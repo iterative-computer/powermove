@@ -58,6 +58,57 @@ async function rpc(child: ChildProcessWithoutNullStreams, message: Record<string
 }
 
 describe('native Powermove agent tool bridge', () => {
+  it('starts the render utility in the background for an editable project run only', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    let finishStartup!: () => void;
+    const startup = new Promise<void>((resolve) => { finishStartup = resolve; });
+    const prepareRun = vi.fn((_run: string) => startup);
+    const finishRun = vi.fn(async (_run: string) => {});
+    const cancelRun = vi.fn(async (_run: string) => 0);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      mcpServerPath: '',
+      engineJobs: { available: true, prepareRun, finishRun, cancelRun } as never
+    });
+    try {
+      const project = await bridge.openSession({ runId: 'editable', owner: owner as never, baseRevision: 0 });
+      expect(project.runId).toBe('editable');
+      await Promise.resolve();
+      expect(prepareRun).toHaveBeenCalledWith('editable');
+      await bridge.openSession({ runId: 'inspect-plan', owner: owner as never, baseRevision: 0, inspectionOnly: true });
+      await bridge.openSession({ runId: 'app-run1', owner: owner as never, baseRevision: 0, context: 'app' });
+      await bridge.openSession({ runId: 'transaction', owner: owner as never, baseRevision: 0, transactionSession: project });
+      expect(prepareRun).toHaveBeenCalledTimes(1);
+      await bridge.callTool(project, 'get_project_state', {});
+      await Promise.resolve();
+      expect(prepareRun).toHaveBeenCalledTimes(2);
+      await project.finish(true);
+      await Promise.resolve();
+      expect(finishRun).toHaveBeenCalledWith('editable');
+      expect(cancelRun).not.toHaveBeenCalledWith('editable');
+    } finally {
+      finishStartup();
+      await bridge.shutdown();
+    }
+  });
+
+  it('releases a warm run if its renderer disappears before finishing', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    const prepareRun = vi.fn(async (_run: string) => {});
+    const cancelRun = vi.fn(async (_run: string) => 0);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      mcpServerPath: '', engineJobs: { available: true, prepareRun, cancelRun } as never
+    });
+    try {
+      const session = await bridge.openSession({ runId: 'owner-gone', owner: owner as never, baseRevision: 0 });
+      await Promise.resolve();
+      owner.emit('render-process-gone');
+      await Promise.resolve();
+      expect(session.isClosed()).toBe(true);
+      expect(cancelRun).toHaveBeenCalledWith('owner-gone');
+      expect(owner.listenerCount('render-process-gone')).toBe(0);
+    } finally { await bridge.shutdown(); }
+  });
+
   it('routes default delivery tools through the production exporter and keeps planning read-only', async () => {
     const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
     const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '' });

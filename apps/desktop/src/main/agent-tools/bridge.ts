@@ -49,6 +49,10 @@ const MAX_TOOL_CONTENT_ITEMS = 8;
 /** Agent renders through the job engine ("Use New Engine"; engine/agent-jobs.ts). */
 export interface AgentEngineJobs {
   readonly available: boolean;
+  /** Start the render utility while the agent prepares its project run. */
+  prepareRun?(run: string): Promise<void>;
+  /** Release the run's warm hold and frame sessions after a commit. */
+  finishRun?(run: string): Promise<void>;
   /** `onStarted` runs once when the job starts rendering (tool timeouts
    *  count from then: plan section 17). */
   exportVideo(owner: number, run: string, project: unknown, input: ExportVideoInput, onStarted?: () => void): Promise<ExportVideoResult>;
@@ -187,6 +191,7 @@ export class PowermoveAgentToolSession {
       this.bridge.closeSession(this);
       // Cancelling or rolling back the run cancels its render jobs (section 17).
       if (!commit) this.bridge.cancelRunJobs(this.runId);
+      else this.bridge.finishRunJobs(this.runId);
     }
     if (!response) return { changed: this.changed };
     this.changed = response.changed === true;
@@ -204,6 +209,18 @@ export class PowermoveAgentToolSession {
   }
 
   isClosed(): boolean { return this.closed; }
+
+  /** The owning renderer vanished; no finish reply can arrive from it. */
+  ownerGone(): void {
+    if (this.closed) return;
+    this.closed = true;
+    // Let each in-flight call's own renderer-crash listener report that its
+    // action outcome is unknown before closing the session's other waiters.
+    queueMicrotask(() => {
+      this.bridge.closeSession(this);
+      this.bridge.cancelRunJobs(this.runId);
+    });
+  }
 
   /** Prefer the run's known stage; discover it lazily for native CLI runs. */
   async rebaseStagingDirectory(forkId: string, workspace: string): Promise<string> {
@@ -255,6 +272,7 @@ export class PowermoveAgentToolBridge {
   private readonly onRendererResponseBound: (event: IpcMainEvent, value: unknown) => void;
   private mediaTools: AgentMediaTools | null = null;
   private readonly mediaCalls = new Map<PowermoveAgentToolSession, Set<AbortController>>();
+  private readonly ownerUnavailable = new Map<PowermoveAgentToolSession, () => void>();
 
   constructor(
     private readonly ipcMain: IpcMain,
@@ -277,6 +295,7 @@ export class PowermoveAgentToolBridge {
   }): Promise<PowermoveAgentToolSession> {
     if (!REQUEST_ID.test(options.runId)) throw new Error('Invalid agent tool run id.');
     if (this.sessionsByRun.has(options.runId)) throw new Error('Agent tool session already exists.');
+    if (options.owner.isDestroyed()) throw new Error('Powermove window is no longer available.');
     const port = await this.ensureServer();
     const token = randomBytes(32).toString('hex');
     const mcpConfig: NativeMcpServerConfig = {
@@ -306,7 +325,22 @@ export class PowermoveAgentToolBridge {
     session.outsideSandbox = options.outsideSandbox ?? null;
     this.sessionsByToken.set(token, session);
     this.sessionsByRun.set(options.runId, session);
+    const ownerGone = (): void => session.ownerGone();
+    this.ownerUnavailable.set(session, ownerGone);
+    session.owner.once('destroyed', ownerGone);
+    session.owner.once('render-process-gone', ownerGone);
+    this.prepareRun(session);
     return session;
+  }
+
+  private prepareRun(session: PowermoveAgentToolSession): void {
+    const engineJobs = this.options.engineJobs;
+    if (session.context !== 'project' || session.inspectionOnly || session.transactionSession || !engineJobs?.available || !engineJobs.prepareRun) return;
+    // Renew a bounded hold on each tool call. The first launch overlaps model
+    // preparation; later calls keep a long-running agent session warm.
+    void Promise.resolve().then(() => {
+      if (!session.isClosed()) return engineJobs.prepareRun!(session.runId);
+    }).catch(() => undefined);
   }
 
   async shutdown(): Promise<void> {
@@ -447,6 +481,12 @@ export class PowermoveAgentToolBridge {
   }
 
   closeSession(session: PowermoveAgentToolSession): void {
+    const ownerGone = this.ownerUnavailable.get(session);
+    if (ownerGone) {
+      session.owner.removeListener('destroyed', ownerGone);
+      session.owner.removeListener('render-process-gone', ownerGone);
+      this.ownerUnavailable.delete(session);
+    }
     for (const controller of this.mediaCalls.get(session) ?? []) controller.abort();
     this.mediaCalls.delete(session);
     if (this.sessionsByToken.get(session.token) === session) this.sessionsByToken.delete(session.token);
@@ -555,6 +595,7 @@ export class PowermoveAgentToolBridge {
    * staging handlers, not just the renderer's editing dispatcher. */
   async callTool(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>, workspace = '', onJobStarted?: () => void): Promise<AgentToolResponseEvent> {
     if (session.isClosed() || session.owner.isDestroyed()) throw new Error('Powermove tool session is not active.');
+    this.prepareRun(session);
     if (tool === OUTSIDE_SANDBOX_TOOL_NAME) return this.runOutsideSandbox(session, args);
     if (!POWERMOVE_AGENT_TOOLS.some(spec => spec.name === tool)) throw new Error(`Unknown Powermove tool: ${tool}`);
     if (session.inspectionOnly && !(POWERMOVE_LIVE_INSPECTION_TOOL_NAMES as readonly string[]).includes(tool)) throw new Error('This planning run can only inspect the project.');
@@ -728,6 +769,11 @@ export class PowermoveAgentToolBridge {
   cancelRunJobs(runId: string): void {
     const engine = this.options.engineJobs;
     if (engine) void engine.cancelRun(runId).catch(() => undefined);
+  }
+
+  finishRunJobs(runId: string): void {
+    const engine = this.options.engineJobs;
+    if (engine?.finishRun) void engine.finishRun(runId).catch(() => undefined);
   }
 
   private async rendererValue(session: PowermoveAgentToolSession, tool: string, args: Record<string, unknown>): Promise<any> {

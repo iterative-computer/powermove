@@ -80,6 +80,8 @@ export interface AgentJobsEngine {
   isReady(process: EngineProcess): boolean;
   canRequest?(process: EngineProcess): boolean;
   ensureReady?(process: EngineProcess): Promise<void>;
+  holdJobRun?(run: string): void;
+  releaseJobRun?(run: string): void;
   /** A user-chosen destination as a write handle for `job` on `session`,
    *  placed under `overwrite` (the engine's default for chosen files is replace). */
   chooseOutput?(file: string, job: string, session: number, overwrite?: 'uniqueName' | 'replace' | 'fail'): string;
@@ -371,6 +373,12 @@ export class AgentJobs {
   private readonly finished: string[] = [];
   /** One live-following job session per window for its agent frames. */
   private readonly frameSessions = new Map<number, Promise<FrameSession>>();
+  /** Owners whose frame sessions a run has used. A shared owner stays open
+   *  until its last run finishes. */
+  private readonly runOwners = new Map<string, Set<number>>();
+  private readonly finishedRuns = new Set<string>();
+  private readonly preparingRuns = new Map<string, Promise<void>>();
+  private readonly heldRuns = new Set<string>();
   /** The window each agent frame session works for (by job engine session). */
   private readonly frameOwners = new Map<number, number>();
 
@@ -400,11 +408,46 @@ export class AgentJobs {
 
   dispose(): void {
     this.unlisten();
+    for (const run of this.heldRuns) this.options.engine.releaseJobRun?.(run);
+    this.heldRuns.clear();
   }
 
   /** Whether the job engine can take work now. */
   get available(): boolean {
     return this.options.engine.canRequest?.('job') ?? this.options.engine.isReady('job');
+  }
+
+  /** Begin the separate render utility while an agent is setting up its
+   *  project run. The caller does not wait: the first render still awaits
+   *  readiness and receives a startup failure through the normal path. */
+  async prepareRun(run: string): Promise<void> {
+    this.heldRuns.add(run);
+    this.options.engine.holdJobRun?.(run);
+    const pending = this.preparingRuns.get(run);
+    if (pending) return pending;
+    const start = this.options.engine.ensureReady?.('job') ?? Promise.resolve();
+    this.preparingRuns.set(run, start);
+    try {
+      await start;
+    } catch (error) {
+      this.releaseRunHold(run);
+      throw error;
+    } finally {
+      if (this.preparingRuns.get(run) === start) this.preparingRuns.delete(run);
+    }
+  }
+
+  private releaseRunHold(run: string): void {
+    if (!this.heldRuns.delete(run)) return;
+    this.options.engine.releaseJobRun?.(run);
+  }
+
+  /** End a committed run's warm hold and close its idle frame sessions.
+   *  Accepted async exports retain their own job sessions. */
+  async finishRun(run: string): Promise<void> {
+    this.releaseRunHold(run);
+    this.finishedRuns.add(run);
+    await this.closeRunFrames(run);
   }
 
   /* ── export_video ──────────────────────────────────────────────────── */
@@ -498,6 +541,7 @@ export class AgentJobs {
   async cancelRun(run: string): Promise<number> {
     const live = [...this.jobs.values()].some((r) => r.run === run && !terminal(r.status.state));
     const frames = this.frameRuns.has(run);
+    await this.finishRun(run);
     if (!live && !frames) return 0;
     try {
       const response = await this.options.engine.request('job', { type: 'cancelJobs', kind: 'run', run });
@@ -565,6 +609,7 @@ export class AgentJobs {
     const restarted = this.generation !== 0;
     this.generation = job.generation;
     this.frameSessions.clear();
+    this.frameOwners.clear();
     if (!restarted) return;
     for (const record of this.jobs.values()) {
       if (terminal(record.status.state)) continue;
@@ -660,36 +705,55 @@ export class AgentJobs {
   async renderFrames(owner: number, run: string, plan: FramesPlan): Promise<AgentFramesResult> {
     const project = asProject(plan.project);
     if (!plan.times.length) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
-    // Startup announces its generation and invalidates old frame sessions.
-    // Wait before installing the first cached session, so it is not discarded.
-    await this.options.engine.ensureReady?.('job');
-    const w = Number(project['w']), h = Number(project['h']);
-    // `width` is today's output width; the engine takes the longest edge.
-    const maxDimension = Math.max(1, Math.min(8192, Math.round(h > w && w > 0 ? plan.width * h / w : plan.width)));
-    const frameSession = await this.frameSession(owner, project);
+    const owners = this.runOwners.get(run) ?? new Set<number>();
+    owners.add(owner);
+    this.runOwners.set(run, owners);
+    // Count the whole call, including startup and session creation: a run
+    // finishing during either must not close the session underneath it.
     this.frameRuns.set(run, (this.frameRuns.get(run) ?? 0) + 1);
-    let response: Response;
     try {
-      response = await this.options.engine.request('job', {
-        type: 'agentFrames',
-        run,
-        frames: plan.times.map((time) => ({ composition: project['compId'], time: toTicks(time) })),
-        maxDimension,
-        format: { kind: 'jpeg', quality: 0.74 },
-        motionBlur: false,
-        blender: 'cachedOrPending'
-      }, frameSession.session, frameSession.revision);
-    } catch (error) {
-      const e = remote(error);
-      if (e?.code === 'unknownSession' || e?.code === 'staleRevision') this.frameSessions.delete(owner);
-      if (e && ROUTED_CODES.has(e.code)) return { status: 'routed', reason: e.message };
-      throw new AgentJobError(e?.message ?? (error instanceof Error ? error.message : String(error)), e?.code ?? 'internal');
+      // Startup announces its generation and invalidates old frame sessions.
+      // Wait before installing the first cached session, so it is not discarded.
+      await this.options.engine.ensureReady?.('job');
+      const w = Number(project['w']), h = Number(project['h']);
+      // `width` is today's output width; the engine takes the longest edge.
+      const maxDimension = Math.max(1, Math.min(8192, Math.round(h > w && w > 0 ? plan.width * h / w : plan.width)));
+      const frameSession = await this.frameSession(owner, project);
+      let response: Response;
+      try {
+        response = await this.options.engine.request('job', {
+          type: 'agentFrames',
+          run,
+          frames: plan.times.map((time) => ({ composition: project['compId'], time: toTicks(time) })),
+          maxDimension,
+          format: { kind: 'jpeg', quality: 0.74 },
+          motionBlur: false,
+          blender: 'cachedOrPending'
+        }, frameSession.session, frameSession.revision);
+      } catch (error) {
+        const e = remote(error);
+        if (e?.code === 'unknownSession' || e?.code === 'staleRevision') this.frameSessions.delete(owner);
+        if (e && ROUTED_CODES.has(e.code)) return { status: 'routed', reason: e.message };
+        throw new AgentJobError(e?.message ?? (error instanceof Error ? error.message : String(error)), e?.code ?? 'internal');
+      }
+      if (response.type !== 'agentFrames') throw new AgentJobError('The job engine answered agent frames with something else.');
+      return this.frameImages(plan.times, response.outcomes, response.queuedMs, frameSession.revision);
     } finally {
       const left = (this.frameRuns.get(run) ?? 1) - 1;
       if (left) this.frameRuns.set(run, left); else this.frameRuns.delete(run);
+      if (!left && this.finishedRuns.has(run)) await this.closeRunFrames(run);
     }
-    if (response.type !== 'agentFrames') throw new AgentJobError('The job engine answered agent frames with something else.');
-    return this.frameImages(plan.times, response.outcomes, response.queuedMs, frameSession.revision);
+  }
+
+  private async closeRunFrames(run: string): Promise<void> {
+    if (this.frameRuns.has(run)) return;
+    const owners = this.runOwners.get(run);
+    this.runOwners.delete(run);
+    this.finishedRuns.delete(run);
+    for (const owner of owners ?? []) {
+      if ([...this.runOwners.values()].some((other) => other.has(owner))) continue;
+      await this.forgetOwner(owner);
+    }
   }
 
   private frameImages(times: number[], outcomes: AgentFrameOutcome[], queuedMs: number, revision: number): AgentFramesResult {
@@ -790,7 +854,10 @@ export class AgentJobs {
     const pending = this.frameSessions.get(owner);
     this.frameSessions.delete(owner);
     const current = await pending?.catch(() => null);
-    if (current && current.generation === this.generation) await this.closeSession(current.session);
+    if (current) {
+      this.frameOwners.delete(current.session);
+      if (current.generation === this.generation) await this.closeSession(current.session);
+    }
   }
 
   /* ── sessions ──────────────────────────────────────────────────────── */
@@ -865,8 +932,11 @@ export class AgentJobs {
 
   private async closeSession(session: number): Promise<void> {
     void this.sessionOwner(session, null);
-    await this.options.bindMediaSession?.(session, null);
-    await this.options.engine.request('job', { type: 'closeSession' }, session).catch(() => undefined);
+    try {
+      await this.options.bindMediaSession?.(session, null);
+    } finally {
+      await this.options.engine.request('job', { type: 'closeSession' }, session).catch(() => undefined);
+    }
   }
 }
 
