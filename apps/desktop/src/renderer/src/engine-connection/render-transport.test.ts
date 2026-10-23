@@ -170,6 +170,9 @@ describe('EngineRenderTransport', () => {
       expect(result.width).toBe(2);
       expect(asked).toHaveLength(6);
       expect(asked[5]!.snapshot.uploaded).toHaveLength(4);
+      expect(asked[0]!.snapshot.compatUploaded).toEqual([]);
+      expect(asked[1]!.snapshot.compatUploaded).toEqual([need]);
+      expect(asked[2]!.snapshot.compatUploaded).toEqual([]);
       expect(async ? runner.render : runner.renderSync).toHaveBeenCalledTimes(4);
     }
   });

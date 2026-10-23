@@ -889,6 +889,7 @@ pub fn snapshot_request() -> crate::snapshot::SnapshotRequest {
         blender_wait_ms: 0,
         captions_hidden: false,
         uploaded: vec!["5e".repeat(32)],
+        compat_uploaded: Vec::new(),
     }
 }
 

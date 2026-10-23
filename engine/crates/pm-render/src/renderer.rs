@@ -230,9 +230,10 @@ fn build_options(
     }
 }
 
-/// The viewer's visible window when `request` is a viewer frame (not an
-/// export, a region of the output) of the open root composition: today's
-/// `canClipPreviewSources` (`crate::compat_crop`).
+/// The viewer's source-clipping window in a preview of the open root
+/// composition: today's `canClipPreviewSources` (`crate::compat_crop`). A
+/// supplied canvas includes its pan buffer, even when presentation only
+/// draws a smaller region. Without a canvas, the region is the window.
 fn preview_window(
     comp: &Comp<'_>,
     request: &RenderRequest,
@@ -243,7 +244,16 @@ fn preview_window(
     {
         return None;
     }
-    let r = request.region?;
+    let r = if request.preview_canvas {
+        pm_protocol::common::PixelRect {
+            x: 0,
+            y: 0,
+            width: request.output_size.width,
+            height: request.output_size.height,
+        }
+    } else {
+        request.region?
+    };
     Some(crate::compat_crop::PreviewWindow {
         x: f64::from(r.x),
         y: f64::from(r.y),

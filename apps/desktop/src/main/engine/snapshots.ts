@@ -108,6 +108,13 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (s['captionsHidden'] !== undefined && typeof s['captionsHidden'] !== 'boolean') return false;
   const uploaded = s['uploaded'];
   if (!Array.isArray(uploaded) || uploaded.length > 64 || !uploaded.every((k) => typeof k === 'string' && k.length > 0 && k.length <= 512)) return false;
+  const compatUploaded = s['compatUploaded'];
+  if (compatUploaded !== undefined && (!Array.isArray(compatUploaded) || compatUploaded.length > 256 || !compatUploaded.every((n) => {
+    if (!n || typeof n !== 'object' || !id(n.composition) || !id(n.layer) || !Number.isSafeInteger(n.time)
+      || !['rasterOverride', 'compatContext'].includes(n.source) || !finite(n.scale) || n.scale <= 0 || n.scale > 32) return false;
+    const c = n.crop;
+    return c === undefined || c === null || (typeof c === 'object' && ['x', 'y', 'width', 'height'].every((k) => safeUint(c[k])) && c.width > 0 && c.height > 0 && c.x + c.width <= 8192 && c.y + c.height <= 8192);
+  }))) return false;
   const target = s['target'] as Record<string, unknown> | null;
   if (!target || typeof target !== 'object') return false;
   if (target['kind'] === 'frame') {

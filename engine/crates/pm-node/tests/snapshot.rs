@@ -152,6 +152,11 @@ fn raster_override_layers_wait_for_the_producer_s_answer() {
 }
 
 #[test]
+fn sync_snapshots_return_raster_needs_already_asked_by_the_viewer() {
+    run_child("child_compat_viewer_pending");
+}
+
+#[test]
 fn the_host_snapshots_sessions_it_opened_for_a_window() {
     run_child("child_host_session");
 }
@@ -441,6 +446,7 @@ fn frame_request(
         blender_wait_ms: 0,
         captions_hidden: false,
         uploaded: Vec::new(),
+        compat_uploaded: Vec::new(),
     }
 }
 
@@ -2339,14 +2345,11 @@ fn child_compat() {
         source: need.source,
         key: "typewriter-3:box:2".into(),
     };
-    // Asked again before the pixels land (the ports race): the job waits.
-    c.snapshot(
-        44,
-        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
-        Some(2),
-        WINDOW,
-        session,
-    );
+    // The renderer posted this answer before asking again, but the ports
+    // race: only the explicitly uploaded need lets the job wait for it.
+    let mut retry = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
+    retry.compat_uploaded = vec![need.clone()];
+    c.snapshot(44, retry, Some(2), WINDOW, session);
     assert!(
         c.inbox
             .try_wait(Duration::from_millis(200), &mut answer(44))
@@ -2416,6 +2419,114 @@ fn child_compat() {
     }));
     let after = pixels_of(&rendered(ask(&mut c, 47, 3)));
     assert_eq!(at(&after, 320, 200, 60), BOX);
+    println!("CHILD-OK");
+}
+
+/// A viewer ask does not mean its renderer has uploaded an answer: a sync
+/// capture may block that renderer before its async raster preparation
+/// finishes. The capture must return the need itself, then wait only once
+/// the caller explicitly says the answer is in flight on the other port.
+#[test]
+#[ignore = "run by sync_snapshots_return_raster_needs_already_asked_by_the_viewer"]
+fn child_compat_viewer_pending() {
+    use pm_protocol::snapshot::{
+        CompatFormat, CompatKey, CompatMessage, CompatPixels, CompatSource,
+    };
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    let session = c.session;
+    let size = Size::new(320, 180);
+    c.resync(2, 1, &shape_project(60.0));
+    c.event(Event::Compat(CompatMessage::Producers {
+        sources: vec![CompatSource::RasterOverride],
+    }));
+    // Keep the viewer and snapshot at the same raster density, so this is
+    // the exact need already recorded as asked rather than a new bucket.
+    let mut viewer = viewer_state();
+    viewer.size = size;
+    viewer.device_pixel_ratio = 1.0;
+    c.event(Event::Viewer(viewer));
+    let viewer_needs = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::Compat(CompatMessage::Needs { revision, needs }),
+            } if port == WINDOW && revision.get() == 1 => Some(needs.clone()),
+            _ => None,
+        });
+    assert_eq!(viewer_needs.len(), 1, "{viewer_needs:?}");
+    let need = &viewer_needs[0];
+    assert_eq!(need.source, CompatSource::RasterOverride);
+    assert_eq!(need.layer.as_str(), "box");
+    assert_eq!(need.time, Ticks::ZERO);
+    assert_eq!(need.scale, 1.0);
+    assert_eq!(need.crop, None);
+
+    // Withhold the viewer answer entirely. A renderer now blocked in
+    // sendSync cannot service that viewer ask: returning it in the host
+    // response is the only way the caller can prepare it synchronously.
+    c.snapshot(
+        40,
+        frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    let snapshot_needs = match c.inbox.wait(Duration::from_secs(20), answer(40)) {
+        Ok(SnapshotOutcome::NeedsRenderer {
+            revision,
+            fallback,
+            compat,
+            svg,
+        }) => {
+            assert_eq!(revision.get(), 1);
+            assert!(fallback.is_empty());
+            assert!(svg.is_empty());
+            compat
+        }
+        other => panic!("outstanding viewer need must not block a sync snapshot: {other:?}"),
+    };
+    assert_eq!(snapshot_needs, viewer_needs);
+
+    // The marked retry waits instead of returning the same need while
+    // its pixel message travels independently through the renderer port.
+    let mut retry = frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000);
+    retry.compat_uploaded = snapshot_needs;
+    c.snapshot(41, retry, Some(1), WINDOW, session);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(200), &mut answer(41))
+            .is_none(),
+        "the uploaded answer is still in flight"
+    );
+    c.event(Event::Compat(CompatMessage::Pixels(CompatPixels {
+        id: CompatKey {
+            composition: need.composition.clone(),
+            layer: need.layer.clone(),
+            time: need.time,
+            source: need.source,
+            key: "sync-viewer-answer".into(),
+        },
+        revision: Revision::new(1).unwrap(),
+        width: 40,
+        height: 20,
+        format: CompatFormat::Rgba8Premultiplied,
+        origin: [20.0, 10.0],
+        scale: need.scale,
+        row: 0,
+        rows: 20,
+        data: Bytes([255u8, 0, 0, 255].repeat(40 * 20)),
+        size: Some([40.0, 20.0]),
+        uv: None,
+        crop: None,
+    })));
+    let result = rendered(c.inbox.wait(Duration::from_secs(20), answer(41)));
+    let pixels = pixels_of(&result);
+    assert_eq!(at(&pixels, 320, 60, 60), [255, 0, 0, 255]);
+    assert_eq!(at(&pixels, 320, 30, 60), BACKGROUND);
+    assert_eq!(result.revision.get(), 1);
     println!("CHILD-OK");
 }
 

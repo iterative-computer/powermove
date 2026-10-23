@@ -191,6 +191,12 @@ pub struct SnapshotRequest {
     /// again: the engine waits for those pixels (they are already on their
     /// way) instead of naming them again.
     pub uploaded: Vec<String>,
+    /// Compatibility needs the caller answered and posted after the last
+    /// `needsRenderer` round. Only these answers are already on their way:
+    /// a viewer ask may still need the caller's now-blocked event loop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<CompatNeed>>", optional))]
+    pub compat_uploaded: Vec<CompatNeed>,
 }
 
 impl SnapshotRequest {
@@ -256,6 +262,18 @@ impl Validate for SnapshotRequest {
             C,
             || "too many uploaded keys".into(),
         )?;
+        ensure(self.compat_uploaded.len() <= MAX_COMPAT_NEEDS, C, || {
+            "too many uploaded compatibility needs".into()
+        })?;
+        for need in &self.compat_uploaded {
+            ensure(
+                need.composition.is_valid() && need.layer.is_valid(),
+                C,
+                || "invalid uploaded compatibility layer".into(),
+            )?;
+            valid_crop(need.crop)?;
+            valid_scale(need.scale)?;
+        }
         match &self.target {
             SnapshotTarget::Frame {
                 motion_blur_samples,
@@ -1170,6 +1188,7 @@ mod tests {
             blender_wait_ms: 0,
             captions_hidden: false,
             uploaded: Vec::new(),
+            compat_uploaded: Vec::new(),
         }
     }
 

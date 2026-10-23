@@ -694,6 +694,35 @@ impl CompatStore {
             .collect()
     }
 
+    /// A snapshot returns every missing need the caller has not itself
+    /// posted. An outstanding viewer/async ask cannot stand in for that:
+    /// the synchronous caller blocks the window that would finish it.
+    pub fn snapshot_needs(
+        &mut self,
+        key: Key,
+        revision: Revision,
+        needs: Vec<CompatNeed>,
+        uploaded: &[CompatNeed],
+        now: Instant,
+    ) -> Vec<CompatNeed> {
+        needs
+            .into_iter()
+            .filter(|need| {
+                let id = answer_id(
+                    key,
+                    &need.composition,
+                    &need.layer,
+                    need.time,
+                    need.source,
+                    need.scale,
+                    need.crop,
+                );
+                self.asked.insert(id, (revision, now));
+                !uploaded.contains(need)
+            })
+            .collect()
+    }
+
     /// A need's name in a snapshot job's `waiting_for` (`compat:` and the
     /// answer's identity).
     pub fn tag(key: Key, need: &CompatNeed) -> String {
@@ -1001,6 +1030,64 @@ mod tests {
         assert!(applied.redraws(true), "the frame tries again");
         // Asked again now, not after ASK_AGAIN.
         assert_eq!(store.to_ask(session(1), r4, vec![need], now).len(), 1);
+    }
+
+    #[test]
+    fn a_snapshot_waits_only_for_needs_its_caller_posted() {
+        let mut store = CompatStore::default();
+        let s = session(1);
+        let revision = Revision::new(3).unwrap();
+        let now = Instant::now();
+        let need = CompatNeed {
+            composition: "c".into(),
+            layer: "L0".into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            scale: 2.0,
+            crop: None,
+        };
+        // The viewer already asked. Its async preparation cannot finish
+        // on the window while that window blocks in a sync snapshot.
+        assert_eq!(
+            store.to_ask(s, revision, vec![need.clone()], now),
+            vec![need.clone()]
+        );
+        assert!(
+            store
+                .to_ask(s, revision, vec![need.clone()], now)
+                .is_empty()
+        );
+        assert_eq!(
+            store.snapshot_needs(s, revision, vec![need.clone()], &[], now),
+            vec![need.clone()]
+        );
+        // Only an exact need posted by this capture may wait for the
+        // client port. A different scale/window/time does not qualify.
+        assert!(
+            store
+                .snapshot_needs(s, revision, vec![need.clone()], &[need.clone()], now)
+                .is_empty()
+        );
+        assert!(store.outstanding(&CompatStore::tag(s, &need)));
+        let mut other = need.clone();
+        other.scale = 1.0;
+        assert_eq!(
+            store.snapshot_needs(s, revision, vec![need.clone()], &[other], now),
+            vec![need.clone()]
+        );
+        store.apply(
+            s,
+            CompatMessage::Native(pm_protocol::snapshot::CompatNative {
+                composition: need.composition.clone(),
+                layer: need.layer.clone(),
+                time: need.time,
+                source: need.source,
+                scale: need.scale,
+                revision,
+                crop: None,
+            }),
+        );
+        assert!(!store.outstanding(&CompatStore::tag(s, &need)));
     }
 
     #[test]

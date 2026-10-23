@@ -274,6 +274,64 @@ fn viewer_frames_ask_for_today_s_preview_crop_window() {
 }
 
 #[test]
+fn a_viewer_canvas_keeps_its_pan_buffer_in_the_source_crop() {
+    let d = json!({ "shape": "rect", "w": 200, "h": 100, "color": "#FFFFFF80", "stroke": 0 });
+    let doc = load(&shape_doc("box", d, 128.0, 128.0));
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_compat_rasters(Some(Producer::new(true, CompatAnswer::Missing)));
+    // Today's canvas is a 512-square crop at 8x with 128-pixel pan buffers.
+    // Only its central 256-square region is needed by the presenter. That
+    // optimization must not change the window observed by a raster wrapper.
+    let mut request = RenderRequest::sized(Size::new(512, 512), Precision::Float32);
+    request.scale = Some((8.0, 8.0));
+    request.origin = Some((0.0, 768.0));
+    request.region = Some(PixelRect {
+        x: 128,
+        y: 128,
+        width: 256,
+        height: 256,
+    });
+    let mut need = |request: &RenderRequest| {
+        let Err(RenderError::CompatPending(needs)) = renderer.render(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            request,
+            &MapResolver::default(),
+        ) else {
+            panic!("expected the raster's crop need");
+        };
+        assert_eq!(needs.len(), 1);
+        needs[0].clone()
+    };
+    // A custom region without a canvas retains its existing contract.
+    assert_eq!(
+        need(&request).crop,
+        Some(PixelRect {
+            x: 0,
+            y: 256,
+            width: 256,
+            height: 512
+        })
+    );
+    request.preview_canvas = true;
+    let canvas = need(&request);
+    assert_eq!(
+        canvas.crop,
+        Some(PixelRect {
+            x: 0,
+            y: 0,
+            width: 512,
+            height: 768
+        })
+    );
+    assert_eq!(canvas.scale, 8.0);
+    // An export never uses preview source clipping.
+    request.export = true;
+    assert_eq!(need(&request).crop, None);
+}
+
+#[test]
 fn the_open_canonical_composition_gets_the_same_preview_crop_as_stored_projects() {
     let d = json!({ "shape": "rect", "w": 200, "h": 100, "color": "#FFFFFF80", "stroke": 0 });
     let mut stored = shape_doc("box", d, 128.0, 128.0);

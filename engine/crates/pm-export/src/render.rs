@@ -903,6 +903,7 @@ fn plan_export_checked(
         output_size: s.size,
         scale: None,
         region: None,
+        preview_canvas: false,
         precision: s.precision,
         depth_id: false,
         // Today's alpha exports render without the composition background.

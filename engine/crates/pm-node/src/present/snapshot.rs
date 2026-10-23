@@ -108,9 +108,9 @@ pub struct SnapshotJob {
     /// Host µs it reached the render thread, and its deadline.
     pub received: i64,
     pub deadline: i64,
-    /// Shader fallback keys whose pixels the renderer posted before asking
-    /// (`SnapshotRequest::uploaded`) and that had not landed when the job
-    /// last rendered: it waits until none of them is outstanding.
+    /// Dependencies the caller explicitly posted before asking
+    /// (`SnapshotRequest::uploaded` and `compat_uploaded`) and that had not
+    /// landed when the job last rendered: wait until none is outstanding.
     pub waiting_for: Vec<String>,
     /// Its Blender stage, once it needed one.
     pub blender: Option<BlenderPrep>,
@@ -701,6 +701,7 @@ mod tests {
                 blender_wait_ms: 0,
                 captions_hidden: false,
                 uploaded: Vec::new(),
+                compat_uploaded: Vec::new(),
             },
             revision.map(|r| Revision::new(r).unwrap()),
             now,

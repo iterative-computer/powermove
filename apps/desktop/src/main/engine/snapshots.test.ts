@@ -86,6 +86,16 @@ describe('snapshot requests', () => {
     expect(validSnapshotRequest(null)).toBe(false);
   });
 
+  it('bounds the exact compatibility needs a snapshot caller says it posted', () => {
+    const need = { composition: 'comp-1', layer: 'title', time: 0, scale: 2, source: 'rasterOverride' as const, crop: { x: 256, y: 0, width: 512, height: 256 } };
+    expect(validSnapshotRequest(request({ compatUploaded: [need] }))).toBe(true);
+    expect(validSnapshotRequest(request({ compatUploaded: [] }))).toBe(true);
+    for (const patch of [{ layer: '' }, { composition: '' }, { time: .5 }, { source: 'unknown' }, { scale: 0 }, { scale: 33 }, { crop: { x: 8192, y: 0, width: 1, height: 1 } }]) {
+      expect(validSnapshotRequest(request({ compatUploaded: [{ ...need, ...patch } as never] }))).toBe(false);
+    }
+    expect(validSnapshotRequest(request({ compatUploaded: Array.from({ length: 257 }, () => need) }))).toBe(false);
+  });
+
   it('accept a window\'s compatibility events only with its document', () => {
     const document = { id: 'doc', revision: 3 };
     const events = [{ type: 'compat', compat: 'producers', sources: ['rasterOverride'] }, { type: 'compat', compat: 'pixels', data: new Uint8Array(4) }];

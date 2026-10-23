@@ -15,7 +15,7 @@
  *   pm-electron-lock bunx playwright test e2e/engine-compat-moat.spec.ts --workers=1
  */
 import { execFileSync } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { ElectronApplication, Page } from 'playwright';
@@ -37,8 +37,15 @@ const FIXTURES: Record<string, string> = {
   'compat-typewriter': 'fixtures/compat-typewriter'
 };
 
-async function install(userData: string, ids: string[]): Promise<void> {
-  for (const id of ids) await cp(path.join(__dirname, FIXTURES[id]!), path.join(userData, 'extensions', id), { recursive: true });
+async function install(userData: string, ids: string[], entries: Record<string, string> = {}): Promise<void> {
+  for (const id of ids) {
+    const destination = path.join(userData, 'extensions', id);
+    await cp(path.join(__dirname, FIXTURES[id]!), destination, { recursive: true });
+    if (entries[id]) {
+      const manifest = path.join(destination, 'manifest.json');
+      await writeFile(manifest, JSON.stringify({ ...JSON.parse(await readFile(manifest, 'utf8')), entry: entries[id] }));
+    }
+  }
 }
 
 async function waitActive(page: Page, ids: string[]): Promise<void> {
@@ -116,6 +123,11 @@ async function zoomViewer(page: Page, zoom: number, x: number, y: number, time: 
   return page.evaluate(({ zoom, x, y, time }) => {
     const PM = (window as any).PM, V = PM.Kernel.services.get('viewer');
     PM.pause?.();
+    // This gate exercises full-density raster planning even under load;
+    // adaptive preview quality would legitimately request a lower density.
+    if (PM.perf) PM.perf.auto = false;
+    PM.quality = 1;
+    PM.previewResolution = '1';
     PM.setTime(time, { force: true });
     V.fit = false;
     V.setZoom(zoom);
@@ -124,9 +136,25 @@ async function zoomViewer(page: Page, zoom: number, x: number, y: number, time: 
     // The current built-in UI clamps its menu to 8x. Exercise the engine's
     // 16x view contract explicitly as well (custom viewers may request it).
     if (zoom > 8 && V.enginePresentation) {
+      // A custom viewer supplies its own canvas too: retaining the built-in's
+      // 8x canvas would keep its raster density even when state.zoom is 16.
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const left = (V._sw - PM.proj.w * zoom) / 2 + V.pan[0];
+      const top = (V._sh - PM.proj.h * zoom) / 2 + V.pan[1];
+      // The same visible crop and 128 CSS-pixel pan buffer as today's
+      // previewRenderViewport, at the custom viewer's requested zoom.
+      const width = Math.min(PM.proj.w * zoom, V._sw + 256);
+      const height = Math.min(PM.proj.h * zoom, V._sh + 256);
+      const x = Math.max(0, Math.min(PM.proj.w * zoom - width, Math.max(0, -left) - 128));
+      const y = Math.max(0, Math.min(PM.proj.h * zoom - height, Math.max(0, -top) - 128));
+      const canvas = {
+        width: Math.round(width * dpr), height: Math.round(height * dpr),
+        crop: { x: x / zoom, y: y / zoom, width: width / zoom, height: height / zoom },
+        css: { x: left + x, y: top + y, width, height },
+      };
       // Keep the custom-viewer request through subsequent playhead updates.
       const update = V.enginePresentation.update.bind(V.enginePresentation);
-      V.enginePresentation.update = (params: any, stage: any) => update({ ...params, zoom, pan: V.pan, playEveryFrame: false }, stage);
+      V.enginePresentation.update = (params: any, stage: any) => update({ ...params, zoom, pan: V.pan, canvas, playEveryFrame: false }, stage);
       V.enginePresentation.update({ zoom, pan: V.pan, resolution: 'full', media: 'originals', playEveryFrame: false });
     }
     PM.invalidate?.('render');
@@ -291,7 +319,10 @@ test.describe('Use New Engine: the customization moat, round two', () => {
   test('a raster override advances at zoom 8 and 16 and receives today\'s planned crop windows', async ({ session }) => {
     test.setTimeout(180_000);
     const ids = ['compat-typewriter', 'crop-recorder'];
-    await install(session.userData, ids);
+    // The original extension has no viewportSafe declaration and therefore
+    // deliberately keeps today's low-density whole-composition canvas. This
+    // identity-shader variant exercises the actual high-density preview path.
+    await install(session.userData, ids, { 'compat-typewriter': 'viewport.ts' });
     await session.relaunch();
     await session.openEditor();
     const page = session.page;
@@ -328,7 +359,15 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       // Centring on the baseline's top at y=120 legitimately clips every
       // visible glyph at t=.2 (the i dot and cursor are outside its x range).
       await zoomViewer(page, zoom, 200, 145, .6);
-      await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().frames), { timeout: 20_000 }).toBeGreaterThan(before);
+      await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().frames), { timeout: 20_000 }).toBeGreaterThan(before).catch(async error => {
+        console.log(JSON.stringify({ zoomStalled: zoom, state: await page.evaluate(() => {
+          const PM = (window as any).PM, view = PM.Kernel.services.get('viewer').enginePresentation;
+          return { time: PM.time, latest: view.latest, view: view.state, presenter: view.stats(), status: PM.EngineConnection.status(),
+            crops: (window as any).__crops, compatibility: PM.EngineRender.compatStats,
+            lookahead: { ...PM.EngineRender.lookaheadStats, recentAnswers: undefined } };
+        }) }));
+        throw error;
+      });
       await expect.poll(() => page.evaluate(() => (window as any).__crops.filter((c: any) => c.layer === 'typed' && c.scale > 16).length)).toBeGreaterThan(0);
       await viewerPixels(page, true); // let setZoom's intermediate pan state settle
       await page.evaluate(() => { (window as any).__crops.length = 0; const PM = (window as any).PM; PM.setTime(.2, { force: true }); });
@@ -347,20 +386,16 @@ test.describe('Use New Engine: the customization moat, round two', () => {
       });
       console.log(JSON.stringify({ zoomPlan: plan }));
       expect(first.data.some((v, i) => i % 4 !== 3 && v > 180), 'the presented frame contains text pixels').toBe(true);
-      const { state, size, world } = plan;
+      const { state, world } = plan;
       expect(state.zoom, 'the requested engine zoom was reached').toBe(zoom);
       expect(plan.crops.every((c: any) => c.scale === Math.min(32, zoom * 3))).toBe(true);
-      const resolution = state.resolution === 'half' ? .5 : state.resolution === 'quarter' ? .25 : 1;
-      const full = size.map((n: number) => Math.max(1, n * state.zoom * state.devicePixelRatio));
-      // Rust f64::round (unlike Math.round for negative half-integers).
-      const round = (n: number) => Math.sign(n) * Math.floor(Math.abs(n) + .5);
-      const output = full.map((n: number) => Math.min(16384, Math.max(1, round(n * resolution))));
-      const origin = full.map((n: number, i: number) => round(((i ? state.size.height : state.size.width) - n) / 2 + state.pan[i] * state.devicePixelRatio));
-      const lo = origin.map((n: number, i: number) => Math.min(output[i]!, Math.max(0, Math.floor(-n * resolution))));
-      const hi = origin.map((n: number, i: number) => Math.min(output[i]!, Math.max(0, Math.ceil(((i ? state.size.height : state.size.width) - n) * resolution))));
-      const sx = output[0]! / size[0], sy = output[1]! / size[1];
-      const visible = [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy, world[4] * sx - lo[0]!, world[5] * sy - lo[1]!];
-      const crop = previewTextRaster(plan.geometry, visible, hi[0]! - lo[0]!, hi[1]! - lo[1]!) ?? null;
+      // Today's compositor asks over its complete canvas, including its pan
+      // buffer, rather than the screen-visible region the engine renders.
+      const canvas = state.canvas;
+      const sx = canvas.width / canvas.crop.width, sy = canvas.height / canvas.crop.height;
+      const visible = [world[0] * sx, world[1] * sy, world[2] * sx, world[3] * sy,
+        world[4] * sx - canvas.crop.x * sx, world[5] * sy - canvas.crop.y * sy];
+      const crop = previewTextRaster(plan.geometry, visible, canvas.width, canvas.height) ?? null;
       expect(crop, `zoom ${zoom}: a cropped source is exercised`).not.toBeNull();
       for (const called of plan.crops) expect(called.crop, `zoom ${zoom}, density ${called.scale}`).toEqual(crop);
       // Today's typewriter definition is a renderable effect, so it keeps the full source.

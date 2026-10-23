@@ -315,6 +315,7 @@ mod child {
                         blender_wait_ms: 0,
                         captions_hidden: false,
                         uploaded: Vec::new(),
+                        compat_uploaded: Vec::new(),
                     },
                 }),
             });
@@ -460,6 +461,7 @@ mod child {
             output_size: size,
             scale: None,
             region: None,
+            preview_canvas: false,
             precision: Precision::Float16,
             depth_id: false,
             background: true,

@@ -1057,10 +1057,13 @@ export class EngineRenderTransport {
       }
     }
     const uploaded: string[] = [];
+    let compatUploaded: CompatNeed[] = [];
     const dependencies = new SnapshotDependencies();
     try {
       for (let round = 0; round < MAX_DEPENDENCY_PHASES; round++) {
-        const reply = native.snapshotSync(this.request(options, 'sync', uploaded, false, revision));
+        const request = this.request(options, 'sync', uploaded, false, revision);
+        request.snapshot.compatUploaded = compatUploaded;
+        const reply = native.snapshotSync(request);
         if (reply.status === 'rendered') {
           this.stats.sync++;
           this.stats.slowestSyncMs = Math.max(this.stats.slowestSyncMs, performance.now() - started);
@@ -1071,6 +1074,7 @@ export class EngineRenderTransport {
         dependencies.observe(reply);
         this.stats.rounds++;
         this.answerRound(reply.compat);
+        compatUploaded = reply.compat;
         this.postSvg(reply.svg, uploaded, (rasters, request) => rasters.drawSync(request));
         if (!reply.fallback.length) continue;
         const runner = this.options.fallbackRunner();
@@ -1098,6 +1102,7 @@ export class EngineRenderTransport {
     const doc = this.options.windowDocument!()!;
     const revision = flushed ?? doc.revision;
     const uploaded: string[] = [];
+    let compatUploaded: CompatNeed[] = [];
     const dependencies = new SnapshotDependencies();
     let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
     // The window's producers go with every request (main's session then
@@ -1109,6 +1114,7 @@ export class EngineRenderTransport {
     for (let round = 0; round < MAX_DEPENDENCY_PHASES + 1; round++) {
       if (send && !body) body = doc.full();
       const request = this.request(options, 'sync', uploaded, true, revision);
+      request.snapshot.compatUploaded = compatUploaded;
       const reply = native.snapshotSync!({
         ...request,
         session: null,
@@ -1139,6 +1145,7 @@ export class EngineRenderTransport {
       dependencies.observe(reply);
       this.stats.rounds++;
       if (reply.compat.length) compatEvents.push(...this.collectAnswers(reply.compat));
+      compatUploaded = reply.compat;
       // The SVG rasters go with the next ask: main posts them on its
       // session before asking again (this window may have no session yet).
       svgPixels = this.drawSvgFor(reply.svg, uploaded);
@@ -1164,6 +1171,7 @@ export class EngineRenderTransport {
     const native = this.options.native;
     if (!native.snapshot) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no engine snapshots.'), 'snapshot');
     const uploaded: string[] = [];
+    let compatUploaded: CompatNeed[] = [];
     const dependencies = new SnapshotDependencies();
     try {
       if (!this.ready) {
@@ -1173,7 +1181,9 @@ export class EngineRenderTransport {
         if (!this.ready) await this.options.wake?.();
       }
       for (let round = 0; round < MAX_DEPENDENCY_PHASES; round++) {
-        const reply = await native.snapshot(this.request(options, cls, uploaded));
+        const request = this.request(options, cls, uploaded);
+        request.snapshot.compatUploaded = compatUploaded;
+        const reply = await native.snapshot(request);
         if (reply.status === 'rendered') {
           if (cls === 'idle') this.stats.idle++;
           else this.stats.async++;
@@ -1184,6 +1194,7 @@ export class EngineRenderTransport {
         dependencies.observe(reply);
         this.stats.rounds++;
         await this.answerRoundAsync(reply.compat);
+        compatUploaded = reply.compat;
         await this.postSvg(reply.svg, uploaded, (rasters, request) => rasters.draw(request));
         if (!reply.fallback.length) continue;
         const runner = this.options.fallbackRunner();

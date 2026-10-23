@@ -5585,6 +5585,7 @@ impl Thread {
             output_size: control.size.ok_or("The preview has no composition size.")?,
             scale: None,
             region: None,
+            preview_canvas: false,
             origin: None,
             precision: pm_protocol::color::Precision::Float16,
             depth_id: false,
@@ -6067,6 +6068,7 @@ impl Thread {
             // (`W / comp.w`, `H / comp.h`).
             scale: None,
             region: None,
+            preview_canvas: false,
             precision: pm_protocol::color::Precision::Float16,
             depth_id: false,
             background,
@@ -6198,9 +6200,13 @@ impl Thread {
                     .iter()
                     .map(|n| super::compat::CompatStore::tag(job.key, n))
                     .collect();
-                let fresh =
-                    self.compat_store()
-                        .to_ask(job.key, revision, needs, std::time::Instant::now());
+                let fresh = self.compat_store().snapshot_needs(
+                    job.key,
+                    revision,
+                    needs,
+                    &job.request.compat_uploaded,
+                    std::time::Instant::now(),
+                );
                 if fresh.is_empty() {
                     let mut job = job;
                     job.waiting_for = tags;
