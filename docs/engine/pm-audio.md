@@ -291,7 +291,7 @@ start. The first-open warm-up and event-specific invalidation gaps remain below.
 | Decoded buffer exceeds 128 MiB (about 5.8 min stereo at 48 kHz), any codec including MP3, WAV and FLAC | Silence and toast: “This audio file is too long to decode safely” | Plays through the bounded block cache; other inactive samples are evicted |
 
 
-Everything else matches today exactly (below): automation stepping and ramps, the
+The covered cases below match today: automation stepping and ramps, the
 decode resampler, in-points and starts between samples, switches, channel folds and
 the wide bus, the playback alignment, and MP3, FLAC and PCM decoding.
 
@@ -391,7 +391,8 @@ It keeps no whole-file sample allocation in RAM. Each block read seeks in that
 spool; the source block cache retains decoded samples under today's **128 MiB**
 `audio` budget, evicting least-recently-used blocks which no render has pinned.
 In-flight blocks may briefly exceed the budget, as today's active voices can.
-The host lease's memory-pressure hook releases every unpinned sample block.
+The host lease's explicit memory-pressure hook releases inactive sample blocks;
+live playback protects pinned blocks and the last 250 ms of input reads.
 
 Opening a restored source only probes metadata. Its sequential decode begins
 on the first sample read, with at most two background decodes unless a reader
@@ -1280,168 +1281,153 @@ failure's attribution stays unconfirmed until a failure records both counters.
 The time-mapped tests are real-time tests (40 ms device, `underruns == 0`), so a
 heavily loaded machine can still fail them; such a failure now names the ring.
 
-## Current status (review round 9, 2026-10-22)
+## Current status (review round 10, 2026-10-23)
 
-Code revision `c035ad187` (later commits change docs only). The chronological logs of
-rounds 1–8 are in `pm-audio-history.md`.
+The round-9 review found three blockers: unbounded resident sequential decodes,
+embedded video trims reread at each run, and understated A8 results. The previous
+campaign is preserved in [pm-audio-history.md](pm-audio-history.md): five scenarios
+missed, including the keyed cold seek (43.40 vs 33.41 ms max); the keyed edit reached
+44.90 vs 32.70 ms p95 (+12.2 ms).
 
-### What changed this round
+### Changes and regression evidence
 
-| Review item | Change | Evidence |
+| Review item | Current behavior | Evidence |
 |---|---|---|
-| 1. AAC/Opus/Vorbis had no random access; every source held its file's bytes | One shared whole decode per file, read through the I/O context (see Decoders); files today refuses decode with random access | `tests/chromium.rs`: random reads bit-equal to the sequential decode, cold block read 0.14 ms, resident bytes = decoded samples, freed with the last open; paired AAC soundtrack rows below |
-| 2. Final revision not qualified | Campaign and suites rerun on `c035ad187` | Below |
-| 3. A precomposition's animated trim re-read at every run start in playback | The producer keeps today's index playhead (Playback above) | `a_precomposition_animated_trim_reads_at_todays_index_build` (fails on the old code: 264,000 against 96,000) |
-| Flaky `queued_transport_receipts_preserve_control_order_and_individual_errors` | The test drains the first run's older-epoch chunks as a device would (it waited for frames the full ring could not take) | 8 of 8 debug runs pass (5 of 6 failed before) |
-| Lifetime underruns rose 5–9 per edit-then-Play | An empty ring counts only after the run's first chunk was heard | `ring::tests::underruns_count_after_the_runs_first_chunk`; the start-hold test now expects 0 |
-| Keyframed speed-1 clips were not in the gates | `tools/playback-gates.ts` takes speed, clip length, keyed gains along the clip, a video soundtrack, seek targets, the work area and a settle wait | Rows `kf-*`, `aac-video-*` below |
-| (found by the new rows) a keyed level channel re-prepared its whole track at every evaluation | Prepared once per voice and revision under the standard evaluator | `prepared_level_tracks_equal_ev_p` (bit-equal to `evP`) |
-| (found by the new rows) replaced documents were freed on the producer, and the presenter deep-copied the document at every mix | Retire thread for documents, graphs, voices and finished glides; the presenter shares its document (copy on write, copied while controls rest) | `replaced_documents_are_freed_off_the_rendering_thread`; a long keyed project's copy and free were 2.7 and 2.4 ms |
+| Total decode memory | Lazy metadata opens; exact Chromium PCM spooled to anonymous temporary files; resident sample blocks use a 128 MiB LRU; explicit host pressure evicts inactive blocks while pinned/recent inputs survive; the last mix/read closes its spool | Ten independent AAC files exceeding the total budget, LRU and pressure checks in `tests/chromium.rs`; `rebuilding_a_mix_releases_decoders_but_keeps_unchanged_sample_identity` |
+| Embedded animated trim | Frozen at the same `today_index` as precomposition trim; subsequent Plays, seeks and loop wraps keep it | `embedded_video_animated_trim_reads_at_todays_index_build`, including edits paused and playing |
+| Export index playhead | `ExportSettings.audioIndexPlayhead` carries the app's cached index time in ticks; the mixer receives it separately from the export range; headless callers may omit it to use range start | Renderer index-lifetime and main settings tests; the complete export pipeline equals an explicitly flattened trim and differs without the field |
+| PLAY-1 | A warmed audio link receives transport and ordered document updates directly from presenter ingress, before the render mirror and surface replan | FIFO/revision-barrier and duplicate-Play test; presenter pool-order test; paired measurements below |
+| A8-WORKER | Nonaudible preparation uses twice the callback period, between 10.67 and 40 ms, with a matching parked-worker policy; audible workers use the callback policy | Actual Mach readback and producer period/computation/deadline invariants for 64- and 512-frame callbacks |
 
-Outside `pm-audio`: `pm-node/src/present/audio.rs` (the shared document, about 20
-lines). No other crate changed this round.
+The memory-pressure hook follows explicit host memory-pressure grants. Ordinary
+playback leases and surface-pool replans do not flush audio. Live pressure preserves
+pinned blocks and inputs read within 250 ms, covering the gap between readiness and
+render; the ordinary LRU budget remains 128 MiB. Exact PCM spools trade resident
+whole-file memory for temporary disk space (about 115 MB for five minutes of stereo
+AAC), released with their final reader.
 
-### A7/A8 paired campaign (2026-10-22 23:20 – 2026-10-23 00:28)
+The direct audio path retains FIFO ordering. While a new link is catching up with
+older document commands, a revision barrier keeps later transport on the ordered
+fallback path. Media replacement, composition changes and stepping also synchronize
+through that path. Video still configures its surface generation before its own
+transport command, then follows the audio clock's new epoch, captured before the
+fast dispatch. Audio owns time; video catches up to that line.
 
-`tools/playback-gates.ts` under exclusive Electron reservations, paired hidden apps
-(today first, then the engine; the distinct-trim row counterbalanced), 30 samples per
-mode and row, MacBook Pro speakers at 48 kHz (engine output latency 15.6 ms, today's
-24 ms), machine load 3–28 from other lanes. Every stressed row ran three times with four
-busy load threads; the first stressed repeat's first rows overlapped two of this lane's
-suite runs (00:00–00:04). Latency from the edit and Play (one renderer task) to the first
-scheduled presentation, ms. Raw JSON is outside the repository
-(`/tmp/ne-w5/audioa7-r9/campaign`).
+`ingressRequestMs` measures PM.play → presenter audio request. The separate
+`producerRequestMs` includes the audio control thread's document/mix preparation;
+the endpoint timestamp does not rename or conceal that preparation. End-to-end
+latency remains PM.play → the scheduled program sample at device output.
 
-| Row | Run | Today p50 / p95 / max | Engine p50 / p95 / max | ≤ today | Loop (engine underruns / starved / overloads; today underruns) |
+### Qualification
+
+Code revision `5c0a905c3` (the subsequent commits change documentation only).
+Paired hidden Electron apps, 30 requested starts per mode per row, one plain and
+three repeats with four busy threads, MacBook Pro speakers at 48 kHz. Latency is
+PM.play → the scheduled program sample at device output, without acoustic
+loopback. Engine device latency is 15.625 ms; today's is about 24 ms. The measured
+rows span 11:18:05–12:18:21 UTC on 2026-10-23.
+
+One 3,590-second reservation was created and deleted before its original expiry;
+it was never renewed. The corrected candidate completed 12 rows exclusively.
+The deadline interrupted the next keyed-loop row; its partial evidence is preserved, and both
+modes were rerun under the normal lock. The remaining 20 rows are marked shared.
+No compilation or headless suite from this lane overlapped these measurements.
+Host one-minute load at row start ranged from 5.8 to 35.5;
+this is shared-machine evidence, not the campaign's final quiet-window qualification.
+
+| Scenario | Run | Today p50 / p95 / max (ms) | Engine p50 / p95 / max (ms) | ≤ today | Play → audio ingress p50 / p95 / max (ms) | Engine loop U/S/O | Lock |
+|---|---|---|---|---|---|---|---|
+| A7 60 s loop, gain edit | plain | 30.62 / 32.43 / 32.61 | 19.35 / 19.76 / 19.89 | yes | 0.154 / 0.234 / 0.242 | 0 / 0 / 0 | exclusive |
+| A7 60 s loop, gain edit | 4 threads, 1 | 30.03 / 32.51 / 32.51 | 19.84 / 20.73 / 21.13 | yes | 0.252 / 0.347 / 0.349 | 0 / 0 / 0 | exclusive |
+| A7 60 s loop, gain edit | 4 threads, 2 | 30.71 / 32.61 / 32.70 | 19.97 / 28.84 / 30.18 | yes | 0.344 / 0.431 / 0.694 | 0 / 0 / 0 | shared |
+| A7 60 s loop, gain edit | 4 threads, 3 | 30.11 / 32.52 / 32.60 | — (gate failed) | **no** | — | 0 / 0 / 0 | shared |
+| 16 voices: speed edit | plain | 29.23 / 32.61 / 32.63 | 25.14 / 26.10 / 26.35 | yes | 0.185 / 0.281 / 0.308 | — | exclusive |
+| 16 voices: speed edit | 4 threads, 1 | 30.32 / 32.33 / 32.43 | 27.37 / 28.69 / 30.03 | yes | 0.235 / 0.302 / 0.347 | — | exclusive |
+| 16 voices: speed edit | 4 threads, 2 | 29.61 / 32.21 / 32.41 | 29.53 / 31.89 / 39.94 | **no** | 0.304 / 0.562 / 0.925 | — | shared |
+| 16 voices: speed edit | 4 threads, 3 | 30.01 / 32.41 / 32.68 | — (gate failed) | **no** | 0.230 / 0.230 / 0.230 | — | shared |
+| 16 distinct trims: speed edit | plain | 29.72 / 31.92 / 32.11 | 27.23 / 28.96 / 33.32 | **no** | 0.230 / 0.323 / 0.325 | — | exclusive |
+| 16 distinct trims: speed edit | 4 threads, 1 | 29.91 / 32.02 / 32.21 | 28.79 / 29.88 / 30.20 | yes | 0.255 / 0.305 / 0.320 | — | exclusive |
+| 16 distinct trims: speed edit | 4 threads, 2 | 30.21 / 32.61 / 32.62 | 31.71 / 36.53 / 45.34 | **no** | 0.353 / 0.440 / 0.457 | — | shared |
+| 16 distinct trims: speed edit | 4 threads, 3 | — | — (gate failed) | **no** | 0.496 / 0.496 / 0.496 | — | shared |
+| Cold seek (2 / 3 s) | plain | 30.31 / 32.21 / 32.51 | 24.22 / 25.36 / 25.50 | yes | 0.331 / 0.502 / 0.589 | — | exclusive |
+| Cold seek (2 / 3 s) | 4 threads, 1 | 29.81 / 32.60 / 32.60 | 26.26 / 27.80 / 31.46 | yes | 0.337 / 0.444 / 0.458 | — | exclusive |
+| Cold seek (2 / 3 s) | 4 threads, 2 | 30.00 / 32.20 / 32.69 | — (gate failed) | **no** | 0.149 / 0.460 / 0.576 | — | shared |
+| Cold seek (2 / 3 s) | 4 threads, 3 | 29.00 / 32.28 / 32.50 | — (gate failed) | **no** | 0.233 / 0.347 / 0.347 | — | shared |
+| Keyed 290 s: 60 s loop, key edit | plain | 30.01 / 32.90 / 33.02 | 30.25 / 35.13 / 35.21 | **no** | 0.225 / 0.283 / 0.296 | 0 / 0 / 0 | exclusive |
+| Keyed 290 s: 60 s loop, key edit | 4 threads, 1 | 31.29 / 33.30 / 33.50 | 39.80 / 95.25 / 98.22 | **no** | 0.333 / 0.456 / 0.473 | 0 / 0 / 0 | shared |
+| Keyed 290 s: 60 s loop, key edit | 4 threads, 2 | 31.50 / 33.61 / 33.80 | 38.35 / 56.31 / 83.29 | **no** | 0.376 / 0.534 / 0.548 | 0 / 0 / 0 | shared |
+| Keyed 290 s: 60 s loop, key edit | 4 threads, 3 | 31.12 / 33.70 / 33.71 | 39.41 / 44.29 / 48.22 | **no** | 0.354 / 0.482 / 1.048 | 0 / 0 / 0 | shared |
+| Keyed 290 s: cold seek (230 / 200 s) | plain | 30.22 / 33.10 / 33.30 | 20.11 / 20.76 / 51.23 | **no** | 0.266 / 0.375 / 0.399 | — | exclusive |
+| Keyed 290 s: cold seek (230 / 200 s) | 4 threads, 1 | 31.30 / 33.50 / 33.59 | 20.83 / 26.23 / 26.35 | yes | 0.340 / 0.557 / 1.428 | — | shared |
+| Keyed 290 s: cold seek (230 / 200 s) | 4 threads, 2 | 31.78 / 33.69 / 34.20 | 20.66 / 24.14 / 28.75 | yes | 0.302 / 0.589 / 1.220 | — | shared |
+| Keyed 290 s: cold seek (230 / 200 s) | 4 threads, 3 | 31.09 / 34.29 / 34.30 | 20.79 / 27.51 / 27.68 | yes | 0.312 / 0.465 / 0.781 | — | shared |
+| AAC video: cold seek (240 / 200 s) | plain | 29.49 / 32.40 / 32.50 | 19.18 / 19.55 / 19.99 | yes | 0.239 / 0.335 / 0.354 | — | exclusive |
+| AAC video: cold seek (240 / 200 s) | 4 threads, 1 | 29.59 / 31.79 / 32.29 | 19.11 / 21.72 / 24.68 | yes | 0.291 / 0.766 / 1.066 | — | shared |
+| AAC video: cold seek (240 / 200 s) | 4 threads, 2 | 29.09 / 32.10 / 32.10 | 19.38 / 20.53 / 22.14 | yes | 0.296 / 0.472 / 0.958 | — | shared |
+| AAC video: cold seek (240 / 200 s) | 4 threads, 3 | 29.78 / 32.48 / 32.49 | 19.16 / 25.82 / 29.57 | yes | 0.216 / 0.456 / 0.518 | — | shared |
+| AAC video: gain edit at 240 s | plain | 30.22 / 32.52 / 32.62 | 19.06 / 19.67 / 19.84 | yes | 0.208 / 0.327 / 0.338 | — | exclusive |
+| AAC video: gain edit at 240 s | 4 threads, 1 | 28.91 / 31.71 / 32.10 | — (gate failed) | **no** | 0.267 / 0.267 / 0.267 | — | shared |
+| AAC video: gain edit at 240 s | 4 threads, 2 | 29.00 / 32.21 / 32.40 | 19.46 / 19.89 / 19.97 | yes | 0.315 / 0.536 / 0.566 | — | shared |
+| AAC video: gain edit at 240 s | 4 threads, 3 | 30.40 / 32.49 / 32.50 | 19.45 / 20.56 / 24.01 | yes | 0.303 / 0.411 / 0.627 | — | shared |
+
+“≤ today” requires p50, p95 and maximum all no worse than today, plus every
+correctness and scheduling gate passing. U/S/O means engine loop underruns,
+starved renders and device overloads. Gate-aborted rows are failures, not passes.
+
+- **A8 remains unqualified:** 18/32 rows beat today; 8 completed rows miss latency
+  and 6 rows abort at a gate. These include 4 startup-arm-timeout
+  rows and 3 CPU-budget-overrun rows (categories may overlap). The table
+  includes every final-candidate attempt.
+- **Loop delivery:** all eight 60-second loops had zero underruns, starved renders
+  and device overloads; today had zero underrun events. The third A7 stress row
+  still fails its startup-arm guard and never reaches its timed-start samples.
+- **Start correctness:** 811 traced engine starts, 0 omitted prefix frames,
+  0 frames of start spread, 0 safety-net fires and
+  0 program underruns. Loop counters and failed gates are shown separately.
+- **PLAY-1:** ingress p50/p95/max is 0.279/0.458/1.428 ms;
+  24 of 811 starts exceed 0.5 ms. The p95 and maximum are both
+  reported; the dispatch target is not claimed universally met. Producer-request
+  p50/p95/max is 0.525/14.877/169.443 ms,
+  including document/mix preparation after the fast request.
+
+The rejected provisional candidate (`8ea4815ff`) is kept outside the qualifying
+table: 313 traced starts, seven gate-failure rows, 256 omitted prefix frames, one
+safety-net fire and 113 program underruns in the start snapshots. Its hook
+incorrectly flushed warm inputs on ordinary lease and surface-pool changes.
+`5c0a905c3` routes only explicit memory pressure and protects recently read inputs;
+the new lease-reason and hot-input tests cover that correction.
+
+### AUDIO-2 after the final fixes
+
+The final release playback binary was rebuilt after the code fixes. These runs
+were isolated from this lane's Electron measurements.
+Fifteen targeted commands per mode ran four cold distinct-voice trials each.
+The stressed headless mode uses the existing two native contention threads; the
+Electron campaign above uses four busy threads.
+The atomic first-publication timestamp still enforces 512/48,000 s = 10.666667 ms;
+the observer timestamp is diagnostic. These are isolated shared-host runs.
+
+| Mode | Atomic trials | p50 / p95 / max (ms) | Trials over 10.666667 ms | Failed commands | Full playback suite |
 |---|---|---|---|---|---|
-| A7 60 s loop (16 voices, 1.5×), then gain edit | plain | 30.22 / 32.32 / 32.62 | stopped at its scheduling gate (below) | no | |
-| A7 60 s loop (16 voices, 1.5×), then gain edit | plain, rerun | 30.42 / 32.51 / 32.52 | 21.63 / 22.21 / 22.38 | yes | 0 / 0 / 0; 0 |
-| A7 60 s loop (16 voices, 1.5×), then gain edit | 4 load threads, 1 | 29.83 / 32.43 / 32.43 | 21.13 / 21.65 / 21.85 | yes | 0 / 0 / 0; 0 |
-| A7 60 s loop (16 voices, 1.5×), then gain edit | 4 load threads, 2 | 29.03 / 32.43 / 32.53 | 21.56 / 22.34 / 22.96 | yes | 0 / 0 / 0; 0 |
-| A7 60 s loop (16 voices, 1.5×), then gain edit | 4 load threads, 3 | 30.21 / 32.50 / 32.62 | 21.65 / 23.45 / 24.23 | yes | 0 / 0 / 0; 0 |
-| speed edit (16 voices, 1.5×) | plain | 30.71 / 32.32 / 32.61 | 31.49 / 34.02 / 34.19 | **no** |  |
-| speed edit (16 voices, 1.5×) | 4 load threads, 1 | 30.03 / 32.33 / 32.83 | 26.67 / 28.16 / 28.19 | yes |  |
-| speed edit (16 voices, 1.5×) | 4 load threads, 2 | 30.71 / 32.32 / 32.43 | stopped at its scheduling gate at sample 15 (below) | no | |
-| speed edit (16 voices, 1.5×) | 4 load threads, 3 | 29.72 / 32.42 / 32.61 | 31.28 / 31.91 / 32.37 | **no** |  |
-| speed edit, 16 distinct trims (engine first) | plain | 29.21 / 32.11 / 32.40 | 34.55 / 36.67 / 37.96 | **no** |  |
-| speed edit, 16 distinct trims (engine first) | 4 load threads, 1 | 30.13 / 32.12 / 32.23 | 30.98 / 31.96 / 32.82 | **no** |  |
-| speed edit, 16 distinct trims (engine first) | 4 load threads, 2 | 30.22 / 32.22 / 32.32 | 32.12 / 33.63 / 34.59 | **no** |  |
-| speed edit, 16 distinct trims (engine first) | 4 load threads, 3 | 30.93 / 32.23 / 32.52 | 32.19 / 33.94 / 34.53 | **no** |  |
-| cold same-task seek (2 s / 3 s) | plain | 29.51 / 32.50 / 32.51 | 28.39 / 31.23 / 37.40 | **no** |  |
-| cold same-task seek (2 s / 3 s) | 4 load threads, 1 | 29.61 / 32.31 / 32.41 | 30.30 / 32.33 / 34.78 | **no** |  |
-| cold same-task seek (2 s / 3 s) | 4 load threads, 2 | 29.91 / 32.30 / 32.31 | 29.99 / 31.46 / 34.93 | **no** |  |
-| cold same-task seek (2 s / 3 s) | 4 load threads, 3 | 30.23 / 32.30 / 32.31 | 29.96 / 32.10 / 33.06 | **no** |  |
-| keyed speed-1 290 s clips: 60 s loop, then key edit | plain | 30.91 / 32.81 / 33.51 | 34.38 / 38.28 / 40.72 | **no** | 0 / 0 / 0; 0 |
-| keyed speed-1 290 s clips: 60 s loop, then key edit | 4 load threads, 1 | 31.02 / 33.41 / 33.51 | 32.50 / 36.51 / 37.43 | **no** | 0 / 0 / 0; 0 |
-| keyed speed-1 290 s clips: 60 s loop, then key edit | 4 load threads, 2 | 30.61 / 32.82 / 32.92 | 32.34 / 36.42 / 36.70 | **no** | 0 / 0 / 0; 0 |
-| keyed speed-1 290 s clips: 60 s loop, then key edit | 4 load threads, 3 | 30.40 / 32.70 / 33.21 | 36.61 / 44.90 / 45.15 | **no** | 0 / 0 / 0; 0 |
-| keyed speed-1 290 s clips: cold seek (230 s / 200 s) | plain | 30.51 / 33.71 / 33.80 | 22.24 / 24.42 / 24.87 | yes |  |
-| keyed speed-1 290 s clips: cold seek (230 s / 200 s) | 4 load threads, 1 | 30.43 / 33.32 / 33.41 | 21.71 / 22.75 / 43.40 | **no** |  |
-| keyed speed-1 290 s clips: cold seek (230 s / 200 s) | 4 load threads, 2 | 30.91 / 33.40 / 33.42 | 21.88 / 23.10 / 26.17 | yes |  |
-| keyed speed-1 290 s clips: cold seek (230 s / 200 s) | 4 load threads, 3 | 31.19 / 33.60 / 33.65 | 21.90 / 24.47 / 27.45 | yes |  |
-| AAC video soundtrack (290 s): cold seek (240 s / 200 s) | plain | 29.60 / 32.00 / 32.70 | 21.03 / 22.30 / 22.61 | yes |  |
-| AAC video soundtrack (290 s): cold seek (240 s / 200 s) | 4 load threads, 1 | 30.40 / 32.60 / 32.61 | 20.94 / 21.63 / 22.13 | yes |  |
-| AAC video soundtrack (290 s): cold seek (240 s / 200 s) | 4 load threads, 2 | 29.71 / 32.60 / 32.61 | 21.09 / 21.72 / 21.74 | yes |  |
-| AAC video soundtrack (290 s): cold seek (240 s / 200 s) | 4 load threads, 3 | 30.00 / 32.30 / 32.30 | 22.09 / 23.99 / 27.27 | yes |  |
-| AAC video soundtrack: gain edit at 240 s | plain | 30.02 / 32.47 / 32.61 | 20.59 / 21.42 / 21.74 | yes |  |
-| AAC video soundtrack: gain edit at 240 s | 4 load threads, 1 | 30.01 / 32.32 / 32.53 | 21.09 / 21.89 / 21.89 | yes |  |
-| AAC video soundtrack: gain edit at 240 s | 4 load threads, 2 | 29.12 / 32.23 / 32.52 | 20.91 / 21.75 / 21.95 | yes |  |
-| AAC video soundtrack: gain edit at 240 s | 4 load threads, 3 | 30.32 / 32.42 / 32.71 | 21.70 / 25.50 / 25.78 | yes |  |
+| plain | 60 | 10.527 / 11.665 / 57.749 | 24 | 13 / 15 | 43/44; AUDIO-2 failed |
+| stress | 60 | 10.645 / 12.604 / 22.015 | 30 | 14 / 15 | 44/44 passed |
 
-- **A7 holds.** Every 60 s loop (the 16-voice 1.5× loop, plain and three stressed, and
-  the keyed 290 s clips, plain and three stressed) had 0 ring underruns, 0 starved
-  renders and 0 overloads; today had 0 underrun events. The first plain A7 attempt
-  stopped on its scheduling gate (one producer unit used 1.44 ms of CPU against its
-  1.07 ms computation budget, phase unknown, while one of this lane's suite runs
-  overlapped it); its loop had 0 / 0 / 0, and the rerun passed. One stressed speed row
-  stopped the same way at sample 15 (a worker's stretch step: 1.32 ms period CPU against
-  1.27 ms).
-- **Every engine start was complete and simultaneous:** 944 traced starts across the 33
-  rows, 0 program underruns, 0 omitted prefix frames, 0 start spread, 0 A4 safety-net
-  fires, 0 history claims.
-- **AAC (review item 1):** the soundtrack rows beat today on every statistic in all
-  eight runs (engine p50 20.6–22.1 ms against today's 29.1–30.4 ms), with no A4 fire.
-- **A8 misses.** The speed-edit, distinct-trim speed-edit, cold-seek and keyed
-  key-edit rows miss today in 14 of 16 runs (one stressed speed run beat it, one stopped
-  on its scheduling gate). The keyed key-edit reaches +12.2 ms p95
-  (44.90 vs 32.70) and +11.9 ms max (45.15 vs 33.21). The cold seek's p50 is at or
-  below today's in two of four runs. The keyed cold seek beats today in three of four
-  runs (stressed run 1 has one 43.4 ms maximum). Two causes, measured:
-  1. **Upstream of the audio path, in the merged integration branch.** The time from
-     the renderer's `PM.play()` to the audio presenter sending its transport commands
-     (`requestedUs` against the request on the host clock) grew from 0.43 ms (round 8's
-     cold seek) to 2.36–2.80 ms, and from 1.60 to 2.82–4.54 ms in the speed rows. A build
-     of the round 9 base (`12b2463bd`: this branch with the integration merge and none of
-     this round's audio changes) measured the same: 3.09–3.20 ms (cold seek) and
-     4.29–4.86 ms (speed), and its producer's longest render grew alike (round 8
-     8.3–9.4 ms; base 14.8–21.5 ms; this revision 10.7–14.6 ms). One identified part: the
-     presenter now replans the viewer's surface pool on Play
-     (`BridgePresenter::replan_transport_pool`, `pm-node/src/present/mod.rs`) before the
-     render thread forwards the transport command to audio; skipping it (an env-gated
-     A/B build, not committed; these A/B runs shared the machine with another lane's
-     e2e run, both arms alike) took the cold seek's request time from 2.77–3.39 to
-     1.39–1.47 ms. That code belongs to the render lane.
-  2. **The document update of a keyed edit.** In the keyed row the request time is
-     9.2–13.2 ms: the renderer's document update for one changed key in each of 16
-     layers of 290 keys reaches the engine before the Play does. The engine's own part
-     after the request is 7.6–8.3 ms (it was 15–20 ms before this round's prepared tracks,
-     retire thread and shared presenter document).
-  The distinct-trim row also carries round 8's DECISION item (sixteen independent
-  canonical pre-rolls under the workers' Mach duty cycle). None of these misses is an
-  audible difference; they are start latency.
-- Device note: the default output was switched to AirPods Pro (160 ms latency) and back
-  during smoke runs before the campaign; every campaign row ran on the speakers.
+The producer's playing period and deadlines remain unchanged, verified by actual
+Mach readback tests. The preparation policy is longer; the 10.67 ms gate has not
+been relaxed. Final A8/AUDIO-2 numbers belong to the orchestrator's quiet window.
 
-### Playback suite on `c035ad187` (43 tests, `--test-threads=1`)
+Validation also passed: 138 audio unit tests (one ignored), five Chromium decode/cache
+tests, 99 presenter tests, four Electron A/V transport tests, 113 protocol tests
+(one ignored), 64 focused desktop tests, both index-playhead playback regressions,
+the complete export-index pipeline regression and 18 remaining audio integration
+tests. Clippy for pm-audio/pm-node/pm-export tests passes with warnings denied.
+The release native addons and desktop app build. Svelte reports zero errors and
+one existing warning; Node TypeScript passes with `composite=false`, while the
+standard script retains two existing TS6307 file-list errors from the
+canonical-json test's compositions/registry imports.
 
-| Series | Runs passing | Failures | Machine load (1 min) |
-|---|---|---|---|
-| plain, 2026-10-23 00:29–01:20 | 13 of 30 | 17 runs, all `cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous` | 6–82 |
-| `PM_AUDIO_PLAYBACK_STRESS=1`, 01:31–02:17 | 15 of 30 | 15 runs: 14 only the distinct cold start; run 27 also three sixteen-voice tests, all on one idle-pool arm timeout (`arm_timeouts` 1, a process-wide counter) at load 26 | 11–57 |
-
-Every other test passed in every run of both series except stressed run 27, including
-the new `a_precomposition_animated_trim_reads_at_todays_index_build`. Stressed, every
-run below a 1-minute load of 20 passed (12 of 12) and 15 of the 18 at 20 or above
-failed. The one failing test is
-the AUDIO-2 headless gate: sixteen distinct-trim voices must have their first 512
-frames visible within 10.67 ms of a cold Play. Its plain misses measured 10.69–17.68 ms
-(median 11.59 ms, 43 trials over the bound; stressed 10.74–20.78 ms, median 12.29 ms,
-47 trials); 3 of the 14 plain runs at a 1-minute load below
-20 failed, and 14 of the 16 at 20 or above. The 30-of-30 requirement is not met.
-
-It is not a regression of this round. Alternating the round 9 base's test binary
-(`12b2463bd`'s pm-audio, built from the same toolchain) with this revision's, 15 runs
-each at load 31–46: both failed 15 of 15, with 45 of 60 trials over the bound each
-(base 10.69–73.6 ms, this revision 10.69–79.9 ms). Earlier rounds recorded the same
-intermittent failure at load 19–41. Making it pass under load is the DECISION item
-above (the workers' Mach duty cycle for starts not yet audible). Earlier partial
-series this round (`/tmp/ne-w5/audioa7-r9/suite`, `suite2`, `suite3`) ran while
-campaign rows or other lanes' builds overlapped and are not counted.
-
-### Remaining and orchestrator decisions
-
-- **A8 latency misses (blocker, needs escalation):** the speed-edit, distinct-trim
-  speed-edit and cold-seek rows on today's 16-voice fixture and the keyed key-edit row
-  miss today's p50, p95 or max in 14 of 16 runs. The keyed cold seek also misses
-  once (43.40 vs 33.41 ms max): **five scenarios** miss, 15 of 20 runs. The largest
-  keyed-edit miss is **+12.2 ms p95**, not 6 ms (table above). The audio
-  path after the request is equal or faster than round 8's apart from the distinct
-  pre-rolls; the added time is before the request, in the merged integration branch
-  (the render lane's Play pool replan, and for the keyed row the document update
-  pipeline). Needs the render and document-host lanes, or the audio presenter receiving
-  Play ahead of the render thread's surface work.
-- **AUDIO-2 distinct cold-start bound and the stressed distinct-trim row:** the worker
-  period change, not attempted (DECISION, as in round 8).
-- **Real-time allocations:** 316,504 per 200 warm renders, unchanged (DECISION; the
-  follow-up lane).
-- **LONG-1 (approved for the beta list; side-by-side above):** files longer than today plays
-  (decoded buffer past its 128 MiB `audio` budget) play in the engine through
-  Powermove's random-access decoder (the plan's "no length limit"); today refuses
-  them, so there is no today sample to match.
-- **Gaps:** today's index playhead for exports and the first-open warm-up, the silent
-  decoder fallback in the app, and sharing prepared tracks across revisions (Gaps
-  below).
-
+Raw evidence, the rejected candidate and the deadline-interrupted attempt remain
+outside Git under `/tmp/ne-w5/audioa7-r10`.
 
 
 ## Gaps
@@ -1480,11 +1466,11 @@ campaign rows or other lanes' builds overlapped and are not counted.
 - **Real-time allocations are not zero.** `tests/render_allocations.rs` counts 316,504
   heap allocations in 200 warm renders (a ratchet; target 0), mostly channel evaluation in
   `pm_eval` and `MixGraph::resolve` per render. Orchestrator decision; follow-up lane.
-- **The headless distinct cold-start bound (AUDIO-2, 10.67 ms)** fails at high machine
-  load (11.3–12.0 ms measured at load 25–85 in this round's suite runs) and the stressed
-  distinct-trim speed edit misses today by 1–2 ms (round 8): sixteen independent canonical
-  pre-rolls under the workers' 1.33 ms Mach duty cycle. The candidate fix, a longer worker
-  period for starts not yet audible, was not attempted. Orchestrator decision.
+- **The headless distinct cold-start bound (AUDIO-2, 10.67 ms)** remains enforced.
+  The longer preparation and parked-worker policy is implemented; final measured
+  results and any deadline misses are recorded above. Shared-machine results do
+  not replace the campaign's final quiet-window qualification.
+
 - **Keyed level channels** prepare their track once per voice and document revision
   (about 0.1 ms for 290 keys); an edit of one key re-prepares every voice whose channel
   changed. Sharing prepared tracks across revisions for unchanged channels, and moving
