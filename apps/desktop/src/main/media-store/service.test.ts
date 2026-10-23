@@ -52,13 +52,39 @@ it('resolves display renditions by frozen original identity without replacing or
   await settledFile(originalFile, bytes(1024, 1)); await settledFile(renditionFile, bytes(512, 2));
   const original = await svc.store.putFile(originalFile, { key: 'original', type: 'video/quicktime' });
   const rendition = await svc.store.putFile(renditionFile, { key: `rendition:${original.hash}`, type: 'video/webm', origin: 'rendition' });
-  await svc.bindJob(5, { id: 'p', assets: { clip: { id: 'clip', contentHash: original.hash, storageKey: 'original' } } });
+  await svc.bindJob(5, { id: 'p', assets: { clip: { id: 'clip', contentHash: original.hash, storageKey: 'original', rendition: true } } });
   expect(await svc.resolveSource('clip', { process: 'job', session: 5 })).toMatchObject({ path: svc.store.objectPath(rendition.hash) });
   expect(await svc.resolveAsset('clip', { process: 'job', session: 5 })).toMatchObject({ path: svc.store.objectPath(original.hash) });
   await settledFile(originalFile, bytes(1024, 3));
   await svc.store.putFile(originalFile, { key: 'original', type: 'video/quicktime' });
+  svc.bind(1, 'another-project', { clip: { key: 'original', rendition: false } });
   expect(await svc.resolveSource('clip', { process: 'job', session: 5 })).toMatchObject({ path: svc.store.objectPath(rendition.hash) });
+  expect(await svc.resolveAsset('clip', { process: 'job', session: 5 })).toMatchObject({ path: svc.store.objectPath(original.hash) });
   await svc.bindJob(5, null);
+});
+
+it('uses originals when a stale rendition exists but the bound asset does not display it', async () => {
+  const svc = service(), sourceFile = path.join(media, 'clip.mp4'), renditionFile = path.join(media, 'old.webm');
+  await settledFile(sourceFile, bytes(1024, 7)); await settledFile(renditionFile, bytes(512, 8));
+  const original = await svc.store.putFile(sourceFile, { key: 'clip', type: 'video/mp4' });
+  const rendition = await svc.store.putFile(renditionFile, { key: `rendition:${original.hash}`, type: 'video/webm', origin: 'rendition' });
+  svc.bind(1, 'p', { clip: { key: 'clip', hash: original.hash, rendition: false } });
+  expect(await svc.resolveSource('clip')).toMatchObject({ path: svc.store.objectPath(original.hash) });
+  await svc.bindJob(6, { id: 'p', assets: { clip: { id: 'clip', storageKey: 'clip', contentHash: original.hash, rendition: false } } });
+  expect(await svc.resolveSource('clip', { process: 'job', session: 6 })).toMatchObject({ path: svc.store.objectPath(original.hash) });
+
+  // A renderer cannot smuggle a string in place of the frozen display choice.
+  svc.bind(1, 'p', { clip: { key: 'clip', hash: original.hash, rendition: 'true' as unknown as boolean } });
+  expect(await svc.resolveSource('clip')).toMatchObject({ path: svc.store.objectPath(original.hash) });
+
+  svc.bind(1, 'p', { clip: { key: 'clip', hash: original.hash, rendition: true } });
+  expect(await svc.resolveSource('clip')).toMatchObject({ path: svc.store.objectPath(rendition.hash) });
+  // Two windows with the same original but different display choices cannot
+  // supply a single source capability. A frozen job retains its own choice.
+  svc.bind(2, 'p', { clip: { key: 'clip', hash: original.hash, rendition: false } });
+  expect(await svc.resolveSource('clip')).toBeNull();
+  expect(await svc.resolveSource('clip', { process: 'job', session: 6 })).toMatchObject({ path: svc.store.objectPath(original.hash) });
+  await svc.bindJob(6, null);
 });
 
 it('freezes a host save’s blob MIME with its content, even if its key is replaced', async () => {

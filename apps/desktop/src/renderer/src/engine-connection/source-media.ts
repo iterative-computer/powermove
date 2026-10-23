@@ -60,7 +60,7 @@ export class EngineSourceMedia {
   private identity(asset: string): string {
     const project = this.host.project(), meta = project.assets?.[asset];
     if (!meta) throw new EngineSnapshotError('mediaOffline', 'This source is no longer in the project.');
-    return JSON.stringify([project.id, asset, meta.contentHash, meta.link, meta.storageKey, meta.size, meta.interpret]);
+    return JSON.stringify([project.id, asset, meta.contentHash, meta.link, meta.storageKey, meta.size, meta.rendition, meta.interpret]);
   }
 
   async frame(asset: string, time: number, width: number, height: number, options: FrameOptions = {}): Promise<EngineSnapshot> {

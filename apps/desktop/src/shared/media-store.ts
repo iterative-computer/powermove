@@ -98,7 +98,8 @@ export type MediaConversion =
   | { ok: true; token: string; size: number; type: 'image/png' | 'video/webm' }
   | { ok: false; error: string; missing?: true };
 
-export type MediaBinding = { key?: string; hash?: string; link?: MediaLink };
+/** `rendition` is the frozen browser-display choice; MediaRead still uses the original. */
+export type MediaBinding = { key?: string; hash?: string; link?: MediaLink; rendition?: boolean };
 
 /** `window.powermove.mediaStore` (preload). */
 export interface MediaStoreBridge {

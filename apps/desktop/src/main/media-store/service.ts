@@ -297,7 +297,7 @@ export class MediaStoreService {
     for (const meta of Object.values<any>(project['assets'] || {})) {
       if (!meta || typeof meta.id !== 'string') continue;
       if (meta.storage === 'linked' && validLink(meta.link)) {
-        assets.set(meta.id, { link: { ...meta.link } });
+        assets.set(meta.id, { link: { ...meta.link }, ...(meta.rendition === true ? { rendition: true } : {}) });
       } else {
         const key = validStorageKey(meta.storageKey) ? meta.storageKey : meta.id;
         const hash = typeof meta.contentHash === 'string' && HASH_HEX.test(meta.contentHash)
@@ -305,7 +305,7 @@ export class MediaStoreService {
         // Freeze the hash now: later key writes must not change this snapshot.
         // The key stays as the window path's fallback for when that object is
         // missing (offline at snapshot time, or put later).
-        const binding: MediaBinding = { ...(validStorageKey(key) ? { key } : {}), ...(hash ? { hash } : {}) };
+        const binding: MediaBinding = { ...(validStorageKey(key) ? { key } : {}), ...(hash ? { hash } : {}), ...(meta.rendition === true ? { rendition: true } : {}) };
         if (binding.key || binding.hash) assets.set(meta.id, binding);
       }
     }
@@ -320,6 +320,7 @@ export class MediaStoreService {
       if (binding.key !== undefined && validStorageKey(binding.key)) clean.key = binding.key;
       if (binding.hash !== undefined && HASH_HEX.test(binding.hash)) clean.hash = binding.hash;
       if (binding.link !== undefined && validLink(binding.link)) clean.link = binding.link;
+      if (typeof binding.rendition === 'boolean') clean.rendition = binding.rendition;
       if (clean.key || clean.hash || clean.link) map.set(id, clean);
     }
     this.bindings.set(owner, { projectId, assets: map });
@@ -389,8 +390,31 @@ export class MediaStoreService {
 
   /** The copy today's browser source monitor displays, pinned to the original hash. */
   async resolveSource(asset: string, context?: { process: EngineProcess; session: number }): Promise<{ path: string; contentHash: ContentHash | null } | null> {
-    const original = await this.resolveAsset(asset, context);
-    if (!original?.contentHash) return original;
+    const job = context?.process === 'job' ? this.jobBindings.get(context.session) : undefined;
+    if (job) {
+      const frozen = job.assets.get(asset);
+      if (frozen) {
+        const original = await this.resolveBindings([frozen]);
+        if (original) return this.sourceCopy(original, frozen.rendition === true);
+      }
+      if (job.projectId === null) return null;
+      const candidates = [...this.bindings.values()].filter(b => b.projectId === job.projectId).map(b => b.assets.get(asset));
+      return this.resolveSourceBindings(candidates, frozen ? frozen.rendition === true : undefined);
+    }
+    if (context?.process === 'interactive' && !this.bound(asset)) await this.bindingOf(asset, this.options.bindWaitMs ?? 1000);
+    return this.resolveSourceBindings([...this.bindings.values()].map(b => b.assets.get(asset)));
+  }
+
+  private async resolveSourceBindings(candidates: (MediaBinding | undefined)[], frozenChoice?: boolean): Promise<{ path: string; contentHash: ContentHash | null } | null> {
+    const choices = new Set(candidates.filter((b): b is MediaBinding => !!b).map(b => b.rendition === true));
+    if (choices.size !== 1) return null;
+    const choice = choices.values().next().value!;
+    if (frozenChoice !== undefined && choice !== frozenChoice) return null;
+    return this.sourceCopy(await this.resolveBindings(candidates), choice);
+  }
+
+  private async sourceCopy(original: { path: string; contentHash: ContentHash | null } | null, renditionRequired: boolean): Promise<{ path: string; contentHash: ContentHash | null } | null> {
+    if (!renditionRequired || !original?.contentHash) return original;
     const hash = Buffer.from(original.contentHash).toString('hex');
     const rendition = await this.store.record(`rendition:${hash}`);
     if (rendition && await this.store.hasObject(rendition.hash)) {

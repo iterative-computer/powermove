@@ -6,7 +6,10 @@
 composition. `time` is source time in ticks, `outputSize` is the returned pixel
 size, and `fit` is stretch, contain, or cover. `display` reads the host's
 `SourceRead` capability, which resolves the browser-playable rendition when
-the asset has one; `interpreted` reads the frozen original `MediaRead` path and
+the asset's binding selects it. A stale cached rendition never replaces a
+browser-playable original. Window bindings and frozen job bindings carry
+this choice; conflicting window choices cannot mint one source capability.
+`interpreted` reads the frozen original `MediaRead` path and
 applies its source interpretation. A non-default SVG interpretation currently
 fails with a named error because Chromium's raster exchange does not carry the
 source transform. A required rendition that has not reached the store is a

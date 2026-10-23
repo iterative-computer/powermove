@@ -6,7 +6,7 @@ import type { EngineBridge } from '../../../shared/engine-ipc';
 import type { DocumentSession } from './session';
 
 function fixture() {
-  const project = { id: 'project', assets: { clip: { id: 'clip', kind: 'video', w: 1920, h: 1080, dur: 20, contentHash: 'original' } } };
+  const project = { id: 'project', assets: { clip: { id: 'clip', kind: 'video', w: 1920, h: 1080, dur: 20, contentHash: 'original', rendition: false } } };
   const pixels = { width: 4, height: 2, data: new Uint8ClampedArray(32), revision: 1, pixels: 'straight' } as EngineSnapshot;
   const snapshot = vi.fn(async () => pixels);
   const encoded: string[] = [];
@@ -64,6 +64,9 @@ describe('engine source consumers', () => {
     f.project.assets.clip.contentHash = 'replacement';
     await f.source.frame('clip', 1, 4, 2);
     expect(f.snapshot).toHaveBeenCalledTimes(3);
+    f.project.assets.clip.rendition = true;
+    await f.source.frame('clip', 1, 4, 2);
+    expect(f.snapshot).toHaveBeenCalledTimes(4);
     expect(f.source.stats.hits).toBe(1);
     f.source.dispose();
   });
