@@ -528,6 +528,44 @@ wasm memory for PMV4 throughout (bigopen), and total RSS stays above
 today's (PMV4 idle 10.2 GB against 6.0 GB: the window 6.1 GB against 3.4,
 the engine process 1.3 GB).
 
+After those batches (not yet re-measured on the private projects):
+
+- Rasters planned ahead missed the layers a wrapper had not answered yet,
+  which on PMV3 are nearly all shapes (1 of 59 drawn ahead was taken): a
+  frame planned ahead now plans an unanswered layer as a pass-through (and
+  still names it as a need), so its rasters are drawn too.
+- Planning while a frame waits for its answers stops at its budget by the
+  measured plan cost (PMV3's first play spent 4 s of render thread there),
+  and a cost measured cold decays. A view without a producer plans ahead
+  only for 2 s after a frame drew rasters of its own (the 500-layer
+  synthetic project rendered 129 frames in 3 s at 120 Hz while planning in
+  every slack; 171 after).
+- The paused warm-up plans as a playing frame (the play's motion blur
+  samples and resampler); it planned with the paused request, and on PMV3
+  none of its rasters were taken.
+- Four base-raster preparations are in flight instead of two (PMV4's
+  wrapper reads every text layer's base each frame).
+- Autosave writes wait while the engine exports (the export's frames wait
+  on this window), and an autosave runs the consistency check at most
+  every 30 s (2 s of the window for PMV3 each time).
+- What the engine's process sends a window within one turn of its event
+  loop goes as one message (an array of envelopes), one task for the
+  window; the page forwards a clock sample with its host offset in one
+  message to the worker, and the worker's stats ride on its presented
+  frames.
+
+The 120 Hz rig (perfbench, merged) on its 500-layer synthetic project, on
+this branch before the last item (load 38 to 50): paused seeks cost the
+page 23 main-thread tasks per step (p50) against today's 8, with 6
+messages posted and 6 received; playing presented 165 of 360 frames
+against today's 282 (the engine rendered 171). The engine path needs a
+message from the engine for each frame and one back from the
+presentation worker: a fresh `VideoFrame` of a shared surface is made only
+on the page's main thread, and the page and the worker share no memory
+without cross-origin isolation, so one page task per frame is not
+reachable on this architecture. The rig now records the engine path's
+counts per step (`enginePathPerStep`).
+
 What remains:
 
 - **First play and first scrub.** The first play after an open meets every
