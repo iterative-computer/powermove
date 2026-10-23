@@ -22,6 +22,14 @@ use pm_protocol::common::{PlaybackRate, TICKS_PER_SECOND, TickRange, Ticks};
 
 const RATE: u32 = 48_000;
 
+struct DecodeWorkers(Arc<SourceCache>);
+
+impl Drop for DecodeWorkers {
+    fn drop(&mut self) {
+        self.0.shutdown();
+    }
+}
+
 struct Usage {
     cpu_s: f64,
     switches: i64,
@@ -49,9 +57,11 @@ fn main() {
     let speed: f64 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let looping = args.next().is_none_or(|s| s != "0");
 
-    let dir = std::env::temp_dir().join(format!("pm-audio-paused-cost-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("tone.wav");
+    let dir = tempfile::Builder::new()
+        .prefix("pm-audio-paused-cost-")
+        .tempdir()
+        .unwrap();
+    let file = dir.path().join("tone.wav");
     let frames = RATE as usize * 12;
     let mut pcm = Vec::with_capacity(frames * 2);
     for i in 0..frames {
@@ -92,6 +102,7 @@ fn main() {
     );
     // The presenter's budget and decode workers.
     let cache = SourceCache::new(256 << 20, 2);
+    let _decode_workers = DecodeWorkers(cache.clone());
     let mut playback = Playback::start(MixFormat::stereo(RATE), cache, PlaybackConfig::default())
         .expect("open the output device");
     let path = |_: &str| Some(file.clone());
@@ -160,5 +171,4 @@ fn main() {
     window("playing", &playback);
     playback.command(TransportCommand::Pause).unwrap();
     playback.shutdown();
-    let _ = std::fs::remove_dir_all(&dir);
 }

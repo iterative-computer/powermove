@@ -62,9 +62,11 @@ fn original_animation_posters_and_nonmonotonic_filmstrips() {
 
 #[test]
 fn source_replacement_offline_corrupt_and_invalid_requests() {
-    let dir = std::env::temp_dir().join(format!("pm-preview-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("original"); // host-store objects need no extension
+    let dir = tempfile::Builder::new()
+        .prefix("pm-preview-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("original"); // host-store objects need no extension
     std::fs::copy(fixtures("still-red.png"), &path).unwrap();
     let mut reader = PreviewReader::open(&path).unwrap();
     assert_eq!(reader.duration().unwrap(), 0.0);
@@ -83,7 +85,6 @@ fn source_replacement_offline_corrupt_and_invalid_requests() {
     assert!(reader.poster().is_err());
     std::fs::remove_file(&path).unwrap();
     assert!(matches!(reader.poster(), Err(MediaError::Io(_))));
-    std::fs::remove_dir(&dir).unwrap();
 }
 
 #[test]
@@ -110,10 +111,12 @@ fn video_poster_and_filmstrip_use_exact_native_decode() {
 
 #[test]
 fn selected_sequence_skips_gaps_preserves_alpha_and_reads_replaced_members() {
-    let dir = std::env::temp_dir().join(format!("pm-preview-sequence-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix("pm-preview-sequence-")
+        .tempdir()
+        .unwrap();
     let paths: Vec<_> = ["frame_12.png", "frame_009.png", "frame_10.PNG"]
-        .map(|n| dir.join(n))
+        .map(|n| dir.path().join(n))
         .into();
     for path in &paths {
         std::fs::copy(fixtures("still-red.png"), path).unwrap();
@@ -138,17 +141,20 @@ fn selected_sequence_skips_gaps_preserves_alpha_and_reads_replaced_members() {
         pixel(&replaced, replaced.decoded().format.width * 3 / 4, 1)[3],
         0
     );
-    let duplicate = vec![paths[0].clone(), dir.join("frame_012.png")];
+    let duplicate = vec![paths[0].clone(), dir.path().join("frame_012.png")];
     assert!(PreviewReader::open_sequence(&duplicate, 30.0).is_err());
     assert!(PreviewReader::open_sequence(&paths, f64::NAN).is_err());
     std::fs::remove_file(&paths[0]).unwrap();
     assert!(reader.frame_at(2.0 / 120.0).is_err());
-    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
 fn preview_memory_stays_accounted_while_consumers_hold_frames() {
-    let path = std::env::temp_dir().join(format!("pm-preview-memory-{}", std::process::id()));
+    let dir = tempfile::Builder::new()
+        .prefix("pm-preview-memory-")
+        .tempdir()
+        .unwrap();
+    let path = dir.path().join("original");
     std::fs::copy(fixtures("still-red.png"), &path).unwrap();
     let mut reader = PreviewReader::open(&path).unwrap();
     let first = reader.poster().unwrap();

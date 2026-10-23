@@ -26,6 +26,7 @@ import type {
   DeadlineSignal,
   EngineProcess,
   Event,
+  HostEncode,
   InFlight,
   JobStatus,
   MediaFacts,
@@ -44,6 +45,7 @@ import type { OutputDestinations } from './outputs';
 import type { ChannelFactory, ClientPortInfo, PortLike, SpawnEngine } from './ports';
 import { isRecord, isSafeUint, ProtocolError } from './protocol';
 import { serveHostFallback, type ShaderFallbackResult } from './shader-fallback-relay';
+import type { ExportEncoders } from './export-encoder';
 import { CACHE_DIRS, HostServicesCore } from './services';
 import { EngineSupervisor, type Launch, type SupervisorState } from './supervisor';
 
@@ -115,6 +117,12 @@ export type NativeEngineOptions = {
    *  (`shader-fallback-relay.ts`); without it such requests answer
    *  `unsupported` and the job fails naming the program. */
   shaderFallback?: (session: number, request: ShaderFallbackRequest, textures: (Uint16Array | Float32Array)[]) => Promise<ShaderFallbackResult>;
+  /** The job engine's WebM exports encoded by Chromium's WebCodecs encoders
+   *  (export-encoder.ts, decision EXPORT-1); without it such requests answer
+   *  `unsupported` and the export fails. */
+  exportEncoders?: ExportEncoders;
+  /** pm-bridge's shared-memory reader, for frames handed to the encoders. */
+  takePixels?: ((name: string, length: number) => Uint8Array) | null;
 };
 
 export type EngineProcessStatus = { state: SupervisorState; generation: number; pid: number | null; attempts: number };
@@ -703,6 +711,7 @@ export class NativeEngine {
 
   private onEnded(launch: Launch, report: CrashReport | null): void {
     const { process } = launch;
+    this.options.exportEncoders?.dropOwner(`${process}:${launch.generation}:${launch.hostPort}`);
     void this.services.endLaunch(process, launch.hostPort).then((n) => {
       if (n) this.options.log('info', `removed ${n} unfinished output(s) of the ${process} engine`);
     });
@@ -785,6 +794,10 @@ export class NativeEngine {
           if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks the host to run fallback requests.'));
           return this.runShaderFallback(body, session ?? 0, current.hostPort);
         }
+        if (body.type === 'hostEncode') {
+          if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks the host to encode.'));
+          return this.runHostEncode(body, session ?? 0, current);
+        }
         if (body.type === 'compatFrame') {
           // Paused Blender previews use the interactive engine. Admit only
           // its exact-PNG map source; every other compatibility draw remains
@@ -820,6 +833,32 @@ export class NativeEngine {
       }
     }, run ? (request, textures) => run(session, request, textures) : null);
     return { type: 'ack' };
+  }
+
+  /** A job engine encode step (export-encoder.ts): the output handle must
+   *  be this job's `outputWrite` handle on the launch's port. */
+  private async runHostEncode(body: Extract<Request, { type: 'hostEncode' }>, session: number, launch: Launch): Promise<Response> {
+    const encoders = this.options.exportEncoders;
+    if (!encoders) throw new ProtocolError('unsupported', 'This host has no WebCodecs encoders.');
+    const { type: _type, ...step } = body;
+    await encoders.serve(step as HostEncode, {
+      owner: `${launch.process}:${launch.generation}:${launch.hostPort}:${session}`,
+      takePixels: this.options.takePixels ?? null,
+      resolveOutput: (handle, job) => {
+        let resolved;
+        try {
+          resolved = this.services.handles.resolve(handle, session, launch.hostPort);
+        } catch (error) {
+          if (error instanceof HandleRejected) throw new ProtocolError('capabilityRejected', error.message);
+          throw error;
+        }
+        if (resolved.kind.kind !== 'outputWrite' || resolved.kind.job !== job) {
+          throw new ProtocolError('capabilityRejected', 'An encode writes only its own export\'s output.');
+        }
+        return resolved.path;
+      }
+    });
+    return { type: 'ack' } as Response;
   }
 
   private onEvent(process: EngineProcess, body: Event, session: number | null): void {

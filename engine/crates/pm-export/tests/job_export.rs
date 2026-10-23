@@ -148,6 +148,7 @@ fn settings(format: ExportFormat, alpha: WireAlpha, dur: f64) -> ExportSettings 
             end: seconds(dur),
         },
         audio: true,
+        audio_index_playhead: None,
         motion_blur: false,
         color: OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,
@@ -207,7 +208,7 @@ fn generated_projects_export_and_verify_in_every_phase_2_format() {
             WireAlpha::None,
             "mov",
             "apch",
-            "lpcm",
+            "in24",
         ),
         (
             "4444",
@@ -217,7 +218,7 @@ fn generated_projects_export_and_verify_in_every_phase_2_format() {
             WireAlpha::Straight,
             "mov",
             "ap4h",
-            "lpcm",
+            "in24",
         ),
         (
             "h264",
@@ -1097,4 +1098,37 @@ fn measure_heavy_precomp_band_cost() {
             println!("{line}");
         }
     }
+}
+
+#[test]
+fn export_uses_the_apps_audio_index_playhead_instead_of_its_range_start() {
+    let mut precomp = layer("nested", "precomp", json!({
+        "comp": "inner", "audioGain": 1,
+        "trim": keys(json!(0), &[(0.0, json!(0)), (2.0, json!(0.346))])
+    }), 0.0, 0.0, 2.0);
+    precomp["from"] = json!(0);
+    let mut nested = project(W, H, 2.0, no_fill(), vec![precomp]);
+    composition(&mut nested, "inner", W, H, 2.0, vec![audio("tone", "tone", 0.5, 2.0)]);
+    asset(&mut nested, "tone", "audio", "wav", 0, 0, 2.0);
+    let mut flat_clip = audio("tone", "tone", 0.5, 2.0);
+    flat_clip["d"]["trim"] = json!(0.173);
+    let mut flat = project(W, H, 2.0, no_fill(), vec![flat_clip]);
+    asset(&mut flat, "tone", "audio", "wav", 0, 0, 2.0);
+    let mut renderer = Renderer::headless().unwrap();
+    let mut render = |doc: &Value, playhead| {
+        let mut s = settings(ExportFormat::H264, WireAlpha::None, 0.8);
+        s.range.start = seconds(0.7);
+        s.audio_index_playhead = playhead;
+        let mut media = MediaPaths::default();
+        media.insert("tone", fixture("tone.wav"));
+        let job = job(doc, media, s, PathBuf::from("/unused.mp4"));
+        let plan = plan_export(&job).unwrap();
+        run_export_into(&mut renderer, &job, plan, MemorySink::default(),
+            &Unrestricted, &AtomicBool::new(false), &mut no_progress()).unwrap().audio
+    };
+    let expected = render(&flat, None);
+    let indexed = render(&nested, Some(seconds(1.0)));
+    let range_start = render(&nested, None);
+    assert!(indexed == expected, "index trim(1 s) = 0.173, independent of range 0.7 s");
+    assert!(indexed != range_start, "the field must reach the export mixer");
 }

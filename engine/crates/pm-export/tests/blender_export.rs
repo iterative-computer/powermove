@@ -154,6 +154,7 @@ fn settings(frames: u32) -> ExportSettings {
             end: seconds(f64::from(frames) / 30.0),
         },
         audio: false,
+        audio_index_playhead: None,
         motion_blur: false,
         color: OutputColor::SrgbImage,
         precision: Precision::Float32,
@@ -343,17 +344,16 @@ fn an_export_with_blender_layers_composites_todays_level1_upload_exactly() {
                     // This existing-project export must retain the old
                     // straight ImageBitmap upload, even under alpha zero.
                     let crop = surface.crop;
-                    let p: [f32; 4] =
-                        if x >= crop.x
-                            && y >= crop.y
-                            && x < crop.x + crop.width
-                            && y < crop.y + crop.height
-                        {
-                            let i = (((y - crop.y) * crop.width + x - crop.x) * 4) as usize;
-                            surface.straight[i..i + 4].try_into().unwrap()
-                        } else {
-                            [0.0; 4]
-                        };
+                    let p: [f32; 4] = if x >= crop.x
+                        && y >= crop.y
+                        && x < crop.x + crop.width
+                        && y < crop.y + crop.height
+                    {
+                        let i = (((y - crop.y) * crop.width + x - crop.x) * 4) as usize;
+                        surface.straight[i..i + 4].try_into().unwrap()
+                    } else {
+                        [0.0; 4]
+                    };
                     if p[3] > 0.0 {
                         covered += 1;
                     }

@@ -511,6 +511,14 @@ describe('export sheet jobs through the job engine', () => {
     }
   });
 
+  it('carries the cached audio index playhead independently of the export range', () => {
+    expect(userExportSettings(project(), { ...options, audioIndexPlayhead: 2 }).audioIndexPlayhead).toBe(1_411_200_000);
+    expect(userExportSettings(project(), options).audioIndexPlayhead).toBeUndefined();
+    for (const value of [-1, NaN, Infinity]) {
+      expect(() => userExportSettings(project(), { ...options, audioIndexPlayhead: value })).toThrow(AgentJobError);
+    }
+  });
+
   it('submit a user job to the chosen file and send its statuses to the window', async () => {
     const engine = new FakeEngine();
     const statuses: Array<[number, UserExportStatus]> = [];

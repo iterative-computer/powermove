@@ -7,6 +7,7 @@ import { trackExportMedia } from './export-media';
 import { exportEffects, type EffectRef } from './export-effects';
 import { AlphaReadbackRetryError } from '../gl/half-readback';
 import { installRenderQueue, wavBytes } from './render-queue';
+import { WEBM_ENCODE_QUEUE_LIMIT, WEBM_VIDEO_CODECS, webmFrameTiming, webmKeyFrame, webmVideoConfig } from './webm-video';
 import { openRenderQueuePanel } from './render-queue-panel';
 import { muxWebM as muxEncodedWebM } from './webm-mux';
 import { writeBlobChunks } from './blob-chunks';
@@ -603,7 +604,7 @@ function sheetOptions(opts: any): any {
   return {
     format: opts.format, alpha: !!opts.alpha && supportsAlpha(opts.format, opts.delivery), fps: Number(opts.fps), scale: Number(opts.scale) || 1,
     start: opts.format === 'still' ? PM.time : t0, end: opts.format === 'still' ? PM.time + 1 / Math.max(1, Number(opts.fps) || p.fps || 30) : t1,
-    audio: opts.audio !== false, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
+    audio: opts.audio !== false, audioIndexPlayhead: PM.Audio?.indexPlayhead?.() ?? PM.time, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
     delivery: normalizeDelivery(opts.delivery), hideCaptions: opts.captionsBurn === false,
     // A raster override's layers are drawn by this window (kernel/raster-compat.ts),
     // and a WebM export's frames go through its compatibility context (compat-context.ts).
@@ -1234,13 +1235,9 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
   const retention = trackStaticExport(PM, opts.mblur !== false);
   let retained: VideoFrame | null = null, lastKey: string | null = null;
   try {
-  const cfgs: any = [
-    { codec: 'vp09.00.31.08', id: 'V_VP9' },
-    { codec: 'vp8', id: 'V_VP8' },
-  ];
   let chosen: any = null;
-  for (const c of cfgs) {
-    const cfg: any = { codec: c.codec, width: W, height: H, bitrate, framerate: opts.fps, latencyMode: 'quality' };
+  for (const c of WEBM_VIDEO_CODECS) {
+    const cfg: any = webmVideoConfig(c.codec, W, H, bitrate, opts.fps);
     const sup: any = await window.VideoEncoder.isConfigSupported(cfg).catch(() => null);
     if (sup && sup.supported) { enc.configure(cfg); chosen = c; configured = true; break; }
   }
@@ -1258,18 +1255,18 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
       if (X.cancel) break;
       cv = renderInto(T, W, H, opts.mblur);
     }
-    const frame: VideoFrame = new window.VideoFrame(retained || cv, { timestamp: Math.round(i / opts.fps * 1e6), duration: Math.round(1e6 / opts.fps) });
+    const frame: VideoFrame = new window.VideoFrame(retained || cv, webmFrameTiming(i, opts.fps));
     try {
       if (key !== null && !retained) { retained = frame.clone(); lastKey = key; }
       if (encoderError) throw encoderError;
-      enc.encode(frame, { keyFrame: i % Math.round(opts.fps * 2) === 0 });
+      enc.encode(frame, { keyFrame: webmKeyFrame(i, opts.fps) });
     } finally { frame.close(); }
     if (i % 3 === 0) {
       pctx.drawImage(retained || cv, 0, 0, ui.prev.width, ui.prev.height);
       ui.set(i + 1, 'Rendering');
       await new Promise((r: any) => window.setTimeout(r, 0));
     }
-    while (enc.encodeQueueSize > 12 && !X.cancel && !encoderError) {
+    while (enc.encodeQueueSize > WEBM_ENCODE_QUEUE_LIMIT && !X.cancel && !encoderError) {
       await new Promise((r: any) => window.setTimeout(r, 6));
     }
     if (encoderError) throw encoderError;

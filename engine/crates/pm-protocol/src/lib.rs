@@ -24,7 +24,8 @@
 //! | 14 | Host services | [`host`] |
 //! | 15 | The headless document host | [`document_host`] |
 //!
-//! [`media`] (Interpret Footage's media facts) extends contract 14.
+//! [`media`] (Interpret Footage's media facts) extends contract 14, and so
+//! does [`host_encode`] (exports encoded by the host's WebCodecs encoders).
 //! [`snapshot`] (engine snapshots, compatibility pixels, presentation
 //! stats: the Phase 3c render transport) extends contracts 2 and 14.
 
@@ -39,6 +40,7 @@ pub mod envelope;
 pub mod error;
 pub mod frame;
 pub mod host;
+pub mod host_encode;
 pub mod interop;
 pub mod lease;
 pub mod media;

@@ -488,6 +488,7 @@ pub fn export(ctx: &Ctx, name: &str, layers: usize, frames: u32) -> BenchReport 
                 end: ticks(f64::from(frames) / 30.0),
             },
             audio: false,
+            audio_index_playhead: None,
             motion_blur: false,
             color: OutputColor::Rec709QuickTime {
                 candidate: QuickTimeTag::Cicp1_13_1,

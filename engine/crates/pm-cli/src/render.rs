@@ -546,6 +546,7 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
             end: seconds_to_ticks(end)?,
         },
         audio: !options.no_audio && !format.is_image(),
+        audio_index_playhead: None,
         motion_blur: false,
         color,
         precision,
@@ -677,8 +678,21 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     // Blender compositions (contract 11): the CLI host runs the pinned
     // worker in the installed Blender itself.
     let mut blender = blender_stage(&job).map_err(|e| Failure::Failed(e.to_string()))?;
+    let mut decoder_notice = None;
     let delivered = pm_export::render::plan_export_for(&job, blender.is_some(), &renderer)
         .and_then(|plan| {
+            if let Some(audio) = &plan.audio {
+                decoder_notice = pm_audio::chromium::fallback_notice(
+                    audio
+                        .graph
+                        .voices
+                        .iter()
+                        .map(|v| v.source.info.codec.as_str()),
+                );
+                if let Some(n) = &decoder_notice {
+                    eprintln!("pm-cli: warning: {n}");
+                }
+            }
             let sink = pm_export::render::sink_for(&plan)?;
             pm_export::render::run_export_with_blender(
                 &mut renderer,
@@ -705,6 +719,8 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     Ok(serde_json::json!({
         "path": delivered.path,
         "approximateSvg": approximate,
+        "audioDecoder": if decoder_notice.is_some() { "powermove-ffmpeg" } else { "today" },
+        "audioDecoderNotice": decoder_notice,
         "codec": r.codec,
         "profile": r.profile,
         "pixelFormat": r.pixel_format,

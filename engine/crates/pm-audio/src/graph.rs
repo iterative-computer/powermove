@@ -129,6 +129,14 @@ pub struct VoicePlan {
     /// the pitch choice): two revisions with the same key read the source
     /// identically, so a time stretch in progress carries over a live edit.
     pub map_key: u64,
+    /// Today's decode resampling of a linear voice's source to the project
+    /// rate and to 48 kHz (the export's), prepared with the graph so no
+    /// render walks a long file ([`crate::today::conversion`]).
+    pub conversions: Vec<Arc<crate::today::Conversion>>,
+    /// A speed other than 1, a time remap or `sourceTime` somewhere on the
+    /// path: the engine follows them (decision AUDIO-4); every other voice
+    /// plays today's model (`crate::today`).
+    pub retimed: bool,
 }
 
 /// One evaluation of a voice at a master time.
@@ -274,6 +282,7 @@ struct PathState {
     animated: bool,
     id: String,
     strip: Option<String>,
+    retimed: bool,
 }
 
 impl<'d> Walk<'_, 'd> {
@@ -328,7 +337,12 @@ impl<'d> Walk<'_, 'd> {
                     window.0.max(offset + from),
                     window.1.min(offset + from + dur),
                 );
-                if window.1 - window.0 <= MIN_WINDOW {
+                // Today clamps a negative start to 0 (`audioLayers`), so a
+                // layer starting before its composition still sounds there.
+                let today = offset + from.max(0.0);
+                if window.1 - window.0 <= MIN_WINDOW
+                    && path.window.1.min(today + dur) - path.window.0.max(today) <= MIN_WINDOW
+                {
                     continue;
                 }
             }
@@ -444,6 +458,9 @@ impl<'d> Walk<'_, 'd> {
                     next.window = window;
                     next.id = item;
                     next.strip = Some(strip);
+                    next.retimed |= node::truthy(remap)
+                        || node::is_property(remap)
+                        || node::truthy(node::member(d, "sourceTime"));
                     next.animated |= on_animated
                         || animated(node::member(d, "audioGain"))
                         || animated(node::member(d, "audioMuted"));
@@ -545,6 +562,26 @@ impl<'d> Walk<'_, 'd> {
             _ => None,
         };
         let map_key = self.map_key(&levels, kind, &asset, &file, &source, conform, pitch);
+        let speed = node::member(d, "speed");
+        let retimed = path.retimed
+            || !unit_speed(speed)
+            || node::truthy(remap)
+            || node::is_property(remap)
+            || node::truthy(node::member(d, "sourceTime"));
+        let mut conversions: Vec<Arc<crate::today::Conversion>> = Vec::new();
+        if !retimed && let Some(frames) = source.length() {
+            let project = crate::mixer::project_sample_rate(self.doc);
+            for rate in [project, 48_000] {
+                if rate != source.sample_rate() && !conversions.iter().any(|c| c.rate == rate) {
+                    conversions.push(crate::today::conversion(
+                        source.id(),
+                        frames,
+                        source.sample_rate(),
+                        rate,
+                    ));
+                }
+            }
+        }
         let mut plan = VoicePlan {
             id,
             strip,
@@ -562,6 +599,8 @@ impl<'d> Walk<'_, 'd> {
             conform,
             constant_rate,
             map_key,
+            conversions,
+            retimed,
         };
         if !plan.animated {
             // Every input is static: evaluate once, inside the window.
@@ -624,9 +663,14 @@ impl Walk<'_, '_> {
                 continue;
             };
             digest(&mut h, node::member(Some(layer), "id"));
-            digest(&mut h, node::member(Some(layer), "from"));
+            for key in ["from", "dur", "on"] {
+                digest(&mut h, node::member(Some(layer), key));
+            }
+            for &g in &level.groups {
+                digest(&mut h, node::member(comp.layers().get(g), "on"));
+            }
             let d = node::member(Some(layer), "d");
-            for key in ["trim", "speed", "timeRemap", "sourceTime"] {
+            for key in ["trim", "speed", "timeRemap", "sourceTime", "audioMuted"] {
                 digest(&mut h, node::member(d, key));
             }
         }
@@ -663,6 +707,7 @@ pub fn audible(doc: &Document, comp_id: &str, ev: &mut Evaluator) -> Result<bool
         animated: false,
         id: String::new(),
         strip: None,
+        retimed: false,
     };
     walk.visit(comp_id, 0, &start)?;
     Ok(walk.candidates > 0)
@@ -702,6 +747,7 @@ impl MixGraph {
             animated: false,
             id: String::new(),
             strip: None,
+            retimed: false,
         };
         walk.visit(comp_id, 0, &start)?;
         let mut strips: Vec<String> = Vec::new();
@@ -729,6 +775,98 @@ impl MixGraph {
             .iter()
             .map(|c| Comp::in_root(root, c, doc.revision()).map_err(AudioError::from))
             .collect()
+    }
+}
+
+/// Compiled constant content for detached preparation with the standard
+/// evaluator. Keep the exact sourceTime arithmetic at every ancestor; deriving
+/// an intercept from two points changes floating-point rounding and PCM.
+pub(crate) struct StaticMap {
+    levels: Vec<(f64, f64, f64, f64)>,
+    active: bool,
+    conform: f64,
+}
+impl StaticMap {
+    pub(crate) fn new(
+        plan: &VoicePlan,
+        comps: &[Comp<'_>],
+        ev: &mut Evaluator,
+        t: f64,
+    ) -> Result<Option<Self>> {
+        if plan.animated || plan.constant_rate.is_none() || plan.offset.is_some() {
+            return Ok(None);
+        }
+        let mut levels = Vec::new();
+        for level in &plan.levels {
+            let comp = &comps[level.comp];
+            let layer = &comp.layers()[level.layer];
+            let d = ev.resolve_content(comp, layer, t)?;
+            let speed = match d.get(&JsString::from("speed")) {
+                None | Some(JsValue::Undefined | JsValue::Null) => 1.0,
+                Some(v) => v.to_number(),
+            };
+            let trim = d
+                .get(&JsString::from("trim"))
+                .filter(|v| v.truthy())
+                .map_or(0.0, |v| v.to_number());
+            levels.push((
+                number(node::member(Some(layer), "from"), 0.0),
+                number(node::member(Some(layer), "dur"), 0.0).max(0.0),
+                speed,
+                trim,
+            ));
+        }
+        Ok(Some(Self {
+            levels,
+            active: plan.static_point.is_some_and(|p| p.active),
+            conform: plan.conform,
+        }))
+    }
+    /// Exact signal identity, independent of the strip's level/fades.
+    /// Compare bits: signed zero and arithmetic order must survive reuse.
+    pub(crate) fn same_signal(&self, other: &Self) -> bool {
+        self.active == other.active
+            && self.conform.to_bits() == other.conform.to_bits()
+            && self.levels.len() == other.levels.len()
+            && self.levels.iter().zip(&other.levels).all(|(a, b)| {
+                [a.0, a.1, a.2, a.3].map(f64::to_bits) == [b.0, b.1, b.2, b.3].map(f64::to_bits)
+            })
+    }
+    fn position(&self, mut t: f64) -> (bool, f64, f64, f64) {
+        let mut on = true;
+        let mut local = 0.0;
+        let mut duration = 0.0;
+        for &(from, dur, speed, trim) in &self.levels {
+            on &= t >= from && t < from + dur;
+            local = t - from;
+            duration = dur;
+            t = local * speed + trim;
+        }
+        (on, t * self.conform, local, duration)
+    }
+    pub(crate) fn point(&self, t: f64, rate: f64) -> crate::stretch::MapPoint {
+        let (on, source, _, _) = self.position(t);
+        crate::stretch::MapPoint {
+            x: source * rate,
+            on: on && self.active,
+        }
+    }
+    pub(crate) fn evaluate(&self, plan: &VoicePlan, t: f64) -> Point {
+        let (on, source_time, local, duration) = self.position(t);
+        let mut out = plan.static_point.expect("compiled static point");
+        out.in_span = on;
+        out.source_time = source_time;
+        out.local = local;
+        out.audible = duration;
+        if let Some(len) = plan.source.info.duration() {
+            let speed = self.levels.last().unwrap().2;
+            if speed.is_finite() && speed > 0.0 {
+                let speed = speed * self.conform;
+                let start = source_time - local * speed;
+                out.audible = out.audible.min((len - start) / speed);
+            }
+        }
+        out
     }
 }
 
@@ -802,8 +940,11 @@ impl VoicePlan {
                     out.active = false;
                 }
                 tau = if self.offset.is_some() {
-                    // A linear path: `local × 1 + trim` (sourceTime).
-                    let trim = node::js_value_opt(node::member(d, "trim"));
+                    // A linear path: `local × 1 + trim` (sourceTime), with the
+                    // trim as `resolveContent` gives it: a channel (`PM.P(0)`,
+                    // how the app stores it) is evaluated, never read with
+                    // `Number(…)`, which is NaN for the channel object.
+                    let trim = field(ev, "trim")?;
                     (tau - from) * 1.0 + if trim.truthy() { trim.to_number() } else { 0.0 }
                 } else {
                     Scope::new(ev, comp, open).source_time(layer, tau, Some(retime))?

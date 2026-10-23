@@ -71,6 +71,35 @@ fn stress_enabled() -> bool {
     std::env::var_os("PM_AUDIO_PLAYBACK_STRESS").is_some()
 }
 
+fn native_dsp_diagnostics_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled = std::env::var_os("PM_STRETCH_DSP_DIAGNOSTICS").is_some();
+        if enabled {
+            pm_stretch::enable_dsp_diagnostics();
+        }
+        enabled
+    })
+}
+
+fn log_native_dsp_diagnostics(label: &str) {
+    if native_dsp_diagnostics_enabled() {
+        let Some(rows) = pm_stretch::dsp_diagnostic_snapshot() else {
+            eprintln!("{label}: native DSP snapshot unavailable");
+            return;
+        };
+        eprintln!(
+            "{label}: native DSP diagnostic enabled; process-global maxima since enable, not per trial; regions={:?}",
+            pm_stretch::DSP_DIAGNOSTIC_REGIONS,
+        );
+        for (entry, row) in pm_stretch::DSP_DIAGNOSTIC_ENTRIES.iter().zip(rows) {
+            eprintln!(
+                "{label}: native DSP entry={entry} processGlobalSinceEnableNs max(ns,localStepMarker)={row:?}",
+            );
+        }
+    }
+}
+
 fn ticks(s: f64) -> Ticks {
     Ticks::new((s * TICKS_PER_SECOND as f64).round() as i64).unwrap()
 }
@@ -188,6 +217,7 @@ fn setup_doc(
     device_channels: usize,
     ppm: f64,
 ) -> (Playback, SimDevice, Rig) {
+    native_dsp_diagnostics_enabled();
     let mut rig = Rig::new(media);
     rig.cache = SourceCache::new(64 << 20, 2);
     if stress_enabled() {
@@ -398,6 +428,404 @@ fn playback_equals_the_offline_render() {
     assert!(
         played == &offline[0][..],
         "played audio differs from the offline render"
+    );
+}
+
+/// The host's memory-pressure grant releases inactive sample blocks
+/// (`Playback::memory_pressure`). Today's `trimDecodedCache` never evicts
+/// the assets of playing voices. Here the grant arrives every few callbacks,
+/// once while paused on a prepared start and then throughout the run: what
+/// is heard stays the offline render, complete from its first sample, with
+/// no ring underrun and no starved render.
+#[test]
+fn memory_pressure_during_playback_keeps_it_whole() {
+    let dir = temp_dir("pressure");
+    let f44 = dir.join("t44.wav");
+    write_wav(
+        &f44,
+        44_100,
+        &[
+            tone(44_100, 6.0, 997.0, 0.5),
+            tone(44_100, 6.0, 1503.0, 0.3),
+        ],
+    );
+    let (playback, mut dev, rig) = setup(&f44, 6.0, SR, 0.0);
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(2.5),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    // Paused: the start is prepared, then the grant takes what it may.
+    until(|| {
+        playback
+            .prepared_starts()
+            .contains(&((2.5 * SR as f64) as i64))
+    });
+    playback.memory_pressure();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    for _ in 0..50 {
+        dev.run(3);
+        playback.memory_pressure();
+    }
+    let stats = playback.stats();
+    assert_eq!(stats.underruns, 0, "{stats:?}");
+    assert_eq!(stats.starved_renders, 0, "{stats:?}");
+    let played: Vec<f32> = dev
+        .log
+        .iter()
+        .flat_map(|(_, b)| b.iter().step_by(2).copied())
+        .collect();
+    let start = played.iter().position(|v| *v != 0.0).expect("audio played");
+    let doc = project(30.0, 6.0, &[audio("A", "s", 0.0, 6.0, "", "")], &[], "");
+    let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
+    let n = 60_000;
+    let offline = rig.render(
+        &mut m,
+        (2.5 * SR as f64) as i64,
+        (2.5 * SR as f64) as i64 + n as i64,
+        4096,
+    );
+    let lead = offline[0].iter().position(|v| *v != 0.0).unwrap();
+    assert!(start >= lead);
+    let played = &played[start - lead..start - lead + n];
+    assert!(
+        played == &offline[0][..],
+        "audio played through memory pressure differs from the offline render"
+    );
+}
+
+/// Today schedules a clip's gain envelope when playback starts, from the
+/// playhead: points one composition frame apart from there. A play from a
+/// time between frames therefore hears the eased key on the grid that starts
+/// at the play position, as an export of the range from there renders it,
+/// not the grid of a play from the project start.
+#[test]
+fn automation_steps_from_the_play_start() {
+    let dir = temp_dir("today-grid");
+    let file = dir.join("dc.wav");
+    write_wav(&file, SR, &[vec![0.5; SR as usize * 4]]);
+    let gain = r#"{"v":0.1,"kf":[{"t":0,"v":0.1,"i":"a","eo":[0.42,0],"ei":[0.58,1],"hold":false},{"t":3,"v":1.2,"i":"b","eo":[0.42,0],"ei":[0.58,1],"hold":false}],"expr":null}"#;
+    let doc = || {
+        project(
+            30.0,
+            4.0,
+            &[audio("A", "s", 0.0, 4.0, &format!(r#","gain":{gain}"#), "")],
+            &[],
+            "",
+        )
+    };
+    let (playback, mut dev, rig) = setup_doc(doc(), &[("s", &file)], SR, 2, 0.0);
+    let at = 1.01234;
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(at),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(120);
+    let played: Vec<f32> = dev
+        .log
+        .iter()
+        .flat_map(|(_, b)| b.iter().step_by(2).copied())
+        .collect();
+    let start = played.iter().position(|v| *v != 0.0).expect("audio played");
+    let first = pm_audio::offline::sample_of_ticks(ticks(at).get(), SR);
+    let n = 30_000;
+    let render = |t0: f64, origin: i64| {
+        let mut m = rig.mixer(doc(), "C", MixFormat::stereo(SR));
+        m.set_today_range(t0, f64::INFINITY, origin);
+        rig.render(&mut m, first, first + n as i64, 4096)[0].clone()
+    };
+    let from_play = render(first as f64 / SR as f64, first);
+    let from_zero = render(0.0, 0);
+    assert_ne!(from_play, from_zero, "the grids differ");
+    assert_eq!(
+        &played[start..start + n],
+        &from_play[..],
+        "played on the play start's grid"
+    );
+    drop(playback);
+}
+
+/// A project whose only audio clip is offline plays on a running clock as
+/// today's does (today's transport never waits on a missing clip): the
+/// producer feeds silence, so the device never underruns.
+#[test]
+fn an_offline_only_clip_keeps_the_clock_fed() {
+    native_dsp_diagnostics_enabled();
+    let cache = SourceCache::new(16 << 20, 2);
+    let (mut playback, side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig::default(),
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let doc = project(
+        30.0,
+        6.0,
+        &[audio("A", "missing", 0.0, 6.0, "", "")],
+        &[],
+        "",
+    );
+    let problems = playback
+        .set_project(Arc::new(doc), "C", &|_: &str| None)
+        .unwrap();
+    assert_eq!(problems.len(), 1, "the clip is reported missing");
+    let mut dev = SimDevice::new(side, SR, 2, 0.0);
+    // Paused with the device open (the app warms it for any audible clip).
+    dev.run(60);
+    let paused = playback.stats();
+    assert_eq!(paused.underruns, 0, "paused: {paused:?}");
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(150);
+    let played = playback.stats();
+    assert!(
+        played.played_frames >= paused.played_frames + 150 * 512,
+        "{played:?}"
+    );
+    playback.command(TransportCommand::Pause).unwrap();
+    dev.run(60);
+    let stats = playback.stats();
+    let clock = playback.clock().expect("the clock runs");
+    assert!(clock.media_time.get() > 0, "the playhead advances");
+    assert_eq!(stats.underruns, 0, "{stats:?}");
+    assert!(playback.shutdown());
+    cache.shutdown();
+}
+
+/// Review round 9, blocker 3: today reads a precomposition's animated
+/// `trim` when its `audioLayers` index is built, and keeps that index until
+/// an edit (`layers`/`project` events, `retune`) invalidates it; Play,
+/// seeks and loop wraps reuse it (`legacy/core/audio.ts`). Playback reads
+/// the trim at the playhead of the index's last build: the first Play's
+/// start, kept by a later Play elsewhere and by loop wraps; an edit while
+/// paused moves it to the next Play's start, an edit while playing to the
+/// playhead heard then.
+#[test]
+fn a_precomposition_animated_trim_reads_at_todays_index_build() {
+    let dir = temp_dir("index-trim");
+    let file = ramp_file(&dir, 20);
+    // The nested clip starts at 8 s in its composition; trim(t) = t / 2, so
+    // it starts at 8 − trim(P) in the parent (P: the index's playhead) and
+    // plays source t − 8 + trim(P) at parent time t.
+    let inner = comp(30.0, 20.0, &[audio("I", "s", 8.0, 12.0, "", "")], "");
+    let outer = layer(
+        "P",
+        "precomp",
+        0.0,
+        20.0,
+        &format!(
+            r#"{{"comp":"X","trim":{}}}"#,
+            keys(&[(0.0, 0.0), (20.0, 10.0)])
+        ),
+        "",
+    );
+    let doc = project(30.0, 20.0, &[outer], &[("X".into(), inner)], "");
+    let (playback, mut dev, rig) = setup_doc(doc.clone(), &[("s", &file)], SR, 2, 0.0);
+    let play = |playback: &Playback, dev: &mut SimDevice, at: f64, buffers: usize| -> usize {
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(at),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        let mark = dev.log.len();
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        dev.run(buffers);
+        mark
+    };
+    let first_heard = |playback: &Playback, dev: &mut SimDevice, at: f64| -> i64 {
+        let mark = play(playback, dev, at, 40);
+        playback.command(TransportCommand::Pause).unwrap();
+        position_of(heard_ramp(dev, mark)[0].0)
+    };
+    let s = SR as f64;
+    let at = |seconds: f64| (seconds * s).round() as i64;
+    // The first Play builds the index at 2 s (trim 1: the clip starts at 7).
+    play(&playback, &mut dev, 2.0, 10);
+    playback.command(TransportCommand::Pause).unwrap();
+    // A later Play at 9 s keeps it (today: no rebuild without an edit).
+    assert_eq!(
+        first_heard(&playback, &mut dev, 9.0),
+        at(2.0),
+        "index kept at 2 s"
+    );
+    // Loop wraps keep it too.
+    playback
+        .command(TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: ticks(9.0),
+                end: ticks(9.25),
+            }),
+        })
+        .unwrap();
+    let mark = play(&playback, &mut dev, 9.0, 60);
+    playback.command(TransportCommand::Pause).unwrap();
+    playback
+        .command(TransportCommand::SetLoop { range: None })
+        .unwrap();
+    let passes = heard_ramp(&dev, mark)
+        .iter()
+        .filter(|f| f.1 == 0.5 && position_of(f.0) == at(2.0))
+        .count();
+    assert!(
+        passes >= 2,
+        "every pass reads trim(2 s): {passes} pass starts"
+    );
+    // An edit while paused invalidates it: the next Play's start rebuilds.
+    let media = rig.media.clone();
+    let resolver = move |id: &str| media.get(id).cloned();
+    playback
+        .set_project(Arc::new(doc.clone()), "C", &resolver)
+        .unwrap();
+    assert_eq!(
+        first_heard(&playback, &mut dev, 9.0),
+        at(5.5),
+        "rebuilt at 9 s"
+    );
+    assert_eq!(
+        first_heard(&playback, &mut dev, 9.5),
+        at(6.0),
+        "kept at 9 s"
+    );
+    // An edit while playing rebuilds at the playhead heard then.
+    play(&playback, &mut dev, 10.0, 20);
+    let heard = playback.clock().unwrap();
+    let heard_at = heard.media_time.get() as f64 / TICKS_PER_SECOND as f64
+        + (host_now_us() as f64 - heard.host_time.get() as f64) / 1e6;
+    playback.set_project(Arc::new(doc), "C", &resolver).unwrap();
+    dev.run(4);
+    playback.command(TransportCommand::Pause).unwrap();
+    let got = first_heard(&playback, &mut dev, 9.0) as f64 / s;
+    let want = 1.0 + heard_at / 2.0;
+    assert!(
+        (got - want).abs() < 0.05,
+        "rebuilt where heard ({heard_at:.3} s): source {got:.3} s, want {want:.3} s"
+    );
+}
+
+#[test]
+fn embedded_video_animated_trim_reads_at_todays_index_build() {
+    let dir = temp_dir("index-trim");
+    let file = ramp_file(&dir, 20);
+    // Embedded trim(t) = t / 2, frozen when audioLayers builds its index.
+    let video = layer(
+        "V",
+        "video",
+        0.0,
+        20.0,
+        &format!(
+            r#"{{"asset":"s","embeddedAudio":true,"trim":{}}}"#,
+            keys(&[(0.0, 0.0), (20.0, 10.0)])
+        ),
+        "",
+    );
+    let doc = project(30.0, 20.0, &[video], &[], "");
+    let (playback, mut dev, rig) = setup_doc(doc.clone(), &[("s", &file)], SR, 2, 0.0);
+    let play = |playback: &Playback, dev: &mut SimDevice, at: f64, buffers: usize| -> usize {
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(at),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        let mark = dev.log.len();
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        dev.run(buffers);
+        mark
+    };
+    let first_heard = |playback: &Playback, dev: &mut SimDevice, at: f64| -> i64 {
+        let mark = play(playback, dev, at, 40);
+        playback.command(TransportCommand::Pause).unwrap();
+        position_of(heard_ramp(dev, mark)[0].0)
+    };
+    let s = SR as f64;
+    let at = |seconds: f64| (seconds * s).round() as i64;
+    // The first Play builds the index at 2 s (trim 1).
+    play(&playback, &mut dev, 2.0, 10);
+    playback.command(TransportCommand::Pause).unwrap();
+    // A later Play at 9 s keeps it (today: no rebuild without an edit).
+    assert_eq!(
+        first_heard(&playback, &mut dev, 9.0),
+        at(10.0),
+        "index kept at 2 s"
+    );
+    // Loop wraps keep it too.
+    playback
+        .command(TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: ticks(9.0),
+                end: ticks(9.25),
+            }),
+        })
+        .unwrap();
+    let mark = play(&playback, &mut dev, 9.0, 60);
+    playback.command(TransportCommand::Pause).unwrap();
+    playback
+        .command(TransportCommand::SetLoop { range: None })
+        .unwrap();
+    let passes = heard_ramp(&dev, mark)
+        .iter()
+        .filter(|f| f.1 == 0.5 && position_of(f.0) == at(10.0))
+        .count();
+    assert!(
+        passes >= 2,
+        "every pass reads trim(2 s): {passes} pass starts"
+    );
+    // An edit while paused invalidates it: the next Play's start rebuilds.
+    let media = rig.media.clone();
+    let resolver = move |id: &str| media.get(id).cloned();
+    playback
+        .set_project(Arc::new(doc.clone()), "C", &resolver)
+        .unwrap();
+    assert_eq!(
+        first_heard(&playback, &mut dev, 9.0),
+        at(13.5),
+        "rebuilt at 9 s"
+    );
+    assert_eq!(
+        first_heard(&playback, &mut dev, 9.5),
+        at(14.0),
+        "kept at 9 s"
+    );
+    // An edit while playing rebuilds at the playhead heard then.
+    play(&playback, &mut dev, 10.0, 20);
+    let heard = playback.clock().unwrap();
+    let heard_at = heard.media_time.get() as f64 / TICKS_PER_SECOND as f64
+        + (host_now_us() as f64 - heard.host_time.get() as f64) / 1e6;
+    playback.set_project(Arc::new(doc), "C", &resolver).unwrap();
+    dev.run(4);
+    playback.command(TransportCommand::Pause).unwrap();
+    let got = first_heard(&playback, &mut dev, 9.0) as f64 / s;
+    let want = 9.0 + heard_at / 2.0;
+    assert!(
+        (got - want).abs() < 0.05,
+        "rebuilt where heard ({heard_at:.3} s): source {got:.3} s, want {want:.3} s"
     );
 }
 
@@ -732,7 +1160,83 @@ fn a_partial_callback_underrun_is_reported_and_recovers_in_order() {
     );
 }
 
+/// Both input blocks for a fresh mapped start must be queued while decode
+/// is blocked; discovering the second only after the first decodes serializes
+/// the artificial/real decode latency and can miss the first callback.
+#[test]
+fn a_cold_mapped_start_queues_its_preroll_blocks_together() {
+    let dir = temp_dir("mapped-preroll-prefetch");
+    let file = dir.join("tone.m4a");
+    generate(
+        &file,
+        "aevalsrc=0.125*sin(2*PI*441*t)|0.125*sin(2*PI*660*t):s=44100:d=20",
+        &["-c:a", "aac", "-b:a", "160k"],
+    );
+    let cache = SourceCache::new(64 << 20, 2);
+    let source = cache.open(&file, None).unwrap();
+    cache.set_decode_blocked(&source, true);
+    let (playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig {
+            preroll_wait_ms: 4000,
+            ..Default::default()
+        },
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    // Set the target before Project can launch an obsolete start at zero.
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(2.0),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    let remap = keys(&[(0.0, 2.0), (6.0, 10.0)]);
+    let clip = layer(
+        "V",
+        "video",
+        0.0,
+        6.0,
+        &format!(r#"{{"asset":"s","timeRemap":true,"sourceTime":{remap},"embeddedAudio":true}}"#),
+        "",
+    );
+    playback
+        .set_project(
+            Arc::new(project(30.0, 12.0, &[clip], &[], "")),
+            "C",
+            &|_: &str| Some(file.clone()),
+        )
+        .unwrap();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    while cache.blocked_decoders() < 2 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let blocked = cache.blocked_decoders();
+    cache.set_decode_blocked(&source, false);
+    until(|| side.queued_frames() >= BUFFER);
+    let mut out = vec![0.0; BUFFER * 2];
+    side.callback(&mut out, 2, host_now_us());
+    assert!(out.iter().any(|v| *v != 0.0));
+    drop(playback);
+    cache.shutdown();
+    assert_eq!(
+        blocked, 2,
+        "both decode workers must receive needed pre-roll blocks before either finishes"
+    );
+}
+
 fn time_mapped_playback(loaded: bool) {
+    // Real-time comparisons (40 ms device, zero underruns) never overlap the
+    // sixteen-voice start tests' bursts of user-interactive pool jobs.
+    let _isolated = POOL_BURSTS.read().unwrap_or_else(|e| e.into_inner());
     let _load = loaded.then(CpuContention::start);
     let dir = temp_dir(if loaded {
         "time-mapped-loaded"
@@ -791,6 +1295,7 @@ fn time_mapped_playback(loaded: bool) {
             .unwrap();
         dev.run(200);
         let stats = playback.stats();
+        let playback_timing = playback.start_timing();
         drop(playback);
         let played: Vec<f32> = dev
             .log
@@ -831,6 +1336,23 @@ fn time_mapped_playback(loaded: bool) {
             "{name}: stats {stats:?}, first difference {:?}",
             played.iter().zip(&offline[0]).position(|(a, b)| a != b)
         );
+        eprintln!(
+            "{name}: first program frame {start}, offline lead {lead}, expired callbacks {}, first queued after control {:?} ms",
+            dev.expired,
+            playback_timing
+                .as_ref()
+                .map(|t| (t.queued_us - t.applied_us) as f64 / 1000.0)
+        );
+        eprintln!(
+            "{name}: DSP span maxima contextLifetimeNs worker={:?} producer={:?}",
+            playback_timing
+                .as_ref()
+                .map(|t| &t.scheduling_max_dsp_unit_by_role_phase_ns[0]),
+            playback_timing
+                .as_ref()
+                .map(|t| &t.scheduling_max_dsp_unit_by_role_phase_ns[1]),
+        );
+        log_native_dsp_diagnostics(name);
         assert_eq!(stats.starved_renders, 0, "{name}: starved renders");
         assert_eq!(stats.underruns, 0, "{name}: device ring underruns");
         assert_eq!(
@@ -1130,6 +1652,64 @@ fn a_pause_during_a_seek_pre_roll_stops_at_the_target() {
     let stopped = playback.clock().unwrap();
     assert_eq!(stopped.state, TransportState::Stopped);
     assert_eq!(stopped.media_time, ticks(4.0), "paused at the seek target");
+    drop(playback);
+
+    // Force the source-hold branch too: a warm seek can finish before Pause
+    // arrives and cannot prove that a deferred control interrupts that hold.
+    let cache = SourceCache::new(64 << 20, 2);
+    let source = cache.open(&file, None).unwrap();
+    cache.block(&source, 0, true).unwrap();
+    cache.set_decode_blocked(&source, true);
+    let (playback, side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig {
+            lookahead_ms: 0,
+            preroll_wait_ms: 400,
+            ..PlaybackConfig::default()
+        },
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let doc = project(30.0, 6.0, &[audio("A", "s", 0.0, 6.0, "", "")], &[], "");
+    playback
+        .set_project(Arc::new(doc), "C", &|_: &str| Some(file.clone()))
+        .unwrap();
+    playback
+        .commands([
+            TransportCommand::Seek {
+                time: ticks(4.0),
+                mode: SeekMode::Exact,
+            },
+            TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            },
+        ])
+        .unwrap();
+    until(|| cache.blocked_decoders() > 0);
+    assert_eq!(side.queued_frames(), 0, "blocked seek has published no PCM");
+    let sent = std::time::Instant::now();
+    let pause = playback.command(TransportCommand::Pause);
+    let elapsed = sent.elapsed();
+    let queued = side.queued_frames();
+    // Always release the test decoder before reporting a failure.
+    cache.set_decode_blocked(&source, false);
+    pause.unwrap();
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "Pause waited for the source hold: {elapsed:?}"
+    );
+    assert_eq!(
+        queued, 0,
+        "no PCM is filled before dispatching deferred Pause"
+    );
+    let stopped = playback.clock().unwrap();
+    assert_eq!(stopped.state, TransportState::Stopped);
+    assert_eq!(stopped.media_time, ticks(4.0));
+    drop(playback);
+    cache.shutdown();
 }
 
 /// A run from a playhead before the loop (the work area set, the playhead
@@ -1855,7 +2435,10 @@ fn bounded_decode_wait(exceed: bool, device_rate: u32, workers: usize) {
         if !crossed && playback.stats().starved_renders > 0 {
             crossed = true;
             held_at = turn;
-            assert!(cache.blocked_decoders() > 0);
+            // The render can count the miss before the decode worker it
+            // queued reaches the gate; wait (wall time only, no device
+            // callbacks) until the worker is actually held there.
+            until(|| cache.blocked_decoders() > 0);
             if !exceed {
                 // Wall time alone cannot spend the buffered device frames.
                 std::thread::sleep(Duration::from_millis(130));
@@ -2535,8 +3118,11 @@ fn voices_own_their_waits_and_notifications() {
         held += 512;
         std::thread::sleep(Duration::from_secs_f64(512.0 / rate as f64));
     }
+    // The device called back throughout the hold, but nothing of the run
+    // was heard yet: a start being prepared is not a ring underrun (the
+    // hold is reported by the start timing and the message below).
     let start_underruns = playback.stats().underruns;
-    assert_eq!(start_underruns, held / 512);
+    assert_eq!(start_underruns, 0, "held callbacks are not underruns");
     until(|| side.queued_frames() >= 3072);
     let mut messages = playback.take_errors();
     assert_eq!(
@@ -3017,4 +3603,713 @@ fn play_preempts_paused_preparation_after_an_edit() {
     );
     drop(playback);
     cache.shutdown();
+}
+
+/// A8: a paused level edit followed by Play in the same control batch
+/// preserves every warmed voice, and the result is the edited offline PCM.
+#[test]
+fn edit_then_play_reuses_all_sixteen_stretched_voices() {
+    assert_sixteen_voice_edit_starts(false, false);
+}
+
+#[test]
+fn cold_seek_and_speed_edit_prepare_sixteen_voices_in_parallel() {
+    assert_sixteen_voice_edit_starts(true, false);
+}
+
+/// The same starts with sixteen different signals (each voice trimmed
+/// 61.3 ms further): no voice can reuse another's stretched head, so every
+/// voice is prepared by its own vocoder job and must still start complete.
+#[test]
+fn edit_then_play_reuses_sixteen_distinct_stretched_voices() {
+    assert_sixteen_voice_edit_starts(false, true);
+}
+
+#[test]
+fn cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous() {
+    assert_sixteen_voice_edit_starts(true, true);
+}
+
+/// The sixteen-voice start tests fill the process-wide preparation pool with
+/// user-interactive jobs. Run concurrently, each would time the other's
+/// sixteen jobs, and a burst would compete with another test's real-time
+/// producer in the same process (an app never prepares paused starts during
+/// its own playback). They take this lock exclusively; the real-time
+/// time-mapped comparisons share it; every other test runs beside both.
+static POOL_BURSTS: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
+    native_dsp_diagnostics_enabled();
+    let _serial = POOL_BURSTS.write().unwrap_or_else(|e| e.into_inner());
+    let _load = stress_enabled().then(CpuContention::start);
+    let dir = temp_dir(match (cold, distinct) {
+        (true, false) => "a8-cold-start",
+        (false, false) => "a8-level-start",
+        (true, true) => "a8-cold-distinct",
+        (false, true) => "a8-level-distinct",
+    });
+    let trim = |i: usize| if distinct { i as f64 * 0.0613 } else { 0.0 };
+    let file = dir.join("tone.wav");
+    write_wav(
+        &file,
+        SR,
+        &[tone(SR, 12.0, 997.0, 0.01), tone(SR, 12.0, 631.0, 0.005)],
+    );
+    let cache = SourceCache::new(128 << 20, 2);
+    let source = cache.open(&file, None).unwrap();
+    for b in 0..9 {
+        cache.block(&source, b, true).unwrap();
+    }
+    let (mut playback, mut side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig::default(),
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let doc = |gain, speed| {
+        let layers: Vec<String> = (0..16)
+            .map(|i| {
+                audio(
+                    &format!("v{i}"),
+                    "s",
+                    0.0,
+                    8.0,
+                    &format!(r#", "speed":{speed}, "gain":{gain}, "trim":{}"#, trim(i)),
+                    "",
+                )
+            })
+            .collect();
+        Arc::new(project(30.0, 8.0, &layers, &[], ""))
+    };
+    let path = |_: &str| Some(file.clone());
+    playback.set_project(doc(1.0, 1.5), "C", &path).unwrap();
+    let mut out = vec![0.0; 512 * 2];
+    let mut violations = Vec::new();
+    for (trial, gain) in [0.3, 0.7, 0.2, 1.0].into_iter().enumerate() {
+        let target = if cold {
+            if trial % 2 == 0 { 2 } else { 3 }
+        } else {
+            4
+        };
+        playback.command(TransportCommand::Pause).unwrap();
+        side.callback(&mut out, 2, host_now_us());
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(target as f64),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        if !cold {
+            until(|| playback.prepared_starts().contains(&(target * SR as i64)));
+        }
+        let edited = doc(gain, if cold && trial % 2 == 0 { 1.6 } else { 1.5 });
+        playback.set_project(edited.clone(), "C", &path).unwrap();
+        let before = playback.stats();
+        let at = std::time::Instant::now();
+        playback
+            .commands([
+                TransportCommand::SetLoop { range: None },
+                TransportCommand::Seek {
+                    time: ticks(target as f64),
+                    mode: SeekMode::Exact,
+                },
+                TransportCommand::Play {
+                    rate: PlaybackRate::NORMAL,
+                },
+            ])
+            .unwrap();
+        let bound = Duration::from_secs_f64(512.0 / SR as f64);
+        // The ring captures both clocks around the same acquired publication.
+        // Its earlier upper bound tolerates either producer or observer being
+        // descheduled after the PCM became visible.
+        // Poll without spinning: the measured instant is the producer's own
+        // publication stamp (or the observation, whichever is earlier), so
+        // the poll interval cannot lengthen it, while a spinning observer
+        // would take a core from the preparation workers it is timing.
+        while side.queued_frames() < 512 && at.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_micros(100));
+        }
+        let observed = at.elapsed();
+        let publication = side
+            .publication_for_queued_frames(512)
+            .unwrap_or_else(|| panic!("edited first buffer: {observed:?}"));
+        side.callback(&mut out, 2, host_now_us());
+        let timing = playback.start_timing().unwrap();
+        #[cfg(target_os = "macos")]
+        if !(matches!(
+            timing.producer_scheduling.as_str(),
+            "device-workgroup" | "custom-audio-interval" | "mach-time-constraint"
+        ) && timing.worker_workgroup_joins + timing.worker_mach_joins > 0
+            && timing.worker_scheduling_failures == 0
+            && timing.producer_mach_error.is_none()
+            && timing.producer_hint_error.is_none()
+            && timing.scheduling_computation_overruns == 0
+            && timing.scheduling_constraint_overruns == 0
+            && timing.scheduling_restore_failures == 0
+            && timing.scheduling_hint_failures == 0
+            && timing.scheduling_constraint_readback_failures == 0
+            && timing.scheduling_interval_failures == 0
+            && timing.scheduling_interval_expired == 0
+            && timing.profile_worker_log_drops == 0
+            && timing.profile_worker_flush_failures == 0
+            && timing.idle_startup_arm.starts_with("Armed")
+            && timing
+                .idle_lease
+                .as_ref()
+                .is_some_and(|lease| lease.active && !lease.conflict)
+            && timing.idle_pool.arm_failures == 0
+            && timing.idle_pool.arm_timeouts == 0
+            && timing.idle_pool_since_play.conflicts == 0
+            && timing.idle_pool.computation_overruns == 0
+            && timing.idle_pool.constraint_overruns == 0
+            && timing.idle_pool.restore_failures == 0
+            && timing.idle_pool.hint_failures == 0
+            && timing.idle_pool.constraint_readback_failures == 0)
+        {
+            violations.push(format!(
+                "trial {trial}: actual audio scheduling: {timing:?}"
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        if timing.producer_scheduling == "custom-audio-interval" {
+            assert_eq!(
+                timing.scheduling_first_interval_requested_us,
+                timing.requested_us
+            );
+            assert_eq!(
+                timing.scheduling_first_interval_deadline_us,
+                timing.requested_us + 10_667
+            );
+            assert!(timing.scheduling_first_interval_start_tick > 0);
+            assert!(
+                timing.scheduling_first_interval_deadline_tick
+                    > timing.scheduling_first_interval_anchor_tick
+            );
+            assert!(
+                timing.scheduling_first_interval_anchor_tick
+                    >= timing.scheduling_first_interval_start_tick
+            );
+        }
+        let published_us = publication.visible_by_us;
+        assert!(
+            published_us >= timing.requested_us,
+            "first buffer publication preceded Play: {publication:?}, {timing:?}"
+        );
+        let published = Duration::from_micros(published_us - timing.requested_us);
+        let ms = |from: u64, to: u64| to.saturating_sub(from) as f64 / 1000.0;
+        eprintln!(
+            "A8 sixteen-voice edit cold={cold} distinct={distinct} first buffer: visible by {:.3} ms (512 frames), observed {:.3} ms; producer stamp {:?}; request to applied {:.3}, applied to ready {:.3}, ready to visible {:.3}",
+            published.as_secs_f64() * 1000.0,
+            observed.as_secs_f64() * 1000.0,
+            publication.published_us,
+            ms(timing.requested_us, timing.applied_us),
+            ms(timing.applied_us, timing.ready_us),
+            ms(timing.ready_us, published_us)
+        );
+        if std::env::var_os("PM_AUDIO_PROFILE").is_some() {
+            eprintln!("A8 first-buffer scopes cold={cold} distinct={distinct}: {timing:?}");
+        }
+        // Retain every raw deadline miss, then complete the exact PCM check
+        // and remaining trials before failing the unchanged callback bound.
+        if published > bound {
+            violations.push(format!(
+                "trial {trial}: first 512 frames visible {published:?} after Play (bound {bound:?}, cold={cold}, distinct={distinct}, {publication:?}, {timing:?})"
+            ));
+        }
+        // Distinct signals cannot share an immutable head; identical cold
+        // starts do (the representative job's prefix serves all sixteen).
+        if distinct {
+            assert_eq!(
+                timing.prefill_ready_us, 0,
+                "distinct voices used a shared head"
+            );
+        }
+        let rig = Rig::new(&[("s", file.as_path())]);
+        let mut reference = rig.mixer((*edited).clone(), "C", MixFormat::stereo(SR));
+        let mut expected = vec![vec![]; 2];
+        reference
+            .render(
+                target * SR as i64,
+                512,
+                &mut expected,
+                &pm_audio::RenderOptions {
+                    wait: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        if cold {
+            let mut captured = out.clone();
+            for _ in 0..15 {
+                until(|| side.queued_frames() >= 512);
+                side.callback(&mut out, 2, host_now_us());
+                captured.extend_from_slice(&out);
+            }
+            let timing = playback.start_timing().unwrap();
+            if !distinct {
+                assert_ne!(timing.prefill_ready_us, 0, "identical voices share a head");
+            }
+            assert_eq!(
+                timing.omitted_prefix_frames, 0,
+                "ordinary cold start must be complete"
+            );
+            assert_eq!(timing.start_spread_frames, 0, "every voice starts together");
+            assert_eq!(timing.safety_net_fires, 0, "A8 must not use A3");
+            assert_eq!(
+                timing.program_underruns, 0,
+                "complete PCM must reach the device without gaps"
+            );
+            assert_eq!(timing.voice_start_samples.len(), 16);
+            let gaps = timing.late_voice_frames;
+            assert!(gaps.is_empty(), "ordinary cold start omitted PCM: {gaps:?}");
+            let max_gap = gaps.iter().map(|(_, n)| *n).max().unwrap_or(0) as usize;
+            eprintln!(
+                "A8 CPU preparation late spans: {gaps:?}, longest {:.3} ms",
+                max_gap as f64 / 48.0
+            );
+            assert!(
+                max_gap < 8192,
+                "every voice must join within the captured span"
+            );
+            // Exact full mix from the first sample, with no omitted voice:
+            // each voice rendered alone, offline, then summed in voice order.
+            let pcm: Vec<Vec<Vec<f32>>> = (0..16)
+                .map(|voice| {
+                    if !distinct && voice > 0 {
+                        return vec![];
+                    }
+                    let one = project(
+                        30.0,
+                        8.0,
+                        &[audio(
+                            &format!("v{voice}"),
+                            "s",
+                            0.0,
+                            8.0,
+                            &format!(
+                                r#", "speed":{}, "gain":{gain}, "trim":{}"#,
+                                if trial % 2 == 0 { 1.6 } else { 1.5 },
+                                trim(voice)
+                            ),
+                            "",
+                        )],
+                        &[],
+                        "",
+                    );
+                    let mut single = rig.mixer(one, "C", MixFormat::stereo(SR));
+                    let mut pcm = vec![vec![]; 2];
+                    single
+                        .render(
+                            target * SR as i64,
+                            8192,
+                            &mut pcm,
+                            &pm_audio::RenderOptions {
+                                wait: true,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap();
+                    pcm
+                })
+                .collect();
+            if distinct {
+                assert!(
+                    (0..8192).any(|i| pcm[0][0][i] != pcm[1][0][i]),
+                    "the trims must give different signals"
+                );
+            }
+            for i in 0..8192 {
+                for c in 0..2 {
+                    let mut sum = 0.0f32;
+                    for voice in 0..16 {
+                        let id = format!("v{voice}");
+                        let gap = gaps
+                            .iter()
+                            .find(|(v, _)| *v == id)
+                            .map_or(0, |(_, n)| *n as usize);
+                        if i >= gap {
+                            sum += pcm[if distinct { voice } else { 0 }][c][i];
+                        }
+                    }
+                    assert_eq!(
+                        captured[2 * i + c],
+                        sum,
+                        "cold trial {trial}, sample {i}, channel {c}, gaps {gaps:?}"
+                    );
+                }
+            }
+        } else {
+            for i in 0..512 {
+                for c in 0..2 {
+                    assert_eq!(out[2 * i + c], expected[c][i]);
+                }
+            }
+            assert_eq!(playback.stats().starved_renders, before.starved_renders);
+            assert_eq!(playback.stats().dropped_renders, before.dropped_renders);
+        }
+        let proof = playback.start_timing().unwrap();
+        eprintln!(
+            "A8 start gates cold={cold} distinct={distinct} trial={trial}: omittedPrefixFrames={} startSpreadFrames={} safetyNetFires={} programUnderruns={} voices={} historyClaims={} workerSchedulingFailures={} computationOverruns={} constraintOverruns={} restoreFailures={} hintFailures={} readbackFailures={} idleConflicts={} idleComputationOverruns={} idleConstraintOverruns={} poolClaims={} poolRequeues={} poolCompletions={} poolWakes={} poolIdleEntries={}",
+            proof.omitted_prefix_frames,
+            proof.start_spread_frames,
+            proof.safety_net_fires,
+            proof.program_underruns,
+            proof.voice_start_samples.len(),
+            proof.history_claims,
+            proof.worker_scheduling_failures,
+            proof.scheduling_computation_overruns,
+            proof.scheduling_constraint_overruns,
+            proof.scheduling_restore_failures,
+            proof.scheduling_hint_failures,
+            proof.scheduling_constraint_readback_failures,
+            proof.idle_pool_since_play.conflicts,
+            proof.idle_pool.computation_overruns,
+            proof.idle_pool.constraint_overruns,
+            proof.idle_pool_since_play.job_claims,
+            proof.idle_pool_since_play.job_requeues,
+            proof.idle_pool_since_play.job_completions,
+            proof.idle_pool_since_play.wake_count,
+            proof.idle_pool_since_play.successful_idle_entries,
+        );
+        eprintln!(
+            "A8 DSP span maxima cold={cold} distinct={distinct} trial={trial} contextLifetimeNs worker={:?} producer={:?}",
+            proof.scheduling_max_dsp_unit_by_role_phase_ns[0],
+            proof.scheduling_max_dsp_unit_by_role_phase_ns[1],
+        );
+        log_native_dsp_diagnostics(&format!("A8 cold={cold} distinct={distinct} trial={trial}"));
+    }
+    playback.command(TransportCommand::Pause).unwrap();
+    #[cfg(target_os = "macos")]
+    {
+        let timing = playback.start_timing().unwrap();
+        if timing.worker_scheduling_failures != 0
+            || timing.producer_mach_error.is_some()
+            || timing.producer_hint_error.is_some()
+            || timing.scheduling_computation_overruns != 0
+            || timing.scheduling_constraint_overruns != 0
+            || timing.scheduling_restore_failures != 0
+            || timing.scheduling_hint_failures != 0
+            || timing.scheduling_constraint_readback_failures != 0
+            || timing.scheduling_interval_failures != 0
+            || timing.scheduling_interval_expired != 0
+            || timing.profile_worker_log_drops != 0
+            || timing.profile_worker_flush_failures != 0
+            || !timing.idle_startup_arm.starts_with("Armed")
+            || !timing
+                .idle_lease
+                .as_ref()
+                .is_some_and(|lease| lease.active && !lease.conflict)
+            || timing.idle_pool.arm_failures != 0
+            || timing.idle_pool.arm_timeouts != 0
+            || timing.idle_pool_since_play.conflicts != 0
+            || timing.idle_pool.computation_overruns != 0
+            || timing.idle_pool.constraint_overruns != 0
+            || timing.idle_pool.restore_failures != 0
+            || timing.idle_pool.hint_failures != 0
+            || timing.idle_pool.constraint_readback_failures != 0
+        {
+            violations.push(format!("final audio scheduling: {timing:?}"));
+        }
+    }
+    if !playback.shutdown() {
+        violations.push("shutdown worker-profile flush failed".into());
+    }
+    drop(playback);
+    cache.shutdown();
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+}
+
+/// A first callback is submitted before its presentation time. Pausing in
+/// that interval must keep the seek target, including a loop's first frame.
+#[test]
+fn pausing_before_the_first_buffer_is_presented_keeps_the_prepared_target() {
+    let dir = temp_dir("a8-first-presentation");
+    let file = ramp_file(&dir, 8);
+    for looping in [false, true] {
+        let (playback, mut dev, _rig) = setup(&file, 8.0, SR, 0.0);
+        if looping {
+            playback
+                .command(TransportCommand::SetLoop {
+                    range: Some(TickRange {
+                        start: ticks(4.0),
+                        end: ticks(6.0),
+                    }),
+                })
+                .unwrap();
+        }
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(4.0),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        until(|| dev.side.queued_frames() >= BUFFER);
+        dev.side.callback(&mut dev.out, 2, host_now_us() + 100_000);
+        assert_eq!(playback.clock().unwrap().state, TransportState::Playing);
+        playback.command(TransportCommand::Pause).unwrap();
+        assert_eq!(playback.clock().unwrap().media_time, ticks(4.0));
+        until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(4.005),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        // A raw seek still prepares the displayed frame as well as its
+        // sample-exact target; the app's next normal Play uses that frame.
+        until(|| playback.prepared_starts().contains(&(4 * SR as i64)));
+        until(|| playback.prepared_starts().contains(&(4 * SR as i64 + 240)));
+    }
+}
+
+/// Prepared loop starts apply at a wrap. Straight entry from before the
+/// work area must keep the running vocoder's phase history.
+#[test]
+fn entering_the_loop_keeps_the_uninterrupted_stretch_history() {
+    let dir = temp_dir("a7-loop-entry");
+    let file = dir.join("tone.wav");
+    write_wav(
+        &file,
+        SR,
+        &[tone(SR, 4.0, 997.0, 0.2), tone(SR, 4.0, 631.0, 0.1)],
+    );
+    let doc = || {
+        project(
+            30.0,
+            3.0,
+            &[audio("A", "s", 0.0, 3.0, r#", "speed":1.5"#, "")],
+            &[],
+            "",
+        )
+    };
+    let (playback, mut dev, rig) = setup_doc(doc(), &[("s", &file)], SR, 2, 0.0);
+    playback
+        .command(TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: ticks(1.0),
+                end: ticks(1.5),
+            }),
+        })
+        .unwrap();
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(0.5),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    until(|| playback.prepared_starts().contains(&(SR as i64)));
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(70);
+    let stats = playback.stats();
+    drop(playback);
+    let mut reference = rig.mixer(doc(), "C", MixFormat::stereo(SR));
+    let expected = rig.render(&mut reference, SR as i64 / 2, SR as i64 / 2 + 32_000, 4096);
+    let played: Vec<Vec<f32>> = (0..2)
+        .map(|c| {
+            dev.log
+                .iter()
+                .flat_map(|(_, b)| b.iter().skip(c).step_by(2).copied())
+                .collect()
+        })
+        .collect();
+    let start = played[0].iter().position(|v| *v != 0.0).unwrap();
+    let lead = expected[0].iter().position(|v| *v != 0.0).unwrap();
+    for c in 0..2 {
+        assert_eq!(
+            &played[c][start - lead..start - lead + 32_000],
+            &expected[c]
+        );
+    }
+    assert_eq!(stats.underruns, 0);
+    assert_eq!(stats.starved_renders, 0);
+}
+
+/// CPU priming must never use the missing-decoder safety net. A genuinely
+/// stuck stretched input keeps all voices complete until 120 ms of device
+/// time, regardless of wall time; only then may its own prefix be dropped.
+#[test]
+fn stretched_starts_are_complete_until_the_decoder_device_bound() {
+    let _load = stress_enabled().then(CpuContention::start);
+    for exceed in [false, true] {
+        let dir = temp_dir(&format!("a8-stretched-bound-{exceed}"));
+        let good_file = dir.join("good.wav");
+        let late_file = dir.join("late.wav");
+        let signal = tone(SR, 8.0, 719.0, 0.2);
+        write_wav(&good_file, SR, &[signal.clone(), vec![0.0; signal.len()]]);
+        write_wav(&late_file, SR, &[vec![0.0; signal.len()], signal]);
+        let cache = SourceCache::new(128 << 20, 2);
+        let good = cache.open(&good_file, None).unwrap();
+        for b in 0..6 {
+            cache.block(&good, b, true).unwrap();
+        }
+        let late = cache.open(&late_file, None).unwrap();
+        cache.set_decode_blocked(&late, true);
+        let (playback, mut side) = Playback::start_headless(
+            MixFormat::stereo(SR),
+            cache.clone(),
+            PlaybackConfig::default(),
+            SR,
+            2,
+            LATENCY_US,
+        )
+        .unwrap();
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(2.0),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        let doc = project(
+            30.0,
+            8.0,
+            &[
+                audio("good", "g", 0.0, 8.0, r#", "speed":1.5"#, ""),
+                audio("late0", "s", 0.0, 8.0, r#", "speed":1.5, "gain":0.5"#, ""),
+                audio("late1", "s", 0.0, 8.0, r#", "speed":1.5, "gain":0.5"#, ""),
+            ],
+            &[],
+            "",
+        );
+        let path = |id: &str| {
+            Some(if id == "g" {
+                good_file.clone()
+            } else {
+                late_file.clone()
+            })
+        };
+        playback
+            .set_project(Arc::new(doc.clone()), "C", &path)
+            .unwrap();
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        until(|| cache.blocked_decoders() > 0);
+        let mut out = vec![0.0; 256 * 2];
+        // Three quarters of the bound, then a long wall pause: neither may
+        // release even the already primed voice.
+        for _ in 0..16 {
+            side.callback(&mut out, 2, host_now_us());
+        }
+        std::thread::sleep(Duration::from_millis(130));
+        assert_eq!(side.queued_frames(), 0);
+        assert_eq!(playback.stats().dropped_renders, 0);
+        if exceed {
+            for _ in 0..32 {
+                side.callback(&mut out, 2, host_now_us());
+            }
+            until(|| side.queued_frames() >= 512);
+        } else {
+            cache.set_decode_blocked(&late, false);
+            until(|| side.queued_frames() >= 512);
+        }
+        out.resize(512 * 2, 0.0);
+        side.callback(&mut out, 2, host_now_us());
+        let timing = playback.start_timing().unwrap();
+        assert_eq!(timing.safety_net_fires, u64::from(exceed));
+        assert_eq!(timing.omitted_prefix_frames > 0, exceed);
+        let rig = Rig::new(&[("g", good_file.as_path()), ("s", late_file.as_path())]);
+        let mut reference = rig.mixer(doc, "C", MixFormat::stereo(SR));
+        let mut expected = vec![vec![]; 2];
+        reference
+            .render(
+                2 * SR as i64,
+                512,
+                &mut expected,
+                &pm_audio::RenderOptions {
+                    wait: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for i in 0..512 {
+            assert_eq!(out[2 * i], expected[0][i], "ready stretched voice {i}");
+            assert_eq!(
+                out[2 * i + 1],
+                if exceed { 0.0 } else { expected[1][i] },
+                "late stretched voice {i}"
+            );
+        }
+        if !exceed {
+            assert_eq!(timing.start_spread_frames, 0);
+            assert_eq!(timing.voice_start_samples.len(), 3);
+        }
+        cache.set_decode_blocked(&late, false);
+        if exceed {
+            let mut captured = out.clone();
+            for _ in 0..31 {
+                until(|| side.queued_frames() >= 512);
+                side.callback(&mut out, 2, host_now_us());
+                captured.extend_from_slice(&out);
+            }
+            let timing = playback.start_timing().unwrap();
+            assert_eq!(
+                timing.voice_start_samples.len(),
+                3,
+                "both gated voices must recover"
+            );
+            let mut reference = rig.mixer(
+                project(
+                    30.0,
+                    8.0,
+                    &[
+                        audio("good", "g", 0.0, 8.0, r#", "speed":1.5"#, ""),
+                        audio("late", "s", 0.0, 8.0, r#", "speed":1.5"#, ""),
+                    ],
+                    &[],
+                    "",
+                ),
+                "C",
+                MixFormat::stereo(SR),
+            );
+            reference
+                .render(
+                    2 * SR as i64,
+                    16384,
+                    &mut expected,
+                    &pm_audio::RenderOptions {
+                        wait: true,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            for i in 0..16384 {
+                let mut right = 0.0f32;
+                for id in ["late0", "late1"] {
+                    let omitted = timing
+                        .late_voice_frames
+                        .iter()
+                        .find(|(v, _)| v == id)
+                        .unwrap()
+                        .1 as usize;
+                    if i >= omitted {
+                        right += expected[1][i] * 0.5;
+                    }
+                }
+                assert_eq!(captured[2 * i], expected[0][i], "ready voice recovery {i}");
+                assert_eq!(
+                    captured[2 * i + 1],
+                    right,
+                    "gated voice recovery {i}, {:?}",
+                    timing.late_voice_frames
+                );
+            }
+        }
+        drop(playback);
+        cache.shutdown();
+    }
 }
