@@ -325,7 +325,9 @@ mod tests {
 
     #[test]
     fn canvas_bytes_are_the_unorm_writes() {
-        let rgba: Vec<f32> = (0..64 * 4).map(|i| (i as f32 / 255.0) * 0.999 - 0.01).collect();
+        let rgba: Vec<f32> = (0..64 * 4)
+            .map(|i| (i as f32 / 255.0) * 0.999 - 0.01)
+            .collect();
         let frame = WorkingFrame {
             rgba: &rgba,
             width: 8,
