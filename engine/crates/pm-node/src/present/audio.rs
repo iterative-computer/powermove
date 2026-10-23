@@ -21,7 +21,7 @@
 //! and the levels of what is heard go back to it about 30 times a second
 //! while playing ([`LEVELS_INTERVAL`]).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -65,8 +65,12 @@ fn control_profile_enabled() -> bool {
 }
 
 fn play_receive_stamp(ctl: &AudioCtl) -> Option<u64> {
-    (control_profile_enabled() && matches!(ctl, AudioCtl::Play { .. }))
-        .then(pm_audio::clock::host_now_us)
+    (control_profile_enabled()
+        && matches!(
+            ctl,
+            AudioCtl::Play { .. } | AudioCtl::Transport(TransportCommand::Play { .. })
+        ))
+    .then(pm_audio::clock::host_now_us)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -80,6 +84,8 @@ struct ProjectTiming {
 pub enum AudioCtl {
     Document(DocumentUpdate),
     MemoryPressure,
+    /// Transport forwarded at presenter ingress, before render/document work.
+    Transport(TransportCommand),
     Media(MediaMap),
     Composition(String),
     /// Seek to `from` (ticks) and play at `rate`.
@@ -113,6 +119,8 @@ pub enum AudioCtl {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioStatus {
+    /// Presenter ingress, before document, surface, and DSP preparation work.
+    pub ingress_request_us: Option<u64>,
     pub device: Option<String>,
     pub device_rate: Option<u32>,
     pub latency_us: Option<u32>,
@@ -126,6 +134,154 @@ pub struct AudioStatus {
     pub problems: Vec<String>,
     pub start_timing: Option<pm_audio::playback::StartTiming>,
     pub prepared_starts: Vec<i64>,
+}
+
+/// FIFO ingress shared with the presenter. It holds senders, never render
+/// state; the audio producer remains the sole owner of the playback clock.
+#[derive(Clone, Default)]
+pub struct AudioIngress(Arc<Mutex<BTreeMap<super::Key, Endpoint>>>);
+
+struct Endpoint {
+    tx: Sender<AudioCtl>,
+    clock: Arc<Mutex<Option<ClockHandle>>>,
+    status: Arc<Mutex<AudioStatus>>,
+    enabled: bool,
+    sent_revision: u64,
+    pending_revision: u64,
+    last_play: Option<(PlaybackRate, Option<u32>)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ForwardedAudio {
+    pub before: Option<u32>,
+}
+
+impl AudioIngress {
+    pub fn register(&self, key: super::Key, link: &AudioLink, enabled: bool, revision: u64) {
+        let mut endpoints = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(endpoint) = endpoints.get_mut(&key) {
+            endpoint.enabled = enabled;
+        } else {
+            endpoints.insert(
+                key,
+                Endpoint {
+                    tx: link.tx.clone(),
+                    clock: link.clock.clone(),
+                    status: link.status.clone(),
+                    enabled,
+                    sent_revision: revision,
+                    pending_revision: revision,
+                    last_play: None,
+                },
+            );
+        }
+    }
+    /// A document sent through the render fallback has now reached audio.
+    pub fn document_sent(&self, key: super::Key, revision: u64) {
+        if let Some(endpoint) = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&key)
+        {
+            endpoint.sent_revision = endpoint.sent_revision.max(revision);
+        }
+    }
+    pub fn forget(&self, key: super::Key) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+    }
+    pub fn transport(&self, key: super::Key, command: TransportCommand) -> Option<ForwardedAudio> {
+        if matches!(command, TransportCommand::Step { .. }) {
+            return None;
+        }
+        let mut endpoints = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let endpoint = endpoints
+            .get_mut(&key)
+            .filter(|e| e.enabled && e.sent_revision >= e.pending_revision)?;
+        let sample = endpoint
+            .clock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(ClockHandle::latest);
+        let before = sample.as_ref().map(|s| s.epoch);
+        match command {
+            TransportCommand::Play { rate } => {
+                if endpoint.last_play.is_some_and(|(r, epoch)| {
+                    r == rate
+                        && (epoch == before
+                            || sample
+                                .as_ref()
+                                .is_some_and(|s| s.state != TransportState::Stopped))
+                }) {
+                    return Some(ForwardedAudio { before });
+                }
+                endpoint.last_play = Some((rate, before));
+            }
+            TransportCommand::Pause => endpoint.last_play = None,
+            _ => {}
+        }
+        if matches!(
+            command,
+            TransportCommand::Play { .. } | TransportCommand::PlayAround { .. }
+        ) {
+            endpoint
+                .status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .ingress_request_us = Some(pm_audio::clock::host_now_us());
+        }
+        endpoint.tx.send(AudioCtl::Transport(command)).ok()?;
+        Some(ForwardedAudio { before })
+    }
+    pub fn document(&self, key: super::Key, update: &DocumentUpdate) -> bool {
+        let mut endpoints = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(endpoint) = endpoints.get_mut(&key) else {
+            return false;
+        };
+        let revision = update.revision().get();
+        if revision <= endpoint.sent_revision {
+            return true;
+        }
+        // A link can appear while older render-thread document commands are
+        // queued. Do not let fast controls overtake those fallback updates.
+        if revision != endpoint.sent_revision + 1
+            || endpoint.pending_revision > endpoint.sent_revision
+        {
+            endpoint.pending_revision = endpoint.pending_revision.max(revision);
+            return false;
+        }
+        if endpoint
+            .tx
+            .send(AudioCtl::Document(update.clone()))
+            .is_err()
+        {
+            return false;
+        }
+        endpoint.sent_revision = revision;
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_endpoint(&self, key: super::Key) -> Receiver<AudioCtl> {
+        let (tx, rx) = channel();
+        self.0.lock().unwrap().insert(
+            key,
+            Endpoint {
+                tx,
+                clock: Arc::default(),
+                status: Arc::default(),
+                enabled: true,
+                sent_revision: 0,
+                pending_revision: 0,
+                last_play: None,
+            },
+        );
+        rx
+    }
 }
 
 pub struct AudioLink {
@@ -174,6 +330,7 @@ impl AudioLink {
                     warm: false,
                     warm_due: None,
                     paused_at: 0,
+                    transport_running: false,
                 }
                 .run()
             },
@@ -188,6 +345,12 @@ impl AudioLink {
     }
 
     pub fn send(&self, ctl: AudioCtl) {
+        if matches!(&ctl, AudioCtl::Play { .. } | AudioCtl::PlayAround { .. }) {
+            self.status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .ingress_request_us = Some(pm_audio::clock::host_now_us());
+        }
         let sent_us = (control_profile_enabled() && matches!(&ctl, AudioCtl::Play { .. }))
             .then(pm_audio::clock::host_now_us);
         let _ = self.tx.send(ctl);
@@ -268,6 +431,7 @@ struct Control {
     warm_due: Option<Instant>,
     /// Latest paused playhead, including seeks before the device opens.
     paused_at: i64,
+    transport_running: bool,
 }
 
 impl Control {
@@ -315,9 +479,16 @@ impl Control {
                 controls.push((ctl, received_us));
             }
             let rested = controls.is_empty();
-            let starting = controls
-                .iter()
-                .any(|(c, _)| matches!(c, AudioCtl::Play { .. } | AudioCtl::PlayAround { .. }));
+            let starting = controls.iter().any(|(c, _)| {
+                matches!(
+                    c,
+                    AudioCtl::Play { .. }
+                        | AudioCtl::PlayAround { .. }
+                        | AudioCtl::Transport(
+                            TransportCommand::Play { .. } | TransportCommand::PlayAround { .. }
+                        )
+                )
+            });
             let _priority = starting.then(pm_audio::playback::StartPriority::new);
             for (ctl, received_us) in controls {
                 if !self.apply(ctl, received_us) {
@@ -410,6 +581,50 @@ impl Control {
     /// Returns false on shutdown.
     fn apply(&mut self, ctl: AudioCtl, received_us: Option<u64>) -> bool {
         match ctl {
+            AudioCtl::Transport(command) => {
+                match command {
+                    TransportCommand::Play { .. } | TransportCommand::PlayAround { .. } => {
+                        if self.playback.is_none() && !self.open() {
+                            return true;
+                        }
+                        if self.dirty {
+                            let _ = self.set_project();
+                        }
+                        // Seek/pause/loop controls have already reached the
+                        // producer through this same FIFO. Play its own current
+                        // playhead rather than a delayed render-thread estimate.
+                        self.transport_running = true;
+                        self.commands(&[
+                            TransportCommand::SetLoop {
+                                range: self.loop_range,
+                            },
+                            command,
+                        ]);
+                    }
+                    TransportCommand::Seek {
+                        time,
+                        mode: SeekMode::Scrub,
+                    } => {
+                        let seek = if self.transport_running {
+                            AudioCtl::Seek(time.get())
+                        } else {
+                            AudioCtl::Scrub(time.get())
+                        };
+                        return self.apply(seek, received_us);
+                    }
+                    TransportCommand::Pause => return self.apply(AudioCtl::Pause, received_us),
+                    TransportCommand::Seek { time, .. } => {
+                        return self.apply(AudioCtl::Seek(time.get()), received_us);
+                    }
+                    TransportCommand::SetLoop { range } => {
+                        return self.apply(AudioCtl::SetLoop(range), received_us);
+                    }
+                    TransportCommand::AudioScrub { enabled } => {
+                        return self.apply(AudioCtl::AudioScrub(enabled), received_us);
+                    }
+                    _ => self.enqueue_simple_command(command),
+                }
+            }
             AudioCtl::Shutdown => return false,
             AudioCtl::MemoryPressure => {
                 if let Some(playback) = &self.playback {
@@ -438,7 +653,10 @@ impl Control {
                 self.loop_range = range;
                 self.enqueue_simple_command(TransportCommand::SetLoop { range });
             }
-            AudioCtl::Pause => self.enqueue_simple_command(TransportCommand::Pause),
+            AudioCtl::Pause => {
+                self.transport_running = false;
+                self.enqueue_simple_command(TransportCommand::Pause);
+            }
             AudioCtl::Warm => self.warm = true,
             AudioCtl::Seek(at) => {
                 self.paused_at = at.max(0);
@@ -471,6 +689,7 @@ impl Control {
                 });
             }
             AudioCtl::PlayAround { at, pre, post } => {
+                self.transport_running = true;
                 if self.playback.is_none() && !self.open() {
                     return true;
                 }
@@ -497,6 +716,7 @@ impl Control {
                 }
             }
             AudioCtl::Play { from, rate } => {
+                self.transport_running = true;
                 let profiled = received_us.is_some();
                 let begin_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
                 let opening = self.playback.is_none();
@@ -741,6 +961,58 @@ fn report_playback(status: &Mutex<AudioStatus>, playback: &Playback) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ingress_keeps_audio_documents_and_transport_fifo_without_a_render_thread() {
+        use pm_protocol::common::{Revision, SessionId};
+        let key = (pm_protocol::host::PortId(1), SessionId::new(1).unwrap());
+        let ingress = super::AudioIngress::default();
+        let rx = ingress.test_endpoint(key);
+        let update = |revision| pm_engine::document::DocumentUpdate::Replace {
+            root: None,
+            revision: Revision::new(revision).unwrap(),
+        };
+        assert!(ingress.document(key, &update(1)));
+        assert!(
+            ingress
+                .transport(
+                    key,
+                    TransportCommand::Play {
+                        rate: PlaybackRate::NORMAL
+                    }
+                )
+                .is_some()
+        );
+        assert!(
+            ingress
+                .transport(
+                    key,
+                    TransportCommand::Play {
+                        rate: PlaybackRate::NORMAL
+                    }
+                )
+                .is_some()
+        );
+        assert!(matches!(rx.recv().unwrap(), super::AudioCtl::Document(_)));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            super::AudioCtl::Transport(TransportCommand::Play { .. })
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "duplicate Play must not restart preparation"
+        );
+        // A link appeared with an older document still in the render queue.
+        // No newer fast control may jump ahead of that fallback update.
+        assert!(!ingress.document(key, &update(3)));
+        assert!(ingress.transport(key, TransportCommand::Pause).is_none());
+        ingress.document_sent(key, 2);
+        assert!(ingress.transport(key, TransportCommand::Pause).is_none());
+        ingress.document_sent(key, 3);
+        assert!(ingress.transport(key, TransportCommand::Pause).is_some());
+        ingress.forget(key);
+        assert!(ingress.transport(key, TransportCommand::Pause).is_none());
+    }
+
     use std::path::Path;
 
     use pm_audio::offline::{PcmFormat, WavWriter};
@@ -818,6 +1090,7 @@ mod tests {
             warm: false,
             warm_due: None,
             paused_at: 0,
+            transport_running: false,
         };
         let invalid_loop = TransportCommand::SetLoop {
             range: Some(TickRange {

@@ -46,7 +46,7 @@ use pm_protocol::interop::SurfaceFormat;
 use pm_protocol::preview::{PreviewAction, PreviewControl, PreviewPhase, PreviewStatus};
 use serde::Serialize;
 
-use super::audio::{AudioCtl, AudioLink, AudioStatus};
+use super::audio::{AudioCtl, AudioIngress, AudioLink, AudioStatus, ForwardedAudio};
 use super::clock::{SAMPLE_INTERVAL_US, TransportClock};
 use super::compose::Composer;
 use super::document::{Route, ViewDocument};
@@ -259,6 +259,7 @@ pub enum Command {
         release: FrameRelease,
     },
     Transport {
+        audio_forwarded: Option<ForwardedAudio>,
         key: Key,
         command: TransportCommand,
         at: i64,
@@ -298,6 +299,7 @@ pub enum Command {
     /// The session's document changed (document source). `posted`: host
     /// µs the engine handed it to the presenter (the per-frame trace).
     Document {
+        audio_forwarded: bool,
         key: Key,
         update: DocumentUpdate,
         posted: i64,
@@ -998,6 +1000,7 @@ struct Thread {
     docs: BTreeMap<Key, ViewDocument>,
     /// Each session's audio playback, from its first Play.
     audio: BTreeMap<Key, AudioLink>,
+    audio_ingress: AudioIngress,
     /// Each session's audio scrub switch and monitor solo, kept before
     /// its playback opens.
     audio_prefs: BTreeMap<Key, AudioPrefs>,
@@ -1088,6 +1091,7 @@ pub fn run(
     sink: Sink,
     stats: Arc<Mutex<Stats>>,
     generations: Generations,
+    audio_ingress: AudioIngress,
 ) {
     pm_bridge::set_thread_user_interactive();
     let fps = i64::from(config.fps.max(1));
@@ -1125,6 +1129,7 @@ pub fn run(
         views: BTreeMap::new(),
         docs: BTreeMap::new(),
         audio: BTreeMap::new(),
+        audio_ingress,
         audio_prefs: BTreeMap::new(),
         peaks,
         generations,
@@ -1820,7 +1825,12 @@ impl Thread {
                     stats.release_mismatches += 1;
                 }
             }
-            Command::Transport { key, command, at } => {
+            Command::Transport {
+                key,
+                command,
+                at,
+                audio_forwarded,
+            } => {
                 let interrupts = match command {
                     TransportCommand::Play { .. }
                     | TransportCommand::Step { .. }
@@ -1850,7 +1860,8 @@ impl Thread {
                         self.cancel_preview(key);
                     }
                 }
-                self.transport(key, command, at);
+                self.transport(key, command, at, audio_forwarded);
+                self.refresh_audio_ingress(key);
             }
             Command::PreviewControl { key, control } => {
                 let Some(status) = self.preview_controls.control(key, control.clone()) else {
@@ -1933,11 +1944,12 @@ impl Thread {
                 }
             }
             Command::Document {
+                audio_forwarded,
                 key,
                 update,
                 posted,
             } => {
-                self.document(key, update, posted);
+                self.document(key, update, posted, audio_forwarded);
             }
             Command::FrameSent {
                 key,
@@ -2040,6 +2052,7 @@ impl Thread {
                 if let Some(audio) = self.audio.get(&key) {
                     audio.send(AudioCtl::Media(media));
                 }
+                self.refresh_audio_ingress(key);
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
                 }
@@ -2460,6 +2473,7 @@ impl Thread {
         fallback.retry_at.remove(&key);
         self.svg.forget_session(key);
         self.docs.remove(&key);
+        self.audio_ingress.forget(key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
         if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
@@ -2472,7 +2486,7 @@ impl Thread {
 
     /// A document update: the mirror, the audio thread's mirror, the frame
     /// grid, and a redraw.
-    fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64) {
+    fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64, audio_forwarded: bool) {
         let traced = i64::try_from(update.revision().get()).unwrap_or(i64::MAX);
         let doc = self.docs.entry(key).or_default();
         if let Err(error) = doc.update(&update) {
@@ -2494,10 +2508,14 @@ impl Thread {
                 Some(revision),
             );
         }
-        if let Some(audio) = self.audio.get(&key) {
-            audio.send(AudioCtl::Document(update));
-        } else {
-            self.warm_audio(key);
+        if !audio_forwarded {
+            if let Some(audio) = self.audio.get(&key) {
+                let revision = update.revision().get();
+                audio.send(AudioCtl::Document(update));
+                self.audio_ingress.document_sent(key, revision);
+            } else {
+                self.warm_audio(key);
+            }
         }
         if self.config.trace {
             let pending = self.doc_trace.entry(key).or_default();
@@ -2506,6 +2524,7 @@ impl Thread {
             }
         }
         self.refresh_timing(key);
+        self.refresh_audio_ingress(key);
         if let Some(view) = self.views.get_mut(&key) {
             view.dirty = true;
             // A paused headless session has no frame to announce this
@@ -2564,7 +2583,13 @@ impl Thread {
     /// clock is the master); without an output device, and for the test
     /// source, the line runs on the host clock. Scrub seeks while paused
     /// play an audio grain when audio scrub is on.
-    fn transport(&mut self, key: Key, command: TransportCommand, at: i64) {
+    fn transport(
+        &mut self,
+        key: Key,
+        command: TransportCommand,
+        at: i64,
+        audio_forwarded: Option<ForwardedAudio>,
+    ) {
         let document = self.config.document;
         let host_clock = self.config.host_clock;
         let Some(view) = self.views.get_mut(&key) else {
@@ -2617,14 +2642,19 @@ impl Thread {
                     view.sample_due = true;
                 } else if wants_audio && self.audio_for(key).is_some() {
                     let audio = &self.audio[&key];
-                    let before = audio.clock().and_then(|c| c.latest()).map(|s| s.epoch);
+                    let before = audio_forwarded.map_or_else(
+                        || audio.clock().and_then(|c| c.latest()).map(|s| s.epoch),
+                        |f| f.before,
+                    );
                     trace_audio_transport(
                         "play-send",
                         key,
                         &self.views[&key],
                         Some(TransportCommand::Play { rate }),
                     );
-                    audio.send(AudioCtl::Play { from, rate });
+                    if audio_forwarded.is_none() {
+                        audio.send(AudioCtl::Play { from, rate });
+                    }
                     let view = self.views.get_mut(&key).expect("checked");
                     // A new rate while playing holds the line where it is
                     // until the new run's first sample.
@@ -2663,12 +2693,17 @@ impl Thread {
                 let here = view.clock.media_at(at);
                 if !host_clock && self.audio_for(key).is_some() {
                     let audio = &self.audio[&key];
-                    let before = audio.clock().and_then(|c| c.latest()).map(|s| s.epoch);
-                    audio.send(AudioCtl::PlayAround {
-                        at: here,
-                        pre: pre_roll,
-                        post: post_roll,
-                    });
+                    let before = audio_forwarded.map_or_else(
+                        || audio.clock().and_then(|c| c.latest()).map(|s| s.epoch),
+                        |f| f.before,
+                    );
+                    if audio_forwarded.is_none() {
+                        audio.send(AudioCtl::PlayAround {
+                            at: here,
+                            pre: pre_roll,
+                            post: post_roll,
+                        });
+                    }
                     let view = self.views.get_mut(&key).expect("checked");
                     view.clock.hold(here, at);
                     view.schedule.reset();
@@ -2696,7 +2731,9 @@ impl Thread {
                     view.sample_due = true;
                     view.dirty = true;
                 }
-                if let Some(audio) = self.audio.get(&key) {
+                if let Some(audio) = self.audio.get(&key)
+                    && audio_forwarded.is_none()
+                {
                     audio.send(AudioCtl::Pause);
                 }
             }
@@ -2710,26 +2747,34 @@ impl Thread {
                     // The audio seeks and starts a new run; the line holds the
                     // target until its first sample.
                     view.clock.hold(time.get(), at);
-                    let before = self
-                        .audio
-                        .get(&key)
-                        .and_then(|a| a.clock())
-                        .and_then(|c| c.latest())
-                        .map(|s| s.epoch);
+                    let before = audio_forwarded.map_or_else(
+                        || {
+                            self.audio
+                                .get(&key)
+                                .and_then(|a| a.clock())
+                                .and_then(|c| c.latest())
+                                .map(|s| s.epoch)
+                        },
+                        |f| f.before,
+                    );
                     let rate = awaiting.map_or(PlaybackRateValue::NORMAL, |a| a.2);
                     let view = self.views.get_mut(&key).expect("checked");
                     view.awaiting = Some((at + AUDIO_START_TIMEOUT_US, before, rate));
-                    if let Some(audio) = self.audio.get(&key) {
+                    if let Some(audio) = self.audio.get(&key)
+                        && audio_forwarded.is_none()
+                    {
                         audio.send(AudioCtl::Seek(time.get()));
                     }
-                } else if mode == SeekMode::Scrub {
+                } else if mode == SeekMode::Scrub && audio_forwarded.is_none() {
                     self.scrub_grain(key, time.get());
                 } else if !host_clock
                     && engine
                     && let Some(audio) = self.audio_for(key)
                 {
                     // Paused exact seeks prepare the next audio start too.
-                    audio.send(AudioCtl::Seek(time.get()));
+                    if audio_forwarded.is_none() {
+                        audio.send(AudioCtl::Seek(time.get()));
+                    }
                 }
                 let view = self.views.get_mut(&key).expect("checked");
                 view.schedule.reset();
@@ -2739,13 +2784,17 @@ impl Thread {
             TransportCommand::SetLoop { range } => {
                 view.clock.apply(TransportCommand::SetLoop { range }, at);
                 view.sample_due = true;
-                if let Some(audio) = self.audio.get(&key) {
+                if let Some(audio) = self.audio.get(&key)
+                    && audio_forwarded.is_none()
+                {
                     audio.send(AudioCtl::SetLoop(range));
                 }
             }
             TransportCommand::AudioScrub { enabled } => {
                 self.audio_prefs.entry(key).or_default().scrub = enabled;
-                if let Some(audio) = self.audio.get(&key) {
+                if let Some(audio) = self.audio.get(&key)
+                    && audio_forwarded.is_none()
+                {
                     audio.send(AudioCtl::AudioScrub(enabled));
                 }
             }
@@ -2845,6 +2894,11 @@ impl Thread {
                     if self.config.document {
                         link.send(AudioCtl::Warm);
                     }
+                    let enabled = !self.config.host_clock
+                        && self.audible(key)
+                        && takes_transport(self.views.get(&key).and_then(|v| v.reported.as_ref()));
+                    self.audio_ingress
+                        .register(key, &link, enabled, doc.revision());
                     self.audio.insert(key, link);
                 }
                 Err(error) => {
@@ -2855,6 +2909,21 @@ impl Thread {
         }
         let link = self.audio.get(&key)?;
         (!link.failed()).then_some(link)
+    }
+
+    fn refresh_audio_ingress(&self, key: Key) {
+        if let Some(link) = self.audio.get(&key) {
+            let enabled = !self.config.host_clock
+                && !link.failed()
+                && self.audible(key)
+                && takes_transport(self.views.get(&key).and_then(|v| v.reported.as_ref()));
+            self.audio_ingress.register(
+                key,
+                link,
+                enabled,
+                self.docs.get(&key).map_or(0, |doc| doc.revision()),
+            );
+        }
     }
 
     /// Whether the composition a view shows has anything to hear
@@ -3039,6 +3108,7 @@ impl Thread {
         }
         let refresh = composition_changed || !view.clock.is_playing();
         if composition_changed {
+            self.audio_ingress.forget(key);
             view.reported = None;
         }
         match pool {
@@ -3835,11 +3905,23 @@ impl Thread {
         let doc = self.docs.entry(key).or_default();
         doc.set_fonts(fonts);
         let route = doc.route(&composition);
+        let audio_revision = doc.revision();
+        let ingress_enabled = self
+            .views
+            .get(&key)
+            .is_some_and(|v| v.reported.as_ref() != Some(&route))
+            && !self.config.host_clock
+            && takes_transport(Some(&route))
+            && self.audible(key);
         let view = self.views.get_mut(&key).expect("checked");
         let changed = view.reported.as_ref() != Some(&route);
         let mut stop = false;
         if changed {
             view.reported = Some(route.clone());
+            if let Some(link) = self.audio.get(&key) {
+                self.audio_ingress
+                    .register(key, link, ingress_enabled, audio_revision);
+            }
             trace_audio_transport("route-changed", key, view, None);
             match &route {
                 Route::Engine => {
@@ -3917,7 +3999,7 @@ impl Thread {
                 if let Some(view) = self.views.get(&key) {
                     trace_audio_transport("deferred-replay", key, view, Some(command));
                 }
-                self.transport(key, command, t);
+                self.transport(key, command, t, None);
             } else if changed && let Some(view) = self.views.get(&key) {
                 trace_audio_transport("decided-without-deferred", key, view, None);
             }
@@ -6399,6 +6481,7 @@ mod tests {
             views: BTreeMap::new(),
             docs: BTreeMap::new(),
             audio: BTreeMap::new(),
+            audio_ingress: AudioIngress::default(),
             audio_prefs: BTreeMap::new(),
             peaks,
             frame_ticks: TICKS_PER_SECOND / 60,

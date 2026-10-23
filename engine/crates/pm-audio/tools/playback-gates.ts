@@ -343,7 +343,9 @@ for (const native of modes) {
             const timing = postEditAudio?.startTiming;
             if (timing && timing.requestedUs >= sample.requestedHostUs) {
               const deviceOverloads = postEditAudio.deviceOverloads - preEditAudio.deviceOverloads;
-              Object.assign(captured, { timing, postEditAudio, deviceOverloads });
+              Object.assign(captured, { timing, postEditAudio, deviceOverloads,
+                ingressRequestMs: postEditAudio.ingressRequestUs == null ? null : (postEditAudio.ingressRequestUs - sample.requestedHostUs) / 1000,
+                producerRequestMs: (timing.requestedUs - sample.requestedHostUs) / 1000 });
               if (deviceOverloads !== 0) {
                 throw new Error(`device overloaded during start: ${JSON.stringify(captured)}`);
               }

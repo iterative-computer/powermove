@@ -230,6 +230,7 @@ struct Meta {
 pub struct BridgePresenter {
     config: PresenterConfig,
     tx: Sender<Command>,
+    audio_ingress: audio::AudioIngress,
     thread: Option<JoinHandle<()>>,
     stats: Arc<Mutex<Stats>>,
     views: BTreeMap<Key, Meta>,
@@ -277,6 +278,8 @@ impl BridgePresenter {
         let thread_generations = generations.clone();
         let thread_sink = sink.clone();
         let back = tx.clone();
+        let audio_ingress = audio::AudioIngress::default();
+        let thread_audio_ingress = audio_ingress.clone();
         let thread = pm_engine::qos::spawn_engine_thread(
             EngineProcess::Interactive,
             "pm-viewer-present",
@@ -288,6 +291,7 @@ impl BridgePresenter {
                     thread_sink,
                     thread_stats,
                     thread_generations,
+                    thread_audio_ingress,
                 )
             },
         )
@@ -353,6 +357,7 @@ impl BridgePresenter {
         Ok(Self {
             config,
             tx,
+            audio_ingress,
             thread: Some(thread),
             stats,
             views: BTreeMap::new(),
@@ -607,6 +612,13 @@ impl FramePresenter for BridgePresenter {
             return;
         }
         let key = (port, session);
+        if self
+            .views
+            .get(&key)
+            .is_some_and(|meta| meta.state.composition != state.composition)
+        {
+            self.audio_ingress.forget(key);
+        }
         // A new surface epoch: the viewer cannot read the surfaces it has
         // (its GPU process restarted), so both pools are made again.
         let renew = self
@@ -672,13 +684,21 @@ impl FramePresenter for BridgePresenter {
                 self.playing.remove(&key)
             }
         });
+        let at = pm_bridge::now_us();
+        if matches!(command, TransportCommand::Step { .. }) {
+            self.audio_ingress.forget(key);
+        }
+        let audio_forwarded = self.audio_ingress.transport(key, command);
+        // Audio is already starting. Keep the video pool generation ahead
+        // of its render command; video catches up to the device clock.
         if transition == Some(true) {
             self.replan_transport_pool(ctx, key);
         }
         self.send(Command::Transport {
             key,
             command,
-            at: pm_bridge::now_us(),
+            at,
+            audio_forwarded,
         });
         if transition == Some(false) {
             self.replan_transport_pool(ctx, key);
@@ -785,6 +805,7 @@ impl FramePresenter for BridgePresenter {
 
     fn session_closed(&mut self, ctx: &mut PresentContext<'_>, port: PortId, session: SessionId) {
         let key = (port, session);
+        self.audio_ingress.forget(key);
         self.forget(ctx, key);
         self.playing.remove(&key);
         self.send(Command::Close { key });
@@ -793,6 +814,7 @@ impl FramePresenter for BridgePresenter {
     fn port_closed(&mut self, ctx: &mut PresentContext<'_>, port: PortId) {
         let keys: Vec<Key> = self.views.keys().filter(|k| k.0 == port).copied().collect();
         for key in keys {
+            self.audio_ingress.forget(key);
             self.forget(ctx, key);
         }
         self.playing.retain(|key| key.0 != port);
@@ -830,8 +852,11 @@ impl FramePresenter for BridgePresenter {
         session: SessionId,
         update: pm_engine::document::DocumentUpdate,
     ) {
+        let key = (port, session);
+        let audio_forwarded = self.audio_ingress.document(key, &update);
         self.send(Command::Document {
-            key: (port, session),
+            key,
+            audio_forwarded,
             update,
             posted: render::now_us(),
         });
@@ -863,6 +888,7 @@ impl FramePresenter for BridgePresenter {
         asset: &str,
         path: Option<std::path::PathBuf>,
     ) {
+        self.audio_ingress.forget((port, session));
         self.send(Command::Media {
             key: (port, session),
             asset: asset.to_owned(),
@@ -941,6 +967,7 @@ mod tests {
         let presenter = BridgePresenter {
             config,
             tx,
+            audio_ingress: audio::AudioIngress::default(),
             thread: None,
             stats: Arc::default(),
             views: BTreeMap::new(),
@@ -1037,6 +1064,7 @@ mod tests {
             })
         ));
 
+        let audio = p.audio_ingress.test_endpoint(key);
         p.transport(
             &mut PresentContext::new(&mut budget, &mut evict),
             port,
@@ -1044,6 +1072,13 @@ mod tests {
             TransportCommand::Play {
                 rate: PlaybackRate::NORMAL,
             },
+        );
+        assert!(
+            matches!(
+                audio.try_recv().unwrap(),
+                audio::AudioCtl::Transport(TransportCommand::Play { .. })
+            ),
+            "audio receives Play independently of the queued surface work"
         );
         assert_eq!(p.views[&key].pool.unwrap().0.count, 8);
         assert_eq!(p.views[&key].depth.unwrap().0.count, 16);
@@ -1072,6 +1107,7 @@ mod tests {
             &commands[play_at],
             Command::Transport {
                 command: TransportCommand::Play { .. },
+                audio_forwarded: Some(_),
                 ..
             }
         ));
