@@ -129,6 +129,20 @@ pub(crate) struct Exec<'a> {
     pub pyramids: &'a mut crate::sampling::gpu::PyramidCache,
     pub failures: Vec<LayerFailure>,
     pub unsupported: Vec<Unsupported>,
+    /// Nested compositions this frame already rendered, by their plan
+    /// (`resolve_content`): a composition drawn twice with the same plan
+    /// (a precomp used by two layers at one time) samples one target. An
+    /// entry lives as long as its target is in `taken` (a motion-blur
+    /// sample gives its targets back early and drops its entries).
+    pub comps: Vec<RenderedComp>,
+}
+
+/// A nested composition's target this frame, and what it was rendered from.
+pub(crate) struct RenderedComp {
+    plan: CompPlan,
+    region: Option<Region>,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
 }
 
 /// `m3(M)`: a 2×3 matrix as the column-major mat3 uniform, in f32.
@@ -257,17 +271,70 @@ impl Exec<'_> {
                         // the region, drawn 1:1.
                         let group = child.group;
                         let child_region = if group { region } else { None };
+                        // The same composition planned the same way earlier
+                        // in this frame: its target holds exactly the pixels
+                        // rendering it again would draw.
+                        let accumulate = matches!(source, Source::Accumulate(_));
+                        if !accumulate
+                            && !self.depth_id
+                            && let Some(kept) = self
+                                .comps
+                                .iter()
+                                .find(|c| c.region == child_region && c.plan == **child)
+                        {
+                            let texture = kept.texture.clone();
+                            r.view = Some(kept.view.clone());
+                            self.prepare_level2(encoder, r, &texture, false);
+                            r.from_fbo = true;
+                            if let (true, Some(g)) = (group, region) {
+                                r.matrix = [
+                                    f64::from(g.width),
+                                    0.0,
+                                    0.0,
+                                    f64::from(g.height),
+                                    f64::from(g.x),
+                                    f64::from(g.y),
+                                ];
+                            }
+                            return;
+                        }
                         let (w, h) = match child_region {
                             Some(g) => (g.width, g.height),
                             None => (child.width, child.height),
                         };
                         let target = self.pool.take_working(self.device, w, h, self.precision);
-                        let inner = if matches!(source, Source::Accumulate(_)) {
+                        // What the render reported: a render that failed a
+                        // layer, met something unsupported, or waits for
+                        // fallback pixels is not given to a second use.
+                        let reported = (
+                            self.failures.len(),
+                            self.unsupported.len(),
+                            self.fallback_pending.len(),
+                            self.effects.fallback.pending.len(),
+                        );
+                        let inner = if accumulate {
                             self.render_accumulation(encoder, child, child_region, &target);
                             Vec::new()
                         } else {
                             self.render_comp(encoder, child, child_region, &target)
                         };
+                        if !accumulate
+                            && !self.depth_id
+                            && reported
+                                == (
+                                    self.failures.len(),
+                                    self.unsupported.len(),
+                                    self.fallback_pending.len(),
+                                    self.effects.fallback.pending.len(),
+                                )
+                        {
+                            self.comps.push(RenderedComp {
+                                plan: (**child).clone(),
+                                region: child_region,
+                                texture: target.texture.clone(),
+                                view: target.view.clone(),
+                            });
+                        }
                         r.view = Some(target.view.clone());
                         self.prepare_level2(encoder, r, &target.texture, false);
                         r.from_fbo = true;
@@ -571,6 +638,7 @@ impl Exec<'_> {
         }
         for (i, draw) in plan.draws.iter().enumerate() {
             let mark = self.taken.len();
+            let comps = self.comps.len();
             self.render_draws(
                 encoder,
                 plan,
@@ -584,6 +652,10 @@ impl Exec<'_> {
             for t in done {
                 self.pool.give(t);
             }
+            // Compositions rendered for this sample lived in those targets,
+            // which the pool hands out again: they are no longer there to
+            // share.
+            self.comps.truncate(comps);
         }
     }
 

@@ -1710,6 +1710,7 @@ impl Renderer {
                 pyramids: &mut self.pyramids,
                 failures: Vec::new(),
                 unsupported: Vec::new(),
+                comps: Vec::new(),
             };
             // Generic renders flip GL rows into the caller's top-down target.
             // Standard snapshots draw directly into their readback target.
