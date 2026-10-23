@@ -124,7 +124,12 @@ host keep the previous behavior.
 
 Build the matching native wrappers, pm-wasm, desktop and CLI host before taking
 the app lease. Hold `pm-electron-lock` only for app runs, with Playwright workers
-set to one:
+set to one. pm-wasm must come from the same tree as the TypeScript
+(`node engine/crates/pm-wasm/scripts/build.mjs`, then the desktop and CLI host
+builds copy it): a stale module made the native hidden host's viewer panel throw
+`unknown query 'camera3d'`, which lands in the workspace answer's `errors` and
+breaks byte equality with today's hidden host (seen 2026-10-23 with a module
+built before the scene3d camera query merged).
 
 - `node apps/desktop/scripts/test-mcp.mjs --desktop`
 - `node apps/desktop/scripts/test-mcp.mjs --native`
