@@ -174,17 +174,25 @@ async function engineReport(session: LaunchedApp): Promise<any> {
 
 /** One step in the page: perform the step's request and wait for its presentation. */
 type StepSpec = { kind: 'time'; t: number } | { kind: 'move'; layer: string; x: number; t: number };
-function pageStep(spec: StepSpec): Promise<{ ms: number | null; counts: Record<string, number> }> {
+function pageStep(spec: StepSpec): Promise<{ ms: number | null; shownMs: number | null; counts: Record<string, number> }> {
   const PM = (window as any).PM;
   const rig = (window as any).__pmRig;
   return new Promise((resolve) => {
     let done = false;
     let wantVersion = -Infinity;
+    // With the engine on: when the viewer's presentation reported the
+    // step's frame on screen (before the page's frame events).
+    let shownMs: number | null = null;
+    const presentation = PM.Kernel?.services?.get?.('viewer')?.enginePresentation;
+    const offShown = presentation?.onPresented?.((frame: any) => {
+      if (shownMs === null && Math.abs(Number(frame?.pts) / 705_600_000 - spec.t) <= 1e-6) shownMs = performance.now() - t0;
+    });
     const finish = (ms: number | null) => {
       if (done) return;
       done = true;
       off?.();
-      resolve({ ms, counts: rig.counts() });
+      offShown?.();
+      resolve({ ms, shownMs, counts: rig.counts() });
     };
     const t0 = performance.now();
     const off = PM.bus.on('preview:presented', (e: any) => {
@@ -209,7 +217,7 @@ function pageStep(spec: StepSpec): Promise<{ ms: number | null; counts: Record<s
  * `gpuUsTotal`, which includes the compose: the render thread's time for
  * the frame); `engineFrames`, frames drawn in the step.
  */
-type StepRecord = { ms: number | null; mainMs: number; engineComposeMs: number; engineFrameMs: number; engineFrames: number; page: Record<string, number>; work: Record<string, number> };
+type StepRecord = { ms: number | null; shownMs: number | null; mainMs: number; engineComposeMs: number; engineFrameMs: number; engineFrames: number; page: Record<string, number>; work: Record<string, number> };
 
 function dist(xs: number[]): { n: number; p50?: number; p95?: number; p99?: number; max?: number } {
   if (!xs.length) return { n: 0 };
@@ -276,6 +284,7 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[]): Pr
     const next = mode === 'engine' ? await engineReport(session) : null;
     steps.push({
       ms: r.ms,
+      shownMs: r.shownMs,
       mainMs: Math.max(0, (m1.TaskDuration! - m0.TaskDuration!) * 1000 - calibrationMs),
       engineComposeMs: next && report ? (next.composeUsTotal - report.composeUsTotal) / 1000 : 0,
       engineFrameMs: next && report ? (next.gpuUsTotal - report.gpuUsTotal) / 1000 : 0,
@@ -340,6 +349,9 @@ function summarize(row: string, mode: Mode, run: { steps: StepRecord[]; calibrat
     engineRenderMsDoubleCounted: mode === 'engine' ? dist(s.map((x) => x.engineComposeMs + x.engineFrameMs)) : null,
     fitBudgetDoubleCounted: mode === 'engine' ? fitsDoubleCounted.length : null,
     stepLatencyMs: dist(presented.map((x) => x.ms!)),
+    // Engine: the request until the viewer's presentation reported the
+    // frame on screen (the rest of stepLatencyMs is the page's frame events).
+    shownLatencyMs: mode === 'engine' ? dist(s.filter((x) => x.shownMs !== null).map((x) => x.shownMs!)) : null,
     pagePerFrame: per(totals),
     enginePerFrame: per(work),
     calibrationMs: run.calibrationMs,
