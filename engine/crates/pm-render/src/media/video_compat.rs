@@ -2,9 +2,9 @@
 //! Apply only to unoverridden level 1 SDR video, never to level 2 or a
 //! sequence's separately preserved persisted-rendition reading.
 use pm_media::probe::VideoProbe;
-use pm_protocol::color::{ColorDescription, MatrixCoefficients, Range};
+use pm_protocol::color::{ColorDescription, MatrixCoefficients, Primaries, Range};
 
-pub(super) fn bt2020_upload(video: &VideoProbe) -> bool {
+pub(super) fn sdr_gamut_upload(video: &VideoProbe) -> bool {
     let tags = &video.color.tagged;
     (matches!(
         (video.codec.codec.as_str(), video.codec.bit_depth),
@@ -12,6 +12,11 @@ pub(super) fn bt2020_upload(video: &VideoProbe) -> bool {
     ) && tags.primaries == Some(9)
         && tags.transfer == Some(1)
         && tags.matrix == Some(9))
+        || (video.codec.codec == "hevc"
+            && video.codec.bit_depth == 10
+            && tags.transfer == Some(1)
+            && tags.matrix == Some(1)
+            && matches!(tags.primaries, Some(9 | 12)))
         || (video.codec.codec == "vp9"
             && video.codec.bit_depth == 10
             && !video.codec.full_range
@@ -68,8 +73,11 @@ struct Params {
 }
 
 pub(super) struct UploadReading {
-    pub gamut: bool,
+    pub gamut: Option<Primaries>,
     pub separate_matrix: bool,
+    /// HDR Canvas N32 source upload fuses the offset into the YUV products;
+    /// its direct WebGL reading adds that offset after the products.
+    pub canvas_source_bias_first: bool,
 }
 
 /// Chromium/Skia samples the decoder's unorm planes before its affine
@@ -269,7 +277,7 @@ impl Upload {
         reading: UploadReading,
         reuse: Option<Target>,
     ) -> Target {
-        let gamut = reading.gamut;
+        let gamut = reading.gamut.is_some();
         let (w, h) = (frame.format.width as u32, frame.format.height as u32);
         let out = reuse.unwrap_or_else(|| {
             Target::new(
@@ -317,11 +325,18 @@ impl Upload {
             ],
         };
         // Skia's named D50 gamuts, concatenated in f32 by pinned skcms.
-        let p = [
-            [1.6603378f32, -0.5877952, -0.07283652],
-            [-0.12453252, 1.1329923, -0.008339925],
-            [-0.018131323, -0.100585446, 1.1188763],
-        ];
+        let p = match reading.gamut {
+            Some(Primaries::DisplayP3) => [
+                [1.2248164f32, -0.22511479, 4.0233135e-6],
+                [-0.042038292, 1.0421473, 1.1311844e-5],
+                [-0.019623475, -0.07863566, 1.0984193],
+            ],
+            _ => [
+                [1.6603378f32, -0.5877952, -0.07283652],
+                [-0.12453252, 1.1329923, -0.008339925],
+                [-0.018131323, -0.100585446, 1.1188763],
+            ],
+        };
         let rows = if matrix == MatrixCoefficients::Bt2020Ncl && frame.format.bits > 8 {
             [
                 [1.167808, 0.0, 1.683611, -0.915688],
@@ -336,7 +351,11 @@ impl Upload {
             primaries: std::array::from_fn(|j| [p[0][j], p[1][j], p[2][j], 0.0]),
             flags: [
                 u32::from(frame.format.layout == Layout::Planar),
-                u32::from(matrix == MatrixCoefficients::Bt2020Ncl && !gamut),
+                u32::from(
+                    matrix == MatrixCoefficients::Bt2020Ncl
+                        && !gamut
+                        && !reading.canvas_source_bias_first,
+                ),
                 u32::from(reading.separate_matrix),
                 u32::from(frame.format.has_alpha()),
             ],

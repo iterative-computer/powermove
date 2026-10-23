@@ -653,7 +653,7 @@ fn video_supported(src: &MediaSource) -> Result<(), String> {
     if !matches!(
         c.primaries,
         Primaries::Bt709 | Primaries::Bt601_525 | Primaries::Bt601_625
-    ) && !video_compat::bt2020_upload(v)
+    ) && !video_compat::sdr_gamut_upload(v)
     {
         return Err(format!(
             "{:?} primaries (wide-gamut footage is {WHEN})",
@@ -1559,7 +1559,7 @@ impl MediaCache {
             && !matches!(desc.transfer, Transfer::Pq | Transfer::Hlg)
         {
             desc = video_compat::color(v, desc);
-            if !self.canvas_video && video_compat::bt2020_upload(v) {
+            if !self.canvas_video && video_compat::sdr_gamut_upload(v) {
                 // texImage2D keeps encoded RGB; Canvas2D additionally
                 // converts from the video's primaries into its sRGB canvas.
                 desc.primaries = Primaries::Bt709;
@@ -1634,7 +1634,7 @@ impl MediaCache {
             && color.tone_map.is_none()
             && !matches!(color.transfer, Transfer::Pq | Transfer::Hlg)
             && (matches!(color.primaries, Primaries::Bt709 | Primaries::Unspecified)
-                || video_compat::bt2020_upload(v));
+                || video_compat::sdr_gamut_upload(v));
         let format = if compatibility_bitmap || full_range_bitmap || (alpha_bitmap && source_bitmap)
         {
             wgpu::TextureFormat::Rgba8Unorm
@@ -1661,10 +1661,16 @@ impl MediaCache {
                 &imported,
                 color.matrix,
                 video_compat::UploadReading {
-                    gamut: bitmap_gamut || color.primaries == Primaries::Bt2020,
+                    gamut: if bitmap_gamut {
+                        Some(Primaries::Bt2020)
+                    } else {
+                        matches!(color.primaries, Primaries::Bt2020 | Primaries::DisplayP3)
+                            .then_some(color.primaries)
+                    },
                     separate_matrix: !self.canvas_video
                         && v.codec.codec == "vp9"
                         && frame.format.bits == 10,
+                    canvas_source_bias_first: false,
                 },
                 reuse,
             )

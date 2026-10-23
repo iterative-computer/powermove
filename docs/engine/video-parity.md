@@ -16,8 +16,10 @@ exactly. The transformed midtone witness matches the actual app's raw float
 readback and exported byte mapping at both captured times and both available
 working precisions. Round 3 adds 48 fresh frames from 16 recipes: all 36
 SDR Canvas frames are exact, bringing the source total to 98. Of the 36 new
-SDR live frames, all 36 are exact. Today decodes the other 12 HDR/P3 frames, while their native
-compatibility conversion remains an explicit blocker.
+SDR live frames, all 36 are exact. Round 4's six HEVC SDR P3/BT.2020 control
+frames also match Canvas and live exactly, bringing the Canvas total to 104.
+Today decodes the other 12 HDR/P3 frames, while their native compatibility
+conversion remains an explicit blocker.
 
 ## Conversion order and precision
 
@@ -161,9 +163,23 @@ full-range 8-bit BT.601/709/2020, BT.2020 PQ/HLG and P3 PQ.
 The registered Round 3 test compares Canvas and live at both precisions for
 every captured case, then aggregates all failures. Its current strict gate
 fails on all 48 HDR/P3 reading/precision attempts. It has no skipped or ignored
-case. All 36 SDR Canvas frames and 36 SDR live frames match, with all 144 SDR comparisons
-exact. The separate alpha-interpretation regression verifies compatibility
+case. All 36 SDR Canvas frames and 36 SDR live frames match, with all 144
+SDR comparisons exact. The separate alpha-interpretation regression verifies compatibility
 cannot change the native reading's pixels or visible sampling domain.
+
+Round 4 adds seven HDR/P3 controls at three timestamps, including six new
+HEVC SDR frames with BT.709 matrices and either Display P3 or BT.2020
+primaries. Their live path keeps encoded RGB; Canvas crosses its RGBA8 source
+store, decodes with Skia's sRGB transfer, applies the pinned named-gamut D50
+matrix, and re-encodes. All 24 new SDR reading/precision comparisons match
+exactly. Every frame also retains independent CPU/GPU Canvas captures in
+sRGB and Display P3, with actual context attributes and hash-bound rasters.
+All 60 reused main rasters are unchanged from Round 3.
+
+The explicit legacy HDR decision is MATCH: direct WebGL retains encoded-looking
+RGB while the sRGB Canvas tone-maps it. The CPU and GPU Canvas HDR paths can
+differ by up to three codes in these controls. Both are captured; a future
+appearance correction must be a deliberate compatibility change.
 
 `pm-render`'s `video_parity` example draws each captured source, writes raw
 native pixels and pm-perf counters outside Git, and fails on **any** different
