@@ -41,13 +41,12 @@ fn upload_pixel(id: vec3<u32>, alpha: f32) {
         rgb = fma(vec3<f32>(y), c0, fma(vec3<f32>(uv.x), c1, uv.y * c2)) + bias;
     }
     if (P.flags.z != 0u) {
-        // Skia's deep planar direct upload emits a matrix product followed
-        // by its offset. Preserve the separate operations at byte ties.
-        let p0 = fma(vec3<f32>(y), c0, vec3<f32>(0.0));
-        let p1 = fma(vec3<f32>(uv.x), c1, vec3<f32>(0.0));
-        let p2 = fma(vec3<f32>(uv.y), c2, vec3<f32>(0.0));
-        rgb = fma(vec3<f32>(1.0),
-            fma(vec3<f32>(1.0), fma(vec3<f32>(1.0), p0, p1), p2), bias);
+        // Skia's deep planar direct upload emits the dot product before its
+        // translation. Its final V product is fused into the accumulated
+        // Y and U terms; preserving that order decides half-code ties.
+        let p0 = vec3<f32>(y) * c0;
+        let p1 = fma(vec3<f32>(uv.x), c1, p0);
+        rgb = fma(vec3<f32>(uv.y), c2, p1) + bias;
     }
     rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     rgb *= alpha;

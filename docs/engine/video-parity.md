@@ -16,8 +16,7 @@ exactly. The transformed midtone witness matches the actual app's raw float
 readback and exported byte mapping at both captured times and both available
 working precisions. Round 3 adds 48 fresh frames from 16 recipes: all 36
 SDR Canvas frames are exact, bringing the source total to 98. Of the 36 new
-SDR live frames, 35 are exact; one deep VP9 BT.2020 pixel remains one code
-apart. Today decodes the other 12 HDR/P3 frames, while their native
+SDR live frames, all 36 are exact. Today decodes the other 12 HDR/P3 frames, while their native
 compatibility conversion remains an explicit blocker.
 
 ## Conversion order and precision
@@ -80,11 +79,14 @@ live samples the four actual decoder planes and attenuates RGB before storing
 RGBA8. Explicit alpha choices supplied through Interpret Footage keep the
 native reading and visible texture domain.
 
-Deep VP9's direct matrix product also needs separately rounded f32 products
-and sums, as emitted by Skia's matrix expression. Explicit `fma(x,c,0)` and
-`fma(1,a,b)` preserve those rounding boundaries on Metal; the plain
-multiply/add trial produced different byte ties. This closes the BT.709
-live tie and one of two BT.2020 live ties, without changing Canvas arithmetic.
+Deep VP9's direct matrix product also needs Skia's dot-product order:
+`p0=y*c0; p1=fma(u,c1,p0); rgb=fma(v,c2,p1)+bias`. The final chroma
+product is fused into the accumulated Y/U terms before the translation.
+Keeping every product separate closes two witnesses but leaves the red tie
+at (86,107) one code high; preserving this order closes all 36 SDR live
+frames without changing Canvas arithmetic. A Metal sampler probe returned
+the same sampled bits for six equivalent coordinates at that pixel, ruling
+out a coordinate adjustment as the correction.
 
 Full-range HEVC10 also needs Chromium's decoder output contract:
 VideoToolbox is requested to emit video-range P010 even when the bitstream
@@ -158,9 +160,8 @@ full-range 8-bit BT.601/709/2020, BT.2020 PQ/HLG and P3 PQ.
 
 The registered Round 3 test compares Canvas and live at both precisions for
 every captured case, then aggregates all failures. Its current strict gate
-fails on the one BT.2020 live pixel in both precisions and all 48 HDR/P3
-reading/precision attempts. It has no skipped or ignored case. All 36 SDR
-Canvas frames and 35 SDR live frames match, with 142 of 144 SDR comparisons
+fails on all 48 HDR/P3 reading/precision attempts. It has no skipped or ignored
+case. All 36 SDR Canvas frames and 36 SDR live frames match, with all 144 SDR comparisons
 exact. The separate alpha-interpretation regression verifies compatibility
 cannot change the native reading's pixels or visible sampling domain.
 
@@ -286,12 +287,9 @@ committed composition fixture includes its captured depth-8 references,
 while this base tests the available Float16/Float32 paths. The complete
 app playback/scrub/export and private-corpus gates remain integration work.
 
-Round 3's remaining SDR gap is VP9 10-bit BT.2020 live at 1.125 seconds,
-pixel (86,107): native `[36,203,84,255]`, today `[35,203,84,255]`.
-Separately rounded operations close the BT.709 witness and the other
-BT.2020 channel. The remaining sampled-value seam is one code at a byte tie;
-no source-backed general sampler correction has been established. It remains
-a blocker, with its captured reference unchanged.
+The last Round 3 SDR gap, VP9 10-bit BT.2020 live at 1.125 seconds,
+pixel (86,107), is closed by the matrix order above: native and today both
+produce `[35,203,84,255]`. The captured reference is unchanged.
 
 HDR/P3 strict-zero native conversion remains open: a pinned
 Skia PQ/HLG, D50-gamut and default RWTMO prototype reached max 1 but did not
