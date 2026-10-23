@@ -228,10 +228,10 @@ pub fn backends(info: &CodecInfo, idx: &FrameIndex) -> Vec<Backend> {
         }
         "h264" | "hevc" => vec![Backend::VideoToolbox, Backend::Ffmpeg],
         "av1" => {
-            if unsafe {
+            let hardware = unsafe {
                 crate::apple::cf::VTIsHardwareDecodeSupported(crate::apple::cf::fcc(b"av01"))
-            } != 0
-            {
+            } != 0;
+            if hardware {
                 vec![Backend::VideoToolbox, Backend::Dav1d]
             } else {
                 vec![Backend::Dav1d]
@@ -240,6 +240,23 @@ pub fn backends(info: &CodecInfo, idx: &FrameIndex) -> Vec<Backend> {
         "vp8" | "vp9" if info.alpha_mode => vec![Backend::FfmpegAlphaPair],
         _ => vec![Backend::Ffmpeg],
     }
+}
+
+fn tiny_chromium_av1(info: &CodecInfo) -> bool {
+    // On captured 256×144 and source-derived 320×180 Main 8-bit clips,
+    // dav1d and VideoToolbox gave bit-identical visible Y/Cb/Cr on all 18
+    // measured frames, and dav1d decoded the first frame sooner. At 640×360
+    // and HD, hardware was faster. Native/Level 2 reading stays VT-first.
+    info.codec == "av1"
+        && info.profile == 0
+        && info.bit_depth == 8
+        && matches!(info.pix_fmt.as_str(), "yuv420p" | "yuvj420p")
+        && (info.log2_chroma_w, info.log2_chroma_h) == (1, 1)
+        && !info.alpha_mode
+        && !info.pix_fmt_alpha
+        && info.width > 0
+        && info.height > 0
+        && i64::from(info.width) * i64::from(info.height) <= 64 * 1024
 }
 
 /// Everything needed to open decoders for one stream.
@@ -303,11 +320,17 @@ pub fn open_with_reading(
         && spec.info.bit_depth == 8
         && (spec.info.full_range || spec.info.alpha_mode || spec.info.pix_fmt_alpha)
         && (spec.info.log2_chroma_w, spec.info.log2_chroma_h) == (1, 1);
+    let chromium_av1_tiny =
+        reading == DecodeReading::Chromium && tiny_chromium_av1(spec.info);
     let mut order = if chromium_h264_software || chromium_vp9_coded {
         vec![Backend::Ffmpeg]
     } else {
         backends(spec.info, spec.index)
     };
+    if chromium_av1_tiny && order.contains(&Backend::Dav1d) {
+        order.retain(|b| *b != Backend::Dav1d);
+        order.insert(0, Backend::Dav1d);
+    }
     if let Some(p) = prefer {
         if !order.contains(&p) {
             return Err(MediaError::unsupported(format!(
@@ -368,7 +391,9 @@ fn open_vt(
     arbiter: &dyn HardwareArbiter,
     pool: &FramePool,
 ) -> Result<Decoder> {
-    let cfg = VtConfig::new_with_reading(spec.info, spec.index, spec.extradata, purpose, reading)?;
+    let cfg = startup::timed(startup::Stage::VtConfig, || {
+        VtConfig::new_with_reading(spec.info, spec.index, spec.extradata, purpose, reading)
+    })?;
     let codec = HwCodec::from_fourcc(cfg.codec_fcc);
     let permit = if cfg.hardware_supported {
         arbiter.try_acquire(codec)
@@ -383,11 +408,58 @@ fn open_vt(
             "no hardware {codec:?} session available"
         )));
     }
-    let dec = VtDecoder::new(&cfg, spec.index.timebase, permit.is_some())?;
+    let dec = startup::timed(startup::Stage::VtSession, || {
+        VtDecoder::new(&cfg, spec.index.timebase, permit.is_some())
+    })?;
     Ok(Decoder::Vt {
         dec,
         cfg,
         _permit: permit,
         pool: pool.clone(),
     })
+}
+
+#[cfg(test)]
+mod backend_policy_tests {
+    use super::*;
+    use crate::decode::service::{DecodeService, MediaSource, ServiceConfig};
+
+    #[test]
+    fn tiny_chromium_av1_uses_dav1d_while_native_and_high_depth_keep_hardware_first() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pm-render/tests/fixtures/video-parity/av1-709-limited.mp4");
+        let source = MediaSource::open(&fixture).unwrap();
+        assert!(tiny_chromium_av1(&source.info));
+        let native_order = backends(&source.info, &source.index);
+        if native_order.contains(&Backend::VideoToolbox) {
+            assert_eq!(native_order[0], Backend::VideoToolbox);
+        }
+        let service = DecodeService::new(ServiceConfig::default());
+        let chromium = service
+            .session_with_reading(&source, 1, DecodePurpose::Export, DecodeReading::Chromium)
+            .unwrap();
+        assert_eq!(chromium.info().backend, Backend::Dav1d);
+        drop(chromium);
+        let native = service
+            .session_with_reading(&source, 1, DecodePurpose::Export, DecodeReading::Native)
+            .unwrap();
+        assert_eq!(native.info().backend, native_order[0]);
+        let mut larger = source.info.clone();
+        larger.width = 640;
+        larger.height = 360;
+        assert!(!tiny_chromium_av1(&larger));
+        let larger_order = backends(&larger, &source.index);
+        if larger_order.contains(&Backend::VideoToolbox) {
+            assert_eq!(larger_order[0], Backend::VideoToolbox);
+        }
+
+        let ten_bit = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pm-render/tests/fixtures/video-parity-round3/av1-10bit-709-limited-r3.mp4");
+        let source = MediaSource::open(&ten_bit).unwrap();
+        assert!(!tiny_chromium_av1(&source.info));
+        let high_depth_order = backends(&source.info, &source.index);
+        if high_depth_order.contains(&Backend::VideoToolbox) {
+            assert_eq!(high_depth_order[0], Backend::VideoToolbox);
+        }
+    }
 }

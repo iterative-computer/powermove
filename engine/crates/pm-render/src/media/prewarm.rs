@@ -169,7 +169,17 @@ fn decode_reading(
                 && (v.codec.log2_chroma_w, v.codec.log2_chroma_h) == (1, 1)
                 && (v.color.tagged.full_range == Some(true)
                     || v.codec.alpha_mode
-                    || v.codec.pix_fmt_alpha)))
+                    || v.codec.pix_fmt_alpha))
+            || (v.codec.codec == "av1"
+                && v.codec.profile == 0
+                && v.codec.bit_depth == 8
+                && matches!(v.codec.pix_fmt.as_str(), "yuv420p" | "yuvj420p")
+                && (v.codec.log2_chroma_w, v.codec.log2_chroma_h) == (1, 1)
+                && !v.codec.alpha_mode
+                && !v.codec.pix_fmt_alpha
+                && v.codec.width > 0
+                && v.codec.height > 0
+                && i64::from(v.codec.width) * i64::from(v.codec.height) <= 64 * 1024))
         && !interprets_video_color(interp)
         && (v.alpha.is_none() || interp.alpha.is_none())
         && !has_color_override
@@ -219,7 +229,10 @@ fn prepare_one(
         let reading = resolve_video(v, interp);
         let timing = Timing::new(src, &reading, job.composition);
         let ticks = (job.seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64;
-        if timing.pick(src, ticks).is_none() || cancel.load(Ordering::Relaxed) {
+        let Some(pick) = timing.pick(src, ticks) else {
+            return Ok(false);
+        };
+        if cancel.load(Ordering::Relaxed) {
             return Ok(false);
         }
         if service.usage().sessions >= MAX_PREPARED_SESSIONS {
@@ -240,9 +253,20 @@ fn prepare_one(
         } else {
             DecodePurpose::Display
         };
-        service
-            .prewarm_session(src, job.key.instance, purpose, reading_kind)
+        // Warm the exact selected decoded frame as well as its decoder. The
+        // service's bounded frame cache is shared with both the viewer and
+        // export path, so the first planned render can reuse it without
+        // retaining a converted GPU texture. A changed source or cancelled
+        // preparation is discarded by the usual completion checks.
+        let mut session = service
+            .session_with_reading(src, job.key.instance, purpose, reading_kind)
             .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+        let frame = session
+            .frame_with(pick.frame, &mut |_| cancel.load(Ordering::Relaxed))
+            .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+        if frame.is_none() || cancel.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
         Ok(true)
     })();
     Completed {
@@ -334,9 +358,9 @@ impl MediaCache {
         failures
     }
 
-    /// Queue source hash/probe/index and decoder startup without blocking the
-    /// presenter. Returns true for a queued job; full queues defer to normal
-    /// source opening at render time.
+    /// Queue source hash/probe/index, decoder startup and the selected source
+    /// frame without blocking the presenter. Returns true for a queued job;
+    /// full queues defer to normal source opening at render time.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_video(
         &mut self,

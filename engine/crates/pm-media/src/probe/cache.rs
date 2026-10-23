@@ -24,6 +24,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 const MAX_ENTRIES: usize = 16;
 const MAX_BYTES: usize = 64 << 20;
 const MAX_VERSIONS: usize = 64;
+// Tiny inputs stay inline to avoid a thread per small imported clip.
+const PARALLEL_HASH_MIN_BYTES: u64 = 128 << 10;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Version {
@@ -301,11 +303,44 @@ fn prewarm_with_cancel(path: &Path, cancel: Option<&AtomicBool>) -> Result<()> {
         return Ok(());
     }
     let before = Version::from(&std::fs::metadata(path)?);
-    let hash = hash_stable(path, before, cancel)?;
     let route = Route {
         version: before,
         extension: extension(path),
     };
+    // A second path to already-prepared bytes should pay only for a hash.
+    // When no cached entry could possibly have this size and container hint,
+    // hash the file alongside the probe/index and the decoder's input open.
+    // The hash and probe each validate the same file version before any result
+    // is published, so an in-place edit cannot combine two file generations.
+    let maybe_copy = {
+        let cache = cache().lock().unwrap();
+        cache.entries.iter().any(|(key, entry)| {
+            key.extension == route.extension && entry.prepared.probe.size == before.len
+        })
+    };
+    if !maybe_copy && before.len >= PARALLEL_HASH_MIN_BYTES {
+        let (hash, prepared) = std::thread::scope(|scope| {
+            let hashing = scope.spawn(|| hash_stable(path, before, cancel));
+            let prepared = probe_prepared(path, before);
+            let hash = hashing
+                .join()
+                .map_err(|_| MediaError::invalid("prewarm hash worker panicked"))?;
+            Ok::<_, MediaError>((hash?, prepared?))
+        })?;
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return Err(MediaError::invalid("prewarm canceled"));
+        }
+        if Version::from(&std::fs::metadata(path)?) != before {
+            return Err(MediaError::invalid("source changed while preparing"));
+        }
+        let key = CacheKey {
+            hash,
+            extension: route.extension.clone(),
+        };
+        cache().lock().unwrap().insert(route, key, prepared);
+        return Ok(());
+    }
+    let hash = hash_stable(path, before, cancel)?;
     let key = CacheKey {
         hash,
         extension: route.extension.clone(),
@@ -318,6 +353,18 @@ fn prewarm_with_cancel(path: &Path, cancel: Option<&AtomicBool>) -> Result<()> {
             return Ok(());
         }
     }
+    let prepared = probe_prepared(path, before)?;
+    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        return Err(MediaError::invalid("prewarm canceled"));
+    }
+    if Version::from(&std::fs::metadata(path)?) != before {
+        return Err(MediaError::invalid("source changed while preparing"));
+    }
+    cache().lock().unwrap().insert(route, key, prepared);
+    Ok(())
+}
+
+fn probe_prepared(path: &Path, before: Version) -> Result<Prepared> {
     let (probed, input) = std::thread::scope(|scope| {
         let input = scope.spawn(|| Input::open(path));
         let probed = super::probe(path);
@@ -326,9 +373,6 @@ fn prewarm_with_cancel(path: &Path, cancel: Option<&AtomicBool>) -> Result<()> {
             .map_err(|_| MediaError::invalid("prewarm input worker panicked"))?;
         Ok::<_, MediaError>((probed?, input?))
     })?;
-    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-        return Err(MediaError::invalid("prewarm canceled"));
-    }
     let Probed { probe, index } = probed;
     let stream = probe
         .video_stream
@@ -338,17 +382,12 @@ fn prewarm_with_cancel(path: &Path, cancel: Option<&AtomicBool>) -> Result<()> {
     if Version::from(&std::fs::metadata(path)?) != before {
         return Err(MediaError::invalid("source changed while probing"));
     }
-    cache().lock().unwrap().insert(
-        route,
-        key,
-        Prepared {
-            probe,
-            index,
-            extradata,
-            input: Arc::new(Mutex::new(Some(input))),
-        },
-    );
-    Ok(())
+    Ok(Prepared {
+        probe,
+        index,
+        extradata,
+        input: Arc::new(Mutex::new(Some(input))),
+    })
 }
 
 #[cfg(all(test, unix))]
@@ -472,5 +511,41 @@ mod tests {
         assert_eq!(MediaSource::open(&original).unwrap().info.codec, "vp9");
         prewarm(&original).unwrap();
         assert_eq!(MediaSource::open(&alias).unwrap().info.codec, "vp9");
+    }
+
+    #[test]
+    fn parallel_hash_and_probe_publish_only_validated_source() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../pm-render/tests/fixtures/video-parity/h264-hd-709-matrix-only.mp4");
+        let dir = std::env::temp_dir().join(format!(
+            "pm-media-parallel-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let _scratch = Scratch(dir.clone());
+        let first = dir.join("first.mp4");
+        let copy = dir.join("copy.mp4");
+        std::fs::copy(&fixture, &first).unwrap();
+        assert!(std::fs::metadata(&first).unwrap().len() >= PARALLEL_HASH_MIN_BYTES);
+        prewarm(&first).unwrap();
+        let prepared = lookup(&first).unwrap().unwrap();
+        let opened = MediaSource::open(&first).unwrap();
+        assert_eq!(opened.info, prepared.probe.video.as_ref().unwrap().codec);
+        assert_eq!(opened.index.frames.len(), prepared.index.frames.len());
+
+        std::fs::copy(&first, &copy).unwrap();
+        prewarm(&copy).unwrap();
+        let copied = lookup(&copy).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&prepared.index, &copied.index));
+        assert_eq!(copied.probe.path, copy);
+        let mut changed = std::fs::OpenOptions::new().write(true).open(&copy).unwrap();
+        changed.seek(SeekFrom::Start(32)).unwrap();
+        changed.write_all(&[0x5a]).unwrap();
+        changed.sync_all().unwrap();
+        assert!(lookup(&copy).unwrap().is_none());
     }
 }

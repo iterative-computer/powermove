@@ -1,7 +1,7 @@
 //! Plan-aware video startup before the first requested frame. The plan is
 //! built with the same document, time and request as rendering, then walked
-//! without decoding pixels or submitting GPU work. Source preparation runs
-//! asynchronously; the presenter never waits for a hash, index or decoder.
+//! without submitting GPU work. Source and selected decoded frame preparation
+//! run asynchronously; the presenter never waits for a hash, index or decoder.
 
 use super::*;
 use crate::composite;
@@ -51,7 +51,9 @@ fn visit_plan(plan: &CompPlan, visit: &mut impl FnMut(&str, &Source)) {
 impl Renderer {
     /// Queue preparation of the videos selected by one planned view. The
     /// worker retains each completed source and matching idle decoder until
-    /// the renderer adopts them. A first render can proceed cold if unfinished.
+    /// the renderer adopts them. It also offers the selected decoded frame to
+    /// the shared lease-bound cache. A first render can proceed cold if the
+    /// worker is unfinished or the frame does not fit that cache.
     pub fn prepare_media(
         &mut self,
         document: &Document,

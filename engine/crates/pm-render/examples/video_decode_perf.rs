@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut report = json!({
         "endpoint":"Renderer::render(video layer) + Renderer::wait_idle; includes source open, FFmpeg/VideoToolbox decode, source conversion, and layer composite",
         "coldDefinition":"Renderer/device and video shader primed on the source, then a fresh path alias opens an independent media source and decoder session; alias removed on drop",
-        "preparedImportColdDefinition":"Optional single import-prepared first render per row: Renderer::prepare_media queues source hash/probe/index and decoder startup; finish_media_preparation explicitly waits outside the first-render timer. Preparation wall time includes the wait; preparation-plus-frame is reported separately. Ordinary cold remains the regression gate",
+        "preparedImportColdDefinition":"Optional single import-prepared first render per row: Renderer::prepare_media queues source hash/probe/index, decoder startup, and decode of the selected source frame; finish_media_preparation explicitly waits outside the first-render timer. Preparation wall time includes the wait; preparation-plus-frame is reported separately. Ordinary cold remains the regression gate",
         "allocationCountersInstalled":pm_perf::alloc_counting_installed(),
         "rows": []
     });

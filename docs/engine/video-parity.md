@@ -247,7 +247,10 @@ planes instead of paying hardware decoder startup. The original 62-frame
 zero-byte gate passes with this policy. Full-range H.264's software policy
 is separately required for its coded-plane contract; larger full-range
 geometry remains a coverage limit. Native, color-overridden, HDR and level-2
-backend policy is unchanged. AV1 keeps its native decoder.
+backend policy is unchanged. Chromium-compatible Main 8-bit 4:2:0 AV1 through
+64K pixels prefers dav1d, with VideoToolbox retained as a fallback. Eighteen
+visible plane comparisons at 256×144 and 320×180 were identical between the
+two decoders. Larger and high-depth AV1 retain the native backend order.
 
 Final H.264 BT.709 limited cold medians are 1.196 ms probe, 0.110 ms
 index, 0.103 ms decoder creation, 1.456 ms first decode and 0.595 ms GPU wait.
@@ -258,20 +261,30 @@ container configuration/index; the optimization does not claim otherwise.
 
 Open/import preparation queues the same planned video sources, instance IDs,
 reading and decode purpose as rendering. A lazy worker hashes/probes/indexes
-and parks a decoder on the retained source Arc; the presenter does not wait
+and parks a decoder and the selected decoded frame on the retained source
+Arc and bounded decode cache; the presenter does not wait
 for media I/O. There are at most two active preparation jobs process-wide,
 16 queued jobs per renderer and eight prepared sessions per decode service.
 Idle workers retire; closing cancels hashing, while an in-progress index may
 finish after closure with its active slot retained. Completed stale sources
 are discarded. Full queues or unfinished preparation use normal native cold
 opening. Tests cover direct and nested sources, display preparation, shared
-source identity, session bounds and idle capacity across renderers.
+source identity, session bounds and idle capacity across renderers. Completed
+display and export preparation require zero source opens, decoder creations,
+and frame decodes on the first planned render. Prepared and cold display
+readbacks must be byte-identical.
 
 The explicit preparation cache keys self-contained container bytes by full
 BLAKE3 plus extension, validates file version before/after hashing, and
 bounds entries, metadata estimates and stat routes. Unix versions include
 inode, size, mtime and ctime; Windows lookups reverify content. Playlists and
 renamed manifests are excluded because sibling media is outside their hash.
+For files of at least 128 KiB, hashing overlaps probing/indexing when no
+same-size/container cached entry could provide a copy hit. Foreground sampled
+identity reads also overlap probing/indexing at that size. Each cache publish
+validates the file generation; small inputs keep the inline path. Startup
+diagnostics distinguish VideoToolbox configuration and session creation, and
+record overlapping durations without treating their sum as wall-clock time.
 Prepared-first-frame, preparation time and preparation-plus-frame time are
 reported separately; fresh cold remains the ordinary regression gate.
 

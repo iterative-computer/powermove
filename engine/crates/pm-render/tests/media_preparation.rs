@@ -67,7 +67,7 @@ fn planned_video_preparation_reuses_exact_source_and_decoder_on_first_render() {
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
     assert_eq!(render_stages.source_opens, 0);
     assert_eq!(render_stages.session_creates, 0);
-    assert_eq!(render_stages.frame_decodes, 1);
+    assert_eq!(render_stages.frame_decodes, 0);
 
     // The first renderer stays alive and idle. Two more renderers must still
     // be able to prepare; idle workers do not monopolize the global cap.
@@ -81,6 +81,69 @@ fn planned_video_preparation_reuses_exact_source_and_decoder_on_first_render() {
         assert!(next.finish_media_preparation().is_empty());
         idle_renderers.push(next);
     }
+}
+
+#[test]
+fn display_preparation_caches_selected_frame_for_first_render() {
+    let _serial = serial_preparation();
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/video-parity/h264-709-full.mp4");
+    let (w, h) = (256, 144);
+    let mut project = doc::project(
+        w,
+        h,
+        2.0,
+        doc::no_fill(),
+        vec![doc::layer(
+            "v",
+            "video",
+            json!({"asset":"clip","fit":"stretch","w":w,"h":h,"trim":0,"speed":1}),
+            f64::from(w) / 2.0,
+            f64::from(h) / 2.0,
+            2.0,
+        )],
+    );
+    doc::asset(&mut project, "clip", "video", "mp4", w, h, 2.0);
+    let document = doc::load(&project);
+    let mut assets = MapResolver::default();
+    assets.paths.insert("clip".into(), path);
+    let request = RenderRequest {
+        export: false,
+        video_end: VideoEnd::Final,
+        ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
+    };
+    let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+
+    let prepared = renderer
+        .prepare_media(&document, "Ptest-root", time, &request, &assets)
+        .unwrap();
+    assert_eq!(prepared.queued_videos, 1);
+    assert!(renderer.finish_media_preparation().is_empty());
+
+    let viewer_before = renderer.scrub_stats();
+    startup::begin();
+    let frame = renderer
+        .render(&document, "Ptest-root", time, &request, &assets)
+        .unwrap();
+    renderer.wait_idle();
+    let stages = startup::finish();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert_eq!(stages.source_opens, 0);
+    assert_eq!(stages.session_creates, 0);
+    assert_eq!(stages.frame_decodes, 0);
+    let viewer_after = renderer.scrub_stats();
+    assert_eq!(viewer_after.cached, viewer_before.cached + 1);
+    assert_eq!(viewer_after.decoded, viewer_before.decoded);
+
+    let prepared_rgba = renderer.read_rgba(&frame).unwrap();
+    let mut cold = Renderer::headless().unwrap();
+    let cold_frame = cold
+        .render(&document, "Ptest-root", time, &request, &assets)
+        .unwrap();
+    cold.wait_idle();
+    assert!(cold_frame.failures.is_empty(), "{:?}", cold_frame.failures);
+    assert_eq!(prepared_rgba, cold.read_rgba(&cold_frame).unwrap());
 }
 
 #[test]
