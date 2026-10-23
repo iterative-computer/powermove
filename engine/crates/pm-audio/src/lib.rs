@@ -30,6 +30,7 @@ pub mod kernel;
 pub mod layout;
 pub mod meter;
 pub mod mixer;
+pub mod mp3;
 pub mod offline;
 pub mod playback;
 mod preparation;

@@ -23,7 +23,40 @@ pub const BLOCK: usize = 1 << 16;
 pub struct Source {
     id: u64,
     pub info: AudioStreamInfo,
-    decoder: Mutex<AudioDecoder>,
+    decoder: Mutex<Decoder>,
+}
+
+/// FFmpeg, or Symphonia for MP3 as today decodes it ([`crate::mp3`]).
+enum Decoder {
+    Ffmpeg(AudioDecoder),
+    Mp3(Box<crate::mp3::Mp3Decoder>, u64),
+}
+
+impl Decoder {
+    fn packets_decoded(&self) -> u64 {
+        match self {
+            Decoder::Ffmpeg(d) => d.packets_decoded(),
+            Decoder::Mp3(_, n) => *n,
+        }
+    }
+
+    fn seek_anchored(&mut self, index: u64) -> Result<()> {
+        match self {
+            Decoder::Ffmpeg(d) => Ok(d.seek_anchored(index)?),
+            Decoder::Mp3(d, _) => d.seek_anchored(index),
+        }
+    }
+
+    fn read(&mut self, out: &mut [Vec<f32>], frames: usize) -> Result<usize> {
+        match self {
+            Decoder::Ffmpeg(d) => Ok(d.read(out, frames)?),
+            Decoder::Mp3(d, n) => {
+                let got = d.read(out, frames)?;
+                *n += got.div_ceil(1152) as u64;
+                Ok(got)
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for Source {
@@ -388,9 +421,20 @@ impl SourceCache {
             return Ok(s.clone());
         }
         let decoder = AudioDecoder::open(path, stream)?;
+        let info = decoder.info().clone();
+        // The FFmpeg probe gives the stream's facts (layout, length, priming);
+        // MP3 samples come from today's decoder.
+        let decoder = if info.codec == "mp3" {
+            match crate::mp3::Mp3Decoder::open(path, info.channels()) {
+                Ok(mp3) => Decoder::Mp3(Box::new(mp3), 0),
+                Err(_) => Decoder::Ffmpeg(decoder),
+            }
+        } else {
+            Decoder::Ffmpeg(decoder)
+        };
         let source = Arc::new(Source {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
-            info: decoder.info().clone(),
+            info,
             decoder: Mutex::new(decoder),
         });
         Ok(lock(&self.sources).entry(key).or_insert(source).clone())

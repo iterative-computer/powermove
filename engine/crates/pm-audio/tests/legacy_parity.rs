@@ -129,7 +129,7 @@ fn ceiling(name: &str) -> Ceiling {
         // from run to run (−149 dBFS between two captures of
         // `corpus-media-audio`): that spread is the ceiling there.
         "wide-quad" | "wide-71" => Ceiling::Mix(-145.0),
-        n if n.starts_with("real-") => Ceiling::Mix(-90.0),
+        n if n.starts_with("real-") => Ceiling::Mix(-240.0),
         _ => Ceiling::Mix(-240.0),
     }
 }
