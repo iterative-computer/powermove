@@ -55,8 +55,9 @@ const MAX_SNAPSHOT_TEXT_CHARS = LIMITS.codexProjectJsonBytes * 2;
 // The job engine's full project (`__engine_frames_plan`), never returned to
 // agents: any project the store accepts, escaped inside the reply's JSON.
 const MAX_PROJECT_TEXT_CHARS = LIMITS.fileSaveBytes * 2;
-// Private host plans carry complete documents and Undo, not paged agent state.
-const MAX_DOCUMENT_PLAN_CHARS = 64 * 1024 * 1024;
+// A save plan carries both the project and its Undo document as escaped JSON.
+// Accept every project the file store accepts, including large user projects.
+const MAX_DOCUMENT_PLAN_CHARS = LIMITS.fileSaveBytes * 4;
 const MAX_TOOL_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_TOOL_CONTENT_ITEMS = 8;
 
