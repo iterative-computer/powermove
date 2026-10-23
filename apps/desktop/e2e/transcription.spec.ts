@@ -9,6 +9,7 @@ import { _electron, type Page } from 'playwright';
 
 import { CATALOG, DEFAULT_MODEL_ID } from '../src/main/transcription/catalog';
 import { expect, launchApp, repoRoot, test, type LaunchedApp } from './helpers/app';
+import { test as onboardingTest } from './helpers/raw-onboarding';
 
 /*
  * On-device transcription in the real app: the download sheet, Settings ›
@@ -324,77 +325,72 @@ test('a real Parakeet Unified EN model transcribes speech in the utility process
   }
 });
 
-test('onboarding starts the chosen model download and it finishes after onboarding', async () => {
+onboardingTest('onboarding starts the chosen model download and it finishes after onboarding', async ({ onboardingResources }) => {
   test.setTimeout(120_000);
-  const home = await mkdtemp(path.join(os.tmpdir(), 'pm-transcription-onb-'));
+  const home = onboardingResources.root = await mkdtemp(path.join(os.tmpdir(), 'pm-transcription-onb-'));
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
+  onboardingResources.releaseDownload = release;
   const files: Record<string, Hosted> = {};
   const { server, origin } = await serve(files, gate);
+  onboardingResources.server = server;
   const catalogFile = await catalog(home, origin, files, false);
   const env: Record<string, string> = { ...process.env as Record<string, string>, POWERMOVE_USER_DATA: path.join(home, 'profile'), POWERMOVE_DEVTOOLS: '0',
     POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_TEST_ONBOARDING: '1', POWERMOVE_TEST_TRANSCRIPTION_CATALOG: catalogFile,
     CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'), POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' };
   delete env.ELECTRON_RUN_AS_NODE;
-  const app = await _electron.launch({ args: ['.'], cwd: repoRoot, env });
-  try {
-    const find = async (pred: (url: string) => boolean): Promise<Page> => {
-      for (let i = 0; i < 100; i++) {
-        const w = app.windows().find(p => pred(p.url()));
-        if (w) return w;
-        await new Promise(r => setTimeout(r, 200));
-      }
-      throw new Error('window not found');
-    };
-    const animation = await find(url => /onboarding/.test(url) && !/welcome/.test(url));
-    await animation.waitForLoadState('domcontentloaded');
-    await animation.evaluate(() => (window as any).onboarding.animationComplete());
-    const welcome = await find(url => /welcome/.test(url));
-    const errors: string[] = [];
-    welcome.on('pageerror', e => errors.push(String(e)));
-    await welcome.waitForSelector('#begin');
-    await welcome.click('#begin');
-    await welcome.locator('#timeline-step').getByRole('button', { name: 'Continue' }).click();
-    await welcome.locator('#agent-step').getByRole('button', { name: 'Continue' }).click();
-    const step = welcome.locator('#transcription-step');
-    await expect(welcome.locator('#transcription-title')).toBeFocused();
-    await expect(step.getByRole('radio')).toHaveCount(curated.length);
-    await expect(step.getByText('Parakeet Unified EN')).toBeVisible();
-    await expect(step.getByText('Whisper Medium')).toHaveCount(0);
-    for (const mode of ['light', 'dark']) {
-      await welcome.evaluate((value) => { document.documentElement.dataset.theme = value; }, mode);
-      await welcome.waitForTimeout(900);
-      if (shots) await welcome.screenshot({ path: path.join(shots, `onboarding-${mode}.png`) });
+  const app = onboardingResources.app = await _electron.launch({ args: ['.'], cwd: repoRoot, env });
+  const find = async (pred: (url: string) => boolean): Promise<Page> => {
+    for (let i = 0; i < 100; i++) {
+      const w = app.windows().find(p => pred(p.url()));
+      if (w) return w;
+      await new Promise(r => setTimeout(r, 200));
     }
-    // Download, go back, then decline: nothing of that download stays on disk.
-    const partial = path.join(home, 'profile', 'models', 'transcription', '.partial', DEFAULT_MODEL_ID);
-    const modelState = () => welcome.evaluate(async (id) => (await (window as any).onboarding.transcription.status()).models.find((model: any) => model.id === id).state, DEFAULT_MODEL_ID);
-    await step.getByRole('button', { name: 'Download' }).click();
-    await expect(welcome.locator('#workspace-title')).toBeFocused();
-    await expect.poll(modelState).toBe('downloading');
-    await expect.poll(() => existsSync(partial)).toBe(true);
-    await welcome.locator('#workspace-step').getByRole('button', { name: /Back/ }).click();
-    await expect(welcome.locator('#transcription-title')).toBeFocused();
-    await step.getByRole('button', { name: 'Not now' }).click();
-    await expect(welcome.locator('#workspace-title')).toBeFocused();
-    await expect.poll(modelState).toBe('absent');
-    await expect.poll(() => existsSync(partial)).toBe(false);
-    // Changing course again: download after all, and it outlives onboarding.
-    await welcome.locator('#workspace-step').getByRole('button', { name: /Back/ }).click();
-    await step.getByRole('button', { name: 'Download' }).click();
-    await expect(welcome.locator('#workspace-title')).toBeFocused();
-    await welcome.getByRole('button', { name: 'Start fresh' }).click();
-    const editor = await find(url => !/onboarding/.test(url) && url.startsWith('app:'));
-    await editor.waitForFunction(() => Boolean((window as any).PM?.Transcription));
-    // Still downloading after onboarding has closed; finishing it makes the model active.
-    expect((await editor.evaluate(async (id) => (await (window as any).PM.Transcription.status()).models.find((model: any) => model.id === id).state, DEFAULT_MODEL_ID))).toBe('downloading');
-    release();
-    await expect.poll(() => editor.evaluate(async () => (await (window as any).PM.Transcription.status()).activeModelId), { timeout: 20_000 }).toBe(DEFAULT_MODEL_ID);
-    expect(errors).toEqual([]);
-  } finally {
-    await app.close().catch(() => undefined);
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(home, { recursive: true, force: true });
+    throw new Error('window not found');
+  };
+  const animation = await find(url => /onboarding/.test(url) && !/welcome/.test(url));
+  await animation.waitForLoadState('domcontentloaded');
+  await animation.evaluate(() => (window as any).onboarding.animationComplete());
+  const welcome = await find(url => /welcome/.test(url));
+  const errors: string[] = [];
+  welcome.on('pageerror', e => errors.push(String(e)));
+  await welcome.waitForSelector('#begin');
+  await welcome.click('#begin');
+  await welcome.locator('#timeline-step').getByRole('button', { name: 'Continue' }).click();
+  await welcome.locator('#agent-step').getByRole('button', { name: 'Continue' }).click();
+  const step = welcome.locator('#transcription-step');
+  await expect(welcome.locator('#transcription-title')).toBeFocused();
+  await expect(step.getByRole('radio')).toHaveCount(curated.length);
+  await expect(step.getByText('Parakeet Unified EN')).toBeVisible();
+  await expect(step.getByText('Whisper Medium')).toHaveCount(0);
+  for (const mode of ['light', 'dark']) {
+    await welcome.evaluate((value) => { document.documentElement.dataset.theme = value; }, mode);
+    await welcome.waitForTimeout(900);
+    if (shots) await welcome.screenshot({ path: path.join(shots, `onboarding-${mode}.png`) });
   }
+  // Download, go back, then decline: nothing of that download stays on disk.
+  const partial = path.join(home, 'profile', 'models', 'transcription', '.partial', DEFAULT_MODEL_ID);
+  const modelState = () => welcome.evaluate(async (id) => (await (window as any).onboarding.transcription.status()).models.find((model: any) => model.id === id).state, DEFAULT_MODEL_ID);
+  await step.getByRole('button', { name: 'Download' }).click();
+  await expect(welcome.locator('#workspace-title')).toBeFocused();
+  await expect.poll(modelState).toBe('downloading');
+  await expect.poll(() => existsSync(partial)).toBe(true);
+  await welcome.locator('#workspace-step').getByRole('button', { name: /Back/ }).click();
+  await expect(welcome.locator('#transcription-title')).toBeFocused();
+  await step.getByRole('button', { name: 'Not now' }).click();
+  await expect(welcome.locator('#workspace-title')).toBeFocused();
+  await expect.poll(modelState).toBe('absent');
+  await expect.poll(() => existsSync(partial)).toBe(false);
+  // Changing course again: download after all, and it outlives onboarding.
+  await welcome.locator('#workspace-step').getByRole('button', { name: /Back/ }).click();
+  await step.getByRole('button', { name: 'Download' }).click();
+  await expect(welcome.locator('#workspace-title')).toBeFocused();
+  await welcome.getByRole('button', { name: 'Start fresh' }).click();
+  const editor = await find(url => !/onboarding/.test(url) && url.startsWith('app:'));
+  await editor.waitForFunction(() => Boolean((window as any).PM?.Transcription));
+  // Still downloading after onboarding has closed; finishing it makes the model active.
+  expect((await editor.evaluate(async (id) => (await (window as any).PM.Transcription.status()).models.find((model: any) => model.id === id).state, DEFAULT_MODEL_ID))).toBe('downloading');
+  release();
+  await expect.poll(() => editor.evaluate(async () => (await (window as any).PM.Transcription.status()).activeModelId), { timeout: 20_000 }).toBe(DEFAULT_MODEL_ID);
+  expect(errors).toEqual([]);
 });
