@@ -10,8 +10,15 @@ ARM64, with Skia pinned to `b6d106297ff9ef2ff8094033695d045e87775581`.
 The original 32 Canvas source captures now match at **max 0**, without changing
 those reference bytes. Six actual app-imported ProRes rendition captures and
 24 additional matrix/range/alpha captures also match exactly: 62 frames in
-all, tested in both Float16 and Float32 compositions. This source result does
-not close the separate live-upload and transformed-composition gaps below.
+all, tested in both Float16 and Float32 compositions. The six original
+full-range BT.709 and limited BT.2020 direct-upload samples now also match
+exactly. The transformed midtone witness matches the actual app's raw float
+readback and exported byte mapping at both captured times and both available
+working precisions. Round 3 adds 48 fresh frames from 16 recipes: all 36
+SDR Canvas frames are exact, bringing the source total to 98. Of the 36 new
+SDR live frames, 35 are exact; one deep VP9 BT.2020 pixel remains one code
+apart. Today decodes the other 12 HDR/P3 frames, while their native
+compatibility conversion remains an explicit blocker.
 
 ## Conversion order and precision
 
@@ -29,7 +36,10 @@ Skia upload directly from the imported decoder planes:
   full-resolution Y texel exactly; reconstruct centered subsampled UV with
   hardware bilinear filtering before applying the matrix.
 - Use Skia's default six-decimal affine matrix and independently rounded
-  offset, with explicit fused accumulation in offset, Y, Cb, Cr order.
+  offset. Canvas uses explicit fused accumulation in offset, Y, Cb, Cr
+  order; the measured direct BT.2020 upload applies the offset after its
+  matrix product. At the remaining half-code witness, offset-first gives
+  125.5, while offset-last gives 125.4999847, preserving Chromium's byte 125.
   Reconstructing the offset from Kr/Kb or normalizing first changes half-byte
   decisions. Store directly to RGBA8 without a half-float intermediate.
 - P010 BT.601/709 uses the measured generic 8-bit table on MSB-aligned
@@ -51,11 +61,30 @@ Chromium's BT.601 fallback, including a lone BT.709 matrix tag; the HD witness
 uses BT.709. Fully specified tags remain authoritative. Untagged opaque VP9
 uses the separately measured BT.709 reading at SD.
 
-Full-range BT.709 H.264 Canvas snapshots use pinned libyuv's integer,
-nearest-chroma bitmap conversion. Limited I420A playback renditions use
+Full-range BT.601/709/2020 H.264 Canvas snapshots use pinned libyuv's
+integer, nearest-chroma bitmap conversion. BT.2020 then runs the same real
+RGBA8-to-sRGB gamut pass. Limited I420A playback renditions use
 libyuv's matrix conversion and alpha attenuation before filtering. The
 ProRes 4444 reference is the actual Canvas-to-WebGL **premultiplied** upload,
 not straight `getImageData` bytes; all 192 captured alpha codes are retained.
+
+Deep VP9's planar 10-bit samples need the physical MSB-aligned unorm
+storage of Chromium's P010 surface before texture filtering. Multiplying a
+filtered low-bit R16 sample by 64 left one-code differences; shifting each
+stored source code before importing the texture removes that filter precision
+seam. This compatibility copy leaves the native decoded cache and interpreted
+readings unchanged. HEVC's `v0a8` alpha surface uses the same centered YUV
+matrix pass, with alpha attenuation before its RGBA8 store. VP9 alpha has
+distinct Canvas and live readings: Canvas retains libyuv's bitmap conversion;
+live samples the four actual decoder planes and attenuates RGB before storing
+RGBA8. Explicit alpha choices supplied through Interpret Footage keep the
+native reading and visible texture domain.
+
+Deep VP9's direct matrix product also needs separately rounded f32 products
+and sums, as emitted by Skia's matrix expression. Explicit `fma(x,c,0)` and
+`fma(1,a,b)` preserve those rounding boundaries on Metal; the plain
+multiply/add trial produced different byte ties. This closes the BT.709
+live tie and one of two BT.2020 live ties, without changing Canvas arithmetic.
 
 Full-range HEVC10 also needs Chromium's decoder output contract:
 VideoToolbox is requested to emit video-range P010 even when the bitstream
@@ -65,6 +94,25 @@ the stream's native range. Decoder sessions, decoded-frame cache entries,
 and scrub workers include the reading in their identity and release both
 namespaces together. The original bitstream range is preserved as metadata;
 the returned pixel format describes the actual surface range.
+
+Full-range H.264's Chromium software reading also preserves the decoder's
+aligned coded plane dimensions, separately from the displayed crop. The
+256×144 witness has 256×162 luma and 128×81 chroma planes. Pool slots start
+cleared before decode, including reused slots; decoded hidden macroblock
+rows remain intact. The upload samples over that coded texture domain and
+then crops RGB to the visible output. Sampling a visible-height chroma
+texture instead produced the entire 256-pixel bottom-row defect (max 98).
+This is a decoder-layout fix, with no special-case bottom-row weighting.
+
+Full-range opaque 8-bit VP9 has a separate coded-width boundary. Chromium's
+libvpx wrapper uses the decoder's luma stride as coded width: the 272×160
+fixture exposes 352×160 Y and 176×80 U/V. Its Chromium reading therefore uses
+`libvpx-vp9` and copies those actual stride-wide rows, after checking each
+plane's extent against its owning AVBuffer. Visible dimensions stay 272×160.
+Clamping UV at the displayed right edge instead changed the final column.
+VP9 alpha also uses libvpx for its Chromium reading, preserving all four
+owned plane strides (320-pixel Y and A rows in the 256-pixel-wide fixture).
+Native and interpreted alpha readings keep their existing decoder policy.
 
 Paused/final sampling and scrubs choose the Canvas reading; playback chooses
 the direct upload. The converted-frame cache includes this distinction. The
@@ -98,6 +146,24 @@ changed source/proxy hashes and incorrect premultiplication before writing.
 These are small public synthetic media and raw source rasters, not private
 corpus data or desktop screenshots.
 
+`tests/fixtures/video-parity-round3` contains 16 source clips and 48 frames,
+with four independent rasters each: direct video, premultiplied direct video,
+Canvas, and premultiplied Canvas. All source and raster hashes are checked
+before packing. The alpha clips must have nonuniform alpha and distinct
+premultiplied RGB for both upload paths. Fresh captures include coded and
+visible dimensions; external full-coded plane copies show actual H.264
+padding differs with the crop geometry. No fixed zero-edge rule is used.
+All 16 recipes decode in today's app, including HEVC alpha, deep VP9/AV1,
+full-range 8-bit BT.601/709/2020, BT.2020 PQ/HLG and P3 PQ.
+
+The registered Round 3 test compares Canvas and live at both precisions for
+every captured case, then aggregates all failures. Its current strict gate
+fails on the one BT.2020 live pixel in both precisions and all 48 HDR/P3
+reading/precision attempts. It has no skipped or ignored case. All 36 SDR
+Canvas frames and 35 SDR live frames match, with 142 of 144 SDR comparisons
+exact. The separate alpha-interpretation regression verifies compatibility
+cannot change the native reading's pixels or visible sampling domain.
+
 `pm-render`'s `video_parity` example draws each captured source, writes raw
 native pixels and pm-perf counters outside Git, and fails on **any** different
 byte or unresolved row. The source-storage tests use the same zero bound for
@@ -119,61 +185,120 @@ Device/renderer setup is excluded. Cold samples use fresh video elements or
 fresh native source aliases after shader priming. Native aliases use RAII;
 the browser profile and video/GPU resources use `finally` cleanup.
 
-Two runs of 13 original/imported rows plus eight expanded rows each take
-three cold and 18 alternating warm samples per row: 882 samples per side,
-zero errors, and zero selected-PTS mismatches. Warm samples prime every
-requested seek position first, then continue alternating timestamps; all
-measured native samples still have one media conversion miss, so this does
-not reuse a converted-frame texture. Native warm p50 and p95 are lower on
-all 21 rows: p50 0.74–1.33 ms versus Chromium 2.15–6.45 ms; p95 1.05–2.92 ms
-versus 2.98–12.53 ms. Earlier runs priming only one position had first-use
-decode spikes and are kept separately in the external report.
+Two final-code native runs cover 21 dataset rows, with six fresh cold and
+36 alternating warm samples per row, plus separately labeled prepared-first
+samples. There are zero row errors or PTS mismatches. The earlier browser
+set has the same counts, media and selected timestamps. All native warm
+p50 values are lower (0.66–1.41 ms versus 2.15–6.45 ms), and 20 of 21 warm
+p95 values are lower. Native cold p50 is lower on 18 of 21 rows (4.03–17.89
+ms versus 5.95–18.15 ms); cold p95 is lower on 13 of 21 rows. These results
+do not close the wall-clock no-regression gate.
 
-Cold p50 is slower on seven rows, so the complete no-regression gate
-**does not pass**. These are measured native/Chromium medians in milliseconds:
+The seven previously slower cold rows now measure on the final code:
 
-| Source | Native cold p50 | Chromium cold p50 |
+| Source | Native cold p50 | Earlier Chromium cold p50 |
 | --- | ---: | ---: |
-| H.264 BT.709 limited | 11.18 | 6.85 |
-| H.264 SD matrix only | 11.50 | 6.40 |
-| H.264 HD matrix only | 22.65 | 16.75 |
-| H.264 BT.709 full | 10.10 | 5.95 |
-| H.264 BT.2020 limited | 11.22 | 9.85 |
-| AV1 BT.709 limited | 13.17 | 9.15 |
-| H.264 midtone witness | 10.41 | 8.45 |
+| H.264 BT.709 limited | 4.15 | 6.85 |
+| H.264 SD matrix only | 6.77 | 6.40 |
+| H.264 HD matrix only | 17.89 | 16.75 |
+| H.264 BT.709 full | 4.98 | 5.95 |
+| H.264 BT.2020 limited | 5.15 | 9.85 |
+| AV1 BT.709 limited | 11.72 | 9.15 |
+| H.264 midtone witness | 5.29 | 8.45 |
 
-The native harness installs `pm-perf`'s counting allocator and records every
-counter, both local and all-thread snapshots, alongside submit and GPU-wait
-wall times. Cold samples have zero shader/pipeline creations, one media
-conversion miss and one queue submit. The slower rows spend most time in
-CPU submission (for example full-range H.264: 9.35 ms submit plus 0.77 ms GPU
-wait). Fresh probing/indexing and decoder startup are plausible contributors;
-the present counters do not isolate them, so the report does not attribute
-the entire gap to a particular function. The ordinary warm source path uses
-one compute pass; full-range H.264, gamut conversion and alpha renditions
-use two. The no-regression follow-up must cover cold startup as well as warm
-conversion; these measurements do not establish sustained playback cost or
-private-corpus performance.
+Warm samples prime every seek position first, then alternate timestamps;
+each measured sample still has a media conversion miss, so converted source
+textures are not reused. Cold primes the source converter before opening a
+fresh source/decoder. The browser harness now explicitly primes its video
+conversion too; earlier browser cold samples did not do that, so their first
+conversion could inflate tails. No corrected browser measurement is reported.
+Earlier native runs beat all browser rows, but they do not supersede the
+final run or close the corrected comparison.
+
+Opt-in current-thread stage timing separates probe input, index, fingerprint,
+decoder creation, packet reader and first frame decode. The probe's FFmpeg
+Input now serves extradata and the first session, eliminating two redundant
+opens (1.39–7.94 ms in representative pre-change rows). For limited SDR
+H.264 through 1920×1080, the Chromium reading uses FFmpeg's direct software
+planes instead of paying hardware decoder startup. The original 62-frame
+zero-byte gate passes with this policy. Full-range H.264's software policy
+is separately required for its coded-plane contract; larger full-range
+geometry remains a coverage limit. Native, color-overridden, HDR and level-2
+backend policy is unchanged. AV1 keeps its native decoder.
+
+Final H.264 BT.709 limited cold medians are 1.196 ms probe, 0.110 ms
+index, 0.103 ms decoder creation, 1.456 ms first decode and 0.595 ms GPU wait.
+AV1 medians are 0.628 ms probe, 0.049 ms index, 2.840 ms decoder creation,
+5.705 ms first decode and 0.717 ms GPU wait. Independent demuxer opening can
+overlap index preparation. Actual decoder creation still uses the completed
+container configuration/index; the optimization does not claim otherwise.
+
+Open/import preparation queues the same planned video sources, instance IDs,
+reading and decode purpose as rendering. A lazy worker hashes/probes/indexes
+and parks a decoder on the retained source Arc; the presenter does not wait
+for media I/O. There are at most two active preparation jobs process-wide,
+16 queued jobs per renderer and eight prepared sessions per decode service.
+Idle workers retire; closing cancels hashing, while an in-progress index may
+finish after closure with its active slot retained. Completed stale sources
+are discarded. Full queues or unfinished preparation use normal native cold
+opening. Tests cover direct and nested sources, display preparation, shared
+source identity, session bounds and idle capacity across renderers.
+
+The explicit preparation cache keys self-contained container bytes by full
+BLAKE3 plus extension, validates file version before/after hashing, and
+bounds entries, metadata estimates and stat routes. Unix versions include
+inode, size, mtime and ctime; Windows lookups reverify content. Playlists and
+renamed manifests are excluded because sibling media is outside their hash.
+Prepared-first-frame, preparation time and preparation-plus-frame time are
+reported separately; fresh cold remains the ordinary regression gate.
+
+The native harness records every pm-perf counter with local/all-thread scopes
+and the counting allocator. H.264/AV1 keep one compute pass, one conversion
+miss and 720 upload bytes; software H.264 imports three planes instead of
+two. Planar alpha uses a lazy additional pipeline and texture binding; opaque
+and HEVC uploads retain the original seven-entry bind group. Making that
+binding universal had added about four allocations per converted frame.
+After isolation, all nine pm-perfbench ratchets pass their unchanged bounds;
+`scrub_24` records 13,013 thread and 15,430 all-thread heap allocations,
+within the existing 15,507 allowance. No baseline is relaxed.
+
+Browser and native captures were taken in separate runs. A controlled
+comparison with corrected converter priming and sustained-playback
+measurement remain required. Raw run metadata, binary hashes, every sample
+and earlier runs stay outside Git.
 
 ## Remaining closure work
 
-The separately captured BT.2020 8-bit direct upload still has one pixel at
-1 CV in its third sample. Its pre-existing live-upload test bound remains
-1 CV; Canvas is now required exact. Full-range H.264's direct-upload boundary
-also differs on its 256-pixel bottom row (max 98 CV in all three samples),
-although its Canvas/export source is exact. Neither direct result is counted among the 62 exact Canvas captures.
+The original direct-upload defects are closed at max 0 in both Float16 and
+Float32 source-storage tests. Canvas -> live -> Canvas cache switches use
+all three timestamps, with no cache flush between readings.
 
-The supplied rotated/opacity midtone composition still differs at 1 and 15
-pixels at its two timestamps, max 1 CV, after its untransformed video source
-became exact. That is a remaining layer-filter/composition precision gap,
-not a passed strict-zero composition result. Operational side-by-sides and
-pixel diagnostics stay outside Git and are linked by the lane report.
+The apparent 1/15-pixel transformed-composition discrepancy was in the
+comparison harness's float-to-byte mapping. The actual app promotes its
+Float32Array values to binary64 before multiplying by 255 and calling
+`Math.round`; multiplying in f32 first introduced false half-code ties.
+The native and app raw float buffers were already byte-identical. The
+regression stores and checks both the exact raw floats and the app's actual
+RGBA8 mapping; it does not replace or relax either reference.
 
-Deep VP9/AV1, other full-range 8-bit matrices, HEVC alpha, HDR/P3, alternative
-decoder backends and the full private corpus need independent captures.
-The current integration base exposes Float16/Float32; project depth 8 needs
-rerunning after the color-depth lane merges. No broader capability reason
-was removed on the strength of these narrower samples.
+Depth-8 composition gates will run after the colordepth lane merges. The
+committed composition fixture includes its captured depth-8 references,
+while this base tests the available Float16/Float32 paths. The complete
+app playback/scrub/export and private-corpus gates remain integration work.
+
+Round 3's remaining SDR gap is VP9 10-bit BT.2020 live at 1.125 seconds,
+pixel (86,107): native `[36,203,84,255]`, today `[35,203,84,255]`.
+Separately rounded operations close the BT.709 witness and the other
+BT.2020 channel. The remaining sampled-value seam is one code at a byte tie;
+no source-backed general sampler correction has been established. It remains
+a blocker, with its captured reference unchanged.
+
+HDR/P3 strict-zero native conversion remains open: a pinned
+Skia PQ/HLG, D50-gamut and default RWTMO prototype reached max 1 but did not
+match all bytes. Its experimental code stays outside the renderer. The
+existing explicit HDR capability reason remains; no alternate renderer or
+weakened bound is used. Detailed captures, failing strict runner results and
+synthetic comparison panels are listed in the external lane report.
 
 ## Transparent PNG export
 
@@ -188,7 +313,8 @@ This applies to the shared level-1 PNG8 export seam at every project depth;
 neither premultiplied rendering nor alpha values are changed.
 
 Source references: Chromium's
-[video renderer](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/media/renderers/paint_canvas_video_renderer.cc)
+[video renderer](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/media/renderers/paint_canvas_video_renderer.cc),
+[VP9 decoder planes](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/media/filters/vpx_video_decoder.cc),
 and [VideoToolbox output attributes](https://chromium.googlesource.com/chromium/src/+/152.0.7977.54/media/gpu/mac/video_toolbox_decompression_session_manager.mm);
 pinned Skia's
 [YUV matrices](https://skia.googlesource.com/skia/+/b6d106297ff9ef2ff8094033695d045e87775581/src/core/SkYUVMath.cpp),
