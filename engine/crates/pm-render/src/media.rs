@@ -1863,6 +1863,10 @@ mod composed_parity_tests;
 mod round3_tests;
 
 #[cfg(test)]
+#[path = "media/round4_tests.rs"]
+mod round4_tests;
+
+#[cfg(test)]
 mod stamp_frame_tests {
     use super::*;
 

@@ -457,6 +457,35 @@ if (mode === 'pack') {
               const premult = new Uint8Array(w * h * 4);
               gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, premult);
               if (gl.getError() !== gl.NO_ERROR) throw new Error('premultiplied canvas texture readback failed');
+              const colorProbes = {};
+              if (row.captureColorProbes) {
+                for (const [name, colorSpace, willReadFrequently] of [
+                  ['srgbGpu', 'srgb', false],
+                  ['displayP3Cpu', 'display-p3', true],
+                  ['displayP3Gpu', 'display-p3', false],
+                ]) {
+                  let probeTexture;
+                  try {
+                    const context = new OffscreenCanvas(w, h).getContext('2d', { colorSpace, willReadFrequently });
+                    if (!context) throw new Error(`Canvas2D ${colorSpace} unavailable`);
+                    context.drawImage(video, 0, 0);
+                    probeTexture = gl.createTexture();
+                    gl.bindTexture(gl.TEXTURE_2D, probeTexture);
+                    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+                    try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, context.canvas); }
+                    finally { gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); }
+                    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, probeTexture, 0);
+                    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('incomplete color-probe framebuffer');
+                    const uploaded = new Uint8Array(w * h * 4);
+                    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, uploaded);
+                    if (gl.getError() !== gl.NO_ERROR) throw new Error('color-probe texture readback failed');
+                    const pixels = context.getImageData(0, 0, w, h, { colorSpace, pixelFormat: 'rgba-unorm8' });
+                    colorProbes[name] = { settings: context.getContextAttributes(), imageDataColorSpace: pixels.colorSpace,
+                      canvas: encode(pixels.data), premult: encode(uploaded) };
+                  } catch (error) { colorProbes[name] = { error: String(error) }; }
+                  finally { gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); if (probeTexture) gl.deleteTexture(probeTexture); }
+                }
+              }
               vf = new VideoFrame(video);
               let raw, planes, rawError, coded, codedPlanes, codedRawError;
               try { raw = new Uint8Array(vf.allocationSize()); planes = await vf.copyTo(raw); } catch (e) { rawError = String(e); }
@@ -475,6 +504,9 @@ if (mode === 'pack') {
                 codedWidth: vf.codedWidth, codedHeight: vf.codedHeight,
                 visibleRect: visible && { x: visible.x, y: visible.y, width: visible.width, height: visible.height },
                 displayWidth: vf.displayWidth, displayHeight: vf.displayHeight,
+                ...(row.captureColorProbes ? { colorProbes, canvasSettings: two.getContextAttributes(),
+                  webglColorSpace: { drawingBuffer: gl.drawingBufferColorSpace, unpack: gl.unpackColorSpace,
+                    conversion: gl.getParameter(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL) } } : {}),
                 colorSpace: vf.colorSpace.toJSON() });
             } finally { vf?.close(); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); gl.deleteTexture(texture); if (liveTexture) gl.deleteTexture(liveTexture); if (premultTexture) gl.deleteTexture(premultTexture); gl.deleteFramebuffer(fbo); gl.getExtension('WEBGL_lose_context')?.loseContext(); }
           }
@@ -488,6 +520,15 @@ if (mode === 'pack') {
         delete captured.playback.bytes;
       }
       for (const [i, frame] of (captured.frames || []).entries()) {
+        for (const [name, probe] of Object.entries(frame.colorProbes || {})) {
+          for (const kind of ['canvas', 'premult']) {
+            if (!probe[kind]) continue;
+            const bytes = Buffer.from(probe[kind], 'base64');
+            const file = `${row.id}-${i}.${name}.${kind}`;
+            await writeFile(path.join(destination, file), bytes);
+            probe[kind] = { file, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+          }
+        }
         for (const field of ['rgba', 'live', 'canvas', 'premult', 'raw', 'coded']) {
           if (frame[field]) {
             const bytes = Buffer.from(frame[field], 'base64');
