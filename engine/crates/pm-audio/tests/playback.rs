@@ -542,6 +542,121 @@ fn an_offline_only_clip_keeps_the_clock_fed() {
     cache.shutdown();
 }
 
+/// Review round 9, blocker 3: today reads a precomposition's animated
+/// `trim` when its `audioLayers` index is built, and keeps that index until
+/// an edit (`layers`/`project` events, `retune`) invalidates it; Play,
+/// seeks and loop wraps reuse it (`legacy/core/audio.ts`). Playback reads
+/// the trim at the playhead of the index's last build: the first Play's
+/// start, kept by a later Play elsewhere and by loop wraps; an edit while
+/// paused moves it to the next Play's start, an edit while playing to the
+/// playhead heard then.
+#[test]
+fn a_precomposition_animated_trim_reads_at_todays_index_build() {
+    let dir = temp_dir("index-trim");
+    let file = ramp_file(&dir, 20);
+    // The nested clip starts at 8 s in its composition; trim(t) = t / 2, so
+    // it starts at 8 − trim(P) in the parent (P: the index's playhead) and
+    // plays source t − 8 + trim(P) at parent time t.
+    let inner = comp(30.0, 20.0, &[audio("I", "s", 8.0, 12.0, "", "")], "");
+    let outer = layer(
+        "P",
+        "precomp",
+        0.0,
+        20.0,
+        &format!(
+            r#"{{"comp":"X","trim":{}}}"#,
+            keys(&[(0.0, 0.0), (20.0, 10.0)])
+        ),
+        "",
+    );
+    let doc = project(30.0, 20.0, &[outer], &[("X".into(), inner)], "");
+    let (playback, mut dev, rig) = setup_doc(doc.clone(), &[("s", &file)], SR, 2, 0.0);
+    let play = |playback: &Playback, dev: &mut SimDevice, at: f64, buffers: usize| -> usize {
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(at),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        let mark = dev.log.len();
+        playback
+            .command(TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            })
+            .unwrap();
+        dev.run(buffers);
+        mark
+    };
+    let first_heard = |playback: &Playback, dev: &mut SimDevice, at: f64| -> i64 {
+        let mark = play(playback, dev, at, 40);
+        playback.command(TransportCommand::Pause).unwrap();
+        position_of(heard_ramp(dev, mark)[0].0)
+    };
+    let s = SR as f64;
+    let at = |seconds: f64| (seconds * s).round() as i64;
+    // The first Play builds the index at 2 s (trim 1: the clip starts at 7).
+    play(&playback, &mut dev, 2.0, 10);
+    playback.command(TransportCommand::Pause).unwrap();
+    // A later Play at 9 s keeps it (today: no rebuild without an edit).
+    assert_eq!(
+        first_heard(&playback, &mut dev, 9.0),
+        at(2.0),
+        "index kept at 2 s"
+    );
+    // Loop wraps keep it too.
+    playback
+        .command(TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: ticks(9.0),
+                end: ticks(9.25),
+            }),
+        })
+        .unwrap();
+    let mark = play(&playback, &mut dev, 9.0, 60);
+    playback.command(TransportCommand::Pause).unwrap();
+    playback
+        .command(TransportCommand::SetLoop { range: None })
+        .unwrap();
+    let passes = heard_ramp(&dev, mark)
+        .iter()
+        .filter(|f| f.1 == 0.5 && position_of(f.0) == at(2.0))
+        .count();
+    assert!(
+        passes >= 2,
+        "every pass reads trim(2 s): {passes} pass starts"
+    );
+    // An edit while paused invalidates it: the next Play's start rebuilds.
+    let media = rig.media.clone();
+    let resolver = move |id: &str| media.get(id).cloned();
+    playback
+        .set_project(Arc::new(doc.clone()), "C", &resolver)
+        .unwrap();
+    assert_eq!(
+        first_heard(&playback, &mut dev, 9.0),
+        at(5.5),
+        "rebuilt at 9 s"
+    );
+    assert_eq!(
+        first_heard(&playback, &mut dev, 9.5),
+        at(6.0),
+        "kept at 9 s"
+    );
+    // An edit while playing rebuilds at the playhead heard then.
+    play(&playback, &mut dev, 10.0, 20);
+    let heard = playback.clock().unwrap();
+    let heard_at = heard.media_time.get() as f64 / TICKS_PER_SECOND as f64
+        + (host_now_us() as f64 - heard.host_time.get() as f64) / 1e6;
+    playback.set_project(Arc::new(doc), "C", &resolver).unwrap();
+    dev.run(4);
+    playback.command(TransportCommand::Pause).unwrap();
+    let got = first_heard(&playback, &mut dev, 9.0) as f64 / s;
+    let want = 1.0 + heard_at / 2.0;
+    assert!(
+        (got - want).abs() < 0.05,
+        "rebuilt where heard ({heard_at:.3} s): source {got:.3} s, want {want:.3} s"
+    );
+}
+
 #[test]
 fn pause_seek_loop_and_scrub() {
     let dir = temp_dir("transport");

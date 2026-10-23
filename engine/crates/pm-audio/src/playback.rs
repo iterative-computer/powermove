@@ -949,6 +949,7 @@ impl Playback {
             transport: Transport::new(format.sample_rate),
             pending_segment: None,
             last_segment_end: None,
+            today_index: None,
             late_start: None,
             history_wait: None,
             stalls: HashMap::new(),
@@ -1689,6 +1690,10 @@ struct RenderThread {
     /// End of the last committed segment, to distinguish a wrap from
     /// continuous entry into the work area.
     last_segment_end: Option<i64>,
+    /// The playhead (seconds) at which today's `audioLayers` index was last
+    /// built, where it reads a precomposition's animated `trim`; `None`
+    /// once an edit invalidated it ([`Self::rebuild_today_index`]).
+    today_index: Option<f64>,
     late_start: Option<i64>,
     /// When the producer began holding a segment for a running history.
     history_wait: Option<std::time::Instant>,
@@ -2168,6 +2173,22 @@ impl RenderThread {
         log.render_active = active;
     }
 
+    /// A new project (an edit) invalidates today's `audioLayers` index, as
+    /// its `layers`/`project` events and `retune` do
+    /// (`legacy/core/audio.ts`). Today rebuilds it at the next
+    /// `audioLayers()` call: while playing, the edit's own `sync(PM.time)`,
+    /// at the playhead heard now; paused, the next Play, at its start
+    /// (seeks, loop wraps and later Plays keep it).
+    fn rebuild_today_index(&mut self) {
+        self.today_index = if self.transport.is_running() {
+            let at = self.heard_sample().unwrap_or(self.transport.position());
+            Some(at as f64 / self.mixer.format().sample_rate as f64)
+        } else {
+            None
+        };
+        self.mixer.set_today_playhead(self.today_index);
+    }
+
     /// The media position heard now, from the published clock. Until the
     /// device presents the current epoch (a seek's pre-roll), the listener
     /// is at the epoch's start, not on the old line.
@@ -2326,6 +2347,7 @@ impl RenderThread {
                     self.mixer.invalidate_prepared();
                 }
                 self.settled = None;
+                self.rebuild_today_index();
                 // A live edit glides into the new mix (a retune); paused, the
                 // next run starts on it.
                 if self.transport.is_running() {
@@ -2898,7 +2920,12 @@ impl RenderThread {
             if seg.rate > 0 && self.last_segment_end != Some(lo) {
                 // Today schedules every clip and its gain envelope when
                 // playback starts, seeks or wraps (`sync(time, true)`), from
-                // the playhead: a run starts today's model there.
+                // the playhead: a run starts today's model there. Its index
+                // is rebuilt there only when an edit invalidated it.
+                if self.today_index.is_none() {
+                    self.today_index = Some(lo as f64 / self.mixer.format().sample_rate as f64);
+                    self.mixer.set_today_playhead(self.today_index);
+                }
                 self.mixer.set_today_playback(lo);
             }
             let rendering = std::time::Instant::now();
