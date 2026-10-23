@@ -74,7 +74,15 @@ export function validCompatAnswer(value: unknown): value is EngineCompatAnswer {
   const w = v['width'], h = v['height'];
   if (!Number.isInteger(w) || !Number.isInteger(h) || (w as number) < 1 || (h as number) < 1 || (w as number) > MAX_EDGE || (h as number) > MAX_EDGE) return false;
   const bpp = v['format'] === 'rgba16fPremultiplied' ? 8 : v['format'] === 'rgba8Premultiplied' || v['format'] === 'rgba8Straight' ? 4 : 0;
-  if (!bpp || !(v['data'] instanceof Uint8Array) || v['data'].byteLength !== (w as number) * (h as number) * bpp) return false;
+  const data = v['data'];
+  if (!(data instanceof Uint8Array)) return false;
+  if (v['format'] === 'png') {
+    if (data.byteLength < 33 || data.byteLength > 256 * 1024 * 1024 ||
+      ![137, 80, 78, 71, 13, 10, 26, 10].every((byte, i) => data[i] === byte) ||
+      String.fromCharCode(...data.subarray(12, 16)) !== 'IHDR' ||
+      new DataView(data.buffer, data.byteOffset + 16, 8).getUint32(0) !== w ||
+      new DataView(data.buffer, data.byteOffset + 16, 8).getUint32(4) !== h) return false;
+  } else if (!bpp || data.byteLength !== (w as number) * (h as number) * bpp) return false;
   const origin = v['origin'];
   return typeof v['key'] === 'string' && v['key'].length > 0 && v['key'].length <= 512 &&
     Array.isArray(origin) && origin.length === 2 && origin.every((n) => Number.isFinite(n)) &&
@@ -118,7 +126,9 @@ export class CompatFrames {
     const windows = this.options.windows();
     // Level 1 SVG images are Chromium's rasters, drawn by the window that
     // has the project open (decision S1).
-    const closed = request.source === 'svgImage'
+    const closed = request.source === 'blenderPng'
+      ? 'Blender image conversion needs the editor window that has this project open.'
+      : request.source === 'svgImage'
       ? 'SVG images are drawn by the editor window that has this project open; open the project in a window to export it.'
       : 'This layer is drawn by an extension in the editor; open the project in a window to export it.';
     if (!windows.length) throw new ProtocolError('notHeadlessRenderable', closed);

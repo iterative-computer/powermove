@@ -40,6 +40,7 @@ use crate::lease::{Lease, LeaseRequest, LeaseUsage};
 use crate::patch::{
     ConsistencyCheck, ConsistencyResult, EngineFact, PatchBatch, PatchesApplied, Resync,
 };
+use crate::preview::{PreviewControl, PreviewStatus};
 use crate::priority::{
     AgentFrameRequest, AgentFrameResult, CancelJobs, ImagePayload, JobAccepted, JobStatus,
     JobsCancelled, SubmitJob,
@@ -339,6 +340,10 @@ pub enum Event {
     /// Interactive engine → renderer (session-bound): presentation stats
     /// for the status bar and the performance panel.
     RenderStats(crate::snapshot::RenderStats),
+    /// Renderer → interactive engine: request or cancel one paused Blender preview.
+    PreviewControl(PreviewControl),
+    /// Interactive engine → renderer: per-request Blender preview state.
+    PreviewStatus(PreviewStatus),
 }
 
 /// Response kinds, for correlating answers with requests.
@@ -500,6 +505,7 @@ impl Event {
             Event::BlenderProgress(_) | Event::BlenderSurface(_) => ContractId::Blender,
             Event::ShaderFallback(_) => ContractId::Definitions,
             Event::Compat(_) | Event::RenderStats(_) => ContractId::Frame,
+            Event::PreviewControl(_) | Event::PreviewStatus(_) => ContractId::Blender,
         }
     }
 
@@ -516,6 +522,8 @@ impl Event {
                 | Event::ShaderFallback(_)
                 | Event::Compat(_)
                 | Event::RenderStats(_)
+                | Event::PreviewControl(_)
+                | Event::PreviewStatus(_)
         )
     }
 }
@@ -614,6 +622,8 @@ impl Validate for Event {
             Event::InFlight(in_flight) => in_flight.validate(),
             Event::ShaderFallback(message) => message.validate(),
             Event::Compat(message) => message.validate(),
+            Event::PreviewControl(control) => control.validate(),
+            Event::PreviewStatus(status) => status.validate(),
             _ => Ok(()),
         }
     }

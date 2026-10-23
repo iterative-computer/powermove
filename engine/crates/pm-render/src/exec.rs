@@ -98,6 +98,8 @@ pub(crate) struct Exec<'a> {
     pub queue: &'a wgpu::Queue,
     pub pipelines: &'a Pipelines,
     pub uniforms: &'a mut UniformPool,
+    /// Bind groups kept across frames (`crate::binds`).
+    pub binds: &'a mut crate::binds::BindCache,
     pub media: &'a mut MediaCache,
     pub pool: &'a mut TargetPool,
     pub scene3d: &'a mut Scene3dRenderer,
@@ -479,6 +481,16 @@ impl Exec<'_> {
                         }
                     },
                     Source::Object3d(object) => {
+                        if !self.scene3d.prepare_svg_maps(
+                            self.device,
+                            self.queue,
+                            encoder,
+                            object,
+                            &mut self.vector.svg,
+                            &plan.composition,
+                        ) {
+                            return;
+                        }
                         match self.scene3d.render(
                             self.device,
                             self.queue,
@@ -499,11 +511,9 @@ impl Exec<'_> {
                                     self.taken.push(d);
                                 }
                             }
-                            Err(crate::scene3d::Error3d::Unsupported(why)) => self.fail(
-                                plan,
-                                draw,
-                                MediaFailure::Unsupported(crate::capability::Feature::Scene3d(why)),
-                            ),
+                            Err(crate::scene3d::Error3d::Unsupported(feature)) => {
+                                self.fail(plan, draw, MediaFailure::Unsupported(feature))
+                            }
                             Err(crate::scene3d::Error3d::Failed(message)) => {
                                 self.fail(plan, draw, MediaFailure::Failed(message))
                             }
@@ -756,18 +766,12 @@ impl Exec<'_> {
         }
         let buffer = self.uniforms.take(self.device, data.len() as u64);
         self.queue.write_buffer(&buffer, 0, &data);
-        let quad_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm quads"),
-            layout: &self.pipelines.quad_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &buffer,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(size_of::<QuadUniform>() as u64),
-                }),
-            }],
-        });
+        let quad_bind = self.binds.quads(
+            self.device,
+            &self.pipelines.quad_layout,
+            &buffer,
+            size_of::<QuadUniform>() as u64,
+        );
         let fill_bind = match &plan.background {
             Background::Gradient(g) if clear => {
                 let mut u = FillUniform::default();
@@ -828,20 +832,12 @@ impl Exec<'_> {
             .iter()
             .map(|r| {
                 r.view.as_ref().map(|view| {
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("pm texture"),
-                        layout: &self.pipelines.texture_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.pipelines.linear),
-                            },
-                        ],
-                    })
+                    self.binds.texture(
+                        self.device,
+                        &self.pipelines.texture_layout,
+                        &self.pipelines.linear,
+                        view,
+                    )
                 })
             })
             .collect();

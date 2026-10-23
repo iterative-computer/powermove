@@ -55,6 +55,10 @@ pub enum Topology {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DrawState {
     pub color_write: bool,
+    /// An explicit channel mask (viewport selection coverage preserves IDs).
+    pub color_mask: Option<u32>,
+    /// False only for coverage drawn independently of scene occlusion.
+    pub depth_test: bool,
     pub depth_write: bool,
     /// `NormalBlending` of a transparent material (straight alpha).
     pub blend: bool,
@@ -225,7 +229,7 @@ fn items<'s>(scene: &'s Scene3d, object: usize, planes: &[[f64; 4]; 6]) -> Vec<I
                 range: None,
             }),
             Materials::Slots(list) => {
-                for g in &mesh.geometry.geometry.groups {
+                for g in mesh.geometry.geometry.groups() {
                     if let Some(material) = list.get(g.material_index as usize) {
                         out.push(Item {
                             object,
@@ -312,6 +316,8 @@ fn state(
     let mirrored = math::determinant(world) < 0.0;
     DrawState {
         color_write: color,
+        color_mask: None,
+        depth_test: true,
         depth_write: depth,
         blend,
         cull: material_side != Side::Double,
@@ -1001,7 +1007,7 @@ fn clip4(m: &Mat4, v: [f64; 4]) -> [f64; 4] {
 }
 
 /// `geometry.computeBoundingSphere().center`: the bounding box center.
-fn sphere_center(g: &pm_geom3d::Geometry) -> [f64; 3] {
+fn sphere_center(g: &super::model::GeometryPayload) -> [f64; 3] {
     match g.bounds() {
         Some((lo, hi)) => [
             (f64::from(lo[0]) + f64::from(hi[0])) * 0.5,

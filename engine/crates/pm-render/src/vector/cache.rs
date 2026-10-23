@@ -718,8 +718,10 @@ impl VectorCache {
         if let Some(e) = self.entries.get_mut(&key) {
             e.used = self.tick;
             e.frame = self.frame;
+            pm_perf::bump(pm_perf::Counter::VectorCacheHits);
             return Ok(e.view.clone());
         }
+        pm_perf::bump(pm_perf::Counter::VectorCacheMisses);
         let (texture, bytes) = match source {
             VectorSource::Shape { .. } | VectorSource::Paths { .. } => {
                 let (width, height, rgba) = raster_level1(source)?;
@@ -843,8 +845,10 @@ impl VectorCache {
         }
         if let Some(view) = self.touch(&id) {
             self.svg.drawn(key);
+            pm_perf::bump(pm_perf::Counter::SvgCacheHits);
             return Ok(SvgResolved::Drawn(view));
         }
+        pm_perf::bump(pm_perf::Counter::SvgCacheMisses);
         let pixels = match self.svg.rasterizer {
             SvgRasterizer::Resvg => {
                 let (doc, _) = super::svg::document(path)?;
@@ -858,6 +862,7 @@ impl VectorCache {
             self.svg.drawn(key);
             return Ok(SvgResolved::Drawn(view));
         }
+        pm_perf::bump(pm_perf::Counter::RasterRequests);
         self.svg.miss(SvgRasterNeed {
             request: pm_protocol::svg_raster::SvgRasterRequest {
                 key: key.clone(),

@@ -756,6 +756,11 @@ impl Effects {
             Status::Ready => {}
             Status::Refused(f) | Status::NeedsFallback(f) => return Err(f.clone()),
         }
+        pm_perf::cache(
+            pm_perf::Counter::ProgramCacheHits,
+            pm_perf::Counter::ProgramCacheMisses,
+            entry.program.is_some(),
+        );
         let building = entry.program.is_none().then(std::time::Instant::now);
         if entry.program.is_none() {
             // Built ahead (decision PROBE-1): taken if it finished, waited

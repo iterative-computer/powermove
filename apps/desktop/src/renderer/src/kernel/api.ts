@@ -325,6 +325,13 @@ export interface Scene3DViewportState {
   hasCamera:boolean;
   /** Edit Mode: the edited model and its selected/total points. */
   editMode:{layer:string;selected:number;total:number}|null;
+  /**
+   * The editor view's camera as the engine renders it (`view`: world-to-camera,
+   * column-major), or null in the camera view.
+   */
+  engineCamera?:{view:number[];projection:{kind:'perspective';fovYDegrees:number;near:number;far:number}|{kind:'orthographic';halfHeight:number;near:number;far:number}}|null;
+  /** Local View: the object layers it shows, or null outside Local View. */
+  localView?:string[]|null;
 }
 /** The 3D viewport attached over a composition stage. */
 export interface Scene3DViewportController {
@@ -789,7 +796,7 @@ export interface RuntimeAsset extends AssetRecord {
    *
    * A three.js object tree for an imported model (OBJ, glTF).
    */
-  object3d?: unknown;
+  object3d?: import('three').Object3D;
   [key: string]: unknown;
 }
 

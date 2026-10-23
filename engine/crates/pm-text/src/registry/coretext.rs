@@ -234,6 +234,40 @@ pub struct CoreTextRegistry {
     generation: u64,
 }
 
+/// Byte lengths of font payloads retained by this registry. The category
+/// totals can overlap because a `FontBytes` value is shared across maps;
+/// `unique_full_bytes` counts each backing value once by its stable identity.
+/// Mapped file lengths describe mappings, not resident physical pages.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FontMemoryUsage {
+    pub files: usize,
+    pub file_bytes: u64,
+    pub table_fonts: usize,
+    pub table_font_bytes: u64,
+    pub blobs: usize,
+    pub blob_bytes: u64,
+    pub sources: usize,
+    pub source_bytes: u64,
+    pub project_faces: usize,
+    pub project_face_bytes: u64,
+    pub faces: usize,
+    pub face_bytes: u64,
+    pub subsets: usize,
+    pub subset_bytes: u64,
+    pub unique_full_bytes: u64,
+    pub total_unique_payload_bytes: u64,
+}
+
+fn unique_font_bytes<'a>(fonts: impl IntoIterator<Item = &'a FontBytes>) -> u64 {
+    let mut seen = HashSet::new();
+    fonts
+        .into_iter()
+        .filter(|data| seen.insert(data.id()))
+        .map(|data| data.as_slice().len() as u64)
+        .sum()
+}
+
 impl CoreTextRegistry {
     /// Must run on the main thread (AppKit's shared font manager); Electron
     /// main's JavaScript thread is the process's main thread.
@@ -272,6 +306,41 @@ impl CoreTextRegistry {
             .collect();
         out.sort();
         out
+    }
+
+    /// Only counts and byte lengths; paths, blob keys and font contents are
+    /// deliberately omitted from the status report.
+    pub fn memory_usage(&self) -> FontMemoryUsage {
+        let mut usage = FontMemoryUsage {
+            files: self.files.len(),
+            table_fonts: self.table_fonts.len(),
+            blobs: self.blobs.len(),
+            sources: self.sources.len(),
+            project_faces: self.project.len(),
+            faces: self.faces.len(),
+            subsets: self.subsets.len(),
+            ..FontMemoryUsage::default()
+        };
+        let bytes = |data: &FontBytes| data.as_slice().len() as u64;
+        usage.file_bytes = self.files.values().map(|(data, _)| bytes(data)).sum();
+        usage.table_font_bytes = self.table_fonts.values().map(|(data, _)| bytes(data)).sum();
+        usage.blob_bytes = self.blobs.values().map(bytes).sum();
+        usage.source_bytes = self.sources.values().map(|(data, _)| bytes(data)).sum();
+        usage.project_face_bytes = self.project.iter().map(|face| bytes(&face.data)).sum();
+        usage.face_bytes = self.faces.iter().map(|face| bytes(&face.info.data)).sum();
+        usage.subset_bytes = self.subsets.values().map(|bytes| bytes.len() as u64).sum();
+        usage.unique_full_bytes = unique_font_bytes(
+            self.files
+                .values()
+                .map(|(data, _)| data)
+                .chain(self.table_fonts.values().map(|(data, _)| data))
+                .chain(self.blobs.values())
+                .chain(self.sources.values().map(|(data, _)| data))
+                .chain(self.project.iter().map(|face| &face.data))
+                .chain(self.faces.iter().map(|face| &face.info.data)),
+        );
+        usage.total_unique_payload_bytes = usage.unique_full_bytes + usage.subset_bytes;
+        usage
     }
 
     pub fn faces(&self) -> impl Iterator<Item = (FaceId, &FaceInfo)> {
@@ -1572,4 +1641,20 @@ fn sfnt_from_tables(ct: &CTFont) -> Vec<u8> {
         }
     }
     build_sfnt(&mut tables)
+}
+
+#[cfg(test)]
+mod memory_usage_tests {
+    use super::{FontBytes, unique_font_bytes};
+
+    #[test]
+    fn shared_font_payload_is_counted_once_across_registry_views() {
+        let system_file = FontBytes::new(vec![0; 10]);
+        let blob_view = system_file.clone();
+        let separate_font = FontBytes::new(vec![0; 7]);
+        assert_eq!(
+            unique_font_bytes([&system_file, &blob_view, &separate_font]),
+            17
+        );
+    }
 }

@@ -162,8 +162,12 @@ impl TargetPool {
             .iter()
             .position(|(k, _, _, recorded)| *k == key && ok(*recorded))
         {
-            Some(i) => self.free.swap_remove(i).1,
+            Some(i) => {
+                pm_perf::bump(pm_perf::Counter::TargetPoolHits);
+                self.free.swap_remove(i).1
+            }
             None => {
+                pm_perf::bump(pm_perf::Counter::TargetPoolMisses);
                 let t = Target::new(device, "pm working target", key.width, key.height, key.format, key.usage);
                 self.live_bytes += t.bytes();
                 self.created += 1;

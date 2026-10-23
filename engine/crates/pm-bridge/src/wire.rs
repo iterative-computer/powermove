@@ -133,8 +133,8 @@ impl SurfaceInfo {
     }
 }
 
-/// Most surfaces in one pool (contract 3 allows 4 to 32).
-pub const MAX_POOL: u32 = 32;
+/// Most transported surfaces: up to 32 color slots or 64 paired chrome planes.
+pub const MAX_POOL: u32 = 64;
 pub const MAX_DIMENSION: u32 = 16384;
 
 #[derive(Debug, PartialEq, Eq)]

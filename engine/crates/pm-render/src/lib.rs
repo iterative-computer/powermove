@@ -28,6 +28,7 @@ pub mod compat;
 pub mod compat_crop;
 pub mod composite;
 pub mod effects;
+mod binds;
 mod error;
 mod exec;
 pub mod expr;
@@ -62,7 +63,7 @@ pub use effects::{Effects, builtin_definitions};
 pub use error::{LayerFailure, RenderError};
 pub use renderer::{
     CommandBracket, Frame, FrameStages, HOST_COMPILE_WAITS, RendererMemory, LayerPixels, LayerQuad, LayerRaster, PassThrough,
-    Rendered, Renderer, SvgWaiting, TextRaster,
+    Rendered, Renderer, SnapshotRows, SvgWaiting, TextRaster,
 };
 pub use request::{RenderRequest, VideoEnd};
 pub use shader_layers::all_builtin_definitions;

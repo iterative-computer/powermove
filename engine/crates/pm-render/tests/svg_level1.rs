@@ -124,6 +124,7 @@ fn a_frame_names_todays_bucket_and_the_svg_bytes() {
     assert_eq!(
         need.request.key,
         SvgRasterKey {
+            texture: None,
             content: sha(ART.as_bytes()),
             width: 150,
             height: 75
@@ -420,12 +421,14 @@ fn rasters_are_uploaded_once_per_content_and_bucket_across_layers() {
     // Forgetting a content drops its rasters (an engine restart starts
     // empty the same way).
     assert!(renderer.has_svg_raster(&SvgRasterKey {
+        texture: None,
         content: sha(ART.as_bytes()),
         width: 40,
         height: 20
     }));
     renderer.forget_svg_rasters(Some(&sha(ART.as_bytes())));
     assert!(!renderer.has_svg_raster(&SvgRasterKey {
+        texture: None,
         content: sha(ART.as_bytes()),
         width: 40,
         height: 20
@@ -434,6 +437,7 @@ fn rasters_are_uploaded_once_per_content_and_bucket_across_layers() {
         renderer
             .put_svg_raster(
                 SvgRasterKey {
+                    texture: None,
                     content: sha(b"x"),
                     width: 2,
                     height: 2
@@ -564,6 +568,64 @@ fn exports_fetch_missing_rasters_from_the_source_before_drawing() {
         Err(e) => panic!("{e}"),
         Ok(_) => panic!("drawn without the raster"),
     }
+}
+
+#[test]
+fn svg_material_maps_use_chromiums_map_upload_without_a_scene3d_refusal() {
+    let path = dir().join("material-map.svg");
+    std::fs::write(&path, ART).unwrap();
+    let mut cube = object3d("cube", "box", json!({}), "#FFFFFF", W, H, 2.0);
+    cube["d"]["data"]["object"]["material"]["maps"] = json!({"color":"art", "normal":"art"});
+    let mut value = project(
+        W,
+        H,
+        2.0,
+        no_fill(),
+        vec![camera("camera", [0.0, 0.0, 6.0], false, 2.0), cube],
+    );
+    asset(&mut value, "art", "image", "svg", 40, 20, 0.0);
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("art".into(), path);
+    let doc = load(&value);
+    assert!(unsupported_with_media(&doc, "Ptest-root", &resolver).is_empty());
+    let mut renderer = Renderer::headless().unwrap();
+    let needs = match renderer.render(&doc, "Ptest-root", ticks(0.0), &request(true), &resolver) {
+        Err(RenderError::SvgRastersPending(needs)) => needs,
+        _ => panic!("the export must wait for Chromium's SVG map, never draw a substitute"),
+    };
+    assert_eq!(
+        needs.len(),
+        1,
+        "color and data maps share identical upload bytes"
+    );
+    assert!(
+        matches!(
+            renderer.render(&doc, "Ptest-root", ticks(0.0), &request(false), &resolver),
+            Err(RenderError::SvgRastersPending(_))
+        ),
+        "preview must keep the previous frame, not show an absent 3D object"
+    );
+    let key = &needs[0].request.key;
+    assert_eq!((key.width, key.height, key.texture), (40, 20, Some(true)));
+    let mut bucket_key = key.clone();
+    bucket_key.texture = None;
+    renderer
+        .put_svg_raster(bucket_key, vec![0; 40 * 20 * 4])
+        .unwrap();
+    assert!(
+        !renderer.has_svg_raster(key),
+        "a canvas bucket is not a material map"
+    );
+    renderer
+        .put_svg_raster(key.clone(), vec![255; 40 * 20 * 4])
+        .unwrap();
+    let frame = renderer
+        .render(&doc, "Ptest-root", ticks(0.0), &request(true), &resolver)
+        .unwrap();
+    assert!(frame.failures.is_empty());
+    assert!(frame.svg_misses.is_empty());
+    let pixels = renderer.read_rgba(&frame).unwrap();
+    assert!(pixels.chunks_exact(4).any(|p| p[3] > 0.9));
 }
 
 #[test]

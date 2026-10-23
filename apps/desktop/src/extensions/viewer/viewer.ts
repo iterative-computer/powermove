@@ -880,7 +880,7 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
   const scene = api.scene3d?.viewport?.state?.();
   enginePresentation.update(viewParamsFor({
     shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution, canvas: engineCanvas,
-    scene3d: scene ? { hasScene: scene.hasScene, shading: scene.shading, xray: scene.xray } : null,
+    scene3d: scene ? { hasScene: scene.hasScene, shading: scene.shading, xray: scene.xray, overlays: scene.overlays, selected: scene.editMode ? [] : scene.selected, active: scene.editMode ? null : scene.active, camera: scene.engineCamera ?? null, localView: scene.localView ?? null } : null,
   }), stage);
 };
 /** The engine frame on screen: its tags and overlay geometry in stage CSS pixels. */

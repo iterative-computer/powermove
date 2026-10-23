@@ -128,6 +128,9 @@ pub(crate) fn premultiplied_f32(raster: &CompatRaster) -> Vec<f32> {
                 out.push(f16_to_f32(u16::from_le_bytes([half[0], half[1]])));
             }
         }
+        // Encoded Blender surfaces (`blenderPng`) are decoded by the job's
+        // Blender resolver, never posted as a layer's raster: nothing to draw.
+        CompatFormat::Png => {}
     }
     out.resize(n * 4, 0.0);
     out

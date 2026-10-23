@@ -113,7 +113,8 @@ pub fn determinant(m: &Mat4) -> f64 {
                 + n13 * n24 * n31
                 - n14 * n23 * n31)
         + n43
-            * (n11 * n24 * n32 - n11 * n22 * n34 - n14 * n21 * n32 + n12 * n21 * n34
+            * (n11 * n24 * n32 - n11 * n22 * n34 - n14 * n21 * n32
+                + n12 * n21 * n34
                 + n14 * n22 * n31
                 - n12 * n24 * n31)
         + n44
@@ -128,14 +129,18 @@ pub fn invert(te: &Mat4) -> Mat4 {
     let (n12, n22, n32, n42) = (te[4], te[5], te[6], te[7]);
     let (n13, n23, n33, n43) = (te[8], te[9], te[10], te[11]);
     let (n14, n24, n34, n44) = (te[12], te[13], te[14], te[15]);
-    let t11 = n23 * n34 * n42 - n24 * n33 * n42 + n24 * n32 * n43 - n22 * n34 * n43 - n23 * n32 * n44
-        + n22 * n33 * n44;
-    let t12 = n14 * n33 * n42 - n13 * n34 * n42 - n14 * n32 * n43 + n12 * n34 * n43 + n13 * n32 * n44
-        - n12 * n33 * n44;
-    let t13 = n13 * n24 * n42 - n14 * n23 * n42 + n14 * n22 * n43 - n12 * n24 * n43 - n13 * n22 * n44
-        + n12 * n23 * n44;
-    let t14 = n14 * n23 * n32 - n13 * n24 * n32 - n14 * n22 * n33 + n12 * n24 * n33 + n13 * n22 * n34
-        - n12 * n23 * n34;
+    let t11 =
+        n23 * n34 * n42 - n24 * n33 * n42 + n24 * n32 * n43 - n22 * n34 * n43 - n23 * n32 * n44
+            + n22 * n33 * n44;
+    let t12 =
+        n14 * n33 * n42 - n13 * n34 * n42 - n14 * n32 * n43 + n12 * n34 * n43 + n13 * n32 * n44
+            - n12 * n33 * n44;
+    let t13 =
+        n13 * n24 * n42 - n14 * n23 * n42 + n14 * n22 * n43 - n12 * n24 * n43 - n13 * n22 * n44
+            + n12 * n23 * n44;
+    let t14 =
+        n14 * n23 * n32 - n13 * n24 * n32 - n14 * n22 * n33 + n12 * n24 * n33 + n13 * n22 * n34
+            - n12 * n23 * n34;
     let det = n11 * t11 + n21 * t12 + n31 * t13 + n41 * t14;
     if det == 0.0 {
         return [0.0; 16];
@@ -304,7 +309,12 @@ mod tests {
         assert!(b.is_empty());
         b.expand_by_point([-1.0, -1.0, -1.0]);
         b.expand_by_point([1.0, 1.0, 1.0]);
-        let q = [0.0, (std::f64::consts::FRAC_PI_8).sin(), 0.0, (std::f64::consts::FRAC_PI_8).cos()];
+        let q = [
+            0.0,
+            (std::f64::consts::FRAC_PI_8).sin(),
+            0.0,
+            (std::f64::consts::FRAC_PI_8).cos(),
+        ];
         let r = b.apply_matrix(&compose([0.0; 3], q, [1.0; 3]));
         assert!((r.max[0] - 2f64.sqrt()).abs() < 1e-12);
         assert_eq!(b.center(), [0.0; 3]);

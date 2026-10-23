@@ -30,6 +30,8 @@ use crate::version::ContractId;
 
 /// Largest bucket edge (`svgRasterDimensions`' `maxDimension`).
 pub const MAX_SVG_EDGE: u32 = 8192;
+/// three.js/ANGLE material map limit on the desktop GPU path.
+pub const MAX_SVG_TEXTURE_EDGE: u32 = 16384;
 /// Largest pixel band in one message.
 pub const MAX_SVG_BAND_BYTES: usize = 8 * 1024 * 1024;
 /// Most requests in one message.
@@ -40,14 +42,20 @@ pub const MAX_SVG_ASSET: usize = 512;
 pub const MAX_SVG_MESSAGE: usize = 2048;
 
 /// One raster: the SVG's bytes (SHA-256, lowercase hex) drawn at one
-/// bucket. The bucket and the bytes decide the pixels; nothing else does
-/// (`drawImage(img, 0, 0, width, height)` into a cleared canvas of that
-/// size).
+/// bucket or material-map upload. Canvas buckets are premultiplied,
+/// top-down RGBA8; material maps use three.js's straight-alpha image
+/// upload with flipY. Source bytes, dimensions and upload kind decide the
+/// pixels.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SvgRasterKey {
     pub content: String,
+    /// A three.js material-map upload of the SVG image element (straight
+    /// alpha, flipY), rather than a 2D premultiplied canvas bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub texture: Option<bool>,
     pub width: u32,
     pub height: u32,
 }
@@ -56,11 +64,24 @@ impl SvgRasterKey {
     /// The key a snapshot's `uploaded` names once the renderer posted the
     /// raster's bands (`svg:<content>:<width>x<height>`).
     pub fn upload_key(&self) -> String {
-        format!("svg:{}:{}x{}", self.content, self.width, self.height)
+        format!(
+            "svg:{}:{}x{}{}",
+            self.content,
+            self.width,
+            self.height,
+            if self.texture == Some(true) {
+                ":texture"
+            } else {
+                ""
+            }
+        )
     }
 
     pub fn validate(&self) -> Result<(), Violation> {
         let c = ContractId::Frame;
+        ensure(self.texture != Some(false), c, || {
+            "omit texture for a canvas bucket".into()
+        })?;
         ensure(
             self.content.len() == 64
                 && self
@@ -70,14 +91,19 @@ impl SvgRasterKey {
             c,
             || "an SVG raster's content is a lowercase SHA-256".into(),
         )?;
+        let max = if self.texture == Some(true) {
+            MAX_SVG_TEXTURE_EDGE
+        } else {
+            MAX_SVG_EDGE
+        };
         ensure(
-            (1..=MAX_SVG_EDGE).contains(&self.width) && (1..=MAX_SVG_EDGE).contains(&self.height),
+            (1..=max).contains(&self.width) && (1..=max).contains(&self.height),
             c,
             || format!("SVG raster {}×{}", self.width, self.height),
         )
     }
 
-    /// Bytes of the raster (premultiplied RGBA8).
+    /// Bytes of the raster (four bytes per texel; encoding above).
     pub fn bytes(&self) -> u64 {
         u64::from(self.width) * u64::from(self.height) * 4
     }
@@ -105,8 +131,9 @@ impl SvgRasterRequest {
     }
 }
 
-/// Rows `row .. row + rows` of a raster: premultiplied RGBA8, top-down
-/// (the bytes today's `texImage2D` of the canvas stores, read back).
+/// Rows `row .. row + rows` of a raster, in upload-storage order: canvas
+/// buckets are top-down premultiplied RGBA8, texture maps are straight
+/// RGBA8 after flipY (bottom row first), as the key specifies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -169,10 +196,54 @@ mod tests {
 
     fn key() -> SvgRasterKey {
         SvgRasterKey {
+            texture: None,
             content: "0123456789abcdef".repeat(4),
             width: 3,
             height: 2,
         }
+    }
+
+    #[test]
+    fn map_keys_are_distinct_and_have_the_three_texture_limit() {
+        let map = SvgRasterKey {
+            texture: Some(true),
+            width: MAX_SVG_TEXTURE_EDGE,
+            ..key()
+        };
+        assert!(map.validate().is_ok());
+        assert!(map.upload_key().ends_with(":texture"));
+        assert_ne!(
+            map.upload_key(),
+            SvgRasterKey {
+                texture: None,
+                ..map.clone()
+            }
+            .upload_key()
+        );
+        assert!(
+            SvgRasterKey {
+                texture: None,
+                ..map.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            SvgRasterKey {
+                texture: Some(false),
+                ..key()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            SvgRasterKey {
+                width: MAX_SVG_TEXTURE_EDGE + 1,
+                ..map
+            }
+            .validate()
+            .is_err()
+        );
     }
 
     #[test]
@@ -183,6 +254,7 @@ mod tests {
             format!("svg:{}:3x2", "0123456789abcdef".repeat(4))
         );
         let upper = SvgRasterKey {
+            texture: None,
             content: "0123456789ABCDEF".repeat(4),
             ..key()
         };
@@ -230,6 +302,7 @@ mod tests {
             revision: crate::common::Revision::ZERO,
             svg,
             frame: None,
+            blender: None,
         };
         let request = SvgRasterRequest {
             key: key(),

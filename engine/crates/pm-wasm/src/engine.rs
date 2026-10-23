@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use pm_eval::bounds::{Bounds, HOST_ONLY, LayerHost, NoHost, PickOptions};
+use pm_eval::bounds::{Bounds, HOST_ONLY, NoHost, PickOptions};
 use pm_eval::node::{self, Got};
 use pm_eval::space3d::Rect;
 use pm_eval::text_anim::UnitKind;
@@ -175,6 +175,12 @@ pub(crate) enum Unanswered {
     /// subsets without outlines (docs/engine/pm-eval-layers.md, allowed
     /// difference 6).
     Ink,
+    /// 3D geometry met model assets the mirror does not have yet: the
+    /// renderer adds them ([`Engine::set_model`]) and asks again.
+    Models(Vec<String>),
+    /// The question met content this engine cannot answer for (a model it
+    /// cannot load): a named failure, `{"unsupported": why}`.
+    Unsupported(String),
 }
 
 /// Measures through [`CompatMeasure`] and notes whether anything asked for
@@ -245,6 +251,8 @@ pub struct Engine {
     detached_tick: u64,
     labels: Arc<Labels>,
     fonts: Fonts,
+    /// Model assets and 3D caches (picks and bounds).
+    models: crate::geometry::Models,
     /// The last `ev_id` answer when it was not a number (for `value_json`).
     last: JsValue,
     last_kind: ValueKind,
@@ -349,18 +357,27 @@ fn at_path<'a>(root: &'a Node, path: &[Value]) -> Option<&'a Node> {
 
 fn bounds_reply(out: &mut Reply, b: &Bounds) {
     let mut first = true;
+    // A model group's bounds carry `z0` and `z1` in `modelGroupBounds`' order.
+    let (z0, z1) = match b.z {
+        Some((z0, z1)) => (Some(z0), Some(z1)),
+        None => (None, None),
+    };
     for (k, v) in [
-        ("x0", b.x0),
-        ("y0", b.y0),
-        ("x1", b.x1),
-        ("y1", b.y1),
-        ("w", b.w),
-        ("h", b.h),
-        ("ax", b.ax),
-        ("ay", b.ay),
+        ("x0", Some(b.x0)),
+        ("y0", Some(b.y0)),
+        ("z0", z0),
+        ("x1", Some(b.x1)),
+        ("y1", Some(b.y1)),
+        ("z1", z1),
+        ("w", Some(b.w)),
+        ("h", Some(b.h)),
+        ("ax", Some(b.ax)),
+        ("ay", Some(b.ay)),
     ] {
-        out.key(&mut first, k);
-        out.num(v);
+        if let Some(v) = v {
+            out.key(&mut first, k);
+            out.num(v);
+        }
     }
 }
 
@@ -379,11 +396,6 @@ fn indexes(out: &mut Reply, layers: &[Node], nodes: &[&Node]) {
     out.nums(&all);
 }
 
-/// A [`LayerHost`] that refuses every 3D question, so the renderer falls back
-/// to today's three.js answer (section 26, Phase 1).
-pub(crate) struct RefuseHost;
-impl LayerHost for RefuseHost {}
-
 pub(crate) fn host_only(e: &JsThrow) -> bool {
     e.kind == HOST_ONLY
 }
@@ -398,6 +410,7 @@ impl Engine {
             detached_tick: 0,
             labels,
             fonts: Fonts::new(),
+            models: crate::geometry::Models::default(),
             last: JsValue::Undefined,
             last_kind: ValueKind::Number,
             stats: Stats::default(),
@@ -408,6 +421,32 @@ impl Engine {
 
     pub fn revision(&self) -> u64 {
         self.doc.revision()
+    }
+
+    // ── 3D model assets ───────────────────────────────────────────────────
+
+    /// Adds or replaces model asset `id` for 3D picks and bounds
+    /// ([`crate::geometry::Models::set`]).
+    pub fn set_model(
+        &mut self,
+        id: &str,
+        kind: crate::geometry::ModelKind,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        self.models.set(id, kind, bytes)
+    }
+
+    pub fn forget_model(&mut self, id: &str) {
+        self.models.forget(id);
+    }
+
+    pub fn clear_models(&mut self) {
+        self.models.clear();
+    }
+
+    /// The model asset ids the mirror holds.
+    pub fn model_ids(&self) -> Vec<String> {
+        self.models.ids().into_iter().map(str::to_owned).collect()
     }
 
     pub fn document(&self) -> &Document {
@@ -701,6 +740,23 @@ impl Engine {
                 self.stats.unanswered += 1;
                 out.raw("{\"ink\":true}");
             }
+            Err(Unanswered::Models(ids)) => {
+                self.stats.unanswered += 1;
+                out.raw("{\"models\":[");
+                for (i, id) in ids.iter().enumerate() {
+                    if i > 0 {
+                        out.raw(",");
+                    }
+                    out.str(id);
+                }
+                out.raw("]}");
+            }
+            Err(Unanswered::Unsupported(why)) => {
+                self.stats.unanswered += 1;
+                out.raw("{\"unsupported\":");
+                out.str(&why);
+                out.raw("}");
+            }
         }
         if let Some(id) = tracked {
             let reads =
@@ -793,7 +849,14 @@ impl Engine {
 
         // The edit kernels (pm-edit): patches the renderer applies.
         if let Some(name) = op.strip_prefix("edit.") {
-            return crate::edit::dispatch(&self.doc, &mut self.fonts, name, request, out);
+            return crate::edit::dispatch(
+                &self.doc,
+                &mut self.fonts,
+                &mut self.models,
+                name,
+                request,
+                out,
+            );
         }
         let Some(root) = self.doc.root() else {
             out.raw("null");
@@ -952,6 +1015,7 @@ impl Engine {
             }
         };
         let fonts = &mut self.fonts;
+        let models = &mut self.models;
         let mut scope = Scope::new(ev, &comp, &open);
         macro_rules! layer {
             () => {
@@ -970,6 +1034,9 @@ impl Engine {
                 match $e {
                     Ok(v) => v,
                     Err(e) if host_only(&e) => return Err(Unanswered::Host),
+                    Err(e) if e.kind == pm_eval::query3d::MODEL_UNLOADABLE => {
+                        return Err(Unanswered::Unsupported(e.message));
+                    }
                     Err(e) => return Ok(Err(e)),
                 }
             };
@@ -1275,9 +1342,174 @@ impl Engine {
                 let id = arg(get(request, "id"));
                 out.bool(scope.valid_matte_source(l, &id));
             }
+            "objectBoxes3d" => {
+                // `viewportBounds`' boxes: `Box3.expandByObject` per object layer.
+                let ids: Vec<String> = get(request, "ids")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let boxes = scope.object_boxes3d(&ids, t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                let boxes = try_js!(boxes);
+                out.raw("{");
+                for (i, (id, b)) in ids.iter().zip(&boxes).enumerate() {
+                    if i > 0 {
+                        out.raw(",");
+                    }
+                    out.str(id);
+                    out.raw(":");
+                    match b {
+                        Some(b) => {
+                            out.nums(&[b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]])
+                        }
+                        None => out.raw("null"),
+                    }
+                }
+                out.raw("}");
+            }
+            "objectWorlds3d" => {
+                // `runtime.objects.get(id).matrixWorld` per object layer.
+                let ids: Vec<String> = get(request, "ids")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let worlds = scope.object_worlds3d(&ids, t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                let worlds = try_js!(worlds);
+                out.raw("{");
+                for (i, (id, w)) in ids.iter().zip(&worlds).enumerate() {
+                    if i > 0 {
+                        out.raw(",");
+                    }
+                    out.str(id);
+                    out.raw(":");
+                    match w {
+                        Some(w) => out.nums(w),
+                        None => out.raw("null"),
+                    }
+                }
+                out.raw("}");
+            }
+            "cursorHit3d" => {
+                // `placeCursor`: the surface point along a world ray, or null.
+                let vec = |k: &str| -> Option<[f64; 3]> {
+                    let a = get(request, k)?.as_array()?;
+                    let n = |i: usize| a.get(i).and_then(Value::as_f64);
+                    Some([n(0)?, n(1)?, n(2)?])
+                };
+                let (Some(origin), Some(direction)) = (vec("origin"), vec("direction")) else {
+                    return Ok(Err(JsThrow::type_error("cursorHit3d needs a ray")));
+                };
+                let ray = pm_geom3d::gltf::pick::Ray { origin, direction };
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let hit = scope.cursor_hit3d(&ray, t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                match try_js!(hit) {
+                    Some(p) => out.nums(&p),
+                    None => out.raw("null"),
+                }
+            }
+            "syncScene3d" => {
+                let l = layer!();
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let result = scope.sync_scene3d(l, t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                try_js!(result);
+                out.raw("null");
+            }
+            "objectMesh3d" => {
+                // `runtime.objects.get(id)` for Edit Mode: `{missing}`,
+                // `{notMesh}`, or the geometry's buffers (positions and uvs as
+                // the Float32Array holds them, the index when it has one).
+                let id = get(request, "id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let mesh = scope.object_mesh3d(&id, t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                use pm_eval::query3d::ObjectMesh3d;
+                match try_js!(mesh) {
+                    ObjectMesh3d::Missing => out.raw("{\"missing\":true}"),
+                    ObjectMesh3d::NotMesh => out.raw("{\"notMesh\":true}"),
+                    ObjectMesh3d::Empty => out.raw("{\"positions\":null}"),
+                    ObjectMesh3d::Mesh(g) => {
+                        let f = |v: &[f32]| v.iter().map(|x| f64::from(*x)).collect::<Vec<f64>>();
+                        out.raw("{\"positions\":");
+                        out.nums(&f(&g.positions));
+                        out.raw(",\"uvs\":");
+                        out.nums(&f(&g.uvs));
+                        out.raw(",\"index\":");
+                        if g.indexed {
+                            let ix: Vec<f64> = g.indices.iter().map(|i| f64::from(*i)).collect();
+                            out.nums(&ix);
+                        } else {
+                            out.raw("null");
+                        }
+                        out.raw("}");
+                    }
+                }
+            }
+            "camera3d" => {
+                // `compositionRuntime(PM, t).camera`: lens and `matrixWorld`.
+                let mut host = crate::geometry::GeomHost::new(models, request);
+                let camera = scope.composition_camera3d(t, &mut host);
+                if !host.wanted.is_empty() {
+                    return Err(Unanswered::Models(host.wanted));
+                }
+                let camera = try_js!(camera);
+                let (orthographic, fov, zoom, near, far) = match camera.lens {
+                    pm_geom3d::query::Lens::Perspective {
+                        fov,
+                        zoom,
+                        near,
+                        far,
+                    } => (false, fov, zoom, near, far),
+                    pm_geom3d::query::Lens::Orthographic { zoom, near, far } => {
+                        (true, f64::NAN, zoom, near, far)
+                    }
+                };
+                out.raw("{\"orthographic\":");
+                out.bool(orthographic);
+                out.raw(",\"fov\":");
+                if orthographic {
+                    out.raw("null");
+                } else {
+                    out.num(fov);
+                }
+                out.raw(",\"zoom\":");
+                out.num(zoom);
+                out.raw(",\"near\":");
+                out.num(near);
+                out.raw(",\"far\":");
+                out.num(far);
+                out.raw(",\"world\":");
+                out.nums(&camera.world);
+                out.raw("}");
+            }
             "bounds" | "groupBounds" | "pick" | "textLayout" | "textRaster" => {
                 fonts.clear_reports();
-                let mut host = RefuseHost;
+                let mut host = crate::geometry::GeomHost::new(models, request);
                 let outlines = fonts.outlines;
                 let mut probe = InkProbe {
                     inner: &mut fonts.measure,
@@ -1287,6 +1519,9 @@ impl Engine {
                     "bounds" => {
                         let l = layer!();
                         let b = scope.bounds(l, t, &mut probe, &mut host);
+                        if !host.wanted.is_empty() {
+                            return Err(Unanswered::Models(host.wanted));
+                        }
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1306,6 +1541,9 @@ impl Engine {
                     "groupBounds" => {
                         let l = layer!();
                         let b = scope.group_bounds(l, t, &mut probe, &mut host);
+                        if !host.wanted.is_empty() {
+                            return Err(Unanswered::Models(host.wanted));
+                        }
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);
@@ -1333,6 +1571,9 @@ impl Engine {
                         let x = number(get(request, "x")).unwrap_or(f64::NAN);
                         let y = number(get(request, "y")).unwrap_or(f64::NAN);
                         let hit = scope.pick(x, y, t, &options, &mut probe, &mut host);
+                        if !host.wanted.is_empty() {
+                            return Err(Unanswered::Models(host.wanted));
+                        }
                         let ink = probe.ink;
                         if fonts.incomplete() {
                             return Err(Unanswered::Fonts);

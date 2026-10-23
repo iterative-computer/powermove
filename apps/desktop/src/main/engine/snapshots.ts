@@ -133,10 +133,10 @@ export const MAX_FALLBACK_PIXELS = 16;
 export const MAX_FALLBACK_BYTES = 256 * 1024 * 1024;
 /** Compatibility events in one `document` snapshot request (bands included). */
 export const MAX_COMPAT_EVENTS = 4096;
-/** Most level 1 SVG rasters one request carries, and their bytes (one
- *  raster may be today's largest bucket, 8192 × 8192). */
+/** Most SVG rasters one request carries, and their bytes (a material
+ *  map may be three.js's largest texture, 16384 × 16384). */
 export const MAX_SVG_PIXELS = 64;
-export const MAX_SVG_BYTES = 512 * 1024 * 1024;
+export const MAX_SVG_BYTES = 1024 * 1024 * 1024;
 /** Largest SVG raster edge (`svgRasterDimensions`' limit). */
 const MAX_SVG_EDGE = 8192;
 
@@ -156,8 +156,10 @@ function validSvgPixels(value: unknown): boolean {
   for (const p of value as Record<string, unknown>[]) {
     const key = p?.['key'] as Record<string, unknown> | undefined;
     if (!key || typeof key !== 'object' || typeof key['content'] !== 'string' || !/^[0-9a-f]{64}$/.test(key['content'])) return false;
+    if (key['texture'] !== undefined && key['texture'] !== true) return false;
+    const max = key['texture'] === true ? 16384 : MAX_SVG_EDGE;
     const w = key['width'], h = key['height'];
-    if (!Number.isInteger(w) || !Number.isInteger(h) || (w as number) < 1 || (h as number) < 1 || (w as number) > MAX_SVG_EDGE || (h as number) > MAX_SVG_EDGE) return false;
+    if (!Number.isInteger(w) || !Number.isInteger(h) || (w as number) < 1 || (h as number) < 1 || (w as number) > max || (h as number) > max) return false;
     const data = p['data'];
     if (!(data instanceof Uint8Array) || data.byteLength !== (w as number) * (h as number) * 4) return false;
     bytes += data.byteLength;

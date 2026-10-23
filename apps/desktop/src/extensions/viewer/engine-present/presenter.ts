@@ -21,7 +21,7 @@
  */
 import { decisionOffsetUs, JitterBuffer, type Queued } from './jitter-buffer';
 import { HINT_INTERVAL_MS, hintChanged, nextVsync, VsyncEstimator, type VsyncFit } from './display-timing';
-import { DeviceLostError, type FramePainter } from './gpu';
+import { DeviceLostError, FrameUnusableError, type FramePainter } from './gpu';
 import type {
   ClockSample,
   EngineFrameMessage,
@@ -74,7 +74,8 @@ export type PresentedFrame = {
   displayUs: number | null;
   /** The frame's depth and object-id surface (`FrameDescriptor.depthId`),
    *  when the viewer asked for it and its pool arrived. */
-  depthId?: { poolIndex: number; seq: number; poolGeneration: number } | null;
+  depthId?: import('./protocol').DepthIdSurface | null;
+  scene3dMeta?: import('./protocol').Scene3dMeta[];
   /** The frame's size in pixels (the canvas takes it when the frame lands). */
   width?: number;
   height?: number;
@@ -130,6 +131,13 @@ export type PresenterOptions = {
    * over a running session), so the next pool retires it.
    */
   generation?: number;
+  /**
+   * A frame could not be read (`FrameUnusableError`): it went back to the
+   * engine undrawn. `generation` is its pool's. The presentation renews
+   * the surfaces when a pool's imports stopped being readable (a GPU
+   * process restart), since no later frame of that pool will draw.
+   */
+  onUnusable?: (generation: number, message: string) => void;
   /**
    * Draw frames shown at the next refresh (paused, scrub, gesture) as soon
    * as they arrive instead of at the next animation frame. Only for a
@@ -232,6 +240,7 @@ export class EnginePresenter implements Presenter {
   /** The last timed frame's duration (ticks), for the decision phase. */
   private lastFrameTicks: number | null = null;
   private listeners = new Set<(frame: PresentedFrame) => void>();
+  private readonly submitted = new Set<Promise<void>>();
   private hint: VsyncHint | null = null;
   private hintSentMs = -Infinity;
   private raf = 0;
@@ -426,7 +435,11 @@ export class EnginePresenter implements Presenter {
     this.generation = pool.generation;
     this.stats.generation = pool.generation;
     for (const item of this.buffer.clear((i) => i.desc.poolGeneration !== pool.generation)) this.dropItem(item, 'generation');
-    this.parked = this.parked.filter((p) => p.desc.poolGeneration === pool.generation);
+    this.parked = this.parked.filter((p) => {
+      if (p.desc.poolGeneration === pool.generation) return true;
+      this.releaseDesc(p.desc, 'generation');
+      return false;
+    });
     if (previous) this.options.source.retire(previous);
   }
 
@@ -578,31 +591,44 @@ export class EnginePresenter implements Presenter {
         this.releaseDesc(desc, 'device-lost');
         return;
       }
+      // This frame only: the next one (or the next pool's) draws.
+      if (error instanceof FrameUnusableError) {
+        this.releaseDesc(desc, 'unusable');
+        this.options.onUnusable?.(desc.poolGeneration, error.message);
+        return;
+      }
       this.releaseDesc(desc, 'draw-failed');
       throw error;
     }
     const submitMs = this.now();
     const width = frame.codedWidth, height = frame.codedHeight;
-    frame.close();
     this.stats.drawn++;
     this.trace?.draws.push([rafMs, desc.seq, desc.revision, desc.pts, item.arrivedMs, submitMs, desc.viewSeq, desc.duration === null ? 0 : 1]);
-    this.options.painter.workDone().then(
+    // Keep the external texture's source alive through GPU completion.
+    // Closing it expires Blink's external-texture lease and can return its
+    // shared-image wrapper to the cache while the submitted draw still reads.
+    const completed = this.options.painter.workDone().then(
       () => {
+        frame.close();
         this.trace?.releases.push([desc.seq, submitMs, this.now()]);
         this.release(desc);
         this.done(desc.seq);
       },
       () => {
+        frame.close();
         this.release(desc);
         this.done(desc.seq);
       }
     );
+    this.submitted.add(completed);
+    void completed.then(() => this.submitted.delete(completed));
     const presented: PresentedFrame = {
       seq: desc.seq,
       revision: desc.revision,
       viewSeq: desc.viewSeq,
       pts: desc.pts,
       overlay: desc.overlay,
+      scene3dMeta: desc.scene3dMeta,
       rafMs,
       timed: desc.duration !== null,
       standIn: desc.quality.standIn === true,
@@ -627,7 +653,8 @@ export class EnginePresenter implements Presenter {
   }
 
   private release(desc: FrameDescriptor): void {
-    if (this.disposed || desc.poolGeneration < this.generation) return;
+    // The chrome lease also needs completion of retired color reads. Native
+    // ownership is sequence checked, so a late release cannot free a new slot.
     this.stats.released++;
     this.options.link.release({ poolIndex: desc.poolIndex, seq: desc.seq });
   }
@@ -641,6 +668,11 @@ export class EnginePresenter implements Presenter {
       this.stats.parkTimeouts++;
       this.releaseDesc(desc, 'no-import');
     }
+  }
+
+  /** After dispose, resolves only when every submitted surface was released. */
+  async drained(): Promise<void> {
+    await Promise.all(this.submitted);
   }
 
   dispose(cancelFrame: (id: number) => void = this.cancelFrame): void {

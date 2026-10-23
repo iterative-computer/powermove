@@ -173,10 +173,11 @@ fn interpreted_gamma_png_needs_a_transfer_override() {
     std::fs::remove_file(&srgb).ok();
 }
 
-/// 3D texture maps upload stored samples: a gamma-only PNG stays an
-/// explicit unsupported map, as before the gamma class opened for layers.
+/// 3D texture maps upload the importer's bitmap, the one a level 1 image
+/// layer draws: a gamma-only PNG map has the level 1 image verdict
+/// (`threed_maps.rs` `map_verdicts_are_the_image_layer_verdicts`).
 #[test]
-fn gamma_png_texture_maps_stay_unsupported() {
+fn gamma_png_texture_maps_follow_the_level1_image_verdict() {
     let d = dir();
     let path = d.join("map.png");
     let opaque: Vec<[u16; 4]> = VALUES
@@ -185,12 +186,23 @@ fn gamma_png_texture_maps_stay_unsupported() {
         .collect();
     write_png(&path, false, Some(70_000), &opaque);
     let pool = pm_media::pool::FramePool::new(0);
-    match pm_render::scene3d::textures::decode(&path, &pool) {
-        Err(pm_render::scene3d::textures::MapError::Unsupported(m)) => {
-            assert!(m.contains("gAMA"), "{m}")
+    match (
+        pm_render::media::probe_image(&path),
+        pm_render::scene3d::textures::decode(&path, &pool),
+    ) {
+        (Ok(()), Ok((w, h, rgba))) => {
+            let (bitmap, _) = pm_render::media::level1_bitmap(&path, &pool).unwrap();
+            assert_eq!(
+                (w as usize, h as usize),
+                (bitmap.frame.format.width, bitmap.frame.format.height)
+            );
+            assert_eq!(rgba.len(), w as usize * h as usize * 4);
         }
-        Err(e) => panic!("{e:?}"),
-        Ok(_) => panic!("decoded"),
+        (
+            Err(pm_render::media::ProbeIssue::Unsupported(a)),
+            Err(pm_render::scene3d::textures::MapError::Unsupported(b)),
+        ) => assert_eq!(a, b),
+        (layer, map) => panic!("image layer {layer:?}, map {map:?}"),
     }
     let plain = d.join("map-plain.png");
     write_png(&plain, false, None, &opaque);
