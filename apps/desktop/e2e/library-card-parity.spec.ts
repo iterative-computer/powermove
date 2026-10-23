@@ -17,9 +17,9 @@ import { VIEWER_VARIANTS, useViewer, type ViewerVariant } from './helpers/viewer
 type Scene = '2d' | '2d-fit' | '3d' | '3d-right';
 
 async function card<T = Buffer>(engine: '0' | '1', theme: string, variant: ViewerVariant, scene: Scene, then?: (page: Page, png: Buffer) => Promise<T>): Promise<T> {
-  // Match engine-viewer-canvas's Standard-color gate. A display-profile
-  // diagnostic remains available: Chromium can dither the shelf's CSS ledge
-  // differently across otherwise identical wide-gamut window captures.
+  // Match engine-viewer-canvas's Standard-color gate. The display-profile
+  // diagnostic also compares the complete card exactly; CSS capture
+  // differences remain failures (docs/engine/consumers.md).
   const args = process.env.PM_LIBRARY_CARD_PROFILE === 'display' ? [] : ['--force-color-profile=srgb'];
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: engine }, args });
   try {
@@ -52,6 +52,12 @@ async function card<T = Buffer>(engine: '0' | '1', theme: string, variant: Viewe
     }, { theme, scene });
     await settle(page);
     await page.evaluate(() => (window as any).PM.LibraryUI.open());
+    // Match the grid and scroll-raster coordinates: unrelated live previews
+    // can have different heights. Use the Library's existing search UI.
+    const search = page.getByRole('searchbox', { name: 'Search panels', exact: true });
+    await search.fill('viewer');
+    await expect(search).toHaveValue('viewer');
+    await expect(page.locator('.library-card[data-panel-id]')).toHaveCount(1);
     const shown = page.locator('.library-card[data-panel-id="viewer"]');
     await shown.scrollIntoViewIfNeeded();
     await expect(shown.locator('.library-clone')).toBeAttached();
