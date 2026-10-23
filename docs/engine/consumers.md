@@ -29,6 +29,14 @@ time, view, engine, source-panel and Library-generation changes; stale captures
 retry while the card is still current. The presented frame must match the
 snapshot revision and time before its overlay is cloned. A panel's own
 `library.render` still runs after the pixels arrive and controls its card.
+If a paused presentation has the wrong time or revision, the card requests
+one exact paused seek per capture target before re-cloning. An unchanged
+layout alone does not request a frame. The readiness diagnostic observed UI
+time 0 with a frame still at 0.9 seconds, at the same revision; the refresh
+preserves the strict frame/overlay checks instead of accepting stale pixels.
+Transient session, resync and timeout errors retry at most three attempts,
+250 ms apart, while the pinned capture is still current; readiness waits for
+the result. Permanent errors propagate, without a resampled fallback.
 
 Playback, cropped and 3D views retain the native presented-image copy. Playback
 never waits for an idle capture; opening the Library keeps playback running. The snapshot
@@ -218,8 +226,8 @@ Every case of the 1.0.18 fork fails at activation on this branch (above).
   app with the engine off, then on, and compares the card images exactly; side
   by sides with a difference mask are under
   `/tmp/ne-w5/consumers-r5/evidence/`, outside the repository):
-  - Identical: 2D at 200% panned in light and dark with the current viewer, a
-    fork of the current viewer and the fork of shipped viewer 1.0.8; 2D at Fit
+  - Round 5, historical: identical 2D at 200% panned in light and dark with
+    the current viewer, a fork of it and the fork of shipped viewer 1.0.8; 2D at Fit
     with the 1.0.8 fork.
   - Round 5's 2D-at-Fit blocker (566/570 pixels, at most 5 levels) came
     from scaling the stage presentation back to the composition backing size.
@@ -238,10 +246,17 @@ Every case of the 1.0.18 fork fails at activation on this branch (above).
     whose old fork has no 3D controls reaches the editor view only through
     the kernel's 3D keys or an agent, but the difference is real. Owner: the
     `render.gl.init` binding (extension compatibility / bridge); escalated.
-  - The grid and orange 3D selection outline are missing from the card with
-    the engine on and off alike (`core/scene3d/overlay.ts` renders without
+  - In the round 5 captures, the grid and orange 3D selection outline were
+    missing from the card with the engine on and off alike
+    (`core/scene3d/overlay.ts` renders without
     `preserveDrawingBuffer`); measured on/off right-view cards differ only as
     above, so this is not an engine-on regression (3D lane).
+    Round 6 also records an on-only missing 3D navigation/label/cursor
+    overlay in the current viewer's dark camera card (8,012 differing
+    pixels, maximum 255). That is a separate visible blocker, beyond the
+    cube-edge scaling differences. The final image pair and difference
+    panel are `consumers-r6/evidence/round6-on-3d-in-dark-current-viewer.png`
+    under `/tmp/ne-w5/`, outside Git.
   - The fork of shipped viewer 1.0.18 fails to activate on this branch (see
     the round 5 notes); its cases fail until `feat/ne-mainmerge` lands.
   - Private-corpus customized forks remain unqualified by this lane.
@@ -278,6 +293,9 @@ orthographic card gates in both themes. The raw frame before stage scaling
 would also satisfy this contract if returned at the same pinned identities.
 The current 3D copied-image differences remain blockers; no tolerance was
 changed and no legacy engine was substituted.
+The separate WebGL viewport chrome also needs a bitmap retained at its draw
+boundary (or an explicit overlay capture API). A composition snapshot alone
+cannot restore a discarded navigation/label/cursor drawing buffer.
 
 ## Contracts transferred out of consumers
 
@@ -330,7 +348,8 @@ blockers or claims that the missing contracts have landed here.
   Native raster-source diagnostics and customized font/fork setups also remain
   unqualified by this lane. Media, renderer and extension owners must close them.
 
-- Multi-selection rotate after Undo (engine on): `viewer-resize.spec.ts`
+- An earlier engine-on qualification found multi-selection rotate after Undo:
+  `viewer-resize.spec.ts`
   resizes a selection, undoes with `PM.hist.undo()`, then rotates by 45°. On
   the press, `EngineDoc.api.worldMatrix` first answers the undone state for
   the root text layer (identity) and, a few calls later in the same press,
@@ -342,8 +361,8 @@ blockers or claims that the missing contracts have landed here.
 - Session teardown: in targeted runs on a loaded machine `app.close()` hung
   until the 30 s test budget ended after the body passed (a trace shows the
   body done at 2.4 s and "Close context" until 32.4 s), with the engine on or
-  off. The final full runs had no teardown-only failures but four (on) and
-  one (off) worker teardowns over budget. Quit and process lifetime belong to
+  off. The round 5 full runs had four (on) and one (off) worker teardowns
+  over budget. Quit and process lifetime belong to
   the bridge owner (`main/index.ts`).
 
 Panel popout already moves live nodes in the same realm and the bridge presenter
@@ -355,6 +374,71 @@ canvas panel drawing `render.renderFrameTo` (its pixels move with it and it
 draws edits there), in both themes with each viewer variant.
 
 ## Validation
+
+Round 6 serial qualification (2026-10-23) used production app and release
+native modules at `6dc7ed62e`: 797 cases per run, one worker, no quarantine
+or retries. ON: 647 passed, 91 failed, 59 skipped (3,918.0 seconds), plus
+one separate global worker teardown timeout. OFF: 685 passed, 53 failed,
+59 skipped (3,116.6 seconds), no global errors. Every failed result is owned
+in the [e2e ledger](e2e-ledger.md). Later changes are test fixtures and
+these notes; production code is unchanged from that build.
+
+The final C3 matrix compares the complete card, including overlay, shelf
+and corners, with zero tolerance and no acceptance mask. All twelve
+rendered 2D cases pass exactly: Fit and 200%, both themes, current viewer,
+frozen-current fork and shipped 1.0.8 fork. The eight current/frozen-current
+cases also pass 24/24 across three repeats (149.0 seconds) under the
+display's normal profile.
+Each case launches engine OFF and ON explicitly and asserts the active
+engine. The standard-color gate matches `engine-viewer-canvas`;
+`PM_LIBRARY_CARD_PROFILE=display` retains the normal-profile path.
+
+The C3 fixture now uses the existing “Search panels” UI to show Viewer
+alone before capture. Unrelated live previews had changed the surrounding
+Library grid height and scroll-raster coordinates: two failing pairs had
+legacy/native grid heights 1,779/1,555 and 1,779/1,406 CSS pixels. Their card
+screen boxes and composition pixels were identical, but shelf/corner pixels
+differed by up to two levels. Three consecutive captures within each launch
+were stable (48 exact comparisons); waiting for ancestor animations or
+changing the CSS raster backend did not fix the mismatched context.
+Filtering makes the entire recorded layout equal, with grid height 338,
+scroll offset zero, the same 358×311 card and unchanged 0.56 frame scale.
+This uses normal UI actions and preserves the default Fit view, canonical
+size, DOM/CSS and every whole-card assertion. The unfiltered Library
+workflows also pass, nine cases in each full run. Historical failed full-run
+results remain recorded; no visible difference is approved.
+
+The final 32-case C3 matrix has 12 passes and 20 failures, without skips.
+Eight fail because viewer 1.0.18 cannot activate pending mainmerge. All
+twelve rendered 3D cases still fail. Current camera light/dark differs by
+1,315/1,370 pixels, maximum 45 levels; current right view by 360/377,
+maximum 5. Frozen-current camera light/dark is 319/328, maximum 4; right
+view is 248/239, maximum 2. Shipped 1.0.8 camera is five pixels / one level;
+its right view is 7,881 / 227 in each theme. These are blockers requiring
+the view/crop snapshot and retained overlay bitmap contracts above. The
+full ON run also recorded missing WebGL navigation chrome (8,012 / 255),
+so the earlier edge-only description does not cover every capture failure.
+Final paired images and amplified differences remain outside Git under
+`/tmp/ne-w5/consumers-r6/evidence/round6-c3-matrix-final-*.png`; all full-run
+and diagnostic artifacts remain under `/tmp/ne-w5/consumers-r6/`.
+
+Opening the Library while playing passes with each engine setting:
+playback continues and cards become ready within two seconds. Focused
+units pass 25/25 (snapshots, queue preparation, composition thumbnails and
+test-process cleanup). The release native modules and production app build
+pass; desktop typecheck has zero errors and the existing IconCropper
+warning; `check:builtins` passes. Protocol regeneration changes no generated
+files (`protocol-07ccbe7fd7aec876`). Final changed E2E files pass strict
+TypeScript checking with zero diagnostics.
+
+The test harness bounds stalled Electron shutdown before removing its own
+temporary profile, including failed startup. Forced shutdown still fails
+the test. Two raw onboarding launches now have their own resource fixture
+and independent teardown budget, retry profile removal and close their
+owned download server even after setup failure. Their unchanged flows pass
+2/2 ON and 2/2 OFF (6.8/6.9 seconds), all with `forced:false`. These targeted
+harness follow-ups do not change the full-run counts. Preview-fit
+screenshots belong to Playwright's output directory.
 
 Round 5 serial runs (2026-10-22/23, 775 cases each, one worker, no
 quarantine; details in the [e2e ledger](e2e-ledger.md)): engine on 638
