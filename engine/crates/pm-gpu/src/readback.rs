@@ -69,7 +69,7 @@ fn layout(format: wgpu::TextureFormat) -> Result<(usize, usize), ReadbackError> 
     Ok(match format {
         F::Rgba16Float => (4, 2),
         F::Rgba32Float => (4, 4),
-        F::Rgba8Unorm => (4, 1),
+        F::Rgba8Unorm | F::Bgra8Unorm => (4, 1),
         F::Rgba16Unorm => (4, 2),
         F::R32Float => (1, 4),
         F::Rg32Float => (2, 4),
@@ -118,6 +118,11 @@ fn decode_f32(
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
             ),
             _ => unreachable!(),
+        }
+    }
+    if format == wgpu::TextureFormat::Bgra8Unorm {
+        for pixel in out.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
         }
     }
     out

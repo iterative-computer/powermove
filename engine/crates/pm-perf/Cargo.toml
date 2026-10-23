@@ -10,3 +10,9 @@ publish.workspace = true
 # No dependencies: the vendored wgpu front crate (engine/third_party/wgpu)
 # counts its calls here, and so does every engine crate.
 [dependencies]
+
+[features]
+# Measurement only: compiles every add out, to measure what the always-on
+# counters cost (docs/engine/perfbench.md, "Overhead"). The ratchet refuses
+# to run with it.
+noop = []

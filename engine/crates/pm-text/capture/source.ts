@@ -6,7 +6,7 @@
    synthetic sets do not reach (3.5x and 7x of a variable project font).
 
    ~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/source.ts \
-     [--project <loaded.json>] [--times 16,18,24] [--out <dir>]
+     [--project <loaded.json>] [--times 16,18,24] [--out <dir>] [--hide-layers]
      -> <dir>/manifest.json, <dir>/<case>.rgba, <dir>/cases.json,
         <dir>/pipeline.json (world matrix, density and geometry per case),
         <dir>/source.json (where the project came from)
@@ -17,7 +17,11 @@
    (`pm-render/tests/fixtures/text-residuals.json`). Cases are named
    `real-<time>-<layer id>`. The legacy app must be built
    (`bun run --cwd apps/desktop build`); it runs hidden with the native
-   engine off. The pixels are renders of a private project and its fonts:
+   engine off. `--hide-layers` loads the project with every layer hidden,
+   so the preview draws no text before the capture: Chromium's glyph atlas
+   then holds only the captured rasters, in capture order, as the gate
+   replays them (distance-field pixels depend on atlas placement). The
+   pixels are renders of a private project and its fonts:
    they go to the private corpus (`~/Library/Application Support/Powermove
    Engine Corpus`, or `$PM_ENGINE_CORPUS_ROOT`) and never into the
    repository. */
@@ -54,6 +58,8 @@ interface Raster {
 }
 
 const doc = JSON.parse(readFileSync(projectPath, 'utf8'));
+const hideLayers = args.includes('--hide-layers');
+if (hideLayers) for (const layer of doc.layers ?? []) layer.on = false;
 const app = await launchLegacyApp();
 try {
   await app.evaluate((doc: any) => { const PM = (window as any).PM; PM.replaceProject(doc); PM.pause(); }, doc);
@@ -99,7 +105,7 @@ try {
   writeFileSync(join(out, 'cases.json'), JSON.stringify({ cases, projectFonts: [], variableSources: {} }));
   writeFileSync(join(out, 'manifest.json'), JSON.stringify({ cases: shots }));
   writeFileSync(join(out, 'pipeline.json'), JSON.stringify(rows, null, 2));
-  writeFileSync(join(out, 'source.json'), JSON.stringify({ project: projectPath, capture: basename(resolve(projectPath, '..', '..', '..')), times }, null, 2));
+  writeFileSync(join(out, 'source.json'), JSON.stringify({ project: projectPath, capture: basename(resolve(projectPath, '..', '..', '..')), times, hideLayers }, null, 2));
   console.log(`captured ${cases.length} source textures into ${out}`);
 } finally {
   await app.close();

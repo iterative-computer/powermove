@@ -1,0 +1,38 @@
+// Skia chrome/m152 AnalyticRRectRenderStep + ShaderInfo's viewport expression.
+layout(set=0, binding=0) uniform Params {
+    float4 viewport;
+    float4 xRadiiOrFlags;
+    float4 radiiOrQuadXs;
+    float4 ltrbOrQuadYs;
+    float4 center;
+    float4 mat0;
+    float4 mat1;
+    float4 mat2;
+    float4 color;
+};
+layout(location=0) out float4 jacobian;
+layout(location=1) out float4 edgeDistances;
+layout(location=2) out float4 xRadii;
+layout(location=3) out float4 yRadii;
+layout(location=4) out float2 strokeParams;
+layout(location=5) out float2 perPixelControl;
+const float kHalfRoot2 = 0.7071067811865476;
+const float2 positions[9] = float2[9](
+    float2(1,0), float2(1,0), float2(0,1), float2(0,1),
+    float2(1,0), float2(0,1), float2(1,0), float2(0,1), float2(1,0));
+const float2 normals[9] = float2[9](
+    float2(1,0), float2(kHalfRoot2), float2(kHalfRoot2), float2(0,1),
+    float2(kHalfRoot2), float2(kHalfRoot2), float2(1,0), float2(0,1), float2(1,0));
+void main() {
+    uint cornerID = uint(sk_VertexID) / 9;
+    uint t = uint(sk_VertexID) % 9;
+    float normalScale = t < 4 ? 1.0 : t < 6 ? 0.0 : -1.0;
+    float centerWeight = t == 8 ? 1.0 : 0.0;
+    float2 local;
+    float4 devPosition = analytic_rrect_vertex_fn(cornerID, positions[t], normals[t],
+        normalScale, centerWeight, xRadiiOrFlags, radiiOrQuadXs, ltrbOrQuadYs, center,
+        0.5, float3x3(mat0.xyz, mat1.xyz, mat2.xyz), jacobian, edgeDistances,
+        xRadii, yRadii, strokeParams, perPixelControl, local);
+    sk_Position = float4(viewport.zw*devPosition.xy - sign(viewport.zw)*devPosition.ww,
+                         devPosition.zw);
+}

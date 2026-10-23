@@ -279,9 +279,12 @@ pub struct Renderer {
     /// Where a waiting frame gets missing level 1 SVG rasters itself (the
     /// job engine's host services; [`Renderer::set_svg_source`]).
     svg_source: Option<Arc<dyn crate::vector::svg_rasters::SvgRasterSource>>,
-    /// Frames read back one after another (exports): the staging buffer and
-    /// a frame target given back with [`Renderer::recycle`]
-    /// (docs/engine/perfbench.md).
+    /// Frames read back one after another (exports): the staging buffer, a
+    /// frame target given back with [`Renderer::recycle`] and pixels given
+    /// back with [`Renderer::give_rgba`] (docs/engine/perfbench.md). Held
+    /// from one frame of an export to the next; dropped by
+    /// [`Renderer::release_frame_reuse`] (the export's end, every one-off
+    /// frame) and by [`Renderer::trim`].
     frame_reuse: FrameReuse,
     /// Bind groups kept across frames (`crate::binds`).
     binds: crate::binds::BindCache,
@@ -1192,6 +1195,9 @@ impl Renderer {
     pub fn trim(&mut self, bytes: u64) {
         // Kept bind groups hold their views (and textures) alive.
         self.binds.clear();
+        // An export's kept staging buffer, frame target and pixels (the
+        // next frame allocates them again).
+        self.release_frame_reuse();
         self.pool.trim(bytes);
         if self.pool.bytes() + self.pyramids.bytes() > bytes {
             self.pyramids.clear();
@@ -1951,8 +1957,19 @@ impl Renderer {
         }
     }
 
-    /// Drops what [`Self::read_rgba_reusing`] and [`Self::recycle`] kept
-    /// (at the end of an export).
+    /// Bytes [`Self::read_rgba_reusing`], [`Self::give_rgba`] and
+    /// [`Self::recycle`] keep for the next frame: the staging buffer, the
+    /// frame target and the pixels.
+    pub fn frame_reuse_bytes(&self) -> u64 {
+        let r = &self.frame_reuse;
+        r.readback.capacity_bytes()
+            + r.target.as_ref().map_or(0, |t| t.bytes())
+            + r.rgba.as_ref().map_or(0, |v| (v.capacity() * 4) as u64)
+    }
+
+    /// Drops what [`Self::read_rgba_reusing`], [`Self::give_rgba`] and
+    /// [`Self::recycle`] kept (at the end of an export, after a one-off
+    /// frame, and on [`Self::trim`]).
     pub fn release_frame_reuse(&mut self) {
         self.frame_reuse = FrameReuse::default();
     }

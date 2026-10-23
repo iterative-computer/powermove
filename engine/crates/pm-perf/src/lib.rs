@@ -12,12 +12,19 @@
 //! The counters are per thread: a bench measures the thread that does the
 //! work (the engine's render thread, an export's thread) and tests that run
 //! in parallel never see each other's counts. Each add is a thread-local
-//! cell increment (no atomics, no locks, no allocation), so they are always
-//! on, in release builds too.
+//! cell increment (no lock, no allocation) plus one relaxed load of a flag
+//! that is false unless a bench turned the process-wide totals on
+//! ([`count_globally`]); only then does an add also do a relaxed atomic
+//! add to a total shared by every thread. So the counters are always on, in
+//! release builds too, and the shipped app (which never turns the totals
+//! on) touches no shared cache line per add. The `noop` feature compiles
+//! every add out: it exists only to measure the counters' own cost
+//! (docs/engine/perfbench.md, "Overhead"); [`ENABLED`] tells a ratchet it
+//! is off.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 macro_rules! counters {
     ($($(#[$doc:meta])* $variant:ident = $name:literal,)*) => {
@@ -174,19 +181,45 @@ thread_local! {
 }
 
 /// Every thread's counts together (work spread over threads: an export's
-/// encoder and pool threads, decode threads).
+/// encoder and pool threads, decode threads), while [`count_globally`] is on.
 static GLOBAL: [AtomicU64; COUNT] = [const { AtomicU64::new(0) }; COUNT];
 
-/// Adds `n` to `counter` on this thread (and to the process's total).
+/// Whether adds also go to [`GLOBAL`] (benches turn it on; the app never does).
+static GLOBAL_ON: AtomicBool = AtomicBool::new(false);
+
+/// Whether this build counts at all (false with the measurement-only `noop`
+/// feature).
+pub const ENABLED: bool = !cfg!(feature = "noop");
+
+/// Turns the process-wide totals ([`snapshot_global`], [`Scope::finish_global`])
+/// on or off. Off by default: then an add touches only its thread's cells.
+/// Benches turn it on before they measure; counts made while it was off are
+/// not in the totals.
+pub fn count_globally(on: bool) {
+    GLOBAL_ON.store(on, Ordering::Relaxed);
+}
+
+/// Whether the process-wide totals are being counted.
+pub fn counting_globally() -> bool {
+    GLOBAL_ON.load(Ordering::Relaxed)
+}
+
+/// Adds `n` to `counter` on this thread (and to the process's total while
+/// [`count_globally`] is on).
 #[inline]
 pub fn add(counter: Counter, n: u64) {
+    if !ENABLED {
+        return;
+    }
     // `try_with`: a thread being torn down (and the allocator running in
     // its destructors) just doesn't count.
     let _ = COUNTS.try_with(|c| {
         let cell = &c[counter as usize];
         cell.set(cell.get().wrapping_add(n));
     });
-    GLOBAL[counter as usize].fetch_add(n, Ordering::Relaxed);
+    if GLOBAL_ON.load(Ordering::Relaxed) {
+        GLOBAL[counter as usize].fetch_add(n, Ordering::Relaxed);
+    }
 }
 
 /// Adds one to `counter` on this thread.
@@ -392,7 +425,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "noop")))]
 mod tests {
     use super::*;
 
@@ -408,6 +441,7 @@ mod tests {
 
     #[test]
     fn scopes_count_this_thread_only() {
+        count_globally(true);
         let scope = Scope::begin();
         bump(Counter::DrawCalls);
         add(Counter::UploadBytes, 40);

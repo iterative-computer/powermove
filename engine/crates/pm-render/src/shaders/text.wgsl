@@ -1,16 +1,17 @@
-// The float paint pass of text rasters (docs/engine/text-render.md).
+// The ordered paint pass of text rasters (docs/engine/text-render.md).
 //
 // Vello renders 8-bit coverage (white, area coverage) into pages laid out
 // 1:1 with device pixels; this pass paints each canvas draw in order with
 // premultiplied source-over (fixed-function ONE, ONE_MINUS_SRC_ALPHA) at
-// working precision:
+// N32 for level 1 and working precision for level 2:
 //
 // - kind 0, coverage: `color × curve(coverage)`, the profile's coverage
 //   curve (17 values at coverage i / 16, linear between them);
 // - kind 1, image: a color bitmap glyph, bilinear (the image carries a
 //   one-pixel transparent border, so edges fade as the CPU reference
 //   samples them), times the draw's alpha;
-// - kind 2, layer: a pre-painted layer (a blurred draw) copied 1:1.
+// - kind 2, layer: a pre-painted layer (a blurred draw) copied 1:1;
+// - kind 3, glyph mask: preblended A8 coverage times the premultiplied paint.
 //
 // Targets are top-down (row 0 at the top), like images.
 
@@ -62,10 +63,11 @@ fn fs_paint(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let k = mix(curve_value(i), curve_value(i + 1), x - f32(i));
         return it.color * k;
     }
-    if (kind < 1.5) {
+    if (kind < 1.5 || kind > 2.5) {
         let p = vec3<f32>(pos.xy, 1.0);
         let u = vec2<f32>(dot(it.inv0.xyz, p), dot(it.inv1.xyz, p));
         let s = textureSampleLevel(src, smp, u / it.isize.xy, 0.0);
+        if (kind > 2.5) { return it.color * s.a; }
         return s * it.color.w;
     }
     let t = vec2<i32>(floor(pos.xy) + it.map.xy);
