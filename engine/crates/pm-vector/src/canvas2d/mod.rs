@@ -13,7 +13,8 @@ pub mod shape;
 pub mod skpath;
 pub mod stroke;
 pub mod svg;
-pub mod tess;
 pub mod svg_text;
+pub mod tess;
 
+mod native;
 pub mod text;

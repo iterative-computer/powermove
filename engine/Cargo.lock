@@ -2462,6 +2462,7 @@ dependencies = [
  "kurbo",
  "libm",
  "peniko",
+ "pm-skia-path",
  "pm-text",
  "png",
  "resvg",
