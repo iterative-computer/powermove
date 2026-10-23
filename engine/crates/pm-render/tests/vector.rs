@@ -855,6 +855,65 @@ fn level1_rasters_drawn_ahead_on_workers_are_the_rasters_drawn_in_order() {
     assert!(drawn_ahead >= 40, "rasters drawn ahead: {drawn_ahead}");
 }
 
+/// Bigrender round 3: a playing view plans the frames it will draw next
+/// and their level 1 rasters are drawn ahead on threads of their own
+/// (`Renderer::plan_ahead`); the frames take them and are the same pixels
+/// as frames that drew their own.
+#[test]
+fn rasters_drawn_ahead_of_a_frame_are_taken_by_it_and_draw_the_same_pixels() {
+    let mut layers: Vec<Value> = Vec::new();
+    for i in 0..8 {
+        let shape = ["rect", "ellipse", "star", "polygon"][i % 4];
+        let mut l = layer(
+            &format!("s{i}"),
+            "shape",
+            json!({ "shape": shape, "w": 40 + 7 * i, "h": 30 + 5 * i, "points": 5 + i % 3,
+                    "radius": 6, "stroke": 2, "strokeColor": "#FFD60A", "color": "#F72585" }),
+            20.0 + 25.0 * i as f64,
+            60.0 + 15.0 * (i % 5) as f64,
+            2.0,
+        );
+        set(&mut l, "scale.x", json!({ "v": 100, "expr": null, "kf": [
+            { "t": 0, "v": 60, "ease": "linear" }, { "t": 2, "v": 180, "ease": "linear" }
+        ] }));
+        layers.push(l);
+    }
+    layers.push(path_layer("p0", 80.0, 190.0, 30.0));
+    let doc = load(&project(W, H, 2.0, no_fill(), layers));
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let draw = |renderer: &mut Renderer, t: f64| {
+        let frame = renderer
+            .render(&doc, "Ptest-root", ticks(t), &request, &MapResolver::default())
+            .expect("render");
+        renderer.read_rgba(&frame).unwrap()
+    };
+    let mut ahead = Renderer::headless().unwrap();
+    let mut own = Renderer::headless().unwrap();
+    let times = [0.0, 0.25, 0.5, 0.75, 1.0];
+    // The first frame, then each frame plans the one after it.
+    for (i, t) in times.iter().enumerate() {
+        if let Some(next) = times.get(i + 1) {
+            let needs = ahead.plan_ahead(&doc, "Ptest-root", ticks(*next), &request, &MapResolver::default(), true);
+            assert!(needs.is_empty());
+        }
+        // Let the threads finish what they can (a frame waits for the rest).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let a = draw(&mut ahead, *t);
+        let b = draw(&mut own, *t);
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "frame at {t} differs");
+        assert_eq!(ahead.vector_cache_len(), own.vector_cache_len(), "same cache entries at {t}");
+    }
+    let stats = ahead.vector_ahead_stats();
+    // Four frames planned ahead, five animated rasters each.
+    assert!(stats.drawn >= 16, "{stats:?}");
+    assert_eq!(stats.taken, stats.drawn, "the frames took everything drawn ahead: {stats:?}");
+    // A seek: what was drawn for frames that will not come is dropped.
+    ahead.plan_ahead(&doc, "Ptest-root", ticks(1.7), &request, &MapResolver::default(), true);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    ahead.forget_ahead();
+    assert_eq!(ahead.vector_ahead_stats().bytes, 0);
+}
+
 /// Bigrender round 2: a large paths layer's own raster is drawn only over
 /// the window a frame samples (today draws the whole bitmap; the window's
 /// pixels are the bitmap's there), in viewer frames and exports alike: the

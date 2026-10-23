@@ -73,6 +73,8 @@ pub struct PrefetchStats {
     /// The slowest raster: its time (µs) and pixels.
     pub slowest_us: u64,
     pub slowest_px: u64,
+    /// Of `drawn`, the rasters drawn ahead of the frame (`prefetch_ahead`).
+    pub ahead: u32,
 }
 
 /// Worker threads for [`VectorCache::prefetch`]: half the cores, at most 4.
@@ -93,6 +95,81 @@ fn prefetch_workers() -> usize {
             })
     });
     *WORKERS
+}
+
+/// Bytes of level 1 rasters drawn ahead (`VectorCache::prefetch_ahead`)
+/// and not yet taken by a frame; past it nothing more is drawn ahead.
+pub const AHEAD_MAX_BYTES: usize = 128 << 20;
+/// Frames a raster drawn ahead waits to be taken before it is dropped.
+pub const AHEAD_KEEP_FRAMES: u64 = 32;
+
+type RasterKey = ([u8; 32], u8);
+type Drawn = Result<(u32, u32, Vec<u8>), String>;
+
+/// Level 1 rasters drawn ahead of the frames that will draw them, on
+/// threads of their own: a playing view plans the frames it will draw next
+/// (`Renderer::compat_needs`) and their shape and path rasters are drawn
+/// here while it draws the current one. A frame takes the ones done, waits
+/// for the ones being drawn, and draws the rest itself (`prefetch`).
+#[derive(Default)]
+struct Ahead {
+    state: std::sync::Mutex<AheadState>,
+    done: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct AheadState {
+    /// Done, with the cache's frame count when it was asked for.
+    ready: HashMap<RasterKey, (Drawn, u64)>,
+    drawing: std::collections::HashSet<RasterKey>,
+    queue: std::collections::VecDeque<(RasterKey, VectorSource, u64)>,
+    bytes: usize,
+    workers: usize,
+    /// Stops the workers (the cache was dropped).
+    closed: bool,
+    /// Rasters drawn ahead, and those a frame took or waited for.
+    drawn: u64,
+    taken: u64,
+    waited: u64,
+}
+
+impl Ahead {
+    fn worker(self: std::sync::Arc<Self>) {
+        loop {
+            let (key, source, asked) = {
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                loop {
+                    if st.closed {
+                        st.workers -= 1;
+                        return;
+                    }
+                    if let Some(job) = st.queue.pop_front() {
+                        break job;
+                    }
+                    let (next, timeout) = self
+                        .done
+                        .wait_timeout(st, std::time::Duration::from_secs(10))
+                        .unwrap_or_else(|e| e.into_inner());
+                    st = next;
+                    // Idle a while: the thread ends (a paused view needs none).
+                    if timeout.timed_out() && st.queue.is_empty() {
+                        st.workers -= 1;
+                        return;
+                    }
+                }
+            };
+            let drawn = raster_level1(&source);
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.drawing.remove(&key);
+            if let Ok((_, _, rgba)) = &drawn {
+                st.bytes += rgba.len();
+            }
+            st.drawn += 1;
+            st.ready.insert(key, (drawn, asked));
+            drop(st);
+            self.done.notify_all();
+        }
+    }
 }
 
 /// A level 1 shape or paths raster: width, height and premultiplied
@@ -262,6 +339,29 @@ pub struct VectorCache {
     pub last_backend: Option<&'static str>,
     /// Level 1 SVG rasters the renderers uploaded (decision S1).
     pub svg: SvgRasters,
+    /// Level 1 rasters drawn ahead (`prefetch_ahead`).
+    ahead: std::sync::Arc<Ahead>,
+}
+
+impl Drop for VectorCache {
+    fn drop(&mut self) {
+        let mut st = self.ahead.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.closed = true;
+        st.queue.clear();
+        drop(st);
+        self.ahead.done.notify_all();
+    }
+}
+
+/// What [`VectorCache::prefetch_ahead`] has done so far (stats).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AheadStats {
+    /// Rasters drawn ahead, and those a frame then took (or waited for).
+    pub drawn: u64,
+    pub taken: u64,
+    pub waited: u64,
+    /// Bytes held for frames that have not come yet.
+    pub bytes: u64,
 }
 
 impl Default for VectorCache {
@@ -284,7 +384,121 @@ impl VectorCache {
             paint: None,
             last_backend: None,
             svg: SvgRasters::default(),
+            ahead: std::sync::Arc::default(),
         }
+    }
+
+    /// Draws the level 1 shape and path rasters of a frame that will be
+    /// drawn soon (its plan's sources) on threads of their own, for
+    /// [`Self::prefetch`] to take when that frame comes: the same function
+    /// of the same source, under the same key, so the frame's pixels are
+    /// the ones it would draw itself. Nothing is drawn for a source already
+    /// cached, done or being drawn, and nothing past [`AHEAD_MAX_BYTES`]
+    /// held for frames that have not come.
+    pub fn prefetch_ahead(&mut self, sources: &[&VectorSource], precision: Precision) {
+        let mut st = self.ahead.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.bytes >= AHEAD_MAX_BYTES {
+            return;
+        }
+        let mut queued = false;
+        for source in sources {
+            if !matches!(source, VectorSource::Shape { .. } | VectorSource::Paths { .. }) {
+                continue;
+            }
+            let key = (source.key(), precision as u8);
+            if self.entries.contains_key(&key)
+                || st.ready.contains_key(&key)
+                || st.drawing.contains(&key)
+            {
+                continue;
+            }
+            st.drawing.insert(key);
+            st.queue.push_back((key, (*source).clone(), self.frame));
+            queued = true;
+        }
+        if !queued {
+            return;
+        }
+        let want = prefetch_workers().min(st.queue.len() + st.workers);
+        while st.workers < want {
+            let ahead = self.ahead.clone();
+            let spawned = std::thread::Builder::new()
+                .name("pm-vector-ahead".into())
+                .spawn(move || ahead.worker());
+            if spawned.is_err() {
+                break;
+            }
+            st.workers += 1;
+        }
+        drop(st);
+        self.ahead.done.notify_all();
+    }
+
+    /// Rasters drawn ahead so far (stats).
+    pub fn ahead_stats(&self) -> AheadStats {
+        let st = self.ahead.state.lock().unwrap_or_else(|e| e.into_inner());
+        AheadStats {
+            drawn: st.drawn,
+            taken: st.taken,
+            waited: st.waited,
+            bytes: st.bytes as u64,
+        }
+    }
+
+    /// Drops what was drawn ahead and not taken (a seek, a stop: those
+    /// frames will not come), and what is still queued.
+    pub fn forget_ahead(&mut self) {
+        let mut st = self.ahead.state.lock().unwrap_or_else(|e| e.into_inner());
+        let queued: Vec<RasterKey> = st.queue.drain(..).map(|(k, _, _)| k).collect();
+        for k in queued {
+            st.drawing.remove(&k);
+        }
+        st.ready.clear();
+        st.bytes = 0;
+    }
+
+    /// The rasters among `keys` drawn ahead, taken; waits for those being
+    /// drawn ahead (drawing them again here would only race the worker).
+    fn take_ahead(&mut self, keys: &[RasterKey]) -> HashMap<RasterKey, Drawn> {
+        let mut out = HashMap::new();
+        let mut st = self.ahead.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.ready.is_empty() && st.drawing.is_empty() {
+            return out;
+        }
+        let mut waited = false;
+        loop {
+            for key in keys {
+                if let Some((drawn, _)) = st.ready.remove(key) {
+                    if let Ok((_, _, rgba)) = &drawn {
+                        st.bytes = st.bytes.saturating_sub(rgba.len());
+                    }
+                    st.taken += 1;
+                    out.insert(*key, drawn);
+                }
+            }
+            // Queued but not started: the frame draws those itself.
+            let queued: Vec<RasterKey> = st
+                .queue
+                .iter()
+                .filter(|(k, _, _)| keys.contains(k))
+                .map(|(k, _, _)| *k)
+                .collect();
+            if !queued.is_empty() {
+                st.queue.retain(|(k, _, _)| !queued.contains(k));
+                for k in &queued {
+                    st.drawing.remove(k);
+                }
+            }
+            if !keys.iter().any(|k| st.drawing.contains(k)) {
+                break;
+            }
+            waited = true;
+            st = self.ahead.done.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+        if waited {
+            st.waited += 1;
+        }
+        out
     }
 
     /// Selects the level 2 coverage backend; cached textures are dropped
@@ -333,6 +547,23 @@ impl VectorCache {
     /// bounded).
     pub fn begin_frame(&mut self) {
         self.frame += 1;
+        // Rasters drawn ahead for frames that passed without taking them
+        // (planned before a skip, a layer whose answer changed its source).
+        {
+            let frame = self.frame;
+            let mut st = self.ahead.state.lock().unwrap_or_else(|e| e.into_inner());
+            if !st.ready.is_empty() {
+                let mut freed = 0usize;
+                st.ready.retain(|_, (drawn, asked)| {
+                    let keep = *asked + AHEAD_KEEP_FRAMES >= frame;
+                    if !keep && let Ok((_, _, rgba)) = drawn {
+                        freed += rgba.len();
+                    }
+                    keep
+                });
+                st.bytes = st.bytes.saturating_sub(freed);
+            }
+        }
         self.svg.begin_frame();
         self.evict(self.max_bytes, self.max_entries, false);
     }
@@ -398,6 +629,24 @@ impl VectorCache {
                 continue;
             }
             misses.push((key, source));
+        }
+        // Drawn ahead (a playing view's next frames): uploaded as the frame
+        // would upload its own.
+        let keys: Vec<RasterKey> = misses.iter().map(|(k, _)| *k).collect();
+        let mut ahead = self.take_ahead(&keys);
+        if !ahead.is_empty() {
+            for (key, _) in &misses {
+                let Some(Ok((width, height, rgba))) = ahead.remove(key) else {
+                    continue;
+                };
+                self.tick += 1;
+                let texture = upload_rgba8(device, queue, width, height, &rgba);
+                self.insert(*key, texture, u64::from(width) * u64::from(height) * 4);
+                stats.drawn += 1;
+                stats.ahead += 1;
+            }
+            // A failed one is left to `resolve`, which reports it in order.
+            misses.retain(|(k, _)| !self.entries.contains_key(k) && !ahead.contains_key(k));
         }
         if misses.len() < 2 {
             // One raster gains nothing from a thread: `resolve` draws it.

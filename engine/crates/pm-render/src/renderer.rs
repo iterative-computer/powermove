@@ -1558,7 +1558,28 @@ impl Renderer {
         request: &RenderRequest,
         assets: &dyn AssetResolver,
     ) -> Vec<crate::compat::CompatNeed> {
-        if self.compat.is_none() || request.validate().is_err() {
+        if self.compat.is_none() {
+            return Vec::new();
+        }
+        self.plan_ahead(document, composition, time, request, assets, false)
+    }
+
+    /// [`Self::compat_needs`] of a frame a playing view will draw soon, and
+    /// (`rasters`) its level 1 shape and path rasters drawn ahead on threads
+    /// of their own (`VectorCache::prefetch_ahead`): when the frame comes
+    /// its prefetch takes them instead of drawing them on the frame's turn.
+    /// The same plan, sources, keys and rasterizers as the frame's own, so
+    /// its pixels are unchanged.
+    pub fn plan_ahead(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        rasters: bool,
+    ) -> Vec<crate::compat::CompatNeed> {
+        if request.validate().is_err() {
             return Vec::new();
         }
         let Ok(comp) = Comp::resolve(document, composition) else {
@@ -1579,7 +1600,7 @@ impl Renderer {
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         let options3d = self.options3d.for_request(request);
         let blender = crate::blender::PlanState::new(options3d.blender.clone());
-        let (_, build) = plan::build_blender(
+        let (plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
             &project,
@@ -1596,11 +1617,36 @@ impl Renderer {
             self.compat.as_deref(),
             None,
         );
-        if build.unsupported.is_empty() {
+        if !build.unsupported.is_empty() {
+            return Vec::new();
+        }
+        if rasters
+            && self.vector_prefetch
+            && let Ok(color) = project_settings(root)
+        {
+            // Keyed by content: a raster the frame does not draw after all
+            // (a layer whose answer changes its source) is never used, and
+            // goes after `AHEAD_KEEP_FRAMES`.
+            let precision = effective_precision(request.precision, color.precision);
+            let mut sources = Vec::new();
+            crate::vector::level1_sources(&plan, &mut sources);
+            self.vector.prefetch_ahead(&sources, precision);
+        }
+        if self.compat.is_some() {
             build.compat_missing
         } else {
             Vec::new()
         }
+    }
+
+    /// Rasters drawn ahead so far (`plan_ahead`).
+    pub fn vector_ahead_stats(&self) -> crate::vector::cache::AheadStats {
+        self.vector.ahead_stats()
+    }
+
+    /// Drops rasters drawn ahead for frames that will not come (a seek, a stop).
+    pub fn forget_ahead(&mut self) {
+        self.vector.forget_ahead();
     }
 
     #[allow(clippy::too_many_arguments)]

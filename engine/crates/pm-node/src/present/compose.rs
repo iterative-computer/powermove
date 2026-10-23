@@ -833,6 +833,33 @@ impl Composer {
             .compat_needs(doc, composition, time, &request, media)
     }
 
+    /// [`Self::compat_needs_at`] for a frame a playing view will draw soon,
+    /// with its level 1 shape and path rasters drawn ahead
+    /// (`Renderer::plan_ahead`).
+    pub fn plan_ahead_at(
+        &mut self,
+        doc: &pm_model::Document,
+        composition: &str,
+        media: &MediaMap,
+        time: Ticks,
+        state: &ViewerState,
+    ) -> Vec<pm_protocol::snapshot::CompatNeed> {
+        let Ok(comp) = pm_eval::Comp::resolve(doc, composition) else {
+            return Vec::new();
+        };
+        let number = |key: &str| {
+            let v = pm_eval::node::to_number(comp.member(key));
+            if v.is_finite() && v > 0.0 { v } else { 1.0 }
+        };
+        let place = placement(state, number("w"), number("h"));
+        let Some(region) = place.region else {
+            return Vec::new();
+        };
+        let request = self.viewer_request(&place, region, state, false);
+        self.renderer
+            .plan_ahead(doc, composition, time, &request, media, true)
+    }
+
     /// [`Self::compose`], also writing the frame's depth and object-id
     /// surface (r depth, g/b id − 1, a coverage; plan section 8) into
     /// `depth`, a `rgbaf16` texture of the working texture's size, placed

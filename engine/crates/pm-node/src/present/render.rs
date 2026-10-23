@@ -471,6 +471,12 @@ pub struct Stats {
     /// Raster-override needs asked ahead of the frames a playing view will
     /// draw (`keep_compat_asked`).
     pub compat_kept_ahead: u64,
+    /// Level 1 shape and path rasters drawn ahead of the frames a playing
+    /// view will draw, those frames took, and the frames that waited for
+    /// one still being drawn.
+    pub rasters_ahead: u64,
+    pub rasters_ahead_taken: u64,
+    pub rasters_ahead_waited: u64,
     /// Planning time spent asking the next frames' compatibility needs
     /// while a playing frame waited for its own (µs).
     pub compat_asked_ahead_us: u64,
@@ -3548,19 +3554,14 @@ impl Thread {
     /// Renders the frame showing `media` into a free surface, waits for the
     /// GPU, and returns its descriptor. `timing` is `(shown_from, shown_for)`
     /// in host µs for timed frames.
-    /// After playing frame `k` drew: the raster-override needs of the next
-    /// [`COMPAT_KEEP_AHEAD`] frames the schedule will draw (at its stride)
-    /// are asked of the window now, planned within a budget (their plans
-    /// only, `Composer::compat_needs_at`); each later frame adds the next.
-    /// Needs already answered or asked are not asked again.
+    /// After playing frame `k` drew, the next [`COMPAT_KEEP_AHEAD`] frames
+    /// are planned within a budget (`Composer::plan_ahead_at`, one frame
+    /// per frame drawn once the span is planned): their raster-override
+    /// needs are asked of the window now (those not answered or asked), and
+    /// their level 1 shape and path rasters are drawn ahead on threads of
+    /// their own, so the frames find both ready when they come.
     fn keep_compat_asked(&mut self, key: Key, k: i64) {
-        if !self.config.document
-            || !self
-                .compat
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .has_producers(key)
-        {
+        if !self.config.document {
             return;
         }
         let started = std::time::Instant::now();
@@ -3585,7 +3586,14 @@ impl Thread {
             Some((r, e, j)) if r == revision && e == epoch && (j - k) * dir > 0 => {
                 (j, COMPAT_KEEP_AHEAD_BUDGET)
             }
-            _ => (k, COMPAT_ASK_AHEAD_BUDGET),
+            previous => {
+                // A seek, a new run or an edit: what was drawn ahead for
+                // the old line will not be drawn.
+                if previous.is_some_and(|(_, e, _)| e != epoch) {
+                    composer.renderer().forget_ahead();
+                }
+                (k, COMPAT_ASK_AHEAD_BUDGET)
+            }
         };
         let composition = view.state.composition.as_str().to_owned();
         let f = view.clock.frame_ticks();
@@ -3596,7 +3604,7 @@ impl Thread {
         while (target - at) * dir > 0 && started.elapsed() < budget {
             at += step;
             let time = view.clock.wrap(at * f);
-            let needs = composer.compat_needs_at(
+            let needs = composer.plan_ahead_at(
                 doc.document(),
                 &composition,
                 doc.media(),
@@ -3611,6 +3619,7 @@ impl Thread {
             ));
         }
         composer.renderer().set_compat_rasters(None);
+        let ahead = composer.renderer().vector_ahead_stats();
         view.compat_asked_ahead = Some((revision, epoch, at));
         for chunk in fresh.chunks(pm_protocol::snapshot::MAX_COMPAT_NEEDS) {
             let envelope = super::compat::needs_event(key.1, revision, chunk.to_vec());
@@ -3621,6 +3630,9 @@ impl Thread {
         let mut stats = self.stats();
         stats.compat_kept_ahead += fresh.len() as u64;
         stats.compat_asked_ahead_us += started.elapsed().as_micros() as u64;
+        stats.rasters_ahead = ahead.drawn;
+        stats.rasters_ahead_taken = ahead.taken;
+        stats.rasters_ahead_waited = ahead.waited;
     }
 
     fn render(
