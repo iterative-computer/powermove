@@ -4,6 +4,8 @@
 //!
 //!   cargo run --release -p pm-perfbench --example perfbench -- [name ...] [--repeat N] [--out file.jsonl]
 //!   cargo run --release -p pm-perfbench --example perfbench -- --correlate [--repeat N] [--out file.jsonl]
+//!   ... --job-qos     runs the benches at the job engine's QoS class (utility),
+//!                     as the app's exports run
 //!
 //! `--correlate` runs the correlation set (`benches::correlation`) N times,
 //! interleaved, and prints, for every counter, how it tracks wall-clock
@@ -33,6 +35,10 @@ fn main() {
                 i += 1;
             }
             "--correlate" => correlate = true,
+            "--job-qos" => {
+                pm_engine::qos::apply_process_qos(pm_protocol::error::EngineProcess::Job)
+                    .expect("the job engine's QoS class");
+            }
             n => names.push(n.to_owned()),
         }
         i += 1;
