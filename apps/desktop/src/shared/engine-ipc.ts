@@ -62,6 +62,8 @@ export const ENGINE_IPC = {
   cancelSnapshot: 'engine:snapshot-cancel',
   /** renderer → main: one revision-pinned agent frame batch, without stopping playback. */
   agentFrames: 'engine:agent-frames',
+  prepareSource: 'engine:prepare-source',
+  releasePreparedSources: 'engine:release-prepared-sources',
   sourceFilmstrip: 'engine:source-filmstrip',
   browserRendition: 'engine:browser-rendition',
   cancelMediaJob: 'engine:cancel-media-job',
@@ -91,8 +93,11 @@ export type EngineSourceFilmstripRequest = EngineMediaJobRequest & {
   times: number[]; width: number; height: number;
   fit: 'stretch' | 'contain' | 'cover'; color: 'display' | 'interpreted';
 };
+/** Starts a frozen source session and draws one real frame ahead of a strip. */
+export type EngineSourcePrepareRequest = Omit<EngineSourceFilmstripRequest, 'times'> & { time: number };
 export type EngineBrowserRenditionRequest = EngineMediaJobRequest & { format: 'png' | 'webm' };
-export type EngineSourceFilmstripReply = { frames: Uint8Array[]; width: number; height: number };
+/** One packed top-down straight RGBA8 buffer; frame i begins at i*width*height*4. */
+export type EngineSourceFilmstripReply = { data: Uint8Array; count: number; width: number; height: number };
 export type EngineBrowserRenditionReply = { data: Uint8Array; type: 'image/png' | 'video/webm' };
 
 /** The `window.postMessage` types the preload uses to hand things to the page. */
@@ -379,6 +384,9 @@ export interface EngineBridge {
   /** Agent observations use the job engine at a pinned document revision. */
   agentFrames?(request: EngineAgentFramesRequest): Promise<EngineAgentFramesReply>;
   sourceFilmstrip?(request: EngineSourceFilmstripRequest): Promise<EngineSourceFilmstripReply>;
+  prepareSource?(request: EngineSourcePrepareRequest): Promise<void>;
+  /** Retires this window's source-frame sessions when its project closes. */
+  releasePreparedSources?(): Promise<void>;
   browserRendition?(request: EngineBrowserRenditionRequest): Promise<EngineBrowserRenditionReply>;
   cancelMediaJob?(requestId: string): Promise<void>;
   /** Compatibility pixels the job engine needs for an export frame; the

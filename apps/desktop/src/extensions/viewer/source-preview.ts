@@ -26,7 +26,7 @@ interface SourceElement extends EventTarget {
   pause(): void;
   dispose?(): void;
 }
-interface NativeSourceMedia { monitor(asset: string): SourceElement & { canvas: HTMLCanvasElement } }
+interface NativeSourceMedia { monitor(asset: string): SourceElement & { canvas: HTMLCanvasElement; surface?: HTMLCanvasElement | HTMLImageElement } }
 
 const STYLES = `
   #source-preview{position:absolute;inset:0;z-index:6;display:none;background:var(--bg-panel-2);border-radius:inherit;overflow:hidden}
@@ -215,7 +215,7 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
         const card = document.createElement('div'); card.className = 'sp-audio';
         const audioIcon = icon('music'); audioIcon.setAttribute('aria-hidden', 'true');
         card.append(audioIcon, name); media.append(card);
-      } else media.append(monitor.canvas);
+      } else media.append(monitor.surface ?? monitor.canvas);
       bindElement(monitor);
     } else if (kind === 'image' && url) {
       const img = document.createElement('img'); img.src = url; img.alt = '';

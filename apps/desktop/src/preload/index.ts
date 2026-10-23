@@ -589,6 +589,8 @@ const bridge: PowermoveBridge = {
       project: String(request.project), revision: request.revision, width: request.width, times: [...request.times]
     }),
     sourceFilmstrip: (request) => ipcRenderer.invoke(ENGINE_IPC.sourceFilmstrip, { ...request, times: [...request.times] }),
+    prepareSource: (request) => ipcRenderer.invoke(ENGINE_IPC.prepareSource, { ...request }),
+    releasePreparedSources: () => ipcRenderer.invoke(ENGINE_IPC.releasePreparedSources),
     cancelSnapshot: (requestId) => ipcRenderer.invoke(ENGINE_IPC.cancelSnapshot, String(requestId)),
     browserRendition: (request) => ipcRenderer.invoke(ENGINE_IPC.browserRendition, { ...request }),
     cancelMediaJob: (requestId) => ipcRenderer.invoke(ENGINE_IPC.cancelMediaJob, String(requestId)),

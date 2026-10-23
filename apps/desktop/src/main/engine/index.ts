@@ -535,6 +535,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   });
   const removeAgentFramesIpc = installAgentFramesIpc(options.ipc, agentJobs, options.isTrustedSender);
   const sourceJobs = new SourceJobs({ engine, directory: path.join(options.userData, 'Engine Cache', 'Scratch'),
+    releaseOutput: handle => engine.releaseOutput(handle),
     ...(options.snapshotMedia ? { snapshotMedia: options.snapshotMedia } : {}),
     ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}) });
   const removeSourceJobsIpc = installSourceJobsIpc(options.ipc, sourceJobs, options.isTrustedSender);

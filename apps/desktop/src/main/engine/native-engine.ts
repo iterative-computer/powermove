@@ -402,6 +402,11 @@ export class NativeEngine {
     return this.outputs.chooseDestination(file, job, session, launch.hostPort, overwrite);
   }
 
+  /** Retained job sessions release each completed job's output choice now. */
+  releaseOutput(handle: string): void {
+    this.outputs.releaseChoice(handle);
+  }
+
   /** Marks a job session as a draft render: offline media resolves to proxies. */
   setDraftSession(session: number, draft: boolean): void {
     this.services.setDraftSession(session, draft);
