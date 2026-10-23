@@ -273,9 +273,43 @@ fn wait_idle(renderer: &mut Renderer) {
 }
 
 /// Renders one frame through `gate`: the whole frame at once when the gate
-/// admits every unit, else bands of rows as regions of interest.
+/// admits every unit, else bands of rows as regions of interest. A one-off
+/// frame (an agent still, a parity frame): the renderer keeps no staging
+/// buffer or frame target afterwards (an export keeps them from frame to
+/// frame, [`run_export_with_blender`]).
 #[allow(clippy::too_many_arguments)]
 pub fn render_frame(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &dyn GpuGate,
+    pass: u64,
+    cancel: &AtomicBool,
+) -> Result<ReadFrame, JobError> {
+    let result = render_frame_reusing(
+        renderer,
+        document,
+        composition,
+        time,
+        request,
+        media,
+        gate,
+        pass,
+        cancel,
+    );
+    renderer.release_frame_reuse();
+    result
+}
+
+/// [`render_frame`], keeping the frame's staging buffer and target for the
+/// next frame (an export's frames; the caller releases them with
+/// `Renderer::release_frame_reuse` when its frames end, as
+/// [`run_export_with_blender`] does).
+#[allow(clippy::too_many_arguments)]
+pub fn render_frame_reusing(
     renderer: &mut Renderer,
     document: &Document,
     composition: &str,
@@ -311,7 +345,7 @@ pub fn render_frame(
     result
 }
 
-/// [`render_frame`]'s bands, with the renderer's bracket set to `span`.
+/// [`render_frame_reusing`]'s bands, with the renderer's bracket set to `span`.
 #[allow(clippy::too_many_arguments)]
 fn render_bands(
     renderer: &mut Renderer,
@@ -1042,7 +1076,8 @@ where
     S::Output: Send,
 {
     let result = export_frames(renderer, job, plan, sink, gate, cancel, progress, blender);
-    // The frames' staging buffer and target are kept only while exporting.
+    // The frames' staging buffer, target and pixels are kept only while
+    // exporting (one-off frames release them in `render_frame`).
     renderer.release_frame_reuse();
     result
 }
@@ -1181,7 +1216,7 @@ where
             };
             let rendered = frame_request
                 .and_then(|frame_request| {
-                    render_frame(
+                    render_frame_reusing(
                         renderer,
                         &document,
                         &job.composition,
