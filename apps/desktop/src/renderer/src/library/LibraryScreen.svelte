@@ -623,6 +623,9 @@
      between builds for scrolling, typing and navigation. A cover travelling
      back from the editor lands before any replacement is measured. */
   const buildQueue: Array<() => void | Promise<void>> = [];
+  const requestedViewerFrames = new WeakMap<HTMLElement, {
+    stamp: string; time: number; revision: number | null; presentation: unknown; viewSeq: number | undefined;
+  }>();
   let pumping = false;
   /* A hidden or busy window can hold animation frames back; a timer keeps
      the queue moving regardless. Whichever fires first runs the step. */
@@ -689,9 +692,21 @@
       if (!PM.playing && !cropped && !scene?.hasScene) {
         // The clone's overlay describes the presented frame. Wait for that
         // frame to catch up before combining it with fresh snapshot pixels.
+        const revision = transport.currentRevision();
         if (presentation && (!presentation.presenting || !latest || latest.standIn
-          || latest.revision !== transport.currentRevision()
-          || latest.pts !== Math.max(0, Math.round(time * 705_600_000)))) return null;
+          || latest.revision !== revision
+          || latest.pts !== Math.max(0, Math.round(time * 705_600_000)))) {
+          const previous = requestedViewerFrames.get(element);
+          if (!previous || previous.stamp !== stamp || previous.time !== time || previous.revision !== revision
+            || previous.presentation !== presentation || previous.viewSeq !== latest?.viewSeq) {
+            requestedViewerFrames.set(element, { stamp, time, revision, presentation, viewSeq: latest?.viewSeq });
+            // An unchanged layout does not request another paused frame.
+            // Ask once for this capture target, including after a project
+            // reset left the engine clock at the previous playhead time.
+            PM.EngineConnection?.transport?.seek(time, false);
+          }
+          return null;
+        }
         const captured = await snapshotClonedCanvasBitmaps(element, clone, {
           transport, time, composition: String(project.compId ?? project.id ?? ''),
           current: () => current() && PM.EngineRender === transport && PM.proj === project && PM.time === time
