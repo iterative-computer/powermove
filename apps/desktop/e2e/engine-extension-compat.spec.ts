@@ -865,6 +865,13 @@ test.describe('Use New Engine: existing extensions', () => {
       const q = (p: number) => Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)] ?? 0);
       return { moves: 60, shown: latencies.length, missed, diagnostics, p50: q(0.5), p95: q(0.95), max: q(1) };
     });
+    // The engine without the override first: the same drag's latency
+    // without compatibility answers (what the override adds).
+    await session.openEditor();
+    await largeDocumentProject(session.page, 2500);
+    await expect.poll(() => session.page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 90_000 }).toBe('engine');
+    await session.page.waitForTimeout(1500);
+    const withoutOverride = await drag(session.page);
     await cp(path.join(__dirname, FIXTURE['shape-tint']!), path.join(session.userData, 'extensions', 'shape-tint'), { recursive: true });
     await session.relaunch();
     await session.openEditor();
@@ -899,7 +906,7 @@ test.describe('Use New Engine: existing extensions', () => {
       await rm(off.userData, { recursive: true, force: true });
     }
     const slow = (a: number[] | null, b: number[] | null) => a && b ? a.map((n, i) => n - b[i]!) : null;
-    console.log(JSON.stringify({ editDrag: { documentBytes: bytes, load: os.loadavg(), engine, today, before, after, slowTurnsDuringDrag: slow(after.slowTurns, before.slowTurns) } }));
+    console.log(JSON.stringify({ editDrag: { documentBytes: bytes, load: os.loadavg(), engine, withoutOverride, today, before, after, slowTurnsDuringDrag: slow(after.slowTurns, before.slowTurns) } }));
     expect(bytes).toBeGreaterThan(4_000_000);
     // Every move drew new base rasters off the render thread, from the
     // worker's mirror: no copy of the document per revision, no reseed.
