@@ -21,7 +21,7 @@ const project = JSON.parse(await readFile(process.env.PM_MEMORY_PROJECT, 'utf8')
 if (Object.keys(project.assets ?? {}).length) throw new Error('Use an asset-free corpus project; this isolated harness does not install media bindings.');
 const count = Number(process.env.PM_MEMORY_SAMPLES ?? 5);
 const variants = (process.env.PM_MEMORY_VARIANTS ?? 'off,after').split(',');
-if (!Number.isInteger(count) || count < 1 || variants.some(v => !['off', 'before', 'nativeBefore', 'compatibility', 'pipelines', 'after'].includes(v))) throw new Error('Invalid measurement settings.');
+if (!Number.isInteger(count) || count < 1 || variants.some(v => !['off', 'before', 'nativeBefore', 'compatibility', 'homeControl', 'pipelines', 'after'].includes(v))) throw new Error('Invalid measurement settings.');
 await mkdir(output, { recursive: true });
 // Every after sample uses the same inode even if another local build finishes.
 const measuredAddon = path.join(output, 'measured.node');
@@ -124,12 +124,14 @@ async function capture(state, prefix, first, variant) {
     if (!host) return null;
     return { status: host.status(), interactive: await host.report('interactive'), job: await host.report('job') };
   });
-  const rendererEngine = await page.evaluate(() => ({
+  const rendererEngine = await page.evaluate(async () => ({
     wasmHeap: window.PM.EngineDoc?.wasm?.heap() ?? null,
     legacyContextCreated: Boolean(window.PM.GL?.peekContext?.()),
-    compatibilityFirstUseMs: window.PM.GL?.compatFirstUseMs ?? null
+    compatibilityFirstUseMs: window.PM.GL?.compatFirstUseMs ?? null,
+    legacyAllocations: window.PM.GL?.allocationStats?.() ?? null,
+    nativePresentation: await window.PM.Kernel.services.get('viewer')?.enginePresentation?.memoryStats?.() ?? null
   }));
-  if (['after', 'nativeBefore', 'compatibility'].includes(variant)
+  if (['after', 'nativeBefore', 'compatibility', 'homeControl'].includes(variant)
       && rendererEngine.legacyContextCreated !== (variant === 'compatibility')) {
     throw new Error(`Unexpected compatibility GL state in ${variant}/${state}.`);
   }
@@ -163,7 +165,7 @@ for (let round = 0; round < count; round++) {
       if (variant === 'before' || variant === 'nativeBefore') {
         if (!process.env.PM_MEMORY_BASELINE_ADDON) throw new Error('PM_MEMORY_BASELINE_ADDON is required for before.');
         env.POWERMOVE_ENGINE_ADDON = process.env.PM_MEMORY_BASELINE_ADDON;
-      } else if (['after', 'compatibility', 'pipelines'].includes(variant)) env.POWERMOVE_ENGINE_ADDON = measuredAddon;
+      } else if (['after', 'compatibility', 'homeControl', 'pipelines'].includes(variant)) env.POWERMOVE_ENGINE_ADDON = measuredAddon;
       else delete env.POWERMOVE_ENGINE_ADDON;
       delete env.ELECTRON_RUN_AS_NODE;
       app = await _electron.launch({ args: ['.', '--force-color-profile=srgb'], cwd: desktop, env, timeout: 90_000 });
@@ -172,6 +174,13 @@ for (let round = 0; round < count; round++) {
       await page.waitForFunction(() => Boolean(window.PM?.ProjectsScreen), undefined, { timeout: 90_000 });
       await page.evaluate(async () => { await window.PM.Kernel.loader.builtinsReady; });
       if (variant !== 'off') await app.evaluate(async () => { await globalThis.__powermoveNativeEngine.engine.ensureReady('interactive'); });
+      if (process.env.PM_MEMORY_HOME_SUSPEND_GATE === '1' && variant !== 'off') {
+        await page.evaluate(enabled => {
+          const connection = window.PM.EngineConnection;
+          if (typeof connection?.setHomeSuspendForDiagnostics !== 'function') throw new Error('Home suspension diagnostics are missing.');
+          connection.setHomeSuspendForDiagnostics(enabled);
+        }, variant !== 'homeControl');
+      }
       if (variant === 'compatibility') {
         // Same native addon and viewer, with the older API's context already
         // allocated. Isolate its cost without changing the rendering route.
@@ -245,7 +254,22 @@ for (let round = 0; round < count; round++) {
           });
           await page.waitForFunction(() => window.PM.isHomeProject() && window.PM.ProjectsScreen.isOpen);
           await page.waitForTimeout(2500);
-          states.push(await capture('homeClosed', prefix, round === 0, variant));
+          if (process.env.PM_MEMORY_HOME_SUSPEND_GATE === '1' && variant !== 'off' && variant !== 'homeControl') {
+            await page.waitForFunction(async () => {
+              const stats = await window.PM.Kernel.services.get('viewer')?.enginePresentation?.memoryStats?.();
+              return stats?.suspended === true && stats?.channelOpen === false && stats?.pendingDrains === 0 && stats?.painter?.trimmed === true;
+            }, undefined, { timeout: 10000 });
+          }
+          const homeClosed = await capture('homeClosed', prefix, round === 0, variant);
+          if (process.env.PM_MEMORY_HOME_SUSPEND_GATE === '1' && variant !== 'off' && variant !== 'homeControl') {
+            const inventory = homeClosed.engine?.interactive?.presenter?.allocations;
+            const presentation = homeClosed.rendererEngine.nativePresentation;
+            if (!inventory || inventory.gpuCreated || inventory.colorSurfaceBytes !== 0 || inventory.workingTargetBytes !== 0
+                || presentation?.imports?.held !== 0 || presentation?.painter?.trimmed !== true) {
+              throw new Error('The suspended home viewer retained its device, pool, imports, or full-size painter.');
+            }
+          }
+          states.push(homeClosed);
         }
       }
       const agentPrewarm = variant === 'off' ? null : await app.evaluate(async ({ BrowserWindow }, project) => {
