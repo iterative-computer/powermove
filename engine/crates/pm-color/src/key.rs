@@ -89,7 +89,11 @@ pub fn source_key_bytes(
         siting_id(desc.siting),
         desc.bit_depth,
         u8::from(project.working() == pm_protocol::color::WorkingEncoding::LinearLight),
-        match precision { Precision::Float16 => 0, Precision::Float32 => 1, Precision::Unorm8 => 2 },
+        match precision {
+            Precision::Float16 => 0,
+            Precision::Float32 => 1,
+            Precision::Unorm8 => 2,
+        },
     ];
     match desc.alpha {
         AlphaMode::Opaque => out.push(0),
@@ -105,7 +109,10 @@ pub fn source_key_bytes(
     out
 }
 
-/// Section 8 and amendment 8: exports default to 32-bit precision when the
+/// Historical amendment 8 advisory (retained for callers). Project renders
+/// now use the saved Color depth directly (DEPTH-1); this helper is not used
+/// to choose their working format.
+/// Exports formerly defaulted to 32-bit precision when the
 /// output or any source exceeds 10 bits (16-bit Blender, PNG, and TIFF
 /// surfaces included); otherwise the project's precision applies.
 pub fn default_export_precision(
@@ -214,7 +221,10 @@ mod tests {
         }
         assert_ne!(base, source_key_bytes(&d, &p, Precision::Float32));
         assert_ne!(base, source_key_bytes(&d, &p, Precision::Unorm8));
-        assert_ne!(source_key_bytes(&d, &p, Precision::Float32), source_key_bytes(&d, &p, Precision::Unorm8));
+        assert_ne!(
+            source_key_bytes(&d, &p, Precision::Float32),
+            source_key_bytes(&d, &p, Precision::Unorm8)
+        );
         assert_eq!(base, source_key_bytes(&d, &p, Precision::Float16));
     }
 

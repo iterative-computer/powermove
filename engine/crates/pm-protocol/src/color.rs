@@ -297,7 +297,8 @@ impl ProjectColor {
     /// Color depth is shared with the shipped engine; only the additional
     /// color operations require the native engine.
     pub fn requires_native(&self) -> bool {
-        self.mode != Self::DEFAULT.mode || self.linear_blending
+        self.mode != Self::DEFAULT.mode
+            || self.linear_blending
             || self.blend_domain != Self::DEFAULT.blend_domain
     }
 }
@@ -791,7 +792,13 @@ mod tests {
         assert_eq!(ProjectColor::DEFAULT.working(), WorkingEncoding::Standard);
         assert!(!ProjectColor::DEFAULT.requires_native());
         for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
-            assert!(!ProjectColor { precision, ..ProjectColor::DEFAULT }.requires_native());
+            assert!(
+                !ProjectColor {
+                    precision,
+                    ..ProjectColor::DEFAULT
+                }
+                .requires_native()
+            );
         }
         let linear = ProjectColor {
             linear_blending: true,

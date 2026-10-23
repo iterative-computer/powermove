@@ -824,11 +824,10 @@ impl Composer {
                 },
                 video_end: pm_render::VideoEnd::Preview,
             };
-            let format = pm_render::Renderer::target_format(doc, &request);
-            let reuse = self
-                .scratch
-                .as_ref()
-                .is_some_and(|t| t.width() == region.width && t.height() == region.height && t.format() == format);
+            let format = self.renderer.device_target_format(doc, &request);
+            let reuse = self.scratch.as_ref().is_some_and(|t| {
+                t.width() == region.width && t.height() == region.height && t.format() == format
+            });
             if !reuse {
                 self.scratch = Some(Target::new(
                     &device,

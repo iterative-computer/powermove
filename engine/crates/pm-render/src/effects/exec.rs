@@ -371,7 +371,8 @@ impl<'c> Gpu<'c> {
         let device = self.device;
         let source = self
             .effects
-            .parity_source(DefinitionKind::Effect, &step.definition);
+            .parity_source(DefinitionKind::Effect, &step.definition)
+            .map(|source| super::parity::scoped_source(&source, self.precision));
         let probe = source
             .as_ref()
             .map(|source| self.effects.parity.verdict(source));
@@ -532,7 +533,8 @@ impl<'c> Gpu<'c> {
         let device = self.device;
         let source = self
             .effects
-            .parity_source(DefinitionKind::Transition, &step.definition);
+            .parity_source(DefinitionKind::Transition, &step.definition)
+            .map(|source| super::parity::scoped_source(&source, self.precision));
         let probe = source
             .as_ref()
             .map(|source| self.effects.parity.verdict(source));
@@ -789,6 +791,7 @@ impl<'c> Gpu<'c> {
             .and_then(|d| d.glsl.as_ref())
             .map(|g| g.source.clone())
             .unwrap_or_default();
+        let parity_source = super::parity::scoped_source(&source, self.precision);
         let program = super::fallback::program_id_of(pm_glsl::VERTEX, &source);
         let (w, h) = (textures[0].width(), textures[0].height());
         if let Some(why) = self.effects.fallback.failure(&program, w, h).cloned() {
@@ -796,9 +799,9 @@ impl<'c> Gpu<'c> {
             // learned from another request of the program): pinned, so
             // later frames take the runner's path without a native draw.
             if native.is_some()
-                && self.effects.parity.verdict(&source) == super::parity::Verdict::Unknown
+                && self.effects.parity.verdict(&parity_source) == super::parity::Verdict::Unknown
             {
-                self.effects.parity.pin(&source);
+                self.effects.parity.pin(&parity_source);
             }
             self.runner_failed(&span, &program, &why);
             return None;
@@ -889,15 +892,14 @@ impl<'c> Gpu<'c> {
             },
         );
         if let Some(native) = native {
-            if let Some(probed_frame) = self.effects.parity.take_present(&request.fragment) {
+            if let Some(probed_frame) = self.effects.parity.take_present(&parity_source) {
                 if probed_frame != request.key {
                     // The caller returns the native target to the pool;
                     // keep a distinct lease for the chain's output.
                     return Some(self.copy_of(native));
                 }
-            } else if self.effects.parity.verdict(&request.fragment)
-                == super::parity::Verdict::Unknown
-                && !self.effects.parity.pending(&request.fragment)
+            } else if self.effects.parity.verdict(&parity_source) == super::parity::Verdict::Unknown
+                && !self.effects.parity.pending(&parity_source)
             {
                 match read_half(
                     device,
@@ -909,11 +911,10 @@ impl<'c> Gpu<'c> {
                         16
                     },
                 ) {
-                    Ok(pixels) => {
-                        self.effects
-                            .parity
-                            .start(&request.key, &request.fragment, pixels)
-                    }
+                    Ok(pixels) => self
+                        .effects
+                        .parity
+                        .start(&request.key, &parity_source, pixels),
                     Err(error) => self.effects.watchdog.report(EngineError::new(
                         ErrorCode::Internal,
                         span_scope(&span),
@@ -922,11 +923,30 @@ impl<'c> Gpu<'c> {
                 }
             }
         }
+        if let Some(code) = self
+            .effects
+            .fallback
+            .result(&request.key)
+            .and_then(|result| result.invalid_rgba8_code(&request))
+        {
+            let message = format!(
+                "{id}: the fallback runner returned invalid RGBA8 channel code {code} (expected 0..=255)"
+            );
+            if self.effects.watchdog.policy() == super::watchdog::Policy::Job {
+                self.effects.fallback.fatal.get_or_insert(message.clone());
+            }
+            self.effects.watchdog.report(EngineError::new(
+                ErrorCode::InvalidMessage,
+                span_scope(&span),
+                message,
+            ));
+            return None;
+        }
         if let Some(result) = self.effects.fallback.result(&request.key)
             && result.fits(&request)
         {
             self.effects.parity.answer(&request.key, &result);
-            self.effects.parity.take_present(&request.fragment);
+            self.effects.parity.take_present(&parity_source);
             let out = self.take(w, h);
             write_half(queue, &out, &result);
             return Some(out);

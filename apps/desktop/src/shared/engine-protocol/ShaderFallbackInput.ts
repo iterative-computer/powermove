@@ -2,7 +2,8 @@
 import type { Bytes } from "./Bytes";
 
 /**
- * Rows `row .. row + rows` of texture `texture` of a request: binary16
- * RGBA, little-endian, rows in GL order (row 0 at the bottom).
+ * Rows `row .. row + rows` of texture `texture` of a request: four u16
+ * slots per pixel. At depth 8 each slot is an exact byte code; otherwise
+ * it is binary16. Little-endian, rows in GL order (row 0 at the bottom).
  */
 export type ShaderFallbackInput = { key: string, texture: number, width: number, height: number, row: number, rows: number, rgba16f: Bytes, };

@@ -430,7 +430,7 @@ pub fn encode_rgba8(half: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
     out
 }
 
-/// The mapped half/float32 rows of one completed snapshot ticket. This is
+/// The mapped RGBA8/half/float32 rows of one completed snapshot ticket. This is
 /// the single final allocation, preserving alpha, row-order, and rounding.
 pub fn encode_mapped_rgba8(
     format: wgpu::TextureFormat,
@@ -442,6 +442,9 @@ pub fn encode_mapped_rgba8(
     rows: pm_render::SnapshotRows,
 ) -> Result<Vec<u8>, pm_gpu::readback::ReadbackError> {
     match format {
+        wgpu::TextureFormat::Rgba8Unorm => Ok(encode_rgba8_unorm_rows(
+            data, row, stride, height, pixels, rows,
+        )),
         wgpu::TextureFormat::Rgba16Float => {
             Ok(encode_rgba8_rows(data, row, stride, height, pixels, rows))
         }
@@ -450,6 +453,28 @@ pub fn encode_mapped_rgba8(
         )),
         other => Err(pm_gpu::readback::ReadbackError::Format(other)),
     }
+}
+
+fn encode_rgba8_unorm_rows(
+    raw: &[u8],
+    row: usize,
+    stride: usize,
+    height: usize,
+    pixels: SnapshotPixels,
+    rows: pm_render::SnapshotRows,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(row * height);
+    for y in 0..height {
+        let source_y = match rows {
+            pm_render::SnapshotRows::TopDown => y,
+            pm_render::SnapshotRows::Gl => height - 1 - y,
+        };
+        let source = &raw[source_y * stride..source_y * stride + row];
+        for px in source.chunks_exact(4) {
+            push_rgba8_unorm(&mut out, [px[0], px[1], px[2], px[3]], pixels);
+        }
+    }
+    out
 }
 
 fn encode_rgba8_f32_rows(
@@ -515,16 +540,25 @@ pub fn encode_rgba8_f32(rgba: &[f32], pixels: SnapshotPixels) -> Vec<u8> {
 
 /// [`encode_rgba8`] from premultiplied RGBA8 (a Canvas2D raster's pixels).
 pub fn encode_rgba8_unorm(rgba: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
+    if pixels == SnapshotPixels::Premultiplied {
+        return rgba.to_vec();
+    }
+    let mut out = Vec::with_capacity(rgba.len());
+    for px in rgba.chunks_exact(4) {
+        push_rgba8_unorm(&mut out, [px[0], px[1], px[2], px[3]], pixels);
+    }
+    out
+}
+
+fn push_rgba8_unorm(out: &mut Vec<u8>, [r, g, b, a]: [u8; 4], pixels: SnapshotPixels) {
     match pixels {
-        // Already in the encoding: no round trip through floats.
-        SnapshotPixels::Premultiplied => rgba.to_vec(),
-        _ => {
-            let mut out = Vec::with_capacity(rgba.len());
-            for px in rgba.chunks_exact(4) {
-                let f = |v: u8| f32::from(v) / 255.0;
-                push_rgba8(&mut out, [f(px[0]), f(px[1]), f(px[2]), f(px[3])], pixels);
-            }
-            out
+        SnapshotPixels::Opaque => out.extend_from_slice(&[r, g, b, 255]),
+        SnapshotPixels::Premultiplied => out.extend_from_slice(&[r, g, b, a]),
+        SnapshotPixels::Straight if a == 0 => out.extend_from_slice(&[0, 0, 0, 0]),
+        SnapshotPixels::Straight => {
+            let un =
+                |v: u8| ((u32::from(v) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
+            out.extend_from_slice(&[un(r), un(g), un(b), a]);
         }
     }
 }
@@ -974,6 +1008,83 @@ mod tests {
                 encode_rgba8_f32_rows(&padded, 16, 32, 2, pixels, pm_render::SnapshotRows::Gl),
                 encode_rgba8_f32(&[bottom, top].concat(), pixels)
             );
+        }
+    }
+
+    #[test]
+    fn mapped_rgba8_rows_keep_exact_codes_flip_and_straight_alpha() {
+        let top = [64, 32, 16, 128, 9, 7, 5, 0];
+        let bottom = [12, 24, 48, 255, 128, 64, 32, 128];
+        let mut mapped = top.to_vec();
+        mapped.extend([0xa5; 8]);
+        mapped.extend(bottom);
+        for pixels in [
+            SnapshotPixels::Opaque,
+            SnapshotPixels::Premultiplied,
+            SnapshotPixels::Straight,
+        ] {
+            for rows in [
+                pm_render::SnapshotRows::TopDown,
+                pm_render::SnapshotRows::Gl,
+            ] {
+                let expected = if rows == pm_render::SnapshotRows::TopDown {
+                    [top.as_slice(), bottom.as_slice()].concat()
+                } else {
+                    [bottom.as_slice(), top.as_slice()].concat()
+                };
+                assert_eq!(
+                    encode_mapped_rgba8(
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        &mapped,
+                        8,
+                        16,
+                        2,
+                        pixels,
+                        rows,
+                    )
+                    .unwrap(),
+                    encode_rgba8_unorm(&expected, pixels),
+                    "{pixels:?} {rows:?}"
+                );
+            }
+        }
+        assert_eq!(
+            encode_mapped_rgba8(
+                wgpu::TextureFormat::Rgba8Unorm,
+                &mapped,
+                8,
+                16,
+                2,
+                SnapshotPixels::Straight,
+                pm_render::SnapshotRows::TopDown,
+            )
+            .unwrap(),
+            vec![
+                128, 64, 32, 128, 0, 0, 0, 0, 12, 24, 48, 255, 255, 128, 64, 128
+            ]
+        );
+    }
+
+    #[test]
+    fn byte_snapshot_alpha_matches_existing_float_conversion_for_all_codes() {
+        for alpha in u8::MIN..=u8::MAX {
+            for value in u8::MIN..=u8::MAX {
+                let byte = [value, value, value, alpha];
+                let float = byte.map(|code| f32::from(code) / 255.0);
+                for mode in [
+                    SnapshotPixels::Opaque,
+                    SnapshotPixels::Premultiplied,
+                    SnapshotPixels::Straight,
+                ] {
+                    let mut expected = Vec::new();
+                    push_rgba8(&mut expected, float, mode);
+                    assert_eq!(
+                        encode_rgba8_unorm(&byte, mode),
+                        expected,
+                        "{mode:?} {byte:?}"
+                    );
+                }
+            }
         }
     }
 }

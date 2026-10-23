@@ -305,6 +305,33 @@ pub(crate) fn upload(
 }
 
 impl crate::exec::Exec<'_> {
+    fn reject_invalid_fallback_code(&mut self, request: &FallbackRequest, layer: &str) -> bool {
+        let Some(code) = self
+            .shaders
+            .fallback
+            .get(&request.key)
+            .and_then(|pixels| pixels.invalid_rgba8_code(request))
+        else {
+            return false;
+        };
+        let message = format!(
+            "Layer {layer}: the fallback runner returned invalid RGBA8 channel code {code} (expected 0..=255)"
+        );
+        if self.effects.watchdog.policy() == crate::effects::watchdog::Policy::Job {
+            self.effects.fallback.fatal.get_or_insert(message.clone());
+        }
+        self.effects
+            .watchdog
+            .report(pm_protocol::error::EngineError::new(
+                pm_protocol::error::ErrorCode::InvalidMessage,
+                pm_protocol::error::ErrorScope::Layer {
+                    layer: layer.into(),
+                },
+                message,
+            ));
+        true
+    }
+
     /// Draws a shader source into a new working target (GL row order,
     /// E-encoded legacy output), and whether the target is the pool's.
     pub(crate) fn shader_source(
@@ -409,6 +436,9 @@ impl crate::exec::Exec<'_> {
                 }
                 return Err(Missed::Disabled);
             }
+            if self.reject_invalid_fallback_code(&request, &source.layer) {
+                return Err(Missed::Disabled);
+            }
             return match self
                 .shaders
                 .fallback_target(self.device, self.queue, &request)
@@ -462,7 +492,8 @@ impl crate::exec::Exec<'_> {
             None
         };
         let probe = probe_code.as_ref().and_then(|code| {
-            let mut verdict = self.effects.parity.verdict(code);
+            let parity_source = crate::effects::parity::scoped_source(code, self.precision);
+            let mut verdict = self.effects.parity.verdict(&parity_source);
             let request = Arc::new(super::fallback::at_color_depth(
                 &super::fallback::request(
                     source.layer.clone(),
@@ -484,7 +515,7 @@ impl crate::exec::Exec<'_> {
                     // Its reference can never be drawn (a lasting runner
                     // failure): pinned, and the runner's failure handling
                     // below decides what today's app shows.
-                    self.effects.parity.pin(code);
+                    self.effects.parity.pin(&parity_source);
                     verdict = crate::effects::parity::Verdict::Runner;
                 } else if self.effects.fallback.retries.last(&program).is_some() {
                     // Its reference failed transiently: the runner's retry
@@ -496,7 +527,9 @@ impl crate::exec::Exec<'_> {
                 }
             }
             if verdict == crate::effects::parity::Verdict::NativeVerified {
-                if self.effects.parity.take_present(code).as_deref() == Some(request.key.as_str()) {
+                if self.effects.parity.take_present(&parity_source).as_deref()
+                    == Some(request.key.as_str())
+                {
                     return Some((verdict, request));
                 }
                 return None;
@@ -505,7 +538,13 @@ impl crate::exec::Exec<'_> {
         });
         if let Some((verdict, request)) = &probe
             && (*verdict != crate::effects::parity::Verdict::Unknown
-                || self.effects.parity.pending(&request.fragment))
+                || self
+                    .effects
+                    .parity
+                    .pending(&crate::effects::parity::scoped_source(
+                        &request.fragment,
+                        self.precision,
+                    )))
         {
             // The runner's outcome, with its retry, backoff and failure
             // handling (a program it cannot draw draws nothing, as today).
@@ -581,6 +620,9 @@ impl crate::exec::Exec<'_> {
                     16
                 },
             ));
+            if self.reject_invalid_fallback_code(&request, &source.layer) {
+                return Err(Missed::Disabled);
+            }
             return match self
                 .shaders
                 .fallback_target(self.device, self.queue, &request)
@@ -636,10 +678,11 @@ impl crate::exec::Exec<'_> {
                     16
                 },
             ) {
-                Ok(native) => self
-                    .effects
-                    .parity
-                    .start(&request.key, &request.fragment, native),
+                Ok(native) => self.effects.parity.start(
+                    &request.key,
+                    &crate::effects::parity::scoped_source(&request.fragment, self.precision),
+                    native,
+                ),
                 Err(error) => self
                     .effects
                     .watchdog
@@ -652,6 +695,9 @@ impl crate::exec::Exec<'_> {
                     )),
             }
             self.pool.give(out);
+            if self.reject_invalid_fallback_code(&request, &source.layer) {
+                return Err(Missed::Disabled);
+            }
             let Some(angle) = self
                 .shaders
                 .fallback
@@ -661,7 +707,12 @@ impl crate::exec::Exec<'_> {
                 return Err(Missed::Pending(request));
             };
             self.effects.parity.answer(&request.key, &angle);
-            self.effects.parity.take_present(&request.fragment);
+            self.effects
+                .parity
+                .take_present(&crate::effects::parity::scoped_source(
+                    &request.fragment,
+                    self.precision,
+                ));
             let target = self
                 .shaders
                 .fallback_target(device, queue, &request)

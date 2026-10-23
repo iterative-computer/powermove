@@ -16,6 +16,19 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::shader_layers::{FallbackFailure, FallbackPixels};
+use pm_protocol::color::Precision;
+
+/// Parity markers judge the fragment's arithmetic *and* the target's store
+/// precision. Keep the GLSL source unchanged for the fallback runner, but
+/// include this value in every verdict/pending/present lookup.
+pub(crate) fn scoped_source(source: &str, precision: Precision) -> String {
+    let depth = match precision {
+        Precision::Unorm8 => "unorm8",
+        Precision::Float16 => "float16",
+        Precision::Float32 => "float32",
+    };
+    format!("working-depth-v1:{depth}\0{source}")
+}
 
 /// How often a cached native verification looks for a pin another process
 /// wrote (one `stat`-sized read per program per period, not per draw).
@@ -204,17 +217,22 @@ impl Parity {
         }
     }
 
-    /// Any channel over one code value pins the whole program. This is an
-    /// absolute bound, also for HDR; non-finite disagreements pin too.
+    /// RGBA8 comparisons use exact byte codes; half-float comparisons allow
+    /// at most one output code value of difference, also for HDR.
     pub fn judge(
         &mut self,
         source: &str,
         native: &FallbackPixels,
         angle: &FallbackPixels,
     ) -> Verdict {
+        let same = if source.starts_with("working-depth-v1:unorm8\0") {
+            matches_rgba8(native, angle)
+        } else {
+            matches(native, angle)
+        };
         let verdict = if self.verdict(source) == Verdict::Runner {
             Verdict::Runner
-        } else if matches(native, angle) {
+        } else if same {
             Verdict::NativeVerified
         } else {
             Verdict::Runner
@@ -281,9 +299,62 @@ pub fn matches(native: &FallbackPixels, angle: &FallbackPixels) -> bool {
         })
 }
 
+fn matches_rgba8(native: &FallbackPixels, angle: &FallbackPixels) -> bool {
+    native.width == angle.width
+        && native.height == angle.height
+        && native.rgba16f.len() == native.width as usize * native.height as usize * 4
+        && native.rgba16f == angle.rgba16f
+        && native.rgba16f.iter().all(|code| *code <= 255)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parity_verdicts_are_scoped_to_working_precision() {
+        let mut parity = Parity::default();
+        parity.configure(Some("precision-scoping".into()), None);
+        let source = "void main() { fragColor = vec4(0.5); }";
+        let rgba8 = scoped_source(source, Precision::Unorm8);
+        let half = scoped_source(source, Precision::Float16);
+        let full = scoped_source(source, Precision::Float32);
+        parity.judge(&half, &pixels(0.5), &pixels(0.5));
+        assert_eq!(parity.verdict(&half), Verdict::NativeVerified);
+        assert_eq!(parity.verdict(&rgba8), Verdict::Unknown);
+        assert_eq!(parity.verdict(&full), Verdict::Unknown);
+        parity.pin(&rgba8);
+        assert_eq!(parity.verdict(&rgba8), Verdict::Runner);
+        assert_eq!(parity.verdict(&half), Verdict::NativeVerified);
+    }
+
+    #[test]
+    fn rgba8_parity_requires_exact_valid_byte_codes() {
+        let mut parity = Parity::default();
+        parity.configure(Some("byte-parity".into()), None);
+        let source = scoped_source("byte probe", Precision::Unorm8);
+        let frame = |code| FallbackPixels {
+            width: 1,
+            height: 1,
+            rgba16f: vec![code; 4],
+        };
+        assert_eq!(
+            parity.judge(&source, &frame(0), &frame(255)),
+            Verdict::Runner
+        );
+        assert_eq!(parity.judge(&source, &frame(0), &frame(0)), Verdict::Runner);
+        let source2 = scoped_source("valid byte probe", Precision::Unorm8);
+        assert_eq!(
+            parity.judge(&source2, &frame(255), &frame(255)),
+            Verdict::NativeVerified
+        );
+        let source3 = scoped_source("invalid byte probe", Precision::Unorm8);
+        assert_eq!(
+            parity.judge(&source3, &frame(256), &frame(256)),
+            Verdict::Runner
+        );
+    }
+
     fn pixels(v: f32) -> FallbackPixels {
         FallbackPixels {
             width: 1,

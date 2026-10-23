@@ -462,7 +462,7 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
     let native = reference(false);
     let expected: Vec<u8> = centered.iter().map(|&v| unorm(v)).collect();
     let wrong: Vec<u8> = native.iter().map(|&v| unorm(v)).collect();
-    assert!(expected.iter().zip(wrong).any(|(&a, b)| a.abs_diff(b) > 20));
+    assert!(expected.iter().zip(&wrong).any(|(&a, &b)| a.abs_diff(b) > 20));
     let bitmap = converted(wgpu::TextureFormat::Rgba8Unorm, true);
     assert_eq!(
         read_raw(&gpu.device, &gpu.queue, &bitmap.texture).unwrap(),

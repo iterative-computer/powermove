@@ -47,9 +47,8 @@ export function migrateProjectColorDepth<T extends Record<string, any>>(project:
 /** The project's color settings with defaults filled in. */
 export function readProjectColor(project: unknown): ProjectColor {
   const color = isRecord(project) ? project['color'] : undefined;
-  // Generated Precision.ts gains `unorm8` with the protocol update.
-  const precision = (isRecord(project) && project['colorDepth'] === 8 ? 'unorm8'
-    : isRecord(project) && project['colorDepth'] === 32 ? 'float32' : 'float16') as ProjectColor['precision'];
+  const precision: ProjectColor['precision'] = isRecord(project) && project['colorDepth'] === 8 ? 'unorm8'
+    : isRecord(project) && project['colorDepth'] === 32 ? 'float32' : 'float16';
   if (!isRecord(color)) return { ...DEFAULT_PROJECT_COLOR, precision };
   return {
     mode: 'standard',

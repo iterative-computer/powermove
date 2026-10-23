@@ -293,7 +293,7 @@ pub fn bands(pixels: &FallbackPixels, max_bytes: usize) -> Vec<(u32, u32, Vec<u8
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FallbackFailure {
     /// `compile`, `deadline`, `contextLost`, `unavailable`, `size`,
-    /// `tooLarge`, or `watchdog`.
+    /// `pixelCode`, `tooLarge`, or `watchdog`.
     pub reason: String,
     pub message: String,
 }
@@ -307,7 +307,10 @@ impl FallbackFailure {
     /// Anything else (`contextLost`, the compile `deadline`, `unavailable`,
     /// `size`) is transient and retried.
     pub fn is_final(&self) -> bool {
-        matches!(self.reason.as_str(), "compile" | "watchdog" | "tooLarge")
+        matches!(
+            self.reason.as_str(),
+            "compile" | "watchdog" | "tooLarge" | "pixelCode"
+        )
     }
 
     /// Whether the failure holds only for the request's size (`tooLarge`):
@@ -423,12 +426,21 @@ impl FallbackPixels {
         self.rgba16f.len() as u64 * 2
     }
 
+    /// The first invalid RGBA8 code, if this request carries byte codes in
+    /// u16 wire slots. A malformed answer must not be mistaken for a size
+    /// mismatch or left pending indefinitely.
+    pub fn invalid_rgba8_code(&self, request: &FallbackRequest) -> Option<u16> {
+        (request.color_depth == 8)
+            .then(|| self.rgba16f.iter().copied().find(|code| *code > 255))
+            .flatten()
+    }
+
     /// Checks the size against a request.
     pub fn fits(&self, request: &FallbackRequest) -> bool {
         self.width == request.width
             && self.height == request.height
             && self.rgba16f.len() as u64 == u64::from(self.width) * u64::from(self.height) * 4
-            && (request.color_depth != 8 || self.rgba16f.iter().all(|v| *v <= 255))
+            && self.invalid_rgba8_code(request).is_none()
     }
 }
 
@@ -571,6 +583,8 @@ mod tests {
         assert!(stored.fits(&u8_request));
         stored.rgba16f[0] = 256;
         assert!(!stored.fits(&u8_request));
+        assert_eq!(stored.invalid_rgba8_code(&u8_request), Some(256));
+        assert_eq!(stored.invalid_rgba8_code(&f16), None);
     }
 
     #[test]
@@ -649,6 +663,7 @@ mod tests {
         };
         assert!(f("tooLarge").is_final() && f("tooLarge").sized());
         assert!(f("compile").is_final() && !f("compile").sized());
+        assert!(f("pixelCode").is_final() && !f("pixelCode").sized());
         assert!(!f("size").is_final() && !f("contextLost").is_final());
         assert_eq!(sized_program_id("p", 8193, 4320), "p@8193x4320");
     }

@@ -112,14 +112,31 @@ mod tests {
 
     #[test]
     fn color_depth_is_authoritative_and_legacy_precision_migrates() {
-        for (depth, precision) in [(8, Precision::Unorm8), (16, Precision::Float16), (32, Precision::Float32)] {
+        for (depth, precision) in [
+            (8, Precision::Unorm8),
+            (16, Precision::Float16),
+            (32, Precision::Float32),
+        ] {
             let json = format!(r#"{{"colorDepth":{depth},"color":{{"precision":"float32"}}}}"#);
             assert_eq!(project_color(&root(&json)).unwrap().precision, precision);
         }
-        for json in [r#"{}"#, r#"{"colorDepth":"32"}"#, r#"{"colorDepth":64}"#, r#"{"colorDepth":null}"#] {
-            assert_eq!(project_color(&root(json)).unwrap().precision, Precision::Float16);
+        for json in [
+            r#"{}"#,
+            r#"{"colorDepth":"32"}"#,
+            r#"{"colorDepth":64}"#,
+            r#"{"colorDepth":null}"#,
+        ] {
+            assert_eq!(
+                project_color(&root(json)).unwrap().precision,
+                Precision::Float16
+            );
         }
-        assert_eq!(project_color(&root(r#"{"color":{"precision":"float32"}}"#)).unwrap().precision, Precision::Float32);
+        assert_eq!(
+            project_color(&root(r#"{"color":{"precision":"float32"}}"#))
+                .unwrap()
+                .precision,
+            Precision::Float32
+        );
     }
 
     #[test]
