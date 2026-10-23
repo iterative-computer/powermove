@@ -775,6 +775,27 @@ impl AudioSchedule {
         }
     }
 
+    /// Preparation for a start which has not become audible can spend its
+    /// CPU reservation over a longer Mach period. This is a separate policy:
+    /// it never changes the callback/producer's period or earlier deadline.
+    pub(crate) fn preparation(&self) -> Self {
+        let mut schedule = self.mach_only();
+        #[cfg(target_os = "macos")]
+        {
+            let inner = Arc::get_mut(&mut schedule.inner).expect("private preparation policy");
+            inner.period_ns = inner.period_ns.max(10_666_666);
+            inner.computation_ns = inner.period_ns * 19 / 20;
+            let (period, computation, _) =
+                mac::constraint_ticks(inner.period_ns, inner.computation_ns, inner.period_ns);
+            inner.period = period;
+            inner.computation = computation;
+            // Attribute the work to its playback while retaining a distinct
+            // policy ID and reservation ledger on each preparation thread.
+            inner.metrics = self.inner.metrics.clone();
+        }
+        schedule
+    }
+
     /// The exact callback period used by both the active and idle contexts.
     pub(crate) fn period_ns(&self) -> u64 {
         #[cfg(target_os = "macos")]
@@ -3696,5 +3717,50 @@ mod mac {
                 2
             );
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod preparation_period_tests {
+    use super::*;
+    #[test]
+    fn nonaudible_preparation_does_not_change_the_playing_producer_policy() {
+        let playing = AudioSchedule::new(48_000, 64, None);
+        let original = (
+            playing.inner.period,
+            playing.inner.period_ns,
+            playing.inner.producer_computation,
+            playing.inner.producer_constraint,
+            playing.inner.producer_computation_ns,
+            playing.inner.producer_constraint_ns,
+        );
+        let preparation = playing.preparation();
+        assert_eq!(preparation.period_ns(), 10_666_666);
+        assert!(preparation.inner.computation_ns > playing.inner.computation_ns);
+        assert_ne!(preparation.inner.id, playing.inner.id);
+        std::thread::spawn(move || {
+            let worker = preparation.enter();
+            assert_ne!(worker.status().method, ScheduleMethod::Unavailable);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            (
+                playing.inner.period,
+                playing.inner.period_ns,
+                playing.inner.producer_computation,
+                playing.inner.producer_constraint,
+                playing.inner.producer_computation_ns,
+                playing.inner.producer_constraint_ns
+            ),
+            original
+        );
+        std::thread::spawn(move || {
+            let producer = playing.enter_producer();
+            assert_ne!(producer.status().method, ScheduleMethod::Unavailable);
+            assert!(mac::verify_constraint(original.0, original.2, original.3).is_ok());
+        })
+        .join()
+        .unwrap();
     }
 }

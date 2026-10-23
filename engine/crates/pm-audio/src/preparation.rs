@@ -1287,10 +1287,12 @@ impl Preparation {
                 let tx = self.tx.clone();
                 let gate = work.gate.clone();
                 let schedule = self.schedule.clone();
+                let preparation_schedule = schedule.preparation();
                 let pending_controls = self.pending_controls.clone();
                 let scheduling = self.scheduling.clone();
                 let ready_generation = current.clone();
                 let critical = work.critical.clone();
+                let audible = critical.clone();
                 let mut trace = JobTrace::new();
                 let mut work = Some(work);
                 let mut task: Option<crate::mixer::PrepareTask> = None;
@@ -1339,7 +1341,11 @@ impl Preparation {
                         let throttle_before = trace
                             .queued_at
                             .map(|_| crate::realtime::thread_throttle_sleep_ns());
-                        let realtime = schedule.enter();
+                        let realtime = if audible.load(Ordering::Acquire) {
+                            schedule.enter()
+                        } else {
+                            preparation_schedule.enter()
+                        };
                         #[cfg(test)]
                         scheduling.slice_entries.fetch_add(1, Ordering::Relaxed);
                         let enter_us = enter_at.map(elapsed_us).unwrap_or(0);
