@@ -133,6 +133,10 @@ pub struct VoicePlan {
     /// rate and to 48 kHz (the export's), prepared with the graph so no
     /// render walks a long file ([`crate::today::conversion`]).
     pub conversions: Vec<Arc<crate::today::Conversion>>,
+    /// A speed other than 1, a time remap or `sourceTime` somewhere on the
+    /// path: the engine follows them (decision AUDIO-4); every other voice
+    /// plays today's model (`crate::today`).
+    pub retimed: bool,
 }
 
 /// One evaluation of a voice at a master time.
@@ -278,6 +282,7 @@ struct PathState {
     animated: bool,
     id: String,
     strip: Option<String>,
+    retimed: bool,
 }
 
 impl<'d> Walk<'_, 'd> {
@@ -332,7 +337,12 @@ impl<'d> Walk<'_, 'd> {
                     window.0.max(offset + from),
                     window.1.min(offset + from + dur),
                 );
-                if window.1 - window.0 <= MIN_WINDOW {
+                // Today clamps a negative start to 0 (`audioLayers`), so a
+                // layer starting before its composition still sounds there.
+                let today = offset + from.max(0.0);
+                if window.1 - window.0 <= MIN_WINDOW
+                    && path.window.1.min(today + dur) - path.window.0.max(today) <= MIN_WINDOW
+                {
                     continue;
                 }
             }
@@ -448,6 +458,9 @@ impl<'d> Walk<'_, 'd> {
                     next.window = window;
                     next.id = item;
                     next.strip = Some(strip);
+                    next.retimed |= node::truthy(remap)
+                        || node::is_property(remap)
+                        || node::truthy(node::member(d, "sourceTime"));
                     next.animated |= on_animated
                         || animated(node::member(d, "audioGain"))
                         || animated(node::member(d, "audioMuted"));
@@ -549,10 +562,14 @@ impl<'d> Walk<'_, 'd> {
             _ => None,
         };
         let map_key = self.map_key(&levels, kind, &asset, &file, &source, conform, pitch);
+        let speed = node::member(d, "speed");
+        let retimed = path.retimed
+            || !unit_speed(speed)
+            || node::truthy(remap)
+            || node::is_property(remap)
+            || node::truthy(node::member(d, "sourceTime"));
         let mut conversions: Vec<Arc<crate::today::Conversion>> = Vec::new();
-        if offset.is_some()
-            && let Some(frames) = source.length()
-        {
+        if !retimed && let Some(frames) = source.length() {
             let project = crate::mixer::project_sample_rate(self.doc);
             for rate in [project, 48_000] {
                 if rate != source.sample_rate() && !conversions.iter().any(|c| c.rate == rate) {
@@ -583,6 +600,7 @@ impl<'d> Walk<'_, 'd> {
             constant_rate,
             map_key,
             conversions,
+            retimed,
         };
         if !plan.animated {
             // Every input is static: evaluate once, inside the window.
@@ -689,6 +707,7 @@ pub fn audible(doc: &Document, comp_id: &str, ev: &mut Evaluator) -> Result<bool
         animated: false,
         id: String::new(),
         strip: None,
+        retimed: false,
     };
     walk.visit(comp_id, 0, &start)?;
     Ok(walk.candidates > 0)
@@ -728,6 +747,7 @@ impl MixGraph {
             animated: false,
             id: String::new(),
             strip: None,
+            retimed: false,
         };
         walk.visit(comp_id, 0, &start)?;
         let mut strips: Vec<String> = Vec::new();

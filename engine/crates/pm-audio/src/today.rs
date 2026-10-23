@@ -620,7 +620,11 @@ impl Shape {
     /// model does not cover (a time map that is not linear, a negative
     /// layer start, a conformed rate).
     pub(crate) fn new(plan: &VoicePlan, comps: &[Comp<'_>], root: &Node) -> Option<Shape> {
-        if plan.offset.is_none() || plan.conform != 1.0 {
+        // Speed and remaps follow the picture (AUDIO-4). Everything else is
+        // today's: a conformed rate is ignored (today plays a video's
+        // soundtrack at its own rate), a negative start is clamped to 0,
+        // an animated trim is read once (`Clip::new`).
+        if plan.retimed {
             return None;
         }
         let (last, chain_levels) = plan.levels.split_last()?;
@@ -630,9 +634,6 @@ impl Shape {
         for level in chain_levels {
             let layer = comps.get(level.comp)?.layers().get(level.layer)?;
             let from = number(node::member(Some(layer), "from"), 0.0);
-            if from < 0.0 {
-                return None;
-            }
             let dur = number(node::member(Some(layer), "dur"), 0.0).max(0.0);
             let natural = offset + from.max(0.0);
             window = (window.0.max(natural), window.1.min(natural + dur));
@@ -653,9 +654,6 @@ impl Shape {
         let comp = comps.get(last.comp)?;
         let layer = comp.layers().get(last.layer)?;
         let from = number(node::member(Some(layer), "from"), 0.0);
-        if from < 0.0 {
-            return None;
-        }
         let dur = number(node::member(Some(layer), "dur"), 0.0).max(0.0);
         let natural_start = offset + from.max(0.0);
         window = (
@@ -713,12 +711,17 @@ impl Shape {
     /// samples `[a, b)` can read whatever range today's model starts from,
     /// with two frames of margin for the offset's rounding; `None` when the
     /// clip is silent there.
-    pub(crate) fn buffer_span(&self, a: i64, b: i64, rate: f64, len: u64) -> Option<(i64, i64)> {
+    pub(crate) fn buffer_span(
+        &self,
+        a: i64,
+        b: i64,
+        rate: f64,
+        len: u64,
+        trim: Option<f64>,
+    ) -> Option<(i64, i64)> {
+        let trim = trim.unwrap_or(self.trim);
         let layer_start = self.natural_start.max(0.0);
-        let audible = self
-            .dur
-            .max(0.0)
-            .min((len as f64 / rate - self.trim).max(0.0));
+        let audible = self.dur.max(0.0).min((len as f64 / rate - trim).max(0.0));
         let start = layer_start.max(self.window.0);
         let end = (layer_start + self.dur.max(0.0))
             .min(self.window.1)
@@ -730,8 +733,14 @@ impl Shape {
         if b <= a {
             return None;
         }
-        let at = |s: i64| ((s as f64 / rate - layer_start + self.trim) * rate).floor() as i64;
+        let at = |s: i64| ((s as f64 / rate - layer_start + trim) * rate).floor() as i64;
         Some((at(a) - 3, at(b - 1) + 4))
+    }
+
+    /// The clip's `trim` member.
+    fn trim_node<'c>(&self, comps: &'c [Comp<'_>]) -> Option<&'c Node> {
+        let layer = comps[self.comp].layers().get(self.layer)?;
+        node::member(node::member(Some(layer), "d"), "trim")
     }
 
     /// A content field of the clip at master time `t`, as `resolveContent`
@@ -742,6 +751,15 @@ impl Shape {
         let d = node::member(Some(layer), "d");
         let (name, value) = match (self.kind, key) {
             (VoiceKind::Embedded, "gain") => ("audioGain", node::member(d, "audioGain")),
+            (VoiceKind::Embedded, "trim") => {
+                // `audioLayers` reads a video's trim with the video itself
+                // (its own start), at the time it is asked for.
+                let v = node::member(d, "trim");
+                if !is_property(v) {
+                    return Ok(node::js_value_opt(v));
+                }
+                return Ok(ev.ev_p(comp, Some(layer), v, t, &JsString::from("c.trim"))?);
+            }
             (VoiceKind::Embedded, _) => return Ok(JsValue::Number(0.0)),
             _ => (key, node::member(d, key)),
         };
@@ -850,6 +868,8 @@ impl Shape {
 pub(crate) struct Clip {
     pub read: SourceRead,
     pub envelope: Envelope,
+    /// The trim today read for this range (once, at its start).
+    pub trim: f64,
 }
 
 impl Clip {
@@ -869,7 +889,18 @@ impl Clip {
         let window_start = layer_start.max(shape.window.0);
         let window_end = (layer_start + layer_duration).min(shape.window.1);
         let source_duration = len as f64 / rate;
-        let audible = layer_duration.min((source_duration - shape.trim).max(0.0));
+        // `plan`: the trim as `resolveContent` gives it where the range
+        // starts (inside the clip), read once.
+        let trim = if is_property(shape.trim_node(comps)) {
+            finite(
+                &shape.field(ev, comps, "trim", layer_start.max(range.t0))?,
+                0.0,
+            )
+            .max(0.0)
+        } else {
+            shape.trim
+        };
+        let audible = layer_duration.min((source_duration - trim).max(0.0));
         let clip_end = window_end.min(layer_start + audible);
         let start = window_start.max(range.t0);
         let end = clip_end.min(range.t1);
@@ -877,7 +908,7 @@ impl Clip {
             return Ok(None);
         }
         let local_start = start - layer_start;
-        let source_offset = shape.trim + local_start;
+        let source_offset = trim + local_start;
         if source_duration.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
             || source_offset >= source_duration - 1e-4
         {
@@ -890,7 +921,11 @@ impl Clip {
         let at = start - range.t0.max(0.0);
         let read = SourceRead::new(at, source_offset, duration, len, rate);
         let envelope = Envelope::new(shape, ev, comps, local_start, duration, audible, at, rate)?;
-        Ok(Some(Clip { read, envelope }))
+        Ok(Some(Clip {
+            read,
+            envelope,
+            trim,
+        }))
     }
 }
 

@@ -1007,7 +1007,8 @@ impl Mixer {
             return None;
         };
         let p = self.format.sample_rate as f64;
-        let Some((x0, x1)) = t.shape.buffer_span(start, end, p, t.len) else {
+        let trim = t.clip.as_ref().map(|c| c.trim);
+        let Some((x0, x1)) = t.shape.buffer_span(start, end, p, t.len, trim) else {
             return Some(None);
         };
         Some(Some(match &t.conversion {
@@ -3007,7 +3008,7 @@ fn blend(acc: &mut [Vec<f32>], next: &[Vec<f32>], done: usize, len: f32) {
 /// Whether today's export model can play a voice: a linear time map at
 /// the source's own rate (the cheap part of [`crate::today::Shape::new`]).
 fn today_candidate(plan: &VoicePlan) -> bool {
-    plan.offset.is_some() && plan.conform == 1.0 && plan.source.length().is_some()
+    !plan.retimed && plan.source.length().is_some()
 }
 
 /// Adds a voice's channels into its strip through its fold matrix, with the

@@ -40,7 +40,7 @@ import { allProjects } from '../../../corpus/src/projects';
 
 const DEFAULT_ROOT = path.join(os.homedir(), 'Library/Application Support/Powermove Engine Corpus');
 
-interface AudioProject { name: string; doc: Doc; notes: string; clicks?: Array<{ media: string; frames: number[]; fps: [number, number]; from: number; trim: number; rate: number }> }
+interface AudioProject { name: string; doc: Doc; notes: string; after?: string; clicks?: Array<{ media: string; frames: number[]; fps: [number, number]; from: number; trim: number; rate: number }> }
 
 // ── media ────────────────────────────────────────────────────────────────
 
@@ -276,6 +276,26 @@ function projects(): AudioProject[] {
     out.push({ name, doc: b.root, notes: `A mono and a stereo clip throughout, ${media} from 1 s to 2 s.` });
   }
 
+  // Starts before the composition (today clamps them to 0), nested too.
+  b = newProject('audio/negative-start', { name: 'Negative starts', fps: 30, dur: 2.5 });
+  b.add(audioLayer(b, 'tone440.wav', { trim: 0.1, gain: b.ch(0.6, [[-0.5, 0.2], [1.2, 0.9]]), fadeIn: 0.3, fadeOut: 0.4 }, { from: -0.6, dur: 2 }));
+  const early = b.composition({ name: 'Early', fps: 30, dur: 2.5 });
+  b.within(early, () => b.add(audioLayer(b, 'tone660.wav', { gain: 0.5 }, { from: -0.25, dur: 1.5 }), early));
+  b.add(b.layer('precomp', { name: 'Early', from: -0.4, dur: 2.2, d: { comp: early.id, audioGain: 0.8 } }));
+  out.push({ name: 'negative-start', doc: b.root, notes: 'Clips and a precomposition starting before 0.' });
+
+  // Animated trims: today reads them once where the range starts.
+  b = newProject('audio/animated-trim', { name: 'Animated trims', fps: 30, dur: 2 });
+  b.add(audioLayer(b, 'noise48.wav', { trim: b.ch(0.2, [[0, 0.2], [2, 0.9]]), gain: 0.5 }, { from: 0.3, dur: 1.5 }));
+  b.add(b.layer('video', { name: 'MOV soundtrack', from: 0.1, dur: 1.6, d: { asset: ref('h264-aac.mov'), fit: 'contain', w: 320, h: 180, trim: b.ch(0.3, [[0, 0.3], [1.5, 0.05]]), embeddedAudio: true, audioGain: 0.8 } }));
+  out.push({ name: 'animated-trim', doc: b.root, notes: 'Keyframed trims on an audio clip and a video soundtrack.' });
+
+  // Interpret Footage: a conformed frame rate; today plays the soundtrack at its own rate.
+  b = newProject('audio/conformed', { name: 'Conformed footage', fps: 30, dur: 2 });
+  b.add(b.layer('video', { name: 'MOV soundtrack', from: 0.2, dur: 1.6, d: { asset: ref('h264-aac.mov'), fit: 'contain', w: 320, h: 180, trim: 0.3, embeddedAudio: true, audioGain: 0.8 } }));
+  out.push({ name: 'conformed', doc: b.root, notes: 'A video interpreted at 24 fps.',
+    after: `(() => { const PM = window.PM; for (const a of Object.values(PM.proj.assets || {})) if (a && a.kind === 'video') a.interpret = { frameRate: 24, frameRateRational: [24, 1] }; return true; })()` });
+
   b = newProject('audio/embedded', { name: 'Embedded audio', fps: 30, dur: 2 });
   b.add(b.layer('video', { name: 'MOV soundtrack', from: 0.2, dur: 1.6, d: { asset: ref('h264-aac.mov'), fit: 'contain', w: 320, h: 180, trim: 0.3, embeddedAudio: true, audioGain: 0.8 } }));
   out.push({ name: 'embedded', doc: b.root, notes: 'A video soundtrack, offset and trimmed.' });
@@ -406,6 +426,8 @@ async function main() {
         const { project: rewritten } = await legacy.evaluate(m => (window as any).__corpus.rewriteMedia(m), map);
         await legacy.evaluate(doc => (window as any).__corpus.open(doc), rewritten);
         record.mediaPending = await legacy.evaluate(() => (window as any).__corpus.waitForMedia(30000));
+        // An edit after import (the asset records exist only now).
+        if (project.after) await legacy.evaluateScript(project.after);
         const loaded = await legacy.evaluate(() => JSON.stringify((window as any).PM.proj));
         writeFileSync(path.join(dir, 'loaded.json'), loaded + '\n');
         const mix = await renderLegacy(legacy, project.doc.dur);

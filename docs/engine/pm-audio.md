@@ -244,12 +244,16 @@ longer stands. What remains, with its status:
 
 1. Speed and time remapping are followed (appendix A item 10: today ignores speed, so
    audio drifts from retimed video, and remapped clips are silent). Kept by decision
-   AUDIO-4 (a bug fix, on the beta list). Such voices play through the engine's own
-   readers and stretch, not today's model.
-2. A negative layer start plays from the right source time (today clamps `from` to 0
-   and shifts the clip against its picture). Not covered by today's model; open.
-3. An animated `trim` follows `sourceTime` over time (today reads it once at the range
-   start). Not covered by today's model; open.
+   AUDIO-4 (a bug fix, on the beta list). Such voices (a speed other than 1, a remap or
+   `sourceTime` anywhere on the path: `VoicePlan::retimed`) play through the engine's
+   own readers and stretch, not today's model.
+
+Matched since 2026-10-22: a negative layer start is clamped to 0 as `audioLayers` does
+(the clip plays from 0, shifted, with its local time from there); an animated `trim`
+is read once where the range or the run starts (`plan()`), and a video's from its own
+start; a conformed frame rate (Interpret Footage) is ignored, as today plays a
+video's soundtrack at its own rate and pitch. A precomposition's animated `trim`
+uses its static value (today evaluates it at the playhead when the export starts).
 
 **Beta list (bug fixes against today, orchestrator decisions):**
 
