@@ -220,7 +220,7 @@ the engine on and off (`e2e/helpers/viewer-fork.ts`):
 
 Every case of the 1.0.18 fork fails at activation on this branch (above).
 
-## Required contracts still absent
+## Historical C3 blockers (rounds 5–6)
 
 - C3, measured by `e2e/library-card-parity.spec.ts` (each case launches the
   app with the engine off, then on, and compares the card images exactly; side
@@ -261,41 +261,42 @@ Every case of the 1.0.18 fork fails at activation on this branch (above).
     the round 5 notes); its cases fail until `feat/ne-mainmerge` lands.
   - Private-corpus customized forks remain unqualified by this lane.
 
-### C3 view snapshot contract still needed
+### Round 7 pinned C3 view snapshots
 
-`EngineSnapshotOptions` (`engine-connection/render-transport.ts`) and
-`SnapshotRequest` (`pm-protocol/src/snapshot.rs`) have no editor-camera or
-composition-crop option. `viewSeq` is echoed in the result; it does not select
-or restore that view. `Thread::run_snapshot`
-(`pm-node/src/present/render.rs`) builds `RenderRequest` with `view: None`,
-`region: None`, derived full-composition scale and final sampling. Thus a
-thumbnail request cannot reproduce a 3D editor view. A second interactive
-presenter is unsafe: `engine.viewer.open` replaces the existing viewer channel
-(`engine-connection/install.ts`).
+`SnapshotRequest.viewer` and `EngineSnapshotOptions.viewer` now carry an
+immutable `{ view: ViewOverride | null, canvas: ViewerCanvas, viewSeq }`.
+The Library selects that pin from `presentation.stateFor(latest.viewSeq)`;
+its original backing size must equal `outputSize`. The engine renders the
+composition crop at per-axis scale `width / crop.width`,
+`height / crop.height`, using the same grid helper as live presentation.
+The result reports the pin's selected sequence. Conflicting top-level and
+pinned sequences, invalid cameras and invalid canvas boxes are rejected.
 
-The bridge/3D contract needed is an explicit **viewer snapshot** option on
-`EngineRenderTransport.thumbnails.request` and `SnapshotRequest`, carrying:
+The raw canvas is returned before stage scaling. It uses paused viewer
+motion blur, sampling, shading, X-ray, Local View, Blender preview selection
+and the live top-down color conversion. The display working target remains
+Float16 even when project intermediates use Float32. Export and agent capture
+defaults remain unchanged without the optional pin. Captures never change the live viewer
+state or open another presenter. The transport deep-copies the pin before
+waiting or retrying; the Library rejects superseded revision/time/view
+results and keeps the original cloned canvas hierarchy and `library.render`.
 
-- `view: ViewOverride`: editor camera matrix/projection, shading, X-ray and
-  Local View, using the existing protocol type; null camera retains the scene
-  camera while still preserving the other preview overrides.
-- `canvas: ViewerCanvas`: original backing width/height and composition crop,
-  using the existing type. Render at that backing size with per-axis scale
-  `width / crop.width`, `height / crop.height`, and crop origin, before any
-  stage presentation scaling. The Library keeps CSS placement itself.
-- The existing revision, time and `viewSeq`, checked against the requested
-  view. The answer must retain those identities or reject as stale.
+Pre-engine forks now forward the editor view to their existing bound
+presenter. Their viewport controller uses that presenter's native depth and
+coverage, mapped from the inner canvas stage to the outer overlay stage.
+The WebGL overlay retains a bitmap synchronously after its final draw;
+the Library copies it before its drawing buffer can be discarded. Screen
+navigation, labels and cursor update independently of native plane arrival.
+A card waits for its overlay's matching revision/view sequence before taking
+an engine snapshot. These changes preserve one interactive presentation
+channel per viewer.
 
-This explicit UI path must use the presentation's preview sampling, 3D shading
-and pixel conversion, without changing export or agent capture defaults or
-mutating the live viewer. It needs exact current/frozen-viewer camera and
-orthographic card gates in both themes. The raw frame before stage scaling
-would also satisfy this contract if returned at the same pinned identities.
-The current 3D copied-image differences remain blockers; no tolerance was
-changed and no legacy engine was substituted.
-The separate WebGL viewport chrome also needs a bitmap retained at its draw
-boundary (or an explicit overlay capture API). A composition snapshot alone
-cannot restore a discarded navigation/label/cursor drawing buffer.
+Rust tests cover wire validation, cropped pixels, selected sequence, an
+unchanged subsequent live frame, editor camera and Local View. TypeScript
+tests cover input validation, immutable asynchronous retries, mismatched
+sequences, original backing sizes, bound camera refresh, overlay retention
+and chrome while native planes arrive. Exact C3 and full-suite qualification
+is recorded below; the zero-pixel assertions remain unchanged.
 
 ## Contracts transferred out of consumers
 
