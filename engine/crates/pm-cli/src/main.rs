@@ -11,7 +11,7 @@
 //!
 //! `render` and `parity render` exit 0 done, 1 failed, 2 usage, 3 the engine
 //! cannot render this yet (the reasons are printed; the desktop app routes
-//! such projects to the current engine); `render` exits 4 when a program
+//! such projects to the current engine); `render` and `scope` exit 4 when a program
 //! only the app's WebGL fallback runner draws makes the project not
 //! headless-renderable (named per layer and definition). `parity eval` (evaluation parity,
 //! section 25; docs/engine/phase1-gate.md) keeps its own statuses, listed in
@@ -110,8 +110,25 @@ const USAGE: &str = "usage:
       captured frame): waveform.png, parade.png, vectorscope.png, scope.json
       --time S  --composition ID  --size WxH | --scale S  --media ASSET=FILE
       --motion-blur off|export|N (default export)  --transparent  --columns N
-      --approximate-svg (as for render)
+      --definitions FILE  --approximate-svg (as for render: user GLSL programs
+               the desktop pinned to its WebGL runner, or has not verified,
+               run in the helper's Chromium, else exit 4)
       --ui-scale S (default 2)";
+
+/// Exit 4 (`render` and `scope`): user programs only the app's WebGL
+/// runner may draw here, and no Chromium helper is attached.
+fn not_headless(reasons: &[String]) -> ExitCode {
+    eprintln!(
+        "pm-cli: not headless-renderable: only the app's WebGL fallback runner draws these \
+         programs (the native pipeline cannot translate them, the desktop pinned them to its \
+         runner, or they are not verified natively yet), and pm-cli has no Chromium helper \
+         (`powermove render` and a bundled pm-cli start one):"
+    );
+    for r in reasons {
+        eprintln!("  {r}");
+    }
+    ExitCode::from(4)
+}
 
 fn list(v: &str) -> Vec<String> {
     v.split(',')
@@ -298,6 +315,7 @@ fn parse_scope(args: &[String]) -> Result<scope::Options, String> {
             "--motion-blur" => o.motion_blur = Some(value(args, &mut i, a)?.into()),
             "--transparent" => o.transparent = true,
             "--approximate-svg" => o.approximate_svg = true,
+            "--definitions" => o.definitions = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             "--columns" => {
                 let v = value(args, &mut i, a)?;
@@ -378,17 +396,7 @@ fn main() -> ExitCode {
                     }
                     ExitCode::from(3)
                 }
-                Err(render::Failure::NotHeadless(reasons)) => {
-                    eprintln!(
-                        "pm-cli: not headless-renderable: these programs compile in WebGL but \
-                         not in the native pipeline, and only the app's WebGL fallback runner \
-                         draws them (pm-cli has none):"
-                    );
-                    for r in reasons {
-                        eprintln!("  {r}");
-                    }
-                    ExitCode::from(4)
-                }
+                Err(render::Failure::NotHeadless(reasons)) => not_headless(&reasons),
                 Err(render::Failure::Failed(m)) => {
                     eprintln!("pm-cli: {m}");
                     ExitCode::FAILURE
@@ -464,9 +472,8 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(render::Failure::Usage(m)) => fail_usage(&m),
-                Err(
-                    render::Failure::Unsupported(reasons) | render::Failure::NotHeadless(reasons),
-                ) => {
+                Err(render::Failure::NotHeadless(reasons)) => not_headless(&reasons),
+                Err(render::Failure::Unsupported(reasons)) => {
                     eprintln!("pm-cli: the new engine cannot render this project yet:");
                     for r in reasons {
                         eprintln!("  {r}");

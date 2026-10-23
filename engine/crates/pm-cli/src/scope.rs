@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::{Size, Ticks};
+use pm_render::RenderRequest;
 use pm_render::motion::MotionBlur;
-use pm_render::{RenderRequest, Renderer};
 use serde::Serialize;
 
 /// Waveform levels (rows), covering [`LEVEL_LO`, `LEVEL_HI`).
@@ -63,6 +63,9 @@ pub struct Options {
     /// With no Chromium helper, draw level 1 SVG images with resvg
     /// (`crate::angle::configure_svg`).
     pub approximate_svg: bool,
+    /// A definition set snapshot (`render --definitions`), else the
+    /// built-in definitions.
+    pub definitions: Option<PathBuf>,
 }
 
 /// Y′, Cb, Cr (BT.709, full range) of E-encoded R′G′B′.
@@ -502,18 +505,26 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
                     .map_err(|_| Failure::Usage(format!("--motion-blur {n:?}")))?,
             ),
         };
-        let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
-        // Never write into the desktop's probe namespace (crate::angle).
-        renderer.read_only_shader_reference();
-        crate::fonts::install(
-            &mut renderer,
-            options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
-        );
-        // Level 1 SVG images as `render` draws them (crate::angle).
-        let angle_host = crate::angle::AngleHost::from_environment()
-            .map_err(Failure::Failed)?
-            .map(std::sync::Arc::new);
-        crate::angle::configure_svg(&mut renderer, angle_host.as_ref(), options.approximate_svg);
+        // The same setup as `render` (crate::render::headless_renderer): the
+        // desktop's shader pins read and honored, pinned or unverified user
+        // GLSL through the helper's Chromium runner, level 1 SVG images
+        // through the same Chromium, and the --definitions snapshot.
+        let crate::render::Headless {
+            mut renderer,
+            angle_host,
+            ..
+        } = crate::render::headless_renderer(&crate::render::HeadlessSetup {
+            document: doc,
+            composition: &loaded.composition,
+            ui_scale: options.ui_scale,
+            approximate_svg: options.approximate_svg,
+            definitions: options.definitions.as_deref(),
+        })?;
+        let headless =
+            crate::render::not_headless(&renderer, doc, &loaded.composition, &loaded.media);
+        if !headless.is_empty() {
+            return Err(Failure::NotHeadless(headless));
+        }
         let issues = renderer.unsupported_with_media(doc, &loaded.composition, &loaded.media);
         if !issues.is_empty() {
             return Err(Failure::Unsupported(
@@ -528,10 +539,21 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
         let frame = renderer
             .render(doc, &loaded.composition, ticks, &request, &loaded.media)
             .map_err(|e| match e {
+                // A user program the frame found only the WebGL runner may
+                // draw (unverified, pinned, or untranslatable) and no helper.
+                pm_render::RenderError::Unsupported(u)
+                    if u.iter()
+                        .any(|u| matches!(u.feature, pm_render::Feature::ShaderFallback(_))) =>
+                {
+                    Failure::NotHeadless(u.iter().map(ToString::to_string).collect())
+                }
                 pm_render::RenderError::Unsupported(u) => {
                     Failure::Unsupported(u.iter().map(ToString::to_string).collect())
                 }
-                other => Failure::Failed(other.to_string()),
+                other => Failure::Failed(crate::render::runner_failure(
+                    angle_host.as_deref(),
+                    other.to_string(),
+                )),
             })?;
         if renderer.svg_approximated() > 0 {
             eprintln!(
