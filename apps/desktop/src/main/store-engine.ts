@@ -155,6 +155,8 @@ export class StoreEngine {
         // A dropped restore is a write main had accepted that is not on disk: reported like a failed write.
         if (request.op === 'restore') {
           this.projects.replayedSeq(key, request.bytes);
+          // A journal it could not replay: entries already on their way are refused too.
+          if (isJournalKey(key)) this.projects.readFailed(key);
           this.reply({ type: 'error', key, error: `not saved: the project could not be read: ${errorText(error)}`, unsaved: true });
         }
         else {

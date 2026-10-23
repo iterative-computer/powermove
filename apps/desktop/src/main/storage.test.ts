@@ -695,16 +695,26 @@ describe('file store', () => {
   /** A worker that can stop (dropping what it was sent) and be replaced, as persistence-thread.ts does. */
   function restartableChannel(engineFs: any = fs) {
     let engine!: StoreEngine, listener: (reply: StoreReply) => void = () => {}, onRestart: () => void = () => {}, generation = 0, dropping = false;
+    let held: StoreReply[] | null = null;
     const start = () => {
       const mine = ++generation;
-      engine = new StoreEngine({ fs: engineFs, now: Date.now, randomSuffix: () => String(Math.random()).slice(2) }, reply => { if (mine === generation) queueMicrotask(() => listener(reply)); });
+      engine = new StoreEngine({ fs: engineFs, now: Date.now, randomSuffix: () => String(Math.random()).slice(2) }, reply => {
+        if (mine !== generation) return;
+        if (held) held.push(reply); else queueMicrotask(() => listener(reply));
+      });
     };
     start();
     const channel: StoreChannel = {
       post: request => { if (!dropping) engine.handle(structuredClone(request)); },
       onReply: cb => { listener = cb; }, onRestart: cb => { onRestart = cb; }, waitSync: () => { throw new Error('unused'); },
     };
-    return { channel, die: () => { dropping = true; }, restart: () => { dropping = false; start(); onRestart(); } };
+    return {
+      channel, die: () => { dropping = true; },
+      // A stopped worker's held replies never arrive.
+      restart: () => { dropping = false; if (held) held = []; start(); onRestart(); },
+      hold: () => { held = []; },
+      release: () => { const queue = held ?? []; held = null; for (const reply of queue) listener(reply); },
+    };
   }
   const named = (revision: number, field: string, value: unknown) => JSON.stringify({ revision, patches: [{ path: field === 'name' ? ['name'] : ['f', field], exists: true, value }] });
   async function gapProject() {
@@ -845,6 +855,129 @@ describe('file store', () => {
     await store.flushAll();
     expect(noGap(await recovered())).toBe(true);
     expect(store.failingKeys!()).toContain('projectJournal.P');
+  });
+
+  it('refuses a slot from a window that does not have the project, so a stored copy never reopens its journal (review probe R5b)', async () => {
+    const { directory, recovered } = await gapProject();
+    const store = createStore(directory, { writeDelayMs: 0, journalEntryBytes: 4096 });
+    store.setOwnership!(() => 'A');
+    await store.load();
+    // Window A journals an edit, then a paste main refuses for its size (A's document has it).
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1), 'A');
+    await expect(store.appendJournal!('projectJournal.P', named(3, 'paste', 'p'.repeat(5000)), 'A')).rejects.toThrow(/size limit/);
+    await store.flushAll();
+    // Window B renames from the stored copy (slot plus journal, without the paste).
+    const stored = recoverProject(JSON.parse(store.getSerialized!('project.P')!), JSON.parse(store.getSerialized!('projectJournal.P') ?? '[]'));
+    await expect(store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { ...stored, name: 'renamed' } }), 'B')).rejects.toThrow(/open in another window/);
+    await store.flushAll();
+    // A's next edit, made on top of the paste, is still refused.
+    await expect(store.appendJournal!('projectJournal.P', named(4, 'pasteEdited', 'on top'), 'A')).rejects.toThrow(/closed/);
+    await store.flushAll();
+    const project = await recovered();
+    expect('pasteEdited' in project.f && !('paste' in project.f)).toBe(false);
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+    // A's own checkpoint reopens it.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'A', f: { one: 1, paste: 'p', pasteEdited: 'on top' } } }), 'A');
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+  });
+
+  it('reopens a closed journal only by a slot from the window that has the project when it lands', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const held = { ...fs, rename: (async (from: any, to: any) => { if (String(to).endsWith('project.P.json')) await gate; return fs.rename(from, to); }) };
+    const { directory } = await gapProject();
+    let owner = 'A';
+    const store = createStore(directory, { writeDelayMs: 0, fs: held as any });
+    store.setOwnership!(() => owner);
+    await store.load();
+    await expect(store.appendJournal!('projectJournal.P', '{not json', 'A')).rejects.toThrow();
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'A', f: {} } }), 'A');
+    await tick();
+    // The tab moves to window C before A's slot lands.
+    owner = 'C';
+    release();
+    await store.flushAll();
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'C', f: {} } }), 'C');
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+  });
+
+  it('keeps the close point when a refusal reply arrives after main refused a later entry (review probe R5a)', async () => {
+    const { directory, recovered } = await gapProject();
+    let listener: (reply: StoreReply) => void = () => {};
+    let holding = false;
+    const queue: StoreReply[] = [];
+    const engine = new StoreEngine({ fs: fs as any, now: Date.now, randomSuffix: () => String(Math.random()).slice(2) }, reply => { if (holding) queue.push(reply); else queueMicrotask(() => listener(reply)); });
+    const channel: StoreChannel = { post: request => engine.handle(structuredClone(request)), onReply: cb => { listener = cb; }, onRestart: () => {}, waitSync: () => { throw new Error('unused'); } };
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0, journalEntryBytes: 4096 });
+    await store.load();
+    holding = true;
+    const refusedByWorker = store.appendJournal!('projectJournal.P', '{bad');
+    void Promise.resolve(store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'S', f: { x: 1 } } }))).catch(() => {});
+    await expect(store.appendJournal!('projectJournal.P', named(3, 'big', 'y'.repeat(5000)))).rejects.toThrow(/size limit/);
+    await tick();
+    holding = false;
+    for (const reply of queue.splice(0)) listener(reply);
+    await expect(refusedByWorker).rejects.toThrow();
+    await store.flushAll();
+    await expect(store.appendJournal!('projectJournal.P', named(4, 'name', 'after B'))).rejects.toThrow(/closed/);
+    await store.flushAll();
+    const project = await recovered();
+    expect(project.name === 'after B' && !('big' in project.f)).toBe(false);
+  });
+
+  it('keeps an entry the stopped worker wrote although its reply never reached main (model check, hold and restart)', async () => {
+    const { directory, recovered } = await gapProject();
+    let releaseJournal!: () => void;
+    const journalGate = new Promise<void>(resolve => { releaseJournal = resolve; });
+    const gated = { ...fs, rename: (async (from: any, to: any) => { if (String(to).endsWith('projectJournal.P.json')) await journalGate; return fs.rename(from, to); }) };
+    const { channel, restart, hold, release } = restartableChannel(gated);
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    // E1 is committed; its journal write waits, so main still has it to replay.
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1));
+    // E2 is taken, and written together with E1, but its replies are held, then the worker stops.
+    hold();
+    void store.appendJournal!('projectJournal.P', named(3, 'two', 2)).catch(() => {});
+    await tick();
+    releaseJournal();
+    await tick();
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'projectJournal.P.json'), 'utf8')).map((entry: any) => entry.revision)).toEqual([2, 3]);
+    restart(); release();
+    await tick();
+    await store.flushAll();
+    // The replacement merges what it read from disk with main's older journal ([E1]): E2 stays.
+    expect((await recovered()).f).toEqual({ one: 1, two: 2 });
+  });
+
+  it('closes the journal in the worker when a replacement cannot replay it, before main hears (model check, hold and read failure)', async () => {
+    const { directory, recovered } = await gapProject();
+    let failReads = false, releaseJournal!: () => void;
+    const journalGate = new Promise<void>(resolve => { releaseJournal = resolve; });
+    const disk = { ...fs,
+      rename: (async (from: any, to: any) => { if (String(to).endsWith('projectJournal.P.json')) await journalGate; return fs.rename(from, to); }),
+      open: (async (file: any, flags: any) => {
+        if (failReads && /project(Journal)?\.P\.json$/.test(String(file))) { failReads = false; throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); }
+        return fs.open(file, flags);
+      }) };
+    const { channel, die, restart, hold, release } = restartableChannel(disk);
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    // An entry committed, its journal write still waiting when the worker stops; the replacement cannot read.
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1));
+    await tick();
+    hold(); die(); failReads = true; restart();
+    await tick();
+    // Posted before main hears that the replay failed.
+    const next = store.appendJournal!('projectJournal.P', named(3, 'name', 'after one'));
+    await tick();
+    release(); releaseJournal();
+    await expect(next).rejects.toThrow(/closed|could not be read/);
+    await store.flushAll();
+    const project = await recovered();
+    expect(project.name === 'after one' && !('one' in project.f)).toBe(false);
   });
 
   it('reports a restore a replacement worker could not apply as not saved', async () => {

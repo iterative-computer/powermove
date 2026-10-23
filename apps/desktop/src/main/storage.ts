@@ -37,10 +37,13 @@ export interface Store {
   bootstrapSerialized?(): Record<string, string>;
   snapshotSerialized?(): Record<string, string>;
   /** Throws for an unknown key; the promise rejects if the value is refused. */
-  set(key: string, value: unknown): void | Promise<void>;
-  setSerialized?(key: string, serialized: string): void | Promise<void>;
+  /** `writer`: who asked (a window's webContents id; SAVE-1c), so a project is written only by the window that has it. */
+  set(key: string, value: unknown, writer?: unknown): void | Promise<void>;
+  setSerialized?(key: string, serialized: string, writer?: unknown): void | Promise<void>;
   /** One journal entry for a project (SAVE-1, project-durability.ts). */
-  appendJournal?(key: string, serialized: string): Promise<void>;
+  appendJournal?(key: string, serialized: string, writer?: unknown): Promise<void>;
+  /** Which writer holds a project (null: none), from main's window registry (SAVE-1c). */
+  setOwnership?(ownerOf: (projectId: string) => unknown): void;
   /** Keys whose newest write did not reach disk (a persist failure, or a refused journal entry) and none has since. */
   failingKeys?(): string[];
   delete(key: string): void | Promise<void>;
@@ -152,6 +155,9 @@ class FileStore implements Store {
   private readonly replayed = new Map<number, number>();
   /** Appends the engine has not answered (a refusal of one closes its journal; a refused set or delete does not). */
   private readonly appends = new Set<number>();
+  /** Slot writes by (original) request id → who posted them, until they land. */
+  private readonly slotWriters = new Map<number, unknown>();
+  private ownerOf?: (projectId: string) => unknown;
   private readonly waiters = new Map<number, Waiter>();
   private readonly listeners = new Set<(event: StoreErrorEvent) => void>();
   private nextId = 1;
@@ -215,20 +221,46 @@ class FileStore implements Store {
     return snapshot;
   }
 
-  set(key: string, value: unknown): Promise<void> {
+  set(key: string, value: unknown, writer?: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeSet);
-    return this.mutate(key, true, IPC.storeSet, id => ({ op: 'set', id, key, value }));
+    if (this.foreign(key, writer)) return this.refused(IPC.storeSet, 'the project is open in another window');
+    return this.mutate(key, true, IPC.storeSet, id => ({ op: 'set', id, key, value }), writer);
   }
 
-  setSerialized(key: string, serialized: string): Promise<void> {
+  setSerialized(key: string, serialized: string, writer?: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeSetSerialized);
+    if (this.foreign(key, writer)) return this.refused(IPC.storeSetSerialized, 'the project is open in another window');
     // A string has at least as many UTF-8 bytes as characters; the engine checks
     // the exact byte length without scanning the string on this thread.
     if (typeof serialized !== 'string' || serialized.length > storeByteLimit(key)) throw new IpcValidationError(IPC.storeSetSerialized, 'serialized value exceeds its size limit');
-    return this.mutate(key, true, IPC.storeSetSerialized, id => ({ op: 'setSerialized', id, key, serialized }));
+    return this.mutate(key, true, IPC.storeSetSerialized, id => ({ op: 'setSerialized', id, key, serialized }), writer);
   }
 
-  appendJournal(key: string, serialized: string): Promise<void> {
+  setOwnership(ownerOf: (projectId: string) => unknown): void { this.ownerOf = ownerOf; }
+
+  /*
+   * SAVE-1c: a project is written only by the window that has it. A slot from
+   * another window (Rename… on the Projects screen of a project open
+   * elsewhere) is that window's stored copy: it lacks the owner's newest
+   * edits, among them any the journal refused, and landing it would both
+   * prune entries it does not hold and reopen a closed journal under a
+   * document the owner never had. The window renames through the owner
+   * instead (window:rename-project); this refusal is the backstop. A project
+   * no window has is written by anyone, as before.
+   */
+  private foreign(key: string, writer: unknown): boolean {
+    if (!key.startsWith('project.') || writer === undefined || !this.ownerOf) return false;
+    const owner = this.ownerOf(key.slice('project.'.length));
+    return owner !== null && owner !== undefined && owner !== writer;
+  }
+
+  private refused(channel: string, detail: string): Promise<void> {
+    const refused = Promise.reject(new IpcValidationError(channel, detail));
+    refused.catch(() => undefined);
+    return refused;
+  }
+
+  appendJournal(key: string, serialized: string, _writer?: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeAppendJournal);
     const refuse = (detail: string): Promise<void> => {
       // This edit is not in the journal: the close point moves past it.
@@ -253,10 +285,15 @@ class FileStore implements Store {
   }
 
   /** A slot write landed: a journal closed before it was posted holds nothing it lacks. */
-  private slotLanded(slotKey: string, id: number): void {
+  private slotLanded(slotKey: string, id: number, writer: unknown): void {
     const key = `projectJournal.${slotKey.slice('project.'.length)}`;
     const after = this.closedJournals.get(key);
     if (after === undefined || id <= after) return;
+    // Only the window that has the project holds the edits the journal lacks.
+    if (writer !== undefined && this.ownerOf) {
+      const owner = this.ownerOf(slotKey.slice('project.'.length));
+      if (owner !== null && owner !== undefined && owner !== writer) return;
+    }
     this.closedJournals.delete(key);
     try { this.channel.post({ op: 'journal', id: this.nextId++, key, open: true }); } catch { /* reopened when the replacement starts */ }
   }
@@ -277,10 +314,11 @@ class FileStore implements Store {
     return () => this.listeners.delete(cb);
   }
 
-  private mutate(key: string, present: boolean, channel: string, build: (id: number) => StoreRequest): Promise<void> {
+  private mutate(key: string, present: boolean, channel: string, build: (id: number) => StoreRequest, writer?: unknown): Promise<void> {
     let posted: { id: number; settled: Promise<unknown> };
     try {
       posted = this.post(build);
+      if (key.startsWith('project.')) this.slotWriters.set(posted.id, writer);
     } catch (error) {
       // Values reach the engine as a structured clone, which refuses what
       // JSON cannot represent either (functions, symbols, host objects).
@@ -322,7 +360,9 @@ class FileStore implements Store {
       this.failing.delete(reply.key);
       const original = this.replayed.get(reply.id) ?? reply.id;
       this.replayed.delete(reply.id);
-      if (reply.key.startsWith('project.') && original) this.slotLanded(reply.key, original);
+      const writer = this.slotWriters.get(original);
+      this.slotWriters.delete(original);
+      if (reply.key.startsWith('project.') && original) this.slotLanded(reply.key, original, writer);
       return;
     }
     const waiter = this.waiters.get(reply.id);
@@ -462,6 +502,8 @@ export interface StoreIpcContext {
    * them on its next write.
    */
   broadcastChange?(keys: string[], sender: unknown): void;
+  /** The writer id (webContents id) of the window that has a project, or null (SAVE-1c). */
+  ownerOf?(projectId: string): unknown;
 }
 
 export function registerStoreIpc(
@@ -477,6 +519,9 @@ export function registerStoreIpc(
      value: without this a window kept treating such a project checkpoint as
      written, never wrote it again, and kept throwing nothing. */
   type Writer = { send(channel: string, payload: unknown): void; isDestroyed?(): boolean };
+  /** A window's identity as a writer (its webContents id), for main's ownership rule (SAVE-1c). */
+  const writerOf = (event: StoreIpcEvent): unknown => (event.sender as { id?: unknown }).id;
+  if (ctx.ownerOf) store.setOwnership?.(ctx.ownerOf);
   const writers = new Map<string, Writer>();
   const wrote = (event: StoreIpcEvent, key: string): void => { writers.set(key, event.sender as unknown as Writer); };
   store.onError(event => {
@@ -522,8 +567,8 @@ export function registerStoreIpc(
     requireTrusted(event, IPC.storeSetSerialized);
     if (!isRecord(payload) || typeof payload.key !== 'string' || typeof payload.serialized !== 'string') throw new IpcValidationError(IPC.storeSetSerialized, 'expected key and serialized JSON');
     wrote(event, payload.key);
-    if (store.setSerialized) await store.setSerialized(payload.key, payload.serialized);
-    else await store.set(payload.key, JSON.parse(payload.serialized));
+    if (store.setSerialized) await store.setSerialized(payload.key, payload.serialized, writerOf(event));
+    else await store.set(payload.key, JSON.parse(payload.serialized), writerOf(event));
     announce(payload.key, event.sender);
   });
 
@@ -565,7 +610,7 @@ export function registerStoreIpc(
       }
       const request = payload as unknown as StoreSetRequest;
       wrote(event, request.key);
-      settleWrite(event, payload, request.key, store.set(request.key, request.value));
+      settleWrite(event, payload, request.key, store.set(request.key, request.value, writerOf(event)));
     } catch (error) {
       if (error instanceof IpcValidationError) {
         sendValidationError(event, payload, error);
@@ -612,7 +657,7 @@ export function registerStoreIpc(
     if (!isRecord(payload) || typeof payload.key !== 'string' || typeof payload.serialized !== 'string') throw new IpcValidationError(IPC.storeAppendJournal, 'expected key and serialized JSON');
     if (!store.appendJournal) throw new IpcValidationError(IPC.storeAppendJournal, 'this store keeps no project journals');
     wrote(event, payload.key);
-    await store.appendJournal(payload.key, payload.serialized);
+    await store.appendJournal(payload.key, payload.serialized, writerOf(event));
     announce(payload.key, event.sender);
   });
 

@@ -23,7 +23,7 @@ export type PersistenceReply =
   | { from: 'project'; id: number; error?: string };
 
 /** Store requests answered by exactly one reply; `restore` is answered only by `written`. */
-const ANSWERED = new Set<StoreRequest['op']>(['init', 'load', 'set', 'setSerialized', 'delete', 'flush']);
+const ANSWERED = new Set<StoreRequest['op']>(['init', 'load', 'set', 'setSerialized', 'delete', 'append', 'flush']);
 const FINAL = new Set<StoreReply['type']>(['ready', 'loaded', 'committed', 'rejected', 'flushed', 'failed']);
 const MAX_RESTARTS = 5;
 

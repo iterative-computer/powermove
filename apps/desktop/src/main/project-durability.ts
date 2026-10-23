@@ -259,10 +259,20 @@ export class ProjectDurability {
     let parsed: unknown;
     try { parsed = JSON.parse(Buffer.from(bytes).toString('utf8')); } catch { return; }
     if (!Array.isArray(parsed)) return;
-    // Main's newest journal holds every entry on disk and those that were not yet.
-    const restored = (parsed.filter(isRecord) as JournalEntry[]).filter(entry => !this.before(state, entry));
-    for (const entry of restored) if (typeof entry.seq === 'number') state.seq = Math.max(state.seq, entry.seq);
-    state.entries = restored;
+    /* Main's newest journal, and the one this engine read from disk: either can
+       be the later one (the stopped worker may have written entries whose
+       replies never reached main). Both are the same list at different
+       moments, so their union by sequence number is that list at the later
+       one; on overlap the copy reaching the higher number wins. */
+    const restored = parsed.filter(isRecord) as JournalEntry[];
+    const disk = state.entries ?? [];
+    const top = (list: JournalEntry[]) => Math.max(0, ...list.map(entry => typeof entry.seq === 'number' ? entry.seq : 0));
+    const [newer, older] = top(disk) >= top(restored) ? [disk, restored] : [restored, disk];
+    const merged = new Map<number, JournalEntry>();
+    for (const entry of [...newer, ...older]) if (typeof entry.seq === 'number' && !merged.has(entry.seq)) merged.set(entry.seq, entry);
+    const unnumbered = newer.filter(entry => typeof entry.seq !== 'number');
+    for (const seq of merged.keys()) state.seq = Math.max(state.seq, seq);
+    state.entries = [...unnumbered, ...[...merged.values()].sort((a, b) => (a.seq as number) - (b.seq as number))].filter(entry => !this.before(state, entry));
     state.journalDirty = true;
     state.journalHeld = false;
     state.acks.push(id);
