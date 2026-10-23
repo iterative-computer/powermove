@@ -15,11 +15,6 @@ naga = { version = "30.0.1", features = ["spv-in", "msl-out"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["std"] }
-thiserror.workspace = true
-libc = "0.2"
-
-[dev-dependencies]
-proptest.workspace = true
 
 [[bin]]
 name = "pm-glsl-fuzz"

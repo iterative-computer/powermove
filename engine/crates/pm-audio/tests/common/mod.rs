@@ -87,10 +87,6 @@ pub fn tone(rate: u32, seconds: f64, hz: f64, amp: f64) -> Vec<f32> {
         .collect()
 }
 
-pub fn ch(v: &str) -> String {
-    format!(r#"{{"v":{v},"kf":[],"expr":null}}"#)
-}
-
 /// A keyframed channel with linear keys `(t, v)`.
 pub fn keys(points: &[(f64, f64)]) -> String {
     let kf: Vec<String> = points
@@ -125,15 +121,6 @@ pub fn bool_keys(points: &[(f64, bool)]) -> String {
         points[0].1,
         kf.join(",")
     )
-}
-
-pub struct LayerSpec<'a> {
-    pub id: &'a str,
-    pub ty: &'a str,
-    pub from: f64,
-    pub dur: f64,
-    pub d: String,
-    pub extra: String,
 }
 
 pub fn layer(id: &str, ty: &str, from: f64, dur: f64, d: &str, extra: &str) -> String {

@@ -13,6 +13,3 @@ pm-model = { path = "../pm-model" }
 serde.workspace = true
 thiserror.workspace = true
 libc = "0.2"
-
-[dev-dependencies]
-proptest.workspace = true

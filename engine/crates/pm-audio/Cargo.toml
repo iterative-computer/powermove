@@ -27,5 +27,4 @@ libc = "0.2"
 test-hooks = []
 
 [dev-dependencies]
-proptest.workspace = true
 pm-audio = { path = ".", features = ["test-hooks"] }
