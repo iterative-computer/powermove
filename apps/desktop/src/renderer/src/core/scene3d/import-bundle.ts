@@ -167,6 +167,7 @@ export async function prepareModelImport(files:File[],PM?:any):Promise<File> {
       if(!exported)throw new Error('Could not package model materials');
       await restoreExporterInputs(exported,scene,packed.bytes,files);
       exported.removeFromParent();
+      const {GLTFExporter}=await import('three/addons/exporters/GLTFExporter.js');
       const data=await new GLTFExporter().parseAsync(exported,{binary:true,onlyVisible:false});
       if(!(data instanceof ArrayBuffer))throw new Error('Could not package model materials');
       return new File([data],model.name.replace(/\.obj$/i,'.glb'),{type:'model/gltf-binary'});
