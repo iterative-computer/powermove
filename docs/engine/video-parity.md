@@ -107,6 +107,54 @@ partitioning, worker identity, and release. P010 raw planes are unavailable
 through this build's VideoFrame.copyTo (format is null); its conclusion comes
 from the complete captured GPU/Canvas outputs.
 
+## Paired decode/upload timing
+
+`apps/desktop/scripts/video-decode-perf.mjs` and the release-mode
+`pm-render/examples/video_decode_perf.rs` compare the same effective media
+files, dimensions and timestamps, including the actual ProRes renditions.
+The browser endpoint is load/seek through video or Canvas upload, a full-size
+WebGL draw and `gl.finish`. Native times `Renderer::render` plus `wait_idle`,
+including source open, indexing, decode, conversion and layer composition.
+Device/renderer setup is excluded. Cold samples use fresh video elements or
+fresh native source aliases after shader priming. Native aliases use RAII;
+the browser profile and video/GPU resources use `finally` cleanup.
+
+Two runs of 13 original/imported rows plus eight expanded rows each take
+three cold and 18 alternating warm samples per row: 882 samples per side,
+zero errors, and zero selected-PTS mismatches. Warm samples prime every
+requested seek position first, then continue alternating timestamps; all
+measured native samples still have one media conversion miss, so this does
+not reuse a converted-frame texture. Native warm p50 and p95 are lower on
+all 21 rows: p50 0.74–1.33 ms versus Chromium 2.15–6.45 ms; p95 1.05–2.92 ms
+versus 2.98–12.53 ms. Earlier runs priming only one position had first-use
+decode spikes and are kept separately in the external report.
+
+Cold p50 is slower on seven rows, so the complete no-regression gate
+**does not pass**. These are measured native/Chromium medians in milliseconds:
+
+| Source | Native cold p50 | Chromium cold p50 |
+| --- | ---: | ---: |
+| H.264 BT.709 limited | 11.18 | 6.85 |
+| H.264 SD matrix only | 11.50 | 6.40 |
+| H.264 HD matrix only | 22.65 | 16.75 |
+| H.264 BT.709 full | 10.10 | 5.95 |
+| H.264 BT.2020 limited | 11.22 | 9.85 |
+| AV1 BT.709 limited | 13.17 | 9.15 |
+| H.264 midtone witness | 10.41 | 8.45 |
+
+The native harness installs `pm-perf`'s counting allocator and records every
+counter, both local and all-thread snapshots, alongside submit and GPU-wait
+wall times. Cold samples have zero shader/pipeline creations, one media
+conversion miss and one queue submit. The slower rows spend most time in
+CPU submission (for example full-range H.264: 9.35 ms submit plus 0.77 ms GPU
+wait). Fresh probing/indexing and decoder startup are plausible contributors;
+the present counters do not isolate them, so the report does not attribute
+the entire gap to a particular function. The ordinary warm source path uses
+one compute pass; full-range H.264, gamut conversion and alpha renditions
+use two. The no-regression follow-up must cover cold startup as well as warm
+conversion; these measurements do not establish sustained playback cost or
+private-corpus performance.
+
 ## Remaining closure work
 
 The separately captured BT.2020 8-bit direct upload still has one pixel at
