@@ -1,4 +1,4 @@
-import type { EngineRenderTransport } from '../engine-connection/render-transport';
+import { EngineSnapshotError, type EngineRenderTransport } from '../engine-connection/render-transport';
 
 const finitePositive = (value: number): boolean => Number.isFinite(value) && value > 0;
 
@@ -99,13 +99,28 @@ export async function snapshotClonedCanvasBitmaps(source: Element, target: Eleme
       copy.width = bound.width;
       copy.height = bound.height;
     }
-    const result = await options.transport.thumbnails.request({
+    const request = {
       key: `library-viewer:${++nextCapture}`,
       composition: options.composition, time: options.time,
       width: copy.width, height: copy.height,
-      pixels: 'opaque', draft3d: true,
+      pixels: 'opaque' as const, draft3d: true,
       ...(revision !== null ? { minRevision: revision } : {}),
-    });
+    };
+    let result;
+    for (let attempt = 0; ; attempt++) {
+      if (!options.current() || options.transport.currentRevision() !== revision) return false;
+      try {
+        result = await options.transport.thumbnails.request(request);
+        break;
+      } catch (error) {
+        // A restarting session can reject instead of returning a stale result.
+        // Keep readiness pending while retrying; never substitute scaled pixels.
+        if (!(error instanceof EngineSnapshotError)
+          || !['noSession', 'resyncPending', 'unavailable', 'timeout'].includes(error.code)
+          || attempt >= 2) throw error;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    }
     if (!result || !options.current() || options.transport.currentRevision() !== revision) return false;
     // A snapshot belongs in today's original composition canvas. Keep the
     // clone's original canvas hierarchy, without a second presentation layer.

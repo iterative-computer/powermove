@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { copyClonedCanvasBitmaps, snapshotClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
-import type { EngineSnapshot } from '../engine-connection/render-transport';
+import { EngineSnapshotError, type EngineSnapshot } from '../engine-connection/render-transport';
 
-afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); });
+afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 function pair(sourceMarkup: string): { source: HTMLElement; clone: HTMLElement } {
   const source = document.createElement('div');
@@ -127,6 +127,52 @@ describe('Library engine snapshots', () => {
     expect(f.clone.querySelector('#engine-present')).toBeNull();
     const picture = f.clone.querySelector<HTMLCanvasElement>('[data-library-engine-snapshot]')!;
     expect([picture.width, picture.height, picture.style.visibility]).toEqual([160, 90, 'visible']);
+  });
+
+  it('keeps the card capture pending through a transient session failure and paints only the recovered snapshot', async () => {
+    vi.useFakeTimers();
+    const f = capture();
+    f.transport.thumbnails.request.mockRejectedValueOnce(new EngineSnapshotError('unavailable', 'Session restarted'));
+    const pending = snapshotClonedCanvasBitmaps(f.source, f.clone, {
+      ...f, transport: f.transport as never, composition: 'comp', time: .5,
+    });
+    await vi.advanceTimersByTimeAsync(249);
+    expect(f.drawImage).not.toHaveBeenCalled();
+    expect(f.transport.thumbnails.request).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending).toBe(true);
+    expect(f.transport.thumbnails.request).toHaveBeenCalledTimes(2);
+    expect(f.drawImage).toHaveBeenCalledExactlyOnceWith(f.bitmap, 0, 0);
+  });
+
+  it('drops a capture that becomes stale while waiting to retry', async () => {
+    vi.useFakeTimers();
+    const f = capture();
+    f.transport.thumbnails.request.mockRejectedValueOnce(new EngineSnapshotError('resyncPending', 'Resyncing'));
+    const pending = snapshotClonedCanvasBitmaps(f.source, f.clone, {
+      ...f, transport: f.transport as never, composition: 'comp', time: .5,
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    f.current.mockReturnValue(false);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await pending).toBe(false);
+    expect(f.transport.thumbnails.request).toHaveBeenCalledTimes(1);
+    expect(f.drawImage).not.toHaveBeenCalled();
+  });
+
+  it('surfaces persistent snapshot failures after three attempts without painting an inexact fallback', async () => {
+    vi.useFakeTimers();
+    const f = capture();
+    const error = new EngineSnapshotError('timeout', 'Snapshot timed out');
+    f.transport.thumbnails.request.mockRejectedValue(error);
+    const pending = snapshotClonedCanvasBitmaps(f.source, f.clone, {
+      ...f, transport: f.transport as never, composition: 'comp', time: .5,
+    });
+    const rejected = expect(pending).rejects.toBe(error);
+    await vi.advanceTimersByTimeAsync(500);
+    await rejected;
+    expect(f.transport.thumbnails.request).toHaveBeenCalledTimes(3);
+    expect(f.drawImage).not.toHaveBeenCalled();
   });
 
   it.each(['revision', 'closed', 'superseded'])('discards a %s capture before it can paint the clone', async reason => {
