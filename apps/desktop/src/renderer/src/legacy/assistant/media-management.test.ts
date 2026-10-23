@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { alreadyImported, listMedia, mediaReferences, manageMedia } from './media-management';
+import { alreadyImported, importMedia, listMedia, mediaReferences, manageMedia } from './media-management';
+import { cloudSourcePaths } from '../core/cloud-media';
 import { install } from '../core/media';
 
 function registry() {
@@ -39,6 +40,33 @@ describe('agent media management', () => {
     expect(PM.proj.layers).toEqual([]);
     expect(PM.sel.layers).toEqual([]);
   });
+  it('imports a host-supplied file exactly as a read of its path would give it', async () => {
+    vi.stubGlobal('window', { File });
+    const PM = registry();
+    PM.hist.mark = () => null;
+    PM.MediaImport.fingerprint = vi.fn(async () => 'v2:4:fp');
+    let seen: File | undefined;
+    PM.assets.add = vi.fn(async (file: File) => {
+      seen = file;
+      PM.proj.assets.n = { id: 'n', name: file.name, kind: 'audio', storage: undefined };
+      PM.assets.get = vi.fn(() => ({}));
+      return { importResult: { asset: { id: 'n' }, persisted: true } };
+    });
+    PM.autosave = vi.fn();
+    const handed = new File([new Uint8Array([1, 2, 3, 4])], 'tone.wav', { type: 'audio/wav' });
+    const result = await importMedia(PM, { path: '/media/takes/tone.wav' }, false, () => true, handed);
+    expect(result).toMatchObject({ status: 'imported', assetId: 'n', name: 'tone.wav', persisted: true, fingerprint: 'v2:4:fp', storage: 'copied' });
+    // Named after the path, untyped and with its source path, as readLocalMediaSource gives it.
+    expect(seen!.name).toBe('tone.wav');
+    expect(seen!.type).toBe('');
+    expect(seen!.size).toBe(4);
+    expect(cloudSourcePaths.get(seen!)).toBe('/media/takes/tone.wav');
+    // The import limit applies to a handed-over file as to a read one.
+    const huge = { size: 512 * 1024 * 1024 + 1, name: 'huge.wav' } as File;
+    await expect(importMedia(PM, { path: '/media/huge.wav' }, false, () => true, huge)).rejects.toThrow('byte import limit');
+    vi.unstubAllGlobals();
+  });
+
   it('dedupes agent imports on the full content hash among every asset sharing the fingerprint', async () => {
     const PM = registry();
     const [h1, h2, h3] = ['1', '2', '3'].map(digit => digit.repeat(64));

@@ -1,3 +1,4 @@
+import { fileAssets } from '../../shared/project-assets';
 /*
  * Agent renders through the job engine (plan sections 17 and 20; contracts
  * 12 and 14), behind "Use New Engine".
@@ -26,10 +27,8 @@
  * gets the current set again before a batch whenever the window pushed
  * since. Render queue jobs carry the set captured when they were queued.
  *
- * Capability routing (section 26, Phase 2): a project the engine cannot
- * render yet (`unsupported`), or whose media the host media store cannot
- * hand it (`mediaOffline`), comes back as `routed`, and the caller runs the
- * legacy exporter or capture instead.
+ * With the new engine enabled, failures stay named failures. No job or
+ * batch is handed to the legacy renderer.
  */
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -95,11 +94,13 @@ export const INLINE_DOCUMENT_BYTES = 4 * 1024 * 1024;
 /** Finished jobs kept for `get_render_status`. */
 const FINISHED_KEPT = 64;
 
+/** How long agent work waits for a starting or restarting job engine: the
+ *  longest crash backoff (30 s, crash.ts) plus a launch. A stopped engine
+ *  (setting off, or one that cannot run here) fails at once. */
+export const ENGINE_READY_WAIT_MS = 45_000;
+
 /** The owner of render queue jobs (no window). */
 export const QUEUE_OWNER = -1;
-
-/** Error codes that send work to the legacy engine instead of failing it. */
-const ROUTED_CODES = new Set<EngineError['code']>(['unsupported', 'mediaOffline']);
 
 export type ExportVideoInput = {
   name?: string;
@@ -118,8 +119,7 @@ export type ExportVideoInput = {
 
 export type ExportVideoResult =
   | { status: 'done'; jobId: string; path: string; width: number; height: number; fps: number }
-  | { status: 'queued'; jobId: string }
-  | { status: 'routed'; reason: string };
+  | { status: 'queued'; jobId: string };
 
 export type RenderStatus = { jobId: string; state: JobState; progress: number; path?: string; error?: string };
 
@@ -130,17 +130,23 @@ export type UserExportOptions = SheetExportOptions;
 /** A preview of the latest encoded frame, for the progress sheet. */
 export type ExportPreviewFrame = { frame: number; width: number; height: number; jpeg: Uint8Array };
 
-/** A user export job's status as the window sees it; `routed` when the
- *  engine cannot render the project and the current exporter should. */
+/** A user export job's status as the window sees it. `routed` remains in
+ * the shared legacy wire shape until the derouter removes that field; this
+ * service never emits it. */
 export type UserExportStatus = RenderStatus & { routed?: boolean; preview?: ExportPreviewFrame; waiting?: string };
 
 export type AgentFrameImage = { time: number; data: Uint8Array; mimeType: 'image/jpeg' | 'image/png'; width: number; height: number };
 export type AgentFramesResult =
-  | { status: 'rendered'; images: AgentFrameImage[]; revision: number; queuedMs: number }
-  | { status: 'routed'; reason: string };
+  | { status: 'rendered'; images: AgentFrameImage[]; revision: number; queuedMs: number };
+
+/** How one agent frame batch may end early. With `signal`, aborting it
+ *  cancels this batch only (never the run's exports) and the batch answers
+ *  with the frames that finished before the cancel: always the first ones,
+ *  in order (a contact sheet at its call deadline, section 20). */
+export type FramesOptions = { signal?: AbortSignal };
 
 /** The project as the agent sees it, and where the frames are. */
-export type FramesPlan = { project: unknown; times: number[]; width: number; revision: number };
+export type FramesPlan = { project: unknown; times: number[]; width: number; revision: number; imageFormat?: 'png' };
 
 /** Agent-facing failure: the engine's one-sentence message. */
 export class AgentJobError extends Error {
@@ -357,7 +363,10 @@ export type AgentJobsOptions = {
    *  session closed): its text measures with that window's font cache
    *  seeds (engine-fonts-seeds.ts). Awaited before the session renders. */
   sessionOwner?(session: number, owner: number | null): Promise<unknown>;
+  packProject?(project: Project, session: number, document: unknown): Promise<string>;
   queueBoundMs?: number;
+  /** Bounded wait for a starting/restarting job engine (`ENGINE_READY_WAIT_MS`). */
+  readyWaitMs?: number;
   now?: () => number;
   log?: (level: 'info' | 'warn' | 'error', message: string) => void;
   /** A window's current definition set (main's relay); null when it pushed none. */
@@ -405,10 +414,21 @@ export class AgentJobs {
     return this.options.engine.isReady('job');
   }
 
+  private nextSaveSession = -1;
+
+  async saveProject(projectValue: unknown, document: unknown = projectValue): Promise<string> {
+    if (!this.options.packProject) throw new AgentJobError('project-save-unavailable: The host project packer is unavailable.');
+    const project = asProject(projectValue);
+    const session = this.nextSaveSession--;
+    try {
+      await this.options.bindMediaSession?.(session, { ...project, assets: fileAssets(document) });
+      return await this.options.packProject(project, session, document);
+    } finally { await this.options.bindMediaSession?.(session, null); }
+  }
+
   /* ── export_video ──────────────────────────────────────────────────── */
 
-  /** Runs an agent export. Resolves `routed` when the engine cannot render
-   *  the project (the caller runs the legacy exporter); throws on failure. */
+  /** Runs an agent export; throws a named engine failure on refusal. */
   async exportVideo(owner: number, run: string, projectValue: unknown, input: ExportVideoInput, onStarted?: () => void): Promise<ExportVideoResult> {
     const project = asProject(projectValue);
     const settings = exportSettingsFor(project, input);
@@ -441,7 +461,6 @@ export class AgentJobs {
       this.jobs.delete(jobId);
       await this.closeSession(session);
       const e = remote(error);
-      if (e && ROUTED_CODES.has(e.code)) return { status: 'routed', reason: e.message };
       throw new AgentJobError(e?.message ?? (error instanceof Error ? error.message : String(error)), e?.code ?? 'internal');
     }
     this.announceAgent(record, `${formatInfo(format).label} · ${settings.size.width}×${settings.size.height}`);
@@ -457,7 +476,6 @@ export class AgentJobs {
           if (!status.path) throw new AgentJobError('The export finished without a path.', 'internal');
           return { status: 'done', jobId: record.jobId, path: status.path, width: record.size.width, height: record.size.height, fps: record.fps };
         case 'failed':
-          if (status.error && ROUTED_CODES.has(status.error.code)) return { status: 'routed', reason: status.error.message };
           throw new AgentJobError(errorText(status.error), status.error?.code ?? 'exportFailed');
         case 'cancelled':
           throw new AgentJobError('Export cancelled.', 'cancelled');
@@ -495,10 +513,16 @@ export class AgentJobs {
   /** Cancels every job of an agent run (the run was cancelled or rolled back). */
   async cancelRun(run: string): Promise<number> {
     const live = [...this.jobs.values()].some((r) => r.run === run && !terminal(r.status.state));
-    const frames = this.frameRuns.has(run);
-    if (!live && !frames) return 0;
+    // Frame batches carry their own wire run (one per batch), so a batch can
+    // be cancelled alone; the agent run's cancel reaches every one of them.
+    const wires = [...(live ? [run] : []), ...(this.frameRuns.get(run) ?? [])];
+    const counts = await Promise.all(wires.map((wire) => this.cancelWireRun(wire, run)));
+    return counts.reduce((sum, count) => sum + count, 0);
+  }
+
+  private async cancelWireRun(wire: string, run: string): Promise<number> {
     try {
-      const response = await this.options.engine.request('job', { type: 'cancelJobs', kind: 'run', run });
+      const response = await this.options.engine.request('job', { type: 'cancelJobs', kind: 'run', run: wire });
       return response.type === 'jobsCancelled' ? response.jobs.length : 0;
     } catch (error) {
       this.options.log?.('warn', `cancelling the jobs of agent run ${run} failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -528,14 +552,12 @@ export class AgentJobs {
     record.status = status;
     if (status.state === 'done' && status.path && !record.queue) this.options.onDelivered?.(record.owner, status.path);
     if (record.user || record.queue) {
-      const routed = status.state === 'failed' && !!status.error && ROUTED_CODES.has(status.error.code);
       const preview = status.preview
         ? { frame: status.preview.frame, width: status.preview.width, height: status.preview.height, jpeg: new Uint8Array(status.preview.jpeg) }
         : undefined;
       const waiting = status.state === 'waitingForMedia' ? status.error?.message : undefined;
       const view: UserExportStatus = {
         ...this.status(record.owner, record.jobId),
-        ...(routed ? { routed: true } : {}),
         ...(preview ? { preview } : {}),
         ...(waiting ? { waiting } : {})
       };
@@ -558,11 +580,13 @@ export class AgentJobs {
   /** The job engine restarted: its sessions and unfinished jobs are gone
    *  (agent jobs never resume, section 17). */
   private onEngineStatus(status: unknown): void {
-    const job = (status as { job?: { generation?: number } } | null)?.job;
+    const job = (status as { job?: { generation?: number; state?: string } } | null)?.job;
+    if (typeof job?.state === 'string') this.jobState = job.state;
     if (!job || typeof job.generation !== 'number' || job.generation === this.generation) return;
     const restarted = this.generation !== 0;
     this.generation = job.generation;
     this.frameSessions.clear();
+    this.frameOwners.clear();
     if (!restarted) return;
     for (const record of this.jobs.values()) {
       if (terminal(record.status.state)) continue;
@@ -579,8 +603,7 @@ export class AgentJobs {
   /** Starts an export the user asked for in the export sheet, to the file
    *  (or, for PNG sequences, folder) they chose, replaced if it exists (the
    *  save panel confirmed that). Statuses go to `onUserStatus` with previews;
-   *  an `unsupported` or `mediaOffline` failure arrives as `routed`, and the
-   *  window runs the current exporter to the same file. */
+   *  engine failures are delivered by name without changing renderers. */
   async exportUser(owner: number, projectValue: unknown, options: UserExportOptions, destination: string, extra: { draft?: boolean } = {}): Promise<{ jobId: string; frames: number }> {
     return this.submitUser(owner, projectValue, { ...options, ...(extra.draft ? { draft: true } : {}) }, destination, 'replace', false, this.windowUpdates(owner));
   }
@@ -651,53 +674,78 @@ export class AgentJobs {
 
   /* ── render_frames ─────────────────────────────────────────────────── */
 
-  private readonly frameRuns = new Map<string, number>();
+  /** Agent run -> the wire runs of its frame batches in flight. */
+  private readonly frameRuns = new Map<string, Set<string>>();
+  private frameBatch = 0;
 
   /** Renders agent frames at the agent's revision in the agent snapshot
-   *  class. `routed` when the engine cannot draw the composition. */
-  async renderFrames(owner: number, run: string, plan: FramesPlan): Promise<AgentFramesResult> {
+   *  class. Every failure is named; playback is never paused. */
+  async renderFrames(owner: number, run: string, plan: FramesPlan, options: FramesOptions = {}): Promise<AgentFramesResult> {
     const project = asProject(plan.project);
     if (!plan.times.length) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
     const w = Number(project['w']), h = Number(project['h']);
     // `width` is today's output width; the engine takes the longest edge.
     const maxDimension = Math.max(1, Math.min(8192, Math.round(h > w && w > 0 ? plan.width * h / w : plan.width)));
+    const { signal } = options;
+    if (signal?.aborted) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
     const frameSession = await this.frameSession(owner, project);
-    this.frameRuns.set(run, (this.frameRuns.get(run) ?? 0) + 1);
+    const wire = `${run}#frames-${++this.frameBatch}`;
+    const wires = this.frameRuns.get(run) ?? new Set<string>();
+    wires.add(wire);
+    this.frameRuns.set(run, wires);
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      void this.cancelWireRun(wire, run);
+    };
     let response: Response;
     try {
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener('abort', onAbort, { once: true });
       response = await this.options.engine.request('job', {
         type: 'agentFrames',
-        run,
+        run: wire,
         frames: plan.times.map((time) => ({ composition: project['compId'], time: toTicks(time) })),
         maxDimension,
-        format: { kind: 'jpeg', quality: 0.74 },
+        format: plan.imageFormat === 'png' ? { kind: 'png' } : { kind: 'jpeg', quality: 0.74 },
         motionBlur: false,
         blender: 'cachedOrPending'
       }, frameSession.session, frameSession.revision);
     } catch (error) {
       const e = remote(error);
       if (e?.code === 'unknownSession' || e?.code === 'staleRevision') this.frameSessions.delete(owner);
-      if (e && ROUTED_CODES.has(e.code)) return { status: 'routed', reason: e.message };
       throw new AgentJobError(e?.message ?? (error instanceof Error ? error.message : String(error)), e?.code ?? 'internal');
     } finally {
-      const left = (this.frameRuns.get(run) ?? 1) - 1;
-      if (left) this.frameRuns.set(run, left); else this.frameRuns.delete(run);
+      signal?.removeEventListener('abort', onAbort);
+      const left = this.frameRuns.get(run);
+      left?.delete(wire);
+      if (left && !left.size) this.frameRuns.delete(run);
     }
     if (response.type !== 'agentFrames') throw new AgentJobError('The job engine answered agent frames with something else.');
-    return this.frameImages(plan.times, response.outcomes, response.queuedMs, frameSession.revision);
+    return this.frameImages(plan.times, response.outcomes, response.queuedMs, frameSession.revision, aborted, plan.imageFormat === 'png' ? 'image/png' : 'image/jpeg');
   }
 
-  private frameImages(times: number[], outcomes: AgentFrameOutcome[], queuedMs: number, revision: number): AgentFramesResult {
-    const images: AgentFrameImage[] = [];
+  /** The batch's images in request order. A batch cancelled through its
+   *  signal answers with the frames before the first cancelled one; any other
+   *  failure (and a cancel the caller did not ask for) is named. */
+  private frameImages(times: number[], outcomes: AgentFrameOutcome[], queuedMs: number, revision: number, aborted = false, mimeType: AgentFrameImage['mimeType'] = 'image/jpeg'): AgentFramesResult {
+    const images: AgentFrameImage[] = new Array(times.length);
+    const cancelled = new Set<number>();
+    if (outcomes.length !== times.length) throw new AgentJobError('The job engine did not render every requested frame.');
     for (const outcome of outcomes) {
+      if (!Number.isInteger(outcome.index) || outcome.index < 0 || outcome.index >= times.length || images[outcome.index] || cancelled.has(outcome.index)) {
+        throw new AgentJobError('The job engine returned an invalid or duplicate frame index.');
+      }
       if (outcome.status === 'failed') {
-        if (ROUTED_CODES.has(outcome.error.code)) return { status: 'routed', reason: outcome.error.message };
+        if (aborted && outcome.error.code === 'cancelled') { cancelled.add(outcome.index); continue; }
         throw new AgentJobError(outcome.error.message, outcome.error.code);
       }
       if (outcome.image.kind !== 'inline') throw new AgentJobError('The job engine answered with an image file; agent frames expect inline images.');
-      images.push({ time: times[outcome.index] ?? 0, data: outcome.image.bytes, mimeType: 'image/jpeg', width: outcome.width, height: outcome.height });
+      images[outcome.index] = { time: times[outcome.index]!, data: outcome.image.bytes, mimeType, width: outcome.width, height: outcome.height };
     }
-    return { status: 'rendered', images, revision, queuedMs };
+    if (!cancelled.size) return { status: 'rendered', images, revision, queuedMs };
+    const first = Math.min(...cancelled);
+    return { status: 'rendered', images: images.slice(0, first), revision, queuedMs };
   }
 
   /** The window's frame session, resynced when the project changed. */
@@ -710,14 +758,21 @@ export class AgentJobs {
       if (current && current.generation === this.generation && current.hash === hash) return this.currentDefinitions(owner, current);
       if (current && current.generation === this.generation) {
         const revision = current.revision + 1;
+        await this.options.bindMediaSession?.(current.session, project);
         await this.resync(current.session, `agent-frames-${owner}`, canonical, hash, revision);
         return this.currentDefinitions(owner, { ...current, revision, hash });
       }
       const generation = this.generation;
       const session = await this.openSession(`agent-frames-${owner}`, 'job', owner);
       this.frameOwners.set(session, owner);
-      await this.resync(session, `agent-frames-${owner}`, canonical, hash, 1);
-      return this.currentDefinitions(owner, { session, revision: 1, hash, generation, definitions: null });
+      try {
+        await this.options.bindMediaSession?.(session, project);
+        await this.resync(session, `agent-frames-${owner}`, canonical, hash, 1);
+        return await this.currentDefinitions(owner, { session, revision: 1, hash, generation, definitions: null });
+      } catch (error) {
+        await this.closeSession(session);
+        throw error;
+      }
     })();
     this.frameSessions.set(owner, next);
     next.catch(() => { if (this.frameSessions.get(owner) === next) this.frameSessions.delete(owner); });
@@ -790,8 +845,28 @@ export class AgentJobs {
 
   /* ── sessions ──────────────────────────────────────────────────────── */
 
+  /** The job engine's last reported supervisor state (null: none reported yet). */
+  private jobState: string | null = null;
+
+  /** Resolves once the job engine is ready. A starting or restarting engine
+   *  (crash backoff) is waited for within `readyWaitMs`; a stopped one, or
+   *  one still down at the bound, is the named error. */
+  private whenAvailable(): Promise<void> {
+    if (this.available) return Promise.resolve();
+    const fail = () => new AgentJobError('The job engine is not running.', 'internal');
+    if (this.jobState !== 'starting' && this.jobState !== 'restarting') return Promise.reject(fail());
+    return new Promise<void>((resolve, reject) => {
+      const done = (error?: AgentJobError) => { clearTimeout(timer); off(); error ? reject(error) : resolve(); };
+      const timer = setTimeout(() => done(fail()), this.options.readyWaitMs ?? ENGINE_READY_WAIT_MS);
+      const off = this.options.engine.listen({ status: () => {
+        if (this.available) done();
+        else if (this.jobState === 'stopped') done(fail());
+      } });
+    });
+  }
+
   private async openSession(document: string, role: 'job' | 'jobSnapshot', owner: number | null): Promise<number> {
-    if (!this.available) throw new AgentJobError('The job engine is not running.', 'internal');
+    await this.whenAvailable();
     const opened = await this.options.engine.request('job', { type: 'openSession', document, role, process: 'job', color: STANDARD_COLOR });
     if (opened.type !== 'sessionOpened') throw new AgentJobError('The job engine did not open a session.');
     if (owner !== null) {
@@ -858,6 +933,7 @@ export class AgentJobs {
   }
 
   private async closeSession(session: number): Promise<void> {
+    this.frameOwners.delete(session);
     void this.sessionOwner(session, null);
     await this.options.bindMediaSession?.(session, null);
     await this.options.engine.request('job', { type: 'closeSession' }, session).catch(() => undefined);

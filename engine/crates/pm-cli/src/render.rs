@@ -31,7 +31,7 @@ use crate::corpus::{member, string};
 pub enum Failure {
     Usage(String),
     Unsupported(Vec<String>),
-    /// Programs only a WebGL runner draws (decision 19): `pm-cli` has none,
+    /// Programs requiring the on-demand WebGL runner (decision 19): when absent,
     /// so the project is not headless-renderable (exit 4). Named per layer
     /// and definition; the same answer on every run.
     NotHeadless(Vec<String>),
@@ -90,6 +90,11 @@ pub struct Options {
     pub definitions: Option<PathBuf>,
     /// The editor's display scale factor (`crate::fonts`).
     pub ui_scale: Option<f32>,
+    /// Parameter values supplied by the CLI user, parsed as JSON.
+    pub parameters: Vec<(String, Value)>,
+    /// With no Chromium helper, draw level 1 SVG images with resvg (an
+    /// approximation, named in a notice) instead of failing.
+    pub approximate_svg: bool,
 }
 
 fn usage(m: impl Into<String>) -> Failure {
@@ -290,7 +295,8 @@ fn load(options: &Options) -> Result<Loaded, Failure> {
         pm_model::container::ReadOptions::default(),
     )
     .map_err(|e| Failure::Failed(format!("{}: {e}", options.input.display())))?;
-    let project = container.project().clone();
+    let mut project = container.project().clone();
+    crate::parameters::apply(&mut project, &options.parameters).map_err(usage)?;
     let composition = match &options.composition {
         Some(c) => c.clone(),
         None => pm_model::canonical::open_comp_id(&project)
@@ -623,34 +629,18 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         seed: 1,
     };
     install_interrupt();
-    let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
-    crate::fonts::install(
-        &mut renderer,
-        options.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
-    );
-    // No Chromium here: level 1 SVG images are drawn by resvg (decision S1),
-    // an approximation of the app's, reported below.
-    renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
-    let (definitions, source) = definitions(options)?;
-    if options.definitions.is_none() {
-        warn_built_in(&job.document, &job.composition);
-    }
-    // Programs WebGL refuses too are skipped, as the app skips them; the
-    // capability check reads the rest of each definition's status.
-    for refused in renderer
-        .set_definitions(&definitions)
-        .map_err(|e| Failure::Failed(format!("definitions: {e}")))?
-    {
-        if refused.code == pm_protocol::error::ErrorCode::ShaderCompile {
-            eprintln!("pm-cli: {} (skipped, as in the app)", refused.message);
-        }
-    }
-    let headless: Vec<String> = renderer
-        .unsupported_with_media(&job.document, &job.composition, &*job.media)
-        .into_iter()
-        .filter(|u| matches!(u.feature, pm_render::Feature::ShaderFallback(_)))
-        .map(|u| u.to_string())
-        .collect();
+    let Headless {
+        mut renderer,
+        angle_host,
+        definitions: source,
+    } = headless_renderer(&HeadlessSetup {
+        document: &job.document,
+        composition: &job.composition,
+        ui_scale: options.ui_scale,
+        approximate_svg: options.approximate_svg,
+        definitions: options.definitions.as_deref(),
+    })?;
+    let headless = not_headless(&renderer, &job.document, &job.composition, &*job.media);
     if !headless.is_empty() {
         return Err(Failure::NotHeadless(headless));
     }
@@ -699,7 +689,7 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         .map_err(|e| match e {
             JobError::Unsupported(list) => Failure::Unsupported(list),
             JobError::Cancelled => Failure::Failed("interrupted; nothing was written".into()),
-            other => Failure::Failed(other.to_string()),
+            other => Failure::Failed(runner_failure(angle_host.as_deref(), other.to_string())),
         })?;
     let r = &delivered.report;
     let seconds = started.elapsed().as_secs_f64();
@@ -733,6 +723,108 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         "fps": r.frames as f64 / seconds.max(1e-9),
         "definitions": source,
     }))
+}
+
+/// What [`headless_renderer`] sets a renderer up for.
+pub(crate) struct HeadlessSetup<'a> {
+    pub document: &'a Document,
+    pub composition: &'a str,
+    /// The editor's display scale factor (`crate::fonts`).
+    pub ui_scale: Option<f32>,
+    /// With no Chromium helper, draw level 1 SVG images with resvg.
+    pub approximate_svg: bool,
+    /// A definition set snapshot file (`--definitions`), else the built-ins.
+    pub definitions: Option<&'a Path>,
+}
+
+/// A renderer as every pm-cli command that draws a project uses it.
+pub(crate) struct Headless {
+    pub renderer: Renderer,
+    /// The helper's on-demand Chromium (`crate::angle`), when there is one.
+    pub angle_host: Option<Arc<crate::angle::AngleHost>>,
+    /// Where the definitions came from (`"built-in"` or the snapshot path).
+    pub definitions: String,
+}
+
+/// Sets up a headless renderer as the app's hosts draw (amendments 21-24;
+/// DEFS-4), shared by `render` and `scope` so neither can draw what the
+/// other would refuse:
+/// - the desktop's persisted shader probe store is read, never written
+///   (`crate::angle::configure_probes`), and a user GLSL program it pinned
+///   to the WebGL runner, or has not verified, never draws natively: with a
+///   helper it runs in the on-demand Chromium (the same ANGLE path as the
+///   desktop's runner), else it is reported as not headless-renderable;
+/// - level 1 SVG images go to the same Chromium (decision S1), else fail
+///   with `svg-chromium-unavailable` unless `approximate_svg`;
+/// - the definitions are the snapshot's, or the built-ins with a warning.
+pub(crate) fn headless_renderer(setup: &HeadlessSetup<'_>) -> Result<Headless, Failure> {
+    let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
+    crate::angle::configure_probes(&mut renderer).map_err(Failure::Failed)?;
+    renderer.require_shader_reference();
+    let angle_host = crate::angle::AngleHost::from_environment()
+        .map_err(Failure::Failed)?
+        .map(Arc::new);
+    if let Some(host) = &angle_host {
+        renderer.set_fallback_host(Some(host.clone()));
+    }
+    crate::fonts::install(
+        &mut renderer,
+        setup.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
+    );
+    // Level 1 SVG images (decision S1): the helper's on-demand Chromium, as
+    // the hidden host draws them; with no helper, a named failure unless
+    // --approximate-svg accepts resvg's approximation (reported by the
+    // caller from `svg_approximated`).
+    crate::angle::configure_svg(&mut renderer, angle_host.as_ref(), setup.approximate_svg);
+    let (definitions, source) = definitions(setup.definitions)?;
+    if setup.definitions.is_none() {
+        warn_built_in(setup.document, setup.composition);
+    }
+    // Programs WebGL refuses too are skipped, as the app skips them; the
+    // capability check reads the rest of each definition's status.
+    for refused in renderer
+        .set_definitions(&definitions)
+        .map_err(|e| Failure::Failed(format!("definitions: {e}")))?
+    {
+        if refused.code == pm_protocol::error::ErrorCode::ShaderCompile {
+            eprintln!("pm-cli: {} (skipped, as in the app)", refused.message);
+        }
+    }
+    Ok(Headless {
+        renderer,
+        angle_host,
+        definitions: source,
+    })
+}
+
+/// The programs only the app's WebGL runner may draw here (no helper
+/// attached, and pinned to the runner or not verified): named per layer and
+/// definition.
+pub(crate) fn not_headless(
+    renderer: &Renderer,
+    document: &Document,
+    composition: &str,
+    media: &dyn pm_render::AssetResolver,
+) -> Vec<String> {
+    renderer
+        .unsupported_with_media(document, composition, media)
+        .into_iter()
+        .filter(|u| matches!(u.feature, pm_render::Feature::ShaderFallback(_)))
+        .map(|u| u.to_string())
+        .collect()
+}
+
+/// A failure message that names the GLSL fallback runner's own failure when
+/// it is the cause.
+pub(crate) fn runner_failure(host: Option<&crate::angle::AngleHost>, other: String) -> String {
+    host.and_then(|host| host.last_failure())
+        .map(|failure| {
+            format!(
+                "GLSL fallback runner failed ({}: {})",
+                failure.reason, failure.message
+            )
+        })
+        .unwrap_or(other)
 }
 
 /// Says so when a project that draws definitions (effects, transitions,
@@ -771,9 +863,9 @@ fn warn_built_in(document: &pm_model::Document, composition: &str) {
 /// the built-in effects, transitions, and layers as the kernel snapshots
 /// them. Returns the set and where it came from.
 fn definitions(
-    options: &Options,
+    path: Option<&Path>,
 ) -> Result<(pm_protocol::definitions::DefinitionSetSnapshot, String), Failure> {
-    let Some(path) = &options.definitions else {
+    let Some(path) = path else {
         return Ok((pm_render::all_builtin_definitions(), "built-in".into()));
     };
     let bytes = std::fs::read(path).map_err(|e| usage(format!("{}: {e}", path.display())))?;

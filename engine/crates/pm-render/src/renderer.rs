@@ -277,9 +277,61 @@ pub struct Renderer {
     /// Where a waiting frame gets missing level 1 SVG rasters itself (the
     /// job engine's host services; [`Renderer::set_svg_source`]).
     svg_source: Option<Arc<dyn crate::vector::svg_rasters::SvgRasterSource>>,
+    /// Frames read back one after another (exports): the staging buffer, a
+    /// frame target given back with [`Renderer::recycle`] and pixels given
+    /// back with [`Renderer::give_rgba`] (docs/engine/perfbench.md). Held
+    /// from one frame of an export to the next; dropped by
+    /// [`Renderer::release_frame_reuse`] (the export's end, every one-off
+    /// frame) and by [`Renderer::trim`].
+    frame_reuse: FrameReuse,
+    /// Bind groups kept across frames (`crate::binds`).
+    binds: crate::binds::BindCache,
+}
+
+/// See [`Renderer::read_rgba_reusing`] and [`Renderer::recycle`].
+#[derive(Default)]
+struct FrameReuse {
+    readback: pm_gpu::readback::Readback,
+    target: Option<Target>,
+    /// A pixel buffer given back for the next read ([`Renderer::give_rgba`]).
+    rgba: Option<Vec<f32>>,
 }
 
 impl Renderer {
+    /// A CLI host reading the desktop's persisted per-machine probe store.
+    /// GPU/driver and pipeline identity are the same suffix as `new` uses.
+    pub fn configure_shader_reference(
+        &mut self,
+        browser: &str,
+        directory: Option<std::path::PathBuf>,
+    ) {
+        let environment = format!(
+            "{browser}; {:?}; pipeline {}",
+            self.device.adapter_info(),
+            pm_glsl::pipeline::PIPELINE_REVISION
+        );
+        self.effects.parity.configure(Some(environment), directory);
+    }
+
+    /// Honour the configured probe directory without ever writing to it:
+    /// this renderer's runner is not the browser that directory's
+    /// decisions were made against (`effects::parity` module notes).
+    pub fn read_only_shader_reference(&mut self) {
+        self.effects.parity.set_read_only();
+    }
+
+    /// CLI hosts without an ANGLE environment must fail closed for user
+    /// programs instead of treating the absence of a parity service as proof.
+    /// A host that supplied the desktop environment retains its persisted
+    /// decisions; unknown programs still need a runner before output.
+    pub fn require_shader_reference(&mut self) {
+        if !self.effects.parity.enabled() {
+            self.effects
+                .parity
+                .configure(Some("host-without-ANGLE-reference".into()), None);
+        }
+    }
+
     /// A renderer on a device. The device needs
     /// `pm_gpu::device::required_features()`; 32-bit precision also needs
     /// `FLOAT32_FILTERABLE` and `FLOAT32_BLENDABLE` (`pm_gpu::Gpu` requests
@@ -289,15 +341,19 @@ impl Renderer {
         let media = MediaCache::new(&device);
         let text_gpu = crate::text::gpu::TextGpu::new(&device);
         let mut effects = Effects::new(format!("{}; wgpu 30", std::env::consts::OS));
-        if let Ok(browser) = std::env::var("POWERMOVE_ENGINE_PARITY_ENV") {
+        if let Some(store) =
+            crate::effects::parity::ProbeStore::from_environment(|name| std::env::var_os(name))
+        {
             let environment = format!(
-                "{browser}; {:?}; pipeline {}",
+                "{}; {:?}; pipeline {}",
+                store.browser,
                 device.adapter_info(),
                 pm_glsl::pipeline::PIPELINE_REVISION
             );
-            let directory = std::env::var_os("POWERMOVE_ENGINE_SHADER_CACHE")
-                .map(|d| std::path::PathBuf::from(d).join("angle-parity"));
-            effects.parity.configure(Some(environment), directory);
+            if store.read_only {
+                effects.parity.set_read_only();
+            }
+            effects.parity.configure(Some(environment), store.directory);
         }
         Renderer {
             text: crate::text::TextContext::default(),
@@ -325,6 +381,8 @@ impl Renderer {
             svg_wait: false,
             svg_skip_failed: false,
             svg_source: None,
+            frame_reuse: FrameReuse::default(),
+            binds: crate::binds::BindCache::default(),
         }
     }
 
@@ -835,8 +893,10 @@ impl Renderer {
             let mut attempt = 0;
             let mut waits = 0;
             let failure = loop {
+                pm_perf::bump(pm_perf::Counter::RasterRequests);
                 let failure = match host.run(&job) {
                     Ok(pixels) if pixels.fits(&job.request) => {
+                        pm_perf::bump(pm_perf::Counter::RasterAnswers);
                         self.put_fallback_pixels(key.clone(), pixels);
                         break None;
                     }
@@ -1145,6 +1205,11 @@ impl Renderer {
     /// raster cache is kept apart from the pool and trims to `bytes` on its
     /// own (`text_gpu().cached_bytes()`).
     pub fn trim(&mut self, bytes: u64) {
+        // Kept bind groups hold their views (and textures) alive.
+        self.binds.clear();
+        // An export's kept staging buffer, frame target and pixels (the
+        // next frame allocates them again).
+        self.release_frame_reuse();
         self.pool.trim(bytes);
         if self.pool.bytes() + self.pyramids.bytes() > bytes {
             self.pyramids.clear();
@@ -1210,14 +1275,23 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let target = Target::new(
-            &self.device,
-            "pm frame",
-            size.width,
-            size.height,
-            Self::target_format(document, request),
-            pm_gpu::target::working_usage(),
-        );
+        let format = Self::target_format(document, request);
+        // A target a finished frame gave back (`recycle`), when it fits.
+        let target = match self.frame_reuse.target.take() {
+            Some(t)
+                if t.width() == size.width && t.height() == size.height && t.format() == format =>
+            {
+                t
+            }
+            _ => Target::new(
+                &self.device,
+                "pm frame",
+                size.width,
+                size.height,
+                format,
+                pm_gpu::target::working_usage(),
+            ),
+        };
         let depth_id = request.depth_id.then(|| {
             Target::new(
                 &self.device,
@@ -1504,6 +1578,8 @@ impl Renderer {
         copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         request.validate()?;
+        // One look at each media file per frame (`media::StampFrame`).
+        let _stamps = crate::media::StampFrame::begin();
         let root = document
             .root()
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
@@ -1618,11 +1694,13 @@ impl Renderer {
         let svg_skip_failed = self.svg_skip_failed && !request.export;
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
+            self.binds.begin_frame();
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,
                 pipelines: &self.pipelines,
                 uniforms: &mut self.uniforms,
+                binds: &mut self.binds,
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,
@@ -1754,6 +1832,7 @@ impl Renderer {
         }
         self.queue.submit([encoder.finish()]);
         self.effects.watchdog.submitted(&self.queue);
+        self.binds.end_frame();
         for t in taken {
             self.pool.give(t);
         }
@@ -1854,6 +1933,52 @@ impl Renderer {
             &self.queue,
             &frame.color.texture,
         )?)
+    }
+
+    /// [`Self::read_rgba`] through a staging buffer the renderer keeps for
+    /// the next read (an export reads every frame): the same values, without
+    /// a new GPU buffer and a packed byte copy per frame.
+    pub fn read_rgba_reusing(&mut self, frame: &Frame) -> Result<Vec<f32>, RenderError> {
+        let out = self.frame_reuse.rgba.take().unwrap_or_default();
+        Ok(self.frame_reuse.readback.read_f32_into(
+            &self.device,
+            &self.queue,
+            &frame.color.texture,
+            out,
+        )?)
+    }
+
+    /// Gives a finished frame's pixels back: the next
+    /// [`Self::read_rgba_reusing`] reads into their allocation.
+    pub fn give_rgba(&mut self, rgba: Vec<f32>) {
+        self.frame_reuse.rgba = Some(rgba);
+    }
+
+    /// Gives a finished frame's color target back: the next [`Self::render`]
+    /// of the same size and format draws into it instead of allocating one.
+    /// The frame is consumed, so nothing can read the target after the next
+    /// render overwrites it.
+    pub fn recycle(&mut self, frame: Frame) {
+        if frame.depth_id.is_none() {
+            self.frame_reuse.target = Some(frame.color);
+        }
+    }
+
+    /// Bytes [`Self::read_rgba_reusing`], [`Self::give_rgba`] and
+    /// [`Self::recycle`] keep for the next frame: the staging buffer, the
+    /// frame target and the pixels.
+    pub fn frame_reuse_bytes(&self) -> u64 {
+        let r = &self.frame_reuse;
+        r.readback.capacity_bytes()
+            + r.target.as_ref().map_or(0, |t| t.bytes())
+            + r.rgba.as_ref().map_or(0, |v| (v.capacity() * 4) as u64)
+    }
+
+    /// Drops what [`Self::read_rgba_reusing`], [`Self::give_rgba`] and
+    /// [`Self::recycle`] kept (at the end of an export, after a one-off
+    /// frame, and on [`Self::trim`]).
+    pub fn release_frame_reuse(&mut self) {
+        self.frame_reuse = FrameReuse::default();
     }
 
     /// Reads the depth and id surface back (r depth, g/b id − 1, a coverage).

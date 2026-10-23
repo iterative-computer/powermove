@@ -1,3 +1,7 @@
+import { persistShaderEnvironment } from './shader-environment';
+import { packAgentProject } from '../agent-tools/project-packer';
+import { ProfileDefinitionsWriter, profileDefinitionsPath } from './profile-definitions';
+import { installAgentFramesIpc } from './agent-frames';
 /*
  * Wires the native engine into the Electron app behind "Use New Engine".
  *
@@ -351,7 +355,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           POWERMOVE_ENGINE_ADDON: addon,
           // Invalidate first-use parity on every engine/browser/OS update.
           // GPU identity and native driver version are added by pm-render.
-          POWERMOVE_ENGINE_PARITY_ENV: JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() }),
+          POWERMOVE_ENGINE_PARITY_ENV: persistShaderEnvironment(path.join(cacheDirectory, CACHE_DIRS.shaderCache), JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() })),
           // Translated shader programs, kept across launches (plan section 11).
           POWERMOVE_ENGINE_SHADER_CACHE: path.join(cacheDirectory, CACHE_DIRS.shaderCache)
         }
@@ -467,10 +471,14 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       });
     }
   });
+  const profileDefinitions = new ProfileDefinitionsWriter(profileDefinitionsPath(options.userData), (message) => log('warn', message));
   options.ipc.on(ENGINE_IPC.definitions, (event, update: unknown) => {
     if (!options.isTrustedSender(event)) return;
     try {
       engine!.updateDefinitions(event.sender.id, update);
+      // `powermove render` draws the app's winning definitions (amendment 24).
+      const set = engine!.definitions.snapshotSet(event.sender.id);
+      if (set) profileDefinitions.write(set);
     } catch (error) {
       log('warn', `definitions from window ${event.sender.id} refused: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -502,6 +510,10 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   let renderQueue: RenderQueue | null = null;
   const agentJobs = new AgentJobs({
     engine,
+    ...(options.resolveAsset ? { packProject: (project: Record<string, any>, session: number, document: unknown) => packAgentProject(project, {
+      directory: options.automaticOutputDirectory ?? path.join(options.home, 'Powermove'),
+      resolveAsset: asset => options.resolveAsset!(asset, { process: 'job', session })
+    }, document) } : {}),
     ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}),
     log,
     // Each job renders its window's winning registrations (contract 10).
@@ -525,6 +537,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     onQueueStatus: (jobId, status) => renderQueue?.status(jobId, status),
     onAgentJob: (job) => renderQueue?.agentJob(job)
   });
+  const removeAgentFramesIpc = installAgentFramesIpc(options.ipc, agentJobs, options.isTrustedSender);
   jobOwners = agentJobs;
   renderQueue = new RenderQueue({
     windowOpen: (owner) => { const contents = webContents.fromId(owner); return !!contents && !contents.isDestroyed(); },
@@ -694,6 +707,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     attachWindow,
     dispose: async () => {
       exportEncoders.dispose();
+      removeAgentFramesIpc();
       removeSnapshotIpc();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
       windowSessions.dispose();
@@ -714,6 +728,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       fontClient.disconnect();
       jobFontClient.disconnect('the job engine stopped');
       options.ipc.removeAllListeners(ENGINE_IPC.definitions);
+      await profileDefinitions.flush();
       options.ipc.removeAllListeners(ENGINE_IPC.playback);
       options.ipc.removeAllListeners(ENGINE_IPC.shaderFallbackResult);
       agentJobs.dispose();

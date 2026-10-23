@@ -730,3 +730,74 @@ captured at both encoder boundaries in hidden test launches.
 - A project frame rate held as a decimal that is not the rational's double
   (for example 29.97 rather than 30000/1001) gives today's encoders a
   different `-framerate`/`framerate`; the engine passes `num / den`.
+
+## Phase 3c agents: strict batches, host packing and CLI delivery
+
+This section supersedes the capability-routing behavior described above for
+agent jobs. With the engine enabled, its presence selects native work even while
+it is recovering. `unsupported`, `mediaOffline` and other engine failures retain
+their named error; agent exports and frame batches never invoke a legacy fallback.
+User job statuses produced by `AgentJobs` no longer mark failures as routed.
+The broader sheet/router removal remains the derouter lane's work.
+
+`AgentHarness.capture` and `observeVisual` now use the authenticated
+`engine:agent-frames` batch endpoint, at JPEG 0.74 and motion blur off. The endpoint
+uses the job lane, pins the document revision, waits for media bindings and
+extension definitions, and never pauses/resumes playback or enters the exclusive
+compatibility capture helper. MCP composition contact sheets submit all cells as
+one engine batch so the document and definitions freeze together. A partial,
+duplicate or out-of-order native response is validated and restored to request
+order. At a contact-sheet deadline or cancellation, that batch alone is
+cancelled and completed cells return with the remaining cells omitted. Ordinary
+frame requests still require every requested frame. Frame sessions pin media like export
+sessions, including across project changes.
+
+Native `save_project` asks for a single serialized document envelope, workspace
+and Undo snapshot, after pending imports finish. The host writes the same PMV3
+container as today's agent save, then records the project with `Projects.put`.
+The shared `project-assets.ts` helpers retain linked-original conversion and
+Undo-reachable media. Each save gets an exclusive owner-only name and media
+binding scope, including frozen blob MIME types. Missing sources are skipped;
+their metadata stays in the document. Source changes during copying fail by
+name and leave no output. Private document-plan responses have a separate bounded
+budget from paginated public agent state.
+
+`powermove render <project> <output> [options]` invokes the native CLI without a
+shell, preserves its exit code and signals, and accepts user-chosen destinations
+outside the agent exports folder. A missing runtime is
+`native-renderer-unavailable`. `pm-cli render --param NAME=JSON` validates all
+values before applying them to its isolated document, retaining each parameter's
+definition. Existing definition snapshots, host fonts and Blender service remain
+in the native CLI; a missing WebGL runner remains a named headless failure.
+
+Agent exports, frame batches and contact sheets wait, bounded at 45 s, for a
+starting or restarting job engine (the longest crash backoff is 30 s), then
+fail as `The job engine is not running.`; a stopped engine fails at once.
+Frames requested as PNG are labelled `image/png`. Native `save_project`
+validates its (empty) arguments with today's strict schema and message.
+
+Targeted tests cover native failures before/after job acceptance and during
+recovery; pinning and playback isolation; incomplete frames; media binding
+lifetimes; PMV3 byte equality, missing originals, MIME, Undo and exclusive naming; CLI argument boundaries;
+parameter validation and rendered expression changes. The desktop MCP smoke now
+checks native text, publication followed by frames, and host-packed PMV3 media and
+Undo. `e2e/engine-agent-observation.spec.ts` measures twenty five-frame 720 px
+observations during a UHD project's playback. Only measured runs establish its
+performance result.
+
+The macOS native hidden host now embeds host services and the production
+per-project document workers. Its render jobs, batches and saves use the same
+`NativeEngine` and `AgentJobs` as the desktop, over Node child-process ports.
+The desktop persists its probe namespace beside the per-machine shader cache;
+the hidden host, Node render command and direct bundled `pm-cli` read it, read
+only: their first-use decisions stay in memory (hidden-host.md). Unknown
+and pinned user programs request the desktop's WebGL runner in on-demand
+Chromium. This is the shader runner only; composition frames remain native.
+The hidden tabs present CPU snapshots from `pm-node`.
+
+See [hidden-host.md](hidden-host.md) for runtime wiring, reproducible gates and
+remaining compatibility dependencies. Both macOS architectures build through
+`pm-node-addon`, `pm-bridge-addon` and the shipping release profile; no LTO
+profile override is required after the release-build repair. Assembly requires
+matching LGPL FFmpeg and native image-decoder licenses, matching architecture
+checks, and clean Node 22 load tests before distributing artifacts.

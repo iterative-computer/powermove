@@ -273,9 +273,43 @@ fn wait_idle(renderer: &mut Renderer) {
 }
 
 /// Renders one frame through `gate`: the whole frame at once when the gate
-/// admits every unit, else bands of rows as regions of interest.
+/// admits every unit, else bands of rows as regions of interest. A one-off
+/// frame (an agent still, a parity frame): the renderer keeps no staging
+/// buffer or frame target afterwards (an export keeps them from frame to
+/// frame, [`run_export_with_blender`]).
 #[allow(clippy::too_many_arguments)]
 pub fn render_frame(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &dyn GpuGate,
+    pass: u64,
+    cancel: &AtomicBool,
+) -> Result<ReadFrame, JobError> {
+    let result = render_frame_reusing(
+        renderer,
+        document,
+        composition,
+        time,
+        request,
+        media,
+        gate,
+        pass,
+        cancel,
+    );
+    renderer.release_frame_reuse();
+    result
+}
+
+/// [`render_frame`], keeping the frame's staging buffer and target for the
+/// next frame (an export's frames; the caller releases them with
+/// `Renderer::release_frame_reuse` when its frames end, as
+/// [`run_export_with_blender`] does).
+#[allow(clippy::too_many_arguments)]
+pub fn render_frame_reusing(
     renderer: &mut Renderer,
     document: &Document,
     composition: &str,
@@ -311,7 +345,7 @@ pub fn render_frame(
     result
 }
 
-/// [`render_frame`]'s bands, with the renderer's bracket set to `span`.
+/// [`render_frame_reusing`]'s bands, with the renderer's bracket set to `span`.
 #[allow(clippy::too_many_arguments)]
 fn render_bands(
     renderer: &mut Renderer,
@@ -328,7 +362,8 @@ fn render_bands(
     let size = request.output_size;
     let (w, h) = (size.width, size.height);
     let total_units = h.div_ceil(BAND_ROWS);
-    let mut rgba = vec![0f32; w as usize * h as usize * 4];
+    // Allocated by the first band unless it is the whole frame.
+    let mut rgba = Vec::new();
     let mut failures = Vec::new();
     let mut y = 0u32;
     while y < h {
@@ -356,7 +391,7 @@ fn render_bands(
                 height: band,
             });
         }
-        let frame = match renderer.render(document, composition, time, &req, media) {
+        let mut frame = match renderer.render(document, composition, time, &req, media) {
             Ok(frame) => frame,
             Err(e) => {
                 // Whatever the failed render submitted finishes before the
@@ -382,11 +417,20 @@ fn render_bands(
             .and_then(|s| s.read_us(renderer.device(), renderer.queue()));
         let units = if whole { total_units } else { admitted };
         admission.finish(units, gpu_us.unwrap_or(wall_us), gpu_us.is_some());
-        let pixels = renderer.read_rgba(&frame)?;
+        let pixels = renderer.read_rgba_reusing(&frame)?;
         let row = w as usize * 4;
         let at = y as usize * row;
-        rgba[at..at + pixels.len()].copy_from_slice(&pixels);
-        failures.extend(frame.failures);
+        if whole {
+            // One band is the whole frame: its pixels are the frame.
+            rgba = pixels;
+        } else {
+            if rgba.is_empty() {
+                rgba = vec![0f32; w as usize * h as usize * 4];
+            }
+            rgba[at..at + pixels.len()].copy_from_slice(&pixels);
+        }
+        failures.append(&mut frame.failures);
+        renderer.recycle(frame);
         y += band;
     }
     Ok(ReadFrame {
@@ -1046,6 +1090,27 @@ pub fn run_export_with_blender<S: Sink + Send>(
     gate: &dyn GpuGate,
     cancel: &AtomicBool,
     progress: &mut (dyn FnMut(Progress) + Send),
+    blender: Option<&mut crate::blender::ExportBlender>,
+) -> Result<S::Output, JobError>
+where
+    S::Output: Send,
+{
+    let result = export_frames(renderer, job, plan, sink, gate, cancel, progress, blender);
+    // The frames' staging buffer, target and pixels are kept only while
+    // exporting (one-off frames release them in `render_frame`).
+    renderer.release_frame_reuse();
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_frames<S: Sink + Send>(
+    renderer: &mut Renderer,
+    job: &ExportJob,
+    plan: ExportPlan,
+    sink: S,
+    gate: &dyn GpuGate,
+    cancel: &AtomicBool,
+    progress: &mut (dyn FnMut(Progress) + Send),
     mut blender: Option<&mut crate::blender::ExportBlender>,
 ) -> Result<S::Output, JobError>
 where
@@ -1083,6 +1148,9 @@ where
         )
     });
     let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
+    // The encoder gives each frame's pixels back for a later frame to read
+    // into (docs/engine/perfbench.md).
+    let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let qos = crate::par::current_qos();
     std::thread::scope(|scope| {
         let encoder = scope.spawn(move || -> Result<S::Output, JobError> {
@@ -1117,7 +1185,7 @@ where
                 } else {
                     None
                 };
-                drop(rgba);
+                let _ = back_tx.send(rgba);
                 if let Some((mixer, rate, last)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
                     let first = first.min(*last);
@@ -1158,6 +1226,16 @@ where
                 render_error = Some(JobError::Cancelled);
                 break;
             }
+            // Three frames' pixels circulate. Before frame n the encoder has
+            // taken frame n - 2 (the channel holds one), so it has given
+            // frame n - 3's back: waiting for it never stalls the export, and
+            // which buffer a frame reads into does not depend on timing. An
+            // encoder that stopped closes the channel: a new buffer then.
+            if n >= PIXEL_BUFFERS
+                && let Ok(rgba) = back_rx.recv()
+            {
+                renderer.give_rgba(rgba);
+            }
             let frame_request = match blender.as_deref_mut() {
                 None => Ok(request.clone()),
                 Some(stage) => stage
@@ -1175,7 +1253,7 @@ where
             };
             let rendered = frame_request
                 .and_then(|frame_request| {
-                    render_frame(
+                    render_frame_reusing(
                         renderer,
                         &document,
                         &job.composition,
@@ -1234,6 +1312,10 @@ where
             .unwrap_or_else(|_| Err(JobError::Render("the encoder thread panicked".into())))
     })
 }
+
+/// Frames' pixel buffers an export keeps in circulation between the render
+/// and encoder threads.
+const PIXEL_BUFFERS: u64 = 3;
 
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
 /// FFmpeg (WebM), or the engine's PNG writer.

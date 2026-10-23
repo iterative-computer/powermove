@@ -463,8 +463,10 @@ impl TextGpu {
         if let Some(c) = self.cache.get_mut(&(plan.key, precision)) {
             c.used = self.tick;
             self.stats.cache_hits += 1;
+            pm_perf::bump(pm_perf::Counter::TextCacheHits);
             return Ok(c.target.view.clone());
         }
+        pm_perf::bump(pm_perf::Counter::TextCacheMisses);
         let scene = &plan.scene;
         let atlas = atlas::pack(scene, MAX_PAGE);
         let pages = self.pages(device, queue, pool, taken, scene, &atlas)?;

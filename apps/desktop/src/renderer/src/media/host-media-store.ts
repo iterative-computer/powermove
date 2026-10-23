@@ -16,6 +16,8 @@ import { Blake3 } from '../../../shared/blake3';
 import type { AssetStorage, ClassifyResult, ConversionKind, MediaBinding, MediaConversion, MediaLink, MediaReadOpen, MediaRecordSource, MediaStoreBridge, MediaStoreRecord } from '../../../shared/media-store';
 import { compactEditLog } from '../core/edit-log';
 import { applyEngineStamp } from '../../../shared/engine-stamp';
+import { mimeOf } from '../../../shared/media-mime';
+export { mimeOf } from '../../../shared/media-mime';
 
 /** Bytes per IPC chunk (main caps reads and writes at 4 MiB). */
 export const CHUNK_BYTES = 4 * 1024 * 1024;
@@ -419,16 +421,6 @@ export function createHostMediaStore(options: HostMediaStoreOptions): HostMediaS
   return store;
 }
 
-const MIME: Record<string, string> = {
-  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska',
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
-  wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', flac: 'audio/flac'
-};
-export function mimeOf(name: unknown): string {
-  const match = /\.([A-Za-z0-9]{1,8})$/.exec(String(name || ''));
-  return match ? MIME[match[1]!.toLowerCase()] ?? '' : '';
-}
-
 /**
  * The storage an import gets (section 21): Copy into project unless the
  * project links files (or an agent asked for `storage: "link"`), and always
@@ -472,9 +464,9 @@ export function bindingsFor(project: any, records: (key: string) => MediaStoreRe
  * Installs the wrapper over `PM.MediaStore` (after `core/media`), the
  * import decisions for `gl/raster`, and the engine bindings.
  */
-export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: MediaStoreBridge; media?: { sourcePath?(file: File): string | null }; remote?: unknown } | null | undefined): void {
+export function installHostMediaStore(PM: Registry, bridge: { mediaStore?: MediaStoreBridge; media?: { sourcePath?(file: File): string | null }; remote?: unknown; nativeHidden?: boolean } | null | undefined): void {
   const host = bridge?.mediaStore;
-  if (!host || bridge?.remote || !PM.MediaStore) return;
+  if (!host || (bridge?.remote && !bridge.nativeHidden) || !PM.MediaStore) return;
   let enabled = false;
   try { enabled = host.configSync().enabled === true; } catch { enabled = false; }
   const relinked = (meta: any, link: MediaLink) => {

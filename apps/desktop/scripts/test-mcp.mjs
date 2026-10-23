@@ -9,7 +9,7 @@
  * the exports are verified with our FFmpeg. Run it under the Electron lock:
  *   ~/Library/Caches/powermove-engine/bin/pm-electron-lock node scripts/test-mcp.mjs --desktop */
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, writeFile, rm, stat, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm, stat, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -18,16 +18,32 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 
 const desktop = process.argv.includes('--desktop');
+const missingBrowser = process.argv.includes('--missing-browser');
+const native = process.argv.includes('--native') || missingBrowser;
+if (process.env.POWERMOVE_REQUIRE_BACKGROUND === '1') {
+  const manager = execFileSync('/bin/launchctl', ['managername'], { encoding: 'utf8' }).trim();
+  assert.equal(manager, 'Background', 'the native service must run outside the Aqua launch session');
+  console.log(`Native MCP launch session: ${manager}`);
+}
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+// The MCP contract does not use an agent provider. Isolate account discovery
+// so a real provider cannot recreate its cache after the profile is removed.
+process.env.CODEX_BINARY = path.join(repository, 'apps/desktop/src/main/codex/__fixtures__/fake-codex-app-server.sh');
 // Powermove's FFmpeg build, found the way the CLI host finds it (src/server/cli.ts hostFfmpeg).
 const ffmpegDir = [process.env.PM_FFMPEG_DIR, path.join(os.homedir(), 'Library/Caches/powermove-engine/ffmpeg/out')]
   .find(dir => dir && existsSync(path.join(dir, 'bin/ffmpeg')));
 const ffmpeg = process.env.POWERMOVE_FFMPEG || (ffmpegDir ? path.join(ffmpegDir, 'bin/ffmpeg') : 'ffmpeg');
 const ffprobe = ffmpegDir ? path.join(ffmpegDir, 'bin/ffprobe') : 'ffprobe';
 const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-mcp-video-'));
+let app = null, child, appLog = '', diagnostics = '';
+try {
 const profile = path.join(root, 'profile'), exportsDir = path.join(root, 'exports');
 const audio = path.join(root, 'tone.wav');
+const sourceVideo = path.join(root, 'source.mov');
+execFileSync(ffmpeg, ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=160x90:r=24', '-t', '1', '-c:v', 'prores_videotoolbox', '-profile:v', '0', sourceVideo]);
+const svg = path.join(root, 'mark.svg');
+await writeFile(svg, '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32" viewBox="0 0 64 32"><rect x="4" y="4" width="20" height="20" fill="#e83a5e"/><path d="M30 4 L60 4 L45 28 Z" fill="#3a5ee8"/></svg>');
 const frames = 48000, bytes = Buffer.alloc(44 + frames * 2);
 bytes.write('RIFF', 0); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
 bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
@@ -36,8 +52,6 @@ bytes.write('data', 36); bytes.writeUInt32LE(frames * 2, 40);
 for (let i = 0; i < frames; i++) bytes.writeInt16LE(Math.round(5000 * Math.sin(i * Math.PI * 2 * 440 / 48000)), 44 + i * 2);
 await writeFile(audio, bytes);
 const desktopDir = path.join(repository, 'apps/desktop');
-let app = null, appLog = '';
-let child;
 if (desktop) {
   const electron = createRequire(path.join(desktopDir, 'package.json'))('electron');
   assert(existsSync(path.join(desktopDir, 'out/main/index.js')), 'Build the desktop app first (bun run build).');
@@ -47,7 +61,7 @@ if (desktop) {
   // Hidden, never focused (background-testing.ts); the new engine on; agent exports in the temp folder.
   app = spawn(electron, ['.'], {
     cwd: desktopDir, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...env, POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DEVTOOLS: '0', POWERMOVE_NEW_ENGINE: '1', POWERMOVE_AGENT_EXPORTS: exportsDir, POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' }
+    env: { ...env, POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DISABLE_RUNTIME_UPDATES: '1', POWERMOVE_DEVTOOLS: '0', POWERMOVE_NEW_ENGINE: '1', POWERMOVE_AGENT_EXPORTS: exportsDir, POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' }
   });
   for (const stream of [app.stdout, app.stderr]) stream.on('data', chunk => { appLog = (appLog + chunk.toString()).slice(-40000); });
   const connection = path.join(profile, 'mcp/connection.json');
@@ -60,9 +74,9 @@ if (desktop) {
   child = spawn(electron, ['.', '--powermove-mcp'], { cwd: desktopDir, stdio: ['pipe', 'pipe', 'pipe'], env });
 } else {
   const cli = process.env.POWERMOVE_TEST_CLI || path.join(repository, 'packages/cli/bin/powermove.mjs');
-  child = spawn(process.execPath, [cli, 'mcp', '--user-data', profile, '--exports', exportsDir], { stdio: ['pipe', 'pipe', 'pipe'] });
+  child = spawn(process.execPath, [cli, 'mcp', '--user-data', profile, '--exports', exportsDir], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...(native ? { POWERMOVE_NEW_ENGINE: '1', POWERMOVE_ENGINE_SHADER_CACHE: path.join(profile, 'Engine Cache', 'Shader Cache') } : {}), ...(missingBrowser ? { POWERMOVE_CHROMIUM: path.join(root, 'missing-chromium') } : {}) } });
 }
-let diagnostics = '', output = '', nextId = 0;
+let output = '', nextId = 0;
 const pending = new Map();
 child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk.toString()).slice(-20000); });
 child.stdout.on('data', chunk => {
@@ -89,6 +103,19 @@ const tool = async (name, args = {}) => {
   return result;
 };
 const text = result => JSON.parse(result.content.find(item => item.type === 'text').text);
+/** A saved .pmv's document (today's agent save: PMV3). */
+const savedDocument = async file => {
+  const packed = await readFile(file);
+  assert.equal(packed.subarray(0, 5).toString(), 'PMV3\n');
+  return JSON.parse(packed.subarray(9, 9 + packed.readUInt32LE(5))).document;
+};
+/** Imported asset records by file name, for comparing the hidden hosts (POWERMOVE_MCP_EVIDENCE). */
+const recordImports = async (document, mode) => {
+  const assets = Object.fromEntries(Object.values(document.proj?.assets ?? document.assets ?? {}).map(({ id: _id, ...asset }) => [asset.name, asset]));
+  const layers = (document.proj ?? document).layers.filter(layer => layer.d?.svgSourceAsset).map(({ id: _id, d, ...layer }) => ({ type: layer.type, name: layer.name, from: layer.from, paths: d.paths?.length, svgWidth: d.svgWidth, svgHeight: d.svgHeight, p: layer.p }));
+  if (process.env.POWERMOVE_MCP_EVIDENCE) { await mkdir(process.env.POWERMOVE_MCP_EVIDENCE, { recursive: true }); await writeFile(path.join(process.env.POWERMOVE_MCP_EVIDENCE, `imports-${mode}.json`), JSON.stringify({ assets, layers }, null, 2)); }
+  return { assets, layers };
+};
 const probe = (file, entries) => JSON.parse(execFileSync(ffprobe, ['-v', 'error', '-show_entries', entries, '-of', 'json', file], { encoding: 'utf8' }));
 const quit = async () => {
   child.stdin.end();
@@ -110,7 +137,16 @@ async function desktopSmoke() {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
-  await tool('start_session', { prompt: 'Create a red video with an audible tone' });
+  const started = text(await tool('start_session', { prompt: 'Create a red video with an audible tone' }));
+  if (native) {
+    await tool('get_project_state');
+    assert.equal((await tool('render_frames', { times: [0], width: 160 })).content.filter(item => item.type === 'image').length, 1);
+    assert(!diagnostics.includes('Chromium started on demand'), 'plain native edits and frames must not start Chromium');
+    await tool('open_panel', { panelId: 'timeline' });
+    assert(diagnostics.includes('Chromium started on demand'), 'the first panel call starts Chromium on demand');
+  }
+  const videoAsset = text(await tool('import_media', { path: sourceVideo }));
+  assert.equal(videoAsset.persisted, true);
   const imported = text(await tool('import_media', { path: audio }));
   assert.equal(imported.persisted, true);
   await tool('get_project_state');
@@ -121,6 +157,44 @@ async function desktopSmoke() {
   assert.equal(images.length, 2);
   assert(images.every(item => item.mimeType === 'image/jpeg'), 'agent frames from the job engine are JPEG');
   assert(!/render_frames routed/.test(appLog), `render_frames was routed to the current engine: ${appLog.match(/render_frames routed[^\n]*/)?.[0]}`);
+  // A composition contact sheet renders its cells through the same engine batches.
+  assert(tools.includes('media_contact_sheet'), 'media_contact_sheet');
+  const sheet = await tool('media_contact_sheet', { target: 'composition', count: 4 });
+  const sheetInfo = text(sheet);
+  assert.equal(sheetInfo.cells.length, 4, JSON.stringify(sheetInfo)); assert(!sheetInfo.incomplete, JSON.stringify(sheetInfo));
+  const sheetImage = sheet.content.find(item => item.type === 'image');
+  assert.equal(sheetImage?.mimeType, 'image/jpeg');
+  const sheetFile = path.join(root, `sheet-${native ? 'hidden' : 'desktop'}.jpg`);
+  await writeFile(sheetFile, Buffer.from(sheetImage.data, 'base64'));
+  const sheetPixel = execFileSync(ffmpeg, ['-v', 'error', '-i', sheetFile, '-frames:v', '1', '-vf', 'crop=2:2:4:4', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
+  assert(sheetPixel[0] > 150 && sheetPixel[1] < 120, `the first sheet cell shows the red composition: ${[...sheetPixel.subarray(0, 3)]}`);
+  assert(!/render_frames routed|media_contact_sheet routed|capture fallback/.test(appLog), 'the composition contact sheet must not route to the legacy renderer');
+  if (native) {
+    // Imports are today's editor import in the project tab: it decodes the media and writes its record.
+    assert(diagnostics.includes('Chromium started on demand'), 'imports run today\'s editor import in the project-pinned tab');
+    const listed = text(await tool('list_media'));
+    assert(listed.assets.every(asset => asset.status === 'available'), `host-store imports are available to the worker: ${JSON.stringify(listed)}`);
+    await tool('check_project');
+    await tool('replace_media', { assetId: imported.assetId, path: audio });
+    await tool('open_panel', { panelId: 'timeline' });
+    const workspace = text(await tool('get_workspace_state'));
+    assert(workspace.layout?.registeredPanels?.length > 0, 'native hidden workspace keeps the full production panel registry');
+    await tool('open_panel', { panelId: 'viewer' });
+    let shown;
+    for (const until = Date.now() + 30_000; ;) {
+      const capture = await tool('capture_panel', { panelId: 'viewer' });
+      const image = capture.content.find(item => item.type === 'image');
+      assert(image, 'native CPU viewer screenshot');
+      shown = Buffer.from(image.data, 'base64');
+      const center = execFileSync(ffmpeg, ['-v', 'error', '-i', 'pipe:0', '-frames:v', '1', '-vf', 'crop=2:2:(iw-2)/2:(ih-2)/2', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { input: shown });
+      if (center[0] > 150 && center[1] < 120 && center[2] < 150) break;
+      if (Date.now() > until) {
+        if (process.env.POWERMOVE_MCP_EVIDENCE) { await mkdir(process.env.POWERMOVE_MCP_EVIDENCE, { recursive: true }); await writeFile(path.join(process.env.POWERMOVE_MCP_EVIDENCE, 'native-cpu-viewer.jpg'), shown); }
+        throw new Error(`Native CPU viewer did not present the red composition: ${center.subarray(0, 3)}. ${diagnostics}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+  }
   const video = text(await tool('export_video', { name: 'MCP desktop engine', audio: true, motionBlur: false }));
   assert(video.jobId, `export_video did not run in the job engine: ${JSON.stringify(video)} ${appLog.match(/export_video routed[^\n]*/)?.[0] ?? ''}`);
   assert(video.path.startsWith(exportsDir), video.path);
@@ -159,48 +233,93 @@ async function desktopSmoke() {
   assert(prores.streams.some(item => item.codec_tag_string === 'tmcd' && item.tags?.timecode === '00:00:00:00'), JSON.stringify(prores));
   const other = await rpc('tools/call', { name: 'get_render_status', arguments: { jobId: 'not-a-job' } });
   assert.equal(other.isError, true);
-  // Capability routing: text layers are not in the Phase 2 renderer, so the
-  // project goes to the current exporter and capture, and still delivers.
+  // Text stays in the native job engine, including the host font service.
   await tool('get_project_state');
-  await tool('apply_commands', { label: 'Title', commands: [JSON.stringify({ type: 'add_layer', layerType: 'text', name: 'Title', content: { text: 'Routed' }, duration: 1 })] });
-  const routedFrames = await tool('render_frames', { times: [0.25], width: 320 });
-  assert.equal(routedFrames.content.filter(item => item.type === 'image').length, 1);
-  assert.match(appLog, /render_frames routed to the current engine: .*text layers/);
-  const routed = text(await tool('export_video', { name: 'MCP desktop routed', audio: true, motionBlur: false }));
-  assert.equal(routed.jobId, undefined, 'a routed export runs in the current exporter');
-  assert.match(appLog, /export_video routed to the current engine: .*text layers/);
-  assert(routed.path.startsWith(exportsDir) && (await stat(routed.path)).size > 1000, routed.path);
-  assert(probe(routed.path, 'stream=codec_name').streams.some(item => item.codec_name === 'h264'));
-  // A routed batch never holds the job engine: without the text layer,
-  // render_frames and export_video run in the job engine again, promptly.
+  await tool('apply_commands', { label: 'Title', commands: [JSON.stringify({ type: 'add_layer', layerType: 'text', name: 'Title', content: { text: 'Native' }, duration: 1 })] });
+  const titledFrames = await tool('render_frames', { times: [0.25], width: 320 });
+  assert.equal(titledFrames.content.filter(item => item.type === 'image').length, 1);
+  const titled = text(await tool('export_video', { name: 'MCP desktop title', audio: true, motionBlur: false }));
+  assert(titled.jobId, 'text exports must stay in the job engine');
+  assert(!/render_frames routed|export_video routed/.test(appLog), 'native tools must never route to the legacy renderer');
+
+  // Publication must settle before the next batch, with the new winning shader.
+  const stage = path.join(started.stagingDirectory, 'mcp-render-smoke');
+  await mkdir(stage, { recursive: true });
+  await writeFile(path.join(stage, 'manifest.json'), JSON.stringify({ id: 'mcp-render-smoke', name: 'MCP render smoke', version: '1.0.0', apiVersion: 3, permissions: [], contributes: ['effects'] }));
+  await writeFile(path.join(stage, 'index.ts'), `import type { PowermoveAPI } from 'powermove';
+export default function activate(api: PowermoveAPI) {
+  api.effects.register({ id: 'mcp-render-smoke.effect', label: 'MCP render smoke', group: 'Color', params: [], frag: 'o = texture(u_tex, v_st);' });
+}
+`);
+  await tool('publish_extensions', { extensions: [{ id: 'mcp-render-smoke', action: 'created', summary: 'MCP render contract fixture' }] });
   const title = text(await tool('get_project_state')).layers.find(layer => layer.name === 'Title');
   assert(title, 'the Title layer');
-  await tool('apply_commands', { label: 'No title', commands: [JSON.stringify({ type: 'delete_layers', targets: [title.id] })] });
-  const routedSoFar = (appLog.match(/render_frames routed/g) ?? []).length;
-  const again = Date.now();
-  const unblocked = await tool('render_frames', { times: [0.75], width: 320 });
-  assert.equal(unblocked.content.filter(item => item.type === 'image').length, 1);
-  assert.equal((appLog.match(/render_frames routed/g) ?? []).length, routedSoFar, 'render_frames ran in the job engine again');
-  assert(Date.now() - again < 30000, `render_frames after a routed batch took ${Date.now() - again} ms`);
-  const after = text(await tool('export_video', { name: 'MCP desktop after routing', audio: false, motionBlur: false }));
-  assert(after.jobId, `export_video after a routed batch did not run in the job engine: ${JSON.stringify(after)}`);
+  await tool('apply_commands', { label: 'Published effect', commands: [JSON.stringify({ type: 'add_effect', target: title.id, effect: 'mcp-render-smoke.effect' })] });
+  const publishedFrames = await tool('render_frames', { times: [0.75], width: 320 });
+  assert.equal(publishedFrames.content.filter(item => item.type === 'image').length, 1);
+  if (native) {
+    // Without `at`, import_media_to_timeline imports the asset only (placement null), as today.
+    const assetOnly = text(await tool('import_media_to_timeline', { path: svg }));
+    assert.equal(assetOnly.layers.length, 0, JSON.stringify(assetOnly));
+    await tool('get_project_state');
+    const placed = text(await tool('import_media_to_timeline', { path: svg, at: 0 }));
+    assert.equal(placed.layers[0]?.type, 'shape', `an SVG with paths lands as an editable shape layer: ${JSON.stringify(placed)}`);
+    await tool('get_project_state');
+  }
+  const saved = text(await tool('save_project'));
+  if (native) {
+    const { assets, layers } = await recordImports(await savedDocument(saved.path), 'native');
+    assert.equal(assets['mark.svg']?.format, 'svg'); assert.equal(assets['mark.svg']?.editablePaths, 2);
+    assert(assets['mark.svg']?.poster === true || assets['mark.svg']?.poster === undefined);
+    assert.equal(layers.length, 1);
+  }
+  const packed = await readFile(saved.path);
+  // Today's agent save: a PMV3 container (shared/project-container.ts).
+  assert.equal(packed.subarray(0, 5).toString(), 'PMV3\n');
+  const headerLength = packed.readUInt32LE(5);
+  const header = JSON.parse(packed.subarray(9, 9 + headerLength));
+  assert(header.media.some(record => record.id === imported.assetId && record.length > 0), 'self-contained save embeds original audio');
+  assert.equal(header.media.find(record => record.id === imported.assetId).type, 'audio/wav', 'save keeps today’s media MIME fallback');
+  const document = header.document;
+  assert(document.proj && document.history && document.proj.layers.some(layer => layer.name === 'Title'), 'save keeps project and Undo history');
+  assert.equal((await stat(saved.path)).mode & 0o777, 0o600);
   await tool('finish_session', { commit: true });
   // No temporary or empty files are left behind.
   const left = await readdir(exportsDir);
-  assert.deepEqual(left.filter(name => name.startsWith('.powermove-')), []);
+  assert.deepEqual(left.filter(name => name.startsWith('.')), []);
   for (const name of left) assert((await stat(path.join(exportsDir, name))).size > 0, name);
   await quit();
-  console.log(`MCP desktop smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, a text project routed to the current exporter, and the job engine still serving after it; ${left.length} verified exports.`);
+  console.log(`MCP ${native ? 'native hidden' : 'desktop'} smoke passed: render_frames and export_video (H.264 wait, ProRes async with get_render_status) through the job engine, native text, published shader plus frames, and a self-contained PMV3 (today's agent save) with Undo history; ${left.length} verified exports.`);
 }
 
-try {
-  if (desktop) { await desktopSmoke(); throw Object.assign(new Error('done'), { done: true }); }
+  if (missingBrowser) {
+    await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'missing-browser', version: '1' } });
+    await tool('create_project', { name: 'Missing Chromium', width: 320, height: 180, fps: 24, duration: 1 });
+    await tool('start_session', { prompt: 'Inspect the workspace' });
+    const result = await rpc('tools/call', { name: 'get_workspace_state', arguments: {} });
+    assert(result.isError && result.content.some(c => /chromium-unavailable/.test(c.text ?? '')), JSON.stringify(result));
+    // Imports run today's editor import in the tab, so they name the missing browser too.
+    for (const name of ['import_media', 'import_media_to_timeline']) {
+      const failed = await rpc('tools/call', { name, arguments: { path: audio } });
+      assert(failed.isError && failed.content.some(c => /chromium-unavailable/.test(c.text ?? '')), JSON.stringify(failed));
+    }
+    await tool('get_project_state');
+    await tool('apply_commands', { label: 'Red', commands: [JSON.stringify({ type: 'add_layer', layerType: 'solid', name: 'Red', content: { color: '#e83a5e', w: 320, h: 180 }, duration: 1 })] });
+    assert.equal((await tool('render_frames', { times: [0], width: 160 })).content.filter(item => item.type === 'image').length, 1);
+    assert(!diagnostics.includes('Chromium started on demand'));
+    await tool('finish_session', { commit: true }); await quit();
+    console.log('Native missing-browser case passed: document edits and frames succeed; DOM tools and imports return chromium-unavailable.');
+    throw Object.assign(new Error('done'), { done: true });
+  }
+  if (desktop || native) { await desktopSmoke(); throw Object.assign(new Error('done'), { done: true }); }
   assert.equal((await rpc('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'smoke', version: '1' } })).serverInfo.name, 'powermove');
   const tools = (await rpc('tools/list')).tools.map(tool => tool.name);
   for (const name of ['create_project', 'apply_commands', 'edit_video', 'probe_media', 'render_frames', 'delegate_task', 'export_video', 'save_project']) assert(tools.includes(name), name);
   assert.equal(new Set(tools).size, tools.length, 'MCP tool names must be unique');
   const project = text(await tool('create_project', { name: 'MCP smoke video', width: 320, height: 180, fps: 12, duration: 1 }));
   await tool('start_session', { prompt: 'Create a red video with an audible tone' });
+  const videoAsset = text(await tool('import_media', { path: sourceVideo }));
+  assert.equal(videoAsset.persisted, true);
   const firstImport = text(await tool('import_media', { path: audio }));
   assert.equal(firstImport.status, 'imported'); assert.equal(firstImport.persisted, true);
   assert.equal(text(await tool('get_project_state')).layerCount, 0);
@@ -226,8 +345,15 @@ try {
   assert(decodedAudio.length > 40000 && decodedAudio.some(byte => byte !== 0), 'MP4 audio must be present and audible');
   const pixel = execFileSync(ffmpeg, ['-v', 'error', '-i', video.path, '-frames:v', '1', '-vf', 'crop=2:2:0:0', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']);
   assert(pixel[0] > 150 && pixel[1] < 120, `Unexpected output pixel: ${pixel.subarray(0, 3)}`);
+  const assetOnly = text(await tool('import_media_to_timeline', { path: svg }));
+  assert.equal(assetOnly.layers.length, 0, JSON.stringify(assetOnly));
+  await tool('get_project_state');
+  const placedSvg = text(await tool('import_media_to_timeline', { path: svg, at: 0 }));
+  assert.equal(placedSvg.layers[0]?.type, 'shape', JSON.stringify(placedSvg));
+  await tool('get_project_state');
   const saved = text(await tool('save_project'));
   assert(saved.path.endsWith('.pmv')); assert((await stat(saved.path)).size > 1000);
+  await recordImports(await savedDocument(saved.path), 'legacy');
   await tool('finish_session', { commit: true });
   await tool('open_project', { projectId: project.projectId });
   await tool('start_session', { prompt: 'Check rollback' });
@@ -235,7 +361,7 @@ try {
   await tool('apply_commands', { label: 'Temporary', commands: [JSON.stringify({ type: 'add_layer', layerType: 'text', name: 'Temporary', content: { text: 'Rollback me' } })] });
   await tool('finish_session', { commit: false });
   await tool('start_session', { prompt: 'Verify', access: 'editor' });
-  assert.equal(text(await tool('get_project_state')).layerCount, 2);
+  assert.equal(text(await tool('get_project_state')).layerCount, 3);
   const rejected = await rpc('tools/call', { name: 'apply_commands', arguments: { commands: [] } });
   assert.equal(rejected.isError, true);
   await tool('finish_session', { commit: true });

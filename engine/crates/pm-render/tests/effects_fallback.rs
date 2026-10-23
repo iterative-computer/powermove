@@ -1067,6 +1067,97 @@ fn parity_probe_presents_angle_then_verifies_or_pins_across_restart() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A renderer whose runner is not the namespace's reference browser (the
+/// hidden MCP host, the CLIs) probes an unknown program as usual but leaves
+/// no decision behind that the desktop would trust; it still honours the
+/// desktop's own persisted verification.
+#[test]
+fn a_read_only_first_probe_leaves_no_marker_for_the_desktop() {
+    use pm_render::effects::parity::Verdict;
+    let _gpu = gpu();
+    let mut set = builtin_definitions();
+    let mut def = set
+        .definitions
+        .iter()
+        .find(|d| d.id.as_str() == "invert")
+        .unwrap()
+        .clone();
+    def.id = "probe.read-only".into();
+    def.origin = DefinitionOrigin::Local;
+    let g = def.glsl.as_mut().unwrap();
+    let start = g.source.find("void main()").unwrap();
+    g.source.truncate(start);
+    g.source.push_str("void main(){o=texture(u_tex,v_st);}");
+    let code = g.source.clone();
+    set.definitions.push(def);
+    let doc = stack(
+        json!([{ "id": "fx", "type": "probe.read-only", "on": true, "p": {} }]),
+        Value::Null,
+    );
+    let dir = std::env::temp_dir().join(format!("pm-render-parity-ro-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let make = |read_only: bool| {
+        let mut r = Renderer::headless().unwrap();
+        r.set_definitions(&set).unwrap();
+        r.set_shader_fallback_runner(true);
+        if read_only {
+            r.read_only_shader_reference();
+        }
+        r.effects_mut()
+            .parity
+            .configure(Some("desktop electron".into()), Some(dir.clone()));
+        r
+    };
+    let probe = |r: &mut Renderer| {
+        let first = match render(r, &doc) {
+            Err(RenderError::ShaderFallbackPending(p)) => p[0].clone(),
+            other => panic!("unknown program must hold presentation: {other:?}"),
+        };
+        let pixels = r.fallback_textures(&first.key).unwrap()[0].as_ref().clone();
+        r.put_fallback_pixels(first.key, pixels);
+        render(r, &doc).unwrap()
+    };
+    let markers = || -> Vec<String> {
+        std::fs::read_dir(&dir)
+            .map(|d| {
+                d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut hidden = make(true);
+    let frame = probe(&mut hidden);
+    assert_eq!(
+        hidden.effects_mut().parity.verdict(&code),
+        Verdict::NativeVerified
+    );
+    assert_eq!(render(&mut hidden, &doc).unwrap(), frame);
+    assert!(
+        markers().is_empty(),
+        "a read-only first probe wrote {:?}",
+        markers()
+    );
+    let mut desktop = make(false);
+    assert_eq!(
+        desktop.effects_mut().parity.verdict(&code),
+        Verdict::Unknown,
+        "the desktop must still compare the program with its own runner"
+    );
+    assert_eq!(probe(&mut desktop), frame);
+    assert_eq!(
+        markers().iter().filter(|m| m.ends_with(".native")).count(),
+        1
+    );
+    // A fresh read-only host honours the desktop's verification at once.
+    let mut later = make(true);
+    assert_eq!(
+        later.effects_mut().parity.verdict(&code),
+        Verdict::NativeVerified
+    );
+    assert_eq!(render(&mut later, &doc).unwrap(), frame);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn parity_probe_covers_transitions_and_fragment_layers() {
     use pm_render::effects::parity::Verdict;

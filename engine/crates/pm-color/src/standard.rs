@@ -31,17 +31,51 @@ impl HexColor {
     }
 }
 
-/// `hexDigits`: drop the first `#`, expand 3- and 4-digit forms.
-fn hex_digits(hex: &str) -> Vec<u16> {
-    let units: Vec<u16> = hex.encode_utf16().collect();
-    let mut s = units;
-    if let Some(i) = s.iter().position(|&u| u == u16::from(b'#')) {
-        s.remove(i);
+/// The digits `hexDigits` leaves (the first `#` dropped, 3- and 4-digit
+/// forms expanded): the first eight UTF-16 units, which are all the channels
+/// read, and how many there are. Parsed on the stack: every solid and fill
+/// color of every frame goes through here.
+struct Digits {
+    units: [u16; 8],
+    len: usize,
+}
+
+impl Digits {
+    /// Up to two units from `from` (`s.slice(from, from + 2)`, `from` ≤ 6).
+    fn pair(&self, from: usize) -> &[u16] {
+        let end = (from + 2).min(self.len);
+        if from < end {
+            &self.units[from..end]
+        } else {
+            &[]
+        }
     }
-    if s.len() == 3 || s.len() == 4 {
-        s.iter().flat_map(|&u| [u, u]).collect()
+}
+
+/// `hexDigits`: drop the first `#`, expand 3- and 4-digit forms.
+fn hex_digits(hex: &str) -> Digits {
+    let mut raw = [0u16; 8];
+    let mut n = 0usize;
+    let mut dropped = false;
+    for u in hex.encode_utf16() {
+        if !dropped && u == u16::from(b'#') {
+            dropped = true;
+            continue;
+        }
+        if n < raw.len() {
+            raw[n] = u;
+        }
+        n += 1;
+    }
+    if n == 3 || n == 4 {
+        let mut units = [0u16; 8];
+        for i in 0..n {
+            units[2 * i] = raw[i];
+            units[2 * i + 1] = raw[i];
+        }
+        Digits { units, len: 2 * n }
     } else {
-        s
+        Digits { units: raw, len: n }
     }
 }
 
@@ -86,10 +120,8 @@ fn parse_int_16(s: &[u16]) -> Option<f64> {
 }
 
 /// `(parseInt(slice, 16) || 0)`: NaN and −0 become 0.
-fn channel(s: &[u16], from: usize) -> f64 {
-    let end = (from + 2).min(s.len());
-    let slice = if from < s.len() { &s[from..end] } else { &[] };
-    match parse_int_16(slice) {
+fn channel(s: &Digits, from: usize) -> f64 {
+    match parse_int_16(s.pair(from)) {
         Some(v) if v != 0.0 => v,
         _ => 0.0,
     }
@@ -101,7 +133,7 @@ fn channel(s: &[u16], from: usize) -> f64 {
 pub fn parse_hex(hex: &str) -> HexColor {
     let s = hex_digits(hex);
     let rgb = [0, 2, 4].map(|i| channel(&s, i) / 255.0);
-    let alpha = if s.len() == 8 {
+    let alpha = if s.len == 8 {
         channel(&s, 6) / 255.0
     } else {
         1.0
@@ -213,6 +245,91 @@ pub fn check_solid(rgb8: [u8; 3], output: SolidOutput) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parser before it read digits on the stack (a `Vec<u16>` copy),
+    /// kept to prove the two agree.
+    fn parse_hex_vec(hex: &str) -> HexColor {
+        let mut s: Vec<u16> = hex.encode_utf16().collect();
+        if let Some(i) = s.iter().position(|&u| u == u16::from(b'#')) {
+            s.remove(i);
+        }
+        if s.len() == 3 || s.len() == 4 {
+            s = s.iter().flat_map(|&u| [u, u]).collect();
+        }
+        let channel = |from: usize| {
+            let end = (from + 2).min(s.len());
+            let slice: &[u16] = if from < s.len() { &s[from..end] } else { &[] };
+            match parse_int_16(slice) {
+                Some(v) if v != 0.0 => v,
+                _ => 0.0,
+            }
+        };
+        let rgb = [0, 2, 4].map(|i| channel(i) / 255.0);
+        let alpha = if s.len() == 8 {
+            channel(6) / 255.0
+        } else {
+            1.0
+        };
+        HexColor { rgb, alpha }
+    }
+
+    #[test]
+    fn the_stack_parser_reads_every_string_as_the_vec_parser_did() {
+        let pieces = [
+            "#", "0", "9", "a", "F", "g", " ", "\u{a0}", "-", "+", "x", "0x", "é", "😀", "\t",
+        ];
+        let mut cases: Vec<String> = vec![
+            String::new(),
+            "#4C8DFF".into(),
+            "#3fcf8e80".into(),
+            "#f80".into(),
+            "#f80c".into(),
+            "4C8DFF".into(),
+            "a#bc".into(),
+            "##123456".into(),
+            "#12345678901".into(),
+            "#-1-2-3".into(),
+            "# 1 2 3".into(),
+        ];
+        // Every string of up to four pieces, and longer seeded ones.
+        let n = pieces.len();
+        for a in 0..n {
+            for b in 0..n {
+                for c in 0..n {
+                    cases.push(format!("{}{}{}", pieces[a], pieces[b], pieces[c]));
+                    cases.push(format!(
+                        "#{}{}{}{}",
+                        pieces[a],
+                        pieces[b],
+                        pieces[c],
+                        pieces[(a + b + c) % n]
+                    ));
+                }
+            }
+        }
+        let mut seed = 7u64;
+        for _ in 0..20_000 {
+            let mut s = String::new();
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            for k in 0..(seed >> 60) as usize + 1 {
+                s.push_str(pieces[((seed >> (k * 4)) % n as u64) as usize]);
+            }
+            cases.push(s);
+        }
+        for c in &cases {
+            let (a, b) = (parse_hex(c), parse_hex_vec(c));
+            assert!(
+                a.rgb
+                    .iter()
+                    .zip(&b.rgb)
+                    .all(|(x, y)| x.to_bits() == y.to_bits())
+                    && a.alpha.to_bits() == b.alpha.to_bits(),
+                "{c:?}"
+            );
+        }
+    }
 
     #[test]
     fn hex_reading_matches_the_legacy_parser() {

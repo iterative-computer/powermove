@@ -1,3 +1,4 @@
+import { installWorkerImports } from './import-media';
 /*
  * One document host worker: one project in a process of its own
  * (docs/engine/document-host.md). It boots the editor's document chain
@@ -24,6 +25,8 @@ import { BUILTIN_EXTENSIONS } from '../../renderer/src/kernel/builtins';
 import { WorkerExtensions } from './extensions';
 import { WorkerMedia } from './media';
 import { projectFingerprint } from '../../renderer/src/legacy/core/project-fingerprint';
+import { createEngineDefinitions } from '../../renderer/src/kernel/engine-definitions';
+import { mcpProjectTool } from '../../renderer/src/legacy/assistant/mcp-project-tools';
 import {
   DOCUMENT_HOST_PROTOCOL, DocumentHostError, INSTANCE_STATE_KEY, isFailure,
   type DocumentHostFailure, type FromWorker, type InstanceOpened, type InstancePersisted, type InstanceStats,
@@ -65,6 +68,36 @@ export class DocumentWorker {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly ext: WorkerExtensions;
   private media: WorkerMedia | null = null;
+  private storeWrites: Promise<unknown> = Promise.resolve();
+  private refreshPreferences: (() => Promise<void>) | null = null;
+
+  private async editorStore() {
+    const seed = await this.service<Record<string, unknown> | null>('store.snapshot');
+    const memory = memoryStore(seed ?? {});
+    // Older embedders keep their existing instance-local preferences. Only a
+    // host that supplied a profile snapshot opts into preference write-through.
+    if (seed === null) return memory;
+    const set = memory.set, del = memory.del;
+    const known = new Set(Object.keys(seed));
+    this.refreshPreferences = async () => {
+      const current = await this.service<Record<string, unknown> | null>('store.snapshot');
+      if (!current) return;
+      for (const key of known) if (!Object.hasOwn(current, key)) del(key);
+      known.clear();
+      for (const [key, value] of Object.entries(current)) { set(key, value); known.add(key); }
+    };
+    memory.set = (key, value) => {
+      const base = key === 'projects' || key === 'projectTrash' ? memory.get(key, null) : undefined;
+      set(key, value);
+      const written = memory.get(key, null);
+      this.storeWrites = this.storeWrites.then(() => this.service('store.write', key, written, base));
+      return true;
+    };
+    memory.setAsync = async (key, value) => { memory.set(key, value); await this.storeWrites; return true; };
+    memory.del = key => { del(key); this.storeWrites = this.storeWrites.then(() => this.service('store.remove', key)); };
+    memory.flush = async () => { await this.storeWrites; };
+    return memory;
+  }
 
   constructor(private readonly port: WorkerPort, private readonly policy: EnginePolicy) {
     port.onMessage((message) => this.receive(message));
@@ -184,24 +217,25 @@ export class DocumentWorker {
     if (this.projectId && this.projectId !== projectId) throw new DocumentHostError('worker-error', `This worker holds project ${this.projectId}.`);
     if (this.chain && this.projectId === projectId) return this.opened(0);
     const joined = await this.service<{ seq: number; doc: unknown | null }>('session.join', projectId);
-    if (!joined?.doc) throw new DocumentHostError('project-missing', `The host has no document for project ${projectId}.`);
+    if (!joined?.doc && projectId !== 'powermove-home') throw new DocumentHostError('project-missing', `The host has no document for project ${projectId}.`);
     // The shared reader guards (plan sections 6 and 21), as the desktop applies them.
     if (refusesProject(joined.doc, this.policy.newEngine)) throw new DocumentHostError('requires-new-engine', `${REQUIRES_NATIVE_MESSAGE}`);
     this.readOnly = needsNewerReader(joined.doc);
     if (this.readOnly) this.log(`[engine] ${projectId}: ${NEWER_PROJECT_MESSAGE}. It is open read-only, so changes are not saved.`);
     const saved = await this.service<InstanceState | null>('store.read', INSTANCE_STATE_KEY(projectId)).catch(() => null);
     await this.ext.probe();
-    this.chain = await bootChain({ bridge: this.bridge(), store: memoryStore(), log: (line) => this.log(line), policy: this.policy });
+    this.chain = await bootChain({ bridge: this.bridge(), store: await this.editorStore(), log: (line) => this.log(line), policy: this.policy });
     const PM = this.chain.PM;
     if (!this.onRequest) throw new DocumentHostError('worker-error', 'The agent tool harness did not register.');
     this.projectId = projectId;
     this.instance = instance;
     this.seq = joined.seq;
-    PM['isHomeProject'] = () => !PM['proj']?.id;
+    PM['isHomeProject'] = () => this.projectId === 'powermove-home' || !PM['proj']?.id;
     // Media status from the host's media store, as the editor's decoded registry gives it (media.ts).
     this.media = new WorkerMedia((request) => this.service('mediaPath.lookup', request), () => this.projectId, (line) => this.log(line));
     PM['assets'] = this.media;
-    PM['replaceProject'](joined.doc, {});
+    installWorkerImports(PM, (project, args, replace) => this.service<Record<string, unknown>>('mediaImport.run', project, args, replace), () => this.projectId);
+    PM['replaceProject'](joined.doc ?? PM['mkProject']({ name: 'Home' }), {});
     this.media.refresh(PM['proj']?.assets);
     PM['bus']?.emit('projects:open');
     this.synced = JSON.stringify(PM['proj']);
@@ -213,6 +247,7 @@ export class DocumentWorker {
       if (saved.hash !== canonicalProjectHash(PM['proj'])) this.log(`[engine] ${projectId}: the document changed since its history was saved (another member edited it); undo applies on top`);
     }
     await this.chain.bootExtensions();
+    PM['EngineDefinitions'] = createEngineDefinitions(PM, PM['Kernel']);
     this.extensions = this.extensionState();
     // The contract tests' deterministic ids and clock (contract.ts), tests only.
     if (import.meta.env.MODE === 'test' && process.env['POWERMOVE_DOCUMENT_HOST_TEST_SEED']) deterministicSeam();
@@ -327,7 +362,27 @@ export class DocumentWorker {
   /* ── tools ───────────────────────────────────────────────────────────── */
 
   private async tool(request: AgentToolRequestEvent): Promise<AgentToolResponseEvent> {
+    await this.storeWrites; await this.refreshPreferences?.();
     const PM = this.requireChain().PM;
+    const text = (value: unknown): AgentToolResponseEvent => ({ runId: request.runId, callId: request.callId, ok: true,
+      revision: Number(PM['proj']?.revision) || 0, content: [{ type: 'text', text: JSON.stringify(value) }] });
+    if (request.tool === '__host_create_project') {
+      const previous = PM['proj'], create = PM['newBlankProject'];
+      try {
+        PM['newBlankProject'] = (options: unknown) => { PM['proj'] = PM['mkProject'](options); };
+        const result = await mcpProjectTool(PM as never, '__mcp_create_project', request.arguments);
+        await PM['store'].flush();
+        return text({ ...(result as object), project: PM['proj'] });
+      } finally { PM['proj'] = previous; PM['newBlankProject'] = create; }
+    }
+    if (request.tool === '__host_snapshot') {
+      await this.chain!.loader()?.whenIdle();
+      await PM['EngineDoc']?.whenReady;
+      await PM['EngineDefinitions']?.settle();
+      await this.syncUp();
+      return text({ project: PM['proj'], document: { ...JSON.parse(PM['serialize']()), history: PM['hist'].export() },
+        definitions: PM['EngineDefinitions'].publisher.all() });
+    }
     const handle = this.onRequest;
     if (!handle) throw new DocumentHostError('worker-error', 'The agent tool harness is not registered.');
     // Media status the call may read is settled first, so the answer never depends on timing.
@@ -343,6 +398,9 @@ export class DocumentWorker {
     // Read-your-writes across the hop: the session has this call's edits
     // before the agent sees the answer.
     await this.syncUp();
+    this.media?.refresh(PM['proj']?.assets);
+    await this.media?.settled();
+    await this.storeWrites;
     // The production consistency check (plan section 6, item 7) after every
     // call that changed the document: the mirror must hash as the document.
     if (Number(PM['proj']?.revision) !== request.baseRevision) PM['EngineDoc']?.check?.('agent-tool');

@@ -333,7 +333,7 @@ impl Effects {
 
     /// A definition requiring a first-use probe, or already pinned.
     pub(crate) fn parity_source(&self, kind: DefinitionKind, id: &str) -> Option<String> {
-        if !self.fallback.runner || !self.parity.enabled() {
+        if !self.parity.enabled() {
             return None;
         }
         let d = self.get(kind, id)?;
@@ -673,6 +673,11 @@ impl Effects {
             Status::Ready => {}
             Status::Refused(f) | Status::NeedsFallback(f) => return Err(f.clone()),
         }
+        pm_perf::cache(
+            pm_perf::Counter::ProgramCacheHits,
+            pm_perf::Counter::ProgramCacheMisses,
+            entry.program.is_some(),
+        );
         if entry.program.is_none() {
             let built = entry
                 .prepared

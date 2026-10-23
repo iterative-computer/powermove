@@ -33,7 +33,7 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 /** The e2e harness's hidden launch (e2e/helpers/app.ts), without its test fixtures. */
 async function launchHidden() {
   const userData = await mkdtemp(path.join(os.tmpdir(), 'powermove-autosave-profile-'));
-  const env = { ...process.env, POWERMOVE_USER_DATA: userData, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1',
+  const env = { ...process.env, POWERMOVE_USER_DATA: userData, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
     CODEX_BINARY: path.join(desktop, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'), POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch({ args: ['.'], cwd: desktop, env });

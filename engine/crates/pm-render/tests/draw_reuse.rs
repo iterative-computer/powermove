@@ -214,6 +214,19 @@ fn edit(doc: &mut Document, rng: &mut Rng, paths: &Paths, serial: &mut u32) -> S
                 at(comp, i, &["p", "position.x", "v"]),
                 Value::Number(v),
             );
+            // Half of them as the editor applies an edit: with the project's
+            // provenance (`revision`, an `edits` entry) in the same batch.
+            if rng.below(2) == 0 {
+                *serial += 1;
+                let _ = doc.apply(&[
+                    Patch::set(vec![key("revision")], Value::Number(f64::from(*serial))),
+                    Patch::set(
+                        vec![key("edits")],
+                        value(&format!("[{{\"id\":\"e{serial}\",\"label\":\"Move\"}}]")),
+                    ),
+                ]);
+                return format!("move {comp}[{i}] with provenance");
+            }
             format!("move {comp}[{i}]")
         }
         6 => {
@@ -397,6 +410,16 @@ fn edit(doc: &mut Document, rng: &mut Rng, paths: &Paths, serial: &mut u32) -> S
             let revision = doc.revision() + 1;
             *doc = Document::new(Some(v), revision);
             "replace".into()
+        }
+        25 => {
+            // Provenance only (`revision` and the `edits` log).
+            *serial += 1;
+            set(
+                doc,
+                vec![key("revision")],
+                Value::Number(f64::from(*serial)),
+            );
+            "revision".into()
         }
         _ => {
             set(doc, at(comp, i, &["d", "color"]), value("\"#E8553A\""));
