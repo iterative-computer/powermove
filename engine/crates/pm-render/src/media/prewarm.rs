@@ -163,8 +163,15 @@ fn decode_reading(
             && (v.color.tagged.full_range == Some(true) || (v.width <= 1920 && v.height <= 1080)))
             || (v.codec.codec == "hevc"
                 && v.codec.bit_depth == 10
-                && v.color.tagged.full_range == Some(true)))
+                && v.color.tagged.full_range == Some(true))
+            || (v.codec.codec == "vp9"
+                && v.codec.bit_depth == 8
+                && (v.codec.log2_chroma_w, v.codec.log2_chroma_h) == (1, 1)
+                && (v.color.tagged.full_range == Some(true)
+                    || v.codec.alpha_mode
+                    || v.codec.pix_fmt_alpha)))
         && !interprets_video_color(interp)
+        && (v.alpha.is_none() || interp.alpha.is_none())
         && !has_color_override
         && !matches!(transfer, Transfer::Pq | Transfer::Hlg)
     {

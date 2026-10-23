@@ -298,7 +298,12 @@ pub fn open_with_reading(
         && spec.info.bit_depth == 8
         && (spec.info.log2_chroma_w, spec.info.log2_chroma_h) == (1, 1)
         && (chromium_h264_full || (spec.info.width <= 1920 && spec.info.height <= 1080));
-    let mut order = if chromium_h264_software {
+    let chromium_vp9_coded = reading == DecodeReading::Chromium
+        && spec.info.codec == "vp9"
+        && spec.info.bit_depth == 8
+        && (spec.info.full_range || spec.info.alpha_mode || spec.info.pix_fmt_alpha)
+        && (spec.info.log2_chroma_w, spec.info.log2_chroma_h) == (1, 1);
+    let mut order = if chromium_h264_software || chromium_vp9_coded {
         vec![Backend::Ffmpeg]
     } else {
         backends(spec.info, spec.index)
@@ -317,15 +322,27 @@ pub fn open_with_reading(
     for b in order {
         let r = match b {
             Backend::VideoToolbox => open_vt(spec, purpose, reading, arbiter, pool),
-            Backend::Ffmpeg => FfDecoder::new(spec.input, spec.stream, None, pool.clone(), threads)
-                .and_then(|decoder| {
-                    if chromium_h264_full {
-                        decoder.with_chromium_h264_padding()
-                    } else {
-                        Ok(decoder)
-                    }
-                })
-                .map(Decoder::Ff),
+            Backend::Ffmpeg => FfDecoder::new(
+                spec.input,
+                spec.stream,
+                if chromium_vp9_coded {
+                    Some("libvpx-vp9")
+                } else {
+                    None
+                },
+                pool.clone(),
+                threads,
+            )
+            .and_then(|decoder| {
+                if chromium_h264_full {
+                    decoder.with_chromium_h264_padding()
+                } else if chromium_vp9_coded {
+                    decoder.with_chromium_vp9_stride()
+                } else {
+                    Ok(decoder)
+                }
+            })
+            .map(Decoder::Ff),
             Backend::Dav1d => Dav1dDecoder::new(pool.clone(), threads).map(Decoder::Dav1d),
             Backend::FfmpegAlphaPair => {
                 AlphaPairDecoder::new(spec.input, spec.stream, pool.clone(), threads)

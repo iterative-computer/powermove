@@ -1496,6 +1496,7 @@ impl MediaCache {
             && fields.is_none()
             && !self.interpretations.contains_key(path);
         let alpha_bitmap = compat
+            && (self.canvas_video || v.codec.codec != "vp9")
             && !sequence
             && working == WorkingEncoding::Standard
             && frame.format.has_alpha()
@@ -1611,7 +1612,8 @@ impl MediaCache {
         // Clip/quantize each source texel before the layer samples it, so
         // saturated out-of-range RGB cannot bleed across a filtered edge.
         // The Canvas export and sequence paths keep their libyuv conversion;
-        // Level 2, alpha files, colour interpretations (Interpret Footage's
+        // live VP9/HEVC alpha samples the YUV and alpha planes before its store.
+        // Level 2 and colour interpretations (Interpret Footage's
         // colour members or a file's colour override), and HDR retain
         // native precision. Overrides that only choose or place frames
         // (frame rate, field order, pixel aspect, clean aperture) keep the
@@ -1620,8 +1622,13 @@ impl MediaCache {
             && !sequence
             && working == WorkingEncoding::Standard
             && ((!frame.format.has_alpha() && color.alpha == AlphaMode::Opaque)
-                || frame.format.label == "v0a8")
+                || frame.format.label == "v0a8"
+                || (!self.canvas_video
+                    && v.codec.codec == "vp9"
+                    && frame.format.bits == 8
+                    && frame.format.has_alpha()))
             && !interprets_video_color(interp)
+            && (!frame.format.has_alpha() || interp.alpha.is_none())
             && !self.interpretations.contains_key(path)
             && fields.is_none()
             && color.tone_map.is_none()
@@ -1653,7 +1660,12 @@ impl MediaCache {
                 encoder,
                 &imported,
                 color.matrix,
-                bitmap_gamut || color.primaries == Primaries::Bt2020,
+                video_compat::UploadReading {
+                    gamut: bitmap_gamut || color.primaries == Primaries::Bt2020,
+                    separate_matrix: !self.canvas_video
+                        && v.codec.codec == "vp9"
+                        && frame.format.bits == 10,
+                },
                 reuse,
             )
         } else {
@@ -1845,6 +1857,10 @@ mod source_storage_tests;
 #[cfg(test)]
 #[path = "media/composed_parity_tests.rs"]
 mod composed_parity_tests;
+
+#[cfg(test)]
+#[path = "media/round3_tests.rs"]
+mod round3_tests;
 
 #[cfg(test)]
 mod stamp_frame_tests {

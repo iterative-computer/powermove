@@ -8,7 +8,7 @@
 struct Params {
     rows: array<vec4<f32>, 3>,
     primaries: array<vec4<f32>, 3>,
-    // planar, direct BT.2020 accumulation, reserved, biplanar alpha.
+    // planar, direct BT.2020 accumulation, separate matrix operations, alpha.
     flags: vec4<u32>,
 };
 @group(0) @binding(0) var y_plane: texture_2d<f32>;
@@ -18,6 +18,7 @@ struct Params {
 @group(0) @binding(4) var<uniform> P: Params;
 @group(0) @binding(5) var out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(6) var<storage, read> decode_lut: array<f32, 256>;
+@group(0) @binding(7) var alpha_plane: texture_2d<f32>;
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(out);
@@ -42,10 +43,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // accumulation. These differ at exact half-code boundaries.
         rgb = fma(vec3<f32>(y), c0, fma(vec3<f32>(uv.x), c1, uv.y * c2)) + bias;
     }
+    if (P.flags.z != 0u) {
+        // Skia's deep planar direct upload emits a matrix product followed
+        // by its offset. Preserve the separate operations at byte ties.
+        let p0 = fma(vec3<f32>(y), c0, vec3<f32>(0.0));
+        let p1 = fma(vec3<f32>(uv.x), c1, vec3<f32>(0.0));
+        let p2 = fma(vec3<f32>(uv.y), c2, vec3<f32>(0.0));
+        rgb = fma(vec3<f32>(1.0),
+            fma(vec3<f32>(1.0), fma(vec3<f32>(1.0), p0, p1), p2), bias);
+    }
     rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     var alpha = 1.0;
     if (P.flags.w != 0u) {
-        alpha = textureLoad(v_plane, vec2<i32>(id.xy), 0).r;
+        alpha = textureLoad(alpha_plane, vec2<i32>(id.xy), 0).r;
         rgb *= alpha;
     }
     textureStore(out, vec2<i32>(id.xy), vec4<f32>(rgb, alpha));

@@ -66,6 +66,11 @@ struct Params {
     flags: [u32; 4],
 }
 
+pub(super) struct UploadReading {
+    pub gamut: bool,
+    pub separate_matrix: bool,
+}
+
 /// Chromium/Skia samples the decoder's unorm planes before its affine
 /// matrix, without section 13's range-normalization intermediate.
 pub(super) struct Upload {
@@ -78,7 +83,9 @@ pub(super) struct Upload {
 
 impl Upload {
     pub fn supports(frame: &ImportedFrame, matrix: MatrixCoefficients) -> bool {
-        (!frame.format.has_alpha() || frame.format.label == "v0a8")
+        (!frame.format.has_alpha()
+            || frame.format.label == "v0a8"
+            || (frame.format.layout == Layout::Planar && frame.format.bits == 8))
             && matches!(
                 frame.format.layout,
                 Layout::Biplanar | Layout::Planar | Layout::BiplanarAlpha
@@ -148,6 +155,16 @@ impl Upload {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ])
                 .collect::<Vec<_>>(),
         });
@@ -208,9 +225,10 @@ impl Upload {
         encoder: &mut wgpu::CommandEncoder,
         frame: &ImportedFrame,
         matrix: MatrixCoefficients,
-        gamut: bool,
+        reading: UploadReading,
         reuse: Option<Target>,
     ) -> Target {
+        let gamut = reading.gamut;
         let (w, h) = (frame.format.width as u32, frame.format.height as u32);
         let out = reuse.unwrap_or_else(|| {
             Target::new(
@@ -278,8 +296,8 @@ impl Upload {
             flags: [
                 u32::from(frame.format.layout == Layout::Planar),
                 u32::from(matrix == MatrixCoefficients::Bt2020Ncl && !gamut),
-                0,
-                u32::from(frame.format.layout == Layout::BiplanarAlpha),
+                u32::from(reading.separate_matrix),
+                u32::from(frame.format.has_alpha()),
             ],
         };
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -339,6 +357,18 @@ impl Upload {
                     binding: 6,
                     resource: self.decode_lut.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(
+                        views
+                            .get(if frame.format.layout == Layout::Planar {
+                                3
+                            } else {
+                                2
+                            })
+                            .unwrap_or(&views[0]),
+                    ),
+                },
             ],
         });
         if !bitmap {
@@ -384,6 +414,10 @@ impl Upload {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: self.decode_lut.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::TextureView(source_view),
                     },
                 ],
             });
