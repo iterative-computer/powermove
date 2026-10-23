@@ -767,6 +767,13 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
             return;
         }
     };
+    // A solid colour through a sample mask, unclipped: every covered sample
+    // takes the same `unorm8(colour + dst × (1 − α))` (coverage 1), which
+    // `MsaaTarget::blend` looks up per value instead of computing.
+    if let (Paint::Solid(color), None, None) = (paint, &coverage, clip) {
+        target.blend(&mask, *color);
+        return;
+    }
     for (i, d) in target.samples.iter_mut().enumerate() {
         let p = i / target.pattern.len();
         let s = i % target.pattern.len();
