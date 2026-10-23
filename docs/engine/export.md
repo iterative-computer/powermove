@@ -848,6 +848,27 @@ audio sample count and first/middle/last pixel check remains in place.
 Tests compare both the expected block vectors and decoded sample planes
 exactly against the previous full-frame/seek-per-sample work.
 
+Opaque VP9 verification now selects FFmpeg's native `vp9` decoder. The
+trial compares complete Y/U/V planes and sampled frame IDs with libvpx
+for cursor reuse and seeking; the saved 1080p export also produces the
+same full 60-frame decoded SHA-256. The exact Rust sampled-verifier path
+measured 11.9–13.5 ms with native VP9 against 25.1–54.4 ms with libvpx at
+one-minute load 15.2. VP8 and alpha verification retain libvpx; alpha
+continues to decode all four planes. Every metadata, packet, audio and
+pixel check stays active.
+
+Progress-preview box filtering uses at most four row workers, with the
+same per-pixel f32 addition order and QoS refresh as other conversion
+workers. Moving 1080p, odd-sized, downscaled, unscaled and special-value
+frames produce exactly the serial implementation's JPEG bytes.
+
+Opaque WebM sheet and queue submissions start the existing hidden window
+while their frozen snapshot opens. This starts no codec session and sends
+no encoder inputs. A real open shares the same pending window; unused
+windows keep the 15-second idle close. Rejection, crash, late startup and
+disposal tests cover its lifetime. Agent work and other formats do not
+warm it. End-to-end speed is measured separately below.
+
 GPU timestamp calibration keeps its completed-submission resolve barrier.
 An attempted early resolve in a separate command buffer returned the prior
 span's end timestamp on Metal, despite successful buffer mapping; that
@@ -865,8 +886,8 @@ properties match. Complete WebM files are byte-identical, including mux
 framing. Today against itself also matches. The 1080p fixture sends 120 GPU
 frame descriptors across two exports and no CPU pixel messages.
 
-Paired 1080p / 60-frame times with profiling off (each pair lists both
-exports, in order):
+Before the final VP9, preview and window-startup changes, paired 1080p /
+60-frame times with profiling off were (both exports, in order):
 
 | Format | Today, moderate load | Engine, moderate load | Today, high load | Engine, high load |
 |---|---:|---:|---:|---:|
@@ -903,14 +924,71 @@ utility after cancellation. The export advanced after playback stopped,
 then reported cancelled.
 
 The deterministic `export_120` ratchet passed after target and RGBA buffer
-reuse: global heap bytes 565,973,304 against the unchanged 823,966,673
-baseline; thread heap bytes 439,211,607 against 440,775,168. GPU counts
-remained 3,720 render passes, 65,640 draws, 240 command encoders/submits,
-33 texture allocations and 120 readbacks. A separate release perfbench
-repeat at load 35–36 measured 20.89 / 18.59 / 17.78 ms per frame. This is
-the 500-layer H.264 fixture, not a Chromium WebM throughput measurement.
+reuse. Its latest replay at load 12.4 measured global heap bytes
+565,907,949 against the unchanged 823,966,673 baseline; thread heap bytes
+439,199,822 against 440,775,168. GPU counts remained 3,720 render passes,
+65,640 draws, 240 command encoders/submits, 33 texture allocations and
+120 readbacks. A separate release perfbench repeat at load 12.9 measured
+15.01 / 13.62 / 13.81 ms per frame. This is the 500-layer H.264 fixture,
+with previews off, not a Chromium WebM throughput measurement. These runs
+precede the final VP9/preview/window changes, which this fixture does not
+exercise.
 
-The complete EXPORT-1 gate is **not green** because WebM remains slower
-than today. Audio parity and playback cadence now pass. No fixture or
-assertion was skipped, and no tolerance, ratchet baseline or GPU admission
-budget was relaxed.
+### Final rebuilt app replay
+
+With native opaque VP9 verification, exact row-parallel previews and bounded
+window warming installed, the full EXPORT-1 command passed all four
+projects and all four formats. Advanced AAC and Opus source replays also
+passed. Every captured encoder boundary, decoded frame/sample, encoded
+audio packet, stream property and complete WebM file still matches today.
+The 1080p cases still send 120 GPU descriptors and zero CPU pixel messages.
+
+The full profiled matrix's 1080p times were:
+
+| Format | Today, two exports | Engine, two exports | Best-of-two ≤ today |
+|---|---:|---:|---|
+| ProRes 4444 | 2,645 / 2,467 ms | 1,810 / 1,320 ms | yes |
+| ProRes 4444 alpha | 5,610 / 6,062 ms | 1,646 / 1,712 ms | yes |
+| H.264 MP4 | 2,710 / 2,746 ms | 1,526 / 1,798 ms | yes |
+| WebM | 628 / 520 ms | 861 / 458 ms | yes |
+
+Engine one-minute load was 29.6–31.2. Its warmed WebM profile measured
+312 ms render-pipeline time, 18 ms preview work, 5 ms audio work and 29 ms
+verification (22 ms sampled decode). The Chromium side measured 9.8 ms
+upload, 0.6 ms copy completion, queue depth 4 without limit waits, 24.5 ms
+Opus and 0.8 ms muxing. These stages overlap; they are not additive.
+
+Three subsequent unprofiled 1080p replays passed every format's existing
+best-of-two speed assertion and exact media comparisons:
+
+| Format | Today / engine best, load 35–39 | Today / engine best, load 44–47 | Today / engine best, load 35–37 |
+|---|---:|---:|---:|
+| ProRes 4444 | 2,570 / 1,372 ms | 2,054 / 1,304 ms | 2,528 / 1,639 ms |
+| ProRes 4444 alpha | 5,973 / 1,660 ms | 5,108 / 1,536 ms | 5,189 / 1,955 ms |
+| H.264 MP4 | 2,729 / 1,313 ms | 2,255 / 1,510 ms | 2,938 / 1,823 ms |
+| WebM | 527 / 450 ms | 496 / 483 ms | 611 / 603 ms |
+
+The high-load WebM pair was today 612 / 496 ms and engine 608 / 483 ms;
+engine load was 47.0 and today's 45.2. The last pair was today 813 / 611 ms
+and engine 700 / 603 ms at engine load 36.5. Both exports in those WebM
+pairs beat their corresponding today runs.
+
+The first optimized unprofiled run **failed** WebM speed: engine 1,002 /
+619 ms against today 700 / 487 ms at load approximately 37. Its media
+comparisons passed. This observation is retained: passing later replays
+does not establish that every shared-machine run or cold start is faster.
+For example, the profiled cold WebM was still 861 vs 628 ms. The test's
+existing best-of-two rule, fixtures, tolerances and GPU budgets are unchanged.
+
+The rebuilt cadence/QoS test passed at load 35.0: control and export playback
+each presented 180 frames over three seconds, with p99 spacing 29.5 and
+25.5 ms respectively, and no gap beyond 33.3 ms. Live runtime classes were
+default idle, utility playing, default stopped, utility cancelled; export
+progress resumed after playback stopped and cancellation completed.
+
+Local verification also passed 73 export unit tests, the explicitly invoked
+saved-input decoder benchmark, four WebM format tests, three GPU reuse
+regressions and 56 focused desktop tests. Scoped Clippy and native/app
+production builds passed. The Node project typecheck retains only its two
+inherited TS6307 include errors. No assertion, corpus case, tolerance,
+ratchet baseline or admission budget was weakened.
