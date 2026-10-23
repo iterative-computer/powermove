@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {layer3DRole,isModelGroup,type Layer3DRole} from './layers';
 import {parent3D,world3D} from '../../legacy/core/space-3d';
 import type {SceneRuntime} from './runtime';
+import {runtimeTargets,type TargetScene} from './engine-targets';
 
 /*
  * What a 3D transform acts on, and how a world-space delta becomes edits to
@@ -47,7 +48,8 @@ export function aimPoint(PM:any,layer:any):THREE.Vector3|null {
   return vec(['X','Y','Z'].map(axis=>ev(PM,layer,content[`target${axis}`],`${role}.target${axis}`))).applyMatrix4(new THREE.Matrix4().fromArray(parent3D(PM,layer,PM.time)));
 }
 
-export function resolveTargets(PM:any,ids:readonly string[],runtime:SceneRuntime|null,options:{excludeCamera?:string|null}={}):TransformTarget[] {
+export function resolveTargets(PM:any,ids:readonly string[],scene:SceneRuntime|TargetScene|null,options:{excludeCamera?:string|null}={}):TransformTarget[] {
+  const runtime:TargetScene|null=!scene?null:'expandBy' in scene?scene:runtimeTargets(scene);
   const out:TransformTarget[]=[];
   for(const id of ids){
     const l=PM.L?.(id),role=roleOf(PM,l);
@@ -71,7 +73,7 @@ export function resolveTargets(PM:any,ids:readonly string[],runtime:SceneRuntime
     if(role==='group'&&!l.threeD){
       const box=new THREE.Box3();
       for(const child of comp(PM).layers)if((PM.groupAncestors?.(child)||[]).some((g:any)=>g.id===id)){
-        const node=runtime?.objects.get(child.id);if(node)box.expandByObject(node);
+        runtime?.expandBy(box,child.id);
       }
       if(!box.isEmpty())box.getCenter(position);
     }

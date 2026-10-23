@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import {compositionRuntime} from './service';
+import {targetScene} from './engine-targets';
+import {renderCamera} from './render-camera';
 import {layer3DRole,isModelGroup} from './layers';
 import {viewportCamera,viewportState,viewLabel,getViewportMode,activeCameraLayer,viewportPose,setViewAxis,setViewportMode,toggleViewProjection,onViewportChange,applyViewportPose,localViewIds,OPPOSITE_VIEW,type ViewAxis} from './viewport';
 import {viewportPreferences,onViewportSettings,selected3D,activeObject,cursorLocation,setCursorLocation,isViewportItem,type ViewportTool} from './editor-state';
@@ -81,14 +83,16 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
   let glyphHits:{id:string;x:number;y:number}[]=[],boxArmed:(()=>void)|null=null,walk:WalkSession|null=null;
   let zoomArmed:(()=>void)|null=null,border:{x:number;y:number;width:number;height:number}|null=null,editHits:{x:number;y:number}[]=[];
   const offs:(()=>void)[]=[];
+  let nativePresentation:any=null,nativeOffs:(()=>void)[]=[];
+  offs.push(()=>{for(const off of nativeOffs)off();nativeOffs=[];});
   const listen=(target:EventTarget,type:string,handler:any,options?:any)=>{target.addEventListener(type,handler,options);offs.push(()=>target.removeEventListener(type,handler,options));};
   const warn=(error:unknown)=>PM.toast?.(error instanceof Error?error.message:String(error),2200,{key:'scene3d-viewport',error:true});
   const stagePoint=(clientX:number,clientY:number):Point=>{const bounds=stage.getBoundingClientRect();return {x:clientX-bounds.left,y:clientY-bounds.top};};
   const available=()=>!disposed&&hasScene3D(PM);
-  const viewCamera=()=>fitCamera(viewportCamera(PM,compositionRuntime(PM).camera),rect);
+  const viewCamera=()=>fitCamera(viewportCamera(PM,renderCamera(PM)),rect);
   const excluded=()=>getViewportMode(PM)==='camera'?activeCameraLayer(PM)?.id??null:null;
   /** In Edit Mode transforms act on the selected points; otherwise on the selected layers. */
-  const targets=()=>editModeLayer(PM)?[pointsTarget(PM)].filter(t=>!!t) as ReturnType<typeof resolveTargets>:resolveTargets(PM,selected3D(PM),compositionRuntime(PM),{excludeCamera:excluded()});
+  const targets=()=>editModeLayer(PM)?[pointsTarget(PM)].filter(t=>!!t) as ReturnType<typeof resolveTargets>:resolveTargets(PM,selected3D(PM),targetScene(PM),{excludeCamera:excluded()});
 
   const navigation:SceneNavigation=createSceneNavigation(PM,stage,{
     height:()=>rect.height,panComposition:host.panComposition,zoomComposition:host.zoomComposition
@@ -135,6 +139,8 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
   let blank:string|null=null;
   function render(){
     frame=0;if(disposed)return;
+    const readFrames:VideoFrame[]=[];
+    let releaseChrome:((done?:Promise<unknown>)=>void)|null=null,chromeDone:Promise<void>|undefined;
     try{
       const prefs=viewportPreferences(PM),visible=available();
       if(!visible){
@@ -148,22 +154,53 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
       }
       blank=null;
       const view=viewportState(PM);
-      const runtime=compositionRuntime(PM),camera=viewCamera(),ids=selected3D(PM),active=activeObject(PM);
+      const engine=!!PM.EngineDoc?.enabled;
+      const presentation=engine?PM.Kernel?.services?.get?.('viewer')?.enginePresentation:null;
+      if(presentation!==nativePresentation){
+        for(const off of nativeOffs)off();nativeOffs=[];nativePresentation=presentation;
+        if(presentation){nativeOffs.push(presentation.onPresented(schedule),presentation.onChromeSurface(schedule));}
+      }
+      const nativeFrame=presentation?.latest,meta=nativeFrame?.depthId;
+      let nativeReady=!engine||!prefs.overlays||!!(presentation?.presenting&&meta?.encoding==='chromePlanesV1'&&nativeFrame.viewSeq===presentation.state?.viewSeq&&nativeFrame.revision>=(PM.EngineDoc?.barrier?.revision??0));
+      if(engine&&prefs.overlays&&nativeReady){releaseChrome=presentation.retainChromeFrame(nativeFrame);if(!releaseChrome)nativeReady=false;}
+      const depth=engine&&prefs.overlays&&nativeReady?presentation?.depthFrame(nativeFrame):null;
+      const coverage=engine&&prefs.overlays&&nativeReady?presentation?.coverageFrame(nativeFrame):null;
+      if(engine&&prefs.overlays&&(!depth||!coverage)){depth?.close();coverage?.close();nativeReady=false;}
+      if(depth&&coverage)readFrames.push(depth,coverage);
+      const runtime=engine?null:compositionRuntime(PM),camera=viewCamera(),ids=selected3D(PM),active=activeObject(PM);
       const stageCamera=camera.clone() as typeof camera,width=Math.max(2,stage.clientWidth),height=Math.max(2,stage.clientHeight);
       stageCamera.setViewOffset(rect.width,rect.height,-rect.x,-rect.y,width,height);stageCamera.updateProjectionMatrix();stageCamera.updateMatrixWorld(true);
       const editing=editModeLayer(PM),edit=editing?editOverlay(PM):null,mode=modal||editing?null:TOOL_MODES[prefs.tool]??null;
       editHits=edit?edit.points.map(point=>{const s=toScreen(camera,rect,point);return {x:s.x,y:s.y};}):[];
       gizmo.sync({targets:mode&&!navigation.active()?targets():[],mode,orientation:prefs.orientation,pivot:prefs.pivot,activeId:active,cursor:cursorLocation(PM),snap:prefs.snap,camera:stageCamera});
+      // Engine geometry keeps hit testing current while the matching chrome
+      // planes are still in flight. Drawing waits for their frame tag.
+      gizmo.helper.updateMatrixWorld(true);
+      if(!nativeReady)return;
       const selected=new Set(ids),pose=viewportPose(PM);
-      overlay.draw({camera,rect,runtime,userView:view.mode==='editor',axis:view.axis,distance:pose.distance,fov:view.fov,overlays:prefs.overlays,
-        edit,xray:prefs.xray,selected:editing?new Set():expand(ids),active:editing?new Set():expand(active?[active]:[]),glyphs:prefs.overlays?glyphs(camera,selected,active):[],guides:modal?.guides??[],gizmo:gizmo.attached()?gizmo.helper:null});
+      let frameGlyphs:Glyph[]=[];
+      if(prefs.overlays){
+        if(engine){
+          glyphHits=[];
+          const selected=new Set<string>(meta?.selection?.selected??[]),activeIds=new Set<string>(meta?.selection?.active??[]);
+          frameGlyphs=(meta?.glyphs??[]).filter((g:any)=>g.id!==excluded()).map((g:any)=>{
+            const position=new THREE.Vector3().fromArray(g.position),screen=toScreen(camera,rect,position);
+            if(screen.z<1)glyphHits.push({id:g.id,x:screen.x,y:screen.y});
+            return {...g,position,target:g.target?new THREE.Vector3().fromArray(g.target):null,up:new THREE.Vector3().fromArray(g.up),state:activeIds.has(g.id)?'active':selected.has(g.id)?'selected':'none'};
+          });
+        }else frameGlyphs=glyphs(camera,selected,active);
+      }
+      // Fence even when drawing throws after a shared texture was uploaded.
+      try { overlay.draw({camera,rect,runtime,native:depth&&coverage?{depth,coverage}:null,userView:view.mode==='editor',axis:view.axis,distance:pose.distance,fov:view.fov,overlays:prefs.overlays,
+        edit,xray:prefs.xray,selected:editing?new Set():expand(ids),active:editing?new Set():expand(active?[active]:[]),glyphs:frameGlyphs,guides:modal?.guides??[],gizmo:gizmo.attached()?gizmo.helper:null});
+      } finally { if(depth&&coverage)chromeDone=overlay.workDone(); }
       const cursor=toScreen(camera,rect,cursorLocation(PM)),rotation=new THREE.Quaternion();camera.matrixWorld.decompose(new THREE.Vector3(),rotation,new THREE.Vector3());
       const fps=PM.proj?.fps||30,activeLayer=active?PM.L?.(active):null;
       chrome.update({visible:true,rotation,axis:view.axis,camera:view.mode==='camera',orthographic:view.projection==='orthographic',
         label:viewLabel(PM),detail:`(${Math.round((PM.time||0)*fps)})${activeLayer?` ${activeLayer.name}`:''}`,leftInset:prefs.toolbar?46:0,rightInset:prefs.sidebar?236:0,
         cursor:prefs.overlays&&cursor.z<1&&cursor.z>-1?{x:cursor.x,y:cursor.y}:null,box:border,
         modal:modal?{header:modal.header(),hints:modal.hints(),link:modal.link}:walk?{header:walk.header(),hints:walk.hints(),link:null}:zoomArmed?{header:'Zoom Border',hints:[['LMB drag','Zoom to region'],['Esc','Cancel']],link:null}:boxArmed?{header:'Box Select',hints:[['LMB drag','Select'],['⇧','Extend'],['Ctrl','Subtract'],['Esc','Cancel']],link:null}:null});
-    }catch(error){console.error('[scene3d] viewport overlay failed',error);}
+    }catch(error){console.error('[scene3d] viewport overlay failed',error);}finally{for(const image of readFrames)image.close();releaseChrome?.(chromeDone);}
   }
 
   /* ── modal transforms ────────────────────────────────── */

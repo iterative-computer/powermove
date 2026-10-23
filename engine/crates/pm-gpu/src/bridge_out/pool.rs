@@ -14,7 +14,7 @@ use super::surface::ExportedSurface;
 /// holds ahead of their presentation time), and two more (the frame on
 /// screen and the one being drawn), clamped to contract 3's 4 to 32.
 pub fn pool_size(ring: u32, jitter: u32) -> u32 {
-    (ring + jitter + 2).clamp(MIN_POOL_SURFACES as u32, MAX_POOL_SURFACES as u32)
+    (ring + jitter + 2).clamp(MIN_POOL_SURFACES as u32, 32)
 }
 
 /// Amendment 4: `rgbaf16` on EDR displays (values above 1.0 reach the

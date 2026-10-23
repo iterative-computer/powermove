@@ -1,4 +1,5 @@
-import {rollView,enterLocalView,exitLocalView,localViewIds,setViewAxis,setViewportMode,getViewportMode,toggleViewProjection,orbitViewStep,applyViewportPose,viewportPose,viewportState,viewLabel,activeCameraLayer,setViewFov,type ViewAxis} from './viewport';
+import type { Scene3DViewportState } from '../../kernel/api';
+import {editorCamera,rollView,enterLocalView,exitLocalView,localViewIds,setViewAxis,setViewportMode,getViewportMode,toggleViewProjection,orbitViewStep,applyViewportPose,viewportPose,viewportState,viewLabel,activeCameraLayer,setViewFov,type ViewAxis} from './viewport';
 import {frameComposition,dollyView,alignCameraToView,setActiveCamera,lockedCamera,writeCameraPose} from './navigation';
 import {viewportPreferences,setViewportPreferences,activeObject,cursorLocation,setCursorLocation,selected3D,VIEWPORT_TOOLS,VIEWPORT_ORIENTATIONS,VIEWPORT_PIVOTS,type ViewportTool,type ViewportPreferences} from './editor-state';
 import {selectAll,selectByType,clickSelect,boxSelect,deleteSelected,duplicateSelected,hideSelected,revealHidden,clearTransform,insertKeyframes,deleteKeyframes,parentToActive,clearParent,snap,type SelectAction,type SnapOperation} from './operators';
@@ -17,12 +18,26 @@ export type ViewportSnapshot=ViewportPreferences&{
   view:{mode:'camera'|'editor';projection:'perspective'|'orthographic';axis:ViewAxis|null;label:string;fov:number};
   cursor:[number,number,number];active:string|null;selected:string[];modal:boolean;hasCamera:boolean;
   editMode:{layer:string;selected:number;total:number}|null;
+  engineCamera:Scene3DViewportState['engineCamera'];localView:string[]|null;
 };
 export function viewportSnapshot(PM:any):ViewportSnapshot {
   const view=viewportState(PM),cursor=cursorLocation(PM);
   return {...viewportPreferences(PM),hasScene:hasScene3D(PM),inContext:inViewportContext(PM),shading:renderState(PM).shading,
     view:{...view,label:viewLabel(PM)},cursor:[cursor.x,cursor.y,cursor.z],active:activeObject(PM),selected:selected3D(PM),
-    modal:!!viewportController(PM)?.modalActive(),hasCamera:!!activeCameraLayer(PM),editMode:editSummary(PM)};
+    modal:!!viewportController(PM)?.modalActive(),hasCamera:!!activeCameraLayer(PM),editMode:editSummary(PM),
+    engineCamera:engineCamera(PM),localView:(()=>{const ids=localViewIds(PM);return ids?[...ids]:null;})()};
+}
+/**
+ * The editor camera as contract 2's `EditorCamera` (the engine viewer's view
+ * override): world-to-camera matrix, and the lens (`resizeCamera` keeps an
+ * orthographic frustum 3 / zoom tall, so its half height is 3 / zoom).
+ */
+export function engineCamera(PM:any):Scene3DViewportState['engineCamera'] {
+  const camera:any=editorCamera(PM);if(!camera)return null;
+  const view=Array.from(camera.matrixWorldInverse.elements as ArrayLike<number>);
+  return camera.isOrthographicCamera
+    ?{view,projection:{kind:'orthographic',halfHeight:3/camera.zoom,near:camera.near,far:camera.far}}
+    :{view,projection:{kind:'perspective',fovYDegrees:camera.fov,near:camera.near,far:camera.far}};
 }
 
 const SELECT_TOOLS:ViewportTool[]=['tweak','box'];

@@ -97,8 +97,17 @@ impl RasterDir {
 
     /// The file of `key`.
     pub fn file(&self, key: &SvgRasterKey) -> std::path::PathBuf {
-        self.dir
-            .join(format!("{}-{}x{}.rgba", key.content, key.width, key.height))
+        self.dir.join(format!(
+            "{}-{}x{}{}.rgba",
+            key.content,
+            key.width,
+            key.height,
+            if key.texture == Some(true) {
+                "-texture"
+            } else {
+                ""
+            }
+        ))
     }
 
     /// Rasters asked for that were not captured, and their SVG files.
@@ -111,7 +120,8 @@ impl RasterDir {
     /// width, height, svg }]`) and returns how many it lists.
     pub fn write_needs(&self) -> std::io::Result<usize> {
         let path = self.dir.join("needs.json");
-        let mut all: std::collections::BTreeMap<(String, u32, u32), String> = Default::default();
+        let mut all: std::collections::BTreeMap<(String, u32, u32, bool), String> =
+            Default::default();
         if let Ok(text) = std::fs::read_to_string(&path)
             && let Ok(serde_json::Value::Array(list)) = serde_json::from_str(&text)
         {
@@ -122,20 +132,28 @@ impl RasterDir {
                     v["height"].as_u64(),
                     v["svg"].as_str(),
                 ) {
-                    all.insert((c.into(), w as u32, h as u32), svg.into());
+                    all.insert(
+                        (
+                            c.into(),
+                            w as u32,
+                            h as u32,
+                            v["texture"].as_bool().unwrap_or(false),
+                        ),
+                        svg.into(),
+                    );
                 }
             }
         }
         for (k, svg) in self.missing() {
             all.insert(
-                (k.content, k.width, k.height),
+                (k.content, k.width, k.height, k.texture == Some(true)),
                 svg.to_string_lossy().into_owned(),
             );
         }
         let list: Vec<serde_json::Value> = all
             .into_iter()
-            .map(|((content, width, height), svg)| {
-                serde_json::json!({ "content": content, "width": width, "height": height, "svg": svg })
+            .map(|((content, width, height, texture), svg)| {
+                serde_json::json!({ "content": content, "width": width, "height": height, "texture": texture, "svg": svg })
             })
             .collect();
         std::fs::create_dir_all(&self.dir)?;
@@ -227,7 +245,8 @@ impl Default for SvgRasters {
 }
 
 impl SvgRasters {
-    /// Stores a raster's pixels (premultiplied RGBA8, top-down).
+    /// Stores a raster's pixels in its key's encoding (canvas bucket or
+    /// straight, flipped material-map upload).
     pub fn put(&mut self, key: SvgRasterKey, data: Vec<u8>) -> Result<(), String> {
         key.validate().map_err(|v| v.to_string())?;
         if data.len() as u64 != key.bytes() {
@@ -388,6 +407,7 @@ mod tests {
 
     fn key(content: char, w: u32, h: u32) -> SvgRasterKey {
         SvgRasterKey {
+            texture: None,
             content: content.to_string().repeat(64),
             width: w,
             height: h,

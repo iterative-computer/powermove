@@ -22,12 +22,36 @@ import { lookup, type DocumentBarrier } from './barrier';
 import type { PmWasm } from './wasm';
 import { DetachedScopes, copyOf } from './detached';
 import type { DualAnswers } from './dual';
-import { layer3DRole } from '../core/scene3d/layers';
+import { geometryRequest, meshFields, refreshModels, resolveModels } from '../core/scene3d/engine-geometry';
+import { sceneForLayer } from '../core/scene3d/service';
+import { parseScene, SCENE3D_DEFINITION } from '../core/scene3d/schema';
+import { compositionScene, layer3DRole } from '../core/scene3d/layers';
+import { ZodError } from 'zod';
 import { COMP_FIELDS, canonicalPath } from '../legacy/core/compositions';
 import type { FontLoader } from './fonts';
 import { ExpressionFrames, type ExpressionFrameSlot } from './expression-frame';
 
 type Legacy = Record<string, any>;
+
+/** Only the editor-reachable size caps waived by the native 3D engine. */
+export function approvedSceneLimit(error: unknown): boolean {
+  if (error instanceof Error && error.message === '3D scene exceeds the 8 MB geometry budget') return true;
+  const issues = (error as { issues?: unknown } | null)?.issues;
+  return Array.isArray(issues) && issues.length > 0 && issues.every((issue: any) => {
+    if (issue?.code !== 'too_big') return false;
+    const path = issue.path;
+    if (!Array.isArray(path)) return false;
+    if (path.length === 1 && path[0] === 'objects' && issue.maximum === 512) return true;
+    if (path.length === 1 && path[0] === 'lights' && issue.maximum === 16) return true;
+    return path.at(-1) === 'name' && issue.maximum === 160;
+  });
+}
+
+/** `runtime.objects.get(id)` as Edit Mode reads it (`NativeApi.objectMesh3d`). */
+export type ObjectMesh3d =
+  | { missing: true }
+  | { notMesh: true }
+  | { positions: number[] | null; uvs?: number[]; index?: number[] | null };
 
 /** A native answer: the value, a throw to rethrow, or a reason to ask the legacy code. */
 type Native<T> = { value: T } | { threw: Error } | { fallback: string };
@@ -251,9 +275,11 @@ interface Context {
   first: boolean;
   /** The live layers (as `PM.curComp().layers` reads, proxies in tracking mode). */
   live: any[];
+  /** The raw layers array `layer` indexes (the composition's own `layers`). */
+  list: any[];
 }
 
-interface Indexed { layers: any[]; revision: number; index: Map<any, number>; firstById: Map<string, number> }
+interface Indexed { layers: any[]; revision: number; index: Map<any, number>; firstById: Map<string, number>; rebuilt?: boolean }
 
 export interface NativeStats {
   calls: Record<string, number>;
@@ -289,11 +315,11 @@ export class NativeApi {
   private depth = 0;
   private answeredNatively = false;
   /** Live channel object → interned id (validated on every use). */
-  private props = new WeakMap<object, { layer: object; layerId: unknown; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; shape: number; project: unknown; cur: unknown; wasm: PmWasm; time?: number; number?: number; frame?: ExpressionFrameSlot }>();
+  private props = new WeakMap<object, { layer: object; layerId: unknown; list: any[]; path: PathPart[]; comp: string; id: number; key: unknown; revision: number; shape: number; project: unknown; cur: unknown; wasm: PmWasm; time?: number; number?: number; frame?: ExpressionFrameSlot }>();
   /** A detached property's validated address; its inputs are rechecked by DetachedScopes. */
   private detachedProps = new WeakMap<object, { layer: object; cur: unknown; key: unknown; path: PathPart[]; request: Record<string, unknown> }>();
   /** Live layer → interned transform channels, valid at the current revision and scope. */
-  private channels = new WeakMap<object, { layer: object; layerId: unknown; comp: string; ids: Map<string, number>; revision: number; shape: number; project: unknown; cur: unknown }>();
+  private channels = new WeakMap<object, { layer: object; layerId: unknown; list: any[]; comp: string; ids: Map<string, number>; revision: number; shape: number; project: unknown; cur: unknown }>();
   private refs = new Map<number, number>();
   private expressionFrames = new ExpressionFrames();
   /**
@@ -352,6 +378,20 @@ export class NativeApi {
     return wasm.dead ? null : wasm;
   }
 
+  /** Import through the same engine module that answers 3D geometry. */
+  importModel(bytes: Uint8Array): any {
+    const wasm = this.ready();
+    if (!wasm) throw new Error('The engine model importer is unavailable');
+    return wasm.importModel(bytes, true);
+  }
+
+  /** Package model import inputs through the engine's import pipeline. */
+  prepareModelImport(files: Array<{ name: string; mime: string; bytes: Uint8Array }>): { unchanged: number } | { bytes: Uint8Array } {
+    const wasm = this.ready();
+    if (!wasm) throw new Error('The engine model import preparation is unavailable');
+    return wasm.prepareModelImport(files);
+  }
+
   private count(op: string) { this.stats.calls[op] = (this.stats.calls[op] ?? 0) + 1; }
   private fell(op: string, why: string) { const k = `${op}:${why}`; this.stats.fallbacks[k] = (this.stats.fallbacks[k] ?? 0) + 1; }
 
@@ -369,6 +409,53 @@ export class NativeApi {
       this.indexed.set(layers, cached);
     }
     return cached;
+  }
+
+  /**
+   * Where `raw` is in `list` now, or undefined. The index is cached per
+   * revision; history can replace a layer object without a revision (a
+   * restore whose values equal the mirror's), so a miss rebuilds it once per
+   * revision before answering that the object is not there.
+   */
+  private positionOf(list: any[], raw: unknown): number | undefined {
+    const cached = this.index(list);
+    const i = cached.index.get(raw);
+    if (i !== undefined && list[i] === raw) return i;
+    if (cached.rebuilt) return undefined;
+    this.indexed.delete(list);
+    const again = this.index(list);
+    again.rebuilt = true;
+    const j = again.index.get(raw);
+    return j !== undefined && list[j] === raw ? j : undefined;
+  }
+
+  /**
+   * Whether `layer` is still the document's: an element of `list`, and
+   * `list` still some composition's own `layers` (the open one's, or one in
+   * `comps`). False is always safe (the caller asks the slow path).
+   */
+  private holds(list: any[] | undefined, layer: object): boolean {
+    if (!Array.isArray(list) || this.positionOf(list, layer) === undefined) return false;
+    const proj = this.unwrap(this.PM.proj);
+    return proj?.layers === list || this.ownerOf(list) !== null;
+  }
+
+  /**
+   * Whether every layer object a memoized structural answer hands out is
+   * still the current composition's. The memos are valid while the shape is
+   * unchanged, but undo, redo, and a scoped rollback replace a restored
+   * layer by a clone at an unchanged shape: an answer holding the replaced
+   * object would hand a caller (a transform gesture's press-time snapshot)
+   * the undone state.
+   */
+  private liveAnswer(value: unknown, cur: unknown): boolean {
+    if (!Array.isArray(value)) return true;
+    const list = (cur as any)?.layers;
+    for (const item of value) {
+      if (!item || typeof item !== 'object') continue;
+      if (!Array.isArray(list) || this.positionOf(list, this.unwrap(item)) === undefined) return false;
+    }
+    return true;
   }
 
   /**
@@ -522,7 +609,7 @@ export class NativeApi {
     const idx = this.index(layers);
     let i = idx.index.get(raw);
     if (i !== undefined && layers[i] !== raw) { this.indexed.delete(layers); i = this.index(layers).index.get(raw); }
-    if (i === undefined) return { comp: c.comp, open: c.open, layer: JSON.parse(JSON.stringify(raw)), raw, first: false, live };
+    if (i === undefined) return { comp: c.comp, open: c.open, layer: JSON.parse(JSON.stringify(raw)), raw, first: false, live, list: layers };
     // The mirror must hold this layer at this index (the shadow is exactly
     // what it holds). If not, a structural write bypassed the barrier: repair
     // before answering rather than answer for another layer.
@@ -534,23 +621,48 @@ export class NativeApi {
       if (missed.length) this.onStale?.('context', missed);
     }
     const first = !c.comp.startsWith('@scope:') && typeof raw.id === 'string' && this.index(layers).firstById.get(raw.id) === i;
-    return { comp: c.comp, open: c.open, layer: i, raw, first, live };
+    return { comp: c.comp, open: c.open, layer: i, raw, first, live, list: layers };
   }
 
   private query<T>(op: string, request: Record<string, unknown>, map?: (v: any) => T): Native<T> {
     let wasm = this.ready();
     if (!wasm) return { fallback: 'unavailable' };
+    // The extension scene is parsed by SceneRuntime only when its layer is
+    // reached. Supply the exact parser error to the native query, which
+    // decides whether that layer is reached by the pick or bounds request.
+    const sceneErrors = new Map<string, Error>();
+    if (op === 'pick' || op === 'bounds' || op === 'syncScene3d') {
+      const layers: any[] = this.comps()?.cur?.layers ?? [];
+      const candidates = op === 'bounds' || op === 'syncScene3d'
+        ? [typeof request.layer === 'number' ? layers[request.layer] : request.layer]
+        : layers;
+      for (const layer of candidates) {
+        if (!layer || layer.type !== 'extension' || typeof layer.id !== 'string') continue;
+        const raw = layer.d?.definition === SCENE3D_DEFINITION ? layer.d?.data?.scene : undefined;
+        try {
+          const scene = sceneForLayer(this.PM, layer, Number(request.t));
+          if (scene && raw && typeof raw === 'object') {
+            parseScene(raw);
+          }
+        } catch (error) {
+          if (!approvedSceneLimit(error))
+            sceneErrors.set(layer.id, error instanceof Error ? error : new Error(String(error)));
+        }
+      }
+    }
     const ask = (instance: PmWasm): any => {
-      const payload: Record<string, unknown> = { op, ...request };
+      const payload: Record<string, unknown> = { op, ...request, invalidSceneIds: [...sceneErrors.keys()] };
       if (typeof request.comp === 'string' && request.comp.startsWith('@json:')) {
         payload.compJsonText = request.comp.slice(6);
         payload.comp = '@detached';
       }
+      refreshModels(this.PM, instance);
       const run = () => typeof request.comp === 'string' && request.comp.startsWith('@scope:')
         && !('compJson' in payload) && !('compJsonText' in payload)
         ? this.detached.query(request.comp, payload, instance, this.barrier()?.revision ?? -1)
         : instance.query(payload);
       let reply = run();
+      if (reply?.models) reply = resolveModels(this.PM, instance, run, reply);
       if (reply?.fonts && this.fonts) {
         // Text layout met fonts the mirror lacks: load them (at once from a
         // synchronous registry, in the background otherwise) and ask again.
@@ -574,8 +686,40 @@ export class NativeApi {
     if (reply?.fonts && this.fonts?.disabled) this.onFailure?.('font-service-unavailable', 'The native font service stopped answering, so text layout cannot run in the new engine.');
     if ('ok' in reply) return { value: map ? map(reply.ok) : reply.ok };
     if (reply.throw) {
+      if (reply.throw.kind === 'SceneValidation') {
+        const exact = sceneErrors.get(reply.throw.message);
+        if (exact) return { threw: exact };
+      }
+      if (reply.throw.kind === 'ZodError') {
+        // This is an exception path only. Reproduce today's composition
+        // parser exception without constructing SceneRuntime or geometry.
+        const context = this.comps();
+        const address = request.comp;
+        const matching = context && (address === context.comp || address === context.open
+          || address === ROOT_VIEW + context.open);
+        if (matching) {
+          try { compositionScene(this.PM, Number(request.t), context.liveCur); }
+          catch (error) {
+            if (!approvedSceneLimit(error))
+              return { threw: error instanceof Error ? error : new Error(String(error)) };
+          }
+        }
+        // An approved 8 MB cap can mask a second schema issue in the JS
+        // parser. The native validator still refuses it; preserve the Zod
+        // exception class for this otherwise unrepresentable combination.
+        const error = new ZodError([{ code: 'custom', path: [], message: reply.throw.message }]);
+        Object.defineProperty(error, 'message', { value: reply.throw.message, configurable: true });
+        return { threw: error };
+      }
       const error = new (reply.throw.kind === 'TypeError' ? TypeError : reply.throw.kind === 'RangeError' ? RangeError : Error)(reply.throw.message);
       return { threw: error };
+    }
+    if (typeof reply.unsupported === 'string') {
+      // Content the engine cannot answer for (a 3D model it cannot load):
+      // named and counted; with "Use New Engine" on (strict) a visible
+      // failure, never three.js; never the missing box.
+      console.warn(`[engine-doc] ${op}: ${reply.unsupported}`);
+      return { fallback: 'unsupported' };
     }
     if (reply.host) return { fallback: 'host' };
     if (reply.fonts) return { fallback: 'fonts' };
@@ -706,7 +850,8 @@ export class NativeApi {
     const memo = this.shapes.get(raw);
     const hit = memo?.get(key);
     // At an unchanged shape the layer is where it was: one look at that index.
-    if (hit && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live && this.mirrored(raw, hit.index, stamp.comp)) {
+    if (hit && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live && this.mirrored(raw, hit.index, stamp.comp)
+      && this.liveAnswer(hit.value, stamp.cur)) {
       this.count(op);
       this.stats.shapeHits += 1;
       return copy(hit.value as T);
@@ -812,7 +957,7 @@ export class NativeApi {
    * rootComp: checked on every call, since the scope object can change
    * without the barrier seeing it.
    */
-  private current(entry: { revision: number; shape: number; project: unknown; cur: unknown; comp: string; layer: object; layerId: unknown; path?: PathPart[]; time?: number; number?: number }, raw: any): boolean {
+  private current(entry: { revision: number; shape: number; project: unknown; cur: unknown; comp: string; layer: object; layerId: unknown; list: any[]; path?: PathPart[]; time?: number; number?: number }, raw: any): boolean {
     const barrier = this.barrier();
     if (!barrier) return false;
     barrier.flush();
@@ -825,6 +970,14 @@ export class NativeApi {
       const project = this.unwrap(this.PM.proj);
       if (entry.project !== project || entry.layerId !== (entry.layer as any)?.id
         || entry.path && at(entry.layer, entry.path) !== raw) return false;
+      // The id names the document's layer with this id. Undo, redo, and a
+      // scoped rollback restore a layer by replacing its object with a clone
+      // (the composition's shape, and so `shapeRevision`, unchanged): the
+      // replaced object is no longer the document's, and the legacy code
+      // answers it from its own members. The slow path does the same
+      // (`context` sends it as JSON), so a caller holding it never gets one
+      // layer's channels from two states.
+      if (!this.holds(entry.list, entry.layer)) return false;
       if (entry.shape !== barrier.shapeRevision) {
         // An added, removed, or reordered layer need not discard every ID.
         // Check the open composition's membership and first-ID rule once per
@@ -922,10 +1075,11 @@ export class NativeApi {
       const stamp = this.stamp()!;
       let entry = this.channels.get(ctx.raw);
       if (!entry || entry.comp !== ctx.comp || entry.project !== this.unwrap(this.PM.proj)
-        || entry.layerId !== ctx.raw.id || entry.cur !== stamp.cur) { entry = { layer: ctx.raw, layerId: ctx.raw.id, comp: ctx.comp, ids: new Map(), revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur }; this.channels.set(ctx.raw, entry); }
+        || entry.layerId !== ctx.raw.id || entry.cur !== stamp.cur) { entry = { layer: ctx.raw, layerId: ctx.raw.id, list: ctx.list, comp: ctx.comp, ids: new Map(), revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur }; this.channels.set(ctx.raw, entry); }
       entry.revision = stamp.revision;
       entry.shape = this.barrier()!.shapeRevision;
       entry.cur = stamp.cur;
+      entry.list = ctx.list;
       let id = entry.ids.get(key);
       if (id === undefined) {
         id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: 'channel' }, ctx.raw);
@@ -1027,12 +1181,13 @@ export class NativeApi {
         }
         const id = this.intern(wasm, { comp: ctx.comp, layer: ctx.raw.id, key, via: path }, rawProp);
         if (id < 0) return this.query('evP', { comp: ctx.comp, open: ctx.open, layer: ctx.layer, path, key, t: T });
-        entry = { layer: ctx.raw, layerId: ctx.raw.id, path, comp: ctx.comp, id, key, revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur, wasm };
+        entry = { layer: ctx.raw, layerId: ctx.raw.id, list: ctx.list, path, comp: ctx.comp, id, key, revision: stamp.revision, shape: this.barrier()!.shapeRevision, project: this.unwrap(this.PM.proj), cur: stamp.cur, wasm };
         this.props.set(rawProp, entry);
       }
       entry!.revision = stamp.revision;
       entry!.shape = this.barrier()!.shapeRevision;
       entry!.cur = stamp.cur;
+      entry!.list = ctx.list;
       const got = this.evById(wasm, entry!.id, T);
       entry!.time = 'value' in got && typeof got.value === 'number' ? T : undefined;
       if ('value' in got && typeof got.value === 'number') entry!.number = got.value;
@@ -1134,7 +1289,7 @@ export class NativeApi {
   // ── groups ────────────────────────────────────────────────────────────
 
   groupBounds(group: any, time: number): any {
-    return this.answer('groups.bounds', () => this.layerQuery('groupBounds', group, { t: time }),
+    return this.answer('groups.bounds', () => this.layerQuery('groupBounds', group, { t: time, ...geometryRequest(this.PM) }),
       () => this.legacy.groupBounds(group, time), () => ({ layer: group?.id, t: time }),
       this.dual ? timePerturbations(time, t => this.legacy.groupBounds(group, t)) : undefined,
       this.dual ? () => this.illConditioned(group, time) : undefined);
@@ -1192,7 +1347,8 @@ export class NativeApi {
     if (!stamp) return ask();
     const key = JSON.stringify(ids);
     const hit = this.rootsAnswer;
-    if (hit && hit.key === key && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live) {
+    if (hit && hit.key === key && hit.shape === stamp.shape && hit.cur === stamp.cur && hit.live === stamp.live
+      && this.liveAnswer(hit.value, stamp.cur)) {
       this.count('groups.transformRoots');
       this.stats.shapeHits += 1;
       return hit.value.slice();
@@ -1262,8 +1418,45 @@ export class NativeApi {
 
   // ── render ────────────────────────────────────────────────────────────
 
+  /** Advance extension scene runtime history at a viewer frame boundary.
+   * Multiple edits before one frame collapse to the source that frame sees;
+   * source recreation between presented frames retains its insertion order. */
+  syncScene3dFrame(T: number): void {
+    const c = this.comps();
+    if (!c) return;
+    const layers: any[] = Array.isArray(c.cur.layers) ? c.cur.layers : [];
+    const fields = meshFields(this.PM);
+    // The open composition can be nested below the registry helper's
+    // top-level scan. Include its definitions exactly as sceneForLayer does.
+    if (fields) for (const layer of layers) {
+      const definition = layer?.type === 'extension' ? layer.d?.definition : null;
+      if (typeof definition !== 'string' || Object.prototype.hasOwnProperty.call(fields, definition)) continue;
+      let renderer: any;
+      try { renderer = this.PM.layerDefinition(definition)?.renderer; } catch { renderer = null; }
+      if (renderer?.kind === 'mesh') fields[definition] = String(renderer.assetField);
+    }
+    const accepted = (reply: Native<unknown>): void => {
+      if ('threw' in reply) throw reply.threw;
+      if ('fallback' in reply) {
+        const error = new Error(`The native viewer could not synchronize the 3D scene (${reply.fallback})`);
+        error.name = 'EngineSceneSyncUnavailable';
+        throw error;
+      }
+    };
+    if (layers.some(layer3DRole)) accepted(this.query('camera3d', { comp: c.comp, open: c.open, t: T, meshFields: fields }));
+    for (let i = 0; i < layers.length; i++) {
+      const layer = layers[i];
+      if (layer?.type !== 'extension') continue;
+      const definition = layer.d?.definition;
+      if (definition !== SCENE3D_DEFINITION && !(typeof definition === 'string' && fields && Object.prototype.hasOwnProperty.call(fields, definition))) continue;
+      if (typeof this.PM.active === 'function' && !this.PM.active(layer, T)) continue;
+      const reply = this.query('syncScene3d', { comp: c.comp, open: c.open, layer: i, t: T, meshFields: fields });
+      accepted(reply);
+    }
+  }
+
   bounds(L: any, T: any): any {
-    return this.answer('gl.bounds', () => this.layerQuery('bounds', L, { t: T }), () => this.legacy.bounds(L, T), () => ({ layer: L?.id, t: T }),
+    return this.answer('gl.bounds', () => this.layerQuery('bounds', L, { t: T, ...geometryRequest(this.PM) }), () => this.legacy.bounds(L, T), () => ({ layer: L?.id, t: T }),
       this.dual ? timePerturbations(T, t => this.legacy.bounds(L, t)) : undefined,
       this.dual ? () => this.illConditioned(L, T) : undefined);
   }
@@ -1304,12 +1497,10 @@ export class NativeApi {
     return this.answer('gl.pick', () => {
       const c = this.comps();
       if (!c) return { fallback: 'context' };
-      const proj = this.unwrap(this.PM.proj);
-      // With 3D layers the order follows the editor's view camera, which is
-      // not in the document: three.js answers until Phase 3c.
-      if ((proj.layers || []).some((layer: any) => layer3DRole(this.unwrap(layer)))) return { fallback: '3d' };
+      // 3D layers are picked on the engine's geometry with the editor's view
+      // camera and Local View (core/scene3d/engine-geometry.ts).
       const live = this.PM.proj.layers;
-      return this.query('pick', { comp: c.open, open: c.open, x, y, t: T, includeLocked: !!options?.includeLocked, localView: null },
+      return this.query('pick', { comp: c.open, open: c.open, x, y, t: T, includeLocked: !!options?.includeLocked, localView: null, ...geometryRequest(this.PM) },
         (hit: number[] | null) => hit == null ? null : live[hit[0]!] ?? null);
     }, () => this.legacy.pick(x, y, T, options), () => ({ x, y, t: T }),
       this.dual ? [
@@ -1317,6 +1508,82 @@ export class NativeApi {
         ...[[1e-7, 0], [-1e-7, 0], [0, 1e-7], [0, -1e-7]].map(([dx, dy]) => () => this.legacy.pick(x + dx!, y + dy!, T, options)),
       ] : undefined,
       this.dual ? () => this.onLayerEdge(x, y, T) : undefined);
+  }
+
+  /**
+   * `Box3.expandByObject` of each 3D object layer in the composition's
+   * runtime at `T` (`viewportBounds`), from pm-wasm's geometry: `[minX,
+   * minY, minZ, maxX, maxY, maxZ]` per id, null for an id without one.
+   * `legacy` is today's three.js answer: it runs only where every other
+   * query's legacy fallback runs (counted in `stats.fallbacks`; with "Use New
+   * Engine" on `onFallback` refuses it with a named failure instead), and in
+   * dual mode as the reference.
+   */
+  objectBoxes3d(ids: readonly string[], T: number, legacy: () => Record<string, number[] | null>): Record<string, number[] | null> {
+    return this.answer('objectBoxes3d', () => {
+      const c = this.comps();
+      if (!c) return { fallback: 'context' };
+      return this.query<Record<string, number[] | null>>('objectBoxes3d', { comp: c.comp, open: c.open, ids: [...ids], t: T, ...geometryRequest(this.PM) });
+    }, legacy, () => ({ ids: [...ids], t: T }));
+  }
+
+  /**
+   * `runtime.objects.get(id).matrixWorld` for 3D object layers `ids` of the
+   * composition being viewed (core/scene3d/engine-targets.ts), from pm-wasm.
+   * `legacy` is today's runtime answer (counted fallbacks, dual mode).
+   */
+  objectWorlds3d(ids: readonly string[], T: number, legacy: () => Record<string, number[] | null>): Record<string, number[] | null> {
+    return this.answer('objectWorlds3d', () => {
+      const c = this.comps();
+      if (!c) return { fallback: 'context' };
+      return this.query<Record<string, number[] | null>>('objectWorlds3d', { comp: c.comp, open: c.open, ids: [...ids], t: T, ...geometryRequest(this.PM) });
+    }, legacy, () => ({ ids: [...ids], t: T }));
+  }
+
+  /**
+   * `compositionRuntime(PM, T).camera` of the composition being viewed
+   * (core/scene3d/render-camera.ts): lens and `matrixWorld` from pm-wasm.
+   * `legacy` is today's runtime camera, run only where every legacy
+   * fallback runs (counted; refused by name with "Use New Engine" on) and in
+   * dual mode.
+   */
+  camera3d(T: number, legacy: () => { orthographic: boolean; fov: number | null; zoom: number; near: number; far: number; world: number[] }): { orthographic: boolean; fov: number | null; zoom: number; near: number; far: number; world: number[] } {
+    return this.answer('camera3d', () => {
+      const c = this.comps();
+      if (!c) return { fallback: 'context' };
+      return this.query('camera3d', { comp: c.comp, open: c.open, t: T, ...geometryRequest(this.PM) });
+    }, legacy, () => ({ t: T }));
+  }
+
+  /**
+   * `placeCursor`'s surface point (core/scene3d/operators.ts): the first
+   * visible mesh hit along the world ray `origin` + t `direction` in the
+   * composition being viewed at `T`, from pm-wasm; null when nothing is hit.
+   * `legacy` is today's three.js raycast (dual mode's reference; with "Use
+   * New Engine" on a question pm-wasm cannot answer is a named failure).
+   */
+  cursorHit3d(origin: readonly number[], direction: readonly number[], T: number, legacy: () => number[] | null): number[] | null {
+    return this.answer('cursorHit3d', () => {
+      const c = this.comps();
+      if (!c) return { fallback: 'context' };
+      return this.query<number[] | null>('cursorHit3d', { comp: c.comp, open: c.open, origin: [...origin], direction: [...direction], t: T, ...geometryRequest(this.PM) });
+    }, legacy, () => ({ origin: [...origin], direction: [...direction], t: T }));
+  }
+
+  /**
+   * What `runtime.objects.get(id)` holds for Edit Mode's `currentMesh`
+   * (core/scene3d/editmode.ts) in the composition being viewed at `T`:
+   * `{missing}`, `{notMesh}`, or its geometry's buffers (`positions` null
+   * for an empty geometry). `legacy` is today's runtime answer (dual mode).
+   */
+  objectMesh3d(id: string, T: number, legacy: () => ObjectMesh3d): ObjectMesh3d {
+    return this.answer('objectMesh3d', () => {
+      const c = this.comps();
+      if (!c) return { fallback: 'context' };
+      // A geometry without a uv attribute has no `uvs` (pm-wasm sends them empty).
+      return this.query<ObjectMesh3d>('objectMesh3d', { comp: c.comp, open: c.open, id, t: T, ...geometryRequest(this.PM) },
+        (v: any) => (v && Array.isArray(v.uvs) && !v.uvs.length ? (({ uvs: _uvs, ...rest }) => rest)(v) : v));
+    }, legacy, () => ({ id, t: T }));
   }
 
   /**

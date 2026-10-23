@@ -17,8 +17,9 @@ use std::ffi::CString;
 use std::io;
 use std::time::{Duration, Instant};
 
-/// The largest segment either side makes or reads (`MAX_SNAPSHOT_BYTES`).
-pub const MAX_SEGMENT: usize = 512 * 1024 * 1024;
+/// The largest segment either side makes or reads: a 16384² RGBA8 SVG
+/// material map. Snapshot requests retain their separate 512 MiB cap.
+pub const MAX_SEGMENT: usize = 1024 * 1024 * 1024;
 /// A segment main has not taken by then is unlinked by the engine.
 pub const ORPHAN_AFTER: Duration = Duration::from_secs(60);
 

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import {compositionRuntime} from './service';
+import {objectGeometry} from './engine-edit';
+import {targetScene} from './engine-targets';
 import {layer3DRole} from './layers';
 import {activeObject,notifyViewport} from './editor-state';
 import {editableLayer,transformModes,type TransformTarget} from './targets';
@@ -21,9 +22,10 @@ function refuse(message:string):never {throw new Error(message);}
 export function currentMesh(PM:any,layer:any):EditMesh {
   const source=layer.d.data.object.source;
   if(source.mesh)return {positions:[...source.mesh.positions],indices:source.mesh.indices?[...source.mesh.indices]:Array.from({length:source.mesh.positions.length/3},(_,i)=>i),...(source.mesh.uvs?{uvs:[...source.mesh.uvs]}:{})};
-  const object=compositionRuntime(PM).objects.get(layer.id) as THREE.Mesh|undefined;
-  if(!object?.isMesh)refuse('This model has no editable mesh');
-  return meshFromGeometry(object.geometry);
+  // The runtime's geometry for the object: pm-wasm's with the engine on (engine-edit.ts).
+  const geometry=objectGeometry(PM,layer.id);
+  if(!geometry)refuse('This model has no editable mesh');
+  return meshFromGeometry(geometry);
 }
 export function canEdit(PM:any,layer:any):string|null {
   if(layer3DRole(layer)!=='object')return 'Select a model to edit';
@@ -110,7 +112,7 @@ export function planExtrude(PM:any):{command:any;target:TransformTarget;adopt:()
   const state=editState(PM);if(!state||!state.selected.size)return null;
   const result=extrudeRegion(state.mesh,state.weld,state.selected);if(!result)return null;
   const weld=result.weld,selected=new Set(result.vertices.map(v=>weld.vertexPoint[v]!));
-  const object=compositionRuntime(PM).objects.get(state.id);object?.updateWorldMatrix(true,false);
+  const object=targetScene(PM).objects.get(state.id);object?.updateWorldMatrix(true,false);
   const normal=result.normal.clone().transformDirection(object?.matrixWorld??new THREE.Matrix4());
   const target=pointsTarget(PM,normal,{mesh:result.mesh,weld,selected});if(!target)return null;
   return {command:meshCommand(PM,state.id,result.mesh),target,adopt:()=>{state.mesh=result.mesh;state.weld=weld;state.selected=selected;notifyViewport(PM);}};
@@ -121,7 +123,7 @@ export function planExtrude(PM:any):{command:any;target:TransformTarget;adopt:()
 export function pointsTarget(PM:any,normal?:THREE.Vector3,plan?:{mesh:EditMesh;weld:Weld;selected:Set<number>}):TransformTarget|null {
   const state=editState(PM);if(!state)return null;
   if(!(plan?.selected??state.selected).size)return null;
-  const layer=PM.L(state.id),object=compositionRuntime(PM).objects.get(state.id);if(!object)return null;
+  const layer=PM.L(state.id),object=targetScene(PM).objects.get(state.id);if(!object)return null;
   object.updateWorldMatrix(true,false);
   const world=object.matrixWorld.clone(),inverse=world.clone().invert(),base=plan?.mesh??state.mesh,weld=plan?.weld??state.weld,selected=new Set(plan?.selected??state.selected);
   const position=new THREE.Vector3();for(const point of selected)position.add(pointPosition(base,weld,point).applyMatrix4(world));position.divideScalar(selected.size);
@@ -133,7 +135,7 @@ export function pointsTarget(PM:any,normal?:THREE.Vector3,plan?:{mesh:EditMesh;w
 /** World positions of the points, their selection and edges, for the overlay. */
 export function editOverlay(PM:any):{points:THREE.Vector3[];selected:boolean[];edges:[number,number][]}|null {
   const state=editState(PM);if(!state)return null;
-  const object=compositionRuntime(PM).objects.get(state.id);if(!object)return null;
+  const object=targetScene(PM).objects.get(state.id);if(!object)return null;
   object.updateWorldMatrix(true,false);
   const points=state.weld.points.map((_,p)=>pointPosition(state.mesh,state.weld,p).applyMatrix4(object.matrixWorld));
   return {points,selected:points.map((_,p)=>state.selected.has(p)),edges:meshEdges(state.mesh,state.weld)};

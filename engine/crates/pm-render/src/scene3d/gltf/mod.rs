@@ -18,32 +18,34 @@ pub mod asset;
 pub(crate) mod gpu;
 pub mod material;
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use pm_geom3d::gltf::{self as g, Mode, ObjectKind, pose};
 
 use super::model::{
-    Geometry3d, Light3d, LightKind, Material3d, MaterialKind, Materials, Mesh3d, Texture3d,
+    Geometry3d, GeometryPayload, Light3d, LightKind, Material3d, MaterialKind, Materials, Mesh3d,
+    Texture3d,
 };
 use crate::three::materials::Side;
 use crate::three::math::{self, Mat4};
+use crate::three::program::Parameters;
 
 pub use asset::{DecodedImage, GltfAsset};
 
-/// How a model asset's file resolves: loaded, missing (offline or
-/// unreadable: today's asset has no scene), or a file the importer
-/// accepted that this engine does not load (routed).
+/// How a model asset's file resolves: loaded, or missing (offline,
+/// unreadable, or a file the reader refuses). The reader accepts exactly
+/// the files today's importer loads (`gltf-acceptance.test.ts`), so a
+/// refused file is one whose asset has no scene today either: the
+/// missing-model box.
 pub fn lookup(path: &std::path::Path) -> super::model::ModelLookup {
     use super::model::ModelLookup;
     if std::fs::metadata(path).is_err() {
+        asset::forget(path);
         return ModelLookup::Missing;
     }
     match asset::load(path) {
         Ok(a) => ModelLookup::Gltf(a),
-        Err(why) => {
-            ModelLookup::Unloadable(format!("imported model the engine does not load ({why})"))
-        }
+        Err(_) => ModelLookup::Missing,
     }
 }
 
@@ -116,17 +118,21 @@ pub struct MorphTexture {
 /// carry instead of the data).
 #[derive(PartialEq)]
 pub struct VertexExtra {
-    pub tangent: Option<Vec<f32>>,
+    pub tangent: Option<Arc<Vec<f32>>>,
     /// `color` and its item size (3 or 4).
-    pub color: Option<(Vec<f32>, usize)>,
-    pub uv1: Option<Vec<f32>>,
-    pub uv2: Option<Vec<f32>>,
-    pub uv3: Option<Vec<f32>>,
-    pub skin_index: Option<Vec<f32>>,
-    pub skin_weight: Option<Vec<f32>>,
+    pub color: Option<(Arc<Vec<f32>>, usize)>,
+    pub uv1: Option<Arc<Vec<f32>>>,
+    pub uv2: Option<Arc<Vec<f32>>>,
+    pub uv3: Option<Arc<Vec<f32>>>,
+    pub skin_index: Option<Arc<Vec<f32>>>,
+    pub skin_weight: Option<Arc<Vec<f32>>>,
     pub mode: Mode,
     pub has_normal: bool,
     pub has_uv: bool,
+    /// Source counts before CPU-safe padding; checked against the final
+    /// material after late scene-map failures have been resolved.
+    pub short_attributes: Vec<(&'static str, usize)>,
+    pub fetched_vertices: usize,
     /// Morph targets: position, normal, color present; count; texture.
     pub morph: Option<(bool, bool, bool, u32, Arc<MorphTexture>)>,
 }
@@ -184,6 +190,8 @@ impl std::fmt::Debug for VertexExtra {
                 ),
             )
             .field("normal", &self.has_normal)
+            .field("short_attributes", &self.short_attributes)
+            .field("fetched_vertices", &self.fetched_vertices)
             .field("skin", &self.skin_index.is_some())
             .field("morph", &self.morph)
             .finish()
@@ -237,6 +245,21 @@ fn f32_bytes(v: &[f32]) -> Vec<u8> {
     v.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
+/// WebGL fetches an active vertex attribute only for indices in the draw.
+/// A short attribute's unused tail does not invalidate an indexed primitive.
+fn fetched_vertex_count(geometry: &g::Geometry) -> usize {
+    geometry.index.as_ref().map_or_else(
+        || geometry.vertex_count(),
+        |indices| {
+            indices
+                .iter()
+                .copied()
+                .max()
+                .map_or(0, |i| (i as usize).saturating_add(1))
+        },
+    )
+}
+
 /// `WebGLMorphtargets`' texture (max texture size 16,384, as ANGLE on
 /// Metal reports).
 fn morph_texture(
@@ -262,30 +285,57 @@ fn morph_texture(
     let mut data = vec![0f32; layer * count];
     for i in 0..count {
         let offset = layer * i;
-        for j in 0..vertices {
+        let primary = if m.position.is_some() {
+            0
+        } else if m.normal.is_some() {
+            1
+        } else {
+            2
+        };
+        let source_count = m.source_counts[primary].get(i).copied().unwrap_or(vertices);
+        // WebGLMorphtargets iterates the primary target's count. The
+        // Float32Array starts at zero, so a short primary target leaves
+        // the remaining texels zero. A secondary target shorter than the
+        // primary yields undefined Vector4 components, stored as NaN.
+        for j in 0..source_count.min(vertices) {
             let s = j * stride;
             if let Some(p) = m.position.as_ref().and_then(|p| p.get(i)) {
                 let at = offset + s * 4;
-                data[at] = p.data.get(j * 3).copied().unwrap_or(0.0);
-                data[at + 1] = p.data.get(j * 3 + 1).copied().unwrap_or(0.0);
-                data[at + 2] = p.data.get(j * 3 + 2).copied().unwrap_or(0.0);
+                let short = j >= m.source_counts[0].get(i).copied().unwrap_or(vertices);
+                data[at] = if short { f32::NAN } else { p.data[j * 3] };
+                data[at + 1] = if short { f32::NAN } else { p.data[j * 3 + 1] };
+                data[at + 2] = if short { f32::NAN } else { p.data[j * 3 + 2] };
                 data[at + 3] = 0.0;
             }
             if let Some(n) = m.normal.as_ref().and_then(|n| n.get(i)) {
                 let at = offset + s * 4 + 4;
-                data[at] = n.data.get(j * 3).copied().unwrap_or(0.0);
-                data[at + 1] = n.data.get(j * 3 + 1).copied().unwrap_or(0.0);
-                data[at + 2] = n.data.get(j * 3 + 2).copied().unwrap_or(0.0);
+                let short = j >= m.source_counts[1].get(i).copied().unwrap_or(vertices);
+                data[at] = if short { f32::NAN } else { n.data[j * 3] };
+                data[at + 1] = if short { f32::NAN } else { n.data[j * 3 + 1] };
+                data[at + 2] = if short { f32::NAN } else { n.data[j * 3 + 2] };
                 data[at + 3] = 0.0;
             }
             if let Some(c) = m.color.as_ref().and_then(|c| c.get(i)) {
                 let at = offset + s * 4 + 8;
                 let size = c.size;
-                data[at] = c.data.get(j * size).copied().unwrap_or(0.0);
-                data[at + 1] = c.data.get(j * size + 1).copied().unwrap_or(0.0);
-                data[at + 2] = c.data.get(j * size + 2).copied().unwrap_or(0.0);
+                let short = j >= m.source_counts[2].get(i).copied().unwrap_or(vertices);
+                data[at] = if short { f32::NAN } else { c.data[j * size] };
+                data[at + 1] = if short {
+                    f32::NAN
+                } else {
+                    c.data[j * size + 1]
+                };
+                data[at + 2] = if short {
+                    f32::NAN
+                } else {
+                    c.data[j * size + 2]
+                };
                 data[at + 3] = if size == 4 {
-                    c.data.get(j * size + 3).copied().unwrap_or(1.0)
+                    if short {
+                        f32::NAN
+                    } else {
+                        c.data[j * size + 3]
+                    }
                 } else {
                     1.0
                 };
@@ -305,48 +355,28 @@ fn morph_texture(
     }))
 }
 
-type GeometryCache = HashMap<(u64, usize), Geometry3d>;
-
-fn geometries() -> &'static Mutex<GeometryCache> {
-    static C: OnceLock<Mutex<GeometryCache>> = OnceLock::new();
-    C.get_or_init(Default::default)
-}
-
 /// The renderer's geometry for glTF geometry `index` of `asset`.
 pub fn geometry(asset: &GltfAsset, index: usize) -> Geometry3d {
-    if let Some(found) = geometries().lock().unwrap().get(&(asset.key, index)) {
+    let mut cache = asset.geometry_cache.lock().unwrap();
+    if let Some(found) = cache.get(&index) {
         return found.clone();
     }
     let gm = &asset.model.geometries[index];
     let n = gm.vertex_count();
-    let indices = match (&gm.index, gm.mode) {
+    let generated_indices = match (&gm.index, gm.mode) {
         // `LineLoop` draws as segments including the closing one.
         (ix, Mode::LineLoop) => {
-            let list: Vec<u32> = ix.clone().unwrap_or_else(|| (0..n as u32).collect());
-            let mut out = Vec::with_capacity(list.len() * 2);
-            for k in 0..list.len() {
-                out.push(list[k]);
-                out.push(list[(k + 1) % list.len()]);
+            let len = ix.as_ref().map_or(n, |ix| ix.len());
+            let at = |k: usize| ix.as_ref().map_or(k as u32, |ix| ix[k]);
+            let mut out = Vec::with_capacity(len * 2);
+            for k in 0..len {
+                out.push(at(k));
+                out.push(at((k + 1) % len));
             }
-            out
+            Some(Arc::new(out))
         }
-        (Some(ix), _) => ix.clone(),
-        (None, _) => (0..n as u32).collect(),
-    };
-    let geometry = pm_geom3d::Geometry {
-        positions: gm.position.data.clone(),
-        normals: gm
-            .normal
-            .as_ref()
-            .map(|a| a.data.clone())
-            .unwrap_or_default(),
-        uvs: gm.uv[0]
-            .as_ref()
-            .map(|a| a.data.clone())
-            .unwrap_or_default(),
-        indices,
-        indexed: gm.index.is_some(),
-        groups: Vec::new(),
+        (Some(_), _) => None,
+        (None, _) => Some(Arc::new((0..n as u32).collect())),
     };
     let (center, radius) = gm.bounding_sphere();
     let morph = morph_texture(asset.key, index, gm).map(|t| {
@@ -369,6 +399,8 @@ pub fn geometry(asset: &GltfAsset, index: usize) -> Geometry3d {
         mode: gm.mode,
         has_normal: gm.normal.is_some(),
         has_uv: gm.uv[0].is_some(),
+        short_attributes: gm.short_attributes.clone(),
+        fetched_vertices: fetched_vertex_count(gm),
         morph,
     };
     let g3 = Geometry3d {
@@ -377,15 +409,14 @@ pub fn geometry(asset: &GltfAsset, index: usize) -> Geometry3d {
             &asset.key.to_le_bytes(),
             &(index as u64).to_le_bytes(),
         ]),
-        geometry: Arc::new(geometry),
+        geometry: GeometryPayload::Gltf {
+            source: Arc::new(gm.clone()),
+            generated_indices,
+        },
         sphere: (center, radius),
         extra: Some(Arc::new(extra)),
     };
-    let mut c = geometries().lock().unwrap();
-    if c.len() >= 4096 {
-        c.clear();
-    }
-    c.insert((asset.key, index), g3.clone());
+    cache.insert(index, g3.clone());
     g3
 }
 
@@ -440,7 +471,7 @@ const SYNC_SLOTS: [&str; 6] = [
 
 /// A loaded material as three.js holds it (texture maps that did not
 /// load dropped; the program depends on which loaded).
-fn source_material(asset: &GltfAsset, m: &g::Material, order: u64) -> Material3d {
+pub(crate) fn source_material(asset: &GltfAsset, m: &g::Material, order: u64) -> Material3d {
     let maps = gltf_maps(asset, m);
     let mut src = m.clone();
     // A map whose texture did not load is `null`.
@@ -626,6 +657,11 @@ pub fn instantiate(
         match &o.kind {
             ObjectKind::Drawable(d) => {
                 let gm = &model.geometries[d.geometry];
+                // A bad index refuses every WebGL draw. Short attributes
+                // depend on the final material and are checked below.
+                if gm.undrawable.is_some() {
+                    continue;
+                }
                 let geometry = geometry(asset, d.geometry);
                 let order = base | n as u64;
                 let loaded = source_material(asset, &model.materials[d.material], order);
@@ -686,7 +722,7 @@ pub fn instantiate(
                 } else {
                     Some(geometry.sphere)
                 };
-                meshes.push(Mesh3d {
+                let mesh = Mesh3d {
                     geometry,
                     world: worlds[i],
                     materials,
@@ -701,7 +737,8 @@ pub fn instantiate(
                         skinned: d.skinned,
                         id: base | n as u64,
                     })),
-                });
+                };
+                meshes.push(mesh);
             }
             ObjectKind::Light(l) => {
                 let light = &model.lights[*l];
@@ -740,6 +777,19 @@ pub fn instantiate(
     Instance { meshes, lights }
 }
 
+/// Apply WebGL's active short-attribute rule to the resolved draw scene.
+/// The model and plan retain this mesh for queries, snapshots, and a map
+/// whose image fails only after planning. GPU preparation calls this after
+/// removing any late-failed scene maps from the final materials.
+pub(crate) fn short_attribute_blocks_draw(mesh: &Mesh3d, params: &Parameters) -> bool {
+    let Some(extra) = mesh.geometry.extra.as_deref() else {
+        return false;
+    };
+    extra.short_attributes.iter().any(|(name, count)| {
+        *count < extra.fetched_vertices && material::consumes_short_attribute(params, name)
+    })
+}
+
 /// The posed vertices of every triangle drawable of an instance, in world
 /// space (tests and Blender snapshots).
 pub fn posed_triangles(asset: &GltfAsset, world: &Mat4, time: f64) -> Vec<(String, Vec<[f64; 3]>)> {
@@ -768,4 +818,114 @@ pub fn posed_triangles(asset: &GltfAsset, world: &Mat4, time: f64) -> Vec<(Strin
         out.push((model.objects[i].name.clone(), list));
     }
     out
+}
+
+#[cfg(test)]
+mod short_morph_tests {
+    use super::*;
+    use pm_geom3d::model_import::glb::GlbWriter;
+    use serde_json::{Map, json};
+
+    fn attr(values: &[f32]) -> g::Attribute {
+        g::Attribute {
+            data: Arc::new(values.to_vec()),
+            size: 3,
+        }
+    }
+
+    fn geometry(normal_count: usize) -> g::Geometry {
+        g::Geometry {
+            position: attr(&[0., 0., 0., 1., 0., 0., 0., 1., 0.]),
+            normal: None,
+            tangent: None,
+            uv: [None, None, None, None],
+            color: None,
+            skin_index: None,
+            skin_weight: None,
+            skin_weight_bits: None,
+            index: None,
+            morph: g::Morph {
+                position: Some(vec![attr(&[1., 2., 3., 4., 5., 6.])]),
+                normal: Some(vec![attr(&[7., 8., 9., 10., 11., 12.])]),
+                color: None,
+                source_counts: [vec![2], vec![normal_count], vec![]],
+            },
+            bounding_box: None,
+            mode: Mode::Triangles,
+            undrawable: None,
+            short_attributes: vec![],
+        }
+    }
+
+    #[test]
+    fn short_primary_morph_leaves_tail_texel_zero() {
+        let packed = morph_texture(1, 0, &geometry(2)).unwrap();
+        assert_eq!(&packed.data[0..4], &[1., 2., 3., 0.]);
+        assert_eq!(&packed.data[4..8], &[7., 8., 9., 0.]);
+        assert_eq!(&packed.data[16..24], &[0.; 8]);
+    }
+
+    #[test]
+    fn shorter_secondary_morph_stores_nan_inside_primary_loop() {
+        let packed = morph_texture(1, 0, &geometry(1)).unwrap();
+        assert_eq!(&packed.data[8..12], &[4., 5., 6., 0.]);
+        assert!(packed.data[12..15].iter().all(|v| v.is_nan()));
+        assert_eq!(packed.data[15], 0.);
+    }
+
+    #[test]
+    fn indexed_draw_does_not_fetch_unused_short_attribute_tail() {
+        let mut geom = geometry(2);
+        geom.index = Some(Arc::new(vec![0, 1, 2]));
+        assert_eq!(fetched_vertex_count(&geom), 3);
+        geom.index = Some(Arc::new(vec![0, 1, 1]));
+        assert_eq!(fetched_vertex_count(&geom), 2);
+        geom.index = None;
+        assert_eq!(fetched_vertex_count(&geom), 3);
+    }
+
+    #[test]
+    fn generated_indices_live_with_asset_across_draw_rebuilds() {
+        let mut writer = GlbWriter::default();
+        let positions = writer.floats(&[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]], true);
+        let mut document = Map::new();
+        document.insert("asset".into(), json!({"version":"2.0"}));
+        document.insert(
+            "meshes".into(),
+            json!([{"primitives":[{"attributes":{"POSITION":positions}}]}]),
+        );
+        document.insert("nodes".into(), json!([{"mesh":0}]));
+        document.insert("scenes".into(), json!([{"nodes":[0]}]));
+        let asset = asset::from_bytes(&writer.finish(document)).unwrap();
+
+        let first = super::geometry(&asset, 0);
+        let GeometryPayload::Gltf {
+            generated_indices: Some(indices),
+            ..
+        } = &first.geometry
+        else {
+            panic!("unindexed glTF requires generated draw indices")
+        };
+        let index_handle = Arc::downgrade(indices);
+        let extra_handle = Arc::downgrade(first.extra.as_ref().unwrap());
+        drop(first);
+
+        let second = super::geometry(&asset, 0);
+        let GeometryPayload::Gltf {
+            generated_indices: Some(indices),
+            ..
+        } = &second.geometry
+        else {
+            panic!("unindexed glTF requires generated draw indices")
+        };
+        assert!(Arc::ptr_eq(indices, &index_handle.upgrade().unwrap()));
+        assert!(Arc::ptr_eq(
+            second.extra.as_ref().unwrap(),
+            &extra_handle.upgrade().unwrap()
+        ));
+        drop(second);
+        drop(asset);
+        assert!(index_handle.upgrade().is_none());
+        assert!(extra_handle.upgrade().is_none());
+    }
 }

@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { BlenderJobRequest, Event } from '../../shared/engine-protocol';
-import { blenderVersion, EngineBlender, pngSize, resolvedDevice, sweepScratch, WORKER_FLAGS, WORKER_SCRIPT, WORKER_SCRIPT_SHA256, workerEnvironment } from './blender';
+import { assetExtension, blenderVersion, EngineBlender, pngSize, resolvedDevice, sweepScratch, WORKER_FLAGS, WORKER_SCRIPT, WORKER_SCRIPT_SHA256, workerEnvironment } from './blender';
 import { HandleTable } from './handles';
 
 const here = path.dirname(new URL(import.meta.url).pathname);
@@ -75,6 +75,7 @@ async function job(ids: string[], name: string, extra: Partial<BlenderJobRequest
   return {
     job: name,
     priority: 'userJob',
+    foregroundCapture: false,
     snapshot: { hash, encoding: 'renderSnapshotJsonV1', handle: cache, bytes: bytes.length },
     workerScriptHash: WORKER_SCRIPT_SHA256,
     assets: [],
@@ -105,6 +106,43 @@ describe('the pinned worker', () => {
     expect(blenderVersion('Blender 5.0')).toBe('5.0.0');
     expect(resolvedDevice({ resolvedDevice: { kind: 'oneapi', name: 'Arc' } })).toEqual({ kind: 'oneApi', name: 'Arc' });
     expect(resolvedDevice({})).toBeNull();
+  });
+});
+
+describe('asset extensions', () => {
+  it('come from the file, or from its first bytes when the media store keeps none', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'pm-blender-ext-'));
+    try {
+      const write = async (name: string, bytes: number[] | string) => {
+        const file = path.join(dir, name);
+        await writeFile(file, typeof bytes === 'string' ? Buffer.from(bytes, 'utf8') : Buffer.from(bytes));
+        return file;
+      };
+      expect(await assetExtension(await write('a.PNG', [0]))).toBe('.png');
+      expect(await assetExtension(await write('png', [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]))).toBe('.png');
+      expect(await assetExtension(await write('jpeg', [0xff, 0xd8, 0xff, 0xe0]))).toBe('.jpg');
+      expect(await assetExtension(await write('webp', 'RIFF\0\0\0\0WEBPVP8 '))).toBe('.webp');
+      expect(await assetExtension(await write('glb', 'glTF\x02\0\0\0'))).toBe('.glb');
+      expect(await assetExtension(await write('blend', 'BLENDER-v405'))).toBe('.blend');
+      // Images other than PNG, JPEG and WebP reach the worker converted to PNG by the engine
+      // (today's canvas); an EXR or HDR file without its extension is not passed through.
+      expect(await assetExtension(await write('exr', [0x76, 0x2f, 0x31, 0x01, 2, 0, 0, 0]))).toBeNull();
+      expect(await assetExtension(await write('hdr', '#?RADIANCE\n'))).toBeNull();
+      expect(await assetExtension(await write('linked.exr', [0]))).toBe('.exr');
+      // Text models, named by the asset's name today (`chair.obj`, `scene.gltf`).
+      expect(await assetExtension(await write('obj', '# Blender export\n\nmtllib chair.mtl\no Chair\nv 0 0 0\n'))).toBe('.obj');
+      expect(await assetExtension(await write('obj-crlf', '\ufeff\r\n#c\r\nv 1 2 3\r\nf 1 1 1\r\n'))).toBe('.obj');
+      expect(await assetExtension(await write('obj-group', 'g part\nv 0 0 0\n'))).toBe('.obj');
+      expect(await assetExtension(await write('gltf', '{\n  "asset": { "version": "2.0" },\n  "scenes": []\n}'))).toBe('.gltf');
+      expect(await assetExtension(await write('gltf-bom', '\ufeff  {"scene":0,"asset":{"version":"2.0"}}'))).toBe('.gltf');
+      expect(await assetExtension(await write('json', '{"name":"not a model"}'))).toBeNull();
+      expect(await assetExtension(await write('text', 'hello world\n'))).toBeNull();
+      expect(await assetExtension(await write('binary', [0x00, 0x01, 0x76, 0x20]))).toBeNull();
+      expect(await assetExtension(await write('tiff', [0x4d, 0x4d, 0, 0x2a]))).toBeNull();
+      expect(await assetExtension(path.join(dir, 'absent'))).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -215,6 +253,55 @@ describe('Blender jobs from the engines', () => {
     expect(state(pid)).not.toMatch(/^T/);
     b.cancel('j8');
     await expect(slow).rejects.toMatchObject({ code: 'cancelled' });
+    await b.dispose();
+  });
+
+  it('lets only an explicit interactive cache capture finish during playback, then restores the pause', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const state = (pid: number) => execFileSync('/bin/ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+    const b = blender();
+    await b.render(await job(['warm'], 'warm'), session, port, () => {});
+    const { pid } = JSON.parse(await readFile(record, 'utf8'));
+    b.setPaused(true);
+    expect(state(pid)).toMatch(/^T/);
+    const automatic = b.render(await job(['a'], 'automatic', { priority: 'interactive' }), session, port, () => {});
+    const capture = b.render(await job(['b'], 'foreground', { priority: 'interactive', foregroundCapture: true }), session, port, () => {});
+    await Promise.all([automatic, capture]);
+    expect(state(pid)).toMatch(/^T/);
+    let completed = false;
+    const ordinary = b.render(await job(['c'], 'ordinary', { priority: 'interactive' }), session, port, () => {}).then(() => { completed = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(completed).toBe(false);
+    b.setPaused(false);
+    await ordinary;
+    expect(completed).toBe(true);
+    await b.dispose();
+  });
+
+  it('restores playback pause when the queued foreground capture is cancelled', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const state = (pid: number) => execFileSync('/bin/ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim();
+    const b = blender();
+    await b.render(await job(['warm'], 'warm'), session, port, () => {});
+    const { pid } = JSON.parse(await readFile(record, 'utf8'));
+    b.setPaused(true);
+    const automatic = b.render(await job(['slow'], 'slow-preview', { priority: 'interactive' }), session, port, () => {})
+      .then(() => null, (error: Error) => error);
+    const capture = b.render(await job(['b'], 'foreground', { priority: 'interactive', foregroundCapture: true }), session, port, () => {})
+      .then(() => null, (error: Error) => error);
+    expect(b.cancel('foreground')).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(state(pid)).toMatch(/^T/);
+    expect(b.cancel('slow-preview')).toBe(true);
+    expect(await automatic).toMatchObject({ code: 'cancelled' });
+    expect(await capture).toMatchObject({ code: 'cancelled' });
+    await b.dispose();
+  });
+
+  it('rejects a foreground capture from a non-interactive class', async () => {
+    const b = blender();
+    await expect(b.render(await job(['a'], 'invalid', { foregroundCapture: true }), session, port, () => {}))
+      .rejects.toMatchObject({ code: 'invalidMessage' });
     await b.dispose();
   });
 });

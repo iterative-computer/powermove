@@ -41,6 +41,9 @@ export type MediaStoreServiceOptions = {
   classify?: Omit<ClassifyOptions, 'userData'>;
   relink?: Partial<Omit<RelinkOptions, 'hash'>>;
   now?: () => number;
+  /** How long an interactive engine's read of an asset no window binds yet
+   *  waits for a binding (default 1000 ms; see `resolveAsset`). */
+  bindWaitMs?: number;
 };
 
 export const MAX_LINK_PATH = 4096;
@@ -62,6 +65,8 @@ export class MediaStoreService {
   private readonly reads = new Map<string, ReadSession>();
   /** Per window: the open project's media (asset id → where its bytes are). */
   private readonly bindings = new Map<number, { projectId: string; assets: Map<string, MediaBinding> }>();
+  /** Interactive reads waiting for an asset's first binding, by asset id. */
+  private readonly bindWaiters = new Map<string, Set<() => void>>();
 
   constructor(private readonly options: MediaStoreServiceOptions) {
     this.store = new MediaStore({ root: options.root, executor: options.executor, ...(options.now ? { now: options.now } : {}) });
@@ -318,6 +323,33 @@ export class MediaStoreService {
       if (clean.key || clean.hash || clean.link) map.set(id, clean);
     }
     this.bindings.set(owner, { projectId, assets: map });
+    for (const id of map.keys()) {
+      const waiters = this.bindWaiters.get(id);
+      if (!waiters) continue;
+      this.bindWaiters.delete(id);
+      for (const wake of waiters) wake();
+    }
+  }
+
+  private bound(asset: string): boolean {
+    for (const binding of this.bindings.values()) if (binding.assets.has(asset)) return true;
+    return false;
+  }
+
+  /** Resolves when a window binds `asset`, or after `ms`. */
+  private bindingOf(asset: string, ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      let waiters = this.bindWaiters.get(asset);
+      if (!waiters) { waiters = new Set(); this.bindWaiters.set(asset, waiters); }
+      const wake = () => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        const current = this.bindWaiters.get(asset);
+        current?.delete(wake);
+        if (current && !current.size) this.bindWaiters.delete(asset);
+        resolve();
+      }, ms);
+      waiters.add(wake);
+    });
   }
 
   /** A window went away: its reads, uploads, and bindings go with it. */
@@ -344,6 +376,14 @@ export class MediaStoreService {
       const type = job.types.get(asset) ?? '';
       return { ...resolved, ...(type ? { type } : {}) };
     }
+    // A new asset reaches the viewer's engine with the document, and its
+    // window binds it right after (imports await `flushBindings`). Answering
+    // offline in that gap would draw the asset missing until a retry (a 3D
+    // model as the orange box) where today's app draws it at once, so the
+    // viewer's read waits for the binding; the engine shows nothing missing
+    // while a read is outstanding. A truly unbound asset is offline after
+    // the wait.
+    if (context?.process === 'interactive' && !this.bound(asset)) await this.bindingOf(asset, this.options.bindWaitMs ?? 1000);
     return this.resolveBindings([...this.bindings.values()].map((b) => b.assets.get(asset)));
   }
 

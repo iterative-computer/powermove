@@ -15,6 +15,7 @@ import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, missedRoute } from './ins
 import { DEFINITIONS_RETRIES, DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
 import { EngineTransport, mediaTicksAt, ticks, TICKS_PER_SECOND } from './transport';
 import { followOpenComposition } from './composition-follow';
+import { EnginePreview, documentWake } from './preview';
 import { createEngineDefinitions } from '../kernel/engine-definitions';
 import { createKernel } from '../kernel/registries';
 
@@ -51,7 +52,7 @@ class FakePort implements PortLike {
 }
 
 /** An engine that welcomes, opens session 5, and acknowledges resyncs. */
-function engine(options: { refuseResync?: boolean } = {}): FakePort {
+function engine(options: { refuseResync?: boolean | (() => boolean) } = {}): FakePort {
   return new FakePort((message, port) => {
     const m = message.message;
     if (m.kind === 'hello') {
@@ -64,7 +65,7 @@ function engine(options: { refuseResync?: boolean } = {}): FakePort {
       else if (body.type === 'resync') {
         queueMicrotask(() =>
           port.deliver(
-            options.refuseResync
+            (typeof options.refuseResync === 'function' ? options.refuseResync() : options.refuseResync)
               ? envelope({ kind: 'error', id: m.id, error: { code: 'invalidMessage', scope: { kind: 'request', id: m.id }, message: 'no', retry: { kind: 'never' }, detail: null } } as never)
               : envelope({ kind: 'response', id: m.id, body: { type: 'patchesApplied', document: body.document, revision: body.revision } } as never, 5, body.revision)
           )
@@ -187,6 +188,60 @@ describe('the engine connection', () => {
     expect(routes).toEqual(['engine', 'legacy', 'engine', 'legacy', 'engine']);
     expect(messages).toEqual(['frame', 'routed', 'frame', 'routed', 'frame']);
     expect(session.lastFrame?.seq).toBe(4);
+  });
+
+  it('keeps the session open for a later resync when the initial resync is refused', async () => {
+    const { connection, port } = await connected(engine({ refuseResync: true }));
+    const logs: string[] = [];
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: (_level, text) => logs.push(text), handlers: { message: () => {}, closed: () => {} } });
+    session.sendHeadless('comp');
+    await expect(session.start()).resolves.toBeUndefined();
+    expect(session.resyncs).toBe(0);
+    expect(session.documentAccepted).toBe(false);
+    expect(session.closed).toBe(false);
+    expect(port.requests('resync')).toHaveLength(1);
+    expect(logs.some(text => text.includes('engine resync (open) failed'))).toBe(true);
+    session.close(); connection.close('test complete');
+  });
+
+  it('tracks acceptance of the current document across refused loads and recovery', async () => {
+    let refuse = true;
+    const { connection, port } = await connected(engine({ refuseResync: () => refuse }));
+    const doc = stream();
+    const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    expect(session.documentAccepted).toBe(false);
+    expect(session.resyncs).toBe(0);
+
+    refuse = false;
+    await session.resync('retry');
+    expect(session.documentAccepted).toBe(true);
+    expect(session.resyncs).toBe(1);
+
+    refuse = true;
+    doc.emit({ revision: 4, origin: 'load' });
+    await flush();
+    expect(port.requests('resync')).toHaveLength(3);
+    expect(session.resyncs).toBe(1);
+    expect(session.documentAccepted).toBe(false);
+    const preview = new EnginePreview(
+      () => session, () => 'P', () => 0, () => 4,
+      undefined, documentWake(async () => {}, () => session),
+    );
+    await expect(preview.render({ cacheOnly: true, size: { width: 32, height: 32 } }))
+      .rejects.toMatchObject({ name: 'EnginePreviewUnavailable' });
+    expect(port.events('previewControl')).toHaveLength(0);
+
+    refuse = false;
+    await session.resync('retry load');
+    expect(session.resyncs).toBe(2);
+    expect(session.documentAccepted).toBe(true);
+    const rendered = preview.render({ cacheOnly: true, size: { width: 32, height: 32 } });
+    await flush();
+    expect(port.events('previewControl')).toHaveLength(1);
+    preview.receiveStatus(session, { generation: 1, automatic: false, revision: 4, composition: 'P', time: 0, phase: 'ready', frameSeq: null, error: null, cacheOnly: true });
+    await rendered;
+    session.close(); connection.close('test complete');
   });
 
   it('streams the kernel\'s definitions to the session before its document, and their failures back', async () => {

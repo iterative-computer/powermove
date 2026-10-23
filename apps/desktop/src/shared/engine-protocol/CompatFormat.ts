@@ -3,4 +3,4 @@
 /**
  * How compatibility pixels are encoded: rows top-down.
  */
-export type CompatFormat = "rgba8Premultiplied" | "rgba8Straight" | "rgba16fPremultiplied";
+export type CompatFormat = "rgba8Premultiplied" | "rgba8Straight" | "rgba16fPremultiplied" | "png";

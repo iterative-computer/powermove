@@ -34,6 +34,8 @@ pub struct Bounds {
     /// The anchor origin inside the raster box.
     pub ax: f64,
     pub ay: f64,
+    /// A model group's depth extent (`modelGroupBounds`' `z0` and `z1`).
+    pub z: Option<(f64, f64)>,
 }
 
 impl Bounds {
@@ -56,6 +58,7 @@ impl Bounds {
             h: y1 - y0,
             ax,
             ay,
+            z: None,
         }
     }
 }
@@ -64,50 +67,20 @@ impl Bounds {
 /// Phase 1.
 pub const HOST_ONLY: &str = "HostOnly";
 
-/// What the engine cannot answer natively in Phase 1 (three.js), plus
-/// registry facts. Every method's default throws
-/// a [`HOST_ONLY`] error, so an unanswered question is never silently wrong.
+/// What the host supplies for layer questions: registry facts, and the 3D
+/// geometry (model assets, the editor camera) that 3D picks and bounds
+/// need ([`crate::query3d`]). Without geometry, every 3D question throws a
+/// [`HOST_ONLY`] error, so an unanswered question is never silently wrong.
 pub trait LayerHost {
-    /// `compositionRuntime(...).bounds(...)` for a 3D object layer.
-    fn object_bounds(&mut self, layer: &Node, time: f64) -> JsResult<Option<Bounds>> {
-        let _ = (layer, time);
-        Err(host_only("3D object bounds"))
-    }
-    /// `modelGroupBounds` (with `z0`, `z1` dropped).
-    fn model_group_bounds(&mut self, group: &Node, time: f64) -> JsResult<Option<Bounds>> {
-        let _ = (group, time);
-        Err(host_only("model group bounds"))
+    /// The 3D geometry service, or `None` when this host has none.
+    fn geometry(&mut self) -> Option<&mut dyn crate::query3d::Geometry3d> {
+        None
     }
     /// `PM.layerDefinition(definition)?.renderer`: the asset field of a mesh
     /// renderer definition, `None` for other definitions. The default knows
     /// the built-in OBJ model layer.
     fn mesh_asset_field(&self, definition: &JsString) -> Option<String> {
         (definition.as_str() == Some("powermove.3d.obj-model")).then(|| "assetId".to_owned())
-    }
-    /// `sceneRuntime(...).bounds(...)` for an extension layer whose scene has
-    /// no background.
-    fn scene_bounds(&mut self, layer: &Node, time: f64) -> JsResult<Option<Bounds>> {
-        let _ = (layer, time);
-        Err(host_only("extension scene bounds"))
-    }
-    /// `runtime.pick(ndcX, ndcY, depthIds, camera) === layer.id` for a 3D
-    /// object layer.
-    fn pick_object(&mut self, layer: &Node, x: f64, y: f64, time: f64) -> JsResult<bool> {
-        let _ = (layer, x, y, time);
-        Err(host_only("3D object pick"))
-    }
-    /// For an extension scene without a background: `runtime.pick` at a
-    /// layer-space point.
-    fn pick_extension_scene(&mut self, layer: &Node, x: f64, y: f64, time: f64) -> JsResult<bool> {
-        let _ = (layer, x, y, time);
-        Err(host_only("extension scene pick"))
-    }
-}
-
-fn host_only(what: &str) -> JsThrow {
-    JsThrow {
-        kind: HOST_ONLY,
-        message: format!("{what} come from the host's 3D runtime in Phase 1"),
     }
 }
 
@@ -388,7 +361,7 @@ impl<'d> Scope<'_, 'd> {
         host: &mut dyn LayerHost,
     ) -> JsResult<Option<Bounds>> {
         match Role3d::of(layer) {
-            Some(Role3d::Object) => return host.object_bounds(layer, time),
+            Some(Role3d::Object) => return self.object_bounds3d(layer, time, host),
             Some(_) => return Ok(None),
             None => {}
         }
@@ -396,7 +369,7 @@ impl<'d> Scope<'_, 'd> {
             return self.group_bounds(layer, time, measure, host);
         }
         if is_type(layer, "extension") && self.backgroundless_scene(layer, time, host)? {
-            return host.scene_bounds(layer, time);
+            return self.scene_bounds3d(layer, time, host);
         }
         let ty = node::to_js_string(node::member(Some(layer), "type"));
         let ty = ty.as_str().unwrap_or("");
@@ -416,6 +389,7 @@ impl<'d> Scope<'_, 'd> {
                 h: s.h,
                 ax: r.anchor_x,
                 ay: r.anchor_y,
+                z: None,
             }));
         }
         if !matches!(
@@ -436,6 +410,7 @@ impl<'d> Scope<'_, 'd> {
                 h: b.h,
                 ax: -b.x0,
                 ay: -b.y0,
+                z: None,
             }));
         }
         let d = self.ev.resolve_content(self.comp, layer, time)?;
@@ -464,6 +439,7 @@ impl<'d> Scope<'_, 'd> {
                     h: s.h,
                     ax: g.w / 2.0,
                     ay: g.h / 2.0,
+                    z: None,
                 }));
             }
             "null" => {
@@ -495,6 +471,7 @@ impl<'d> Scope<'_, 'd> {
             h,
             ax,
             ay,
+            z: None,
         }))
     }
 
@@ -508,7 +485,7 @@ impl<'d> Scope<'_, 'd> {
         host: &mut dyn LayerHost,
     ) -> JsResult<Option<Bounds>> {
         if self.is_model_group(group)? {
-            return host.model_group_bounds(group, time);
+            return self.model_group_bounds3d(group, time, host);
         }
         let m = self.world_matrix(group, time)?;
         let Some(inv) = invert(&m) else {
@@ -617,7 +594,13 @@ impl<'d> Scope<'_, 'd> {
             }
             match Role3d::of(layer) {
                 Some(Role3d::Object) => {
-                    if host.pick_object(layer, x / w * 2.0 - 1.0, 1.0 - y / h * 2.0, time)? {
+                    if self.pick_object3d(
+                        layer,
+                        x / w * 2.0 - 1.0,
+                        1.0 - y / h * 2.0,
+                        time,
+                        host,
+                    )? {
                         return Ok(Some(layer));
                     }
                     continue;
@@ -637,7 +620,7 @@ impl<'d> Scope<'_, 'd> {
                         continue;
                     };
                     let (px, py) = project_point(&inverse, x, y);
-                    if !host.pick_extension_scene(layer, px, py, time)? {
+                    if !self.pick_scene3d(layer, px, py, time, host)? {
                         continue;
                     }
                 }

@@ -6,13 +6,14 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+mod chrome;
 mod layer_raster;
 pub use layer_raster::{LayerPixels, LayerRaster};
 
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};
 use pm_model::Document;
-use pm_protocol::color::Precision;
+use pm_protocol::color::{Precision, WorkingEncoding};
 use pm_protocol::common::Ticks;
 
 use crate::assets::AssetResolver;
@@ -78,6 +79,8 @@ fn host_progress(
 
 /// A rendered frame.
 pub struct Frame {
+    /// Scene diagnostics of these pixels, grouped by composition and layer.
+    pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
     /// Premultiplied working values (Standard: E-encoded, Rec.709
     /// primaries), the request's precision, the region's size.
     pub color: Target,
@@ -117,6 +120,7 @@ pub struct PassThrough {
 
 /// What a render into a caller's target reports.
 pub struct Rendered {
+    pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
     pub legend: Vec<String>,
     pub failures: Vec<LayerFailure>,
     pub seconds: f64,
@@ -137,6 +141,14 @@ pub struct Rendered {
     /// the frame again when they arrive. Frames that may not substitute
     /// fail with [`RenderError::SvgRastersPending`] instead.
     pub svg_misses: Vec<crate::vector::svg_rasters::SvgRasterNeed>,
+}
+
+/// Row order in a snapshot target. `Gl` rows are inverted while the mapped
+/// readback is encoded; other callers always receive top-down targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotRows {
+    TopDown,
+    Gl,
 }
 
 /// One drawn quad of a top-level layer ([`Rendered::quads`]).
@@ -1060,6 +1072,36 @@ impl Renderer {
         self.pool.bytes() + self.pyramids.bytes()
     }
 
+    /// Nominal texel bytes retained by reusable intermediate targets.
+    pub fn target_pool_bytes(&self) -> u64 {
+        self.pool.bytes()
+    }
+
+    /// Reusable targets currently idle in the pool.
+    pub fn target_pool_idle(&self) -> usize {
+        self.pool.idle()
+    }
+
+    /// Targets allocated since this renderer was created.
+    pub fn target_pool_created(&self) -> u64 {
+        self.pool.created()
+    }
+
+    /// Nominal texel bytes retained by image mip pyramids.
+    pub fn pyramid_bytes(&self) -> u64 {
+        self.pyramids.bytes()
+    }
+
+    /// Nominal texel bytes of still and converted-video textures.
+    pub fn media_texture_bytes(&self) -> u64 {
+        self.media.bytes
+    }
+
+    /// Nominal texel bytes of cached text rasters.
+    pub fn text_cache_bytes(&self) -> u64 {
+        self.text_gpu.cached_bytes()
+    }
+
     /// Keeps translated 3D programs (amendment 11's disk program cache) and
     /// translated GLSL (`dir/glsl`, plan section 11) in `dir` across
     /// processes; the engine host passes its shader cache folder.
@@ -1186,6 +1228,16 @@ impl Renderer {
                 .contains(wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE)
     }
 
+    /// The output format a fresh [`Self::render`] frame would use. Callers
+    /// rendering into their own target must make the same precision choice.
+    pub fn target_format(document: &Document, request: &RenderRequest) -> wgpu::TextureFormat {
+        let precision = match document.root().map(project_settings) {
+            Some(Ok(c)) => effective_precision(request.precision, c.precision),
+            _ => request.precision,
+        };
+        working_format(precision)
+    }
+
     /// Renders `composition` at `time` into a new texture.
     pub fn render(
         &mut self,
@@ -1196,16 +1248,12 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let precision = match document.root().map(project_settings) {
-            Some(Ok(c)) => effective_precision(request.precision, c.precision),
-            _ => request.precision,
-        };
         let target = Target::new(
             &self.device,
             "pm frame",
             size.width,
             size.height,
-            working_format(precision),
+            Self::target_format(document, request),
             pm_gpu::target::working_usage(),
         );
         let depth_id = request.depth_id.then(|| {
@@ -1230,6 +1278,7 @@ impl Renderer {
             depth_id.as_ref(),
         )?;
         Ok(Frame {
+            scene3d_meta: r.scene3d_meta,
             color: target,
             depth_id,
             legend: r.legend,
@@ -1260,6 +1309,115 @@ impl Renderer {
         target: &Target,
         depth_id: Option<&Target>,
     ) -> Result<Rendered, RenderError> {
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            depth_id,
+            SnapshotRows::TopDown,
+            None,
+        )
+    }
+
+    /// Renders a fresh presenter snapshot. In Standard working encoding, the
+    /// target keeps GL row order so its mapped readback can reverse rows
+    /// without recording a second render pass. Linear encoding still uses
+    /// its GPU color-conversion and flip pass.
+    pub fn render_snapshot_into(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_snapshot_into_with_copy(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+        )
+    }
+
+    /// Snapshot variant that queues the fresh target's staging copy in the
+    /// same GPU submission as its render passes. Mapping begins afterward.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_snapshot_into_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: &pm_gpu::readback::ReadbackCopy,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_snapshot_into_with_copy(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            Some(copy),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_snapshot_into_with_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        let rows = if self.bracket.is_none()
+            && document
+                .root()
+                .and_then(|root| project_settings(root).ok())
+                .is_some_and(|color| color.working == WorkingEncoding::Standard)
+        {
+            SnapshotRows::Gl
+        } else {
+            SnapshotRows::TopDown
+        };
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+            rows,
+            copy,
+        )
+        .map(|rendered| (rendered, rows))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_into_rows(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        depth_id: Option<&Target>,
+        rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
+    ) -> Result<Rendered, RenderError> {
         if self.fallback_host.is_none() {
             return self.render_into_svg(
                 document,
@@ -1269,6 +1427,8 @@ impl Renderer {
                 assets,
                 target,
                 depth_id,
+                rows,
+                copy,
             );
         }
         self.effects.fallback.retries.clear();
@@ -1284,6 +1444,8 @@ impl Renderer {
                 assets,
                 target,
                 depth_id,
+                rows,
+                copy,
             );
             let Some(host) = self.fallback_host.clone() else {
                 break result;
@@ -1316,6 +1478,8 @@ impl Renderer {
         assets: &dyn AssetResolver,
         target: &Target,
         depth_id: Option<&Target>,
+        rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         for _ in 0..3 {
             match self.render_into_once(
@@ -1326,6 +1490,8 @@ impl Renderer {
                 assets,
                 target,
                 depth_id,
+                rows,
+                copy,
             ) {
                 Err(RenderError::SvgRastersPending(needs)) if self.svg_source.is_some() => {
                     let source = self.svg_source.clone().expect("checked");
@@ -1357,6 +1523,8 @@ impl Renderer {
             assets,
             target,
             depth_id,
+            rows,
+            copy,
         )
     }
 
@@ -1370,12 +1538,15 @@ impl Renderer {
         assets: &dyn AssetResolver,
         target: &Target,
         depth_id: Option<&Target>,
+        rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         request.validate()?;
         let root = document
             .root()
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
+        debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
         let precision = effective_precision(request.precision, color.precision);
         if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
@@ -1514,15 +1685,18 @@ impl Renderer {
                 failures: Vec::new(),
                 unsupported: Vec::new(),
             };
-            // Frames are drawn in GL row order and flipped once into the
-            // caller's top-down target (see shaders/composite.wgsl).
-            let gl_rows = exec.pool.take(
-                exec.device,
-                size.width,
-                size.height,
-                target.format(),
-                pm_gpu::target::working_usage(),
-            );
+            // Generic renders flip GL rows into the caller's top-down target.
+            // Standard snapshots draw directly into their readback target.
+            let pooled_gl_rows = (rows == SnapshotRows::TopDown).then(|| {
+                exec.pool.take(
+                    exec.device,
+                    size.width,
+                    size.height,
+                    target.format(),
+                    pm_gpu::target::working_usage(),
+                )
+            });
+            let gl_rows = pooled_gl_rows.as_ref().unwrap_or(target);
             // The viewer's frames draw from the kept bottom of the last one
             // when they start with the same draws (`crate::frame_prefix`).
             let (resolved, kept_legend) = if prefix {
@@ -1543,13 +1717,13 @@ impl Renderer {
                     &mut encoder,
                     &plan,
                     region,
-                    &gl_rows,
+                    gl_rows,
                     &mut self.prefix,
                     key,
                 )
             } else {
                 (
-                    exec.render_comp(&mut encoder, &plan, region, &gl_rows),
+                    exec.render_comp(&mut encoder, &plan, region, gl_rows),
                     Vec::new(),
                 )
             };
@@ -1566,10 +1740,12 @@ impl Renderer {
                 && exec.effects.fallback.fatal.is_none()
                 && !held
                 && !svg_waits;
-            if complete {
-                exec.flip_color(&mut encoder, &gl_rows, target);
+            if complete && rows == SnapshotRows::TopDown {
+                exec.flip_color(&mut encoder, gl_rows, target);
             }
-            exec.taken.push(gl_rows);
+            if let Some(gl_rows) = pooled_gl_rows {
+                exec.taken.push(gl_rows);
+            }
             if let Some(ids) = depth_id.filter(|_| complete) {
                 let id_rows = exec.pool.take(
                     exec.device,
@@ -1611,11 +1787,15 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.end(&mut encoder, &target.view);
         }
+        if let Some(copy) = copy {
+            copy.record(&mut encoder, &target.texture);
+        }
         self.queue.submit([encoder.finish()]);
         self.effects.watchdog.submitted(&self.queue);
         for t in taken {
             self.pool.give(t);
         }
+        let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
             if unsupported.is_empty() && pending.is_empty() {
                 self.prefix.remember(std::mem::take(&mut plan.draws));
@@ -1626,6 +1806,7 @@ impl Renderer {
         self.media.flush();
         self.media.scrub = scrub;
         failures.extend(exec_failures);
+        crate::scene3d::metadata::failures(document, &failures, &mut scene3d_meta);
         if !unsupported.is_empty() {
             self.vector.svg.take_misses();
             return Err(RenderError::Unsupported(unsupported));
@@ -1654,7 +1835,11 @@ impl Renderer {
             ));
         }
         let svg_misses = self.vector.svg.take_misses();
-        if (request.export || self.svg_wait)
+        if (request.export
+            || self.svg_wait
+            || svg_misses
+                .iter()
+                .any(|need| need.request.key.texture == Some(true)))
             && svg_misses
                 .iter()
                 .any(|m| !(svg_skip_failed && self.vector.svg.is_failed(&m.request.key)))
@@ -1662,6 +1847,7 @@ impl Renderer {
             return Err(RenderError::SvgRastersPending(svg_misses));
         }
         Ok(Rendered {
+            scene3d_meta,
             quads,
             legend,
             failures,

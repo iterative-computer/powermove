@@ -120,3 +120,13 @@ trait methods; if it needs a method, that is a bump.
 - Electron's `importSharedTexture` keeps no reference to the
   `IOSurfaceRef` in main (retain count 1 with an import alive); the GPU
   process holds its own.
+
+### Paired viewport chrome planes (3D round 5)
+
+The maximum transported pool is 64 surfaces, allowing depth and coverage for
+all 32 color presentation slots in one generation. Color presentation's
+ring/jitter sizing remains clamped to 32. The Mach bridge and preload bounds
+accept 64 surfaces and indices 0–63. These limits do not allocate memory by
+themselves: the presenter charges actual paired RGBA16F pool bytes to the
+lease and retires the pair with its color ownership. See RFC 02's
+`chromePlanesV1` encoding and frame-alignment rules.

@@ -25,6 +25,17 @@ impl Drop for Decode {
 }
 
 pub(super) fn read(path: &Path, orientation: u8, pool: &FramePool) -> Result<StillImage> {
+    read_source(path, orientation, pool, false)
+}
+
+/// Samples of the PNG rendition itself, before Blink reduces it to its
+/// 8-bit bitmap. Blender receives this PNG directly in today's app.
+pub(super) fn read_source(
+    path: &Path,
+    orientation: u8,
+    pool: &FramePool,
+    full_depth: bool,
+) -> Result<StillImage> {
     crate::ff::init();
     let bytes = std::fs::read(path)?;
     let size = i32::try_from(bytes.len()).map_err(|_| MediaError::invalid("TIFF packet size"))?;
@@ -111,12 +122,44 @@ pub(super) fn read(path: &Path, orientation: u8, pool: &FramePool) -> Result<Sti
             ),
             "TIFF RGB",
         )?;
-        let rgba: Vec<u8> = if wide {
-            stored.chunks_exact(2).map(|c| c[0]).collect()
+        let (frame, depth) = if wide && full_depth {
+            let samples: Vec<u16> = stored
+                .chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+            let (rgba, w, h) = orient(&samples, w as usize, h as usize, 4, orientation);
+            (
+                pool_rgba(
+                    pool,
+                    w,
+                    h,
+                    Rgba::U16(&rgba),
+                    false,
+                    16,
+                    "FFmpeg TIFF PNG samples".into(),
+                )?,
+                16,
+            )
         } else {
-            stored
+            let rgba: Vec<u8> = if wide {
+                stored.chunks_exact(2).map(|c| c[0]).collect()
+            } else {
+                stored
+            };
+            let (rgba, w, h) = orient(&rgba, w as usize, h as usize, 4, orientation);
+            (
+                pool_rgba(
+                    pool,
+                    w,
+                    h,
+                    Rgba::U8(&rgba),
+                    false,
+                    8,
+                    "FFmpeg TIFF PNG samples".into(),
+                )?,
+                8,
+            )
         };
-        let (rgba, w, h) = orient(&rgba, w as usize, h as usize, 4, orientation);
         let side = f::av_frame_get_side_data(d.frame, f::AV_FRAME_DATA_ICC_PROFILE);
         let profile = if side.is_null() {
             None
@@ -126,17 +169,9 @@ pub(super) fn read(path: &Path, orientation: u8, pool: &FramePool) -> Result<Sti
             matches!(bytes.get(16..20), Some(b"RGB " | b"GRAY")).then(|| bytes.to_vec())
         };
         Ok(StillImage {
-            frame: pool_rgba(
-                pool,
-                w,
-                h,
-                Rgba::U8(&rgba),
-                false,
-                8,
-                "FFmpeg TIFF PNG samples".into(),
-            )?,
+            frame,
             backend: ImageBackend::Ffmpeg,
-            bit_depth: 8,
+            bit_depth: depth,
             float: false,
             color: ImageColor {
                 icc_class: profile.as_deref().map(icc::classify),
