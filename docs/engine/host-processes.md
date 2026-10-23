@@ -695,6 +695,19 @@ what the previous code did. Two tests prove it:
   was quarantined. The first checkpoint is durable about 2 s into the open.
   The previous code made its first slot write durable only after its 75 s
   bridge copy.
+  One review run failed (kill 3, 2067 ms, setting off). The two 57 MB
+  documents differed in exactly one value, a keyframe id. The fixture built
+  252,000 keyframes with PM.uid ids (`k` plus 7 random base-36 characters),
+  which collide about one run in three, and every open gives the second of a
+  duplicate pair a fresh random id (app.ts, sanitizeProp). The clean open
+  and the killed open each stored, and recovered, their own renaming. A
+  fixture with one forced duplicate reproduced it on every recovering kill,
+  settled opens included. The fixture now has fixed, unique ids, and a
+  mismatch prints the paths that differ. At 13ff12c23, 11 seeds
+  (`POWERMOVE_CRASH_SEED` 1 to 11) gave 165 kills: 110 with the setting off
+  and 55 with it on, from 40 ms to 5.9 s into the open plus 22 after it
+  settled. 86 recovered the document (62 off, 24 on), 79 recovered nothing,
+  and none recovered another document or quarantined a file.
 
 Preparation (engine on) also lost two of its three whole-document passes:
 
