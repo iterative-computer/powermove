@@ -53,8 +53,9 @@ it.each([
   }
   const original = validator.validateStagedExtensions;
   vi.spyOn(validator, 'validateStagedExtensions').mockImplementationOnce(async (snapshot, changes) => {
-    await original(snapshot, changes);
+    const warnings = await original(snapshot, changes);
     if (phase === 'validation') { ready(); await pause; }
+    return warnings;
   });
   const publication = external.call('publish_extensions', { extensions: [{ id, action: 'updated', summary: 'Update text' }] });
   const outcome = publication.then(value => ({ value }), error => ({ error }));

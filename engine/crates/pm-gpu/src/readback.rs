@@ -541,13 +541,19 @@ impl Readback {
                 depth_or_array_layers: 1,
             },
         );
-        queue.submit([encoder.finish()]);
+        let submission = queue.submit([encoder.finish()]);
         let slice = buffer.slice(..size);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        // Wait for this copy's own submission (and what the queue ran before
+        // it), not for work other threads submitted after it: a reader off the
+        // presentation thread does not wait for the frames it renders meanwhile.
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        });
         rx.recv()
             .map_err(|e| ReadbackError::Map(e.to_string()))?
             .map_err(|e| ReadbackError::Map(e.to_string()))?;

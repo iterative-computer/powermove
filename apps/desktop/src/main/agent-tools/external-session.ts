@@ -11,6 +11,7 @@ import { prepareAgentWorkspace, discardPartialRun, discardExtensionStage, remove
 import { withStageSnapshot, publishExtensionChanges } from '../codex/change-history';
 import { validateStagedExtensions } from '../codex/validate-staged-extensions';
 import { isRendererUnavailable, watchRendererDocument } from '../renderer-recovery';
+import { DEPRECATION_GUIDANCE } from '../../shared/extension-analysis';
 
 const start = z.object({ prompt: z.string().min(1).max(200000), access: z.enum(['project', 'editor']).default('project'), context: z.enum(['project', 'app']).default('project') }).strict();
 const changes = z.object({ extensions: z.array(z.object({ id: z.string(), action: z.enum(['created', 'updated', 'removed']), summary: z.string().max(4000) }).strict()).max(100) }).strict();
@@ -90,13 +91,16 @@ export class ExternalAgentSession {
         if (this.disconnected) throw new Error('This MCP connection is closed.');
         if (!isCurrent()) throw new Error('The MCP session ended before publishing extensions. Start a new session.');
       };
+      let deprecations: Awaited<ReturnType<typeof validateStagedExtensions>> = [];
       const changeSet = await withStageSnapshot(workspace, async snapshot => {
         checkCurrent();
-        await validateStagedExtensions(snapshot, input.extensions);
+        deprecations = await validateStagedExtensions(snapshot, input.extensions);
         checkCurrent();
         return publishExtensionChanges(snapshot, input.extensions, checkCurrent);
       }, input.extensions.map(change => change.id));
-      const result = (stagingDirectory: string | null) => ({ changeSetId: changeSet?.id ?? null, extensions: input.extensions, stagingDirectory });
+      // Deprecated compatibility APIs in what was published (amendment 23; extension-analysis.ts).
+      const result = (stagingDirectory: string | null) => ({ changeSetId: changeSet?.id ?? null, extensions: input.extensions, stagingDirectory,
+        ...(deprecations.length ? { deprecations, guidance: DEPRECATION_GUIDANCE } : {}) });
       await this.options.refreshExtensions?.(input.extensions.map(change => change.id));
       // Publication has completed. Keep that outcome when its session ends,
       // and avoid preparing a new workspace for the disconnected client.

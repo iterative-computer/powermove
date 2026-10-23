@@ -147,6 +147,16 @@ fn blender_compositions_are_captured_as_today() {
 }
 
 #[test]
+fn raster_override_layers_wait_for_the_producer_s_answer() {
+    run_child("child_compat");
+}
+
+#[test]
+fn sync_snapshots_return_raster_needs_already_asked_by_the_viewer() {
+    run_child("child_compat_viewer_pending");
+}
+
+#[test]
 fn the_host_snapshots_sessions_it_opened_for_a_window() {
     run_child("child_host_session");
 }
@@ -436,6 +446,7 @@ fn frame_request(
         blender_wait_ms: 0,
         captions_hidden: false,
         uploaded: Vec::new(),
+        compat_uploaded: Vec::new(),
     }
 }
 
@@ -664,6 +675,62 @@ fn child_snapshots() {
     let px = pixels_of(&shape);
     assert_eq!(at(&px, 48, 24, 14), BOX, "the box's color inside");
     assert_eq!(at(&px, 48, 1, 1)[3], 0, "the pad is transparent");
+    // Any scale, as today's `PM.raster`: the density is
+    // `min(scale, 8192 / w, 8192 / h)` of the 48 × 28 raster box, so scale 40
+    // is 1920 × 1120, scales past 8192 / 48 stop at the 8192-pixel edge, and
+    // a tiny scale is one pixel (with the box's coverage in it; none at a
+    // vanishing scale). Geometry is unchanged.
+    for (id, scale) in [
+        (40u64, 40.0),
+        (41, 50.0),
+        (42, 1_000.0),
+        (43, f64::MAX),
+        (44, 0.005),
+        (45, 1e-9),
+    ] {
+        let mut request = raster_request(None, None);
+        request.target = SnapshotTarget::Layer {
+            layer: "box".into(),
+            scale,
+            crop: None,
+            content: None,
+        };
+        request.output_size = Size::new(8192, 8192);
+        c.snapshot(id, request, None, WINDOW, session);
+        let at_scale = rendered(c.inbox.wait(Duration::from_secs(30), answer(id)));
+        let density = scale.min(8192.0 / 48.0).min(8192.0 / 28.0);
+        let canvas = (
+            ((48.0 * density).ceil().max(1.0)) as u32,
+            ((28.0 * density).ceil().max(1.0)) as u32,
+        );
+        assert_eq!(
+            (at_scale.width, at_scale.height),
+            canvas,
+            "scale {scale}: today's canvas"
+        );
+        assert_eq!(at_scale.origin, [4.0, 4.0], "scale {scale}");
+        assert_eq!(at_scale.layer_box, Some([48.0, 28.0]), "scale {scale}");
+        let g = at_scale.raster.clone().expect("raster geometry");
+        assert_eq!(
+            g.selection,
+            Some([-20.0, -10.0, 20.0, 10.0]),
+            "scale {scale}"
+        );
+        let px = pixels_of(&at_scale);
+        if canvas.0 > 2 {
+            let (cx, cy) = (canvas.0 / 2, canvas.1 / 2);
+            assert_eq!(
+                at(&px, canvas.0, cx, cy),
+                BOX,
+                "scale {scale}: the box inside"
+            );
+        } else if scale < 1e-6 {
+            assert!(
+                px.chunks_exact(4).all(|p| p[3] == 0),
+                "scale {scale}: no ink at a vanishing density"
+            );
+        }
+    }
     // A crop window of a shape is cut from the same raster.
     let window = pm_protocol::common::PixelRect {
         x: 4,
@@ -756,6 +823,9 @@ fn child_snapshots() {
             row,
             rows,
             data: Bytes(vec![200; (4 * rows * 4) as usize]),
+            size: None,
+            uv: None,
+            crop: None,
         })));
     }
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -775,9 +845,11 @@ fn child_snapshots() {
 
     let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
     let presenter = &status["presenter"];
-    // Six frames and three layer rasters.
-    assert_eq!(presenter["snapshots"], 9, "{presenter}");
-    assert_eq!(presenter["snapshotShared"], 2, "{presenter}");
+    // Six frames, three layer rasters, and six at other scales; two of the
+    // frames and four of the rasters at other scales are over the inline
+    // limit, in shared memory.
+    assert_eq!(presenter["snapshots"], 15, "{presenter}");
+    assert_eq!(presenter["snapshotShared"], 6, "{presenter}");
     println!("CHILD-OK");
 }
 
@@ -2179,6 +2251,343 @@ fn child_svg_font_failure() {
         asked.len(),
         presenter["presenter"]
     );
+}
+
+fn shape_project(x: f64) -> Value {
+    let mut doc = project(x);
+    doc["layers"][0]["type"] = json!("shape");
+    doc["layers"][0]["d"] =
+        json!({ "shape": "rect", "w": 40, "h": 20, "color": "#E8E2CF", "stroke": 0 });
+    doc
+}
+
+#[test]
+#[ignore = "run by raster_override_layers_wait_for_the_producer_s_answer"]
+fn child_compat() {
+    use pm_protocol::snapshot::{
+        CompatFormat, CompatKey, CompatMessage, CompatNative, CompatPixels, CompatSource,
+    };
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    let session = c.session;
+    let small = Size::new(320, 180);
+    c.resync(2, 1, &shape_project(60.0));
+    let ask = |c: &mut Child, id: u64, revision: u64| {
+        c.snapshot(
+            id,
+            frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+            Some(revision),
+            WINDOW,
+            session,
+        );
+        c.inbox.wait(Duration::from_secs(20), answer(id))
+    };
+    // No producer: the engine draws the shape without asking.
+    let native = pixels_of(&rendered(ask(&mut c, 40, 1)));
+    assert_eq!(at(&native, 320, 60, 60), BOX);
+    // A raster override registered: the frame names the layer it needs.
+    c.event(Event::Compat(CompatMessage::Producers {
+        sources: vec![CompatSource::RasterOverride],
+    }));
+    let need = match ask(&mut c, 41, 1) {
+        Ok(SnapshotOutcome::NeedsRenderer {
+            revision,
+            fallback,
+            compat,
+            svg,
+        }) => {
+            assert_eq!(revision.get(), 1);
+            assert!(svg.is_empty());
+            assert!(fallback.is_empty());
+            assert_eq!(compat.len(), 1, "{compat:?}");
+            compat[0].clone()
+        }
+        other => panic!("expected needsRenderer, got {other:?}"),
+    };
+    assert_eq!(
+        (
+            need.composition.as_str(),
+            need.layer.as_str(),
+            need.time,
+            need.source
+        ),
+        (
+            "Psnap-root",
+            "box",
+            Ticks::ZERO,
+            CompatSource::RasterOverride
+        )
+    );
+    assert!((need.scale - 1.0).abs() < 1e-12, "{}", need.scale);
+    // Passed through: drawn exactly as without a producer.
+    c.event(Event::Compat(CompatMessage::Native(CompatNative {
+        composition: need.composition.clone(),
+        layer: need.layer.clone(),
+        time: need.time,
+        source: need.source,
+        scale: need.scale,
+        revision: Revision::new(1).unwrap(),
+        crop: None,
+    })));
+    assert_eq!(pixels_of(&rendered(ask(&mut c, 42, 1))), native);
+    // An edit invalidates the answer: the next frame asks again. The
+    // producer's raster (red, on a 40 × 20 quad anchored at its center)
+    // replaces the layer where it moved.
+    c.resync(3, 2, &shape_project(200.0));
+    let need = match ask(&mut c, 43, 2) {
+        Ok(SnapshotOutcome::NeedsRenderer { compat, .. }) => compat[0].clone(),
+        other => panic!("expected needsRenderer, got {other:?}"),
+    };
+    let id = CompatKey {
+        composition: need.composition.clone(),
+        layer: need.layer.clone(),
+        time: need.time,
+        source: need.source,
+        key: "typewriter-3:box:2".into(),
+    };
+    // The renderer posted this answer before asking again, but the ports
+    // race: only the explicitly uploaded need lets the job wait for it.
+    let mut retry = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
+    retry.compat_uploaded = vec![need.clone()];
+    c.snapshot(44, retry, Some(2), WINDOW, session);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(200), &mut answer(44))
+            .is_none(),
+        "answered before the raster arrived"
+    );
+    c.event(Event::Compat(CompatMessage::Pixels(CompatPixels {
+        id: id.clone(),
+        revision: Revision::new(2).unwrap(),
+        // 40 × 20 pixels (160 bytes a row, not a multiple of 256): red
+        // everywhere but a transparent column at x = 30, so the rows must
+        // keep their stride for the column to stay straight.
+        width: 40,
+        height: 20,
+        format: CompatFormat::Rgba8Premultiplied,
+        origin: [20.0, 10.0],
+        scale: need.scale,
+        row: 0,
+        rows: 20,
+        data: Bytes(
+            (0..20 * 40)
+                .flat_map(|i| {
+                    if i % 40 == 30 {
+                        [0u8, 0, 0, 0]
+                    } else {
+                        [255u8, 0, 0, 255]
+                    }
+                })
+                .collect(),
+        ),
+        size: Some([40.0, 20.0]),
+        uv: None,
+        crop: None,
+    })));
+    let red = pixels_of(&rendered(c.inbox.wait(Duration::from_secs(20), answer(44))));
+    assert_eq!(at(&red, 320, 200, 60), [255, 0, 0, 255]);
+    assert_eq!(at(&red, 320, 60, 60), BACKGROUND);
+    // The quad is the raster's own: 40 × 20 around (200, 60).
+    assert_eq!(at(&red, 320, 181, 60), [255, 0, 0, 255]);
+    assert_eq!(at(&red, 320, 178, 60), BACKGROUND);
+    // The column at raster x = 30 is at x = 210 on every row.
+    for y in [51, 55, 60, 64, 68] {
+        assert_eq!(at(&red, 320, 210, y), BACKGROUND, "row {y}");
+        assert_eq!(at(&red, 320, 209, y), [255, 0, 0, 255], "row {y}");
+        assert_eq!(at(&red, 320, 211, y), [255, 0, 0, 255], "row {y}");
+    }
+    // Another edit, the same raster (the producer's key did not change).
+    c.resync(4, 3, &{
+        let mut doc = shape_project(200.0);
+        doc["layers"][0]["name"] = json!("renamed");
+        doc
+    });
+    match ask(&mut c, 45, 3) {
+        Ok(SnapshotOutcome::NeedsRenderer { .. }) => {}
+        other => panic!("expected needsRenderer, got {other:?}"),
+    }
+    c.event(Event::Compat(CompatMessage::Reuse {
+        id,
+        scale: need.scale,
+        revision: Revision::new(3).unwrap(),
+        crop: None,
+    }));
+    assert_eq!(pixels_of(&rendered(ask(&mut c, 46, 3))), red);
+    // The override disposed: nothing is asked and the shape is the engine's.
+    c.event(Event::Compat(CompatMessage::Producers {
+        sources: Vec::new(),
+    }));
+    let after = pixels_of(&rendered(ask(&mut c, 47, 3)));
+    assert_eq!(at(&after, 320, 200, 60), BOX);
+    println!("CHILD-OK");
+}
+
+/// A viewer ask does not mean its renderer has uploaded an answer: a sync
+/// capture may block that renderer before its async raster preparation
+/// finishes. The capture must return the need itself, then wait only once
+/// the caller explicitly says the answer is in flight on the other port.
+#[test]
+#[ignore = "run by sync_snapshots_return_raster_needs_already_asked_by_the_viewer"]
+fn child_compat_viewer_pending() {
+    use pm_protocol::snapshot::{
+        CompatFormat, CompatKey, CompatMessage, CompatNative, CompatPixels, CompatSource,
+    };
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    let session = c.session;
+    let size = Size::new(320, 180);
+    c.resync(2, 1, &shape_project(60.0));
+    c.event(Event::Compat(CompatMessage::Producers {
+        sources: vec![CompatSource::RasterOverride],
+    }));
+    // Keep the viewer and snapshot at the same raster density, so this is
+    // the exact need already recorded as asked rather than a new bucket.
+    let mut viewer = viewer_state();
+    viewer.size = size;
+    viewer.device_pixel_ratio = 1.0;
+    c.event(Event::Viewer(viewer));
+    let viewer_needs = c
+        .inbox
+        .wait(Duration::from_secs(20), |port, m| match &m.message {
+            Message::Event {
+                body: Event::Compat(CompatMessage::Needs { revision, needs }),
+            } if port == WINDOW && revision.get() == 1 => Some(needs.clone()),
+            _ => None,
+        });
+    assert_eq!(viewer_needs.len(), 1, "{viewer_needs:?}");
+    let need = &viewer_needs[0];
+    assert_eq!(need.source, CompatSource::RasterOverride);
+    assert_eq!(need.layer.as_str(), "box");
+    assert_eq!(need.time, Ticks::ZERO);
+    assert_eq!(need.scale, 1.0);
+    assert_eq!(need.crop, None);
+
+    // Withhold the viewer answer entirely. A renderer now blocked in
+    // sendSync cannot service that viewer ask: returning it in the host
+    // response is the only way the caller can prepare it synchronously.
+    c.snapshot(
+        40,
+        frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    let snapshot_needs = match c.inbox.wait(Duration::from_secs(20), answer(40)) {
+        Ok(SnapshotOutcome::NeedsRenderer {
+            revision,
+            fallback,
+            compat,
+            svg,
+        }) => {
+            assert_eq!(revision.get(), 1);
+            assert!(fallback.is_empty());
+            assert!(svg.is_empty());
+            compat
+        }
+        other => panic!("outstanding viewer need must not block a sync snapshot: {other:?}"),
+    };
+    assert_eq!(snapshot_needs, viewer_needs);
+
+    // Queue the marked retry while its answer is still in flight. If the
+    // later message rejects that answer, this already-queued wait must end.
+    let mut retry = frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000);
+    retry.compat_uploaded = snapshot_needs.clone();
+    c.snapshot(41, retry, Some(1), WINDOW, session);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(200), &mut answer(41))
+            .is_none(),
+        "the posted answer has not arrived yet"
+    );
+
+    // A renderer can first reuse a surface the store already evicted. That
+    // terminal rejection must return a fresh need even when the snapshot's
+    // retry says it posted the old answer. The viewer may re-ask meanwhile.
+    c.event(Event::Compat(CompatMessage::Reuse {
+        id: CompatKey {
+            composition: need.composition.clone(),
+            layer: need.layer.clone(),
+            time: need.time,
+            source: need.source,
+            key: "evicted-surface".into(),
+        },
+        scale: need.scale,
+        revision: Revision::new(1).unwrap(),
+        crop: None,
+    }));
+    // A pass-through for an undrawn identity is a renderer-port barrier:
+    // observing it guarantees the earlier rejected reuse has been applied.
+    c.event(Event::Compat(CompatMessage::Native(CompatNative {
+        composition: need.composition.clone(),
+        layer: "upload-barrier".into(),
+        time: need.time,
+        source: need.source,
+        scale: need.scale,
+        revision: Revision::new(1).unwrap(),
+        crop: None,
+    })));
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
+        if status["presenter"]["compatAnswers"].as_u64().unwrap_or(0) > 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "renderer-port barrier did not arrive: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let snapshot_needs = match c.inbox.wait(Duration::from_secs(20), answer(41)) {
+        Ok(SnapshotOutcome::NeedsRenderer { compat, .. }) => compat,
+        other => {
+            panic!("rejected reuse must be re-asked, not wait for nonexistent pixels: {other:?}")
+        }
+    };
+    assert_eq!(snapshot_needs, viewer_needs);
+
+    // The marked retry waits instead of returning the same need while
+    // its pixel message travels independently through the renderer port.
+    let mut retry = frame_request(SnapshotClass::Sync, size, SnapshotPixels::Opaque, 5_000);
+    retry.compat_uploaded = snapshot_needs;
+    c.snapshot(42, retry, Some(1), WINDOW, session);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(200), &mut answer(42))
+            .is_none(),
+        "the uploaded answer is still in flight"
+    );
+    c.event(Event::Compat(CompatMessage::Pixels(CompatPixels {
+        id: CompatKey {
+            composition: need.composition.clone(),
+            layer: need.layer.clone(),
+            time: need.time,
+            source: need.source,
+            key: "sync-viewer-answer".into(),
+        },
+        revision: Revision::new(1).unwrap(),
+        width: 40,
+        height: 20,
+        format: CompatFormat::Rgba8Premultiplied,
+        origin: [20.0, 10.0],
+        scale: need.scale,
+        row: 0,
+        rows: 20,
+        data: Bytes([255u8, 0, 0, 255].repeat(40 * 20)),
+        size: Some([40.0, 20.0]),
+        uv: None,
+        crop: None,
+    })));
+    let result = rendered(c.inbox.wait(Duration::from_secs(20), answer(42)));
+    let pixels = pixels_of(&result);
+    assert_eq!(at(&pixels, 320, 60, 60), [255, 0, 0, 255]);
+    assert_eq!(at(&pixels, 320, 30, 60), BACKGROUND);
+    assert_eq!(result.revision.get(), 1);
+    println!("CHILD-OK");
 }
 
 /// A viewer frame from the window port.

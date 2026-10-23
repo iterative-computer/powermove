@@ -99,7 +99,7 @@ export function engineRasterSync(transport: EngineRenderTransport, host: RasterH
   const window = engineCrop(crop);
   const where = host.locate(layer);
   const snapshot = transport.rasterSync(String(layer?.id ?? ''), scale, time, window, rasterOptions(layer, where));
-  return snapshot ? toRasterSurface(snapshot, layer, window, (s) => transport.toCanvas(s), host, time) : null;
+  return snapshot ? toRasterSurface(withoutInk(snapshot, layer, scale), layer, window, (s) => transport.toCanvas(s), host, time) : null;
 }
 
 /** The same, asynchronously (`render.rasterAsync`, apiVersion 4). */
@@ -107,7 +107,27 @@ export async function engineRaster(transport: EngineRenderTransport, host: Raste
   const window = engineCrop(crop);
   const where = host.locate(layer);
   const snapshot = await transport.raster(String(layer?.id ?? ''), scale, time, window, rasterOptions(layer, where));
-  return snapshot ? toRasterSurface(snapshot, layer, window, (s) => transport.toCanvas(s), host, time) : null;
+  return snapshot ? toRasterSurface(withoutInk(snapshot, layer, scale), layer, window, (s) => transport.toCanvas(s), host, time) : null;
+}
+
+/** Playback's base pixels, asynchronously prepared at dependency priority. */
+export async function engineRasterPrepared(transport: EngineRenderTransport, host: RasterHost, layer: any, scale: number, time: number, crop: RasterCrop): Promise<EngineRasterSurface | null> {
+  const window = engineCrop(crop);
+  const where = host.locate(layer);
+  const snapshot = await transport.rasterForCompat(String(layer?.id ?? ''), scale, time, window, rasterOptions(layer, where));
+  return snapshot ? toRasterSurface(withoutInk(snapshot, layer, scale), layer, window, s => transport.toCanvas(s), host, time) : null;
+}
+
+/** Today's raster at zero, a negative scale, or NaN draws through a
+ *  degenerate density onto a canvas of at most one pixel: nothing lands on
+ *  it (the captions rasterizer alone floors its density at 0.05). The
+ *  engine draws such a request at a vanishing density (`layerRasterScale`),
+ *  where its text rasterizer can still leave a faint pixel, so the
+ *  surface is cleared to today's transparent canvas. */
+function withoutInk(snapshot: EngineSnapshot, layer: any, scale: number): EngineSnapshot {
+  if (scale > 0 || kindOf(layer) === 'captions') return snapshot;
+  snapshot.data.fill(0);
+  return snapshot;
 }
 
 function rasterOptions(layer: any, where: { composition: string | null; own: boolean }): { composition?: string; content: Uint8Array | null } {

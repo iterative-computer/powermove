@@ -57,7 +57,7 @@ function apiHarness(services = serviceHarness().services) {
       previewResolution: 1, invalidate: vi.fn(), pause: vi.fn(),
     },
     render: {
-      gl: { get context() { return context; }, get previewViewport() { return null; }, init, resize, bounds: () => null, pick: () => null },
+      gl: { get context() { return context; }, get canvas() { return (context as { canvas?: HTMLCanvasElement } | null)?.canvas ?? null; }, get previewViewport() { return null; }, init, resize, bounds: () => null, pick: () => null },
       raster: () => null,
     },
     util: { clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)) },

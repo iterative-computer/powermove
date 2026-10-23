@@ -64,6 +64,7 @@ import { StoreLocalError, type StoreInstallerRegistry } from './install';
 import type { ProvenanceOrigin, ProvenancePublished, ProvenanceRecord, ProvenanceStore } from './provenance';
 import { categoryFor } from './store-ipc';
 import { permissionFindings } from './permission-scan';
+import { analyzeExtensionSource } from '../../shared/extension-analysis';
 
 /* ── the registry calls publishing needs ─────────────────── */
 
@@ -504,6 +505,9 @@ export function createPublisher(options: PublisherOptions): Publisher {
         try { return [{ path: input.path, text: utf8.decode(input.bytes) }]; } catch { return []; }
       }), local.manifest),
       waivableFindings: frozen.findings.waivable,
+      deprecationFindings: analyzeExtensionSource(frozen.inputs.flatMap((input) => {
+        try { return [{ path: input.path, text: utf8.decode(input.bytes) }]; } catch { return []; }
+      })),
       manifest: { id: local.manifest.id, name: local.manifest.name, description: local.manifest.description ?? null },
       listing
     };

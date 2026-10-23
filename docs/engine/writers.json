@@ -699,43 +699,43 @@
       "code": "pm: deps.pm"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:251",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:254",
       "class": "touch",
       "scope": "makeAnim > touch",
       "code": "PM?.touch?.()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:339",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:342",
       "class": "hist.do",
       "scope": "makeHistory > (anonymous)",
       "code": "PM?.hist?.do?.(label, fn)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:340",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:343",
       "class": "history.transaction",
       "scope": "makeHistory > begin",
       "code": "PM?.hist?.begin?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:345",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:348",
       "class": "history.external",
       "scope": "makeHistory > external",
       "code": "PM?.hist?.external?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:358",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:361",
       "class": "edit.mutate",
       "scope": "makeEdit > (anonymous)",
       "code": "PM?.Edit?.mutate?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:523",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:590",
       "class": "doc.touched",
       "scope": "makeUIState > setLayerCollapsed",
       "code": "touchedDocument(PM, [['layers', index, 'collapsed']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:997",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:1175",
       "class": "extension-layer-refresh",
       "scope": "installKernel > kernel.layerTypes.onChange(callback)",
       "code": "writeDocument(PM, [['layers'], ['comps']], () => { for (const container of containers) for (const layer of container?.layers ?? []) { if ..."
@@ -762,7 +762,7 @@
       "site": "apps/desktop/src/renderer/src/legacy/app.ts:693",
       "class": "hist.do",
       "scope": "install > writeExportDefaults",
-      "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = next; })"
+      "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults); })"
     },
     {
       "site": "apps/desktop/src/renderer/src/legacy/app.ts:1267",

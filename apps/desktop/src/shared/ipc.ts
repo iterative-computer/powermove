@@ -395,6 +395,8 @@ export type CodexRunResult =
       liveEditsApplied?: boolean;
       /** One history entry containing every live edit made during this run. */
       liveEditHistoryId?: string;
+      /** Deprecated compatibility APIs the published extensions use (amendment 23): the agent suggests migrating them. */
+      extensionWarnings?: import('./extension-analysis').ExtensionDeprecationWarning[];
     }
   | {
       ok: false;

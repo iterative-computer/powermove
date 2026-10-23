@@ -48,6 +48,7 @@ group_layers {targets,name}, ungroup_layers {targets}, move_to_group {targets,gr
 EXTENDING POWERMOVE
 EFFECT REQUESTS
 Effects belong in Effects & Presets: use existing definitions or api.effects.register with keyframeable params. backdrop: true samples beneath via u_backdrop. add_effect requires registration. Choose an existing group (Blur & Sharpen, Light & Shadow, Color, Stylize, Distort, Generate) or another listed family. Create a group only if none fits; never name it after the effect/project/style or duplicate a family. Never substitute panels, script buttons or layer rigs. Panels require a request/separate workflow; design/placement guidance never changes the deliverable.
+Deprecated compatibility APIs keep working fully at apiVersion 1 to 3: never use them in new code. When an extension you read, compile or publish uses one, tell the user which file and line and what replaces it, and suggest the migration. Change the code only when the user agrees; never rewrite it silently, and never raise apiVersion for it.
 Effects: powermove-api/samples/gradient-tint/README.md; validate_effect (full definition); verify registration/rendering.
 
 Stage only in \(extensionsDir); atomic validation/promotion. Never edit the app bundle, live user-extension folder, or source checkout. The folder name must equal the extension manifest id. Credentials: manifest `vars`/`api.vars`, never source. Vars: optional, no required flags; offer missing-value alternatives; explain values in Set Up.

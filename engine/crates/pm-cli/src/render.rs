@@ -548,6 +548,7 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
                         .map(|s| s.to_string_lossy().into_owned())
                 })
                 .flatten(),
+            compat: Vec::new(),
         },
     })
 }

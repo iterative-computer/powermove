@@ -19,6 +19,8 @@ export interface ShaderHooks extends ShaderHooksContract {}
 
 export interface ServicesRegistry extends ServicesAPI {
   clear(): void;
+  /** Kernel-side: `fn` runs whenever the implementation `name` resolves to changes. */
+  onChange(name: string, fn: () => void): Disposable;
 }
 
 interface ServiceEntry {
@@ -30,25 +32,50 @@ interface ServiceEntry {
  * reveals the previous implementation, including out-of-order disposal. */
 export function createServicesRegistry(): ServicesRegistry {
   const entries = new Map<string, ServiceEntry[]>();
+  const listeners = new Map<string, Set<() => void>>();
+  const top = (name: string): unknown => {
+    const stack = entries.get(name);
+    return stack?.[stack.length - 1]?.implementation;
+  };
+  /** Runs `change`, then the listeners of `name` if what it resolves to changed. */
+  const changing = (name: string, change: () => void): void => {
+    const before = top(name);
+    change();
+    if (top(name) === before) return;
+    for (const fn of [...(listeners.get(name) ?? [])]) {
+      try { fn(); } catch (error) { console.error(`[kernel] services.${name} listener failed`, error); }
+    }
+  };
 
   return {
     register<T>(name: string, implementation: T): Disposable {
       if (typeof name !== 'string' || !name) throw new Error('services.register requires a name');
-      const stack = entries.get(name) ?? [];
       const entry: ServiceEntry = { implementation, disposed: false };
-      stack.push(entry);
-      entries.set(name, stack);
+      changing(name, () => {
+        const stack = entries.get(name) ?? [];
+        stack.push(entry);
+        entries.set(name, stack);
+      });
       return {
         dispose(): void {
           if (entry.disposed) return;
           entry.disposed = true;
-          const current = entries.get(name);
-          if (!current) return;
-          const index = current.indexOf(entry);
-          if (index >= 0) current.splice(index, 1);
-          if (!current.length) entries.delete(name);
+          changing(name, () => {
+            const current = entries.get(name);
+            if (!current) return;
+            const index = current.indexOf(entry);
+            if (index >= 0) current.splice(index, 1);
+            if (!current.length) entries.delete(name);
+          });
         }
       };
+    },
+
+    onChange(name: string, fn: () => void): Disposable {
+      const set = listeners.get(name) ?? new Set();
+      set.add(fn);
+      listeners.set(name, set);
+      return { dispose: () => void set.delete(fn) };
     },
 
     get<T>(name: string): T | null {
@@ -57,7 +84,8 @@ export function createServicesRegistry(): ServicesRegistry {
     },
 
     clear(): void {
-      entries.clear();
+      const names = [...entries.keys()];
+      for (const name of names) changing(name, () => entries.delete(name));
     }
   };
 }

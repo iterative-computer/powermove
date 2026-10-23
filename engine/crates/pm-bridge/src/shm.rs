@@ -188,6 +188,26 @@ fn read_from(fd: libc::c_int, length: usize) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Whether a published segment is still waiting for its reader. `take`
+/// unlinks before copying, so a missing name releases the publisher's
+/// outstanding-result budget. Other errors must not release that budget.
+pub fn exists(name: &str) -> io::Result<bool> {
+    let c = c_name(name)?;
+    // SAFETY: a validated segment name; no creation or mutation.
+    let fd = unsafe { libc::shm_open(c.as_ptr(), libc::O_RDONLY, 0) };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ENOENT) {
+            Ok(false)
+        } else {
+            Err(error)
+        };
+    }
+    // SAFETY: this call owns the descriptor.
+    unsafe { libc::close(fd) };
+    Ok(true)
+}
+
 /// Unlinks `name` if it still exists (the engine's orphan cleanup).
 pub fn unlink(name: &str) {
     if let Ok(c) = c_name(name) {
@@ -251,8 +271,11 @@ mod tests {
         let bytes: Vec<u8> = (0..4096u32).map(|i| (i * 7) as u8).collect();
         let name = publish(&bytes).unwrap();
         assert!(name_ok(&name), "{name}");
+        assert!(exists(&name).unwrap());
         assert_eq!(take(&name, bytes.len()).unwrap(), bytes);
         // Taken means unlinked.
+        assert!(!exists(&name).unwrap());
+        assert!(exists("/etc/passwd").is_err());
         assert!(take(&name, bytes.len()).is_err());
     }
 

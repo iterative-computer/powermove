@@ -40,6 +40,8 @@ export type CompatFramesOptions = {
   /** pm-bridge's shared-memory writer and its cleanup (absent without the addon). */
   publishPixels: ((bytes: Uint8Array) => string) | null;
   unlinkPixels: ((name: string) => void) | null;
+  /** pm-bridge's shared-memory reader (an export frame the engine shared). */
+  takePixels?: ((name: string, length: number) => Uint8Array) | null;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
 };
 
@@ -55,6 +57,10 @@ export function validCompatAnswer(value: unknown): value is EngineCompatAnswer {
   const v = value as Record<string, unknown>;
   if (!Number.isSafeInteger(v['ask'])) return false;
   if (v['status'] === 'unavailable') return typeof v['message'] === 'string';
+  if (v['status'] === 'native') return true;
+  const finite = (a: unknown, n: number) => Array.isArray(a) && a.length === n && a.every((x) => Number.isFinite(x));
+  if (v['size'] !== undefined && !(finite(v['size'], 2) && (v['size'] as number[]).every((x) => x > 0))) return false;
+  if (v['uv'] !== undefined && !finite(v['uv'], 4)) return false;
   if (v['status'] !== 'pixels') return false;
   const w = v['width'], h = v['height'];
   if (!Number.isInteger(w) || !Number.isInteger(h) || (w as number) < 1 || (h as number) < 1 || (w as number) > MAX_EDGE || (h as number) > MAX_EDGE) return false;
@@ -71,7 +77,7 @@ export function validCompatAnswer(value: unknown): value is EngineCompatAnswer {
   const origin = v['origin'];
   return typeof v['key'] === 'string' && v['key'].length > 0 && v['key'].length <= 512 &&
     Array.isArray(origin) && origin.length === 2 && origin.every((n) => Number.isFinite(n)) &&
-    typeof v['scale'] === 'number' && Number.isFinite(v['scale']) && v['scale'] > 0 && v['scale'] <= 16;
+    typeof v['scale'] === 'number' && Number.isFinite(v['scale']) && v['scale'] > 0 && v['scale'] <= 32;
 }
 
 export class CompatFrames {
@@ -80,8 +86,9 @@ export class CompatFrames {
 
   constructor(private readonly options: CompatFramesOptions) {}
 
-  /** The job engine's `compatFrame` request. */
-  async serve(request: CompatFrameRequest): Promise<Response> {
+  /** The job engine's `compatFrame` request; `layer`: the layer as the
+   *  export's snapshot holds it (JSON), when main has the snapshot. */
+  async serve(request: CompatFrameRequest, layer: string | null = null): Promise<Response> {
     if (this.pending.size >= MAX_ASKS) throw new ProtocolError('budgetExceeded', 'Too many compatibility frames are being drawn.');
     const windows = this.options.windows();
     // Level 1 SVG images are Chromium's rasters, drawn by the window that
@@ -92,6 +99,13 @@ export class CompatFrames {
       ? 'SVG images are drawn by the editor window that has this project open; open the project in a window to export it.'
       : 'This layer is drawn by an extension in the editor; open the project in a window to export it.';
     if (!windows.length) throw new ProtocolError('notHeadlessRenderable', closed);
+    // A compatibility context's export frame goes to the windows inline.
+    const frame = request.frame;
+    if (frame && frame.payload.kind === 'sharedMemory') {
+      if (!this.options.takePixels) throw new ProtocolError('internal', 'Main cannot read shared pixels without the frame bridge addon.');
+      const bytes = this.options.takePixels(frame.payload.name, Number(frame.payload.length));
+      request = { ...request, frame: { ...frame, payload: { kind: 'inline', bytes } } };
+    }
     const ask = this.next++;
     const answer = await new Promise<EngineCompatAnswer>((resolve) => {
       const timer = (this.options.schedule ?? defaultSchedule)(() => {
@@ -99,8 +113,11 @@ export class CompatFrames {
         resolve({ ask, status: 'unavailable', message: `The editor did not draw the layer within ${ASK_TIMEOUT_MS / 1000} s.` });
       }, ASK_TIMEOUT_MS);
       this.pending.set(ask, { windows: new Set(windows.map((w) => w.id)), last: closed, resolve, timer });
-      for (const window of windows) window.ask({ ask, request });
+      for (const window of windows) window.ask({ ask, request, ...(layer !== null ? { layer } : {}) });
     });
+    if (answer.status === 'native') {
+      return { type: 'compatFrame', key: 'native', width: 1, height: 1, format: 'rgba8Premultiplied', origin: [0, 0], scale: request.scale, payload: { kind: 'inline', bytes: new Uint8Array(0) }, native: true } as Response;
+    }
     if (answer.status !== 'pixels') throw new ProtocolError('notHeadlessRenderable', answer.message.slice(0, 1024));
     let payload: { kind: 'inline'; bytes: Uint8Array } | { kind: 'sharedMemory'; name: string; length: number };
     if (answer.data.byteLength <= INLINE_PIXEL_BYTES) {
@@ -112,7 +129,8 @@ export class CompatFrames {
       (this.options.schedule ?? defaultSchedule)(() => this.options.unlinkPixels?.(name), SEGMENT_ORPHAN_MS);
       payload = { kind: 'sharedMemory', name, length: answer.data.byteLength };
     }
-    return { type: 'compatFrame', key: answer.key, width: answer.width, height: answer.height, format: answer.format, origin: answer.origin, scale: answer.scale, payload } as Response;
+    return { type: 'compatFrame', key: answer.key, width: answer.width, height: answer.height, format: answer.format, origin: answer.origin, scale: answer.scale, payload,
+      ...(answer.size ? { size: answer.size } : {}), ...(answer.uv ? { uv: answer.uv } : {}) } as Response;
   }
 
   /** A window's answer (IPC input). Only an asked window may answer, once:
@@ -129,7 +147,7 @@ export class CompatFrames {
     }
     this.pending.delete(value.ask);
     pending.timer.cancel();
-    pending.resolve(value.status === 'pixels' ? value : { ask: value.ask, status: 'unavailable', message: pending.last });
+    pending.resolve(value.status === 'unavailable' ? { ask: value.ask, status: 'unavailable', message: pending.last } : value);
     return true;
   }
 

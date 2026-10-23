@@ -326,7 +326,7 @@ export const POWERMOVE_AGENT_TOOLS: readonly PowermoveAgentToolSpec[] = [
   },
   {
     name: 'store_publish_prepare',
-    description: 'Dry-run a publish of a local extension without publishing: returns the coordinate, suggested version, tree hash, file count/size, whether it is a first publish, and any blocking or waivable secret/permission findings. Requires the user be signed in with a publisher handle. Call this before store_publish to inspect findings and pick a version. No confirmation is shown and nothing is uploaded.',
+    description: 'Dry-run a publish of a local extension without publishing: returns the coordinate, suggested version, tree hash, file count/size, whether it is a first publish, and any blocking or waivable secret/permission findings, plus deprecationFindings: deprecated compatibility APIs the source uses, advice that never blocks (suggest the migration to the user; change code only if they agree). Requires the user be signed in with a publisher handle. Call this before store_publish to inspect findings and pick a version. No confirmation is shown and nothing is uploaded.',
     inputSchema: closedObject({ localId: { type: 'string' } }, ['localId'])
   },
   {

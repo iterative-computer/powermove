@@ -3,11 +3,11 @@ import path from 'node:path';
 import { expect, test } from './helpers/app';
 
 test('character Typewriter loads, renders partial text and cursor, and disposes cleanly', async ({ session }, testInfo) => {
-  await cp(path.join(__dirname, 'fixtures/typewriter-effect'), path.join(session.userData, 'extensions/typewriter-effect'), { recursive: true });
+  await cp(path.join(__dirname, 'fixtures/compat-typewriter'), path.join(session.userData, 'extensions/compat-typewriter'), { recursive: true });
   await session.relaunch();
   await session.openEditor();
   const { page } = session;
-  await page.waitForFunction(() => (window as any).PM.Kernel.loader.activeIds().includes('typewriter-effect'));
+  await page.waitForFunction(() => (window as any).PM.Kernel.loader.activeIds().includes('compat-typewriter'));
   const result = await page.evaluate(async () => {
     const PM = (window as any).PM;
     PM.replaceProject(PM.mkProject({ name: 'Typewriter checks', w: 400, h: 300, dur: 3, fps: 30 }));
@@ -31,7 +31,7 @@ test('character Typewriter loads, renders partial text and cursor, and disposes 
       return { ink, frame: Array.from(frame) };
     };
     const empty = surface(0), partial = surface(40), full = surface(100), cursor = surface(0, true);
-    await PM.Kernel.loader.deactivate('typewriter-effect');
+    await PM.Kernel.loader.deactivate('compat-typewriter');
     layer.fx = []; PM.touch();
     return {
       ink: [empty.ink, partial.ink, full.ink, cursor.ink],

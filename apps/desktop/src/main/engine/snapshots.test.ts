@@ -5,6 +5,7 @@ import type { Request, Response } from '../../shared/engine-protocol';
 import { RemoteError } from './protocol';
 import { MAX_BLENDER_WAIT_MS, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, validSnapshotRequest, type SnapshotEngine } from './snapshots';
 import { FallbackInputs } from './fallback-inputs';
+import { decode, encode } from './msgpack';
 
 const request = (over: Partial<EngineSnapshotRequest['snapshot']> = {}, top: Partial<EngineSnapshotRequest> = {}): EngineSnapshotRequest => ({
   generation: 2,
@@ -54,6 +55,17 @@ function engine(answer: (body: Request, revision: number | null) => Promise<Resp
 }
 
 describe('snapshot requests', () => {
+  it('accepts any positive layer raster scale, as today’s PM.raster, independently of output scale', () => {
+    for (const scale of [1e-9, 0.005, 16.25, 24, 32, 33, 50, 1000, Number.MAX_VALUE, 0, -1, NaN, Infinity, -Infinity]) {
+      expect(validSnapshotRequest(request({ target: { kind: 'layer', layer: 'L1', scale, crop: null } })), String(scale)).toBe(Number.isFinite(scale) && scale > 0);
+    }
+    // The renderer sends scales above 2^53 as the largest safe integer
+    // (`layerRasterScale`): every number above it is an integer the wire's
+    // encoder refuses, which left such a request unanswered for 15 s.
+    expect(decode(encode({ scale: Number.MAX_SAFE_INTEGER }))).toEqual({ scale: Number.MAX_SAFE_INTEGER });
+    expect(() => encode({ scale: Number.MAX_VALUE })).toThrow(/safe range/);
+  });
+
   it('accept the shapes the renderer sends and refuse the rest', () => {
     expect(validSnapshotRequest(request())).toBe(true);
     expect(validSnapshotRequest(request({ captionsHidden: true }))).toBe(true);
@@ -72,6 +84,26 @@ describe('snapshot requests', () => {
     expect(validSnapshotRequest(request({ uploaded: [''] }))).toBe(false);
     expect(validSnapshotRequest(request({ uploaded: Array.from({ length: 65 }, () => 'k') }))).toBe(false);
     expect(validSnapshotRequest(null)).toBe(false);
+  });
+
+  it('bounds the exact compatibility needs a snapshot caller says it posted', () => {
+    const need = { composition: 'comp-1', layer: 'title', time: 0, scale: 2, source: 'rasterOverride' as const, crop: { x: 256, y: 0, width: 512, height: 256 } };
+    expect(validSnapshotRequest(request({ compatUploaded: [need] }))).toBe(true);
+    expect(validSnapshotRequest(request({ compatUploaded: [] }))).toBe(true);
+    for (const patch of [{ layer: '' }, { composition: '' }, { time: .5 }, { source: 'unknown' }, { scale: 0 }, { scale: 33 }, { crop: { x: 8192, y: 0, width: 1, height: 1 } }]) {
+      expect(validSnapshotRequest(request({ compatUploaded: [{ ...need, ...patch } as never] }))).toBe(false);
+    }
+    expect(validSnapshotRequest(request({ compatUploaded: Array.from({ length: 257 }, () => need) }))).toBe(false);
+  });
+
+  it('accept a window\'s compatibility events only with its document', () => {
+    const document = { id: 'doc', revision: 3 };
+    const events = [{ type: 'compat', compat: 'producers', sources: ['rasterOverride'] }, { type: 'compat', compat: 'pixels', data: new Uint8Array(4) }];
+    expect(validSnapshotRequest({ ...request({}, { session: null }), document, compatEvents: events })).toBe(true);
+    expect(validSnapshotRequest({ ...request(), compatEvents: events })).toBe(false);
+    expect(validSnapshotRequest({ ...request({}, { session: null }), document, compatEvents: [{ type: 'compat', compat: 'needs' }] })).toBe(false);
+    expect(validSnapshotRequest({ ...request({}, { session: null }), document, compatEvents: [{ type: 'compat', compat: 'pixels', data: 'x' }] })).toBe(false);
+    expect(validSnapshotRequest({ ...request({}, { session: null }), document, compatEvents: [{ type: 'shaderFallback' }] })).toBe(false);
   });
 
   it('accept a bounded Blender wait for async and idle captures only', () => {
@@ -255,7 +287,7 @@ describe('sync snapshots served by main’s session for the window', () => {
     const service = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare }, log: () => {} });
     const reply = await service.snapshot(12, request({}, { session: null, generation: 0, document: doc }));
     expect(reply.status).toBe('rendered');
-    expect(prepare).toHaveBeenCalledWith(12, doc, [], []);
+    expect(prepare).toHaveBeenCalledWith(12, doc, [], [], []);
     expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
     expect(service.status().windowSessions).toBe(1);
   });

@@ -1,3 +1,5 @@
+import { DEPRECATION_GUIDANCE, formatDeprecationWarning, type ExtensionDeprecationWarning } from './extension-analysis';
+
 /** A small common brief. Detailed procedures stay in task-specific sections
  * and the shipped API guide; matching a task never grants more authority. */
 export const AGENT_TASK_GUIDANCE = `TASK FOCUS
@@ -25,7 +27,7 @@ export function creativeTaskGuidance(request: string): string {
 }
 
 /** The original brief stays first so automatic checks use the same task profile. */
-export function resultVerificationPrompt(originalRequest: string, imports: unknown[], health: unknown[], deferredCommands: unknown[]): string {
+export function resultVerificationPrompt(originalRequest: string, imports: unknown[], health: unknown[], deferredCommands: unknown[], deprecations: readonly ExtensionDeprecationWarning[] = []): string {
   return `${originalRequest}
 
 AUTOMATIC RESULT VERIFICATION
@@ -43,5 +45,9 @@ ${JSON.stringify(deferredCommands)}
 Powermove will reconcile and apply deferred commands after registration. Return replacement commands or apply intended edits live without duplicating mutations.
 Inspect get_workspace_state for runtime errors and registeredEffects. For panels use get_panel_layout, open_panel, get_panel_state and capture_panel; exercise relevant controls without unrelated or external side effects. For effects confirm registration, then inspect render_frames at representative beginning, middle and end times. Compilation, mocked API tests and status labels do not prove the result works.
 Fix failures in the isolated staging directory and return changed ids in extensions so Powermove can load and verify them again. Return extensions: [] when no correction is needed. State concrete blockers in notes; do not ask the user to press Fix it.
+` : ''}${deprecations.length ? `
+DEPRECATED COMPATIBILITY APIS (advice, not failures)
+${deprecations.slice(0, 40).map((warning) => `${warning.extension}/${formatDeprecationWarning(warning)}`).join('\n')}
+${DEPRECATION_GUIDANCE} Mention these in notes as a suggestion to the user; do not change them in this verification pass.
 ` : ''}`;
 }

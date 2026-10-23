@@ -34,6 +34,7 @@
 
 pub(crate) mod blender;
 pub(crate) mod blender_png;
+pub(crate) mod compat;
 mod compile;
 mod definitions;
 mod fallback;
@@ -374,6 +375,12 @@ impl Shared {
 
     fn device(&self) -> Result<wgpu::Device, String> {
         self.gpu().map(|(device, _)| device)
+    }
+}
+
+impl compat::CompatHost for Shared {
+    fn call(&self, request: Request, session: SessionId) -> Result<Response, String> {
+        Shared::call(self, request, Some(session)).map_err(|e| e.message)
     }
 }
 
@@ -1580,6 +1587,33 @@ fn run_job(
             shared.status_with(host, job, preview, None, |r| r.progress = f.min(0.999));
         }
     };
+    // A `raster` override's layers (the exporting window's producers):
+    // each frame asks the host for them (`compat::JobCompat`).
+    let job_compat = (!settings.delivery.compat.is_empty()).then(|| {
+        let id = document
+            .document
+            .root()
+            .map(pm_render::js::layer_id)
+            .unwrap_or_default();
+        Arc::new(compat::JobCompat::new(
+            shared.clone() as Arc<dyn compat::CompatHost>,
+            document.session,
+            id,
+            document.revision,
+            settings.delivery.compat.clone(),
+        ))
+    });
+    renderer.set_compat_rasters(
+        job_compat
+            .clone()
+            .map(|c| c as Arc<dyn pm_render::compat::CompatRasters>),
+    );
+    // A compatibility context in the exporting window draws over each frame
+    // (today's WebM frames, `frame:rendered` before the canvas was encoded).
+    let mut plan = plan;
+    plan.frame_post = job_compat
+        .as_ref()
+        .and_then(|c| c.context_frames(export.composition.clone()));
     let result = run_export_with_blender(
         renderer,
         &export,
@@ -1590,6 +1624,14 @@ fn run_job(
         &mut progress,
         stage,
     );
+    renderer.set_compat_rasters(None);
+    // A layer the window's override could not answer for fails with why.
+    let result = match (result, job_compat.as_ref().and_then(|c| c.failure())) {
+        (Err(_), Some(why)) => Err(JobError::Render(format!(
+            "An extension in the editor draws a layer of this export, and it could not be drawn: {why}"
+        ))),
+        (result, _) => result,
+    };
     match result {
         Ok(delivered) => {
             let r = &delivered.report;

@@ -2,7 +2,7 @@ import { validateFrameRate } from '../../../../shared/frame-rate';
 import { CHANNELS_3D } from './space-3d';
 import { normalizeColorDepth } from '../../core/color-depth';
 /* Ported from js/core/model.js — behavior-preserving. */
-import { normalizeExportDefaults } from '../../core/export-defaults';
+import { normalizeExportDefaults, storedExportDefaults } from '../../core/export-defaults';
 import type { PMRegistry } from '../registry';
 import { install as installCompositions } from './compositions';
 import { installLayerGroups } from './layer-groups';
@@ -210,7 +210,7 @@ PM.mkProject = (o: any = {}) => ({
   work: [0, o.dur || 10],
   /* Delivery settings travel with the project: the Export dialog and the
      Settings › Project tab both read and write this. */
-  exportDefaults: normalizeExportDefaults(o.exportDefaults, o.fps || 30),
+  exportDefaults: storedExportDefaults(normalizeExportDefaults(o.exportDefaults, o.fps || 30), o.exportDefaults),
   params: {},         // agent/workspace-exposed scene parameters
   revision: 0,
   edits: [],          // shared UI/agent transaction provenance

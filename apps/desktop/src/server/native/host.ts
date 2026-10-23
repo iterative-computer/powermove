@@ -120,6 +120,8 @@ export class NativeHiddenHost {
       compatFrame: async request => {
         const answer = await options.browser.compat(request.document, request);
         if (!validCompatAnswer(answer)) throw new Error('invalidMessage: The compatibility runner returned invalid pixels.');
+        // The producer passed the layer through: the job draws it itself (compat-frames.ts).
+        if (answer.status === 'native') return { type: 'compatFrame', key: 'native', width: 1, height: 1, format: 'rgba8Premultiplied', origin: [0, 0], scale: request.scale, payload: { kind: 'inline', bytes: new Uint8Array(0) }, native: true };
         if (answer.status !== 'pixels') throw new Error(`notHeadlessRenderable: ${answer.message}`);
         let payload: import('../../shared/engine-protocol').PixelPayload = { kind: 'inline', bytes: answer.data };
         if (answer.data.length > 1024 * 1024) { const name = loaded.publishPixels(answer.data); const timer = setTimeout(() => { loaded.unlinkPixels(name); this.sharedPixels.delete(name); }, 60_000); timer.unref(); this.sharedPixels.set(name, timer); payload = { kind: 'sharedMemory', name, length: answer.data.length }; }

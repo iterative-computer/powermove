@@ -53,7 +53,7 @@ import { retryPendingWorkspaceAppearance } from './workspace-appearance';
 import { createLoader, type BuiltinFactory, type Loader, type LoaderOptions } from './loader';
 import { createKernel, runKernelCommand, type Kernel } from './registries';
 import { makeScene3DAPI } from '../core/scene3d/api';
-import { engineRaster, engineRasterSync, locateLayer, type RasterCrop, type RasterHost } from '../engine-connection/raster-surface';
+import { engineRaster, engineRasterPrepared, engineRasterSync, locateLayer, type RasterCrop, type RasterHost } from '../engine-connection/raster-surface';
 import { records as storeRecords } from './extensions.svelte';
 import { installRuntimeGlobals } from './runtime-globals';
 import { installKernelSignals } from './signals.svelte';
@@ -115,6 +115,9 @@ import { bridge as hostBridge } from './bridge';
 import { parseExtensionUrl } from '../../../shared/extension-url';
 import { fetchRemoteMedia, type AdmitDownload, type ImportUrl } from './remote-media';
 import { touchedDocument, writeDocument } from '../engine-doc/write';
+import { assetAudio, assetSource } from './live-media';
+import { createRasterCompat, TICKS_PER_SECOND } from './raster-compat';
+import { compatContext, createCompatContextHost } from './compat-context';
 import { runCommandWhenReady } from '../engine-doc/readiness';
 
 type LegacyPM = Record<string, any>;
@@ -385,12 +388,15 @@ function makeMedia(PM: LegacyPM): MediaAPI {
         const asset = PM?.assets?.get?.(id);
         if (PM?.EngineDoc?.enabled && asset?.object3d && !warnedObject3dAssets.has(id)) {
           warnedObject3dAssets.add(id);
-          console.warn('[agent] media.assets.get(id).object3d is deprecated; use scene3d APIs for new extensions. The compatibility Object3D remains available for apiVersion 1–3.');
+          console.warn('[agent] media.assets.get(id).object3d is deprecated; use api.scene3d.describe(layerId) in new code. The compatibility Object3D keeps working at apiVersion 1–3.');
         }
         return asset;
       },
       add: (...args) => PM?.assets?.add?.(...args) ?? Promise.resolve(undefined),
-      kind: (file) => PM?.assetKind?.(file) ?? null
+      kind: (file) => PM?.assetKind?.(file) ?? null,
+      // The replacements of the deprecated live fields (live-media.ts).
+      source: (id, options) => assetSource(PM, id, options),
+      audio: (id, options) => assetAudio(PM, id, options)
     },
     get fonts() { return PM?.Fonts ?? emptyFonts; }
   } as MediaAPI;
@@ -410,15 +416,56 @@ function rasterHost(PM: LegacyPM): RasterHost {
   };
 }
 
+/**
+ * The identity of a layer's base pixels for the raster override's cache, or
+ * null when they may change with time alone. Today's raster cache
+ * (`legacy/gl/raster.ts` `PM.raster`) keys plain text and plain shapes by
+ * their resolved content and density, never by composition time, and hands
+ * every caller the same surface: a rotating shape or a typewriter's
+ * unchanged source text is rasterized once. Paths, text animators and
+ * styles, and font anchoring depend on time beyond the content, and
+ * captions on the cue, so they are never cached. A layer of the document
+ * is keyed by its composition and id as well; a detached copy a wrapper
+ * rasterizes (a typed prefix) by its content alone, as today.
+ */
+export function rasterContentKey(PM: LegacyPM, layer: any, scale: number, time: number, crop?: { x: number; y: number; width: number; height: number } | null): string | null {
+  const d = layer?.d;
+  if (!d || typeof d !== 'object') return null;
+  if (layer.type === 'shape') { if (d.paths?.length) return null; }
+  else if (layer.type === 'text') { if (d.animators?.length || d.styles?.length || d.fontAnchorBounds || d.paths?.length) return null; }
+  else return null;
+  const evaluator = native(PM);
+  if (!evaluator) return null;
+  const where = rasterHost(PM).locate(layer);
+  const owner = where.own ? ['own', where.composition, String(layer.id ?? '')] : ['detached'];
+  try {
+    return JSON.stringify([layer.type, owner, evaluator.resolveContent(layer, time), scale, crop ?? null]);
+  } catch {
+    return null;
+  }
+}
+
 /** The engine's raster in today's shape, or null (logged) when it fails. */
 function engineRasterBase(PM: LegacyPM, engine: NonNullable<ReturnType<typeof engineRender>>, args: Parameters<RenderAPI['raster']>): ReturnType<RenderAPI['raster']> {
+  // Today's `PM.raster(L, scale = 1, ...)` uses any other scale as given
+  // (zero and negatives too); the transport maps it (`layerRasterScale`).
   const [layer, scale = 1, time, , crop] = args;
   try {
-    return engineRasterSync(engine, rasterHost(PM), layer, Number(scale) || 1, time ?? PM?.time ?? 0, crop as RasterCrop) as ReturnType<RenderAPI['raster']>;
+    return engineRasterSync(engine, rasterHost(PM), layer, Number(scale), time ?? PM?.time ?? 0, crop as RasterCrop) as ReturnType<RenderAPI['raster']>;
   } catch (error) {
     console.warn(`[engine] render.raster(${String((layer as any)?.id ?? '')}) failed: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
+}
+
+/** The canvas the last `render.gl.init` got (one per window, as `GL.init`). */
+const initCanvas: { current: HTMLCanvasElement | null } = { current: null };
+
+/** Binds the engine's presentation to the canvas `init` got before the engine connection installed. */
+export function bindLate(PM: LegacyPM, canvas: HTMLCanvasElement | null): boolean {
+  const binding = PM?.EngineCanvas;
+  if (!binding || !canvas || binding.bound || !canvas.isConnected) return false;
+  return binding.bind?.(canvas) === true;
 }
 
 function makeRender(PM: LegacyPM): RenderAPI {
@@ -427,7 +474,9 @@ function makeRender(PM: LegacyPM): RenderAPI {
      off; the pixels are the engine's with "Use New Engine" on. */
   const placed = (surface: ReturnType<RenderAPI['raster']>, args: Parameters<RenderAPI['raster']>) => {
     const n = native(PM);
-    if (!n || !surface || (args[1] ?? 1) !== 1) return surface;
+    // A wrapper owns its returned geometry: it may have rasterized a
+    // detached layer with different content or deliberately moved its anchor.
+    if (!n || !surface || (args[1] ?? 1) !== 1 || PM?.RasterCompat?.wrapped?.()) return surface;
     return n.rasterSurface(surface, args[0], args[2] ?? PM?.time ?? 0);
   };
   const raster = (...args: Parameters<RenderAPI['raster']>) => {
@@ -449,16 +498,32 @@ function makeRender(PM: LegacyPM): RenderAPI {
          until it is removed. */
       init: (canvas, options) => {
         const legacy = !!PM?.GL?.init?.(canvas, options);
+        initCanvas.current = canvas;
         return PM?.EngineCanvas?.bind?.(canvas) === true || legacy;
       },
       resize: (width, height, viewport) => {
         const legacy = !!PM?.GL?.resize?.(width, height, viewport);
+        // A viewer that called `init` before the engine connection was up
+        // (frozen viewers call it once, at mount) is bound now.
+        bindLate(PM, initCanvas.current);
         PM?.EngineCanvas?.resize?.(width, height, viewport);
         return legacy || !!PM?.EngineCanvas?.bound;
       },
       compileError: (key) => PM?.GL?.compileError?.(key) ?? null,
       get previewViewport() { return PM?.GL?.previewViewport ?? null; },
-      get context() { return PM?.GL?.gl ?? null; }
+      /* The canvas `init` bound (the engine's binding with the new engine on,
+         the compositor's otherwise). */
+      get canvas() {
+        // Its pixels hold any drawing into the compatibility context (compat-context.ts).
+        PM?.CompatContext?.flush?.();
+        // `GL.canvas` first: reading `GL.gl` allocates a deferred legacy
+        // context (compositor.ts), which a canvas lookup must not do.
+        return (PM?.EngineCanvas?.bound ?? PM?.GL?.canvas ?? (PM?.GL?.peekContext ? null : PM?.GL?.gl?.canvas) ?? null) as HTMLCanvasElement | null;
+      },
+      /* The compatibility context: null until a viewer called `init`; with
+         the engine on, a WebGL2 context on an offscreen canvas that reads the
+         presented frame back and composites its drawing (compat-context.ts). */
+      get context() { return compatContext(PM); }
     },
     raster,
     textLayout: (layer, time) => { const n = native(PM); const t = time ?? PM?.time ?? 0; return (n ? n.textLayout(layer, t) : PM?.textCaretLayout?.(layer, t)) ?? null; },
@@ -503,7 +568,9 @@ function makeRender(PM: LegacyPM): RenderAPI {
       const engine = engineRender(PM);
       const args = [layer, scale, time, undefined, crop ?? undefined] as Parameters<RenderAPI['raster']>;
       if (!engine) return raster(...args);
-      const wrapped = !!PM?.Kernel?.services?.get?.('raster') && PM.Kernel.services.get('raster') !== PM?.__rasterBase;
+      // A wrapper (a service registration, or a deprecated `PM.raster`
+      // assignment through `host.pm`) runs around the engine's raster.
+      const wrapped = PM?.RasterCompat?.wrapped?.() ?? (!!PM?.Kernel?.services?.get?.('raster') && PM.Kernel.services.get('raster') !== PM?.__rasterBase);
       if (wrapped) return raster(...args);
       const t = time ?? PM?.time ?? 0;
       return placed((await engineRaster(engine, rasterHost(PM), layer, Number(scale) || 1, t, crop as RasterCrop)) as ReturnType<RenderAPI['raster']>, args);
@@ -938,18 +1005,129 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
   // can capture/delegate to it without changing the base beneath themselves.
   const rasterDescriptor = Object.getOwnPropertyDescriptor(PM, 'raster');
   let nativeRaster = PM.raster;
+  /* With "Use New Engine" on, a registered wrapper makes the window the
+     engine's raster override producer (raster-compat.ts): the engine asks
+     for each text, captions, and shape layer, and the chain runs over lazy
+     engine rasters. */
+  /* `PM.raster` as an extension reaches it through the deprecated
+     `api.host.pm` (apiVersion 1 to 3): today the compositor calls whatever
+     it holds, so a function assigned there wraps everything beneath it
+     (`rasterDispatch`: the services chain over the base). It is an
+     accessor so the engine's producer hears such an assignment. */
+  let assignedRaster: unknown = null;
+  const assignedListeners = new Set<() => void>();
+  const legacyWrapper = (): RenderAPI['raster'] | null =>
+    typeof assignedRaster === 'function' && assignedRaster !== rasterDispatch ? assignedRaster as RenderAPI['raster'] : null;
+  const rasterCompat = createRasterCompat(PM, {
+    isBase: (fn) => fn === rasterBase,
+    // Today's call order: an assigned `PM.raster` outermost, then the
+    // services chain (LIFO), then the base.
+    chain: () => legacyWrapper() ?? kernel.services.get<RenderAPI['raster']>('raster'),
+    onChainChange: (fn) => {
+      const services = kernel.services.onChange('raster', fn);
+      assignedListeners.add(fn);
+      return { dispose: () => { services.dispose(); assignedListeners.delete(fn); } };
+    },
+    engineRaster: (layer, scale, time, crop) => {
+      const engine = engineRender(PM);
+      return engine ? engineRasterBase(PM, engine, [layer as Layer, scale, time, undefined, crop as RasterWindow | undefined]) : null;
+    },
+    rasterKey: (layer, scale, time, crop) => rasterContentKey(PM, layer, scale, time, crop),
+    engineRasterAsync: async (layer, scale, time, crop) => {
+      const engine = engineRender(PM);
+      if (!engine) return null;
+      return await engineRasterPrepared(engine, rasterHost(PM), layer, scale, time, crop as RasterCrop);
+    }
+  });
   const rasterBase: RenderAPI['raster'] = (...args) => {
+    if (rasterCompat.producing) return rasterCompat.base(args);
     const engine = publicRaster > 0 ? engineRender(PM) : null;
     return engine ? engineRasterBase(PM, engine, args) : (nativeRaster?.(...args) ?? null);
   };
   PM.__rasterBase = rasterBase;
   const rasterRegistration = kernel.services.register('raster', rasterBase);
+  rasterCompat.reset();
+  PM.RasterCompat = rasterCompat;
+  if (PM.EngineRender) subscriptions.push(rasterCompat.attach(PM.EngineRender));
+  subscriptions.push(() => {
+    rasterCompat.dispose();
+    if (PM.RasterCompat === rasterCompat) PM.RasterCompat = null;
+  });
+  /* `render.gl.context` with the engine on: a WebGL2 context on an
+     offscreen canvas (compat-context.ts). It hears each presented frame
+     before any extension hears `frame:rendered` (this subscription is made
+     before the bus is forwarded below), so drawing in a `frame:rendered`
+     handler lands on the new frame, as today. */
+  /* The engine connection installs after the kernel: a viewer that already
+     called `render.gl.init` gets its presentation as soon as it does. */
+  {
+    // After the task: the connection sets `PM.EngineCanvas` right after it announces the service.
+    const late = () => queueMicrotask(() => { if (bindLate(PM, initCanvas.current)) PM?.EngineCanvas?.resize?.(); });
+    if (typeof window !== 'undefined') {
+      window.addEventListener('powermove:engine-viewer-changed', late);
+      subscriptions.push(() => window.removeEventListener('powermove:engine-viewer-changed', late));
+    }
+  }
+  const compatContextHost = createCompatContextHost(PM);
+  PM.CompatContext = compatContextHost;
+  /** The viewport the last presented frame carried (today's export frames
+   *  emitted `GL.previewViewport` as it stood). */
+  let presentedViewport: unknown = null;
+  {
+    const off = PM?.bus?.on?.('preview:presented', (frame: { viewport?: unknown } | undefined) => {
+      presentedViewport = frame?.viewport ?? null;
+      compatContextHost.presented();
+    });
+    if (typeof off === 'function') subscriptions.push(off);
+  }
+  /* WebM exports with the engine: each frame comes here before it is
+     encoded, and `frame:rendered` runs over it in the compatibility
+     context, as today's `renderInto` frames did (compat-context.ts). The
+     engine connection installs after the kernel and attaches its
+     transport (engine-connection/install.ts). */
+  const contextExports = {
+    attach(transport: import('../engine-connection/render-transport').EngineRenderTransport): () => void {
+      transport.contextActive = () => compatContextHost.active;
+      const unprovide = transport.provideCompat('compatContext', (request) => {
+        const frame = request.frame;
+        if (!frame) return null;
+        if (frame.payload.kind !== 'inline') throw new Error('The export frame did not reach this window.');
+        const width = Number(frame.width), height = Number(frame.height);
+        const time = Number(request.time) / TICKS_PER_SECOND;
+        const drawn = compatContextHost.exportFrame({ width, height, data: frame.payload.bytes }, () =>
+          kernel.events.emit('frame:rendered', { time, viewport: (presentedViewport ?? null) as any, version: PM.animVersion?.(), quality: 1 }));
+        return drawn ? { key: `compat-context:${String(request.time)}`, width, height, format: 'rgba8Premultiplied', origin: [0, 0], scale: 1, data: drawn } : 'native';
+      });
+      return () => {
+        unprovide();
+        if (transport.contextActive) transport.contextActive = null;
+      };
+    }
+  };
+  PM.CompatContextExports = contextExports;
+  if (PM.EngineRender?.provideCompat) subscriptions.push(contextExports.attach(PM.EngineRender));
+  subscriptions.push(() => { if (PM.CompatContextExports === contextExports) PM.CompatContextExports = null; });
+  subscriptions.push(() => {
+    compatContextHost.dispose();
+    if (PM.CompatContext === compatContextHost) PM.CompatContext = null;
+  });
   const rasterDispatch: RenderAPI['raster'] = (...args) =>
     (kernel.services.get<RenderAPI['raster']>('raster') ?? rasterBase)(...args);
+  const assignRaster = (value: unknown) => {
+    if (value === assignedRaster) return;
+    assignedRaster = value;
+    for (const fn of [...assignedListeners]) {
+      try { fn(); } catch (error) { console.error('[raster] a raster change listener failed', error); }
+    }
+  };
   const attachRaster = (value: any) => {
     nativeRaster = value;
+    assignedRaster = rasterDispatch;
+    // Reads and writes behave as the plain writable property they were
+    // (`const raster = PM.raster; PM.raster = wrapper`; restoring it puts
+    // `rasterDispatch` back); the setter tells the engine's producer.
     Object.defineProperty(PM, 'raster', {
-      configurable: true, enumerable: true, writable: true, value: rasterDispatch
+      configurable: true, enumerable: true, get: () => assignedRaster, set: assignRaster
     });
   };
   if (typeof nativeRaster === 'function') attachRaster(nativeRaster);

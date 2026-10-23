@@ -55,6 +55,21 @@ describe('external Powermove MCP sessions', () => {
     expect(root).toContain('powermove-mcp');
   });
 
+  it('returns deprecated compatibility API uses from publish_extensions and still publishes', async () => {
+    const { root, session } = await setup();
+    const opened: any = await session.call('start_session', { prompt: 'Make an extension' });
+    const dir = path.join(opened.stagingDirectory, 'frame-grab');
+    await mkdir(dir);
+    await writeFile(path.join(dir, 'manifest.json'), JSON.stringify({ id: 'frame-grab', name: 'Frame grab', version: '1.0.0', apiVersion: 3, contributes: ['commands'] }));
+    await writeFile(path.join(dir, 'index.ts'), 'export default function activate(api) {\n  const gl = api.render.gl.context;\n}\n');
+    const published: any = await session.call('publish_extensions', { extensions: [{ id: 'frame-grab', action: 'created', summary: 'Grab' }] });
+    expect(published.changeSetId).toEqual(expect.any(String));
+    expect(published.deprecations).toEqual([expect.objectContaining({ extension: 'frame-grab', file: 'index.ts', line: 2, member: 'render.gl.context' })]);
+    expect(published.guidance).toMatch(/only when the user agrees/);
+    expect((await stat(path.join(root, 'extensions', 'frame-grab', 'index.ts'))).isFile()).toBe(true);
+    await session.call('finish_session', { commit: true });
+  });
+
   it('enforces planning access and blocks project switching during an active session', async () => {
     const { session } = await setup();
     await session.call('start_session', { prompt: 'Inspect', access: 'editor' });

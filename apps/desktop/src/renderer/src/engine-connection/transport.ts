@@ -73,6 +73,10 @@ export class EngineTransport implements TransportDriver {
   private live = false;
   /** The playhead as last asked or reported (seconds). */
   private lastTime = 0;
+  /** The last seek sent (its session and ticks), until a play or pause. */
+  private seekSent: { session: DocumentSession | null; time: number } | null = null;
+  /** The clock sample current when a play or pause was last sent. */
+  private movedAfter: { session: DocumentSession | null; epoch: number | null; seq: number | null } | null = null;
 
   constructor(
     private readonly session: () => DocumentSession | null,
@@ -142,7 +146,15 @@ export class EngineTransport implements TransportDriver {
 
   private send(command: TransportCommand): void {
     this.options.prepare?.();
-    this.session()?.transport(command);
+    const s = this.session();
+    s?.transport(command);
+    // Where the line was last sent, or the clock sample a move was sent
+    // after (until a newer sample, the window does not know where it rests).
+    if (command.command === 'seek') this.seekSent = { session: s, time: command.time };
+    else if (command.command === 'play' || command.command === 'pause' || command.command === 'playAround') {
+      this.seekSent = null;
+      this.movedAfter = { session: s, epoch: s?.clock?.epoch ?? null, seq: s?.clock?.seq ?? null };
+    }
   }
 
   play(time: number): void {
@@ -168,7 +180,16 @@ export class EngineTransport implements TransportDriver {
     const moving = !!clock && clock.state !== 'stopped' && clock.rate.num !== 0;
     this.run = { before: clock?.epoch ?? null, played: false };
     // A rate change while the engine plays continues from what is heard.
-    if (!moving) this.send({ command: 'seek', time: ticks(time), mode: 'exact' });
+    // A stopped line already resting at `time` is not sent there again: the
+    // engine would draw and present that paused frame once more just before
+    // the run presents it, and extensions would hear `frame:rendered` for
+    // it twice, where today's Play renders it once.
+    const target = ticks(time);
+    const sampledSinceMove = !this.movedAfter || this.movedAfter.session !== s
+      || this.movedAfter.epoch !== (clock?.epoch ?? null) || this.movedAfter.seq !== (clock?.seq ?? null);
+    const resting = !moving && !!clock && clock.mediaTime === target
+      && (this.seekSent !== null ? this.seekSent.session === s && this.seekSent.time === target : sampledSinceMove);
+    if (!moving && !resting) this.send({ command: 'seek', time: target, mode: 'exact' });
     this.send({ command: 'play', rate: { num: rate, den: 1 } });
   }
 

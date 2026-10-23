@@ -126,6 +126,9 @@ export type SheetExportOptions = {
   hideCaptions?: boolean;
   /** "Render using: Proxies (draft)" (section 14.8). */
   draft?: boolean;
+  /** Compatibility producers the exporting window has (a registered
+   *  `raster` override): the job asks the window for those layers. */
+  compat?: import('./engine-protocol').CompatSource[];
 };
 
 /** Checks the shape and limits of sheet export options (IPC input). */
@@ -260,12 +263,20 @@ export type EngineSnapshotRequest = {
   /** Shader fallback pixels drawn for an earlier `needsRenderer` answer of
    *  a `document` snapshot (a window's own session gets them on its port). */
   fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];
+  /** The window's compatibility events for a `document` snapshot (its
+   *  producers, and its answers to an earlier `needsRenderer` round's
+   *  `compat` needs): main posts them on its session for the window before
+   *  the snapshot, as the window's own session gets them on its port. */
+  compatEvents?: EngineCompatEvent[];
   /** Level 1 SVG rasters (premultiplied RGBA8, top-down) drawn for an
    *  earlier `needsRenderer` answer of a `document` snapshot: main posts
    *  them on its session for the window before asking again (the window
    *  may have no session of its own yet; decision S1). */
   svgPixels?: { key: import('./engine-protocol').SvgRasterKey; data: Uint8Array }[];
 };
+
+/** A `compat` session event (pm_protocol `CompatMessage`) a window sends. */
+export type EngineCompatEvent = { type: 'compat'; compat: 'producers' | 'native' | 'reuse' | 'pixels' } & Record<string, unknown>;
 
 export type EngineSnapshotDocument = { id: string; revision: number; hash?: string | null; json?: Uint8Array | null };
 
@@ -314,7 +325,14 @@ export type EngineSnapshotReply =
 
 /** main → renderer: compatibility pixels the job engine needs for an export
  *  frame (contract 14 `compatFrame`). */
-export type EngineCompatAsk = { ask: number; request: import('./engine-protocol').CompatFrameRequest };
+export type EngineCompatAsk = {
+  ask: number;
+  request: import('./engine-protocol').CompatFrameRequest;
+  /** The layer as the export's snapshot holds it (JSON), when main has
+   *  the snapshot: the window draws that layer, not its live one (a render
+   *  queue job renders the project as queued, as today's queue did). */
+  layer?: string;
+};
 
 /** A window's `unavailable` answer when another document is open there:
  *  main keeps the more useful reason (the named S1 message, or another
@@ -323,7 +341,11 @@ export const OTHER_DOCUMENT_OPEN = 'This window has another document open.';
 
 /** renderer → main: the answer to an `EngineCompatAsk`. */
 export type EngineCompatAnswer =
-  | { ask: number; status: 'pixels'; key: string; width: number; height: number; format: import('./engine-protocol').CompatFormat; origin: [number, number]; scale: number; data: Uint8Array }
+  | { ask: number; status: 'pixels'; key: string; width: number; height: number; format: import('./engine-protocol').CompatFormat; origin: [number, number]; scale: number; data: Uint8Array;
+      /** The quad in layer pixels and the part of the raster it samples (today's `w`, `h`, `uv`). */
+      size?: [number, number]; uv?: [number, number, number, number] }
+  /** The producer passed the layer through: the job draws it itself. */
+  | { ask: number; status: 'native' }
   | { ask: number; status: 'unavailable'; message: string };
 
 /** The renderer's view (`window.powermove.nativeEngine`, present on the

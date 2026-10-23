@@ -15,7 +15,10 @@ export async function mcpProjectTool(PM: PMRegistry, tool: string, args: Record<
     empty.parse(args);
     const project = PM.proj, home = PM.isHomeProject?.() === true;
     await PM.HostMedia?.flushBindings(project);
-    return { projectId: project.id, projectName: project.name, projectJSON: agentProjectSnapshot(project), home };
+    // The window's compatibility producers (a `raster` override): an engine
+    // export of this project asks this window for those layers (kernel/raster-compat.ts).
+    const compat = Array.isArray((PM as any).EngineRender?.producing) ? [...(PM as any).EngineRender.producing] : [];
+    return { projectId: project.id, projectName: project.name, projectJSON: agentProjectSnapshot(project), home, compat };
   }
   if (tool === '__mcp_list_projects') {
     empty.parse(args); return { currentProjectId: PM.isHomeProject?.() ? null : PM.proj.id, projects: PM.Projects.list() };

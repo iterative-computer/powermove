@@ -225,8 +225,41 @@ fn build_options(
         sampling: request.sampling,
         shader_fallback,
         video_end: request.video_end,
+        preview: preview_window(comp, request),
         origin: request.origin,
     }
+}
+
+/// The viewer's source-clipping window in a preview of the open root
+/// composition: today's `canClipPreviewSources` (`crate::compat_crop`). A
+/// supplied canvas includes its pan buffer, even when presentation only
+/// draws a smaller region. Without a canvas, the region is the window.
+fn preview_window(
+    comp: &Comp<'_>,
+    request: &RenderRequest,
+) -> Option<crate::compat_crop::PreviewWindow> {
+    if request.export
+        || !(comp.at_root() || comp.is_open_canonical())
+        || !matches!(request.video_end, crate::request::VideoEnd::Preview)
+    {
+        return None;
+    }
+    let r = if request.preview_canvas {
+        pm_protocol::common::PixelRect {
+            x: 0,
+            y: 0,
+            width: request.output_size.width,
+            height: request.output_size.height,
+        }
+    } else {
+        request.region?
+    };
+    Some(crate::compat_crop::PreviewWindow {
+        x: f64::from(r.x),
+        y: f64::from(r.y),
+        width: f64::from(r.width),
+        height: f64::from(r.height),
+    })
 }
 
 /// The renderer.
@@ -260,6 +293,8 @@ pub struct Renderer {
     explicit_meshes: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
     text: crate::text::TextContext,
     text_gpu: crate::text::gpu::TextGpu,
+    /// The session's compatibility rasters (`crate::compat`).
+    compat: Option<Arc<dyn crate::compat::CompatRasters>>,
     /// Layer draws kept across frames of one paused time
     /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
     reuse: crate::reuse::DrawReuse,
@@ -375,6 +410,7 @@ impl Renderer {
             shaders: Default::default(),
             fallback_host: None,
             explicit_meshes: Default::default(),
+            compat: None,
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
             prefix: Default::default(),
@@ -384,6 +420,14 @@ impl Renderer {
             frame_reuse: FrameReuse::default(),
             binds: crate::binds::BindCache::default(),
         }
+    }
+
+    /// The compatibility rasters frames draw from (`crate::compat`): with a
+    /// producer for a source, the layers it draws ask it, and a frame whose
+    /// answers have not arrived fails with [`RenderError::CompatPending`].
+    /// `None` (the default): every layer is the engine's own.
+    pub fn set_compat_rasters(&mut self, compat: Option<Arc<dyn crate::compat::CompatRasters>>) {
+        self.compat = compat;
     }
 
     /// Whether [`Renderer::render_into`] plans with the layer draws kept
@@ -1701,6 +1745,7 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             blender,
+            self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
         if !request.background {
@@ -1717,6 +1762,9 @@ impl Renderer {
         let mut failures = build.failures;
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
+        }
+        if !build.compat_missing.is_empty() {
+            return Err(RenderError::CompatPending(build.compat_missing));
         }
         let region = request.region.map(|r| Region {
             x: r.x,
@@ -2283,6 +2331,7 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             crate::blender::PlanState::collecting(preview, options),
+            self.compat.as_deref(),
             None,
         );
         Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
@@ -2327,6 +2376,7 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             blender,
+            self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
         if !build.unsupported.is_empty() {

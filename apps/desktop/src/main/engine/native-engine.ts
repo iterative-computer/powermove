@@ -106,9 +106,11 @@ export type NativeEngineOptions = {
   now?: () => number;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
   /** The job engine's `compatFrame` requests: a layer's compatibility
-   *  pixels drawn by the document's window (compat-frames.ts). Without it
-   *  they answer `notHeadlessRenderable`. */
-  compatFrame?: (request: import('../../shared/engine-protocol').CompatFrameRequest) => Promise<Response>;
+   *  pixels drawn by the document's window (compat-frames.ts).
+   *  `session`: the job engine's session (its export snapshot's layers),
+   *  `null` for the interactive engine. Without it they answer
+   *  `notHeadlessRenderable`. */
+  compatFrame?: (request: import('../../shared/engine-protocol').CompatFrameRequest, session: number | null) => Promise<Response>;
   /** Runs a job engine fallback request in a window's runner
    *  (`shader-fallback-relay.ts`); without it such requests answer
    *  `unsupported` and the job fails naming the program. */
@@ -794,7 +796,7 @@ export class NativeEngine {
           }
           if (!this.options.compatFrame) return Promise.reject(new ProtocolError('notHeadlessRenderable', 'This host draws no compatibility frames.'));
           const { type: _type, ...request } = body;
-          return this.options.compatFrame(request);
+          return this.options.compatFrame(request, process === 'job' ? session ?? null : null);
         }
         return this.services.serve(process, current.hostPort, body, session);
       },
