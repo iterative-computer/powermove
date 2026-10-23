@@ -32,9 +32,10 @@ export type StoreRequest =
   | { op: 'delete'; id: number; key: string }
   /** One entry for a project's journal (SAVE-1, project-durability.ts). */
   | { op: 'append'; id: number; key: string; serialized: string }
-  /** Re-persist bytes main already published, after a replacement engine starts.
-   *  `closed`: a project journal that refused an entry (project-durability.ts). */
-  | { op: 'restore'; id: number; key: string; bytes: Uint8Array | null; closed?: boolean }
+  /** Re-persist bytes main already published, after a replacement engine starts. */
+  | { op: 'restore'; id: number; key: string; bytes: Uint8Array | null }
+  /** Main closes or reopens a project's journal (SAVE-1b, storage.ts). */
+  | { op: 'journal'; id: number; key: string; open: boolean }
   | { op: 'flush'; id: number };
 
 /** Engine to main. */
@@ -46,8 +47,6 @@ export type StoreReply =
   | { type: 'rejected'; id: number; key: string; channel: string; detail: string }
   /** The committed operation `id` reached disk. */
   | { type: 'written'; id: number; key: string }
-  /** A project journal closed by a refused entry accepts entries again (a slot holding that edit landed). */
-  | { type: 'reopened'; key: string }
   | { type: 'flushed'; id: number }
   | { type: 'failed'; id: number; error: string }
   /** `unsaved`: a write the engine committed did not reach disk. */
@@ -85,6 +84,10 @@ export function storeByteLimit(key: string): number {
 }
 
 const encoder = new TextEncoder();
+/* Windows flushes a file (FlushFileBuffers) only through a handle opened for
+   writing; a read-only one fails with EPERM. fsync works on a read-only
+   descriptor on macOS and Linux. */
+const SYNC_FLAGS = process.platform === 'win32' ? 'r+' : 'r';
 
 export class StoreEngine {
   private readonly pending = new Map<string, PendingWrite>();
@@ -118,7 +121,6 @@ export class StoreEngine {
       randomId: () => options.randomSuffix(),
       persist: (key, data) => this.persist(key, data === null ? { id: 0, kind: 'delete' } : { id: 0, kind: 'set', data }),
       barrier: key => this.barrier(key),
-      reopened: key => this.reply({ type: 'reopened', key }),
       // id 0: a write no request waits for (a journal shrunk after its slot landed); it still tells main the key is on disk.
       written: (id, key) => this.reply({ type: 'written', id, key }),
       failed: (key, error) => this.reply({ type: 'error', key, error: errorText(error), unsaved: true }),
@@ -141,13 +143,25 @@ export class StoreEngine {
 
   private run(request: StoreRequest): Promise<void> | undefined {
     // A replacement engine reads a project's slot head and journal before touching it.
+    // Main's close or reopen applies at once, read or not.
+    if (request.op === 'journal') {
+      if (isJournalKey(request.key)) { if (request.open) this.projects.open(request.key); else this.projects.close(request.key); }
+      return undefined;
+    }
     const key = 'key' in request ? request.key : null;
     const reading = key === null ? undefined : this.projects.ready(key);
     if (reading && key !== null) {
       return reading.then(() => this.run(request), error => {
         // A dropped restore is a write main had accepted that is not on disk: reported like a failed write.
-        if (request.op === 'restore') this.reply({ type: 'error', key, error: `not saved: the project could not be read: ${errorText(error)}`, unsaved: true });
-        else this.reply({ type: 'rejected', id: request.id, key, channel: IPC.storeSet, detail: `the project could not be read: ${errorText(error)}` });
+        if (request.op === 'restore') {
+          this.projects.replayedSeq(key, request.bytes);
+          this.reply({ type: 'error', key, error: `not saved: the project could not be read: ${errorText(error)}`, unsaved: true });
+        }
+        else {
+          // An entry it could not take: later ones, already on their way, are refused too.
+          if (request.op === 'append') this.projects.readFailed(key);
+          this.reply({ type: 'rejected', id: request.id, key, channel: IPC.storeSet, detail: `the project could not be read: ${errorText(error)}` });
+        }
       });
     }
     switch (request.op) {
@@ -191,11 +205,7 @@ export class StoreEngine {
       }
       case 'restore':
         if (isSlotKey(request.key)) { this.projects.restoreSlot(request.id, request.key, request.bytes); return undefined; }
-        if (isJournalKey(request.key)) {
-          if (request.closed) this.projects.restoreClosed(request.key);
-          this.projects.restoreJournal(request.id, request.key, request.bytes);
-          return undefined;
-        }
+        if (isJournalKey(request.key)) { this.projects.restoreJournal(request.id, request.key, request.bytes); return undefined; }
         if (request.key.startsWith('projectState.')) this.sessions.set(request.key, request.bytes && Buffer.from(request.bytes).toString('utf8'));
         this.schedule(request.key, request.bytes ? { id: request.id, kind: 'set', data: request.bytes } : { id: request.id, kind: 'delete' });
         return undefined;
@@ -406,7 +416,7 @@ export class StoreEngine {
       // Atomic replacement sequence: write a sibling temporary file, open and
       // fsync that file, close it, then rename it over the destination.
       await fs.writeFile(temporaryPath, operation.data, { encoding: 'utf8', flag: 'wx' });
-      const handle = await fs.open(temporaryPath, 'r');
+      const handle = await fs.open(temporaryPath, SYNC_FLAGS);
       try {
         await handle.sync();
       } finally {
@@ -432,7 +442,7 @@ export class StoreEngine {
      cannot open a directory for syncing; NTFS journals the rename. */
   private async barrier(key: string): Promise<void> {
     const { fs } = this.options;
-    const file = await fs.open(path.join(this.directory, this.fileNameFor(key)), 'r');
+    const file = await fs.open(path.join(this.directory, this.fileNameFor(key)), SYNC_FLAGS);
     try { await file.sync(); } finally { await file.close(); }
     if (process.platform === 'win32') return;
     const directory = await fs.open(this.directory, 'r');

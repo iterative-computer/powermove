@@ -20,12 +20,14 @@
  *   file is rewritten whole (atomically) from `entries`, independently of the
  *   slot writes: whatever slot a crash leaves, the entries after it are on
  *   disk once their journal write has landed.
- * - Once an entry is refused (the journal at the store's limit, or malformed),
- *   the journal is closed: every later entry is refused too, until a slot
- *   write numbered after the LAST refused entry (so holding every refused
- *   edit) lands. Accepting a later, smaller entry would leave a gap: a
- *   document that never existed. The window therefore keeps sending every
- *   entry while the journal is closed, so main knows the last refusal.
+ * - A journal entry that is not written durably leaves a gap: accepting a
+ *   later, smaller one would recover a document that never existed. Main's
+ *   FileStore owns that rule (SAVE-1b, storage.ts): any append that does not
+ *   end in an acknowledged write closes the project's journal there, and only
+ *   a slot posted after the latest such edit, once it has landed, reopens it
+ *   (`open`). This engine closes the journal itself the moment it refuses an
+ *   entry or cannot read the project for one, so appends already on their way
+ *   are refused too, and it reopens only when main says so.
  * - Before the journal shrinks after a slot lands, the slot file and its
  *   directory are synced (one barrier per checkpoint, `barrier`), so a power
  *   loss cannot leave the shrunk journal beside the older slot.
@@ -64,8 +66,8 @@ type State = {
   acks: number[];
   /** A journal write failed: retried at the next append, slot write or flush, not at once. */
   journalHeld: boolean;
-  /** An entry was refused when the sequence stood here: every later one is, until a slot numbered after it lands. */
-  closedAt?: number;
+  /** Entries are refused (an earlier one was not written), until main reopens the journal. */
+  closed?: boolean;
   timer?: ReturnType<typeof setTimeout>;
   reading?: Promise<void>;
   /** What the running writes will do when they finish (for the model check's state key). */
@@ -84,8 +86,7 @@ export interface DurabilityHost {
   persist(key: string, data: string | Uint8Array | null): Promise<void>;
   /** Syncs a landed file and its directory to stable storage (an ordering barrier). */
   barrier(key: string): Promise<void>;
-  /** A journal closed by a refused entry accepts entries again. */
-  reopened(key: string): void;
+
   written(id: number, key: string): void;
   failed(key: string, error: unknown): void;
   later(run: () => void, ms: number): ReturnType<typeof setTimeout>;
@@ -193,17 +194,27 @@ export class ProjectDurability {
   append(id: number, key: string, entry: unknown, limit: number): Uint8Array {
     const projectId = projectOf(key)!;
     const state = this.state(projectId);
-    if (state.closedAt !== undefined) {
-      // Every refused edit must be in the slot that reopens the journal.
-      state.closedAt = state.seq;
-      throw new Error('the project journal is closed after a refused entry until the project is saved');
-    }
+    if (state.closed) throw new Error('the project journal is closed after an entry that was not saved, until the project is saved');
     try { return this.accept(id, projectId, state, entry, limit); }
-    catch (error) { state.closedAt = state.seq; throw error; }
+    catch (error) { state.closed = true; throw error; }
   }
 
-  /** Whether entries are refused until a slot lands (main's FileStore keeps it across a worker replacement). */
-  closed(key: string): boolean { return this.states.get(projectOf(key)!)?.closedAt !== undefined; }
+  /** A replay the engine could not apply still numbered its writes: later ones never reuse those numbers. */
+  replayedSeq(key: string, bytes: Uint8Array | null): void {
+    if (!bytes) return;
+    const state = this.state(projectOf(key)!);
+    if (isSlotKey(key)) { state.seq = Math.max(state.seq, slotHead(Buffer.from(bytes.subarray(0, 512)).toString('utf8')).seq ?? 0); return; }
+    try {
+      const parsed: unknown = JSON.parse(Buffer.from(bytes).toString('utf8'));
+      if (Array.isArray(parsed)) for (const entry of parsed) if (isRecord(entry) && typeof entry.seq === 'number') state.seq = Math.max(state.seq, entry.seq);
+    } catch { /* not a journal: nothing numbered */ }
+  }
+
+  /** Main closes a project's journal (an entry it refused or lost), or reopens it (a slot holding every such edit landed). */
+  close(key: string): void { this.state(projectOf(key)!).closed = true; }
+  open(key: string): void { this.state(projectOf(key)!).closed = false; }
+  /** A replacement engine could not read the project for an entry. */
+  readFailed(key: string): void { const state = this.state(projectOf(key)!); state.closed = true; }
 
   private accept(id: number, projectId: string, state: State, serialized: unknown, limit: number): Uint8Array {
     const entry: unknown = typeof serialized === 'string' ? JSON.parse(serialized) : serialized;
@@ -222,12 +233,7 @@ export class ProjectDurability {
     return bytes;
   }
 
-  /** A replacement engine: the journal was closed (main remembers a refused entry). */
-  restoreClosed(key: string): void {
-    // Posted after every other restore: every slot write main replayed is numbered at or below it.
-    const state = this.state(projectOf(key)!);
-    state.closedAt = Math.max(state.closedAt ?? 0, state.seq);
-  }
+
 
   /** What main had not seen reach disk before the engine was replaced. */
   restoreSlot(id: number, key: string, bytes: Uint8Array | null): void {
@@ -284,7 +290,7 @@ export class ProjectDurability {
     const state = this.states.get(id);
     if (!state) return null;
     const slot = state.slot && { id: state.slot.id, seq: state.slot.seq, deleted: 'deleted' in state.slot, cp: 'deleted' in state.slot ? null : state.slot.cp, data: 'deleted' in state.slot ? null : String(typeof state.slot.data === 'string' ? state.slot.data : Buffer.from(state.slot.data).toString('utf8')) };
-    return { seq: state.seq, closedAt: state.closedAt ?? null, durable: state.durable, entries: state.entries, slot, journalDirty: state.journalDirty, journalHeld: state.journalHeld, acks: state.acks,
+    return { seq: state.seq, closed: !!state.closed, durable: state.durable, entries: state.entries, slot, journalDirty: state.journalDirty, journalHeld: state.journalHeld, acks: state.acks,
       writingSlot: state.slotTask ? state.writingSlot : null, writingAcks: state.journalTask ? state.writingAcks : null, reading: !!state.reading && (state.durable === undefined || state.entries === undefined) };
   }
 
@@ -337,11 +343,8 @@ export class ProjectDurability {
       this.host.failed(key, error);
       return;
     }
-    // A slot holding everything up to a refused entry reopens the journal.
-    if (state.closedAt !== undefined && slot.seq > state.closedAt) { state.closedAt = undefined; this.host.reopened(JOURNAL + id); }
     if ('deleted' in slot) {
       state.durable = null;
-      if (state.closedAt !== undefined) { state.closedAt = undefined; this.host.reopened(JOURNAL + id); }
       if (state.entries !== undefined || this.host.loaded()) { state.entries = []; state.journalDirty = true; state.journalHeld = false; }
     } else if (slot.cp === null) {
       // A bare project: no number on disk, so recovery replays every entry; keep those after it.

@@ -74,6 +74,8 @@ export interface StoreOptions {
   randomSuffix?: () => string;
   /** A project journal's byte limit (tests). */
   journalLimitBytes?: number;
+  /** One journal entry's byte limit, checked on this thread (tests; default the store's). */
+  journalEntryBytes?: number;
 }
 
 /**
@@ -131,9 +133,25 @@ class FileStore implements Store {
   private readonly unsettled = new Map<string, { id: number; present: boolean }>();
   /** Keys whose newest committed value has not reached disk yet. */
   private readonly unwritten = new Map<string, number>();
-  /** Keys whose last write failed to reach disk, until one of them reaches it.
-   *  `after`: a refused journal entry (request id), until a slot write posted after it lands. */
-  private readonly failing = new Map<string, { error: string; after?: number }>();
+  /** Keys whose last write failed to reach disk, until one of them reaches it. */
+  private readonly failing = new Map<string, string>();
+  /*
+   * SAVE-1b: the one place that decides whether a project journal takes
+   * entries. Any append that does not end in an acknowledged write (refused
+   * here for its size, refused by the engine, not readable in a replacement
+   * engine, lost when the worker stopped, or its journal write failing) leaves
+   * an edit missing from the journal; a later entry accepted over it recovers
+   * a document that never existed. So the journal is closed, at the request
+   * id of the latest such edit, and every later entry is refused here (moving
+   * that point), until a slot write posted after it has landed: its snapshot
+   * holds every one of those edits. The engine is told in order (`journal`),
+   * and a replacement engine is told before anything is replayed to it.
+   */
+  private readonly closedJournals = new Map<string, number>();
+  /** Restore request id → the id of the write it replays (a replayed slot reopens by the original). */
+  private readonly replayed = new Map<number, number>();
+  /** Appends the engine has not answered (a refusal of one closes its journal; a refused set or delete does not). */
+  private readonly appends = new Set<number>();
   private readonly waiters = new Map<number, Waiter>();
   private readonly listeners = new Set<(event: StoreErrorEvent) => void>();
   private nextId = 1;
@@ -141,7 +159,8 @@ class FileStore implements Store {
   constructor(
     private readonly directory: string,
     private readonly channel: StoreChannel,
-    private readonly writeDelayMs: number
+    private readonly writeDelayMs: number,
+    private readonly limits: { journalEntryBytes?: number } = {}
   ) {
     channel.onReply(reply => this.receive(reply));
     channel.onRestart?.(() => this.restarted());
@@ -211,8 +230,35 @@ class FileStore implements Store {
 
   appendJournal(key: string, serialized: string): Promise<void> {
     this.fileNameFor(key, IPC.storeAppendJournal);
-    if (typeof serialized !== 'string' || serialized.length > storeByteLimit(key)) throw new IpcValidationError(IPC.storeAppendJournal, 'journal entry exceeds its size limit');
-    return this.mutate(key, true, IPC.storeAppendJournal, id => ({ op: 'append', id, key, serialized }));
+    const refuse = (detail: string): Promise<void> => {
+      // This edit is not in the journal: the close point moves past it.
+      this.closeJournal(key, this.nextId++);
+      const refused = Promise.reject(new IpcValidationError(IPC.storeAppendJournal, detail));
+      refused.catch(() => undefined);
+      return refused;
+    };
+    if (this.closedJournals.has(key)) return refuse('the project journal is closed after an entry that was not saved, until the project is saved');
+    if (typeof serialized !== 'string' || serialized.length > this.entryLimit(key)) return refuse('journal entry exceeds its size limit');
+    const written = this.mutate(key, true, IPC.storeAppendJournal, id => { this.appends.add(id); return { op: 'append', id, key, serialized }; });
+    return written;
+  }
+
+  private entryLimit(key: string): number { return this.limits.journalEntryBytes ?? storeByteLimit(key); }
+
+  private closeJournal(key: string, after: number, post = true): void {
+    const was = this.closedJournals.get(key);
+    this.closedJournals.set(key, Math.max(was ?? 0, after));
+    if (was !== undefined || !post) return;
+    try { this.channel.post({ op: 'journal', id: this.nextId++, key, open: false }); } catch { /* the worker is gone; its replacement is told */ }
+  }
+
+  /** A slot write landed: a journal closed before it was posted holds nothing it lacks. */
+  private slotLanded(slotKey: string, id: number): void {
+    const key = `projectJournal.${slotKey.slice('project.'.length)}`;
+    const after = this.closedJournals.get(key);
+    if (after === undefined || id <= after) return;
+    this.closedJournals.delete(key);
+    try { this.channel.post({ op: 'journal', id: this.nextId++, key, open: true }); } catch { /* reopened when the replacement starts */ }
   }
 
   delete(key: string): Promise<void> {
@@ -224,7 +270,7 @@ class FileStore implements Store {
     await this.request(id => ({ op: 'flush', id }));
   }
 
-  failingKeys(): string[] { return [...this.failing.keys()]; }
+  failingKeys(): string[] { return [...new Set([...this.failing.keys(), ...this.closedJournals.keys()])]; }
 
   onError(cb: (event: StoreErrorEvent) => void): () => void {
     this.listeners.add(cb);
@@ -240,6 +286,7 @@ class FileStore implements Store {
       // JSON cannot represent either (functions, symbols, host objects).
       if (error instanceof Error && error.name === 'DataCloneError') throw new IpcValidationError(channel, `value is not JSON-serialisable: ${error.message}`);
       // The storage worker is gone for good; report it like a failed write.
+      if (key.startsWith('projectJournal.')) this.closeJournal(key, this.nextId++, false);
       this.emitError(key, errorText(error));
       const failed = Promise.reject(error);
       failed.catch(() => undefined);
@@ -272,11 +319,10 @@ class FileStore implements Store {
     if (reply.type === 'error') { this.emitError(reply.key, reply.error, reply.unsaved === true); return; }
     if (reply.type === 'written') {
       if (this.unwritten.get(reply.key) === reply.id) this.unwritten.delete(reply.key);
-      if (!this.failing.get(reply.key)?.after) this.failing.delete(reply.key);
-      return;
-    }
-    if (reply.type === 'reopened') {
       this.failing.delete(reply.key);
+      const original = this.replayed.get(reply.id) ?? reply.id;
+      this.replayed.delete(reply.id);
+      if (reply.key.startsWith('project.') && original) this.slotLanded(reply.key, original);
       return;
     }
     const waiter = this.waiters.get(reply.id);
@@ -288,6 +334,7 @@ class FileStore implements Store {
         waiter?.resolve(undefined);
         return;
       case 'committed':
+        this.appends.delete(reply.id);
         if (reply.bytes) this.committed.set(reply.key, asBuffer(reply.bytes));
         else this.committed.delete(reply.key);
         this.unwritten.set(reply.key, reply.id);
@@ -296,8 +343,7 @@ class FileStore implements Store {
         return;
       case 'rejected': {
         if (this.unsettled.get(reply.key)?.id === reply.id) this.unsettled.delete(reply.key);
-        // A refused journal entry is an edit not on disk until the project's next slot write lands.
-        if (reply.key.startsWith('projectJournal.')) this.failing.set(reply.key, { error: reply.detail, after: this.failing.get(reply.key)?.after ?? reply.id });
+        if (this.appends.delete(reply.id)) this.closeJournal(reply.key, reply.id);
         const error = new IpcValidationError(reply.channel, reply.detail);
         this.emitError(reply.key, error.message);
         waiter?.reject(error);
@@ -316,24 +362,28 @@ class FileStore implements Store {
   /** A replacement engine: everything not yet on disk is written again. */
   private restarted(): void {
     const stopped = new Error('The storage worker stopped before this change was saved.');
+    // Entries the stopped worker never answered are lost: their journals close at them.
+    for (const [key, { id }] of this.unsettled) if (key.startsWith('projectJournal.')) this.closeJournal(key, id, false);
+    this.appends.clear();
     for (const [key] of this.unsettled) this.emitError(key, stopped.message);
     for (const waiter of this.waiters.values()) waiter.reject(stopped);
     this.waiters.clear();
     this.unsettled.clear();
     try {
       void this.request(id => ({ op: 'init', id, directory: this.directory, writeDelayMs: this.writeDelayMs })).catch(() => undefined);
+      // Closed journals first: nothing replayed reopens one unless it was posted after the close point.
+      for (const key of this.closedJournals.keys()) this.channel.post({ op: 'journal', id: this.nextId++, key, open: false });
       // In the order they were first made (their ids), not the map's: a project's
       // slot and journal are replayed as they happened (project-durability.ts).
-      // A journal that refused an entry stays closed in the new engine (project-durability.ts).
-      // Closed journals last: their closing covers every slot write replayed before.
-      const closed = new Set([...this.failing].filter(([key, value]) => key.startsWith('projectJournal.') && value.after !== undefined).map(([key]) => key));
-      const keys = [...this.unwritten].sort(([, a], [, b]) => a - b).map(([key]) => key).filter(key => !closed.has(key));
-      keys.push(...closed);
-      for (const key of keys) {
+      for (const [key, latest] of [...this.unwritten].sort(([, a], [, b]) => a - b)) {
         const id = this.nextId++;
         const bytes = this.committed.get(key);
-        this.channel.post({ op: 'restore', id, key, bytes: bytes ? new Uint8Array(bytes) : null, ...(closed.has(key) ? { closed: true } : {}) });
+        // Replayed before (an earlier replacement): still the write it first was.
+        const original = this.replayed.get(latest) ?? latest;
+        this.replayed.delete(latest);
+        this.channel.post({ op: 'restore', id, key, bytes: bytes ? new Uint8Array(bytes) : null });
         this.unwritten.set(key, id);
+        this.replayed.set(id, original);
       }
     } catch (error) {
       for (const key of this.unwritten.keys()) this.emitError(key, `not saved: ${errorText(error)}`, true);
@@ -368,7 +418,11 @@ class FileStore implements Store {
   }
 
   private emitError(key: string, error: string, unsaved = false): void {
-    if (unsaved) this.failing.set(key, { error, ...(this.failing.get(key)?.after ? { after: this.failing.get(key)!.after } : {}) });
+    if (unsaved) {
+      this.failing.set(key, error);
+      // A journal write that failed, or a replay that could not be applied: entries may be missing.
+      if (key.startsWith('projectJournal.')) this.closeJournal(key, this.nextId - 1);
+    }
     const event: StoreErrorEvent = unsaved ? { key, error, unsaved } : { key, error };
     for (const listener of this.listeners) {
       try {
@@ -390,7 +444,7 @@ export function createStore(dir: string, options: StoreOptions = {}): Store {
     randomSuffix: options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`),
     ...(options.journalLimitBytes ? { journalLimitBytes: options.journalLimitBytes } : {})
   });
-  return new FileStore(path.resolve(dir), channel, options.writeDelayMs ?? WRITE_DELAY_MS);
+  return new FileStore(path.resolve(dir), channel, options.writeDelayMs ?? WRITE_DELAY_MS, options.journalEntryBytes ? { journalEntryBytes: options.journalEntryBytes } : {});
 }
 
 function asBuffer(bytes: Uint8Array): Buffer {
