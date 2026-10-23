@@ -18,6 +18,8 @@
 //! It also keeps each layer's group ancestry (`PM.groupAncestors(L)`, read
 //! for every member's activity and transform), which reads only the
 //! composition's layers.
+//! And a layer's local matrix when every channel `PM.localMatrix` reads
+//! was found time-independent: it is the same at every time then.
 //!
 //! Anything else (an expression, a discrete or throwing track, a read that
 //! throws, a non-finite time) takes the ordinary path, which this mirrors
@@ -80,6 +82,9 @@ pub(crate) struct ChannelMemo {
     /// `PM.groupAncestors(L)` by layer address, as positions in the
     /// composition's `layers` (`Evaluator::group_ancestors`).
     ancestors: HashMap<usize, crate::JsResult<Box<[u32]>>, crate::scope::BuildAddressHasher>,
+    /// `PM.localMatrix(L, T)` by layer address when every channel it reads
+    /// is time-independent (`None`: some channel is not; it is computed).
+    locals: HashMap<usize, Option<crate::transform::Mat2d>, crate::scope::BuildAddressHasher>,
     pub(crate) hits: u64,
     pub(crate) misses: u64,
 }
@@ -102,6 +107,7 @@ impl ChannelMemo {
             self.entries.clear();
             self.keys.clear();
             self.ancestors.clear();
+            self.locals.clear();
             self.edition = Some(edition);
             // The first plan at an edition only notes it (see above).
             self.open = None;
@@ -123,6 +129,7 @@ impl ChannelMemo {
         self.entries.clear();
         self.keys.clear();
         self.ancestors.clear();
+        self.locals.clear();
         self.edition = None;
     }
 
@@ -222,6 +229,50 @@ impl ChannelMemo {
         };
         self.misses += 1;
         self.ancestors.insert(address(layer), kept);
+    }
+}
+
+impl ChannelMemo {
+    /// Whether `layer`'s channel `key` was found time-independent (falsy,
+    /// or a static value).
+    pub(crate) fn is_static(&self, cx: &crate::Comp<'_>, layer: &Node, key: &[u8]) -> bool {
+        if !self.answers(cx) || !is_element(cx.layers(), layer) {
+            return false;
+        }
+        let keys = &self.keys;
+        matches!(
+            self.entries.get(&(address(layer), key_hash(key))),
+            Some((at, len, Found::Zero | Found::Static(_)))
+                if keys.get(*at as usize..(*at + *len) as usize) == Some(key)
+        )
+    }
+
+    /// What was kept of `layer`'s local matrix: `Some(Some(m))` a
+    /// time-independent matrix, `Some(None)` one that is not.
+    pub(crate) fn local(
+        &mut self,
+        cx: &crate::Comp<'_>,
+        layer: &Node,
+    ) -> Option<Option<crate::transform::Mat2d>> {
+        if !self.answers(cx) || !is_element(cx.layers(), layer) {
+            return None;
+        }
+        let found = *self.locals.get(&address(layer))?;
+        self.hits += 1;
+        Some(found)
+    }
+
+    pub(crate) fn keep_local(
+        &mut self,
+        cx: &crate::Comp<'_>,
+        layer: &Node,
+        m: Option<crate::transform::Mat2d>,
+    ) {
+        if !self.answers(cx) || !is_element(cx.layers(), layer) {
+            return;
+        }
+        self.misses += 1;
+        self.locals.insert(address(layer), m);
     }
 }
 

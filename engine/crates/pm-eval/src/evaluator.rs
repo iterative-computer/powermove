@@ -712,6 +712,40 @@ impl Evaluator {
         self.ev_ordinary(cx, layer, key, time)
     }
 
+    /// A layer's local matrix kept across the frames of an unchanged
+    /// document (`crate::channel_memo`): `Some(Some(m))` when every channel
+    /// it reads is time-independent, `Some(None)` when one is not, `None`
+    /// when nothing is known (or channel reads have effects the memo does
+    /// not reproduce: hooks, or expression errors to forget).
+    pub(crate) fn kept_local_matrix(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+    ) -> Option<Option<crate::transform::Mat2d>> {
+        if self.hooks.overrides_channels() || !self.errors.is_empty() {
+            return None;
+        }
+        self.channel_memo.local(cx, layer)
+    }
+
+    /// Keeps `m`, `layer`'s local matrix just computed from `keys`, when
+    /// every one of them was found time-independent.
+    pub(crate) fn keep_local_matrix(
+        &mut self,
+        cx: &Comp<'_>,
+        layer: &Node,
+        keys: &[&str],
+        m: crate::transform::Mat2d,
+    ) {
+        if self.hooks.overrides_channels() || !self.errors.is_empty() {
+            return;
+        }
+        let fixed = keys
+            .iter()
+            .all(|k| self.channel_memo.is_static(cx, layer, k.as_bytes()));
+        self.channel_memo.keep_local(cx, layer, fixed.then_some(m));
+    }
+
     /// `PM.ev(L, key, T)` for a literal key: [`Evaluator::ev`] without
     /// making the key a string when the channel memo answers.
     pub fn ev_key(
