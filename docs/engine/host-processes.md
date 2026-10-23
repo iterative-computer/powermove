@@ -702,7 +702,9 @@ document that never existed. It is replaced by one owner and one invariant
   one today) is not numbered; when it lands, the entries posted after it
   are kept, and recovery replays them over it.
 - The window marks a project unsaved when one of its writes fails (main
-  forwards persist failures to the window that wrote the key), so its next
+  forwards persist failures to the last window whose write of the key it
+  accepted; a refused write from another window does not take that over,
+  review recheck 6 R6h), so its next
   checkpoint writes rather than checks and its next autosave checkpoints.
   While slot writes fail, every journal entry still reaches main; past the
   4 MiB bound the window does not checkpoint again on each edit. Once main
@@ -718,7 +720,9 @@ document that never existed. It is replaced by one owner and one invariant
   edit: keys that fail together before the next flush share one toast, a key
   stays quiet while it keeps failing, and a key that starts failing after a
   flush is a new episode (so an unrelated error that never clears does not
-  hide a later project's failure).
+  hide a later project's failure). A key main still reports failing stays
+  quiet even after a flush with no new error, so a background checkpoint
+  retried on a full disk is the same episode.
 - SAVE-1c: a project is written only by the window that has it (main's window
   registry, `windows.ts`). Rename… on the Projects screen of a project open in
   another window used to write the stored copy (slot plus journal), which
@@ -733,11 +737,55 @@ document that never existed. It is replaced by one owner and one invariant
   - main refuses a slot write from a window that does not have the project
     (each store write carries its window's id), so no stored copy ever lands
     beside the owner's edits; and a closed journal reopens only for a slot
-    from the window that has the project when it lands.
+    from the window that has the project when it lands;
+  - main refuses a delete of the slot from a window that does not have the
+    project, the same way (review recheck 6, R6e). Delete Forever from Trash
+    (or the boot prune of empty projects) in one window, of a project open
+    in another, used to delete the owner's slot and journal while it kept
+    editing; a crash before its next slot lost the project. DECISION: the
+    delete is not routed to the owner (that would close its tab, a visible
+    change), and over IPC it is dropped quietly, so the deleting window sees
+    exactly what it saw before (the project leaves its Trash, no error), and
+    the owner's next checkpoint puts the project back in the library, as it
+    did before. Only the slot and journal are kept: the deleting window
+    still removes the project's metadata, history and workspace keys, which
+    the owner rewrites on its next session capture;
+  - a main-internal write or delete (no window id) is never refused, and a
+    slot from it reopens a closed journal. Nothing in main writes or
+    deletes a project slot today; such a writer must hold every edit the
+    owner made.
 - After a refused entry the window checkpoints 250 ms after the last refused
   edit, not at the next autosave (whose debounce grows to a large project's
   last write time, up to 60 s), so the journal reopens as soon as that slot
-  lands while the user pauses.
+  lands while the user pauses. Each refused edit after a checkpoint was
+  posted moves main's close point past it, and a large project's checkpoint
+  costs about a second of serialization in the window and its whole size in
+  IPC, so the checkpoint is throttled (review recheck 6): one is in flight
+  at a time (posted, then a flush until it is on disk); refused edits
+  meanwhile are covered by the next one, whose timer each refused edit
+  restarts; while the journal stays closed after one landed, the wait
+  doubles (and is at least four times the last checkpoint's own cost), up
+  to 8 s while edits keep being refused and 60 s when none was (the slot
+  write itself failed). It stops only when the journal reopens (the wait
+  starts again at 250 ms) or the project leaves the screen (its switch
+  checkpoints it), so a closed journal still converges to a landed slot.
+  Twenty refused edits 300 ms apart post 2 checkpoints, not 20
+  (`projects.behavior.test.ts`).
+- Known gaps in the single-writer rule (review recheck 6), none a lock-out:
+  - R6d, the no-owner gap: a window reads the stored copy before it claims
+    the project (`switchProject` claims fire-and-forget), and a closing
+    window's dirty check can post its slot after it released the project.
+    If that late slot lands in the gap it is accepted, and recovery then
+    mixes the closing window's raw (unjournaled) change into the new
+    owner's journaled edits until the new owner's next slot. Raw changes
+    already reach disk only with a slot, so this is narrow.
+  - R6g: an unstamped (main-internal) slot is never refused and reopens a
+    closed journal (above). There is no production caller.
+  - A renderer that crashed but was not destroyed keeps ownership (main
+    checks only `isDestroyed`), so a rename routed to it is dropped and the
+    asking window does not fall back to renaming the stored copy. This
+    matches the claim rule (no window can take the project either) and is
+    not a new lock-out.
 - Raw (unannounced) writes reach disk only with a slot, as before: a crash
   recovers the last slot and the journaled edits after it.
 
@@ -767,7 +815,9 @@ of the real FileStore, store engine and durability module on an in-memory
 file system where every rename into place and every unlink waits for the
 checker. Window A has the project (main's ownership says so) and is a script
 that keeps every edit in its document; window B can write the project from
-its stored copy. At every step the checker chooses among: posting A's next
+its stored copy. The model never changes the owner: ownership is fixed to A
+for the whole schedule, and B's write is always refused before it is
+posted. At every step the checker chooses among: posting A's next
 operation, or its next two in one task; completing or failing any pending
 disk operation; and the faults. The faults: a disk operation that fails; a
 slot write or journal entry the worker refuses (alone, with the next
@@ -793,6 +843,12 @@ failing keys name the project; then (liveness) one more fault-free
 checkpoint and edit from A must be accepted, recover the final document, and
 leave nothing failing.
 
+A fourth sweep, the two-fault sweep from before SAVE-1c, is kept but slow, so
+it runs only with `PM_MODEL_SLOW=1` (beside the file's other `PM_MODEL_`
+runs): every arrangement of 2 slot writes and 3 patches with any two faults
+of the earlier kinds, 101,959 schedules, 0 violations (3.4 to 9 min at load
+average about 30; the same count as the review's run at recheck 6).
+
 Each of these deliberate bugs is caught: a failed slot write that shrinks the
 journal; recovery that ignores sequence numbers; a journal shrunk before its
 slot is on disk; a replacement worker that does not read the journal first;
@@ -806,7 +862,10 @@ main (liveness), a close point that can move backward (a late refusal, then
 main's own; two faults), main's own refusal closing at an older entry, and
 main reopening without telling the worker (liveness). Also caught: a
 non-owner's slot accepted, a worker that does not close on a failed journal
-replay, and a replay that replaces the journal instead of merging. The
+replay, and a replay that replaces the journal instead of merging; and the
+two of review recheck 6, which the unit tests also catch directly now
+(`main/storage.test.ts`): a non-owner's slot refused only while the journal
+is closed (M1), and a replay merge that does not advance the sequence (M2). The
 sweeps found four bugs in the design as it went, all fixed with named tests
 in `main/storage.test.ts`: a replacement that could not replay a slot reused
 its numbers; a slot replayed by a second replacement was judged by the first
@@ -816,7 +875,12 @@ failed journal replay closed the journal only in main, so an entry already
 on its way was accepted. Not covered: power loss (the model's fsync does
 nothing), more than two faults, larger scripts with the newer fault kinds,
 and the window's own rules (when it checkpoints, keeps its copy, routes a
-rename, or reports), which the crash and behavior tests cover.
+rename, or reports), which the crash and behavior tests cover. Because the
+owner is fixed, the model also does not exercise an ownership transfer
+(the tab moving to another window while a slot is in flight), a gap with
+no owner, an unstamped (main-internal) writer, the owner check made when a
+slot lands, or deletes; named tests in `main/storage.test.ts` and the
+review's hand probes (recheck 6, R6b to R6h) cover those.
 
 The dirty check's fingerprints (twice per autosave and per open) are now
 serialized in slices and hashed on a worker (`project-fingerprint.ts`, the
