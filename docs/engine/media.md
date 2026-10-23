@@ -1,5 +1,49 @@
 # pm-media: design notes
 
+## Source media surfaces (mediaframes lane)
+
+`SnapshotTarget::Source` draws a frozen asset independently of the project
+composition. `time` is source time in ticks, `outputSize` is the returned pixel
+size, and `fit` is stretch, contain, or cover. `display` reads the host's
+`SourceRead` capability, which resolves the browser-playable rendition when
+the asset has one; `interpreted` reads the frozen original `MediaRead` path and
+applies its source interpretation. A non-default SVG interpretation currently
+fails with a named error because Chromium's raster exchange does not carry the
+source transform. A required rendition that has not reached the store is a
+named error. The interactive path reuses the renderer's media
+decoder/cache and source GPU pass. Snapshot cancellation removes queued work;
+a decode/readback already running on the render thread completes before the
+next command is handled.
+
+Source SVGs use the existing Chromium SVG raster exchange. The source request
+hashes the frozen SVG bytes and asks for a raster at the actual draw size;
+the interactive snapshot returns `NeedsRenderer.svg` until the window uploads
+it. Source filmstrip jobs fetch the same raster through the existing
+`CompatFrame` host service. The native SVG decoder is deliberately not used
+for these display pixels.
+
+`AudioMessage::SourceMonitor` runs on a separate `pm-audio` link from project
+playback. Its generation-tagged `SourceStatus` reports heard time and levels,
+or a host-clock position for a silent video, and reports natural end or a
+named output failure. Closing the source monitor drops its link. Source
+audio uses the frozen display path, including a stored browser rendition,
+with unity source and master gain. `pm-audio` copies a mono channel to both
+stereo outputs without pan-law attenuation. A direct heard-PCM comparison
+against `HTMLMediaElement` is still unmeasured; the existing audio corpus
+gate compares composition exports instead. Source filmstrip jobs write one
+tightly packed, top-down, straight-alpha RGBA8 file
+with frames in requested order. Browser-rendition jobs run the existing
+FFmpeg/sips conversion flags against the frozen original and commit the
+result through host output capabilities; cancellation kills the converter.
+
+Targeted native checks: source render tests cover fit, alpha, SVG raster
+upload, video decoder reuse, and an end-time held frame. On a 64×48 VP9
+test clip, six source seeks took 40.716 ms with three media-cache hits, six
+draw calls, and six readbacks (one run on the development Mac; no legacy
+comparison implied). Job tests compare decoded WebM video and audio, and
+decoded TIFF-to-PNG pixels, against the existing converter flags. The app
+parity and relative-performance gates are tracked by the integration lane.
+
 Production media I/O for plan section 13, built from the S6 spike
 (`docs/engine/spikes/S6.md`, `engine/spikes/s6-decode`). Crates:
 `engine/crates/pm-media` (probe, index, decode, images, cache, hashing) and the

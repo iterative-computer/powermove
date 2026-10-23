@@ -778,6 +778,14 @@ impl FramePresenter for BridgePresenter {
         Ok(())
     }
 
+    fn cancel_snapshot(&mut self, host: PortId, id: RequestId) -> bool {
+        if self.config.source != Some(FrameSource::Document) {
+            return false;
+        }
+        self.send(Command::CancelSnapshot { host, id });
+        true
+    }
+
     fn lease_changed(&mut self, ctx: &mut PresentContext<'_>) {
         self.sync_frame_cache(ctx);
     }
@@ -863,6 +871,21 @@ impl FramePresenter for BridgePresenter {
         path: Option<std::path::PathBuf>,
     ) {
         self.send(Command::Media {
+            key: (port, session),
+            asset: asset.to_owned(),
+            path,
+        });
+    }
+
+    fn source_media(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        asset: &str,
+        path: Option<Option<std::path::PathBuf>>,
+    ) {
+        self.send(Command::SourceMedia {
             key: (port, session),
             asset: asset.to_owned(),
             path,

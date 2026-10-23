@@ -303,6 +303,14 @@ impl SnapshotQueue {
         gone
     }
 
+    pub fn take_request(&mut self, host: PortId, id: RequestId) -> Option<SnapshotJob> {
+        let index = self
+            .jobs
+            .iter()
+            .position(|job| job.host == host && job.id == id)?;
+        self.jobs.remove(index)
+    }
+
     /// Removes and returns every job whose deadline passed.
     pub fn take_expired(&mut self, now: i64) -> Vec<SnapshotJob> {
         let (gone, kept): (Vec<_>, Vec<_>) =
@@ -378,7 +386,7 @@ impl SnapshotQueue {
     /// document revision.
     pub fn next(
         &mut self,
-        revision: impl Fn(Key) -> Option<u64>,
+        revision: impl Fn(&SnapshotJob) -> Option<u64>,
         outstanding: impl Fn(&str) -> bool,
         pressure: Pressure,
         now: i64,
@@ -391,7 +399,7 @@ impl SnapshotQueue {
             let found = self.jobs.iter().position(|j| {
                 j.request.class == class
                     && !j.waiting_for.iter().any(|k| outstanding(k))
-                    && self.ready(j, revision(j.key), pressure, now) == Ready::Run
+                    && self.ready(j, revision(j), pressure, now) == Ready::Run
             });
             if let Some(index) = found {
                 return self.jobs.remove(index);
@@ -785,6 +793,45 @@ mod tests {
     }
 
     #[test]
+    fn cancellation_removes_only_its_host_and_request_id() {
+        let mut q = SnapshotQueue::default();
+        for (host, id) in [(10, 1), (10, 2), (11, 1)] {
+            let mut pending = job(SnapshotClass::Sync, key(3, 1), None, 0);
+            pending.host = PortId(host);
+            pending.id = RequestId::new(id).unwrap();
+            q.push(pending).unwrap();
+        }
+        assert!(
+            q.take_request(PortId(11), RequestId::new(2).unwrap())
+                .is_none()
+        );
+        let cancelled = q
+            .take_request(PortId(10), RequestId::new(1).unwrap())
+            .unwrap();
+        assert_eq!(
+            (cancelled.host, cancelled.id),
+            (PortId(10), RequestId::new(1).unwrap())
+        );
+        assert!(
+            q.take_request(PortId(10), RequestId::new(1).unwrap())
+                .is_none()
+        );
+        let remaining = [
+            q.next(|_| Some(0), |_| false, idle(), 0).unwrap(),
+            q.next(|_| Some(0), |_| false, idle(), 0).unwrap(),
+        ];
+        assert_eq!(
+            (remaining[0].host, remaining[0].id),
+            (PortId(10), RequestId::new(2).unwrap())
+        );
+        assert_eq!(
+            (remaining[1].host, remaining[1].id),
+            (PortId(11), RequestId::new(1).unwrap())
+        );
+        assert!(q.is_empty());
+    }
+
+    #[test]
     fn a_job_whose_frame_blender_renders_waits_on_its_own_bound_not_its_wait() {
         let mut q = SnapshotQueue::default();
         let mut j = job(SnapshotClass::Async, key(3, 1), None, 0);
@@ -923,6 +970,19 @@ mod tests {
         // binary16 value 1/510 × 255 = 0.5 → 0.
         let px = half([1.0 / 510.0, 0.0, 0.0, 1.0]);
         assert_eq!(encode_rgba8(&px, SnapshotPixels::Opaque)[0], 0);
+    }
+
+    #[test]
+    fn source_rgba8_alpha_is_straight_for_canvas_and_filmstrip() {
+        let premultiplied = [128, 0, 0, 128, 0, 0, 0, 0];
+        assert_eq!(
+            encode_rgba8_unorm(&premultiplied, SnapshotPixels::Premultiplied),
+            premultiplied,
+        );
+        assert_eq!(
+            encode_rgba8_unorm(&premultiplied, SnapshotPixels::Straight),
+            [255, 0, 0, 128, 0, 0, 0, 0],
+        );
     }
 
     #[test]

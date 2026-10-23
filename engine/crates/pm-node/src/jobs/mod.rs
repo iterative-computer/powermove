@@ -38,6 +38,7 @@ mod compile;
 mod definitions;
 mod fallback;
 pub mod gate;
+mod source;
 mod svg;
 
 use std::collections::{HashMap, VecDeque};
@@ -577,13 +578,13 @@ impl JobService for JobEngineService {
         document: Option<JobDocument>,
     ) -> Result<JobAccepted, Box<EngineError>> {
         let job = submit.job.clone();
-        let JobSpec::Export { .. } = &submit.spec else {
+        if matches!(&submit.spec, JobSpec::GenerateProxy { .. }) {
             return Err(Box::new(job_error(
                 &job,
                 ErrorCode::Unsupported,
                 "Proxy generation is not in the job engine yet (Phase 4a).",
             )));
-        };
+        }
         let Some(document) = document else {
             return Err(Box::new(job_error(
                 &job,
@@ -1315,6 +1316,10 @@ fn run_job(
     cancel: &Arc<AtomicBool>,
     blender: &mut LaneBlender,
 ) {
+    if !matches!(&submit.spec, JobSpec::Export { .. }) {
+        source::run(shared, renderer, gate, job, host, submit, document, cancel);
+        return;
+    }
     let JobSpec::Export {
         composition,
         settings,

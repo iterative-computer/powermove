@@ -63,6 +63,7 @@ pm-model = { path = "../pm-model" }
 pm-audio = { path = "../pm-audio", features = ["test-hooks"] }
 pm-node = { path = ".", features = ["test-hooks"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+tempfile = "3"
 
 [[test]]
 # Runs on the main thread (the CoreText registry uses AppKit's font manager).

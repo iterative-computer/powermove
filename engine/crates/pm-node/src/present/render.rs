@@ -53,6 +53,11 @@ use super::document::{Route, ViewDocument};
 use super::schedule::{Next, Phase, Schedule};
 use super::view;
 
+mod source;
+use source::{SourceAudio, SourceSilent};
+#[cfg(test)]
+use source::{audio_source_end, silent_source_position};
+
 /// Stand-in for the C′ prototype's layer in builds without it (feature
 /// `remote-layer`): uninhabited, so a pool never has a remote layer.
 #[cfg(not(feature = "remote-layer"))]
@@ -318,6 +323,11 @@ pub enum Command {
         asset: String,
         path: Option<PathBuf>,
     },
+    SourceMedia {
+        key: Key,
+        asset: String,
+        path: Option<Option<PathBuf>>,
+    },
     /// The mix's monitor and data for the renderer (contract 6).
     Audio {
         key: Key,
@@ -336,6 +346,10 @@ pub enum Command {
     /// A host snapshot of a session's document (the Phase 3c render
     /// transport, [`super::snapshot`]).
     Snapshot(Box<super::snapshot::SnapshotJob>),
+    CancelSnapshot {
+        host: PortId,
+        id: RequestId,
+    },
     /// Compatibility pixels the session's renderer uploaded
     /// ([`super::compat`]).
     Compat {
@@ -971,6 +985,10 @@ struct Thread {
     docs: BTreeMap<Key, ViewDocument>,
     /// Each session's audio playback, from its first Play.
     audio: BTreeMap<Key, AudioLink>,
+    /// Independent source-monitor audio, never mixed into a composition.
+    source_audio: BTreeMap<Key, SourceAudio>,
+    source_silent: BTreeMap<Key, SourceSilent>,
+    source_intent: BTreeMap<Key, (pm_protocol::common::AssetId, Ticks, u32)>,
     /// Each session's audio scrub switch and monitor solo, kept before
     /// its playback opens.
     audio_prefs: BTreeMap<Key, AudioPrefs>,
@@ -1098,6 +1116,9 @@ pub fn run(
         views: BTreeMap::new(),
         docs: BTreeMap::new(),
         audio: BTreeMap::new(),
+        source_audio: BTreeMap::new(),
+        source_silent: BTreeMap::new(),
+        source_intent: BTreeMap::new(),
         audio_prefs: BTreeMap::new(),
         peaks,
         generations,
@@ -1189,9 +1210,11 @@ fn command_name(command: &Command) -> &'static str {
         Command::Document { .. } => "document",
         Command::Definitions { .. } => "definitions",
         Command::Media { .. } => "media",
+        Command::SourceMedia { .. } => "sourceMedia",
         Command::ShaderFallback { .. } => "shader fallback",
         Command::FrameCache { .. } => "frame cache",
         Command::Snapshot(_) => "snapshot",
+        Command::CancelSnapshot { .. } => "cancel snapshot",
         Command::SnapshotMapReady => "snapshot map ready",
         Command::SnapshotPollFailed { .. } => "snapshot poll failed",
         Command::Compat { .. } => "compat",
@@ -2016,6 +2039,39 @@ impl Thread {
                     view.dirty = true;
                 }
             }
+            Command::SourceMedia { key, asset, path } => {
+                self.docs
+                    .entry(key)
+                    .or_default()
+                    .set_source_media(&asset, path);
+                if self
+                    .source_audio
+                    .get(&key)
+                    .is_some_and(|source| source.asset.as_str() == asset)
+                {
+                    self.source_audio.remove(&key);
+                }
+                if self
+                    .source_silent
+                    .get(&key)
+                    .is_some_and(|source| source.asset.as_str() == asset)
+                {
+                    self.source_silent.remove(&key);
+                }
+                if let Some((wanted, time, generation)) = self.source_intent.get(&key).cloned()
+                    && wanted.as_str() == asset
+                {
+                    self.audio_message(
+                        key,
+                        AudioMessage::SourceMonitor {
+                            asset: Some(wanted),
+                            time,
+                            playing: true,
+                            generation,
+                        },
+                    );
+                }
+            }
             Command::ShaderFallback { key, message } => self.shader_fallback(key, message),
             Command::FrameCache { bytes } => {
                 self.frame_cache = bytes;
@@ -2030,6 +2086,11 @@ impl Thread {
                     self.stats().snapshot_failures += 1;
                     self.snapshot_error(&job, ErrorCode::BudgetExceeded, &refused.message());
                 }
+            }
+            Command::CancelSnapshot { host, id } => {
+                self.snapshots.take_request(host, id);
+                self.pending_snapshots
+                    .retain(|pending| pending.job.host != host || pending.job.id != id);
             }
             Command::Compat {
                 key,
@@ -2423,6 +2484,9 @@ impl Thread {
         self.svg.forget_session(key);
         self.docs.remove(&key);
         self.audio.remove(&key);
+        self.source_audio.remove(&key);
+        self.source_silent.remove(&key);
+        self.source_intent.remove(&key);
         self.audio_prefs.remove(&key);
         if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
             composer.forget_definitions(key);
@@ -2731,6 +2795,14 @@ impl Thread {
     /// The mixer's monitor solo and waveform requests from the renderer.
     fn audio_message(&mut self, key: Key, message: AudioMessage) {
         match message {
+            AudioMessage::SourceMonitor {
+                asset,
+                time,
+                playing,
+                generation,
+            } => {
+                self.handle_source_monitor(key, asset, time, playing, generation);
+            }
             AudioMessage::Monitor { solo } => {
                 let solo = (!solo.is_empty()).then(|| solo.into_iter().collect());
                 self.audio_prefs.entry(key).or_default().solo = solo.clone();
@@ -2750,7 +2822,9 @@ impl Thread {
                     }
                 }
             }
-            AudioMessage::Levels(_) | AudioMessage::Peaks(_) => self.log(
+            AudioMessage::Levels(_)
+            | AudioMessage::Peaks(_)
+            | AudioMessage::SourceStatus { .. } => self.log(
                 LogLevel::Warn,
                 "the renderer sent an engine-to-renderer audio message".into(),
             ),
@@ -3585,6 +3659,7 @@ impl Thread {
     }
 
     fn work(&mut self) {
+        self.work_source_monitor();
         self.sync_font_generation();
         if self
             .gpu
@@ -5308,9 +5383,20 @@ impl Thread {
             // A document whose media the host has not answered yet is not
             // ready: the snapshot waits (within its wait) rather than draw
             // media missing that is on its way.
-            let revision = |key: Key| {
-                docs.get(&key)
-                    .filter(|d| d.has_document() && d.media_ready())
+            let revision = |job: &super::snapshot::SnapshotJob| {
+                docs.get(&job.key)
+                    .filter(|d| {
+                        d.has_document()
+                            && d.media_ready()
+                            && match &job.request.target {
+                                pm_protocol::snapshot::SnapshotTarget::Source {
+                                    asset,
+                                    color: pm_protocol::snapshot::SourceColor::Display,
+                                    ..
+                                } => d.source_media(asset.as_str()).is_some(),
+                                _ => true,
+                            }
+                    })
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
@@ -5481,6 +5567,10 @@ impl Thread {
             self.snapshot_error(&job, ErrorCode::DeviceLost, "The engine has no GPU device.");
             return;
         }
+        if let SnapshotTarget::Source { .. } = &job.request.target {
+            self.run_source_snapshot(job, started);
+            return;
+        }
         let (layer_target, motion_blur, background, draft_3d) = match &job.request.target {
             SnapshotTarget::Frame {
                 motion_blur_samples,
@@ -5488,6 +5578,7 @@ impl Thread {
                 draft_3d,
             } => (false, *motion_blur_samples, *background, *draft_3d),
             SnapshotTarget::Layer { .. } => (true, 0, true, false),
+            SnapshotTarget::Source { .. } => unreachable!("handled above"),
         };
         if layer_target {
             self.run_layer_snapshot(job, started);
@@ -6339,6 +6430,9 @@ mod tests {
             views: BTreeMap::new(),
             docs: BTreeMap::new(),
             audio: BTreeMap::new(),
+            source_audio: BTreeMap::new(),
+            source_silent: BTreeMap::new(),
+            source_intent: BTreeMap::new(),
             audio_prefs: BTreeMap::new(),
             peaks,
             frame_ticks: TICKS_PER_SECOND / 60,
@@ -6789,5 +6883,94 @@ mod tests {
         let wrap = Generations(Arc::new(AtomicU32::new(u32::MAX)));
         assert_eq!(wrap.next(), u32::MAX);
         assert_eq!(wrap.next(), 1);
+    }
+
+    #[test]
+    fn silent_source_uses_host_time_and_stops_at_duration() {
+        let source = SourceSilent {
+            asset: "a".into(),
+            generation: 3,
+            from: Ticks::new(3 * TICKS_PER_SECOND / 4).unwrap(),
+            started: 1_000_000,
+            duration: Ticks::from_whole_seconds(1),
+            last_sent: 0,
+        };
+        assert_eq!(
+            silent_source_position(&source, 1_100_000),
+            (Ticks::new(85 * TICKS_PER_SECOND / 100).unwrap(), true)
+        );
+        assert_eq!(
+            silent_source_position(&source, 1_300_000),
+            (Ticks::from_whole_seconds(1), false)
+        );
+    }
+
+    #[test]
+    fn unrelated_source_answer_keeps_silent_monitor_clock() {
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        thread.source_silent.insert(
+            key,
+            SourceSilent {
+                asset: "video".into(),
+                generation: 7,
+                from: Ticks::ZERO,
+                started: 1_000_000,
+                duration: Ticks::from_whole_seconds(2),
+                last_sent: 0,
+            },
+        );
+        thread.apply(Command::SourceMedia {
+            key,
+            asset: "unrelated".into(),
+            path: Some(None),
+        });
+        assert_eq!(
+            thread.source_silent.get(&key).unwrap().asset.as_str(),
+            "video"
+        );
+        thread.apply(Command::SourceMedia {
+            key,
+            asset: "video".into(),
+            path: Some(None),
+        });
+        assert!(!thread.source_silent.contains_key(&key));
+    }
+
+    #[test]
+    fn source_audio_clock_end_requires_play_and_holds_final_time() {
+        let duration = Ticks::from_whole_seconds(1);
+        let sample = pm_protocol::clock::ClockSample {
+            seq: Seq::new(1).unwrap(),
+            epoch: 1,
+            state: TransportState::Playing,
+            host_time: pm_protocol::common::HostMicros::new(1_000_000).unwrap(),
+            media_time: Ticks::ZERO,
+            rate: pm_protocol::common::PlaybackRate { num: 1, den: 1 },
+            output_latency_us: 0,
+            sample_rate: 48_000,
+            loop_range: None,
+        };
+        assert_eq!(
+            audio_source_end(
+                &sample,
+                duration,
+                true,
+                pm_protocol::common::HostMicros::new(2_000_000).unwrap()
+            ),
+            Some(duration)
+        );
+        let stopped = pm_protocol::clock::ClockSample {
+            state: TransportState::Stopped,
+            media_time: Ticks::new(TICKS_PER_SECOND / 2).unwrap(),
+            rate: pm_protocol::common::PlaybackRate { num: 0, den: 1 },
+            ..sample
+        };
+        let at = pm_protocol::common::HostMicros::new(2_000_000).unwrap();
+        assert_eq!(audio_source_end(&stopped, duration, false, at), None);
+        assert_eq!(
+            audio_source_end(&stopped, duration, true, at),
+            Some(stopped.media_time)
+        );
     }
 }

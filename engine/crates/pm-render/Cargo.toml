@@ -43,6 +43,7 @@ serde_json.workspace = true
 pm-text = { path = "../pm-text", default-features = false, features = ["render", "level2", "cg-masks"] }
 
 [dev-dependencies]
+tempfile = "3"
 pm-export = { path = "../pm-export", features = ["test-sinks"] }
 # Anchor edits on level 2 text (the semantic gate runs the edit kernels).
 pm-edit = { path = "../pm-edit" }
