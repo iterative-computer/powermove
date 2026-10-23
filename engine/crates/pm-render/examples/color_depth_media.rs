@@ -7,6 +7,7 @@ mod support;
 use pm_protocol::{color::Precision, common::Size};
 use pm_render::{MapResolver, RenderRequest, Renderer};
 use serde_json::json;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 fn input_dir() -> PathBuf {
@@ -52,8 +53,8 @@ fn main() {
     let samples = manifest["samples"].as_array().expect("samples array");
     assert_eq!(
         samples.len(),
-        9,
-        "three depths × two video times and one 3D time"
+        15,
+        "three depths × two times for each video fixture and one 3D time"
     );
     let mut renderer = Renderer::headless().expect("native renderer");
     assert!(
@@ -67,6 +68,64 @@ fn main() {
     for sample in samples {
         renderer.trim(0);
         let id = sample_id(sample);
+        let source_diagnostic = match sample["kind"].as_str().expect("sample kind") {
+            "video" => {
+                assert!(sample["visibleVideoPixels"].as_u64().unwrap() > 320 * 180 / 2);
+                serde_json::Value::Null
+            }
+            "video-detail" => {
+                assert!(
+                    sample["colors"].as_u64().unwrap() > 64,
+                    "{id}: color variety"
+                );
+                assert!(
+                    sample["detailNonbackgroundPixels"].as_u64().unwrap() > 7200,
+                    "{id}: detailed image visible"
+                );
+                assert!(
+                    sample["detailMidtonePixels"].as_u64().unwrap() > 7200,
+                    "{id}: midtone image visible"
+                );
+                let source = &sample["source"];
+                let (source_w, source_h) = (
+                    source["width"].as_u64().expect("source width"),
+                    source["height"].as_u64().expect("source height"),
+                );
+                assert_eq!(
+                    (source_w, source_h),
+                    (160, 90),
+                    "{id}: prepared source size"
+                );
+                let source_bytes = std::fs::read(dir.join(format!("{id}.source.rgba")))
+                    .expect("prepared video source pixels");
+                assert_eq!(
+                    source_bytes.len(),
+                    (source_w * source_h * 4) as usize,
+                    "{id}: prepared source length"
+                );
+                let distinct: HashSet<[u8; 3]> = source_bytes
+                    .chunks_exact(4)
+                    .map(|p| [p[0], p[1], p[2]])
+                    .collect();
+                let midtones = source_bytes
+                    .chunks_exact(4)
+                    .filter(|p| p[..3].iter().all(|v| *v > 32 && *v < 224))
+                    .count();
+                assert!(
+                    distinct.len() > 64 && midtones > 7200,
+                    "{id}: prepared source lacks detailed mid-tones"
+                );
+                json!({"width":source_w,"height":source_h,"distinctColors":distinct.len(),"midtonePixels":midtones})
+            }
+            "scene3d" => {
+                assert!(
+                    sample["colors"].as_u64().unwrap() > 8,
+                    "{id}: visible geometry"
+                );
+                serde_json::Value::Null
+            }
+            other => panic!("{id}: unexpected kind {other}"),
+        };
         let (w, h) = (
             sample["width"].as_u64().unwrap() as u32,
             sample["height"].as_u64().unwrap() as u32,
@@ -146,7 +205,8 @@ fn main() {
         );
         results.push(
             json!({"id":id,"depth":sample["depth"],"kind":sample["kind"],"pass":pass,
-            "differentPixels":different,"maxByteDelta":max_byte_delta,"maxRawCv":max_raw_cv,"error":render_error}),
+            "differentPixels":different,"maxByteDelta":max_byte_delta,"maxRawCv":max_raw_cv,
+            "source":source_diagnostic,"error":render_error}),
         );
     }
     std::fs::write(

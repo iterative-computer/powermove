@@ -112,11 +112,18 @@ with a 2D overlay, source conversion/cache isolation, and actual session frame
 snapshots. Settings/migration and runner unit tests pass. Protocol fixtures and
 generated TypeScript are regenerated from the contract sources.
 
-The video/3D gate (`color-depth-media.ts`, `color_depth_media`) adds two video
-times and one visible three.js cube with a translucent 2D overlay at every
-depth. All nine samples match both output bytes and raw float values exactly.
-The video reference must show the fixture's expected red/green image, and the
-3D reference must contain visible geometry and settle to two identical frames.
+The original video/3D gate adds two flat red/green video frames and one visible
+three.js cube with a translucent 2D overlay at every depth. All nine samples
+match both output bytes and raw float values exactly. The video reference must
+show the fixture's expected image, and the 3D reference must contain visible
+geometry and settle to two identical frames. The expanded gate
+(`color-depth-media.ts`, `color_depth_media`) also prepares a mid-tone detailed
+clip with scaling, rotation and partial opacity; those additional six captures
+are pending shared app access. Its source pixels are recorded separately from
+composition sampling. `color-depth-alpha.ts` likewise prepares an actual
+legacy transparent PNG export with overlapping solids and a blurred layer;
+comparison of that PNG is pending. Capture preparation happens outside the
+Electron lock, while app execution waits for a normal shared slot.
 The seven depth-8 slice projects also export through the native PNG job with
 the app's Float32 request hint and dither enabled; all decoded PNG pixels
 match the app readback. The full 8-bit delivery matrix, independent codec

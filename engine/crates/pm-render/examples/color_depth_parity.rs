@@ -6,7 +6,97 @@ mod support;
 use pm_protocol::{color::Precision, common::Size};
 use pm_render::{MapResolver, RenderRequest, Renderer};
 use serde_json::json;
-use std::{path::PathBuf, time::Instant};
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+    time::Instant,
+};
+
+fn export_depth8(
+    r: &mut Renderer,
+    doc: Arc<pm_model::Document>,
+    comp: &str,
+    sample: &serde_json::Value,
+    destination: PathBuf,
+    reference: &[u8],
+) -> usize {
+    use pm_export::render::{
+        ExportJob, MediaPaths, Unrestricted, plan_export_for, run_export_into, sink_for,
+    };
+    use pm_protocol::{
+        color::OutputColor,
+        common::{FrameRate, TICKS_PER_SECOND, TickRange, Ticks},
+        priority::{AlphaOutput, DeliveryOptions, ExportFormat, ExportSettings, QualityTier},
+    };
+    let start = support::ticks(sample["time"].as_f64().unwrap());
+    let job = ExportJob {
+        document: doc,
+        composition: comp.to_owned(),
+        settings: ExportSettings {
+            format: ExportFormat::PngStill { sixteen_bit: false },
+            alpha: if sample["exportReference"].is_string() {
+                AlphaOutput::Straight
+            } else {
+                AlphaOutput::None
+            },
+            quality: QualityTier::Max,
+            size: Size::new(
+                sample["width"].as_u64().unwrap() as u32,
+                sample["height"].as_u64().unwrap() as u32,
+            ),
+            frame_rate: FrameRate::new(30, 1),
+            range: TickRange {
+                start,
+                end: Ticks::new(start.get() + TICKS_PER_SECOND / 30).unwrap(),
+            },
+            audio: false,
+            motion_blur: false,
+            color: OutputColor::SrgbImage,
+            precision: Precision::Float32,
+            dither: true,
+            draft_from_proxies: false,
+            delivery: DeliveryOptions::default(),
+        },
+        media: Arc::new(MediaPaths::default()),
+        destination: destination.clone(),
+        overwrite: pm_export::Overwrite::Replace,
+        mode: Some(0o600),
+        seed: 17,
+    };
+    let plan = plan_export_for(&job, false, r).unwrap();
+    let sink = sink_for(&plan).unwrap();
+    run_export_into(
+        r,
+        &job,
+        plan,
+        sink,
+        &Unrestricted,
+        &AtomicBool::new(false),
+        &mut |_| {},
+    )
+    .unwrap();
+    let (info, decoded) = pm_export::png::read(&destination, true).unwrap();
+    assert_eq!(info.bit_depth, 8);
+    let decoded = decoded.unwrap();
+    let actual = decoded.planes[0].u8().unwrap();
+    assert_eq!(actual.len(), reference.len());
+    let exported_reference;
+    let reference = if let Some(name) = sample["exportReference"].as_str() {
+        let (_, decoded) =
+            pm_export::png::read(&destination.parent().unwrap().join(name), true).unwrap();
+        exported_reference = decoded.unwrap();
+        exported_reference.planes[0].u8().unwrap()
+    } else {
+        // Opaque PNG pixels coincide with the premultiplied app readback.
+        assert!(reference.chunks_exact(4).all(|p| p[3] == 255));
+        reference
+    };
+    actual
+        .chunks_exact(4)
+        .zip(reference.chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count()
+}
 
 fn main() {
     let dir = PathBuf::from(
@@ -41,8 +131,10 @@ fn main() {
             s["width"].as_u64().unwrap() as u32,
             s["height"].as_u64().unwrap() as u32,
         );
-        let doc =
-            pm_model::Document::new(Some(support::read_json(&dir.join(format!("{id}.json")))), 1);
+        let doc = Arc::new(pm_model::Document::new(
+            Some(support::read_json(&dir.join(format!("{id}.json")))),
+            1,
+        ));
         let comp = pm_eval::node::string(pm_eval::node::member(doc.root(), "compId"))
             .unwrap()
             .to_string_lossy();
@@ -72,6 +164,22 @@ fn main() {
             .zip(ref_bytes.chunks_exact(4))
             .filter(|(a, b)| a != b)
             .count();
+        let export_different = if s["depth"] == 8 {
+            assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba8Unorm);
+            let different = export_depth8(
+                &mut r,
+                Arc::clone(&doc),
+                &comp,
+                s,
+                dir.join(format!("{id}.export.png")),
+                &ref_bytes,
+            );
+            println!("{id} exported PNG: different={different}");
+            failures += usize::from(different != 0);
+            Some(different)
+        } else {
+            None
+        };
         let max_cv = pixels
             .iter()
             .zip(&reference)
@@ -168,7 +276,7 @@ fn main() {
             timings[6],
             r.target_pool_bytes()
         );
-        results.push(json!({"id":id,"depth":s["depth"],"pass":pass,"differentPixels":different,"maxCv":max_cv,"source":source_result,"p50Ms":timings[6],"targetPoolBytes":r.target_pool_bytes(),"outputBytes":frame.color.bytes()}));
+        results.push(json!({"id":id,"depth":s["depth"],"pass":pass,"differentPixels":different,"exportDifferentPixels":export_different,"maxCv":max_cv,"source":source_result,"p50Ms":timings[6],"targetPoolBytes":r.target_pool_bytes(),"outputBytes":frame.color.bytes()}));
     }
     std::fs::write(
         dir.join("parity.json"),

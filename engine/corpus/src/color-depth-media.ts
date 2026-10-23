@@ -1,11 +1,14 @@
 /** Legacy-app reference frames for the video and 3D color-depth gate.
- * Build apps/desktop outside the lock, then run:
+ * Build apps/desktop outside the lock, prepare the generated clip, then run:
+ *   bun engine/corpus/src/color-depth-media.ts /external/output --prepare
  *   pm-electron-lock bun engine/corpus/src/color-depth-media.ts /external/output
  * The fixture is read from the repository at runtime. Only the supplied
  * external directory receives captures; launchLegacyApp removes its profile.
  */
 import path from 'node:path';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { launchLegacyApp } from './app';
 import { repoRoot } from './catalog';
 import { encodePng } from './png';
@@ -17,10 +20,29 @@ if (out === repoRoot || out.startsWith(repoRoot + path.sep)) throw new Error('Ou
 const fixture = path.join(repoRoot, 'apps/desktop/e2e/fixtures/h264-aac.mp4');
 if (!existsSync(fixture)) throw new Error(`Missing repository video fixture: ${fixture}`);
 mkdirSync(out, { recursive: true });
+const detailFixture = path.join(out, 'detail.mp4');
+if (process.argv[3] === '--prepare') {
+  const ffmpeg = path.join(process.env.PM_FFMPEG_DIR ?? path.join(os.homedir(), 'Library/Caches/powermove-engine/ffmpeg/out'), 'bin/ffmpeg');
+  if (!existsSync(ffmpeg)) throw new Error(`Missing pinned FFmpeg: ${ffmpeg}`);
+  const temporary = path.join(out, 'detail.tmp.mp4');
+  try {
+    const result = spawnSync(ffmpeg, [
+      '-hide_banner', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=160x90:r=30:d=2',
+      '-vf', "format=rgb24,lutrgb=r='val*0.55+50':g='val*0.55+50':b='val*0.55+50',format=yuv420p",
+      '-c:v', 'h264_videotoolbox', '-b:v', '1M', '-color_primaries', 'bt709', '-color_trc', 'bt709',
+      '-colorspace', 'bt709', '-color_range', 'tv', '-an', temporary,
+    ], { encoding: 'utf8' });
+    if (result.error || result.status !== 0) throw new Error(`Pinned FFmpeg detail fixture failed: ${result.error ?? result.stderr}`);
+    renameSync(temporary, detailFixture);
+  } finally { rmSync(temporary, { force: true }); }
+  console.log(`Prepared ${detailFixture}`);
+  process.exit(0);
+}
+if (!existsSync(detailFixture)) throw new Error(`Generate detailed video outside the Electron lock first: bun ${import.meta.path} ${out} --prepare`);
 const app = await launchLegacyApp();
 const samples: Array<Record<string, unknown>> = [];
 try {
-  for (const kind of ['video', 'scene3d'] as const) for (const depth of kind === 'scene3d' ? [16, 32, 8] : [8, 16, 32]) {
+  for (const kind of ['video', 'video-detail', 'scene3d'] as const) for (const depth of kind === 'scene3d' ? [16, 32, 8] : [8, 16, 32]) {
     const created = await app.evaluate(({ kind, depth }) => {
       const PM = (window as any).PM;
       const project = PM.mkProject({ name: `Depth media ${kind}`, w: 320, h: 180, fps: 30, dur: 2,
@@ -42,24 +64,27 @@ try {
       return { id: PM.proj.id };
     }, { kind, depth });
     let media: { assetId: string; path: string }[] = [];
-    if (kind === 'video') {
+    if (kind === 'video' || kind === 'video-detail') {
+      const source = kind === 'video-detail' ? detailFixture : fixture;
       await app.evaluate(() => {
         const input = document.createElement('input'); input.type = 'file'; input.id = 'color-depth-media-input';
         input.hidden = true; document.body.append(input);
       });
       try {
-        await app.setInputFiles('#color-depth-media-input', [fixture]);
-        const assetId = await app.evaluate(async () => {
+        await app.setInputFiles('#color-depth-media-input', [source]);
+        const assetId = await app.evaluate(async ({ kind }) => {
           const PM = (window as any).PM;
           const input = document.querySelector('#color-depth-media-input') as HTMLInputElement;
           const file = input.files?.[0]; if (!file) throw new Error('Video fixture input is empty');
           const asset = await PM.assets.add(file, { newAsset: true, silent: true });
-          const layer = PM.mkLayer('video', { name: 'Fixture clip', d: { asset: asset.id, fit: 'contain', w: 320, h: 180 },
-            p: { 'position.x': 160, 'position.y': 90 } }, PM.proj);
+          const detail = kind === 'video-detail';
+          const layer = PM.mkLayer('video', { name: detail ? 'Detailed clip' : 'Fixture clip',
+            d: { asset: asset.id, fit: 'contain', w: detail ? 240 : 320, h: detail ? 135 : 180 },
+            p: { 'position.x': 160, 'position.y': 90, ...(detail ? { rotation: 14, 'scale.x': 92, 'scale.y': 83, opacity: 67 } : {}) } }, PM.proj);
           PM.proj.layers.unshift(layer); PM.touch(); PM.invalidate();
           return asset.id as string;
-        });
-        media = [{ assetId, path: fixture }];
+        }, { kind });
+        media = [{ assetId, path: source }];
       } finally {
         await app.evaluate(() => document.querySelector('#color-depth-media-input')?.remove());
       }
@@ -72,12 +97,24 @@ try {
         PM.proj.layers.unshift(overlay); PM.touch(); PM.invalidate();
       });
     }
-    const times = kind === 'video' ? [0.5, 1.5] : [0.5];
+    const times = kind === 'scene3d' ? [0.5] : [0.5, 1.5];
     for (const time of times) {
       const capture = await app.evaluate(async ({ time, depth, kind }) => {
         const PM = (window as any).PM;
         PM.setTime(time, { raw: true, force: true });
         await PM.prepareFrame(time);
+        // prepareFrame publishes the canvas that the compositor passes to
+        // texFor. Save its decoded pixels before the layer transform/blend so
+        // a parity mismatch can be located on either side of that upload.
+        let source: { width: number; height: number; layer: string; asset: string; pixels: number[] } | undefined;
+        if (kind === 'video-detail') {
+          const layer = PM.proj.layers.find((item: any) => item.type === 'video');
+          if (!layer) throw new Error('Detailed video layer is missing');
+          const canvas = PM.preparedVideoFrames?.get(layer.id + '@' + time) as HTMLCanvasElement | undefined;
+          if (!canvas?.width || !canvas.height) throw new Error('Detailed video has no prepared source canvas');
+          const data = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height).data;
+          source = { width: canvas.width, height: canvas.height, layer: layer.id, asset: layer.d.asset, pixels: Array.from(data) };
+        }
         const gl = PM.GL.gl;
         let previous: Float32Array | null = null;
         for (let attempt = 0; attempt < 12; attempt++) {
@@ -103,9 +140,11 @@ try {
           // flat background and 2D overlay is never a valid 3D witness.
           const colors = new Set<number>();
           let visibleVideoPixels = 0;
+          let detailNonbackgroundPixels = 0;
+          let detailMidtonePixels = 0;
           for (let i = 0; i < pixels.length; i += 4) {
             const rgb = [Math.round(pixels[i]! * 255), Math.round(pixels[i + 1]! * 255), Math.round(pixels[i + 2]! * 255)];
-            if (kind === 'scene3d') colors.add((rgb[0]! << 16) | (rgb[1]! << 8) | rgb[2]!);
+            if (kind !== 'video') colors.add((rgb[0]! << 16) | (rgb[1]! << 8) | rgb[2]!);
             // The fixture is red at 0.5 s and green at 1.5 s. Require the
             // expected image over most of the canvas, not a blank readback.
             const expectedVideoColor = time < 1
@@ -113,12 +152,19 @@ try {
               : rgb[1]! > 200 && rgb[0]! < 32 && rgb[2]! < 32;
             if (kind === 'video' && expectedVideoColor)
               visibleVideoPixels++;
+            if (kind === 'video-detail') {
+              if (Math.max(Math.abs(rgb[0]! - 40), Math.abs(rgb[1]! - 51), Math.abs(rgb[2]! - 70)) > 16)
+                detailNonbackgroundPixels++;
+              if (rgb.every(channel => channel > 32 && channel < 224)) detailMidtonePixels++;
+            }
           }
-          const complete = kind === 'scene3d' ? colors.size > 8 : visibleVideoPixels > 320 * 180 / 2;
+          const complete = kind === 'scene3d' ? colors.size > 8
+            : kind === 'video-detail' ? colors.size > 64 && detailNonbackgroundPixels > 7200 && detailMidtonePixels > 7200
+              : visibleVideoPixels > 320 * 180 / 2;
           if (complete && previous && previous.every((value, i) => value === pixels[i]))
-            return { doc: JSON.parse(JSON.stringify(PM.proj)), pixels: Array.from(pixels),
+            return { doc: JSON.parse(JSON.stringify(PM.proj)), pixels: Array.from(pixels), source,
               dither: gl.isEnabled(gl.DITHER), supported: PM.GL.supportedColorDepths, attempts: attempt + 1,
-              colors: colors.size, visibleVideoPixels };
+              colors: colors.size, visibleVideoPixels, detailNonbackgroundPixels, detailMidtonePixels };
           previous = complete ? pixels : null;
           await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         }
@@ -130,9 +176,17 @@ try {
       writeFileSync(path.join(out, `${id}.rgba32f`), new Uint8Array(rgba.buffer));
       writeFileSync(path.join(out, `${id}.png`), encodePng({ width: 320, height: 180, channels: 4,
         data: Uint8Array.from(rgba, v => Math.round(Math.min(1, Math.max(0, v)) * 255)) }));
+      let sourceMetadata: Record<string, unknown> | undefined;
+      if (capture.source) {
+        const { pixels, ...metadata } = capture.source;
+        sourceMetadata = metadata;
+        writeFileSync(path.join(out, `${id}.source.rgba`), new Uint8Array(pixels));
+        writeFileSync(path.join(out, `${id}.source.json`), JSON.stringify(metadata));
+      }
       samples.push({ id, kind, depth, width: 320, height: 180, time, media,
         dither: capture.dither, supported: capture.supported, attempts: capture.attempts, colors: capture.colors,
-        visibleVideoPixels: capture.visibleVideoPixels, projectId: created.id });
+        visibleVideoPixels: capture.visibleVideoPixels, detailNonbackgroundPixels: capture.detailNonbackgroundPixels,
+        detailMidtonePixels: capture.detailMidtonePixels, source: sourceMetadata, projectId: created.id });
       console.log(`Captured ${id}`);
     }
   }
