@@ -103,6 +103,12 @@ when the built app, with Use New Engine off, reproduces that original reference
 exactly after substituting only the historical equation. PNG comparisons use
 decoded pixels; float comparisons use every binary32 bit.
 
+The qualification covers primary corpus, SVG and text gates, including
+isolated-text captures. Its 30 distinct reference kinds comprise 20 float
+captures and ten opaque PNGs; three PNGs are shared by the SVG and text gates.
+Every original was reproduced exactly before recapture, and the independent
+artifact audit rechecked 11,462,400 binary32 patterns and 7,488,000 byte codes.
+
 `src/blend-main-recapture.ts` consumes an external comparison plan and uses the
 ordinary corpus page capture, media import and output helpers. It restores the
 current shader and independently repeats the current capture before publishing

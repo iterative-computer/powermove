@@ -159,14 +159,18 @@ screen-blended precomp. An independent CPU expectation and an RGBA8 GPU
 witness preserve red/green source contributions over a translucent backdrop.
 No tolerance or reference fixture was changed to obtain the 52-image pass.
 
-The full render suite then exposed 25 comparisons against captures made before
-main changed that equation in `2b1fa379a`. Under explicit decision BLEND-1,
-the main-merged app with Use New Engine off reproduced every old comparison
-exactly after changing only the two historical blend expressions: 20 float
-frames bit for bit and five decoded opaque images byte for byte. Restoring
-the current equation produced independently repeated exact captures. All 25
-explained comparisons were recaptured through the corpus tool; none remained
-unexplained. Original files are retained, and both project and manifest
+The full render suite then exposed 25 primary-corpus comparisons and eight
+SVG/text comparisons against captures made before main changed that equation
+in `2b1fa379a`. Three PNG files are shared by the SVG and text gates, so these
+failures involve 30 distinct reference kinds. Under explicit decision BLEND-1,
+the main-merged app with Use New Engine off reproduced every original exactly
+after changing only the two historical blend expressions: 20 float captures
+bit for bit and ten decoded opaque images byte for byte, including ordinary
+and isolated-text captures. Restoring the current equation produced
+independently repeated exact captures. All 30 explained reference kinds were
+recaptured through the corpus tool; none remained unexplained. An independent
+PNG decoder and hash audit also verified the original and current artifacts.
+Original files are retained, and both project and manifest
 metadata record `recaptured after main 2b1fa379a blend change`, original and
 current hashes, historical pixels, app build and merged head. The corpus
 verifier checks that provenance. Comparison bounds are unchanged; see
