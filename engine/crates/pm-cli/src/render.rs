@@ -312,7 +312,6 @@ fn load(options: &Options) -> Result<Loaded, Failure> {
     )
     .map_err(|e| Failure::Failed(format!("{}: {e}", options.input.display())))?;
     let mut project = container.project().clone();
-    apply_precision_override(&mut project, options.precision)?;
     crate::parameters::apply(&mut project, &options.parameters).map_err(usage)?;
     apply_precision_override(&mut project, options.precision)?;
     let composition = match &options.composition {
