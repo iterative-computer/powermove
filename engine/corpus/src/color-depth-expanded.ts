@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { launchLegacyApp } from './app';
 import { blendModes, transitions, repoRoot } from './catalog';
-import { newProject, type Builder, type Doc } from './doc';
+import { newProject, type Builder, type Doc, type Value } from './doc';
 import { encodePng } from './png';
 
 const out = path.resolve(process.argv[2] ?? '');
@@ -67,8 +67,8 @@ for (const kind of ['layers', 'group', 'precomp']) {
 }
 for (const transition of transitions) {
   const b = make(`transition-${transition.id}`), layer = art(b);
-  const params = Object.fromEntries(transition.params.map(p => [p.k,
-    p.k === 'angle' ? 31 : p.k === 'softness' ? 19 : p.k === 'direction' ? 27 : p.def]));
+  const params: Record<string, Value> = Object.fromEntries(transition.params.map(p => [p.k,
+    p.k === 'angle' ? 31 : p.k === 'softness' ? 19 : p.k === 'direction' ? 27 : p.def as Value]));
   layer.transitionIn = b.transition(transition.id, .8, params);
   layer.transitionOut = b.transition(transition.id, .6, params);
   record(`transition-${transition.id}-in`, b, [`transition ${transition.id}`, 'in', 'partial opacity'], .4);

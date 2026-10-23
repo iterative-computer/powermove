@@ -191,7 +191,7 @@ for (const sample of manifest.samples) {
         draw();
         const coldMs = performance.now() - coldStart;
         const cold = counts;
-        if (!(cold.drawCalls > 0) || !(cold.textureAllocBytes > 0))
+        if (!((cold.drawCalls ?? 0) > 0) || !((cold.textureAllocBytes ?? 0) > 0))
           throw new Error('Cold render did not draw and allocate a fresh working texture');
         counts = {};
         draw(); draw(); // Warmups are deliberately unmeasured.
@@ -203,7 +203,7 @@ for (const sample of manifest.samples) {
           timings.push(performance.now() - start);
         }
         const warm12 = counts;
-        if (!(warm12.drawCalls > 0)) throw new Error('Warm renders had no draw calls');
+        if (!((warm12.drawCalls ?? 0) > 0)) throw new Error('Warm renders had no draw calls');
         timings.sort((a, b) => a - b);
         return { id: sample.id, depth: sample.depth, workingFormat: GL.colorDepth,
           initialCache, cold, warm12, coldMs, p50Ms: timings[6] };

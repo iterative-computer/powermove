@@ -159,6 +159,19 @@ screen-blended precomp. An independent CPU expectation and an RGBA8 GPU
 witness preserve red/green source contributions over a translucent backdrop.
 No tolerance or reference fixture was changed to obtain the 52-image pass.
 
+The full render suite then exposed 25 comparisons against captures made before
+main changed that equation in `2b1fa379a`. Under explicit decision BLEND-1,
+the main-merged app with Use New Engine off reproduced every old comparison
+exactly after changing only the two historical blend expressions: 20 float
+frames bit for bit and five decoded opaque images byte for byte. Restoring
+the current equation produced independently repeated exact captures. All 25
+explained comparisons were recaptured through the corpus tool; none remained
+unexplained. Original files are retained, and both project and manifest
+metadata record `recaptured after main 2b1fa379a blend change`, original and
+current hashes, historical pixels, app build and merged head. The corpus
+verifier checks that provenance. Comparison bounds are unchanged; see
+`corpus.md` for the proof and publication workflow.
+
 A separate depth-8 shader layer, transformed and screen-blended at partial
 opacity over a gradient, uses a registered three-pass user effect. Both
 production first-use parity requests settle through the actual WebGL runner;

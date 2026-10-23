@@ -50,6 +50,66 @@ export function verifyCapture(dir: string): VerifyResult {
     } catch (error) { problems.push(`${what}: ${record!.file} does not decode: ${(error as Error).message}`); }
   };
 
+  // BLEND-1 adds retained references beside active frames. Keep every record
+  // inside the capture even if a manifest is edited to name an absolute path,
+  // `..`, or a symlink into another directory.
+  const checkBlend = (record: unknown, what: string): Buffer | null => {
+    if (!isRecord(record) || !Number.isSafeInteger(record.bytes) || record.bytes < 0) {
+      problems.push(`${what}: malformed file record`);
+      return null;
+    }
+    const relative = record.file;
+    if (!relative || path.isAbsolute(relative) || relative.split(/[\\/]/).includes('..')) {
+      problems.push(`${what}: record is outside the capture: ${relative}`);
+      return null;
+    }
+    const file = path.resolve(dir, relative);
+    if (existsSync(file)) {
+      const root = realpathSync(dir), resolved = realpathSync(file);
+      const fromRoot = path.relative(root, resolved);
+      if (!fromRoot || fromRoot.startsWith('..') || path.isAbsolute(fromRoot)) {
+        problems.push(`${what}: record is outside the capture: ${relative}`);
+        return null;
+      }
+    }
+    return check(record, what);
+  };
+  const blendPng = (record: unknown, what: string, width: number, height: number): Uint8Array | null => {
+    const bytes = checkBlend(record, what);
+    if (!bytes) return null;
+    try {
+      const png = decodePng(new Uint8Array(bytes));
+      if (png.width !== width || png.height !== height || png.channels !== 4) {
+        problems.push(`${what}: ${png.width}x${png.height}x${png.channels}, expected ${width}x${height}x4`);
+        return null;
+      }
+      return png.data;
+    } catch (error) { problems.push(`${what}: PNG does not decode: ${(error as Error).message}`); return null; }
+  };
+  const blendFloat = (value: any, what: string, width: number, height: number, time: number): Buffer | null => {
+    const data = checkBlend(value?.data, `${what} data`);
+    const header = checkBlend(value?.header, `${what} header`);
+    if (!data || !header) return null;
+    if (data.length !== width * height * 16) problems.push(`${what}: float data is ${data.length} bytes, expected ${width * height * 16}`);
+    try {
+      const parsed = JSON.parse(header.toString('utf8'));
+      if (parsed.format !== 'powermove-corpus-rgba32f' || parsed.version !== 1
+          || parsed.width !== width || parsed.height !== height || parsed.time !== time
+          || parsed.channels !== 4 || parsed.sampleType !== 'f32' || parsed.endianness !== 'little'
+          || parsed.rowOrder !== 'top-down' || parsed.alpha !== 'premultiplied'
+          || parsed.sourcePrecision !== 'binary16'
+          || parsed.dataFile !== path.basename(value.data.file) || parsed.dataBytes !== data.length
+          || parsed.dataSha256 !== value.data.sha256) problems.push(`${what}: float header differs from data or sample`);
+    } catch (error) { problems.push(`${what}: float header is not JSON: ${(error as Error).message}`); }
+    if (data.length === width * height * 16) {
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      let nonFinite = 0;
+      for (let offset = 0; offset < data.length; offset += 4) if (!Number.isFinite(view.getFloat32(offset, true))) nonFinite++;
+      if (nonFinite) problems.push(`${what}: ${nonFinite} non-finite float values`);
+    }
+    return data;
+  };
+
   let frames = 0, floatFrames = 0, evalDumps = 0, blenderDumps = 0, failedSamples = 0, bytes = 0;
   for (const project of manifest.projects ?? []) {
     const where = project.id;
@@ -62,9 +122,11 @@ export function verifyCapture(dir: string): VerifyResult {
     for (const asset of project.blender?.assets ?? []) { bytes += asset.bytes; check(asset, `${where} Blender asset`); }
     for (const sample of project.samples ?? []) {
       const at = `${where} @ ${sample.time}`;
+      const recaptures = sample.blendMainRecapture;
       if (sample.error) failedSamples++;
       if (sample.png) { frames++; bytes += sample.png.bytes; }
-      checkPng(sample.png, `${at} png`, sample.width, sample.height);
+      if (recaptures !== undefined && sample.png) blendPng(sample.png, `${at} png`, sample.width, sample.height);
+      else checkPng(sample.png, `${at} png`, sample.width, sample.height);
       // Owner annotations add references alongside the immutable original
       // outputs; they do not rewrite the original capture's byte totals.
       const substitution = sample.referenceSubstitution;
@@ -91,6 +153,66 @@ export function verifyCapture(dir: string): VerifyResult {
           }
         }
       }
+      const local = localSamples.find((s: any) => s.time === sample.time);
+      if (!isDeepStrictEqual(recaptures, local?.blendMainRecapture)) problems.push(`${at}: BLEND-1 metadata differs between project and manifest`);
+      if (recaptures !== undefined) {
+        if (!recaptures || typeof recaptures !== 'object' || Array.isArray(recaptures)
+            || !Object.keys(recaptures).length) problems.push(`${at}: invalid BLEND-1 annotation`);
+        else for (const [kind, annotation] of Object.entries<any>(recaptures)) {
+          const label = `${at} BLEND-1 ${kind}`;
+          if (kind !== 'opaque' && kind !== 'float') { problems.push(`${label}: invalid comparison kind`); continue; }
+          if (!annotation || annotation.id !== 'BLEND-1' || annotation.mainCommit !== '2b1fa379a'
+              || annotation.reason !== 'recaptured after main 2b1fa379a blend change'
+              || !/^[0-9a-f]{64}$/.test(annotation.oldCaptureSha256)
+              || !/^[0-9a-f]{64}$/.test(annotation.currentCaptureSha256)
+              || !/^[0-9a-f]{40}$/.test(annotation.mergedMainHead)
+              || !/^[0-9a-f]{64}$/.test(annotation.appBuildSha256)
+              || annotation.oldCaptureSha256 === annotation.currentCaptureSha256) {
+            problems.push(`${label}: invalid decision metadata`);
+            continue;
+          }
+          const active = kind === 'opaque' ? sample.png : sample.float;
+          const localActive = kind === 'opaque' ? local?.png : local?.float;
+          if (!isDeepStrictEqual(annotation.corrected, active) || !isDeepStrictEqual(active, localActive)) problems.push(`${label}: corrected record differs from active sample`);
+          const oldPixels = kind === 'opaque'
+            ? blendPng(annotation.original, `${label} original`, sample.width, sample.height)
+            : blendFloat(annotation.original, `${label} original`, sample.width, sample.height, sample.time);
+          const currentPixels = kind === 'opaque'
+            ? blendPng(annotation.corrected, `${label} corrected`, sample.width, sample.height)
+            : blendFloat(annotation.corrected, `${label} corrected`, sample.width, sample.height, sample.time);
+          const historical = checkBlend(annotation.historical, `${label} historical`);
+          if (historical && historical.length !== sample.width * sample.height * (kind === 'opaque' ? 4 : 16)) problems.push(`${label}: historical raw data has wrong dimensions`);
+          if (oldPixels && sha256(oldPixels) !== annotation.oldCaptureSha256) problems.push(`${label}: original pixels differ from oldCaptureSha256`);
+          if (historical && sha256(historical) !== annotation.oldCaptureSha256) problems.push(`${label}: historical pixels differ from oldCaptureSha256`);
+          if (currentPixels && sha256(currentPixels) !== annotation.currentCaptureSha256) problems.push(`${label}: corrected pixels differ from currentCaptureSha256`);
+          const proof = checkBlend(annotation.evidence, `${label} evidence`);
+          if (proof) {
+            try {
+              const evidence = JSON.parse(proof.toString('utf8'));
+              if (evidence.id !== 'BLEND-1' || evidence.mainCommit !== annotation.mainCommit
+                  || evidence.reason !== annotation.reason || evidence.kind !== kind
+                  || evidence.projectId !== project.id || evidence.time !== sample.time
+                  || !isDeepStrictEqual(evidence.original, annotation.original)
+                  || !isDeepStrictEqual(evidence.current, annotation.corrected)
+                  || !isDeepStrictEqual(evidence.historical, annotation.historical)
+                  || evidence.oldCaptureSha256 !== annotation.oldCaptureSha256
+                  || evidence.originalPixelSha256 !== annotation.oldCaptureSha256
+                  || evidence.currentCaptureSha256 !== annotation.currentCaptureSha256
+                  || evidence.loadedDocumentSha256 !== project.loaded?.sha256
+                  || evidence.mergedMainHead !== annotation.mergedMainHead
+                  || evidence.appBuild?.sha256 !== annotation.appBuildSha256
+                  || evidence.oldExact !== true || evidence.currentRepeatExact !== true
+                  || !isDeepStrictEqual(evidence.equation, {
+                    old: ['vec3 res = mix(dc, bc, s.a);', 'o = vec4(res * a, a);'],
+                    current: ['vec3 res = (1. - s.a) * d.rgb + (1. - d.a) * s.rgb + s.a * d.a * bc;', 'o = vec4(res, a);'],
+                  })
+                  || !isDeepStrictEqual(evidence.setting, { useNewEngine: false, colorDepth: 16 })) {
+                problems.push(`${label}: evidence differs from annotation or sample`);
+              }
+            } catch (error) { problems.push(`${label}: evidence is not JSON: ${(error as Error).message}`); }
+          }
+        }
+      }
       if (sample.alphaPng) bytes += sample.alphaPng.bytes;
       checkPng(sample.alphaPng, `${at} alpha png`, sample.width, sample.height);
       const floats = [
@@ -100,6 +222,10 @@ export function verifyCapture(dir: string): VerifyResult {
       for (const { float, at } of floats) {
         floatFrames++;
         bytes += float.data.bytes + float.header.bytes;
+        if (float === sample.float && recaptures !== undefined) {
+          blendFloat(float, `${at} float`, sample.width, sample.height, sample.time);
+          continue;
+        }
         const data = check(float.data, `${at} float data`), header = check(float.header, `${at} float header`);
         if (data && header) {
           try {
