@@ -20,6 +20,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::time::{Duration, Instant};
 
 use pm_media::sys::ffmpeg as ff;
 
@@ -942,12 +943,21 @@ fn copy_frame_plane(
     }
 }
 
+#[derive(Default)]
+struct SampledPixelTimes {
+    crop: Duration,
+    means: Duration,
+}
+
 fn frame_blocks(
     f: &ff::AVFrame,
     alpha: bool,
     frame: u64,
     expected_size: (u32, u32),
+    mut times: Option<&mut SampledPixelTimes>,
 ) -> Result<Vec<BlockSample>, Error> {
+    let started = times.as_ref().map(|_| Instant::now());
+    let means_before = times.as_ref().map_or(Duration::ZERO, |t| t.means);
     let (w, h, strides) = frame_layout(f, alpha)?;
     if (w as u32, h as u32) != expected_size {
         return Err(Error::Verify(format!(
@@ -962,7 +972,16 @@ fn frame_blocks(
         || !w.is_multiple_of(2)
         || !h.is_multiple_of(2)
     {
-        return Ok(verify::block_means(&frame_input(f, alpha)?, frame));
+        let input = frame_input(f, alpha)?;
+        let means_started = times.as_ref().map(|_| Instant::now());
+        let blocks = verify::block_means(&input, frame);
+        if let (Some(times), Some(means_started)) = (times.as_deref_mut(), means_started) {
+            times.means += means_started.elapsed();
+        }
+        if let (Some(times), Some(started)) = (times, started) {
+            times.crop += started.elapsed().saturating_sub(times.means - means_before);
+        }
+        return Ok(blocks);
     }
     let mut blocks = Vec::with_capacity(9);
     for region in verify::block_regions(w as u32, h as u32) {
@@ -994,12 +1013,19 @@ fn frame_blocks(
             height: region.height,
             planes,
         };
+        let means_started = times.as_ref().map(|_| Instant::now());
         let mut block = verify::block_means(&crop, frame)
             .pop()
             .expect("a cropped block has one region");
+        if let (Some(times), Some(means_started)) = (times.as_deref_mut(), means_started) {
+            times.means += means_started.elapsed();
+        }
         block.x = region.x;
         block.y = region.y;
         blocks.push(block);
+    }
+    if let (Some(times), Some(started)) = (times, started) {
+        times.crop += started.elapsed().saturating_sub(times.means - means_before);
     }
     Ok(blocks)
 }
@@ -1022,10 +1048,13 @@ pub fn verify_webm(
     blocks: &[BlockSample],
     audio_pushed: u64,
 ) -> Result<VerifyReport, Error> {
+    let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
+    let verify_started = profiling.then(Instant::now);
     pm_media::ff::init();
     let mut problems: Vec<String> = vec![];
     let alpha = spec.alpha != AlphaOutput::None;
     let p = cstr(&path.to_string_lossy());
+    let open_started = profiling.then(Instant::now);
     let input = unsafe {
         let mut fmt: *mut ff::AVFormatContext = ptr::null_mut();
         check(
@@ -1041,6 +1070,8 @@ pub fn verify_webm(
         .map_err(|e| Error::Verify(e.to_string()))?;
         d
     };
+    let open_ms = open_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e3);
+    let scan_started = profiling.then(Instant::now);
     let fmt = input.0;
     let streams: Vec<*mut ff::AVStream> = unsafe {
         (0..(*fmt).nb_streams as usize)
@@ -1230,10 +1261,35 @@ pub fn verify_webm(
             })
         }
     };
+    let scan_ms = scan_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e3);
     // Sampled pixels, decoded by libvpx (which also decodes the alpha stream).
-    let decoded = decode_sampled(fmt, vst, spec, alpha)?;
+    let mut sampled_pixels = SampledPixelTimes::default();
+    let decode_started = profiling.then(Instant::now);
+    let decoded = decode_sampled(
+        fmt,
+        vst,
+        spec,
+        alpha,
+        profiling.then_some(&mut sampled_pixels),
+    )?;
+    let sampled_total = decode_started.map_or(Duration::ZERO, |started| started.elapsed());
+    let decode_ms = sampled_total
+        .saturating_sub(sampled_pixels.crop + sampled_pixels.means)
+        .as_secs_f64()
+        * 1e3;
+    let pixel_check_started = profiling.then(Instant::now);
     let pixels: Vec<PixelCheck> =
         verify::check_pixel_blocks(spec.codec, blocks, decoded, &mut problems);
+    let pixel_check_ms =
+        pixel_check_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e3);
+    if let Some(started) = verify_started {
+        eprintln!(
+            "[export timing] webm_verify_open_ms={open_ms:.3} webm_verify_scan_audio_ms={scan_ms:.3} webm_verify_sample_decode_ms={decode_ms:.3} webm_verify_crop_ms={:.3} webm_verify_means_ms={:.3} webm_verify_pixel_check_ms={pixel_check_ms:.3} webm_verify_total_ms={:.3}",
+            sampled_pixels.crop.as_secs_f64() * 1e3,
+            sampled_pixels.means.as_secs_f64() * 1e3,
+            started.elapsed().as_secs_f64() * 1e3,
+        );
+    }
     if !problems.is_empty() {
         return Err(Error::Verify(problems.join("; ")));
     }
@@ -1265,10 +1321,11 @@ fn decode_sampled(
     vst: *mut ff::AVStream,
     spec: &ExportSpec,
     alpha: bool,
+    mut times: Option<&mut SampledPixelTimes>,
 ) -> Result<Vec<BlockSample>, Error> {
     let key_interval = (2.0 * spec.rate.to_f64()).round().max(1.0) as u64;
     let sampled = decode_sampled_with_gap_map(fmt, vst, spec, key_interval, |f, n| {
-        frame_blocks(f, alpha, n, (spec.width, spec.height))
+        frame_blocks(f, alpha, n, (spec.width, spec.height), times.as_deref_mut())
     })?;
     Ok(sampled.into_iter().flat_map(|(_, blocks)| blocks).collect())
 }
@@ -1612,7 +1669,7 @@ mod sampled_decode_tests {
             for decode_gap in [gap, 0] {
                 let cropped: Vec<_> =
                     decoded_samples_with(&delivered.path, &spec, decode_gap, |f, n| {
-                        frame_blocks(f, alpha, n, (spec.width, spec.height))
+                        frame_blocks(f, alpha, n, (spec.width, spec.height), None)
                     })
                     .into_iter()
                     .flat_map(|(_, blocks)| blocks)
