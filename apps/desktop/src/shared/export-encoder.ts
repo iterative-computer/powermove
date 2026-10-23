@@ -22,6 +22,8 @@ export type EncoderCommand =
       fps: { num: number; den: number }; bitrate: number; frames: number;
       audio: { sampleRate: number; channels: number } | null;
       capture?: boolean;
+      /** Opt-in aggregate timings; never adds per-frame IPC. */
+      profile?: boolean;
     }
   /** Top-down RGBA8, premultiplied, `width × height × 4` bytes. */
   | { type: 'video'; seq: number; id: string; index: number; rgba: Uint8Array }
@@ -35,4 +37,4 @@ export type EncoderReply =
   | { type: 'ready' }
   | { type: 'ack'; seq: number; rgba?: Uint8Array }
   | { type: 'error'; seq: number; message: string }
-  | { type: 'file'; seq: number; bytes: Uint8Array };
+  | { type: 'file'; seq: number; bytes: Uint8Array; profile?: Record<string, number> };

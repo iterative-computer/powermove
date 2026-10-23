@@ -42,6 +42,7 @@ export type ExportEncodersOptions = {
   writeOutput(path: string, bytes: Uint8Array): Promise<void>;
   /** Test-only capture read from the actual Chromium encoder canvas. */
   capture?: (rgba: Uint8Array) => Promise<void>;
+  profile?: (timings: Record<string, number>) => void;
   closeMs?: number;
   idleMs?: number;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
@@ -66,6 +67,7 @@ type Session = {
   /** The first failure of an unanswered step, thrown at the next step. */
   failure: Error | null;
   capture: Promise<void>;
+  timings: Record<string, number>;
 };
 
 /** Frame and audio steps answered before the window answers them, so the
@@ -115,7 +117,7 @@ export class ExportEncoders {
       if (this.sessions.has(key)) throw new ProtocolError('invalidMessage', 'This export is already encoding.');
       const output = context.resolveOutput(body.output, body.job);
       const session: Session = {
-        key, id: `e${++nextId}`, output, frameBytes: body.width * body.height * 4, busy: 0, idle: null, inFlight: [], failure: null, capture: Promise.resolve()
+        key, id: `e${++nextId}`, output, frameBytes: body.width * body.height * 4, busy: 0, idle: null, inFlight: [], failure: null, capture: Promise.resolve(), timings: {}
       };
       this.sessions.set(key, session);
       this.closeTimer?.cancel();
@@ -125,7 +127,7 @@ export class ExportEncoders {
           type: 'open', seq: 0, id: session.id, codec: body.codec, width: body.width, height: body.height,
           fps: { num: body.frameRate.num, den: body.frameRate.den }, bitrate: body.bitrate, frames: body.frames,
           audio: body.audio ? { sampleRate: body.audio.sampleRate, channels: body.audio.channels } : null,
-          capture: !!this.options.capture
+          capture: !!this.options.capture, profile: !!this.options.profile
         });
       } catch (error) {
         this.end(session);
@@ -165,7 +167,9 @@ export class ExportEncoders {
           const reply = await this.command(session, { type: 'finish', seq: 0, id: session.id });
           if (reply.type !== 'file') throw new ProtocolError('exportFailed', 'The export encoder did not return a file.');
           this.end(session);
+          const started = this.options.profile ? performance.now() : 0;
           await this.options.writeOutput(session.output, reply.bytes);
+          this.options.profile?.({ ...session.timings, ...reply.profile, write_ms: performance.now() - started });
           return;
         }
       }
@@ -213,7 +217,11 @@ export class ExportEncoders {
       session.failure ??= error instanceof Error ? error : new Error(String(error));
     });
     session.inFlight.push(sent);
-    while (session.inFlight.length > MAX_IN_FLIGHT) await session.inFlight.shift();
+    while (session.inFlight.length > MAX_IN_FLIGHT) {
+      const started = this.options.profile ? performance.now() : 0;
+      await session.inFlight.shift();
+      if (this.options.profile) session.timings.backpressure_ms = (session.timings.backpressure_ms ?? 0) + performance.now() - started;
+    }
     if (session.failure) throw session.failure;
   }
 
@@ -251,9 +259,16 @@ export class ExportEncoders {
     session.idle?.cancel();
     session.idle = null;
     try {
+      let started = this.options.profile ? performance.now() : 0;
       const live = await this.window();
+      if (this.options.profile) session.timings.window_wait_ms = (session.timings.window_wait_ms ?? 0) + performance.now() - started;
       if (this.sessions.get(session.key) !== session) throw new ProtocolError('cancelled', 'The export encode was abandoned.');
+      started = this.options.profile ? performance.now() : 0;
       const reply = await this.send(live, command);
+      if (this.options.profile) {
+        const key = `${command.type}_roundtrip_ms`;
+        session.timings[key] = (session.timings[key] ?? 0) + performance.now() - started;
+      }
       if (reply.type === 'error') throw new ProtocolError('exportFailed', `The export encoder failed: ${reply.message}`);
       if (reply.type === 'ack' && reply.rgba && this.options.capture) {
         const rgba = reply.rgba;

@@ -325,6 +325,31 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // The job engine's WebM exports go through Chromium's WebCodecs encoders,
   // as today's exporter's do (decision EXPORT-1), in a hidden encoder window.
   const rendererUrl = !options.isPackaged ? env['ELECTRON_RENDERER_URL']?.replace(/\/$/, '') : undefined;
+  // Process-cumulative counters: overlapping/aborted exports must not reset
+  // another session's transport measurements. Compare snapshots for a run.
+  const exportImports = { process_surface_imports: 0, process_surface_import_sync_ms: 0,
+    process_surface_sends: 0, process_surface_send_ms: 0, process_surface_send_failures: 0 };
+  const textures = sharedTexture as unknown as SharedTextureLike;
+  const exportTextures: SharedTextureLike = env['PM_EXPORT_PROFILE'] === '1' ? {
+    importSharedTexture: (options) => {
+      const started = performance.now();
+      const texture = textures.importSharedTexture(options);
+      exportImports.process_surface_imports++;
+      exportImports.process_surface_import_sync_ms += performance.now() - started;
+      return texture;
+    },
+    sendSharedTexture: (options, ...args) => {
+      exportImports.process_surface_sends++;
+      const started = performance.now();
+      return textures.sendSharedTexture(options, ...args).then(() => {
+        exportImports.process_surface_send_ms += performance.now() - started;
+      }, (error: unknown) => {
+        exportImports.process_surface_send_ms += performance.now() - started;
+        exportImports.process_surface_send_failures++;
+        throw error;
+      });
+    }
+  } : textures;
   const exportEncoders = new ExportEncoders({
     openWindow: () => openEncoderWindow({
       preload: path.join(options.mainDirectory, '../preload/exportEncoder.js'),
@@ -333,6 +358,11 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       log
     }),
     writeOutput: (file, bytes) => writeFile(file, bytes),
+    ...(env['PM_EXPORT_PROFILE'] === '1' ? {
+      profile: (timings: Record<string, number>) => {
+        console.log('[export timing] host', JSON.stringify({ ...timings, ...exportImports }));
+      }
+    } : {}),
     ...(env['POWERMOVE_BACKGROUND_TEST'] === '1' && env['PM_EXPORT_INPUT_CAPTURE_DIR'] ? {
       capture: (rgba: Uint8Array) => appendFile(path.join(env['PM_EXPORT_INPUT_CAPTURE_DIR']!, 'native.rgba'), rgba)
     } : {})
@@ -340,7 +370,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // Separate authenticated Mach connection for job encoders. Viewer and
   // export pools have independent generations, receivers and lifetimes.
   const exportFrameBridge = bridgeAddon ? new FrameBridge({
-    addon: bridgeAddon, sharedTexture: sharedTexture as unknown as SharedTextureLike,
+    addon: bridgeAddon, sharedTexture: exportTextures,
     allowUnsignedDev: !options.isPackaged, resolve: () => exportEncoders.receiver(), log,
   }) : null;
   exportFrameBridge?.listen((event) => {
