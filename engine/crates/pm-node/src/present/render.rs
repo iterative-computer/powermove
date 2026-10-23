@@ -334,9 +334,11 @@ pub enum Command {
         key: Key,
         message: pm_protocol::shader_fallback::ShaderFallbackMessage,
     },
+    /// The engine's memory pressure grant reached the viewer: audio drops
+    /// its cold decoded blocks ([`super::audio::AudioCtl::MemoryPressure`]).
+    AudioMemoryPressure,
     /// The viewer's frame-cache share of the lease (bytes): the composer's
     /// decode service evicts down to it at once.
-    AudioMemoryPressure,
     FrameCache {
         bytes: usize,
     },
@@ -915,6 +917,10 @@ struct View {
     awaiting: Option<(i64, Option<u32>, PlaybackRateValue)>,
     /// Latest Play intent while the document or media is not ready.
     deferred_transport: Option<TransportCommand>,
+    /// The deferred Play already reached the audio thread through the
+    /// ingress (PLAY-1): its run is going, so the replay once the route is
+    /// decided follows that run instead of starting the audio again.
+    deferred_forwarded: Option<ForwardedAudio>,
     /// The audio clock version last followed.
     audio_version: u64,
     /// Paused after a `seek {scrub}`: frames may show stand-ins for video
@@ -2906,10 +2912,12 @@ impl Thread {
                     // Not decided yet (document or media on its way): the
                     // latest Play waits for the route.
                     view.deferred_transport = Some(TransportCommand::Play { rate });
+                    view.deferred_forwarded = audio_forwarded;
                     trace_audio_transport("play-deferred", key, view, view.deferred_transport);
                     return;
                 }
                 view.deferred_transport = None;
+                view.deferred_forwarded = None;
                 if view.awaiting.is_some_and(|a| a.2 == rate)
                     || (view.clock.is_playing() && view.clock.rate() == rate)
                 {
@@ -2967,6 +2975,7 @@ impl Thread {
                         pre_roll,
                         post_roll,
                     });
+                    view.deferred_forwarded = audio_forwarded;
                     trace_audio_transport(
                         "play-around-deferred",
                         key,
@@ -2976,6 +2985,7 @@ impl Thread {
                     return;
                 }
                 view.deferred_transport = None;
+                view.deferred_forwarded = None;
                 let here = view.clock.media_at(at);
                 if !host_clock && self.audio_for(key).is_some() {
                     let audio = &self.audio[&key];
@@ -3011,6 +3021,7 @@ impl Thread {
             TransportCommand::Pause => {
                 trace_audio_transport("pause-explicit", key, view, None);
                 view.deferred_transport = None;
+                view.deferred_forwarded = None;
                 view.awaiting = None;
                 if view.clock.apply(TransportCommand::Pause, at) {
                     view.schedule.reset();
@@ -3358,6 +3369,7 @@ impl Thread {
             layer_reports: Default::default(),
             awaiting: None,
             deferred_transport: None,
+            deferred_forwarded: None,
             audio_version: 0,
             scrub: false,
             stand_in: None,
@@ -4231,6 +4243,8 @@ impl Thread {
             let rate = view.awaiting.map_or(view.clock.rate(), |a| a.2);
             view.deferred_transport
                 .get_or_insert(TransportCommand::Play { rate });
+            // The audio pauses below: the replay starts it again.
+            view.deferred_forwarded = None;
             view.awaiting = None;
             view.clock.apply(TransportCommand::Pause, t);
             view.schedule.reset();
@@ -4279,15 +4293,19 @@ impl Thread {
             {
                 link.send(AudioCtl::Seek(view.clock.media_at(t)));
             }
-            let deferred = self
-                .views
-                .get_mut(&key)
-                .and_then(|v| v.deferred_transport.take());
-            if let Some(command) = deferred {
+            let deferred = self.views.get_mut(&key).and_then(|v| {
+                v.deferred_transport
+                    .take()
+                    .map(|c| (c, v.deferred_forwarded.take()))
+            });
+            if let Some((command, forwarded)) = deferred {
                 if let Some(view) = self.views.get(&key) {
                     trace_audio_transport("deferred-replay", key, view, Some(command));
                 }
-                self.transport(key, command, t, None);
+                // A Play the ingress forwarded before the route was known
+                // already started its audio run: sending it again would
+                // restart what is being heard.
+                self.transport(key, command, t, forwarded);
             } else if changed && let Some(view) = self.views.get(&key) {
                 trace_audio_transport("decided-without-deferred", key, view, None);
             }
@@ -6833,6 +6851,76 @@ mod tests {
             chrome_selection: None,
             canvas: None,
             surface_epoch: None,
+        }
+    }
+
+    /// PLAY-1: the ingress forwards an edit and the Play after it before
+    /// the render thread decides the edit's route. When the route is then
+    /// pending (a new asset's media answer on its way), the Play waits for
+    /// it; its replay follows the audio run the forwarded Play started and
+    /// does not start (restart) the audio again. A Play the ingress did not
+    /// forward still starts the audio at the replay.
+    #[test]
+    fn deferred_forwarded_play_replays_without_restarting_the_audio() {
+        use super::super::audio::{AudioCtl, AudioLink, ForwardedAudio};
+        use pm_engine::document::DocumentUpdate;
+
+        let text = r#"{"id":"P","compId":"main","name":"T","w":320,"h":180,"fps":30,"dur":4,"layers":[{"id":"l","type":"audio","name":"l","from":0,"dur":4,"on":true,"solo":false,"group":null,"parent":null,"p":{},"fx":[],"masks":[],"d":{"asset":"a","gain":1,"trim":0,"fadeIn":0,"fadeOut":0}}],"comps":{},"assets":{"a":{"id":"a","name":"tone.wav","kind":"audio","format":"wav"}},"params":{}}"#;
+        let play = TransportCommand::Play {
+            rate: PlaybackRateValue::NORMAL,
+        };
+        for forwarded in [Some(ForwardedAudio { before: None }), None] {
+            let (mut thread, _) = preview_thread();
+            thread.config.host_clock = false;
+            let key = preview_key();
+            let (link, audio) = AudioLink::test_link();
+            thread.audio.insert(key, link);
+            let mut doc = ViewDocument::default();
+            doc.update(&DocumentUpdate::Replace {
+                root: Some(Arc::new(pm_model::json::parse(text).unwrap())),
+                revision: Revision::new(1).unwrap(),
+            })
+            .unwrap();
+            thread.docs.insert(key, doc);
+            thread.configure(key, headless_test_state(true), None, None);
+            thread.document_step(key);
+            assert!(
+                matches!(thread.views[&key].reported, Some(Route::Pending(_))),
+                "{:?}",
+                thread.views[&key].reported
+            );
+            assert!(thread.audible(key));
+            let _ = audio.try_iter().count();
+
+            thread.transport(key, play, now(), forwarded);
+            assert_eq!(thread.views[&key].deferred_transport, Some(play));
+            assert!(audio.try_recv().is_err(), "a deferred Play sends nothing");
+
+            thread
+                .docs
+                .get_mut(&key)
+                .unwrap()
+                .set_media("a", Some("/media/tone.wav".into()));
+            thread.document_step(key);
+            let view = &thread.views[&key];
+            assert_eq!(view.reported, Some(Route::Engine));
+            assert_eq!(view.deferred_transport, None);
+            assert!(view.deferred_forwarded.is_none());
+            assert!(
+                view.awaiting.is_some(),
+                "the line waits for the audio clock"
+            );
+            let sent: Vec<AudioCtl> = audio.try_iter().collect();
+            let plays = sent
+                .iter()
+                .filter(|c| matches!(c, AudioCtl::Play { .. }))
+                .count();
+            assert_eq!(
+                plays,
+                usize::from(forwarded.is_none()),
+                "forwarded {forwarded:?}: {} controls",
+                sent.len()
+            );
         }
     }
 
