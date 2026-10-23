@@ -42,6 +42,23 @@ function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: 
 }
 
 describe('the raster override producer', () => {
+  it('does not put a required paused raster behind background scheduler work', async () => {
+    const postTask = vi.fn(async () => {});
+    vi.stubGlobal('scheduler', { postTask });
+    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => ({ ...original(...args), key: 'required' }));
+    try {
+      await compat.prepare(need('box'), 4, { urgent: true });
+      expect(postTask).not.toHaveBeenCalled();
+      expect(engineRasterAsync).toHaveBeenCalledOnce();
+      expect(engineRaster).not.toHaveBeenCalled();
+      expect(compat.answer(need('box'), 4, { prepared: true })).toMatchObject({ key: 'required' });
+      await compat.prepare(need('box', 1), 4);
+      expect(postTask).toHaveBeenCalled();
+    } finally { compat.dispose(); vi.unstubAllGlobals(); }
+  });
+
   it('reuses a native-evaluated unchanged base across playback times while wrappers still run at each time', async () => {
     const { services, compat, engineRaster, engineRasterAsync, need } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.d, scale, crop]));
     const original = services.get<any>('raster');

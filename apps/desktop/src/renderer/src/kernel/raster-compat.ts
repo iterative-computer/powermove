@@ -37,7 +37,7 @@
  * sent again), so the next frame asks afresh.
  */
 import type { CompatNeed } from '../../../shared/engine-protocol';
-import type { CompatAnswerOptions, CompatAnswerResult, EngineRenderTransport } from '../engine-connection/render-transport';
+import type { CompatAnswerOptions, CompatPrepareOptions, CompatAnswerResult, EngineRenderTransport } from '../engine-connection/render-transport';
 import { COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT } from '../engine-connection/render-transport';
 import type { Disposable } from './api';
 import { compositorPixels } from './raster-pixels';
@@ -98,7 +98,7 @@ export interface RasterCompatHandle {
   /** Answers one need (tests, the transport); `fresh`: never `reuse` (an export frame). */
   answer(need: CompatNeed, revision: number, options?: CompatAnswerOptions): CompatAnswerResult;
   /** Prepare an interactive answer and all its base dependencies asynchronously. */
-  prepare(need: CompatNeed, revision: number): Promise<void>;
+  prepare(need: CompatNeed, revision: number, options?: CompatPrepareOptions): Promise<void>;
   /** Where base pixels came from (diagnostics; the cadence gates log it). */
   readonly stats: RasterCompatStats;
   dispose(): void;
@@ -263,7 +263,8 @@ const TRANSPARENT: CompatAnswerResult = { kind: 'raster', key: 'powermove:empty'
 /** Give frame delivery and input a turn before speculative wrapper work.
  *  Native replies often arrive together; chaining their continuations as
  *  microtasks would run several wrappers before a presentation event. */
-async function preparationTurn(): Promise<void> {
+async function preparationTurn(urgent = false): Promise<void> {
+  if (urgent) return;
   const scheduler = (globalThis as typeof globalThis & { scheduler?: { postTask: (callback: () => void, options: { priority: 'background' }) => Promise<void> } }).scheduler;
   if (scheduler?.postTask) await scheduler.postTask(() => {}, { priority: 'background' });
 }
@@ -471,7 +472,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       return finish(readPixels(source));
     },
 
-    async prepare(need: CompatNeed, revision: number): Promise<void> {
+    async prepare(need: CompatNeed, revision: number, prepareOptions?: CompatPrepareOptions): Promise<void> {
       if (!options.engineRasterAsync || !wrapped()) return;
       sampleRevision(revision);
       const layer = findLayer(PM, String(need.composition), String(need.layer));
@@ -484,7 +485,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         const waitingGeneration = generation;
         await Promise.race(running);
         if (generation !== waitingGeneration) return;
-        return handle.prepare(need, revision);
+        return handle.prepare(need, revision, prepareOptions);
       }
       const epoch = generation;
       pending++;
@@ -501,7 +502,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
           // later turn. The finite bound also rejects a nonconvergent chain.
           for (let phase = 0; phase < 64 && valid(); phase++) {
             const queued = performance.now();
-            await preparationTurn();
+            await preparationTurn(prepareOptions?.urgent);
             transport?.trace?.record('wrapper scheduling', revision, need.time, queued, phase);
             if (!valid()) return;
             const attempt = { samples, tainted, missing: null as Dependency | null, readback: null as (() => Promise<CompatAnswerResult>) | null };
@@ -581,7 +582,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       // A producer list without the source drops its answers, then the
       // source comes back: the next frame asks afresh.
       unanswer();
-      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options), options.engineRasterAsync ? (need, revision) => handle.prepare(need, revision) : undefined);
+      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options), options.engineRasterAsync ? (need, revision, prepareOptions) => handle.prepare(need, revision, prepareOptions) : undefined);
     },
 
     dispose(): void {
@@ -599,7 +600,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     clearReady();
     if (!transport) return;
     if (wrapped() && !unanswer) {
-      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options), options.engineRasterAsync ? (need, revision) => handle.prepare(need, revision) : undefined);
+      unanswer = transport.answerCompat('rasterOverride', (need, revision, options) => handle.answer(need, revision, options), options.engineRasterAsync ? (need, revision, prepareOptions) => handle.prepare(need, revision, prepareOptions) : undefined);
     } else if (!wrapped() && unanswer) {
       unanswer();
       unanswer = null;
