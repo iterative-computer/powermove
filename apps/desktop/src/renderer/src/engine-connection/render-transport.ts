@@ -32,7 +32,7 @@
  *   context) on the session's port; `provideCompat` registers the producer
  *   the job engine's export frames are drawn by (main asks the window).
  */
-import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, SnapshotPixels, SnapshotRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
+import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, SnapshotPixels, SnapshotRequest, SnapshotViewer, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
 import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAsk, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
 
@@ -77,6 +77,8 @@ export type EngineSnapshotOptions = {
   background?: boolean;
   /** Native shading may stand in for Blender (thumbnails, posters). Default false. */
   draft3d?: boolean;
+  /** A pinned editor view, rendered before the viewer scales its canvas. */
+  viewer?: SnapshotViewer;
   /** How long the engine may wait for the revision and its turn (ms). */
   waitMs?: number;
   /** Today's `snapshotAsync`: Blender renders the frame's Blender
@@ -212,6 +214,10 @@ export function svgUploadKey(key: SvgRasterKey): string {
 
 export type TransportStats = { sync: number; async: number; idle: number; failed: number; rounds: number; lastFailure: string | null; slowestSyncMs: number; documentSync: number };
 
+function pinViewer(options: EngineSnapshotOptions): EngineSnapshotOptions {
+  return options.viewer ? { ...options, viewer: structuredClone(options.viewer) } : options;
+}
+
 function failure(reply: Extract<EngineSnapshotReply, { status: 'failed' }>): EngineSnapshotError {
   return new EngineSnapshotError(reply.code, reply.message);
 }
@@ -270,7 +276,8 @@ export class EngineRenderTransport {
       captionsHidden: !layer && (options.captionsHidden ?? this.options.captionsHidden?.() ?? false),
       pixels: options.pixels ?? 'opaque',
       class: cls,
-      viewSeq: this.options.viewSeq(),
+      viewSeq: options.viewer?.viewSeq ?? this.options.viewSeq(),
+      ...(options.viewer ? { viewer: options.viewer } : {}),
       waitMs: Math.max(1, Math.min(120_000, Math.round(wait))),
       ...(blender ? { blenderWaitMs: BLENDER_WAIT_MS } : {}),
       uploaded
@@ -352,6 +359,7 @@ export class EngineRenderTransport {
    * here waits for a task.
    */
   snapshotSync(options: EngineSnapshotOptions): EngineSnapshot {
+    options = pinViewer(options);
     const started = performance.now();
     const native = this.options.native;
     if (!native.snapshotSync) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no synchronous engine snapshots.'), 'snapshot');
@@ -468,6 +476,7 @@ export class EngineRenderTransport {
 
   /** The same, asynchronously (`async` or `idle` class). */
   async snapshot(options: EngineSnapshotOptions, cls: Exclude<SnapshotClass, 'sync'> = 'async'): Promise<EngineSnapshot> {
+    options = pinViewer(options);
     const native = this.options.native;
     if (!native.snapshot) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no engine snapshots.'), 'snapshot');
     const uploaded: string[] = [];
@@ -710,9 +719,11 @@ export class EngineThumbnails {
     const ticket = ++this.next;
     this.latest.set(request.key, ticket);
     const required = request.minRevision ?? revision() ?? 0;
+    const viewSeq = request.viewer?.viewSeq;
     try {
       const result = await this.transport.snapshot(request, 'idle');
-      if (this.latest.get(request.key) !== ticket || result.revision < required) {
+      if (this.latest.get(request.key) !== ticket || result.revision < required
+        || (viewSeq !== undefined && result.viewSeq !== viewSeq)) {
         this.stale++;
         return null;
       }

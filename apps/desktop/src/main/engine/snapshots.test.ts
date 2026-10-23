@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineSnapshotRequest } from '../../shared/engine-ipc';
-import type { Request, Response } from '../../shared/engine-protocol';
+import type { Request, Response, SnapshotViewer } from '../../shared/engine-protocol';
 import { RemoteError } from './protocol';
 import { MAX_BLENDER_WAIT_MS, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, validSnapshotRequest, type SnapshotEngine } from './snapshots';
 import { FallbackInputs } from './fallback-inputs';
@@ -54,6 +54,25 @@ function engine(answer: (body: Request, revision: number | null) => Promise<Resp
 }
 
 describe('snapshot requests', () => {
+  it('validates pinned viewer captures at the original backing size and rejects malformed cameras', () => {
+    const viewer: SnapshotViewer = { viewSeq: 19, canvas: { width: 4, height: 2, crop: { x: 40, y: 20, width: 100, height: 50 }, css: { x: 5, y: 6, width: 200, height: 100 } },
+      view: { camera: { view: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -2, -3, -4, 1], projection: { kind: 'orthographic', halfHeight: 3, near: -100, far: 100 } }, shading: 'solid', xray: true, localView: ['cube'] } };
+    expect(validSnapshotRequest(request({ viewSeq: 19, viewer }))).toBe(true);
+    expect(validSnapshotRequest(request({ viewSeq: 19, viewer: { ...viewer, view: null } }))).toBe(true);
+    const bad = (change: (v: SnapshotViewer) => void) => {
+      const pin = structuredClone(viewer); change(pin);
+      expect(validSnapshotRequest(request({ viewSeq: 19, viewer: pin }))).toBe(false);
+    };
+    bad(v => { v.canvas.width = 5; });
+    bad(v => { v.canvas.crop.width = 0; });
+    bad(v => { v.canvas.css.x = Infinity; });
+    bad(v => { v.viewSeq = -1; });
+    expect(validSnapshotRequest(request({ viewSeq: 18, viewer }))).toBe(false);
+    bad(v => { v.view!.camera!.view[0] = NaN; });
+    bad(v => { v.view!.camera!.projection = { kind: 'perspective', fovYDegrees: 180, near: .1, far: 100 }; });
+    expect(validSnapshotRequest(request({ viewSeq: 19, viewer, target: { kind: 'layer', layer: 'L1', scale: 1, crop: null } }))).toBe(false);
+  });
+
   it('accept the shapes the renderer sends and refuse the rest', () => {
     expect(validSnapshotRequest(request())).toBe(true);
     expect(validSnapshotRequest(request({ captionsHidden: true }))).toBe(true);

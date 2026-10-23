@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
-import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
+import type { ShaderFallbackRequest, SnapshotViewer } from '../../../shared/engine-protocol';
 import { BLENDER_WAIT_MS, EngineRenderTransport, EngineSnapshotError, type TransportSession, type TransportSvgRasters, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
@@ -62,6 +62,32 @@ function setup(replies: EngineSnapshotReply[], options: { flush?: () => number; 
 }
 
 describe('EngineRenderTransport', () => {
+  it('pins viewer camera, crop and selected sequence across asynchronous renderer rounds', async () => {
+    const viewer: SnapshotViewer = { viewSeq: 19,
+      canvas: { width: 2, height: 2, crop: { x: 40, y: 20, width: 100, height: 50 }, css: { x: 5, y: 6, width: 200, height: 100 } },
+      view: { camera: { view: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -2, -3, -4, 1], projection: { kind: 'orthographic', halfHeight: 3, near: .01, far: 100 } }, shading: 'solid', xray: true, localView: ['cube'] } };
+    const selected = structuredClone(viewer);
+    const needs: EngineSnapshotReply = { status: 'needsRenderer', revision: 12, fallback: [fallbackRequest('a'.repeat(64))], compat: [] };
+    const reply = { ...rendered(2, 2), viewSeq: 19 } as EngineSnapshotReply;
+    const { transport, asked } = setup([needs, reply]);
+    const pending = transport.snapshot({ time: .5, width: 2, height: 2, viewer }, 'idle');
+    viewer.viewSeq = 20;
+    viewer.canvas.crop.x = 80;
+    viewer.view!.camera!.view[12] = 99;
+    const result = await pending;
+    expect(asked).toHaveLength(2);
+    for (const request of asked) expect(request.snapshot).toMatchObject({ viewer: selected, viewSeq: 19 });
+    expect(result.viewSeq).toBe(19);
+    expect(asked[0]!.snapshot.viewer!.view!.camera).not.toBe(viewer.view!.camera);
+  });
+
+  it('rejects a thumbnail tagged with a different selected view sequence', async () => {
+    const viewer: SnapshotViewer = { view: null, viewSeq: 19, canvas: { width: 2, height: 2, crop: { x: 0, y: 0, width: 2, height: 2 }, css: { x: 0, y: 0, width: 2, height: 2 } } };
+    const { transport } = setup([rendered(2, 2)]);
+    expect(await transport.thumbnails.request({ key: 'viewer', time: 0, width: 2, height: 2, viewer })).toBeNull();
+    expect(transport.thumbnails.stale).toBe(1);
+  });
+
   it('asks synchronously at the flushed revision, with the window session and view', () => {
     let flushed = 0;
     const { transport, asked } = setup([rendered(4, 2)], { flush: () => { flushed++; return 12; } });
