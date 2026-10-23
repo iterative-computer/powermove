@@ -389,7 +389,9 @@ export class EngineRenderTransport {
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private aheadTurn = 0;
   private pumpingAhead = false;
-  readonly lookaheadStats = { prefetched: 0, maxPrefetchInFlight: 0, answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, inFlight: 0, maxInFlight: 0, obsolete: 0, slowestAnswerMs: 0, answerMs: 0, recentAnswers: [] as { time: number; ms: number }[], recent: [] as number[] };
+  /** How long one asynchronous preparation takes, on average (ms). */
+  private prepareMs: number | null = null;
+  readonly lookaheadStats = { prepareMs: 0, latePrepareSkips: 0, prefetched: 0, maxPrefetchInFlight: 0, answered: 0, asked: 0, askedAhead: 0, skipped: 0, recoveries: 0, pending: 0, maxPending: 0, inFlight: 0, maxInFlight: 0, obsolete: 0, slowestAnswerMs: 0, answerMs: 0, recentAnswers: [] as { time: number; ms: number }[], recent: [] as number[] };
   private readonly offAsk: () => void;
   readonly stats: TransportStats = { sync: 0, async: 0, idle: 0, failed: 0, rounds: 0, lastFailure: null, slowestSyncMs: 0, documentSync: 0 };
   /** UI snapshots (thumbnails, library cards, posters, the project thumbnail). */
@@ -552,6 +554,16 @@ export class EngineRenderTransport {
       });
       // Breadth first: every layer's current frame precedes speculative
       // work. A slow producer gets at most one turn before another layer.
+      // A preparation started for a frame the clock reaches before it can
+      // finish is wasted, and when every one is, playback never catches up
+      // (it would keep preparing the frame at the clock). Frames sooner than
+      // a preparation takes are left to the engine's own asks; the horizon
+      // starts where answers can still arrive in time.
+      const frameMs = ((this.options.frameTicks?.() ?? 0) / ticks(1)) * 1000;
+      // Only while the line moves: a Play held in the engine's preroll
+      // (rate 0) waits for exactly the frames at the clock.
+      const lead = clock && clock.rate !== 0 && this.prepareMs !== null && frameMs > 0
+        ? Math.min(COMPAT_LOOKAHEAD, Math.ceil((this.prepareMs * Math.abs(clock.rate)) / frameMs)) : 0;
       let done = 0, pending = 0;
       const outside = (entry: AheadEntry, time: number) => time < 0 || (!!span && entry.need.composition === this.options.composition() && (time < span.start || time >= span.end));
       for (let offset = 0; offset <= COMPAT_LOOKAHEAD; offset++) {
@@ -561,6 +573,7 @@ export class EngineRenderTransport {
           const time = intoLoop(entry.cursor + offset * entry.step, entry.loop ?? null);
           if (outside(entry, time) || entry.sent.has(time) || entry.pending.has(time)) continue;
           if (warm && performance.now() >= warmUntil && !entry.required.has(time)) continue;
+          if (offset < lead && this.preparers.has(entry.need.source)) { this.lookaheadStats.latePrepareSkips++; continue; }
           pending++;
           if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
           const prepare = this.preparers.get(entry.need.source);
@@ -623,7 +636,11 @@ export class EngineRenderTransport {
     this.aheadInFlight++;
     this.lookaheadStats.inFlight = this.aheadInFlight;
     this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
+    const began = performance.now();
     void Promise.resolve().then(() => prepare(need, revision)).then(() => {
+      const ms = performance.now() - began;
+      this.prepareMs = this.prepareMs === null ? ms : this.prepareMs * 0.75 + ms * 0.25;
+      this.lookaheadStats.prepareMs = Math.round(this.prepareMs * 10) / 10;
       const clock = this.options.playing?.() ? this.options.playhead?.() : null;
       const cursor = clock && need.composition === this.options.composition()
         ? Math.floor(clock.time / Math.abs(entry.step)) * Math.abs(entry.step) : entry.cursor;

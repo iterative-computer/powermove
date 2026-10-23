@@ -754,6 +754,36 @@ describe('compatibility answers during playback', () => {
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 
+  it('starts preparing where a preparation can still finish before the clock reaches the frame', async () => {
+    vi.useFakeTimers();
+    const { t, session, state } = rig(true);
+    const prepared: number[] = [];
+    const pending: Array<() => void> = [];
+    t.answerCompat('rasterOverride', () => ({ kind: 'native' }), n => { prepared.push(n.time); return new Promise<void>(resolve => pending.push(resolve)); });
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepared).toEqual([0, frame]);
+      // Each preparation takes 100 ms: three frames at 30 fps.
+      await vi.advanceTimersByTimeAsync(100);
+      pending.shift()!(); pending.shift()!();
+      // The clock moved on 3 frames meanwhile.
+      state.time = 3 * frame;
+      await vi.advanceTimersByTimeAsync(0);
+      const next = prepared.slice(2);
+      expect(next.length).toBeGreaterThan(0);
+      // Frames 3 to 5 cannot be ready in time: the horizon starts at 6.
+      expect(Math.min(...next)).toBe(6 * frame);
+      expect(t.lookaheadStats.latePrepareSkips).toBeGreaterThan(0);
+      // A stopped line (a Play in the engine's preroll) prepares the frames at the clock.
+      state.rate = 0;
+      state.time = 40 * frame;
+      t.receiveCompat({ compat: 'needs', needs: [need(40 * frame)] }, session);
+      while (pending.length) { pending.shift()!(); await vi.advanceTimersByTimeAsync(0); }
+      expect(prepared).toContain(40 * frame);
+    } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
+  });
+
   it('measures distances along a looping run: the frames after the wrap follow the last ones', () => {
     const loop = { start: 10 * frame, end: 100 * frame };
     expect(runAhead(98 * frame, 12 * frame, frame, loop)).toBe(4 * frame);
