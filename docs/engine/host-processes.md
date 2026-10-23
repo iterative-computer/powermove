@@ -628,7 +628,12 @@ work.
   The per-sample reference comparison remains bit-exact.
 - Export answer horizons are per layer: a newly appearing layer no longer
   moves every older layer's horizon backwards. An already-prefetched gap
-  does not change the learned frame step. Near frames precede far ones.
+  does not change the learned frame step. Each composition learns its own
+  cadence, so a remapped precomp's local time cannot shrink the root's
+  look-ahead interval. Cadence observes answered frames too, pauses
+  speculation when intervals change, and recovers after two stable
+  intervals; queued work from the old grid expires. Near frames precede
+  far ones.
   The window still executes a wrapper at every requested time, then caches
   fresh readback bytes under its explicit texture key and unchanged quad
   (4,096 entries, 192 MiB; cleared on revision, reset and chain changes).

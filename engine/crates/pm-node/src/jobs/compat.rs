@@ -83,9 +83,6 @@ pub(crate) struct JobCompat {
     answers: Mutex<HashMap<AnswerKey, CompatAnswer>>,
     /// Why an answer could not be had (the export fails with it).
     failure: Mutex<Option<String>>,
-    /// The earliest time of the last batch (ticks): the frame step is the
-    /// distance to the next one.
-    last_batch: Mutex<Option<i64>>,
     /// The job itself, for the background fetch (unset: no pipelining).
     me: std::sync::Weak<JobCompat>,
     ahead: Mutex<Ahead>,
@@ -103,12 +100,75 @@ struct Ahead {
     /// each. A new layer starts at its own frame, without moving older
     /// layers' cursors backwards and filling the worker queue again.
     layers: HashMap<LayerKey, i64>,
-    /// The frame step (ticks).
-    step: i64,
+    /// Each composition's observed answer times. A remapped precomp cannot
+    /// change another composition's frame step.
+    cadences: HashMap<String, Cadence>,
     /// Answers before each composition's floor are done (an export moves
     /// forward).
     floors: HashMap<String, i64>,
-    worker: Option<std::sync::mpsc::Sender<Vec<AnswerKey>>>,
+    worker: Option<std::sync::mpsc::Sender<AheadBatch>>,
+}
+
+#[derive(Default)]
+struct Cadence {
+    last: Option<i64>,
+    step: i64,
+    candidate: i64,
+    candidate_count: u8,
+    learned: bool,
+    epoch: u64,
+}
+
+impl Cadence {
+    /// True when the speculative grid changed. One changed interval stops
+    /// the old grid immediately; two equal intervals restore a stable one.
+    fn observe(&mut self, time: i64) -> bool {
+        let Some(last) = self.last.replace(time) else { return false };
+        if time == last { return false }
+        let Some(delta) = time.checked_sub(last) else { return self.disable() };
+        if delta <= 0 || delta > pm_protocol::common::TICKS_PER_SECOND {
+            return self.disable();
+        }
+        if delta == self.step {
+            self.candidate = 0;
+            self.candidate_count = 0;
+            return false;
+        }
+        if !self.learned {
+            self.learned = true;
+            self.step = delta;
+            self.epoch = self.epoch.wrapping_add(1);
+            return true;
+        }
+        let changed = if self.step != 0 { self.disable() } else { false };
+        if self.candidate == delta {
+            self.candidate_count = self.candidate_count.saturating_add(1);
+        } else {
+            self.candidate = delta;
+            self.candidate_count = 1;
+        }
+        if self.candidate_count < 2 { return changed }
+        self.step = delta;
+        self.candidate = 0;
+        self.candidate_count = 0;
+        self.epoch = self.epoch.wrapping_add(1);
+        true
+    }
+
+    fn disable(&mut self) -> bool {
+        self.candidate = 0;
+        self.candidate_count = 0;
+        if self.step == 0 { return false }
+        self.step = 0;
+        self.epoch = self.epoch.wrapping_add(1);
+        true
+    }
+}
+
+struct AheadBatch {
+    composition: String,
+    epoch: u64,
+    keys: Vec<AnswerKey>,
 }
 
 fn raster_bytes(answer: &CompatAnswer) -> usize {
@@ -134,7 +194,6 @@ impl JobCompat {
             sources,
             answers: Mutex::new(HashMap::new()),
             failure: Mutex::new(None),
-            last_batch: Mutex::new(None),
             me: std::sync::Weak::new(),
             ahead: Mutex::new(Ahead::default()),
             inflight: Mutex::new(std::collections::HashSet::new()),
@@ -176,6 +235,22 @@ impl JobCompat {
             .fetch_sub(freed, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Every rendered answer, including a prefetched hit, observes the
+    /// composition's local clock. Missing fetch batches cannot tell a
+    /// skipped prefetched frame from a larger frame interval.
+    fn observe(&self, comp: &str, time: i64) {
+        let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
+        if ahead.cadences.entry(comp.to_owned()).or_default().observe(time) {
+            // A changed clock makes every old layer cursor's future grid
+            // invalid. Rebuild it from this frame once the clock is stable.
+            for ((composition, _, _, _), scheduled) in &mut ahead.layers {
+                if composition == comp {
+                    *scheduled = time;
+                }
+            }
+        }
+    }
+
     /// Frame `time` (ticks) of `comp` is being drawn: older answers of the
     /// composition go, and the next frames are asked for when the
     /// background fetch is close to running out.
@@ -184,14 +259,18 @@ impl JobCompat {
             return;
         };
         let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
-        let step = ahead.step;
-        if step <= 0 || ahead.layers.is_empty() {
-            return;
-        }
-        let floor = time - step;
+        let (step, epoch) = ahead.cadences.get(comp).map_or((0, 0), |cadence| (cadence.step, cadence.epoch));
+        let floor = time.saturating_sub(step.max(0));
         let prune = ahead.floors.get(comp).is_none_or(|f| floor > *f);
         if prune {
             ahead.floors.insert(comp.to_owned(), floor);
+        }
+        if step <= 0 || ahead.layers.is_empty() {
+            drop(ahead);
+            if prune {
+                self.prune(comp, floor);
+            }
+            return;
         }
         let mut keys = Vec::new();
         for ((c, l, source, scale), scheduled) in &mut ahead.layers {
@@ -217,7 +296,7 @@ impl JobCompat {
                 ahead.worker = spawn_ahead(&me);
             }
             if let Some(worker) = &ahead.worker
-                && worker.send(keys).is_err()
+                && worker.send(AheadBatch { composition: comp.to_owned(), epoch, keys }).is_err()
             {
                 ahead.worker = None;
             }
@@ -307,20 +386,26 @@ impl JobCompat {
 
 /// The background fetch of a pipelined job: asks for what it is sent,
 /// within [`AHEAD_BYTES`], until the job is gone.
-fn spawn_ahead(job: &Arc<JobCompat>) -> Option<std::sync::mpsc::Sender<Vec<AnswerKey>>> {
-    let (tx, rx) = std::sync::mpsc::channel::<Vec<AnswerKey>>();
+fn spawn_ahead(job: &Arc<JobCompat>) -> Option<std::sync::mpsc::Sender<AheadBatch>> {
+    let (tx, rx) = std::sync::mpsc::channel::<AheadBatch>();
     let weak = Arc::downgrade(job);
     std::thread::Builder::new()
         .name("pm-export-compat-ahead".into())
         .spawn(move || {
-            while let Ok(keys) = rx.recv() {
-                for chunk in keys.chunks(AHEAD_ASKS) {
+            while let Ok(batch) = rx.recv() {
+                for chunk in batch.keys.chunks(AHEAD_ASKS) {
                     // Within the byte bound: the export uses (and drops)
                     // answers as it moves on.
                     loop {
                         let Some(job) = weak.upgrade() else { return };
                         if job.failure().is_some() {
                             return;
+                        }
+                        let current = job.ahead.lock().unwrap_or_else(|e| e.into_inner())
+                            .cadences.get(&batch.composition)
+                            .is_some_and(|cadence| cadence.step > 0 && cadence.epoch == batch.epoch);
+                        if !current {
+                            break;
                         }
                         if job.bytes.load(std::sync::atomic::Ordering::Relaxed) < AHEAD_BYTES {
                             break;
@@ -329,6 +414,12 @@ fn spawn_ahead(job: &Arc<JobCompat>) -> Option<std::sync::mpsc::Sender<Vec<Answe
                         std::thread::sleep(std::time::Duration::from_millis(5));
                     }
                     let Some(job) = weak.upgrade() else { return };
+                    let current = job.ahead.lock().unwrap_or_else(|e| e.into_inner())
+                        .cadences.get(&batch.composition)
+                        .is_some_and(|cadence| cadence.step > 0 && cadence.epoch == batch.epoch);
+                    if !current {
+                        break;
+                    }
                     job.ask(chunk.iter().map(|k| (k.clone(), false)).collect(), AHEAD_ASKS);
                 }
             }
@@ -539,6 +630,7 @@ impl CompatRasters for JobCompat {
             source,
             scale.to_bits(),
         );
+        self.observe(composition, ticks.get());
         self.advance(composition, ticks.get());
         if let Some(answer) = self
             .answers
@@ -566,40 +658,36 @@ impl CompatRasters for JobCompat {
                 n.scale.to_bits(),
             )
         };
-        // The frame step: from the first two missing frames. Later frames
-        // may have been answered ahead, so their absence from fetch must
-        // not turn a multi-frame gap into a new (slower) frame rate.
-        let earliest = needs.iter().map(|n| n.time.get()).min().unwrap_or(0);
-        let observed_step = {
-            let mut last = self.last_batch.lock().unwrap_or_else(|e| e.into_inner());
-            let step = last.map_or(0, |l| earliest - l);
-            *last = Some(earliest);
-            step
-        };
-        let step = {
+        let pipelined = self.me.upgrade().is_some();
+        // A fetch may include nested compositions at remapped local times.
+        // Its needs identify new layers, but only rendered answers observe
+        // the cadence: fetched gaps can skip frames already answered ahead.
+        let mut earliest = HashMap::<String, i64>::new();
+        for n in needs {
+            earliest
+                .entry(n.composition.as_str().to_owned())
+                .and_modify(|time| *time = (*time).min(n.time.get()))
+                .or_insert(n.time.get());
+        }
+        let steps = {
             let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
-            if observed_step > 0 && observed_step <= pm_protocol::common::TICKS_PER_SECOND {
-                if ahead.step == 0 || observed_step < ahead.step {
-                    ahead.step = observed_step;
+            if pipelined {
+                // A newly seen layer starts at its own local time; other
+                // compositions' horizons stay where they were.
+                for n in needs {
+                    if ahead.cadences.get(n.composition.as_str()).is_some_and(|cadence| cadence.step > 0) {
+                        let layer = (
+                            n.composition.as_str().to_owned(),
+                            n.layer.as_str().to_owned(),
+                            n.source,
+                            n.scale.to_bits(),
+                        );
+                        ahead.layers.entry(layer).or_insert(n.time.get());
+                    }
                 }
             }
-            ahead.step
+            earliest.keys().map(|comp| (comp.clone(), ahead.cadences.get(comp).map_or(0, |cadence| cadence.step))).collect::<HashMap<_, _>>()
         };
-        let stepped = step > 0 && step <= pm_protocol::common::TICKS_PER_SECOND;
-        let pipelined = self.me.upgrade().is_some();
-        if pipelined && stepped {
-            // The background fetch asks for these layers at the next frames.
-            let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
-            for n in needs {
-                let layer = (
-                    n.composition.as_str().to_owned(),
-                    n.layer.as_str().to_owned(),
-                    n.source,
-                    n.scale.to_bits(),
-                );
-                ahead.layers.entry(layer).or_insert(earliest);
-            }
-        }
         // The frame's needs first, then (unpipelined) the same layers at
         // the next frames, in time order (the order today's export ran the
         // chain in).
@@ -607,9 +695,13 @@ impl CompatRasters for JobCompat {
         {
             let answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
             let mut seen = std::collections::HashSet::new();
-            let ahead = if stepped && !pipelined { FETCH_AHEAD } else { 0 };
-            for k in 0..=ahead {
+            let count = if pipelined { 0 } else { FETCH_AHEAD };
+            for k in 0..=count {
                 for n in needs {
+                    let step = steps[n.composition.as_str()];
+                    if k > 0 && (pipelined || step <= 0) {
+                        continue;
+                    }
                     let key = key_of(n, n.time.get() + k * step);
                     if answers.contains_key(&key) || !seen.insert(key.clone()) {
                         continue;
@@ -623,11 +715,8 @@ impl CompatRasters for JobCompat {
         }
         if !pipelined {
             // An export moves forward: answers before this frame are done.
-            let floor = earliest - step.max(0);
-            let comps: std::collections::BTreeSet<String> =
-                needs.iter().map(|n| n.composition.as_str().to_owned()).collect();
-            for comp in comps {
-                self.prune(&comp, floor);
+            for (comp, time) in earliest {
+                self.prune(&comp, time - steps[&comp].max(0));
             }
         }
         // Those the background fetch is asking for: waited for, then asked
@@ -698,6 +787,7 @@ fn answer_of(result: Result<Response, String>) -> Result<CompatAnswer, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
     use super::*;
     use pm_protocol::common::Bytes;
     use pm_protocol::snapshot::{CompatFormat, CompatFrame};
@@ -761,6 +851,17 @@ mod tests {
             scale,
             crop: None,
         }
+    }
+
+    fn draw_and_fetch(compat: &JobCompat, needs: &[pm_protocol::snapshot::CompatNeed]) {
+        for n in needs {
+            compat.answer(
+                n.composition.as_str(), n.layer.as_str(),
+                n.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64,
+                n.scale, n.source, None,
+            );
+        }
+        assert!(compat.fetch(needs));
     }
 
     #[test]
@@ -856,11 +957,11 @@ mod tests {
         let (host, compat) = job(|r| Ok(frame(r.layer.as_str() == "plain")));
         let step = 1.0 / 30.0;
         // The first frame: its own needs only (no step known yet).
-        assert!(compat.fetch(&[need("typed", 0.0, 2.0), need("plain", 0.0, 2.0)]));
+        draw_and_fetch(&compat, &[need("typed", 0.0, 2.0), need("plain", 0.0, 2.0)]);
         assert_eq!(host.calls.lock().unwrap().len(), 2);
         // The next frame gives the step: its needs and the same layers at
         // the next frames come in one batch, frame by frame.
-        assert!(compat.fetch(&[need("typed", step, 2.0), need("plain", step, 2.0)]));
+        draw_and_fetch(&compat, &[need("typed", step, 2.0), need("plain", step, 2.0)]);
         let times: Vec<(String, i64)> = host.calls.lock().unwrap()[2..]
             .iter()
             .map(|c| (c.layer.as_str().to_owned(), c.time.get()))
@@ -938,8 +1039,8 @@ mod tests {
         let layers: Vec<String> = (0..20).map(|i| format!("L{i}")).collect();
         let needs = |t: f64| layers.iter().map(|l| need(l, t, 1.0)).collect::<Vec<_>>();
         // The first two frames give the layers and the step.
-        assert!(compat.fetch(&needs(0.0)));
-        assert!(compat.fetch(&needs(step)));
+        draw_and_fetch(&compat, &needs(0.0));
+        draw_and_fetch(&compat, &needs(step));
         let mut fetched = 0;
         for k in 2..60 {
             let t = step * k as f64;
@@ -974,24 +1075,159 @@ mod tests {
 
     #[test]
     fn a_new_layer_after_answered_frames_keeps_the_existing_horizon() {
-        let (_, job) = job(|_| Ok(frame(true)));
+        let (host, job) = job(|_| Ok(frame(true)));
         let compat = job.pipelined();
         let step = ticks_of(1.0 / 30.0).get();
-        assert!(compat.fetch(&[need("old", 0.0, 1.0)]));
-        assert!(compat.fetch(&[need("old", 1.0 / 30.0, 1.0)]));
-        let old = ("root".into(), "old".into(), CompatSource::RasterOverride, 1.0f64.to_bits());
-        let new = ("root".into(), "new".into(), CompatSource::RasterOverride, 1.0f64.to_bits());
-        let first_horizon = compat.ahead.lock().unwrap().layers[&old];
-        assert_eq!(first_horizon, (1 + AHEAD_FRAMES) * step);
+        draw_and_fetch(&compat, &[need("old", 0.0, 1.0)]);
+        draw_and_fetch(&compat, &[need("old", 1.0 / 30.0, 1.0)]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !host.calls.lock().unwrap().iter().any(|c| c.layer.as_str() == "old" && c.time.get() == 4 * step) {
+            assert!(Instant::now() < deadline, "the original layer is answered ahead");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        compat.wait_for(&[("root".into(), "old".into(), 4 * step, CompatSource::RasterOverride, 1.0f64.to_bits())]);
+        // These rendered frames are cache hits, so there is no intervening
+        // fetch batch from which to infer their cadence.
+        for k in 2..=4 {
+            assert!(matches!(compat.answer("root", "old", k as f64 / 30.0, 1.0, CompatSource::RasterOverride, None), CompatAnswer::Native));
+        }
+        draw_and_fetch(&compat, &[need("new", 5.0 / 30.0, 1.0)]);
+        let target = (5 + AHEAD_FRAMES) * step;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !host.calls.lock().unwrap().iter().any(|c| c.layer.as_str() == "new" && c.time.get() == target) {
+            assert!(Instant::now() < deadline, "new layer reaches its full frame-grid horizon");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(host.calls.lock().unwrap().iter().filter(|c| c.layer.as_str() == "new")
+            .all(|c| (c.time.get() - 5 * step) % step == 0));
+    }
 
-        // The old layer's next frames were already scheduled. A new layer
-        // first seen after that run must get its own horizon; the missing
-        // batch's four-frame gap must not replace the frame step.
-        assert!(compat.fetch(&[need("new", 5.0 / 30.0, 1.0)]));
-        let ahead = compat.ahead.lock().unwrap();
-        assert_eq!(ahead.step, step);
-        assert_eq!(ahead.layers[&old], first_horizon);
-        assert_eq!(ahead.layers[&new], (5 + AHEAD_FRAMES) * step);
+    #[test]
+    fn remapped_nested_time_does_not_change_root_export_cadence() {
+        let (host, job) = job(|_| Ok(frame(true)));
+        let compat = job.pipelined();
+        let root_step = ticks_of(1.0 / 30.0).get();
+        let nested_step = root_step * 9 / 10;
+        // The nested clock starts just after root frame 1. Comparing
+        // consecutive batches across compositions would observe 1,000
+        // ticks and wrongly use that as both compositions' frame step.
+        let nested_offset = root_step + 1_000;
+        let at = |comp: &str, layer: &str, time: i64| {
+            let mut n = need(layer, 0.0, 1.0);
+            n.composition = comp.into();
+            n.time = pm_protocol::common::Ticks::new(time).unwrap();
+            n
+        };
+        draw_and_fetch(&compat, &[at("root", "root-old", 0)]);
+        draw_and_fetch(&compat, &[at("root", "root-old", root_step)]);
+        draw_and_fetch(&compat, &[at("nested", "nested-old", nested_offset)]);
+        draw_and_fetch(&compat, &[at("root", "root-mid", 2 * root_step)]);
+        draw_and_fetch(&compat, &[at("nested", "nested-old", nested_offset + nested_step)]);
+        // Both clocks skip four batches because those frames were answered
+        // ahead. New layers must still be asked at their own frame times.
+        for k in 2..=4 {
+            if k > 2 {
+                compat.answer("root", "root-old", k as f64 / 30.0, 1.0, CompatSource::RasterOverride, None);
+            }
+            compat.answer("nested", "nested-old", (nested_offset + k * nested_step) as f64 / pm_protocol::common::TICKS_PER_SECOND as f64, 1.0, CompatSource::RasterOverride, None);
+        }
+        draw_and_fetch(&compat, &[at("root", "root-new", 5 * root_step)]);
+        draw_and_fetch(&compat, &[at("nested", "nested-new", nested_offset + 5 * nested_step)]);
+        let expected = [
+            ("root-old", (1 + AHEAD_FRAMES) * root_step),
+            ("nested-old", nested_offset + (1 + AHEAD_FRAMES) * nested_step),
+            ("root-new", (5 + AHEAD_FRAMES) * root_step),
+            ("nested-new", nested_offset + (5 + AHEAD_FRAMES) * nested_step),
+        ];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let calls = host.calls.lock().unwrap();
+            if expected.iter().all(|(layer, time)| calls.iter().any(|c| c.layer.as_str() == *layer && c.time.get() == *time)) {
+                // Check the observable requests, not the scheduler's state:
+                // every speculative answer is useful on a real local frame.
+                for call in calls.iter() {
+                    let (offset, step) = if call.composition.as_str() == "root" {
+                        (0, root_step)
+                    } else {
+                        (nested_offset, nested_step)
+                    };
+                    assert_eq!((call.time.get() - offset) % step, 0);
+                }
+                break;
+            }
+            assert!(Instant::now() < deadline, "both local clocks reach their full answer horizons");
+            drop(calls);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_speed_ramp_restores_the_normal_answer_horizon() {
+        let (host, job) = job(|_| Ok(frame(true)));
+        let compat = job.pipelined();
+        let step = ticks_of(1.0 / 30.0).get();
+        let times = [0, step, 2 * step, 2 * step + step / 2,
+            2 * step + step / 2 + 3 * step / 4,
+            2 * step + step / 2 + 3 * step / 4 + step,
+            2 * step + step / 2 + 3 * step / 4 + 2 * step];
+        let at = |layer: &str, time: i64| {
+            let mut n = need(layer, 0.0, 1.0);
+            n.time = pm_protocol::common::Ticks::new(time).unwrap();
+            n
+        };
+        for time in times {
+            draw_and_fetch(&compat, &[at("ramp", time)]);
+        }
+        let new_time = times[times.len() - 1] + step;
+        draw_and_fetch(&compat, &[at("after-ramp", new_time)]);
+        let target = new_time + AHEAD_FRAMES * step;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let calls = host.calls.lock().unwrap();
+            if calls.iter().any(|c| c.layer.as_str() == "after-ramp" && c.time.get() == target) {
+                assert!(calls.iter().filter(|c| c.layer.as_str() == "after-ramp")
+                    .all(|c| (c.time.get() - new_time) % step == 0),
+                    "recovered lookahead uses the normal local step");
+                break;
+            }
+            assert!(Instant::now() < deadline, "normal cadence regains a full horizon");
+            drop(calls);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn offset_instances_of_one_composition_do_not_keep_asking_false_future_frames() {
+        use std::collections::HashSet;
+        let (host, job) = job(|_| Ok(frame(true)));
+        let compat = job.pipelined();
+        let step = ticks_of(1.0 / 30.0).get();
+        let offset = step * 3 / 5;
+        let mut observed = HashSet::new();
+        for frame_index in 0..40 {
+            for time in [frame_index * step, frame_index * step + offset] {
+                observed.insert(time);
+                let mut n = need("shared", 0.0, 1.0);
+                n.time = pm_protocol::common::Ticks::new(time).unwrap();
+                draw_and_fetch(&compat, &[n]);
+            }
+        }
+        // The first pair can warm up one speculative horizon before the
+        // alternating 0.6/0.4-frame intervals expose the two clocks.
+        // Thereafter an unstable cadence must not keep making guesses.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let calls = host.calls.lock().unwrap();
+            if calls.iter().any(|c| c.time.get() == 39 * step + offset) {
+                let waste = calls.iter().filter(|c| !observed.contains(&c.time.get())).count();
+                assert!(waste <= AHEAD_FRAMES as usize,
+                    "unstable instance clocks made {waste} unusable future asks");
+                break;
+            }
+            assert!(Instant::now() < deadline, "the final observed frame is answered");
+            drop(calls);
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]
