@@ -637,61 +637,78 @@ The writes are also coalesced (`core/projects.ts`):
 - Asset metadata changes outside typed history (the poster backfill) are one
   journal entry replacing `assets` (about 20 KB here), instead of a full
   checkpoint. The check understands a journal that holds only such entries.
-- Main's store engine writes a project's journal (entries or its deletion)
-  only after that project's pending or in-flight slot write reaches disk.
-  Before, a crash between the two could recover the older slot without its
-  journal. The new crash-point test fails on the old order.
-- A failed checkpoint loses no edit. Main tells the window that wrote a key
-  when an accepted write of it did not reach disk (ENOSPC, EIO, a storage
-  worker that stopped); before, only a refused value was reported, so a
-  persist failure left the window treating its checkpoint as written. Per
-  slot, main records the newest write's request id and outcome; an older
-  write finishing never clears a newer failure (a checkpoint refused while
-  the one before it is still renaming, as when a project crosses the 256 MB
-  slot limit). A journal deletion goes ahead only if the newest slot write
-  posted before it reached disk, and a journal is written only if every
-  entry's checkpoint id names the slot on disk.
-- While a slot write is failing every edit stays on disk (D1). Each
-  checkpoint keeps the journal as it stands against the slot before it. On
-  a slot error the window goes back to it: everything journaled since is
-  appended, tagged with the older slot's id, and written, and later edits
-  keep being appended. Past the 4 MiB journal bound the project is
-  checkpointed as before, except while its slot write is failing: the
-  journal then keeps growing up to the store's own value limit, and the save
-  error stays reported (`PM.store.flush()` throws, so autosave and
-  flushProject show it) until a checkpoint lands. The project is marked
-  unsaved, so its next checkpoint writes rather than checks and its next
-  autosave checkpoints even when the journal has entries; that write clears
-  the save error.
-- Each slot write carries a checkpoint id (`cp`), and each journal entry the
-  id of the checkpoint it follows. Projects.get no longer replays an entry
-  tagged for another checkpoint: with the journal written after the slot, a
-  crash in the one unlink between them left the new slot with the old
-  journal, and replaying it reverted any path an old entry set that a raw
-  (unannounced) write had changed since, next to raw writes it kept. A
-  window that reads a slot (Projects.get) before it checkpoints the project
-  tags its entries with that slot's id.
-- Untagged entries remain, and replay over whatever slot is on disk as
-  before (the same-path hazard in the unlink window): entries written by
-  older builds, entries against a slot without an id (written by an older
-  build) while the window has not checkpointed it, and entries after
-  another window wrote the slot (the read id is forgotten). Two slot writes
-  in flight with the older failing send the window back to that older
-  base; main then declines its entries (their id is not on disk) until the
-  next checkpoint, which the unsaved mark makes the next autosave: the disk
-  stays at the newer slot and its journal, an older state but a real one.
+- Main owns a project's durability (SAVE-1, below); the window only posts
+  slot snapshots and journal entries, in order.
+
+**SAVE-1: one owner for a project's durability.** Three review rounds
+patched a protocol in which the window decided when the journal was deleted
+or rewritten, case by case; each round found an interleaving of slot writes,
+failures and restarts that lost edits already on disk or recovered a
+document that never existed. It is replaced by one owner and one invariant
+(`main/project-durability.ts`, `shared/project-journal.ts`):
+
+- Main's store engine numbers, per project and in arrival order, every slot
+  write and every journal entry (`seq`). It writes the slot's `cp` and `seq`
+  at the head of its envelope, and tags each entry with its `seq` and the
+  `cp` of the slot on disk when it arrived. The window sends no ids.
+- Main keeps `durable`, the newest slot fully on disk, and the journal
+  against it. Only a slot write main itself completed changes `durable`, and
+  only then is the journal rewritten: the entries numbered after that slot,
+  retagged with it (deleted when none). A slot write that fails or is
+  refused changes nothing. Journal entries are only appended; the journal
+  file is rewritten whole and atomically from main's list, concurrently with
+  slot writes. Nothing the window sends can replace or delete the journal:
+  `set`, `setSerialized` and `delete` of `projectJournal.<id>` are refused.
+  Deleting the slot (deleting the project) deletes its journal after it.
+- Recovery (Projects.get, any build that has SAVE-1): the slot plus the
+  journal entries numbered after it, in order. A slot holds every edit posted
+  before it and an entry follows everything numbered before it, so this is
+  right for whichever slot and journal a crash leaves, including a new slot
+  with a journal not yet rewritten. Slots without a number (written before
+  SAVE-1, or by an older build) replay every entry, as before.
+- A replacement storage worker reads a project's slot head and journal from
+  disk before it touches the project; main replays what had not reached disk
+  in the order it was first made (request ids), not map order.
+- The window marks a project unsaved when one of its writes fails (main
+  forwards persist failures to the window that wrote the key), so its next
+  checkpoint writes rather than checks and its next autosave checkpoints.
+  While slot writes fail, every journal entry still reaches main; past the
+  4 MiB bound the window does not checkpoint again on each edit. Main refuses
+  entries past the store's 32 MiB value limit; the window then stops
+  appending until its next checkpoint, and the edits stay in the document.
+- `PM.store.flush()` learns from main which keys are still not on disk (a
+  persist failure, or a refused entry, until a later write of that key
+  lands), so a transient failure stops being reported once the disk
+  recovers. The "Could not save" toasts appear once per failure episode (until
+  a flush finds nothing failing), not once per edit.
 - Known limit: a write of `project.<id>` by another writer (another window's
   Projects screen rename, a future main-side writer) marks the key stale in
   the owning window but does not drop its digest, so that window's next
   checkpoint of the same, unchanged object is checked against its own last
   write and skipped where the old code overwrote. Windows own their
-  projects, so no such writer exists today.
+  projects, so no such writer exists today. Raw (unannounced) writes reach
+  disk only with a slot, as before: a crash recovers the last slot and the
+  journaled edits after it.
 
-**On-disk format (D3).** A project slot is `{"v":…,"cp":"<id>","proj":{…}}`
-(`cp` before `proj`; main reads it from the envelope's head). A journal
-entry is `{"revision":n,"patches":[…],"cp":"<id>"}`. Both members are
-optional and backward compatible: older builds read `proj` and replay every
-entry, and data without them is read as before.
+**On-disk format.** A project slot is `{"cp":"<id>","seq":n,"v":…,"proj":{…}}`
+and a journal entry `{"revision":…,"patches":[…],"seq":n,"cp":"<id>"}`. The
+members are optional and backward compatible: older builds read `proj` and
+replay every entry, and data without them is read as before.
+
+**What is proven.** `main/project-durability.model.test.ts` is a model check
+of the real FileStore, store engine and durability module on an in-memory
+file system where every rename into place and every unlink waits for the
+checker. For every arrangement of 3 slot writes and 4 journal patches (35
+scripts), it explores every order of the window's posts and the pending disk
+operations with at most one injected fault: a disk operation that fails, a
+slot write the engine refuses, or the storage worker replaced (its pending
+operations abandoned before or after they landed). States reached twice are
+explored once. 121,182 schedules; every disk state of every schedule (each a
+crash point) recovers a state the document had, never older than an earlier
+crash point, and with every patch the engine had acknowledged as written. It
+catches each of these deliberate bugs: a failed slot write that shrinks the
+journal, recovery that ignores sequence numbers, a journal shrunk before its
+slot is on disk, a replacement worker that does not read the journal first.
 
 The dirty check's fingerprints (twice per autosave and per open) are now
 serialized in slices and hashed on a worker (`project-fingerprint.ts`, the
@@ -710,12 +727,16 @@ what the previous code did. Two tests prove it:
   never an older state than an earlier point. Every settled point recovers
   exactly what the previous code recovered there. Slot writes: 1 for the open
   (was 5), and 3 more only where the document really changed. It recovers
-  through a fresh window's Projects.get. It also covers a failing slot rename
-  and an ENOSPC slot write (the edits survive every crash point, and the next
-  autosave writes the slot and lets flush succeed), edits made while every
-  slot write fails (each on disk once settled), a checkpoint refused while
-  the one before it is still renaming, and a raw write after a journaled
-  edit to the same path (never reverted by the old journal).
+  through a fresh window's Projects.get. It also covers, end to end: a
+  failing slot rename and an ENOSPC slot write (the edits survive every crash
+  point, and the next autosave writes the slot and lets flush succeed); edits
+  made while every slot write fails (each on disk once settled); a checkpoint
+  refused while the one before it is still renaming; two slot writes in
+  flight with the older failing, the newer landing later or failing too
+  (review recheck 2); a raw write after a journaled edit to the same path;
+  and one toast per failure episode under a disk that stays full.
+  `main/storage.test.ts` covers the same cases at main's store, and a
+  replacement worker replaying a slot and its journal in either order.
 - `e2e/project-open-crash-recovery.spec.ts` SIGKILLs the whole app at 15
   seeded moments, from 0.2 s into a large open to after it settles, with
   either setting. Every relaunch recovered nothing (killed before the first
