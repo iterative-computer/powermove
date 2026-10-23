@@ -119,13 +119,51 @@ pub(crate) fn premultiplied_f32(raster: &CompatRaster) -> Vec<f32> {
                 out.push(f16_to_f32(u16::from_le_bytes([half[0], half[1]])));
             }
         }
-        // Encoded Blender maps never become layer rasters: the protocol
-        // refuses PNG pixel bands and the job engine refuses PNG layer
-        // answers, so nothing reaches here (transparent if it did).
+        // PNG answers never become layer rasters: the protocol refuses PNG
+        // pixel bands and the job engine refuses PNG layer answers, so
+        // nothing reaches here (transparent if it did).
         CompatFormat::Png => {}
     }
     out.resize(n * 4, 0.0);
     out
+}
+
+/// IEEE 754 binary16 bits of `v`, rounded to nearest even (overflow to
+/// infinity, subnormals kept).
+fn f16_bits(v: f32) -> u16 {
+    let x = v.to_bits();
+    let sign = ((x >> 16) & 0x8000) as u16;
+    let exp = ((x >> 23) & 0xff) as i32;
+    let man = x & 0x7f_ffff;
+    if exp == 0xff {
+        // Inf or NaN (keep NaN quiet).
+        return sign | 0x7c00 | if man != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign;
+        }
+        // Subnormal: shift the implicit one in, round to nearest even.
+        let m = man | 0x80_0000;
+        let shift = (14 - e) as u32;
+        let half = 1u32 << (shift - 1);
+        let rest = m & ((1u32 << shift) - 1);
+        let mut out = m >> shift;
+        if rest > half || (rest == half && out & 1 == 1) {
+            out += 1;
+        }
+        return sign | out as u16;
+    }
+    let mut out = ((e as u32) << 10) | (man >> 13);
+    let rest = man & 0x1fff;
+    if rest > 0x1000 || (rest == 0x1000 && out & 1 == 1) {
+        out += 1;
+    }
+    sign | out as u16
 }
 
 fn f16_to_f32(bits: u16) -> f32 {
@@ -146,7 +184,7 @@ fn f16_to_f32(bits: u16) -> f32 {
 }
 
 /// The texture of a raster: premultiplied E values as `rgba32float` at
-/// 32-bit precision, `rgba16float` otherwise (a Blender surface's upload).
+/// 32-bit precision, `rgba16float` otherwise.
 pub(crate) fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -165,7 +203,7 @@ pub(crate) fn upload(
             wgpu::TextureFormat::Rgba16Float,
             values
                 .iter()
-                .flat_map(|v| crate::blender::gpu::f16_bits(*v).to_le_bytes())
+                .flat_map(|v| f16_bits(*v).to_le_bytes())
                 .collect(),
             8,
         ),

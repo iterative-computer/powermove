@@ -433,18 +433,6 @@ impl Exec<'_> {
                         ));
                         r.encoded = true;
                     }
-                    Source::Blender(blender) => {
-                        r.view = Some(crate::blender::gpu::upload(
-                            self.device,
-                            self.queue,
-                            &blender.surface,
-                            self.precision,
-                            blender.compatibility,
-                        ));
-                        // Premultiplied E like the native 3D output: linear
-                        // light decodes it (section 9).
-                        r.encoded = true;
-                    }
                     Source::Shader(shader) => match self.shader_source(encoder, shader) {
                         Ok((target, pooled)) => {
                             // Level 2 shader output is resampled.

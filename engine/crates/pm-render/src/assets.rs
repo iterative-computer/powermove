@@ -12,17 +12,6 @@ pub trait AssetResolver: Send + Sync {
     /// The original media file of `asset` (its document record is passed
     /// when the document has one), or `None` when the media is offline.
     fn path(&self, asset: &str, record: Option<&Node>) -> Option<PathBuf>;
-
-    /// Exact Chromium Canvas2D PNG for a Blender image map. Job and viewer
-    /// hosts obtain this from the document window through `compatFrame`;
-    /// standalone callers may provide a captured Chromium conversion.
-    fn blender_png(
-        &self,
-        _asset: &str,
-        _source: &std::path::Path,
-    ) -> Result<Option<std::sync::Arc<Vec<u8>>>, String> {
-        Ok(None)
-    }
 }
 
 /// Reads the record's `sourcePath` (linked media).

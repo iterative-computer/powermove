@@ -2113,24 +2113,9 @@ dependencies = [
  "pm-protocol",
  "pm-stretch",
  "pm-time",
- "proptest",
  "rubato",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "pm-blender"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "libc",
- "pm-model",
- "pm-protocol",
- "png",
- "serde_json",
- "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -2165,7 +2150,6 @@ name = "pm-cli"
 version = "0.1.0"
 dependencies = [
  "libc",
- "pm-blender",
  "pm-eval",
  "pm-export",
  "pm-media",
@@ -2249,7 +2233,6 @@ dependencies = [
  "objc2-io-surface",
  "objc2-video-toolbox",
  "pm-audio",
- "pm-blender",
  "pm-eval",
  "pm-export",
  "pm-media",
@@ -2374,7 +2357,6 @@ dependencies = [
  "napi-derive",
  "objc2",
  "pm-audio",
- "pm-blender",
  "pm-bridge",
  "pm-engine",
  "pm-eval",
@@ -2448,7 +2430,6 @@ dependencies = [
  "blake3",
  "kurbo",
  "libm",
- "pm-blender",
  "pm-color",
  "pm-edit",
  "pm-eval",

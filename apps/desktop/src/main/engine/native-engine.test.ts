@@ -266,26 +266,19 @@ describe('NativeEngine with fake engines', () => {
 
   const live = (process: EngineProcess) => engines.filter((e) => e.process === process && !e.dead).at(-1)!;
 
-  it('admits only interactive Blender PNG compatibility asks and preserves source identity', async () => {
-    const png: CompatFrameRequest = { document: 'doc-1', composition: 'blender', layer: 'blender',
-      time: 0, source: 'blenderPng', scale: 1, revision: 8,
-      blender: { asset: 'avif-map', content: new Uint8Array(32).fill(0xab) } };
-    const answer = await live('interactive').ask({ type: 'compatFrame', ...png }, 3);
-    expect(answer.message.kind === 'response' && answer.message.body.type).toBe('compatFrame');
-    expect(compatRequests).toHaveLength(1);
-    expect(compatRequests[0]).toMatchObject({ document: 'doc-1', revision: 8, source: 'blenderPng',
-      blender: { asset: 'avif-map', content: new Uint8Array(32).fill(0xab) } });
-
-    const { blender: _blender, ...base } = png;
-    for (const source of ['rasterOverride', 'compatContext', 'svgImage'] as const) {
+  it('admits compatibility asks only from the job engine', async () => {
+    const base: CompatFrameRequest = { document: 'doc-1', composition: 'c', layer: 'l',
+      time: 0, source: 'rasterOverride', scale: 1, revision: 8 };
+    for (const source of ['rasterOverride', 'compatContext', 'svgImage', 'blenderPng'] as const) {
       const refused = await live('interactive').ask({ type: 'compatFrame', ...base, source }, 3);
       expect(refused.message.kind === 'error' && refused.message.error.code).toBe('capabilityRejected');
     }
-    expect(compatRequests).toHaveLength(1);
+    expect(compatRequests).toHaveLength(0);
 
-    const job = await live('job').ask({ type: 'compatFrame', ...base, source: 'rasterOverride' }, 3);
+    const job = await live('job').ask({ type: 'compatFrame', ...base }, 3);
     expect(job.message.kind === 'response' && job.message.body.type).toBe('compatFrame');
-    expect(compatRequests).toHaveLength(2);
+    expect(compatRequests).toHaveLength(1);
+    expect(compatRequests[0]).toMatchObject({ document: 'doc-1', revision: 8, source: 'rasterOverride' });
   });
 
   it('negotiates both engines, grants leases, sends the slicing policy, and links them', () => {

@@ -481,8 +481,8 @@ fn depth8_project_exports_every_shipped_format() {
         };
         assert_eq!(job.settings.precision, Precision::Float32, "{}", case.name);
         assert_eq!(job.settings.dither, case.depth <= 8, "{}", case.name);
-        let plan = plan_export_for(&job, false, &renderer)
-            .unwrap_or_else(|e| panic!("{} plan: {e}", case.name));
+        let plan =
+            plan_export_for(&job, &renderer).unwrap_or_else(|e| panic!("{} plan: {e}", case.name));
         assert_eq!(
             plan.request.precision,
             Precision::Float32,
@@ -712,7 +712,7 @@ fn depth8_project_exports_every_shipped_format() {
                     mode: Some(0o600),
                     seed: 73,
                 };
-                let baseline_plan = plan_export_for(&baseline_job, false, &renderer).unwrap();
+                let baseline_plan = plan_export_for(&baseline_job, &renderer).unwrap();
                 assert_eq!(baseline_plan.request.precision, Precision::Float16);
                 run_export(
                     &mut renderer,
@@ -825,7 +825,7 @@ fn depth8_png_keeps_translucent_and_overlap_witnesses() {
         mode: Some(0o600),
         seed: 73,
     };
-    let plan = plan_export_for(&job, false, &renderer).unwrap();
+    let plan = plan_export_for(&job, &renderer).unwrap();
     assert_eq!(plan.request.precision, Precision::Float32);
     assert!(
         job.settings.dither,

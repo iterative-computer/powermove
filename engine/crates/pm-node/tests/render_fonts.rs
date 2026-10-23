@@ -467,7 +467,6 @@ mod child {
             background: true,
             export: true,
             view: None,
-            blender: pm_render::blender::BlenderRender::Native,
             motion_blur: pm_render::motion::MotionBlur::Off,
             sampling: pm_render::sampling::Sampling::Final,
             video_end: pm_render::VideoEnd::of(pm_protocol::frame::FramePurpose::Export),

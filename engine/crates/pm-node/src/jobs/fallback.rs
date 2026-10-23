@@ -21,14 +21,26 @@ use std::time::{Duration, Instant};
 
 use pm_protocol::common::SessionId;
 use pm_protocol::envelope::{Request, Response};
-use pm_protocol::error::ErrorCode;
+use pm_protocol::error::{EngineError, ErrorCode};
 use pm_protocol::host::{
     CacheKind, CapabilityHandle, CapabilityKind, HandleAccess, MintHandle, ResolveHandle,
 };
 use pm_protocol::shader_fallback::HostShaderFallback;
 use pm_render::shader_layers::{FallbackFailure, FallbackHost, FallbackJob, FallbackPixels};
 
-use super::blender::HostPort;
+/// The host port as the fallback runner uses it: calls made from a render
+/// thread, answered by the engine's host connection.
+pub(crate) trait HostPort: Send + Sync {
+    fn call(&self, request: Request, session: Option<SessionId>) -> Result<Response, EngineError>;
+    /// One call answered by `deadline`, or `None` once `cancel` is set.
+    fn call_until(
+        &self,
+        request: Request,
+        session: Option<SessionId>,
+        deadline: Instant,
+        cancel: &AtomicBool,
+    ) -> Option<Result<Response, EngineError>>;
+}
 
 /// How long one request may take in the host (a window's runner compiles
 /// with a 10 s deadline and draws each pass under its own 10 s deadline;
@@ -216,8 +228,7 @@ impl<P: HostPort + ?Sized> FallbackHost for HostFallback<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pm_protocol::common::JobId;
-    use pm_protocol::error::{EngineError, ErrorScope};
+    use pm_protocol::error::ErrorScope;
     use pm_protocol::host::HandleResolved;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -290,12 +301,6 @@ mod tests {
             let length = self.output_bytes.lock().unwrap().unwrap_or(input.len());
             std::fs::write(self.dir.join(&f.output), &input[..length.min(input.len())]).unwrap();
             Some(Ok(Response::Ack))
-        }
-
-        fn begin_blender_job(&self, _: &JobId) {}
-
-        fn take_blender_surfaces(&self, _: &JobId) -> Vec<pm_protocol::blender::BlenderSurface> {
-            vec![]
         }
     }
 

@@ -32,8 +32,6 @@
 // Host answers carry protocol errors by value, as the engine hands them over.
 #![allow(clippy::result_large_err)]
 
-pub(crate) mod blender;
-pub(crate) mod blender_png;
 pub(crate) mod compat;
 mod compile;
 mod definitions;
@@ -52,7 +50,7 @@ use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
 use pm_engine::priority::Scheduler;
 use pm_export::render::{
     ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
-    encode_jpeg, encode_png, offline_media, plan_export_for, render_still, run_export_with_blender,
+    encode_jpeg, encode_png, offline_media, plan_export_for, render_still, run_export_into,
     sink_for, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
@@ -156,8 +154,6 @@ struct State {
     probes: VecDeque<(PortId, RequestId, pm_protocol::media::ProbeMedia)>,
     shutdown: bool,
     stats: ServiceStats,
-    /// Blender surfaces received for the lanes' Blender requests.
-    blender: blender::Delivered,
     /// Definition pushes waiting for the compile worker's answer.
     compiles: compile::Queue,
 }
@@ -300,7 +296,7 @@ impl Shared {
     }
 
     /// One host call answered by `deadline`, or `None` once `cancel` is set
-    /// (Blender jobs: long, and cancelled with the export).
+    /// (shader fallback requests: long, and cancelled with the export).
     fn call_until(
         &self,
         request: Request,
@@ -333,7 +329,7 @@ impl Shared {
                 return Some(Err(EngineError::new(
                     ErrorCode::Timeout,
                     ErrorScope::Connection,
-                    "Blender did not finish in time.",
+                    "Host services did not answer in time.",
                 )));
             }
             st = self
@@ -378,13 +374,7 @@ impl Shared {
     }
 }
 
-impl compat::CompatHost for Shared {
-    fn call(&self, request: Request, session: SessionId) -> Result<Response, String> {
-        Shared::call(self, request, Some(session)).map_err(|e| e.message)
-    }
-}
-
-impl blender::HostPort for Shared {
+impl fallback::HostPort for Shared {
     fn call(&self, request: Request, session: Option<SessionId>) -> Result<Response, EngineError> {
         Shared::call(self, request, session)
     }
@@ -398,14 +388,11 @@ impl blender::HostPort for Shared {
     ) -> Option<Result<Response, EngineError>> {
         Shared::call_until(self, request, session, deadline, cancel)
     }
+}
 
-    fn begin_blender_job(&self, job: &JobId) {
-        self.lock().blender.begin(job);
-    }
-
-    /// The surfaces host services delivered for Blender job `job`.
-    fn take_blender_surfaces(&self, job: &JobId) -> Vec<pm_protocol::blender::BlenderSurface> {
-        self.lock().blender.take(job)
+impl compat::CompatHost for Shared {
+    fn call(&self, request: Request, session: SessionId) -> Result<Response, String> {
+        Shared::call(self, request, Some(session)).map_err(|e| e.message)
     }
 }
 
@@ -445,9 +432,6 @@ fn engine_error(job: &JobId, e: &JobError) -> EngineError {
         JobError::Invalid(_) => ErrorCode::InvalidMessage,
         JobError::Render(_) | JobError::Audio(_) => ErrorCode::ExportFailed,
         JobError::Export(_) => ErrorCode::ExportFailed,
-        JobError::Blender(pm_blender::BlenderError::Missing(_)) => ErrorCode::BlenderMissing,
-        JobError::Blender(pm_blender::BlenderError::Cancelled) => ErrorCode::Cancelled,
-        JobError::Blender(pm_blender::BlenderError::Failed(_)) => ErrorCode::BlenderFailed,
     };
     job_error(job, code, e.to_string())
 }
@@ -847,12 +831,6 @@ impl JobService for JobEngineService {
         std::mem::take(&mut self.shared.lock().outbox)
     }
 
-    fn host_event(&mut self, event: &pm_protocol::envelope::Event) {
-        if let pm_protocol::envelope::Event::BlenderSurface(s) = event {
-            self.shared.lock().blender.push(s.clone());
-        }
-    }
-
     fn session_closed(&mut self, session: SessionId) {
         let mut st = self.shared.lock();
         st.media.remove(&session);
@@ -962,7 +940,6 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
         lane,
     };
     let mut renderer: Option<Renderer> = None;
-    let mut blender = LaneBlender::default();
     let mut definitions = definitions::LaneDefinitions::default();
     while let Some(work) = next_work(shared, lane) {
         if renderer.is_none() {
@@ -1038,17 +1015,7 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
                 submit,
                 document,
                 cancel,
-            } => run_job(
-                shared,
-                r,
-                &gate,
-                &job,
-                host,
-                &submit,
-                &document,
-                &cancel,
-                &mut blender,
-            ),
+            } => run_job(shared, r, &gate, &job, host, &submit, &document, &cancel),
         }
         r.set_svg_source(None);
         // Keep the pool small between work items (lease pressure).
@@ -1395,7 +1362,6 @@ fn run_job(
     submit: &SubmitJob,
     document: &JobDocument,
     cancel: &Arc<AtomicBool>,
-    blender: &mut LaneBlender,
 ) {
     let JobSpec::Export {
         composition,
@@ -1502,14 +1468,8 @@ fn run_job(
         }
         shared.status(host, job, |r| r.state = JobState::Running);
     }
-    // Blender compositions (contract 11): the lane's Blender stage, when
-    // host services run Blender; a host without Blender routes them.
-    let stage = match lane_blender(shared, blender, &export, document, submit.class, job) {
-        Ok(stage) => stage,
-        Err(e) => return finish(JobState::Failed, None, Some(e)),
-    };
     // Routing first: nothing is created for work the engine cannot do.
-    let mut plan = match plan_export_for(&export, stage.is_some(), renderer) {
+    let mut plan = match plan_export_for(&export, renderer) {
         Ok(plan) => plan,
         Err(e) => {
             let state = if matches!(e, JobError::Cancelled) {
@@ -1614,16 +1574,7 @@ fn run_job(
     plan.frame_post = job_compat
         .as_ref()
         .and_then(|c| c.context_frames(export.composition.clone()));
-    let result = run_export_with_blender(
-        renderer,
-        &export,
-        plan,
-        sink,
-        gate,
-        cancel,
-        &mut progress,
-        stage,
-    );
+    let result = run_export_into(renderer, &export, plan, sink, gate, cancel, &mut progress);
     renderer.set_compat_rasters(None);
     // A layer the window's override could not answer for fails with why.
     let result = match (result, job_compat.as_ref().and_then(|c| c.failure())) {
@@ -1691,75 +1642,6 @@ fn run_job(
             finish(JobState::Failed, None, Some(engine_error(job, &e)))
         }
     }
-}
-
-/// A lane's Blender stage: created when its first Blender export starts.
-#[derive(Default)]
-struct LaneBlender {
-    stage: Option<pm_export::blender::ExportBlender>,
-    params: Option<Arc<Mutex<blender::JobParams>>>,
-}
-
-/// Bytes of decoded Blender surfaces a lane keeps in memory (today's
-/// renderer budget; contract 8's `blenderSurfaces` category).
-const BLENDER_SURFACE_BYTES: u64 = 512 << 20;
-
-/// The lane's Blender stage for `export` when its composition renders with
-/// Blender: `None` when it does not, or when host services do not run
-/// Blender (the export then routes as before); an error when Blender is
-/// missing (the export fails with appendix D's sentence).
-fn lane_blender<'b>(
-    shared: &Arc<Shared>,
-    blender: &'b mut LaneBlender,
-    export: &ExportJob,
-    document: &JobDocument,
-    class: PriorityClass,
-    job: &JobId,
-) -> Result<Option<&'b mut pm_export::blender::ExportBlender>, EngineError> {
-    let needs =
-        pm_render::unsupported_with_media(&export.document, &export.composition, &*export.media)
-            .iter()
-            .any(|u| u.feature == pm_render::Feature::Blender);
-    if !needs {
-        return Ok(None);
-    }
-    let params = blender::JobParams {
-        session: document.session,
-        priority: class,
-        foreground_capture: false,
-        export: job.clone(),
-    };
-    let shared_params = blender
-        .params
-        .get_or_insert_with(|| Arc::new(Mutex::new(params.clone())))
-        .clone();
-    *shared_params.lock().unwrap_or_else(|e| e.into_inner()) = params;
-    if blender.stage.is_none() {
-        let mut backend = blender::HostBackend::new(shared.clone(), shared_params);
-        // A host that does not serve Blender keeps routing these exports.
-        match shared.call(Request::BlenderStatus, Some(document.session)) {
-            Ok(Response::BlenderStatus(_)) => {}
-            _ => return Ok(None),
-        }
-        let area = backend
-            .area()
-            .map_err(|e| job_error(job, ErrorCode::BlenderFailed, e.to_string()))?;
-        let cache =
-            pm_blender::SurfaceCache::new(BLENDER_SURFACE_BYTES, Some(area.0.join("surfaces")));
-        blender.stage = Some(pm_export::blender::ExportBlender::new(
-            pm_blender::job::BlenderStage::new(cache),
-            Box::new(backend),
-        ));
-    }
-    blender.stage.as_mut().unwrap().converted_assets =
-        Some(Arc::new(blender_png::HostBlenderPng::new(
-            export.media.clone(),
-            shared.clone(),
-            document.session,
-            document.revision,
-            &export.document,
-        )));
-    Ok(blender.stage.as_mut())
 }
 
 /// The probe lane: answers `probeMedia` requests in order until shutdown.

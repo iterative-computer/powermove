@@ -350,7 +350,7 @@ A Cargo workspace at `engine/`.
 | `pm-color` | Transfer functions (extended), tone mapping, chroma, gamut, OCIO bridge (after cutover) | native |
 | `pm-gpu` | wgpu device, pools, shader compilation, GLSL compatibility, interop trait, GPU time slicing | native |
 | `pm-render` | Render graph, 2D layers, 3D scene pass, effects, compositing, motion blur | native |
-| `pm-blender` | Blender job client: snapshots from the evaluated scene, protocol, surface import, cache keys | native |
+| (no `pm-blender`) | Removed with Blender (main 2b1fa379a): `render3d` is inert and 3D layers draw natively in every mode. Contract 11's messages remain in `pm-protocol` until a protocol bump | — |
 | `pm-media` | Probe, demux, decode, index, image readers, color and chroma metadata | native |
 | (no `pm-cache`) | Frame, render, and disk caches and leases live with their owners: `pm-engine`, `pm-media`, `pm-render`, `pm-node` | native |
 | (no `pm-proxy`) | Representation policy, jobs, and the generated-media store live in `pm-media`, `pm-export`, and `pm-node` | native |
@@ -2062,7 +2062,7 @@ Drafted in Phase 0 as Rust types and RFCs; frozen when their consumer phase star
 | Model and evaluation | `pm-time`, `pm-model`, `pm-eval`, `pm-edit`, `pm-wasm`, editor-helper shims | 0, 1 |
 | Renderer write path | Write barrier, flush, identity registry, auditor, dual-answer mode, consistency check, writer-inventory script, frame-rate validator, `minReaderVersion` and `requiresEngine`, headless document host and its per-project instances | 0, 1, 2, 3c |
 | Text and vectors | `pm-text`, font registry, `pm-vector` | 0, 1, 2, 3a |
-| 3D | `pm-geom3d`, 3D scene pass, depth and ID surface, `pm-blender`, 3D viewport integration | 0, 1, 2, 3a, 3b, 3c |
+| 3D | `pm-geom3d`, 3D scene pass, depth and ID surface, 3D viewport integration | 0, 1, 2, 3a, 3b, 3c |
 | Media | `pm-media`, decoders, readers, index, chroma, content hashing | 0, 2, 3b |
 | GPU and render | `pm-gpu`, `pm-render` 2D, GLSL pipeline, definition snapshots, fallback runner | 0, 2, 3a |
 | Color | `pm-color`, invariants, interpretation, tone mapping | 0, 2, 3a, 3b |

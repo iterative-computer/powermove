@@ -19,7 +19,6 @@
 //! current engine's.
 
 pub mod audio;
-pub mod blender;
 pub mod clock;
 pub mod compat;
 pub mod complete;
@@ -238,10 +237,6 @@ pub struct BridgePresenter {
     playing: BTreeSet<Key>,
     generations: Generations,
     told_no_source: bool,
-    /// The paused viewer's Blender jobs: host calls made from its worker
-    /// (`blender`), and the previews (document source only).
-    link: Option<Arc<crate::jobs::blender::HostLink>>,
-    blender: Option<Arc<blender::PreviewBlender>>,
     /// The viewer's frame cache: the share sent to the render thread and
     /// the bytes reserved for it in the lease.
     frame_cache: Option<usize>,
@@ -276,7 +271,7 @@ impl BridgePresenter {
         let thread_config = config.thread.clone();
         let generations = Generations::default();
         let thread_generations = generations.clone();
-        let thread_sink = sink.clone();
+        let thread_sink = sink;
         let back = tx.clone();
         let thread = pm_engine::qos::spawn_engine_thread(
             EngineProcess::Interactive,
@@ -293,64 +288,6 @@ impl BridgePresenter {
             },
         )
         .map_err(|e| format!("could not start the viewer presenter: {e}"))?;
-        // Documents get Blender shading while paused: its host calls wake
-        // the utility process through the sink (it then calls `pump`).
-        let (link, blender) = if config.source == Some(FrameSource::Document) {
-            let wake_sink = sink.clone();
-            let link = crate::jobs::blender::HostLink::new(Arc::new(move || wake_sink(Vec::new())));
-            let ready = tx.clone();
-            let blender = blender::PreviewBlender::start(
-                link.clone(),
-                sink,
-                stats.clone(),
-                Box::new(move |notice| {
-                    let _ = ready.send(match notice {
-                        blender::Notice::Started {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                        } => Command::BlenderStarted {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                        },
-                        blender::Notice::Ready {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                        } => Command::BlenderReady {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                        },
-                        blender::Notice::Failed {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                            error,
-                        } => Command::BlenderFailed {
-                            key,
-                            revision,
-                            generation,
-                            shading,
-                            error,
-                        },
-                        blender::Notice::Captured { token, result } => {
-                            Command::BlenderCaptured { token, result }
-                        }
-                    });
-                }),
-            )?;
-            let _ = tx.send(Command::UseBlender(blender.clone()));
-            (Some(link), Some(blender))
-        } else {
-            (None, None)
-        };
         Ok(Self {
             config,
             tx,
@@ -360,8 +297,6 @@ impl BridgePresenter {
             playing: BTreeSet::new(),
             generations,
             told_no_source: false,
-            link,
-            blender,
             frame_cache: None,
             frame_cache_reserved: 0,
         })
@@ -799,26 +734,6 @@ impl FramePresenter for BridgePresenter {
         self.send(Command::ClosePort { port });
     }
 
-    fn drain_host_requests(&mut self) -> Vec<pm_engine::jobs::HostRequest> {
-        self.link.as_ref().map(|l| l.drain()).unwrap_or_default()
-    }
-
-    fn host_answer(
-        &mut self,
-        token: u64,
-        answer: Result<pm_protocol::envelope::Response, EngineError>,
-    ) {
-        if let Some(link) = &self.link {
-            link.answer(token, answer);
-        }
-    }
-
-    fn host_event(&mut self, event: &pm_protocol::envelope::Event) {
-        if let Some(link) = &self.link {
-            link.event(event);
-        }
-    }
-
     fn renders_documents(&self) -> bool {
         self.config.source == Some(FrameSource::Document)
     }
@@ -873,10 +788,6 @@ impl FramePresenter for BridgePresenter {
 
 impl Drop for BridgePresenter {
     fn drop(&mut self) {
-        // Blender first: a running preview job is cancelled.
-        if let Some(blender) = self.blender.take() {
-            blender.shutdown();
-        }
         let _ = self.tx.send(Command::Shutdown);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -947,8 +858,6 @@ mod tests {
             playing: BTreeSet::new(),
             generations: Generations::default(),
             told_no_source: false,
-            link: None,
-            blender: None,
             frame_cache: None,
             frame_cache_reserved: 0,
         };
