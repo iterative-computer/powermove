@@ -53,7 +53,9 @@ const savedProject = async file => { const bytes = await readFile(file); return 
 let app;
 try {
   const profile = path.join(root, 'desktop-profile'), exportsDir = path.join(root, 'desktop-exports');
-  const appEnv = { ...process.env, POWERMOVE_USER_DATA: profile, POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DEVTOOLS: '0', POWERMOVE_NEW_ENGINE: '1', POWERMOVE_AGENT_EXPORTS: exportsDir, POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' }; delete appEnv.ELECTRON_RUN_AS_NODE;
+  const appEnv = { ...process.env, POWERMOVE_USER_DATA: profile, POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DEVTOOLS: '0', POWERMOVE_NEW_ENGINE: '1', POWERMOVE_AGENT_EXPORTS: exportsDir,
+    POWERMOVE_DISABLE_RUNTIME_UPDATES: '1', CODEX_BINARY: path.join(desktop, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'),
+    POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' }; delete appEnv.ELECTRON_RUN_AS_NODE;
   let appLog = '';
   app = start(electron, ['.'], { cwd: desktop, env: appEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   for (const stream of [app.stdout, app.stderr]) stream.on('data', b => { appLog = (appLog + b).slice(-30000); });
