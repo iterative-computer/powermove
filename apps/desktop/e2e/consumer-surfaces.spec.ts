@@ -20,6 +20,22 @@ const LAYER = { left: 40, top: 30, right: 160, bottom: 110 };
 const ZOOM = 2;
 const PAN: [number, number] = [-30, 16];
 
+test('Library opens immediately while playback continues', async ({ session }) => {
+  await session.openEditor();
+  const { page } = session;
+  if (await page.evaluate(() => !!(window as any).PM.EngineRender)) {
+    await expect(page.locator('#panel-viewer #engine-present')).toHaveCSS('visibility', 'visible');
+  }
+  await page.evaluate(() => (window as any).PM.play());
+  await expect.poll(() => page.evaluate(() => (window as any).PM.playing)).toBe(true);
+  await page.evaluate(() => (window as any).PM.LibraryUI.open());
+  const card = page.locator('.library-card[data-panel-id="viewer"]');
+  await card.scrollIntoViewIfNeeded();
+  await expect(card.locator('.library-clone')).toBeAttached({ timeout: 2_000 });
+  await expect(page.locator('[data-previews="ready"]')).toBeAttached({ timeout: 2_000 });
+  expect(await page.evaluate(() => (window as any).PM.playing)).toBe(true);
+});
+
 for (const theme of ['light', 'dark']) for (const variant of VIEWER_VARIANTS) {
   test(`Library viewer card at 200% with a selection in ${theme}, ${variant.name}`, async ({ session }, testInfo) => {
     await session.openEditor();

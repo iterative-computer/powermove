@@ -686,7 +686,7 @@
       // SnapshotRequest currently renders whole compositions through their
       // scene camera. Cropped/3D views retain their presented bitmap until
       // the snapshot contract can carry the view and crop (consumers.md C3).
-      if (!cropped && !scene?.hasScene) {
+      if (!PM.playing && !cropped && !scene?.hasScene) {
         // The clone's overlay describes the presented frame. Wait for that
         // frame to catch up before combining it with fresh snapshot pixels.
         if (presentation && (!presentation.presenting || !latest || latest.standIn
