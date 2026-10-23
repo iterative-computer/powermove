@@ -760,7 +760,11 @@ what the previous code did. Two tests prove it:
   recheck fixes (failed-checkpoint semantics, deterministic keyframe ids),
   5 more seeds (12 to 16) at 037b44cf7 gave 75 kills (50 off,
   25 on, 10 settled), 36 recovering the document, all
-  clean. Opening now
+  clean. With SAVE-1, 5 more seeds (17 to 21) at 912a22c58 gave 75 kills
+  (50 off, 25 on, 10 settled), 30 recovering the document, all clean
+  (315 in all since the fixture fix). The e2e kills the whole app with no
+  slot write failing, so the failure cases are the model check's and the
+  crash tests'. Opening now
   replaces a repeated or missing keyframe id deterministically (`kA.2`,
   `k<index>`), so a document with real duplicates also opens to the same
   document every time.
