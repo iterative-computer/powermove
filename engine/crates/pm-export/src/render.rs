@@ -284,7 +284,7 @@ pub struct ReadFrame {
     /// Owned GPU frame for a GPU-capable sink.
     pub gpu: Option<wgpu::Texture>,
     /// Whole-frame target held until a GPU sink has finished reading it.
-    gpu_target: Option<pm_render::Frame>,
+    gpu_target: Option<Box<pm_render::Frame>>,
     pub width: u32,
     pub height: u32,
     /// Layers that failed and drew nothing (section 8 isolation).
@@ -438,7 +438,7 @@ fn render_bands(
         rgba.clear();
     }
     let mut gpu_frame: Option<wgpu::Texture> = None;
-    let mut gpu_target: Option<pm_render::Frame> = None;
+    let mut gpu_target: Option<Box<pm_render::Frame>> = None;
     let mut failures = Vec::new();
     let mut y = 0u32;
     while y < h {
@@ -564,7 +564,7 @@ fn render_bands(
         // GPU conversion has completed. A band copy and CPU readback have
         // completed above, so their targets can be reused immediately.
         if gpu && whole {
-            gpu_target = Some(frame);
+            gpu_target = Some(Box::new(frame));
         } else {
             renderer.recycle(frame);
         }
@@ -1200,7 +1200,7 @@ enum Rendered {
         u64,
         Vec<f32>,
         Option<wgpu::Texture>,
-        Option<pm_render::Frame>,
+        Option<Box<pm_render::Frame>>,
     ),
     Failed(JobError),
 }
@@ -1296,7 +1296,8 @@ where
     let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
     // The encoder returns pixels and completed whole GPU targets for later
     // frames to reuse (docs/engine/perfbench.md).
-    let (back_tx, back_rx) = std::sync::mpsc::channel::<(Vec<f32>, Option<pm_render::Frame>)>();
+    let (back_tx, back_rx) =
+        std::sync::mpsc::channel::<(Vec<f32>, Option<Box<pm_render::Frame>>)>();
     let qos = crate::par::current_qos();
     std::thread::scope(|scope| {
         let encoder_gate = gate;
@@ -1305,6 +1306,8 @@ where
             let _qos_refresh = crate::par::install_qos_refresh(encoder_gate.worker_qos_refresh());
             encoder_gate.sync_worker_qos();
             let mut last_preview: Option<Instant> = None;
+            let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
+            let (mut video_ns, mut preview_ns, mut audio_ns, mut progress_ns) = (0, 0, 0, 0);
             for expected in 0..frames {
                 let (n, rgba, texture, gpu_target) = match rx.recv() {
                     Ok(Rendered::Frame(n, rgba, texture, gpu_target)) => {
@@ -1321,11 +1324,14 @@ where
                     height: h,
                     rgba: &rgba,
                 };
+                let started = profiling.then(Instant::now);
                 if let Some(texture) = texture {
                     pipeline.push_gpu(&texture, (!rgba.is_empty()).then_some(&frame))?;
                 } else {
                     pipeline.push_frame(&frame)?;
                 }
+                video_ns += started.map_or(0, |t| t.elapsed().as_nanos());
+                let started = profiling.then(Instant::now);
                 let due = wants_preview
                     && !rgba.is_empty()
                     && (n + 1 == frames
@@ -1343,9 +1349,11 @@ where
                 } else {
                     None
                 };
+                preview_ns += started.map_or(0, |t| t.elapsed().as_nanos());
                 // `push_gpu` has completed every source-texture GPU read.
                 // On an error above, the target is dropped instead of reused.
                 let _ = back_tx.send((rgba, gpu_target));
+                let started = profiling.then(Instant::now);
                 if let Some((mixer, rate, last)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
                     let first = first.min(*last);
@@ -1367,11 +1375,23 @@ where
                         pipeline.push_audio(&block)?;
                     }
                 }
+                audio_ns += started.map_or(0, |t| t.elapsed().as_nanos());
+                let started = profiling.then(Instant::now);
                 progress(Progress {
                     frames_done: n + 1,
                     frames,
                     preview,
                 });
+                progress_ns += started.map_or(0, |t| t.elapsed().as_nanos());
+            }
+            if profiling {
+                eprintln!(
+                    "[export timing] encoder_video_ms={:.3} encoder_preview_ms={:.3} encoder_audio_ms={:.3} encoder_progress_ms={:.3}",
+                    video_ns as f64 / 1e6,
+                    preview_ns as f64 / 1e6,
+                    audio_ns as f64 / 1e6,
+                    progress_ns as f64 / 1e6,
+                );
             }
             encoder_gate.sync_worker_qos();
             pipeline
@@ -1401,7 +1421,7 @@ where
                 && let Ok((rgba, gpu_target)) = back_rx.recv()
             {
                 if let Some(frame) = gpu_target {
-                    renderer.recycle(frame);
+                    renderer.recycle(*frame);
                 }
                 if !rgba.is_empty() {
                     available_pixels.push(rgba);
