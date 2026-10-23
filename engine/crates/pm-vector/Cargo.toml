@@ -15,11 +15,12 @@ conformance = []
 # rasterizer of compat level 1, the scene model, the vello_cpu coverage
 # backend, and SVG through usvg (text off) with filters through resvg.
 # Off for pm-eval and pm-wasm, which need geometry only.
-render = ["dep:pm-text", "usvg/text", "usvg/system-fonts", "dep:peniko", "dep:vello_cpu", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
+render = ["dep:pm-perf", "dep:pm-text", "usvg/text", "usvg/system-fonts", "dep:peniko", "dep:vello_cpu", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
 # Vello's GPU compute coverage backend on the engine's wgpu device.
 gpu = ["render", "dep:vello", "dep:wgpu"]
 
 [dependencies]
+pm-perf = { path = "../pm-perf", optional = true }
 pm-text = { path = "../pm-text", default-features = false, features = ["render"], optional = true }
 kurbo = "0.13.1"
 libm.workspace = true

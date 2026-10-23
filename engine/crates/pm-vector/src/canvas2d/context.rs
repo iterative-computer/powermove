@@ -948,6 +948,12 @@ fn render_op_region(
         return;
     };
     use super::msaa::unit8;
+    // The opaque interior's source-over result is independent of the
+    // destination. Quantize it once, retaining the same unorm8 rounding.
+    let opaque = match paint {
+        Paint::Solid(color) if color[3] == 1.0 => Some(color.map(unorm8)),
+        _ => None,
+    };
     for y in y0..y1 {
         for x in x0..x1 {
             let p = (y * target.width + x) as usize;
@@ -967,6 +973,10 @@ fn render_op_region(
                 };
                 let cov = cov * clip.map_or(1.0, |c| c[i]);
                 if cov == 0.0 {
+                    continue;
+                }
+                if cov == 1.0 && let Some(color) = opaque {
+                    target.samples[i] = color;
                     continue;
                 }
                 let base = *at.get_or_insert_with(|| {

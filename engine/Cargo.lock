@@ -2488,6 +2488,7 @@ dependencies = [
  "kurbo",
  "libm",
  "peniko",
+ "pm-perf",
  "pm-skia-path",
  "pm-text",
  "png",

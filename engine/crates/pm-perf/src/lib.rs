@@ -153,6 +153,11 @@ counters! {
     /// Vector (shape, mask, path) rasters found.
     VectorCacheHits = "cache.vector.hits",
     VectorCacheMisses = "cache.vector.misses",
+    /// Exact CPU canvas bytes kept across texture evictions and seeks.
+    CanvasCacheHits = "cache.canvas.hits",
+    CanvasCacheMisses = "cache.canvas.misses",
+    /// Analytic canvas varying components interpolated on the CPU.
+    CanvasInterpolations = "engine.canvas_interpolations",
     /// Text runs found rendered.
     TextCacheHits = "cache.text.hits",
     TextCacheMisses = "cache.text.misses",

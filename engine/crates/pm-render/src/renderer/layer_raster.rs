@@ -264,15 +264,16 @@ impl Renderer {
             }));
         }
         if has_paths {
-            let (_, colors, layer_paths) = crate::vector::paths(&mut scope, node, seconds)
+            let (nodes, colors, layer_paths) = crate::vector::paths(&mut scope, node, seconds)
                 .map_err(|e| RenderError::Request(e.to_string()))?;
-            let (bitmap, raster) =
-                pm_vector::canvas2d::shape::raster_paths(&layer_paths, &colors, scale)
-                    .map_err(|e| RenderError::Request(e.to_string()))?;
+            let raster = layer_paths.raster(scale);
+            let (width, height, rgba) = self.vector.canvas_raster(&crate::vector::VectorSource::Paths {
+                nodes, colors, scale, crop: None,
+            }).map_err(RenderError::Request)?;
             let b = layer_paths.bounds;
             return Ok(Some(LayerRaster {
-                canvas: (bitmap.width, bitmap.height),
-                pixels: LayerPixels::Rgba8(bitmap.rgba),
+                canvas: (width, height),
+                pixels: LayerPixels::Rgba8((*rgba).clone()),
                 box_size: (b.w, b.h),
                 anchor: (raster.anchor_x, raster.anchor_y),
                 selection: Some([b.x0, b.y0, b.x1, b.y1]),
@@ -286,12 +287,13 @@ impl Renderer {
             .map_err(|e| RenderError::Request(e.to_string()))?;
         let (content, colors) = crate::vector::shape_content(&d);
         let g = pm_vector::shape::ShapeRaster::new(&content, scale);
-        let bitmap = pm_vector::canvas2d::shape::raster_shape(&content, &colors, scale)
-            .map_err(|e| RenderError::Request(e.to_string()))?;
+        let (width, height, rgba) = self.vector.canvas_raster(&crate::vector::VectorSource::Shape {
+            content, colors, scale, crop: None,
+        }).map_err(RenderError::Request)?;
         let s = g.selection;
         Ok(Some(LayerRaster {
-            canvas: (bitmap.width, bitmap.height),
-            pixels: LayerPixels::Rgba8(bitmap.rgba),
+            canvas: (width, height),
+            pixels: LayerPixels::Rgba8((*rgba).clone()),
             box_size: (g.w, g.h),
             anchor: (g.pad, g.pad),
             selection: Some([s.x0, s.y0, s.x1, s.y1]),

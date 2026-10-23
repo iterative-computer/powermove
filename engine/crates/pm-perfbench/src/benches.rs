@@ -13,7 +13,7 @@ use std::time::Instant;
 use pm_gpu::bridge_out::display::WorkingTexture;
 use pm_node::present::compose::Composer;
 use pm_node::present::document::{Route, ViewDocument};
-use pm_perf::Scope;
+use pm_perf::{Counter, Scope};
 use pm_protocol::color::ViewerColorSpace;
 use pm_protocol::common::{Revision, Seq, Size, TICKS_PER_SECOND, Ticks};
 use pm_protocol::frame::{MediaPreference, PreviewResolution, ViewerState};
@@ -92,6 +92,8 @@ pub fn all() -> Vec<Bench> {
         ("edit_playback_500", edit_playback_500),
         ("inspector_edit_500", inspector_edit_500),
         ("scrub_24", scrub_24),
+        ("canvas_cold_24", canvas_cold_24),
+        ("canvas_seek_revisit_24", canvas_seek_revisit_24),
         ("export_120", export_120),
         ("typing_60", typing_60),
         ("open_large_2000", open_large_2000),
@@ -450,6 +452,122 @@ pub fn scrub_24(ctx: &Ctx) -> BenchReport {
         m,
         wall,
         json!({ "media": "h264-aac.mp4 (320x180, 30 fps)" }),
+    )
+}
+
+fn canvas_doc() -> Value {
+    let mut layers = Vec::new();
+    for (i, shape) in ["rect", "ellipse", "star", "line"].iter().enumerate() {
+        let mut layer = fixtures::layer(
+            &format!("canvas-{i}"),
+            "shape",
+            json!({
+                "shape": shape, "w": 32 + 5 * i, "h": 26 + 4 * i,
+                "points": 5 + i, "radius": 5, "stroke": 2,
+                "strokeColor": "#FFD60A", "color": "#4C8DFF"
+            }),
+            45.0 + 60.0 * i as f64,
+            70.0 + 10.0 * i as f64,
+            2.0,
+        );
+        layer["compat"] = json!(1);
+        // A different raster scale at each of the 24 exact frame times.
+        let scale = fixtures::keys(
+            json!(60),
+            &[(0.0, json!(60)), (1.0, json!(360))],
+            ([0.0, 0.0], [1.0, 1.0]),
+        );
+        fixtures::set(&mut layer, "scale.x", scale.clone());
+        fixtures::set(&mut layer, "scale.y", scale);
+        layers.push(layer);
+    }
+    fixtures::project(320, 180, 24.0, 2.0, fixtures::solid_fill("#141821"), layers)
+}
+
+fn canvas_viewer<'a>(ctx: &'a Ctx, doc: &Value) -> Viewer<'a> {
+    let mut v = Viewer::new(ctx, doc, &Default::default());
+    v.composer.set_draw_reuse(false);
+    v.composer.renderer().set_vector_prefetch(false);
+    v.composer.renderer().set_vector_cache_budget(0, 4096);
+    v
+}
+
+fn canvas_times() -> [Ticks; 24] {
+    std::array::from_fn(|k| ticks(k as f64 / 24.0))
+}
+
+/// Twenty-four distinct, cold CPU canvas rasters of four animated level 1
+/// shapes. The pipeline gets one separate warm-up frame; the GPU texture
+/// budget remains zero so every measured frame uploads and draws the raster.
+pub fn canvas_cold_24(ctx: &Ctx) -> BenchReport {
+    let doc = canvas_doc();
+    let mut v = canvas_viewer(ctx, &doc);
+    v.frame(ticks(1.5));
+    let times = canvas_times();
+    let scope = Scope::begin();
+    let wall = times.iter().map(|&time| v.frame(time)).collect();
+    let m = measured(scope);
+    assert_eq!(
+        m.0.get(Counter::CanvasCacheMisses),
+        4 * 24,
+        "each cold shape must rasterize at every distinct frame time"
+    );
+    assert_eq!(
+        m.0.get(Counter::CanvasCacheHits),
+        0,
+        "cold frame times reused a raster"
+    );
+    assert!(
+        m.0.get(Counter::CanvasInterpolations) > 0,
+        "the cold frames bypassed canvas interpolation"
+    );
+    assert!(
+        m.0.get(Counter::DrawCalls) >= 24,
+        "the cold frames did not draw GPU frames"
+    );
+    report(
+        "canvas_cold_24",
+        "frames",
+        m,
+        wall,
+        json!({ "shapes": 4, "gpu_vector_budget_bytes": 0 }),
+    )
+}
+
+/// Revisit 24 paused frames of four animated level 1 shapes after their CPU
+/// canvas rasters are warm. The GPU texture budget is zero, so each seek must
+/// upload and draw again while reusing the exact CPU pixels across eviction.
+pub fn canvas_seek_revisit_24(ctx: &Ctx) -> BenchReport {
+    let doc = canvas_doc();
+    let mut v = canvas_viewer(ctx, &doc);
+    let times = canvas_times();
+    for &time in &times {
+        v.frame(time);
+    }
+    let scope = Scope::begin();
+    // Seven is coprime with 24: all warmed times are revisited once, out of
+    // order, with forward and backward seeks.
+    let wall = (0..24).map(|k| v.frame(times[(k * 7) % 24])).collect();
+    let m = measured(scope);
+    assert_eq!(
+        m.0.get(Counter::CanvasCacheMisses),
+        0,
+        "warmed canvas rasters were lost"
+    );
+    assert!(
+        m.0.get(Counter::CanvasCacheHits) >= 24,
+        "the seeks bypassed the canvas cache"
+    );
+    assert!(
+        m.0.get(Counter::DrawCalls) >= 24,
+        "the seeks did not draw GPU frames"
+    );
+    report(
+        "canvas_seek_revisit_24",
+        "seeks",
+        m,
+        wall,
+        json!({ "shapes": 4, "warmed_frames": 24, "gpu_vector_budget_bytes": 0 }),
     )
 }
 

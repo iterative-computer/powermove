@@ -11,6 +11,7 @@
 
 pub mod cache;
 pub mod level2;
+mod rasters;
 pub mod svg;
 pub mod svg_rasters;
 

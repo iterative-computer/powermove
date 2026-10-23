@@ -829,6 +829,7 @@ fn rasterize_verts(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64;
         coverage: vec![None; sw * (sy1 - sy0) as usize * n],
     };
     let index = |px: i64, py: i64, si: usize| ((py - sy0) as usize * sw + (px - sx0) as usize) * n + si;
+    let mut interpolations = 0u64;
     for tri in &tris {
         let p = &tri.p;
         let [minx, miny, maxx, maxy] = tri.bbox;
@@ -915,14 +916,22 @@ fn rasterize_verts(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64;
                 let lerp = |a: f32, b: f32, c: f32| (b0 * f64::from(a) + b1 * f64::from(b) + b2 * f64::from(c)) as f32;
                 let t = &tri.v;
                 let mut v = t[0];
-                for i in 0..4 {
-                    v.jacobian[i] = lerp(t[0].jacobian[i], t[1].jacobian[i], t[2].jacobian[i]);
-                    v.edge[i] = lerp(t[0].edge[i], t[1].edge[i], t[2].edge[i]);
-                }
-                for i in 0..2 {
-                    v.control[i] = lerp(t[0].control[i], t[1].control[i], t[2].control[i]);
-                }
-                let c = coverage(&v);
+                v.control[0] = lerp(t[0].control[0], t[1].control[0], t[2].control[0]);
+                interpolations += 1;
+                // `coverage` returns 1 immediately for solid interiors.
+                // Keep that exact interpolated branch test, but don't
+                // interpolate nine unused varying components.
+                let c = if v.control[0] > 0.0 {
+                    1.0
+                } else {
+                    interpolations += 9;
+                    for i in 0..4 {
+                        v.jacobian[i] = lerp(t[0].jacobian[i], t[1].jacobian[i], t[2].jacobian[i]);
+                        v.edge[i] = lerp(t[0].edge[i], t[1].edge[i], t[2].edge[i]);
+                    }
+                    v.control[1] = lerp(t[0].control[1], t[1].control[1], t[2].control[1]);
+                    coverage(&v)
+                };
                 for (si, &cov) in covered.iter().enumerate().take(n) {
                     if cov {
                         out.coverage[index(px, py, si)] = Some(c);
@@ -931,6 +940,7 @@ fn rasterize_verts(verts: &[Varyings], width: u32, height: u32, pattern: &[[f64;
             }
         }
     }
+    pm_perf::add(pm_perf::Counter::CanvasInterpolations, interpolations);
     out
 }
 

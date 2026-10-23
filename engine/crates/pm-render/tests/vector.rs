@@ -914,6 +914,37 @@ fn rasters_drawn_ahead_of_a_frame_are_taken_by_it_and_draw_the_same_pixels() {
     assert_eq!(ahead.vector_ahead_stats().bytes, 0);
 }
 
+/// A seek may discard textures and speculative frames. Their exact canvas
+/// pixels still serve the next frame and the base raster read by a wrapper.
+#[test]
+fn canvas_pixels_survive_texture_eviction_and_serve_wrapper_bases() {
+    let shape = layer("shape", "shape", json!({
+        "shape": "rect", "w": 60, "h": 40, "radius": 7,
+        "stroke": 2, "strokeColor": "#FFD60A", "color": "#F72585"
+    }), 80.0, 90.0, 2.0);
+    let doc = load(&project(W, H, 2.0, no_fill(), vec![shape]));
+    let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
+    let draw = |r: &mut Renderer, t| {
+        let frame = r.render(&doc, "Ptest-root", ticks(t), &request, &MapResolver::default()).unwrap();
+        r.read_rgba(&frame).unwrap()
+    };
+    let mut renderer = Renderer::headless().unwrap();
+    renderer.set_vector_prefetch(false);
+    let expected = draw(&mut renderer, 0.0);
+    renderer.set_vector_cache_budget(0, 4096);
+    renderer.forget_ahead();
+    let measured = pm_perf::Scope::begin();
+    let base = renderer.layer_raster(&doc, "Ptest-root", "shape", None, 0.5, 1.0, Precision::Float32).unwrap().unwrap();
+    assert!(matches!(base.pixels, pm_render::LayerPixels::Rgba8(_)));
+    let actual = draw(&mut renderer, 0.5);
+    let counts = measured.finish();
+    assert_eq!(counts.get(pm_perf::Counter::CanvasCacheMisses), 0);
+    assert_eq!(counts.get(pm_perf::Counter::CanvasCacheHits), 2);
+    assert_eq!(actual.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+    renderer.trim(0);
+    assert_eq!(renderer.vector_cache_bytes(), 0);
+}
+
 /// A raster override that has not answered a frame planned ahead: its
 /// layers are planned as pass-throughs (their rasters drawn ahead) and named
 /// as needs; once the producer passes them through, the frame takes them.

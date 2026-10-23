@@ -20,7 +20,6 @@ use std::collections::HashMap;
 
 use pm_protocol::color::Precision;
 use pm_vector::gpu::GpuCoverage;
-use pm_vector::path::PathLayer;
 use pm_vector::render::cpu::render_coverage;
 use pm_vector::render::scene::{AtlasLayout, CoverageScene, PixelRect};
 
@@ -105,7 +104,7 @@ pub const AHEAD_MAX_BYTES: usize = 128 << 20;
 pub const AHEAD_KEEP_FRAMES: u64 = 64;
 
 type RasterKey = ([u8; 32], u8);
-type Drawn = Result<(u32, u32, Vec<u8>), String>;
+type Drawn = Result<super::rasters::Pixels, String>;
 
 /// Level 1 rasters drawn ahead of the frames that will draw them, on
 /// threads of their own: a playing view plans the frames it will draw next
@@ -114,6 +113,7 @@ type Drawn = Result<(u32, u32, Vec<u8>), String>;
 /// for the ones being drawn, and draws the rest itself (`prefetch`).
 #[derive(Default)]
 struct Ahead {
+    rasters: std::sync::Arc<super::rasters::Rasters>,
     state: std::sync::Mutex<AheadState>,
     done: std::sync::Condvar,
 }
@@ -126,6 +126,7 @@ struct AheadState {
     queue: std::collections::VecDeque<(RasterKey, VectorSource, u64)>,
     bytes: usize,
     workers: usize,
+    generation: u64,
     /// Stops the workers (the cache was dropped).
     closed: bool,
     /// Rasters drawn ahead, and those a frame took or waited for.
@@ -137,15 +138,15 @@ struct AheadState {
 impl Ahead {
     fn worker(self: std::sync::Arc<Self>) {
         loop {
-            let (key, source, asked) = {
+            let (key, source, asked, generation) = {
                 let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 loop {
                     if st.closed {
                         st.workers -= 1;
                         return;
                     }
-                    if let Some(job) = st.queue.pop_front() {
-                        break job;
+                    if let Some((key, source, asked)) = st.queue.pop_front() {
+                        break (key, source, asked, st.generation);
                     }
                     let (next, timeout) = self
                         .done
@@ -159,46 +160,31 @@ impl Ahead {
                     }
                 }
             };
-            let drawn = raster_level1(&source);
+            let drawn = self.rasters.get(&source);
             let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
             st.drawing.remove(&key);
+            if generation != st.generation || st.closed {
+                drop(st);
+                self.done.notify_all();
+                continue;
+            }
             if let Ok((_, _, rgba)) = &drawn {
                 st.bytes += rgba.len();
             }
             st.drawn += 1;
             st.ready.insert(key, (drawn, asked));
+            // Queued work can complete after the caller filled the bound.
+            // Keep the ready set bounded too; the content cache still
+            // retains recently warmed pixels after this set discards them.
+            while st.bytes > AHEAD_MAX_BYTES {
+                let Some(oldest) = st.ready.iter().min_by_key(|(_, (_, frame))| frame).map(|(k, _)| *k) else { break };
+                if let Some((Ok((_, _, rgba)), _)) = st.ready.remove(&oldest) {
+                    st.bytes = st.bytes.saturating_sub(rgba.len());
+                }
+            }
             drop(st);
             self.done.notify_all();
         }
-    }
-}
-
-/// A level 1 shape or paths raster: width, height and premultiplied
-/// `Rgba8Unorm` rows top-down.
-fn raster_level1(source: &VectorSource) -> Result<(u32, u32, Vec<u8>), String> {
-    match source {
-        VectorSource::Shape {
-            content,
-            colors,
-            scale,
-            crop,
-        } => {
-            let b = pm_vector::canvas2d::shape::raster_shape_window(content, colors, *scale, *crop)
-                .map_err(|e| e.to_string())?;
-            Ok((b.width, b.height, b.rgba))
-        }
-        VectorSource::Paths {
-            nodes,
-            colors,
-            scale,
-            crop,
-        } => {
-            let layer = PathLayer::new(nodes);
-            let (b, _) = pm_vector::canvas2d::shape::raster_paths_window(&layer, colors, *scale, *crop)
-                .map_err(|e| e.to_string())?;
-            Ok((b.width, b.height, b.rgba))
-        }
-        _ => Err("not a level 1 raster".into()),
     }
 }
 
@@ -342,6 +328,7 @@ pub struct VectorCache {
     pub svg: SvgRasters,
     /// Level 1 rasters drawn ahead (`prefetch_ahead`).
     ahead: std::sync::Arc<Ahead>,
+    rasters: std::sync::Arc<super::rasters::Rasters>,
 }
 
 impl Drop for VectorCache {
@@ -373,6 +360,7 @@ impl Default for VectorCache {
 
 impl VectorCache {
     pub fn new() -> Self {
+        let rasters = std::sync::Arc::new(super::rasters::Rasters::default());
         Self {
             entries: HashMap::new(),
             tick: 0,
@@ -385,7 +373,8 @@ impl VectorCache {
             paint: None,
             last_backend: None,
             svg: SvgRasters::default(),
-            ahead: std::sync::Arc::default(),
+            ahead: std::sync::Arc::new(Ahead { rasters: rasters.clone(), ..Default::default() }),
+            rasters,
         }
     }
 
@@ -435,6 +424,11 @@ impl VectorCache {
         self.ahead.done.notify_all();
     }
 
+    /// Exact canvas bytes shared by viewer draws and wrapper base reads.
+    pub(crate) fn canvas_raster(&self, source: &VectorSource) -> Result<super::rasters::Pixels, String> {
+        self.rasters.get(source)
+    }
+
     /// Rasters drawn ahead so far (stats).
     pub fn ahead_stats(&self) -> AheadStats {
         let st = self.ahead.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -450,6 +444,7 @@ impl VectorCache {
     /// frames will not come), and what is still queued.
     pub fn forget_ahead(&mut self) {
         let mut st = self.ahead.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.generation += 1;
         let queued: Vec<RasterKey> = st.queue.drain(..).map(|(k, _, _)| k).collect();
         for k in queued {
             st.drawing.remove(&k);
@@ -514,7 +509,7 @@ impl VectorCache {
 
     /// Bytes of cached textures and of the stored level 1 SVG rasters.
     pub fn bytes(&self) -> u64 {
-        self.bytes + self.svg.bytes()
+        self.bytes + self.svg.bytes() + self.rasters.bytes() as u64
     }
 
     /// Cached textures.
@@ -548,6 +543,7 @@ impl VectorCache {
     /// bounded).
     pub fn begin_frame(&mut self) {
         self.frame += 1;
+        self.rasters.begin_frame();
         // Rasters drawn ahead for frames that passed without taking them
         // (planned before a skip, a layer whose answer changed its source).
         {
@@ -573,8 +569,10 @@ impl VectorCache {
     /// stay (lease pressure, between frames: every entry may go), then
     /// stored SVG rasters within what the textures leave.
     pub fn trim(&mut self, budget: u64) {
+        self.forget_ahead();
         self.evict(budget, self.max_entries, true);
         self.svg.evict(budget.saturating_sub(self.bytes));
+        self.rasters.trim(budget.saturating_sub(self.bytes + self.svg.bytes()) as usize);
     }
 
     /// Evicts least recently used entries until at most `bytes` and
@@ -655,7 +653,7 @@ impl VectorCache {
         }
         let workers = prefetch_workers().min(misses.len());
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let mut drawn: Vec<Option<(u32, u32, Vec<u8>)>> = Vec::new();
+        let mut drawn: Vec<Option<super::rasters::Pixels>> = Vec::new();
         drawn.resize_with(misses.len(), || None);
         let started = std::time::Instant::now();
         let mut slowest = (0u64, 0u64);
@@ -670,7 +668,7 @@ impl VectorCache {
                                 break;
                             };
                             let began = std::time::Instant::now();
-                            let raster = raster_level1(source);
+                            let raster = self.rasters.get(source);
                             out.push((i, raster, began.elapsed().as_micros() as u64));
                         }
                         out
@@ -724,7 +722,7 @@ impl VectorCache {
         pm_perf::bump(pm_perf::Counter::VectorCacheMisses);
         let (texture, bytes) = match source {
             VectorSource::Shape { .. } | VectorSource::Paths { .. } => {
-                let (width, height, rgba) = raster_level1(source)?;
+                let (width, height, rgba) = self.rasters.get(source)?;
                 (
                     upload_rgba8(device, queue, width, height, &rgba),
                     u64::from(width) * u64::from(height) * 4,
