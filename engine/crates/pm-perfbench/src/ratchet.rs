@@ -28,6 +28,17 @@ pub struct Baselines {
     pub benches: BTreeMap<String, BTreeMap<String, u64>>,
     /// (bench, counter) → (relative tolerance, reason).
     pub tolerance: BTreeMap<(String, String), (f64, String)>,
+    /// Counters reported but not gated, with the reason (no correlation
+    /// with wall-clock was shown: docs/engine/perfbench.md).
+    pub ungated: BTreeMap<String, String>,
+}
+
+impl Baselines {
+    /// Whether `counter` has an upper bound: a cost counter that is not
+    /// listed as ungated (cache hits are benefits, never bounded).
+    pub fn gates(&self, counter: Counter) -> bool {
+        !counter.is_benefit() && !self.ungated.contains_key(counter.name())
+    }
 }
 
 impl Baselines {
@@ -43,6 +54,12 @@ impl Baselines {
                 for (name, n) in counters.as_object().into_iter().flatten() {
                     entry.insert(name.clone(), n.as_u64().expect("a count"));
                 }
+            }
+        }
+        if let Some(u) = v["ungated"].as_object() {
+            for (name, reason) in u {
+                out.ungated
+                    .insert(name.clone(), reason.as_str().unwrap_or_default().to_owned());
             }
         }
         if let Some(t) = v["tolerance"].as_object() {
@@ -81,6 +98,7 @@ impl Baselines {
             "about": "Highest allowed pm-perf counts per bench (docs/engine/perfbench.md). Lowered by PM_PERF_RATCHET=update; raised only by hand with the change that needs it.",
             "benches": benches,
             "tolerance": tolerance,
+            "ungated": self.ungated,
         })
     }
 
@@ -134,7 +152,7 @@ pub fn compare(baselines: &Baselines, reports: &[BenchReport]) -> Outcome {
     let mut out = Outcome::default();
     for r in reports {
         let base = baselines.benches.get(&r.name);
-        for &c in Counter::ALL {
+        for &c in Counter::ALL.iter().filter(|&&c| baselines.gates(c)) {
             let actual = r.counters.get(c);
             let name = c.name();
             let baseline = base.and_then(|b| b.get(name).copied());
@@ -179,7 +197,14 @@ pub fn lowered(baselines: &Baselines, reports: &[BenchReport]) -> Baselines {
     for r in reports {
         let entry = next.benches.entry(r.name.clone()).or_default();
         let fresh = entry.is_empty();
-        for &c in Counter::ALL {
+        let gated: Vec<Counter> = Counter::ALL
+            .iter()
+            .copied()
+            .filter(|&c| baselines.gates(c))
+            .collect();
+        // Counters no longer gated are dropped from the file.
+        entry.retain(|name, _| Counter::from_name(name).is_some_and(|c| gated.contains(&c)));
+        for c in gated {
             let actual = r.counters.get(c);
             match entry.get(c.name()).copied() {
                 Some(b) if actual < b => {
@@ -233,6 +258,10 @@ mod tests {
             ("a".into(), "cpu.heap_allocs".into()),
             (0.05, "timing".into()),
         );
+        // Cache hits are benefits: more of them never fails.
+        let mut hits = report("a", 10, 100);
+        hits.counters.set(Counter::DrawReuseHits, 500);
+        assert!(compare(&b, &[hits]).regressions.is_empty());
         // Within the tolerance; draws exact.
         let o = compare(&b, &[report("a", 10, 105)]);
         assert!(o.regressions.is_empty(), "{:?}", o.regressions);

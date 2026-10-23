@@ -40,6 +40,12 @@ macro_rules! counters {
                 }
             }
 
+            /// Whether more is better (a cache hit): reported, never an
+            /// upper bound.
+            pub fn is_benefit(self) -> bool {
+                self.name().ends_with(".hits")
+            }
+
             /// The counter with this name.
             pub fn from_name(name: &str) -> Option<Counter> {
                 match name {
