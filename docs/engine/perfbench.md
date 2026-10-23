@@ -388,19 +388,6 @@ PM_REUSE_FRAMES=800`: every plan and frame identical); the pm-render corpus
 (357 frames compared, 0 failed, none skipped) with headless, composite, effects
 and stills.
 
-The frame120 fixes (2026-10-23): `pm-render` `tests/channel_memo.rs` (two
-renderers with and without the memo through seeded times and edits of every
-input a channel, a layer's group ancestry or a local matrix reads: every plan
-identical, sampled frames bit-identical; `PM_MEMO_FUZZ=8` gave 1,434,655
-answers from the memo), the draw-reuse fuzz with a memo-free reference,
-`tests/comp_reuse.rs` (a precomp used twice equals the scene with an identical
-copy of the composition bit for bit), the motion corpus (blur-precomps exact),
-the page fixes' unit tests (`timeline` index test, `shell` test) and an app
-check that the home and settings screens still hide the editor; the full
-`cargo test --release -p pm-render -p pm-eval -p pm-model` (785 passed, 0
-failed) with the pixel corpus (357 frames), SVG level 1 (105 frames), text
-(576 frames) and the pm-eval corpus (773,554 channels, 0 mismatched).
-
 ## Results
 
 The rerun with corrected endpoints used the release addon with the fixes
@@ -501,24 +488,6 @@ B2 recorded 197 engine renders, 169 direct callbacks, 20 replacements of
 pending emissions, and 149 bus events. Its 169 completed draws through the
 next-rAF endpoint (against A2's 35) also show substantial playback variation
 under contention.
-
-### frame120 (2026-10-23)
-
-The rig above, rerun with every frame120 fix (release addon, 04:05–04:25,
-load 18–21; `perfbench-rig.spec.ts` as on integration):
-
-| Row | Fit 8.33 ms | Span fit | Page main thread | Engine compose CPU | Engine GPU only | Engine span | Presentation callback | GPU done + next rAF |
-|---|---|---|---|---|---|---|---|---|
-| Paused seeks, today | 223 of 240 | | 4.55 / 5.85 | | | | 6.40 / 8.30 | 12.20 / 20.80 |
-| Paused seeks, engine | 238 of 240 | 193 of 240 | 3.98 / 4.95 | 4.98 / 5.45 | 2.41 / 4.38 | 7.51 / 9.23 | 10.00 / 11.70 | 20.60 / 22.50 |
-| Paused edit, today | 0 of 240 | | 18.58 / 23.88 | | | | 14.70 / 17.40 | 21.30 / 28.40 |
-| Paused edit, engine | 0 of 240 | 0 of 240 | 16.42 / 21.79 | 3.28 / 3.48 | 1.44 / 1.54 | 4.70 / 4.89 | 16.80 / 21.10 | 26.10 / 30.70 |
-
-Real playback (`PM.play`, 3 s at 120 fps): the engine completed 341 of 360
-frames (gaps p50 / p95 8.3 / 10.4 ms, 16 over budget; 358 rendered at 5.39 ms
-compose, 7.75 ms span each, page main 2.48 ms per frame); today 255 of 360
-(gaps 8.9 / 20.9 ms, 98 over budget; page main 4.92 ms). Before (the table
-above, load 44–70): 35 and 271.
 
 ## What remains
 
