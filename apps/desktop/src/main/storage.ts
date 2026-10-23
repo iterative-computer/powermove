@@ -44,11 +44,11 @@ export interface Store {
   appendJournal?(key: string, serialized: string, writer?: unknown): Promise<void>;
   /** Which writer holds a project (null: none), from main's window registry (SAVE-1c). */
   setOwnership?(ownerOf: (projectId: string) => unknown): void;
-  /** Whether a write of `key` by `writer` is refused now: a project another window has (SAVE-1c). */
+  /** Whether a write or delete of `key` by `writer` is refused now: a project another window has (SAVE-1c). */
   refuses?(key: string, writer: unknown): boolean;
   /** Keys whose newest write did not reach disk (a persist failure, or a refused journal entry) and none has since. */
   failingKeys?(): string[];
-  delete(key: string): void | Promise<void>;
+  delete(key: string, writer?: unknown): void | Promise<void>;
   flushAll(): Promise<void>;
   onError(cb: (event: StoreErrorEvent) => void): () => void;
 }
@@ -247,9 +247,12 @@ class FileStore implements Store {
    * edits, among them any the journal refused, and landing it would both
    * prune entries it does not hold and reopen a closed journal under a
    * document the owner never had. The window renames through the owner
-   * instead (window:rename-project); this refusal is the backstop. A project
-   * no window has is written by anyone, as before. A main-internal write (no
-   * writer) is never refused.
+   * instead (window:rename-project); this refusal is the backstop. A delete
+   * is refused the same way: another window's Delete Forever would remove the
+   * owner's slot and journal while it keeps editing, and a crash before its
+   * next slot would lose the project. A project no window has is written and
+   * deleted by anyone, as before. A main-internal write (no writer) is never
+   * refused.
    */
   refuses(key: string, writer: unknown): boolean {
     if (!key.startsWith('project.') || writer === undefined || !this.ownerOf) return false;
@@ -301,9 +304,10 @@ class FileStore implements Store {
     try { this.channel.post({ op: 'journal', id: this.nextId++, key, open: true }); } catch { /* reopened when the replacement starts */ }
   }
 
-  delete(key: string): Promise<void> {
+  delete(key: string, writer?: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeDelete);
-    return this.mutate(key, false, IPC.storeDelete, id => ({ op: 'delete', id, key }));
+    if (this.refuses(key, writer)) return this.refused(IPC.storeDelete, 'the project is open in another window');
+    return this.mutate(key, false, IPC.storeDelete, id => ({ op: 'delete', id, key }), writer);
   }
 
   async flushAll(): Promise<void> {
@@ -639,8 +643,13 @@ export function registerStoreIpc(
         throw new IpcValidationError(IPC.storeDelete, 'expected { key }');
       }
       const request = payload as unknown as StoreDeleteRequest;
-      wrote(event, request.key);
-      settleWrite(event, payload, request.key, store.delete(request.key));
+      /* Another window has the project (Delete Forever from Trash, or the
+         boot prune, while it is open there): its slot and journal stay, and
+         the owner's next checkpoint puts the project back in the library, as
+         it did after the delete before. Dropped quietly, so this window sees
+         what it saw before (SAVE-1c). */
+      if (!wrote(event, request.key)) return;
+      settleWrite(event, payload, request.key, store.delete(request.key, writerOf(event)));
     } catch (error) {
       if (error instanceof IpcValidationError) {
         sendValidationError(event, payload, error);

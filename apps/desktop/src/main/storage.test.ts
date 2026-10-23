@@ -1025,6 +1025,33 @@ describe('file store', () => {
     expect(recoverProject(slot, journal).name).toBe('After bare');
   });
 
+  it('refuses a delete from a window that does not have the project, so its slot and journal stay (review recheck 6, R6e)', async () => {
+    const { directory, recovered } = await gapProject();
+    let owner: string | null = 'A';
+    const store = createStore(directory, { writeDelayMs: 0, journalEntryBytes: 4096 });
+    store.setOwnership!(() => owner);
+    await store.load();
+    await store.appendJournal!('projectJournal.P', named(2, 'one', 1), 'A');
+    await expect(store.appendJournal!('projectJournal.P', named(3, 'paste', 'p'.repeat(5000)), 'A')).rejects.toThrow(/size limit/);
+    // Delete Forever from window B's Trash while A has the project open.
+    await expect(store.delete('project.P', 'B')).rejects.toThrow(/open in another window/);
+    await store.flushAll();
+    expect((await recovered()).f).toEqual({ one: 1 });
+    // A's own checkpoint and the edits after it land on the project it kept.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'A', f: { one: 1, paste: 'P' } } }), 'A');
+    await store.flushAll();
+    await store.appendJournal!('projectJournal.P', named(4, 'five', 5), 'A');
+    await store.flushAll();
+    expect((await recovered()).f).toEqual({ one: 1, paste: 'P', five: 5 });
+    expect(store.failingKeys!()).toEqual([]);
+    // Once no window has it, anyone deletes it, the journal with the slot.
+    owner = null;
+    await store.delete('project.P', 'B');
+    await store.flushAll();
+    await expect(fs.stat(path.join(directory, 'project.P.json'))).rejects.toThrow();
+    await expect(fs.stat(path.join(directory, 'projectJournal.P.json'))).rejects.toThrow();
+  });
+
   for (const order of ['journal first', 'slot first'] as const) {
     it(`a replacement engine replays a slot and its journal in either order without losing an entry (review restart probe, ${order})`, async () => {
       const directory = await temporaryDirectory();
@@ -1212,8 +1239,9 @@ describe('store IPC and quit integration', () => {
     const owner = { id: 1, send: vi.fn(), isDestroyed: () => false }, other = { id: 2, send: vi.fn(), isDestroyed: () => false };
     // The owner's checkpoint is accepted; its rename waits.
     await handlers.get(IPC.storeSetSerialized)?.({ sender: owner }, { key: 'project.P', serialized: JSON.stringify({ v: '1', proj: { id: 'P', name: 'A' } }) });
-    // Another window's write of the project is refused.
+    // Another window's write of the project is refused, and so is its delete (quietly).
     await expect(handlers.get(IPC.storeSetSerialized)?.({ sender: other }, { key: 'project.P', serialized: JSON.stringify({ v: '1', proj: { id: 'P', name: 'B' } }) })).rejects.toThrow(/open in another window/);
+    handlers.get(IPC.storeDelete)?.({ sender: other }, { key: 'project.P' });
     await vi.waitFor(() => expect(held.length).toBe(1));
     held.splice(0).forEach(release => release());
     gated = false;
