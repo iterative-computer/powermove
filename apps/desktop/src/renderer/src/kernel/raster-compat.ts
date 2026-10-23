@@ -132,10 +132,8 @@ export interface RasterCompatStats extends RasterReadbackStats {
   syncLoadSites: string[];
 }
 
-/** Content-identical base surfaces (today's raster cache shares one surface
- *  per resolved content, `legacy/gl/raster.ts`). Only plain shapes survive
- *  document revisions: their complete raster input is resolved content and
- *  density; text may also depend on the project's font resources. */
+/** Content-identical base surfaces kept per revision (today's raster cache
+ *  shares one surface per resolved content, `legacy/gl/raster.ts`). */
 export const BASE_CACHE_ENTRIES = 16;
 export const BASE_CACHE_BYTES = 32 * 1024 * 1024;
 /** Prepared base pixels waiting for their frames' answers. */
@@ -285,7 +283,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object>; readback: (() => Promise<CompatAnswerResult>) | null } | null = null;
   const preparing = new Map<string, { layer: unknown; promise: Promise<void> }>();
   const running = new Set<Promise<void>>();
-  const bases = new Map<string, { surface: any; bytes: number; persistent: boolean }>();
+  const bases = new Map<string, { layer: unknown; surface: any; bytes: number }>();
   let baseBytes = 0;
   let pending = 0, generation = 0, readyRevision: number | null = null;
   let serial = 0;
@@ -304,21 +302,18 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   const sampleRevision = (revision: number) => {
     if (readyRevision === revision) return;
     readyRevision = revision;
-    ready.clear();
-    for (const [key, entry] of bases) if (!entry.persistent) {
-      bases.delete(key); baseBytes -= entry.bytes;
-    }
+    ready.clear(); bases.clear(); baseBytes = 0;
     generation++;
   };
   const clearReady = () => { ready.clear(); preparing.clear(); bases.clear(); baseBytes = 0; readyRevision = null; generation++; };
-  const rememberBase = (key: string | null, layer: any, surface: any) => {
+  const rememberBase = (key: string | null, layer: unknown, surface: any) => {
     if (!key || !surface) return;
     const bytes = Number(surface.cv?.width) * Number(surface.cv?.height) * 4;
     if (!(bytes > 0 && bytes <= BASE_CACHE_BYTES)) return;
     const old = bases.get(key);
     if (old) baseBytes -= old.bytes;
     bases.delete(key);
-    bases.set(key, { surface, bytes, persistent: layer?.type === 'shape' && !layer.d?.paths?.length }); baseBytes += bytes;
+    bases.set(key, { layer, surface, bytes }); baseBytes += bytes;
     while (bases.size > BASE_CACHE_ENTRIES || baseBytes > BASE_CACHE_BYTES) {
       const first = bases.keys().next().value!;
       baseBytes -= bases.get(first)!.bytes; bases.delete(first);

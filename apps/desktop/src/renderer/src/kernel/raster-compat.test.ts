@@ -87,8 +87,8 @@ describe('the raster override producer', () => {
     } finally { compat.dispose(); vi.unstubAllGlobals(); }
   });
 
-  it('reuses unchanged shape bases across edits while wrappers still run, and fetches changed content', async () => {
-    const { PM, services, compat, engineRaster, engineRasterAsync, need } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.d, scale, crop]));
+  it('reuses a native-evaluated unchanged base across playback times while wrappers still run at each time', async () => {
+    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.d, scale, crop]));
     const original = services.get<any>('raster');
     services.register('raster', (layer: any, scale: number, time: number, ...rest: any[]) => ({ ...original(layer, scale, time, ...rest), key: `animated-wrapper:${time}` }));
     expect(compat.answer(need('box', 0), 4)).toMatchObject({ key: 'animated-wrapper:0' });
@@ -96,18 +96,9 @@ describe('the raster override producer', () => {
     expect(compat.answer(need('box', 1), 4, { prepared: true })).toMatchObject({ key: 'animated-wrapper:1' });
     expect(engineRaster).toHaveBeenCalledTimes(1);
     expect(engineRasterAsync).not.toHaveBeenCalled();
-    // Moving a shape changes the revision, but none of its base pixels.
+    // A new document revision invalidates content-identical cached pixels.
     await compat.prepare(need('box', 1.5), 5);
-    expect(compat.answer(need('box', 1.5), 5, { prepared: true })).toMatchObject({ key: 'animated-wrapper:1.5' });
-    expect(engineRasterAsync).not.toHaveBeenCalled();
-    // Resolved content is the identity: changing it still fetches a base.
-    PM.proj.layers = PM.proj.layers.map((l: any) => l.id === 'box' ? { ...l, d: { ...l.d, w: 41 } } : l);
-    await compat.prepare(need('box', 1.5), 6);
     expect(engineRasterAsync).toHaveBeenCalledTimes(1);
-    compat.reset();
-    await compat.prepare(need('box', 1.5), 6);
-    expect(engineRasterAsync).toHaveBeenCalledTimes(2);
-    compat.dispose();
   });
 
   it('reuses a detached copy\'s content-identical base across frames instead of a synchronous engine raster each frame', async () => {
