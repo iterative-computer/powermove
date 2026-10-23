@@ -70,6 +70,15 @@ The diff reads the live side as `JSON.stringify` does (`engine-doc/json-diff.ts`
 `diffOps`' operations on plain JSON (2,000 random pairs) and converges on live
 objects (`NaN`, `-0`, `undefined`, `toJSON`, accessors).
 
+A `touch()` without paths compares every layer of the open composition. Each
+id-keyed array element found equal remembers the live content it matched, as one
+flat list of keys and primitive values (`JsonMemo`). While that shadow element is
+unchanged, a live value that walks the same list serializes to the same JSON, so the
+comparison reads only the live side, without keyed lookups on the shadow. Invariant:
+the barrier forgets every shadow object along an operation's path before applying it
+(the shadow is mutated in place). Values the list cannot vouch for (`toJSON`, other
+prototypes, `NaN`, changed shared prototypes) take the exact comparison.
+
 How writes reach the barrier:
 
 | Source | How |
