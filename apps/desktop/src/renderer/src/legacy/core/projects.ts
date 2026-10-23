@@ -154,12 +154,18 @@ PM.bus?.on?.('storage:error', (event: any) => {
   if (key.startsWith(R.SLOT)) restoreBase(id);
 });
 
+/** The journal this window holds for `id` since its last checkpoint. */
+function journalSince(id: string): any[] {
+  const state = written;
+  return state && state.id === id ? state.entries : journal(id);
+}
+
 /** After a failed checkpoint: the journal against the slot before it, with everything since (see `bases`). */
 function restoreBase(id: string): void {
   const base = bases.get(id);
   bases.delete(id);
   if (!base) { checkpoints.delete(id); return; }
-  const since = (written?.id === id ? written.entries : journal(id)).map((entry: any) => {
+  const since = journalSince(id).map((entry: any) => {
     const { cp: _cp, ...rest } = entry ?? {};
     return base.cp === null ? rest : { ...rest, cp: base.cp };
   });
@@ -206,7 +212,7 @@ function writeSlot(proj: any) {
   // The journal against the slot this one replaces, should this one fail.
   const previous = checkpoints.has(proj.id) ? checkpoints.get(proj.id)! : onDisk.get(proj.id);
   const prior = previous === undefined ? null
-    : (written?.id === proj.id ? written.entries : journal(proj.id)).filter((entry: any) => typeof entry?.cp !== 'string' || entry.cp === previous);
+    : journalSince(proj.id).filter((entry: any) => typeof entry?.cp !== 'string' || entry.cp === previous);
   const cp = checkpointId();
   const envelope = { v: PM.version || '1.0.0', cp, proj };
   if (PM.store.set(R.SLOT + proj.id, envelope) === false) throw new Error('Project storage is unavailable or full');
