@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 pm-protocol = { path = "../pm-protocol", default-features = false }
+# Work counters (docs/engine/perfbench.md).
+pm-perf = { path = "../pm-perf" }
 pm-model = { path = "../pm-model" }
 pm-time = { path = "../pm-time" }
 pm-eval = { path = "../pm-eval" }

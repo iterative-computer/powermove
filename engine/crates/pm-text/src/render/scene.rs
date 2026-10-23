@@ -48,6 +48,22 @@ pub enum ItemContent {
         /// Image pixels to device px.
         transform: Affine,
     },
+    /// A glyph's preblended A8 coverage. Paint is applied when the glyph
+    /// reaches the canvas, rather than quantized into a colored word image.
+    GlyphMask {
+        mask: Arc<GlyphMask>,
+        image: Arc<Rgba8>,
+        transform: Affine,
+    },
+    Graphite {
+        image: Arc<Rgba8>,
+        transform: Affine,
+        raster: Arc<super::graphite::Raster>,
+        /// The canonical glyph path draws this raster holds, in order, when
+        /// it came from the [`PathRasterizer`]: [`resolve_canvas_pass`]
+        /// redraws them with the rest of the canvas's render pass.
+        paths: Option<Arc<[PathDraw]>>,
+    },
 }
 
 /// One canvas draw.
@@ -201,7 +217,9 @@ pub trait MaskSource {
     /// `post` (`[scaleX, skewY, skewX, scaleY]`, kept to 1/1024) with the
     /// synthetic skew `skew`, at quarter offsets `sub` in x and y, as the
     /// platform generates glyphs under a rotated, skewed or non-uniform
-    /// matrix. `None` when the platform does not draw glyphs this way.
+    /// matrix. `None` when the platform does not draw glyphs this way. A
+    /// mask over 256 px (beyond `fitsInAtlasDirect`) may carry its bounds
+    /// only, with empty `coverage`: the scene draws that glyph as a path.
     #[cfg(feature = "cg-masks")]
     #[allow(clippy::too_many_arguments)]
     fn matrix_mask(
@@ -290,9 +308,40 @@ pub struct PathGlyph {
     pub stroke: Option<f32>,
 }
 
+/// One `fillText`/`strokeText` call's canonical glyph paths, as the
+/// [`PathRasterizer`] received them.
+#[derive(Clone)]
+pub struct PathDraw {
+    pub glyphs: Vec<PathGlyph>,
+    pub viewport: (u32, u32),
+    pub color: Rgba,
+    pub opacity: f64,
+    pub blur: f64,
+}
+
+impl std::fmt::Debug for PathDraw {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PathDraw")
+            .field("glyphs", &self.glyphs.len())
+            .field("viewport", &self.viewport)
+            .field("blur", &self.blur)
+            .finish()
+    }
+}
+
 /// The host's Canvas2D path renderer. Kept at this seam because pm-vector
 /// also consumes pm-text; text must not acquire a reverse dependency.
 pub trait PathRasterizer {
+    /// Draws `draws` in order into one Graphite render pass of the canvas
+    /// (one target, blended per sample when multisampled). Every draw has
+    /// the same viewport and blur. `multisample_pass`: a draw outside
+    /// `draws` makes the pass multisampled, even if none of these needs
+    /// MSAA (Graphite picks the sample count per render pass, from
+    /// `DrawList`'s requirement).
+    fn raster_pass(&self, draws: &[PathDraw], multisample_pass: bool) -> Option<Item>;
+
+    /// One `fillText`/`strokeText` call's glyph paths in a pass of their
+    /// own.
     fn raster(
         &self,
         paths: &[PathGlyph],
@@ -300,7 +349,18 @@ pub trait PathRasterizer {
         color: Rgba,
         opacity: f64,
         blur: f64,
-    ) -> Option<Item>;
+    ) -> Option<Item> {
+        self.raster_pass(
+            &[PathDraw {
+                glyphs: paths.to_vec(),
+                viewport,
+                color,
+                opacity,
+                blur,
+            }],
+            false,
+        )
+    }
 }
 
 /// What a glyph draw needs: the caches and the profile.
@@ -511,6 +571,56 @@ impl Painter<'_> {
         Some(Arc::new(path))
     }
 
+    /// A glyph drawn as its canonical 64 px platform path under the
+    /// glyph's matrix (Skia's path sub run).
+    #[cfg(feature = "cg-masks")]
+    fn canonical_path_glyph(
+        &mut self,
+        run: &Run<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        place: &Placement,
+        origin: (f64, f64),
+        position: (f64, f64),
+    ) -> Option<PathGlyph> {
+        let path = self.canonical_glyph(run, coords, glyph)?;
+        Some(PathGlyph {
+            path,
+            matrix: place.glyph_matrix(origin, position, run.size / 64.0),
+            stroke: None,
+        })
+    }
+
+    /// The direct mask `m` of a glyph, or, when Skia's atlas rejects it
+    /// (`SkGlyphDigest::fitsInAtlasDirect`), the glyph's canonical path:
+    /// rejected direct-mask glyphs fall through to the path sub run.
+    #[cfg(feature = "cg-masks")]
+    #[allow(clippy::too_many_arguments)]
+    fn direct_mask_or_path(
+        &mut self,
+        m: Arc<GlyphMask>,
+        at: (i64, i64, bool),
+        run: &Run<'_>,
+        coords: &[(u32, f32)],
+        glyph: u16,
+        place: &Placement,
+        origin: (f64, f64),
+        position: (f64, f64),
+        platform: &mut Vec<(i64, i64, Arc<GlyphMask>, bool)>,
+        canonical: &mut Vec<PathGlyph>,
+    ) {
+        if fits_atlas_direct(&m) {
+            platform.push((at.0, at.1, m, at.2));
+        } else if let Some(p) =
+            self.canonical_path_glyph(run, coords, glyph, place, origin, position)
+        {
+            canonical.push(p);
+        } else {
+            self.unsupported
+                .push("canonical platform glyph path unavailable".into());
+        }
+    }
+
     /// The fake-bold outset per side for a synthesized bold run.
     fn fake_bold(&self, synthetic: bool, device_size: f64) -> (f64, f64) {
         if synthetic {
@@ -555,6 +665,8 @@ impl Painter<'_> {
         // Glyphs drawn as distance-field text (coverage per pixel).
         #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
         let mut sdf_glyphs: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
+        #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
+        let mut native_sdf = Vec::new();
         let mut curve_size = 0.0f64;
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
@@ -672,7 +784,19 @@ impl Painter<'_> {
                 let Some(bare) = self.outlines.get(run.face, run.coords, g.id, plain) else {
                     continue;
                 };
-                let as_path = self.profile.glyph_as_path(device_size, bare.bounds);
+                // `SubRunContainer::MakeInAlloc` (Skia m152,
+                // src/text/gpu/SubRunContainer.cpp) tries SDFT and direct
+                // masks only while `ApproximateTransformedTextSize` (the
+                // size times `getMaxScale`) is below `maxMaskSize`, Graphite's
+                // `fGlyphsAsPathsFontSize` (256 on macOS); the rest falls to
+                // the path sub run. Under a skew or a non-uniform scale that
+                // exceeds the uniform device size.
+                let as_path = self.profile.glyph_as_path(device_size, bare.bounds)
+                    || (self.masks.is_some()
+                        && !place.axis_aligned
+                        && self
+                            .profile
+                            .as_path(f64::from(run.size * place.max_scale())));
                 // A glyph whose distance field is beyond the atlas is drawn
                 // as a direct mask when its mask fits (`SubRunContainer`
                 // hands the SDFT run's rejects to the direct mask case).
@@ -700,6 +824,12 @@ impl Painter<'_> {
                             super::sdf::draw(&field, left_top, matrix, super::sdf::APPLE_GPU)
                         {
                             sdf_glyphs.push(cov);
+                            native_sdf.push(super::graphite::Geometry::Sdf {
+                                font_size: run.size.to_bits(),
+                                field,
+                                left_top,
+                                matrix,
+                            });
                         }
                         continue;
                     }
@@ -714,14 +844,16 @@ impl Painter<'_> {
                     // the canonical 64 px under the glyph's matrix.
                     #[cfg(feature = "cg-masks")]
                     if let Coords::User(coords) = run.coords
-                        && let Some(local) = self.canonical_glyph(run, coords, g.id as u16)
+                        && let Some(glyph) = self.canonical_path_glyph(
+                            run,
+                            coords,
+                            g.id as u16,
+                            &place,
+                            origin,
+                            (g.x, g.y),
+                        )
                     {
-                        let gm = place.glyph_matrix(origin, (g.x, g.y), run.size / 64.0);
-                        canonical_glyphs.push(PathGlyph {
-                            path: local,
-                            matrix: gm,
-                            stroke: None,
-                        });
+                        canonical_glyphs.push(glyph);
                         continue;
                     }
                     self.unsupported
@@ -758,7 +890,18 @@ impl Painter<'_> {
                         place.strike_scale(),
                         super::skpath::Frame::fake_bold(run.size),
                     ) {
-                        platform.push((ix as i64, y as i64, m, true));
+                        self.direct_mask_or_path(
+                            m,
+                            (ix as i64, y as i64, true),
+                            run,
+                            coords,
+                            g.id as u16,
+                            &place,
+                            origin,
+                            (g.x, g.y),
+                            &mut platform,
+                            &mut canonical_glyphs,
+                        );
                     }
                     continue;
                 }
@@ -785,6 +928,20 @@ impl Painter<'_> {
                         style,
                         bare.bounds.inflate(grow_x, 0.0),
                     ) {
+                        #[cfg(feature = "cg-masks")]
+                        self.direct_mask_or_path(
+                            m,
+                            (ix as i64, y as i64, false),
+                            run,
+                            coords,
+                            g.id as u16,
+                            &place,
+                            origin,
+                            (g.x, g.y),
+                            &mut platform,
+                            &mut canonical_glyphs,
+                        );
+                        #[cfg(not(feature = "cg-masks"))]
                         platform.push((ix as i64, y as i64, m, false));
                     }
                     continue;
@@ -813,7 +970,20 @@ impl Painter<'_> {
                         skew_of(run) as f32,
                         sub,
                     ) {
-                        platform.push((ix as i64, iy as i64, m, false));
+                        // A skew or rotation can widen a glyph's mask past
+                        // the atlas even when its upright outline fits.
+                        self.direct_mask_or_path(
+                            m,
+                            (ix as i64, iy as i64, false),
+                            run,
+                            coords,
+                            g.id as u16,
+                            &place,
+                            origin,
+                            (g.x, g.y),
+                            &mut platform,
+                            &mut canonical_glyphs,
+                        );
                     }
                     continue;
                 }
@@ -877,7 +1047,11 @@ impl Painter<'_> {
             ));
         }
         if !sdf_glyphs.is_empty() {
-            out.extend(sdf_image(sdf_glyphs, color, opacity, blur));
+            out.extend(
+                sdf_image(sdf_glyphs, color, opacity, blur).and_then(|item| {
+                    native_sdf_item(item, native_sdf, self.viewport, color, opacity)
+                }),
+            );
         }
         if let Some(bounds) = mask.1 {
             out.push(Item {
@@ -1074,6 +1248,269 @@ impl Painter<'_> {
 }
 
 impl Painter<'_> {
+    /// [`resolve_canvas_pass`] with this painter's path renderer, after the
+    /// canvas's draws are recorded into `out`.
+    pub fn resolve_canvas_pass(&self, out: &mut Vec<Item>, multisampled: bool) {
+        if let Some(renderer) = self.path_rasterizer {
+            resolve_canvas_pass(out, renderer, multisampled);
+        }
+    }
+}
+
+/// Resolves a Canvas2D raster's Graphite render pass once all of its draws
+/// are recorded in `out`.
+///
+/// Chromium replays the canvas's recording into one Graphite render pass and
+/// snaps it at the read. Graphite picks the pass's sample count once: 4 when
+/// any of its draws needs MSAA (`DrawList` tracks the requirement,
+/// `DrawContext::flush` uses it). A filtered draw renders in its save layer's
+/// own pass, which only its own draws decide; its layer is composited into
+/// the canvas pass as an image.
+///
+/// Each `fillText`/`strokeText` call's glyph paths were rasterized as a pass
+/// of their own. Here the unfiltered path draws of the canvas pass are drawn
+/// again together, in order, into one target:
+///
+/// - When the pass is multisampled (`multisampled`: by a draw outside `out`,
+///   such as a caption box, or by any unfiltered path draw in `out`),
+///   analytic draws cover samples rather than pixel centers at their mesh
+///   edges (an animator's rectangular glyphs, Arial `l` and `.`, next to
+///   tessellated glyphs), and overlapping draws blend per sample before the
+///   resolve (two rotated Zapfino `g`s whose edges share a pixel).
+/// - Single-sampled, the draws blend into one N32 target in order.
+///
+/// The merged pass takes the place of the group's first draw, which moves
+/// the later draws before the items drawn between them. That is exact where
+/// those items have no ink under a later draw. In the box around pixels
+/// where they do, every draw keeps its own place and pass (a crop of the
+/// same viewport). An item whose pixels are unknown here (filtered, or
+/// vector coverage) within reach of a later draw ends the group.
+///
+/// Direct-mask quads are pixel aligned and distance-field quads end two
+/// texels outside the field's padded ink, so their pixels do not depend on
+/// the pass's sample count; they keep their own items.
+pub fn resolve_canvas_pass(out: &mut Vec<Item>, renderer: &dyn PathRasterizer, multisampled: bool) {
+    let unfiltered = |item: &Item| item.blur <= 0.0;
+    let multisampled = multisampled
+        || out.iter().any(|item| {
+            unfiltered(item)
+                && matches!(&item.content, ItemContent::Graphite { raster, .. } if raster.multisampled)
+        });
+    let path_draws = |item: &Item| match &item.content {
+        ItemContent::Graphite {
+            paths: Some(paths),
+            raster,
+            ..
+        } if unfiltered(item) => Some((paths.clone(), raster.multisampled)),
+        _ => None,
+    };
+    // Groups of path items drawn as one pass, in item order. A path draw
+    // joins the previous group unless an item between them is filtered or
+    // drawn by the paint pass in a way whose pixels are unknown here (it
+    // cannot be ordered pixel by pixel).
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for i in 0..out.len() {
+        if path_draws(&out[i]).is_none() {
+            continue;
+        }
+        let joins = groups.last().is_some_and(|group| {
+            (group[0]..i)
+                .filter(|j| !group.contains(j))
+                .all(|j| ink_overlap(&out[j], &out[i]).is_some())
+        });
+        if joins {
+            groups.last_mut().expect("checked").push(i);
+        } else {
+            groups.push(vec![i]);
+        }
+    }
+    let mut replaced: Vec<Option<Vec<Item>>> = vec![None; out.len()];
+    for group in groups {
+        let members: Vec<_> = group.iter().filter_map(|&i| path_draws(&out[i])).collect();
+        // A member drawn alone, in a pass with the canvas's sample count.
+        let alone = |k: usize| -> Option<Item> {
+            if members[k].1 == multisampled {
+                Some(out[group[k]].clone())
+            } else {
+                renderer.raster_pass(&members[k].0, multisampled)
+            }
+        };
+        if group.len() == 1 {
+            if !members[0].1 && multisampled {
+                replaced[group[0]] = Some(alone(0).into_iter().collect());
+            }
+            continue;
+        }
+        let draws: Vec<PathDraw> = members
+            .iter()
+            .flat_map(|(paths, _)| paths.iter().cloned())
+            .collect();
+        let Some(merged) = renderer.raster_pass(&draws, multisampled) else {
+            continue;
+        };
+        // Pixels where a later member's ink meets the ink of an item drawn
+        // between the group's first member and it. The merged pass moves
+        // that member before the item; outside this box it commutes with
+        // it. Inside, every member keeps its own place and pass.
+        let mut conflict: Option<[i64; 4]> = None;
+        for &m in &group[1..] {
+            for j in (group[0]..m).filter(|j| !group.contains(j)) {
+                if let Some(Some(r)) = ink_overlap(&out[j], &out[m]) {
+                    conflict = Some(conflict.map_or(r, |c| {
+                        [c[0].min(r[0]), c[1].min(r[1]), c[2].max(r[2]), c[3].max(r[3])]
+                    }));
+                }
+            }
+        }
+        let Some(k) = conflict else {
+            replaced[group[0]] = Some(vec![merged]);
+            for &i in &group[1..] {
+                replaced[i] = Some(Vec::new());
+            }
+            continue;
+        };
+        // One pixel more each side: the pixel footprints above are of the
+        // CPU primitive images.
+        let k = [k[0] - 1, k[1] - 1, k[2] + 1, k[3] + 1];
+        let b = merged.bounds;
+        let (bx0, by0, bx1, by1) = (
+            b.x0.floor() as i64,
+            b.y0.floor() as i64,
+            b.x1.ceil() as i64,
+            b.y1.ceil() as i64,
+        );
+        let mut first: Vec<Item> = [
+            [bx0, by0, bx1, k[1]],
+            [bx0, k[3], bx1, by1],
+            [bx0, k[1], k[0], k[3]],
+            [k[2], k[1], bx1, k[3]],
+        ]
+        .into_iter()
+        .filter_map(|r| crop_item(&merged, r))
+        .collect();
+        for (n, &i) in group.iter().enumerate() {
+            let inside = alone(n).and_then(|item| crop_item(&item, k));
+            if n == 0 {
+                first.extend(inside);
+            } else {
+                replaced[i] = Some(inside.into_iter().collect());
+            }
+        }
+        replaced[group[0]] = Some(first);
+    }
+    if replaced.iter().all(Option::is_none) {
+        return;
+    }
+    let items = std::mem::take(out);
+    for (item, replacement) in items.into_iter().zip(replaced) {
+        match replacement {
+            Some(items) => out.extend(items),
+            None => out.push(item),
+        }
+    }
+}
+
+/// An unfiltered pixel image at a whole-pixel offset: its pixels and the
+/// device position of its first pixel.
+fn item_pixels(item: &Item) -> Option<(&Rgba8, i64, i64)> {
+    if item.blur > 0.0 {
+        return None;
+    }
+    let (image, transform) = match &item.content {
+        ItemContent::Image { image, transform }
+        | ItemContent::GlyphMask {
+            image, transform, ..
+        }
+        | ItemContent::Graphite {
+            image, transform, ..
+        } => (image, transform),
+        ItemContent::Coverage { .. } => return None,
+    };
+    let [a, b, c, d, e, f] = transform.as_coeffs();
+    let whole = |v: f64| v == v.round();
+    (a == 1.0 && b == 0.0 && c == 0.0 && d == 1.0 && whole(e) && whole(f))
+        .then(|| (image.as_ref(), e as i64, f as i64))
+}
+
+/// Where two draws can both put ink: `None` when that is unknown (a
+/// filtered or vector coverage draw within reach), `Some(None)` when no
+/// pixel has ink from both, else the device box of those pixels.
+fn ink_overlap(a: &Item, b: &Item) -> Option<Option<[i64; 4]>> {
+    let reach = a.reach().intersect(b.reach());
+    if reach.width() <= 0.0 || reach.height() <= 0.0 {
+        return Some(None);
+    }
+    let ((ia, ax, ay), (ib, bx, by)) = (item_pixels(a)?, item_pixels(b)?);
+    let x0 = ax.max(bx);
+    let y0 = ay.max(by);
+    let x1 = (ax + i64::from(ia.width)).min(bx + i64::from(ib.width));
+    let y1 = (ay + i64::from(ia.height)).min(by + i64::from(ib.height));
+    let ink = |image: &Rgba8, x: i64, y: i64| {
+        let i = (y as usize * image.width as usize + x as usize) * 4;
+        image.data[i..i + 4] != [0; 4]
+    };
+    let mut found: Option<[i64; 4]> = None;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if ink(ia, x - ax, y - ay) && ink(ib, x - bx, y - by) {
+                found = Some(found.map_or([x, y, x + 1, y + 1], |f| {
+                    [f[0].min(x), f[1].min(y), f[2].max(x + 1), f[3].max(y + 1)]
+                }));
+            }
+        }
+    }
+    Some(found)
+}
+
+/// An unfiltered path raster restricted to the device box `r`: the same
+/// draws, a smaller crop of the pass's viewport.
+fn crop_item(item: &Item, r: [i64; 4]) -> Option<Item> {
+    let ItemContent::Graphite {
+        image,
+        raster,
+        paths,
+        ..
+    } = &item.content
+    else {
+        return None;
+    };
+    let c = raster.crop.map(i64::from);
+    let crop = [c[0].max(r[0]), c[1].max(r[1]), c[2].min(r[2]), c[3].min(r[3])];
+    if crop[2] <= crop[0] || crop[3] <= crop[1] {
+        return None;
+    }
+    let width = (crop[2] - crop[0]) as usize;
+    let mut data = Vec::with_capacity(width * (crop[3] - crop[1]) as usize * 4);
+    for y in crop[1]..crop[3] {
+        let i = ((y - c[1]) as usize * image.width as usize + (crop[0] - c[0]) as usize) * 4;
+        data.extend_from_slice(&image.data[i..i + width * 4]);
+    }
+    let crop32 = crop.map(|v| v as u32);
+    Some(Item {
+        content: ItemContent::Graphite {
+            image: Arc::new(Rgba8 {
+                width: width as u32,
+                height: (crop[3] - crop[1]) as u32,
+                data,
+            }),
+            transform: Affine::translate((crop[0] as f64, crop[1] as f64)),
+            raster: Arc::new(super::graphite::Raster {
+                crop: crop32,
+                ..raster.as_ref().clone()
+            }),
+            paths: paths.clone(),
+        },
+        bounds: Rect::new(
+            crop[0] as f64,
+            crop[1] as f64,
+            crop[2] as f64,
+            crop[3] as f64,
+        ),
+        ..item.clone()
+    })
+}
+
+impl Painter<'_> {
     /// A color bitmap glyph as the platform draws it (CoreGraphics, the
     /// whole-pixel position and quarter offset, Apple Color Emoji's shift),
     /// with the paint's alpha; `None` when the platform does not draw it.
@@ -1150,6 +1587,7 @@ impl Painter<'_> {
         }
         let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
         let mut sdf_quads: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
+        let mut native_sdf = Vec::new();
         let mut images = Vec::new();
         for run in runs {
             let device_size = f64::from(run.size) * place.scale;
@@ -1221,6 +1659,12 @@ impl Painter<'_> {
                         super::sdf::draw(&field, left_top, matrix, super::sdf::APPLE_GPU)
                     {
                         sdf_quads.push(cov);
+                        native_sdf.push(super::graphite::Geometry::Sdf {
+                            font_size: run.size.to_bits(),
+                            field,
+                            left_top,
+                            matrix,
+                        });
                     }
                     continue;
                 }
@@ -1255,7 +1699,7 @@ impl Painter<'_> {
                     continue;
                 };
                 // Glyph images beyond the atlas are drawn as paths.
-                if m.width > 256 || m.height > 256 {
+                if !fits_atlas_direct(&m) {
                     return false;
                 }
                 platform.push((ix as i64, y as i64, m, true));
@@ -1274,7 +1718,11 @@ impl Painter<'_> {
             ));
         }
         if !sdf_quads.is_empty() {
-            out.extend(sdf_image(sdf_quads, color, opacity, 0.0));
+            out.extend(
+                sdf_image(sdf_quads, color, opacity, 0.0).and_then(|item| {
+                    native_sdf_item(item, native_sdf, self.viewport, color, opacity)
+                }),
+            );
         }
         out.extend(images);
         true
@@ -1346,6 +1794,88 @@ fn flatten_color_glyphs(items: Vec<Item>, color: Rgba, opacity: f64, blur: f64) 
     }]
 }
 
+/// Keep source distance fields until the native fragment pass; the CPU
+/// image remains the platform-independent reference for the same item.
+fn native_sdf_item(
+    mut item: Item,
+    geometry: Vec<super::graphite::Geometry>,
+    viewport: Option<(u32, u32)>,
+    color: Rgba,
+    opacity: f64,
+) -> Option<Item> {
+    let Some((width, height)) = viewport else {
+        return Some(item);
+    };
+    // Filter layers include the kernel's outset, just as the path adapter.
+    let pad = blur_radius(item.blur);
+    let b = item.bounds;
+    let crop = [
+        (b.x0 + pad as f64).max(0.) as u32,
+        (b.y0 + pad as f64).max(0.) as u32,
+        (b.x1 + pad as f64).min((width + 2 * pad) as f64) as u32,
+        (b.y1 + pad as f64).min((height + 2 * pad) as f64) as u32,
+    ];
+    if crop[0] >= crop[2] || crop[1] >= crop[3] {
+        return None;
+    }
+    let ItemContent::Image { image, .. } = &item.content else {
+        return Some(item);
+    };
+    let (cw, ch) = (crop[2] - crop[0], crop[3] - crop[1]);
+    let (ox, oy) = (
+        (crop[0] as f64 - pad as f64 - b.x0) as usize,
+        (crop[1] as f64 - pad as f64 - b.y0) as usize,
+    );
+    let mut data = Vec::with_capacity((cw * ch * 4) as usize);
+    for y in 0..ch as usize {
+        let i = ((oy + y) * image.width as usize + ox) * 4;
+        data.extend_from_slice(&image.data[i..i + cw as usize * 4]);
+    }
+    let alpha = (color[3] * opacity) as f32;
+    let paint = [
+        color[0] as f32 * alpha,
+        color[1] as f32 * alpha,
+        color[2] as f32 * alpha,
+        alpha,
+    ];
+    let draws = geometry
+        .into_iter()
+        .map(|mut geometry| {
+            if let super::graphite::Geometry::Sdf { matrix, .. } = &mut geometry {
+                matrix[4] += pad as f32;
+                matrix[5] += pad as f32;
+            }
+            super::graphite::Draw {
+                geometry,
+                color: paint,
+            }
+        })
+        .collect();
+    item.bounds = Rect::new(
+        crop[0] as f64 - pad as f64,
+        crop[1] as f64 - pad as f64,
+        crop[2] as f64 - pad as f64,
+        crop[3] as f64 - pad as f64,
+    );
+    item.content = ItemContent::Graphite {
+        image: Arc::new(Rgba8 {
+            width: cw,
+            height: ch,
+            data,
+        }),
+        transform: Affine::translate((item.bounds.x0, item.bounds.y0)),
+        paths: None,
+        raster: Arc::new(super::graphite::Raster {
+            width: width + 2 * pad,
+            height: height + 2 * pad,
+            crop,
+            multisampled: false,
+            draws,
+        }),
+    };
+    Some(item)
+}
+
 /// Distance-field glyph coverage (`sdf::draw`) as one image item, each
 /// glyph blended source-over into the 8-bit target with its unquantized
 /// coverage (the fragment's value), quantized after every glyph, as the GPU
@@ -1408,10 +1938,74 @@ fn sdf_image(
     })
 }
 
-/// One image item holding the platform masks of a `fillText` call, each
-/// glyph composited over the earlier ones (Skia draws glyph quads one by
-/// one with source-over), in `color` through the preblend `table`.
+/// Ordered platform glyph masks of a `fillText` call, using the paint's
+/// preblend table. Filtered calls instead retain their N32 save layer.
+/// `SkGlyphDigest::fitsInAtlasDirect`: Skia places a direct glyph mask in
+/// its atlas only when `maxDimension() <= kSkSideTooBigForAtlas` (256).
+#[cfg(feature = "cg-masks")]
+fn fits_atlas_direct(m: &GlyphMask) -> bool {
+    m.width.max(m.height) <= 256
+}
+
+/// Whether `m` holds its pixels (an atlas-rejected mask may carry its
+/// bounds only).
+fn has_coverage(m: &GlyphMask) -> bool {
+    m.coverage.len() == m.width as usize * m.height as usize
+}
+
 fn mask_image(
+    masks: &[(i64, i64, Arc<GlyphMask>, bool)],
+    tables: [&[u8; 256]; 2],
+    color: Rgba,
+    opacity: f64,
+    blur: f64,
+) -> Vec<Item> {
+    // A filtered fillText has a transparent N32 save layer. Unfiltered
+    // glyphs instead blend directly into the existing canvas, in order.
+    if blur > 0.0 {
+        return mask_save_layer(masks, tables, color, opacity, blur)
+            .into_iter()
+            .collect();
+    }
+    masks
+        .iter()
+        .filter_map(|(x, y, mask, path)| {
+            if mask.width == 0 || mask.height == 0 || !has_coverage(mask) {
+                return None;
+            }
+            let table = tables[usize::from(*path)];
+            let image = Arc::new(Rgba8 {
+                width: mask.width,
+                height: mask.height,
+                data: mask
+                    .coverage
+                    .iter()
+                    .flat_map(|&c| [table[c as usize]; 4])
+                    .collect(),
+            });
+            let left = *x + i64::from(mask.left);
+            let top = *y + i64::from(mask.top);
+            Some(Item {
+                content: ItemContent::GlyphMask {
+                    mask: mask.clone(),
+                    image,
+                    transform: Affine::translate((left as f64, top as f64)),
+                },
+                color,
+                opacity,
+                blur,
+                bounds: Rect::new(
+                    left as f64,
+                    top as f64,
+                    (left + i64::from(mask.width)) as f64,
+                    (top + i64::from(mask.height)) as f64,
+                ),
+            })
+        })
+        .collect()
+}
+
+fn mask_save_layer(
     masks: &[(i64, i64, Arc<GlyphMask>, bool)],
     tables: [&[u8; 256]; 2],
     color: Rgba,
@@ -1419,7 +2013,8 @@ fn mask_image(
     blur: f64,
 ) -> Option<Item> {
     let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
-    for (x, y, m, _) in masks {
+    let masks: Vec<_> = masks.iter().filter(|(.., m, _)| has_coverage(m)).collect();
+    for (x, y, m, _) in &masks {
         x0 = x0.min(x + i64::from(m.left));
         y0 = y0.min(y + i64::from(m.top));
         x1 = x1.max(x + i64::from(m.left) + i64::from(m.width));
@@ -1831,6 +2426,246 @@ mod tests {
         }
         out.extend(body);
         out
+    }
+
+    /// Glyph images beyond Skia's direct-mask atlas draw as paths, never as
+    /// masks (the GPU atlas holds 512 px plots). This covers the
+    /// `fitsInAtlasDirect` gate only: a glyph whose mask is over 256 px is
+    /// rejected to the path sub run (Arial 'H' at 75 px, 2x, under an 80
+    /// degree animator skew; a Zapfino glyph that fits upright, rotated 45
+    /// degrees). The skew case is also far above the
+    /// `ApproximateTransformedTextSize` gate (about 860 px), so it passes
+    /// with either gate alone; the rotation keeps the largest scale at 2
+    /// (100 px), so only `fitsInAtlasDirect` sends it to paths. A nearly
+    /// upright rotation keeps the direct mask. The size gate on its own is
+    /// covered by `transformed_text_at_the_path_size_draws_as_paths`.
+    #[cfg(all(feature = "cg-masks", target_os = "macos"))]
+    #[test]
+    fn glyph_images_beyond_the_atlas_draw_as_paths() {
+        use skrifa::MetadataProvider;
+        use std::cell::RefCell;
+        struct Recorder(RefCell<Vec<usize>>);
+        impl PathRasterizer for Recorder {
+            fn raster_pass(&self, draws: &[PathDraw], _: bool) -> Option<Item> {
+                for draw in draws {
+                    self.0.borrow_mut().push(draw.glyphs.len());
+                }
+                None
+            }
+        }
+        let font = |name: &str| {
+            std::fs::read(format!("/System/Library/Fonts/Supplemental/{name}.ttf"))
+                .expect("ships with macOS")
+        };
+        let (arial, zapfino) = (font("Arial"), font("Zapfino"));
+        let draw = |data: &[u8], ch: char, size: f32, m: Affine| {
+            let face = FaceRef {
+                data,
+                index: 0,
+                id: 1,
+            };
+            let id = skrifa::FontRef::new(data)
+                .unwrap()
+                .charmap()
+                .map(ch)
+                .unwrap()
+                .to_u32();
+            let glyphs = [PlacedGlyph { id, x: 0.0, y: 0.0 }];
+            let mut outlines = Outlines::new();
+            let mut bitmaps = Bitmaps::new();
+            let mut masks = super::super::cgmask::CgMasks::new();
+            let recorder = Recorder(RefCell::new(Vec::new()));
+            let mut painter = Painter {
+                outlines: &mut outlines,
+                bitmaps: &mut bitmaps,
+                masks: Some(&mut masks),
+                viewport: Some((2000, 1000)),
+                path_rasterizer: Some(&recorder),
+                profile: Profile::CANVAS2D,
+                unsupported: Vec::new(),
+            };
+            let run = Run {
+                face,
+                size,
+                coords: Coords::User(&[]),
+                synthetic_bold: false,
+                synthetic_italic: false,
+                oblique: 0.0,
+                glyphs: &glyphs,
+                bitmap_size: None,
+            };
+            let mut items = Vec::new();
+            painter.fill_text(
+                &mut items,
+                &[run],
+                (300.0, 300.0),
+                m,
+                [0.0, 0.0, 0.0, 1.0],
+                1.0,
+                0.0,
+            );
+            let masks: Vec<(u32, u32)> = items
+                .iter()
+                .filter_map(|i| match &i.content {
+                    ItemContent::GlyphMask { mask, .. } => Some((mask.width, mask.height)),
+                    _ => None,
+                })
+                .collect();
+            let unsupported = painter.unsupported;
+            (masks, recorder.0.into_inner(), unsupported)
+        };
+        let skew = 80f64.to_radians().tan();
+        let rotated = |deg: f64| Affine::scale(2.0) * Affine::rotate(deg.to_radians());
+        for (name, data, ch, size, m) in [
+            (
+                "skew",
+                &arial,
+                'H',
+                75.0,
+                Affine::new([2.0, 0.0, 2.0 * skew, 2.0, 0.0, 0.0]),
+            ),
+            ("rotation", &zapfino, 'g', 50.0, rotated(45.0)),
+        ] {
+            let (masks, paths, unsupported) = draw(data, ch, size, m);
+            assert!(unsupported.is_empty(), "{name}: {unsupported:?}");
+            assert!(
+                masks.is_empty(),
+                "{name}: a mask beyond the atlas: {masks:?}"
+            );
+            assert_eq!(paths, [1], "{name}: drawn as its canonical path");
+        }
+        let (masks, paths, unsupported) = draw(&zapfino, 'g', 50.0, rotated(1.0));
+        assert!(
+            unsupported.is_empty() && paths.is_empty(),
+            "{unsupported:?}"
+        );
+        assert_eq!(masks.len(), 1);
+        assert!(masks[0].0.max(masks[0].1) <= 256, "{masks:?}");
+    }
+
+    /// The `ApproximateTransformedTextSize` gate on its own. Skia m152
+    /// `SubRunContainer::MakeInAlloc` tries masks and distance fields only
+    /// while the text size times `SkMatrix::getMaxScale` is below
+    /// `maxMaskSize` (Graphite's `fGlyphsAsPathsFontSize`, 256 on macOS);
+    /// at or above it every outline glyph of the run is a path sub run, even
+    /// when each glyph's mask would fit the atlas. Here every mask is well
+    /// under 256 px and the uniform device size (`sqrt|det|`) is below the
+    /// large and distance-field ranges, so only the largest-scale term sends
+    /// the glyphs to paths. Controls just below the size stay in the atlas
+    /// (as distance fields: 162 to 256 px is the SDFT range).
+    #[cfg(all(feature = "cg-masks", target_os = "macos"))]
+    #[test]
+    fn transformed_text_at_the_path_size_draws_as_paths() {
+        use skrifa::MetadataProvider;
+        use std::cell::RefCell;
+        struct Recorder(RefCell<Vec<usize>>);
+        impl PathRasterizer for Recorder {
+            fn raster_pass(&self, draws: &[PathDraw], _: bool) -> Option<Item> {
+                for draw in draws {
+                    self.0.borrow_mut().push(draw.glyphs.len());
+                }
+                None
+            }
+        }
+        let arial = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf")
+            .expect("ships with macOS");
+        let face = FaceRef {
+            data: &arial,
+            index: 0,
+            id: 1,
+        };
+        let charmap = skrifa::FontRef::new(&arial).unwrap().charmap();
+        let skewed = |deg: f64| {
+            let k = deg.to_radians().tan();
+            Affine::new([2.0, 0.0, 2.0 * k, 2.0, 0.0, 0.0])
+        };
+        let stretched = |sx: f64| Affine::scale(2.0) * Affine::scale_non_uniform(sx, 1.0);
+        // (name, size, matrix, at the path size)
+        let cases = [
+            ("skew 60", 60.0, skewed(60.0), true),
+            ("scale 2.8x1", 48.0, stretched(2.8), true),
+            ("skew 55", 60.0, skewed(55.0), false),
+            ("scale 2.5x1", 48.0, stretched(2.5), false),
+        ];
+        for (name, size, m, at_path_size) in cases {
+            let place = Placement::of(m);
+            let approx = size * place.max_scale();
+            let device = f64::from(size) * place.scale;
+            assert_eq!(approx >= 256.0, at_path_size, "{name}: approx {approx}");
+            assert!(
+                !Profile::CANVAS2D.as_path(device) && !Profile::CANVAS2D.is_large(device),
+                "{name}: device size {device}"
+            );
+            assert_eq!(sdf_strike(size, &place).is_none(), at_path_size, "{name}");
+            for ch in ['.', 'i', 'l'] {
+                let id = charmap.map(ch).unwrap().to_u32();
+                let mut masks = super::super::cgmask::CgMasks::new();
+                // The mask Skia would gauge for this glyph fits the atlas.
+                let gauge = masks
+                    .matrix_mask(
+                        face,
+                        &[],
+                        id as u16,
+                        size,
+                        place.relaxed_post(),
+                        0.0,
+                        (0, 0),
+                    )
+                    .expect("a matrix mask");
+                assert!(
+                    gauge.width.max(gauge.height) < 256,
+                    "{name} {ch:?}: {}x{}",
+                    gauge.width,
+                    gauge.height
+                );
+                let glyphs = [PlacedGlyph { id, x: 0.0, y: 0.0 }];
+                let mut outlines = Outlines::new();
+                let mut bitmaps = Bitmaps::new();
+                let recorder = Recorder(RefCell::new(Vec::new()));
+                let mut painter = Painter {
+                    outlines: &mut outlines,
+                    bitmaps: &mut bitmaps,
+                    masks: Some(&mut masks),
+                    viewport: Some((2000, 1000)),
+                    path_rasterizer: Some(&recorder),
+                    profile: Profile::CANVAS2D,
+                    unsupported: Vec::new(),
+                };
+                let run = Run {
+                    face,
+                    size,
+                    coords: Coords::User(&[]),
+                    synthetic_bold: false,
+                    synthetic_italic: false,
+                    oblique: 0.0,
+                    glyphs: &glyphs,
+                    bitmap_size: None,
+                };
+                let mut items = Vec::new();
+                painter.fill_text(
+                    &mut items,
+                    &[run],
+                    (300.0, 300.0),
+                    m,
+                    [0.0, 0.0, 0.0, 1.0],
+                    1.0,
+                    0.0,
+                );
+                assert!(painter.unsupported.is_empty(), "{:?}", painter.unsupported);
+                let masks = items
+                    .iter()
+                    .filter(|i| matches!(i.content, ItemContent::GlyphMask { .. }))
+                    .count();
+                let paths = recorder.0.into_inner();
+                if at_path_size {
+                    assert_eq!(masks, 0, "{name} {ch:?}: no mask at the path size");
+                    assert_eq!(paths, [1], "{name} {ch:?}: drawn as its canonical path");
+                } else {
+                    assert!(!items.is_empty(), "{name} {ch:?}: drawn below it");
+                    assert!(paths.is_empty(), "{name} {ch:?}: {paths:?}");
+                }
+            }
+        }
     }
 
     #[test]

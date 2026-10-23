@@ -496,6 +496,7 @@ pub(crate) fn comp_pass<'d>(
     transparent: bool,
     group_parent: Option<&'d Node>,
 ) -> CompPlan {
+    pm_perf::bump(pm_perf::Counter::CompPasses);
     let comp_id = scope.comp.id().to_string_lossy();
     let all: Vec<&'d Node> = scope.layers().iter().collect();
     let background = if transparent {
@@ -573,6 +574,7 @@ pub(crate) fn comp_pass<'d>(
         }
         let drawn =
             crate::reuse::draw(scope, b, layer, time, width, height, scale, solo, |s, b| {
+                pm_perf::bump(pm_perf::Counter::LayersPlanned);
                 draw_layer(s, b, layer, time, width, height, scale, solo, &all)
             });
         match drawn {

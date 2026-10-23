@@ -248,6 +248,7 @@ impl SvgRasters {
     /// Stores a raster's pixels in its key's encoding (canvas bucket or
     /// straight, flipped material-map upload).
     pub fn put(&mut self, key: SvgRasterKey, data: Vec<u8>) -> Result<(), String> {
+        pm_perf::bump(pm_perf::Counter::RasterAnswers);
         key.validate().map_err(|v| v.to_string())?;
         if data.len() as u64 != key.bytes() {
             return Err(format!(
@@ -480,9 +481,16 @@ mod tests {
 
     #[test]
     fn raster_directories_read_captures_and_list_what_is_missing() {
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
         let dir = std::env::temp_dir().join(format!("pm-svg-dir-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let _cleanup = Cleanup(dir.clone());
         let rasters = RasterDir::new(&dir);
         let need = |k: SvgRasterKey| SvgRasterNeed {
             request: SvgRasterRequest {

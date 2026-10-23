@@ -69,7 +69,7 @@ fn layout(format: wgpu::TextureFormat) -> Result<(usize, usize), ReadbackError> 
     Ok(match format {
         F::Rgba16Float => (4, 2),
         F::Rgba32Float => (4, 4),
-        F::Rgba8Unorm => (4, 1),
+        F::Rgba8Unorm | F::Bgra8Unorm => (4, 1),
         F::Rgba16Unorm => (4, 2),
         F::R32Float => (1, 4),
         F::Rg32Float => (2, 4),
@@ -84,26 +84,48 @@ pub fn read_f32(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
 ) -> Result<Vec<f32>, ReadbackError> {
-    let format = texture.format();
-    let (channels, bytes_per_channel) = layout(format)?;
-    let raw = read_raw(device, queue, texture)?;
-    let (w, h) = (texture.width() as usize, texture.height() as usize);
-    let mut out = Vec::with_capacity(w * h * channels);
-    for chunk in raw.chunks_exact(bytes_per_channel) {
-        let v = match (format, bytes_per_channel) {
-            (wgpu::TextureFormat::Rgba16Float, 2) => {
-                half_to_f32(u16::from_le_bytes([chunk[0], chunk[1]]))
-            }
-            (wgpu::TextureFormat::Rgba16Unorm, 2) => {
-                f32::from(u16::from_le_bytes([chunk[0], chunk[1]])) / 65535.0
-            }
-            (_, 1) => f32::from(chunk[0]) / 255.0,
-            (_, 4) => f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+    Readback::default().read_f32(device, queue, texture)
+}
+
+/// Decodes mapped rows of `format` (`row` useful bytes of `h` rows spaced
+/// `padded` apart) into f32 channels, tightly packed, top-down.
+fn decode_f32(
+    format: wgpu::TextureFormat,
+    data: &[u8],
+    row: usize,
+    padded: usize,
+    h: usize,
+    mut out: Vec<f32>,
+) -> Vec<f32> {
+    let (channels, bytes_per_channel) = layout(format).expect("checked by the caller");
+    out.clear();
+    out.reserve(row / bytes_per_channel * h);
+    debug_assert_eq!(row % (channels * bytes_per_channel), 0);
+    for y in 0..h {
+        let line = &data[y * padded..y * padded + row];
+        match (format, bytes_per_channel) {
+            (wgpu::TextureFormat::Rgba16Float, 2) => out.extend(
+                line.chunks_exact(2)
+                    .map(|c| half_to_f32(u16::from_le_bytes([c[0], c[1]]))),
+            ),
+            (wgpu::TextureFormat::Rgba16Unorm, 2) => out.extend(
+                line.chunks_exact(2)
+                    .map(|c| f32::from(u16::from_le_bytes([c[0], c[1]])) / 65535.0),
+            ),
+            (_, 1) => out.extend(line.iter().map(|&b| f32::from(b) / 255.0)),
+            (_, 4) => out.extend(
+                line.chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])),
+            ),
             _ => unreachable!(),
-        };
-        out.push(v);
+        }
     }
-    Ok(out)
+    if format == wgpu::TextureFormat::Bgra8Unorm {
+        for pixel in out.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+    }
+    out
 }
 
 /// Reads `texture` (mip 0) as raw texel bytes, tightly packed rows.
@@ -437,6 +459,34 @@ impl Readback {
             self.buffer = None;
             self.capacity = 0;
         }
+    }
+
+    /// [`read_f32`] through this staging buffer: the channels are decoded
+    /// straight from the mapped rows (no packed byte copy), and the buffer is
+    /// kept for the next read (an export's frames read one after another).
+    pub fn read_f32(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+    ) -> Result<Vec<f32>, ReadbackError> {
+        self.read_f32_into(device, queue, texture, Vec::new())
+    }
+
+    /// [`Self::read_f32`] into `out` (cleared first; its allocation is
+    /// reused when it is large enough).
+    pub fn read_f32_into(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        out: Vec<f32>,
+    ) -> Result<Vec<f32>, ReadbackError> {
+        let format = texture.format();
+        layout(format)?;
+        self.with_mapped_rows(device, queue, texture, |data, row, padded, h| {
+            decode_f32(format, data, row, padded, h, out)
+        })
     }
 
     /// Copy this texture into the staging buffer and map it afresh. The

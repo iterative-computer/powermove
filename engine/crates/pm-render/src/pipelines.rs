@@ -643,8 +643,8 @@ mod tests {
         times.extend(pipelines.ops.path_masks.probe_all());
         times.extend(pipelines.resample.probe_all());
         times.extend(text.probe_all());
-        assert_eq!(times.len(), 47);
-        assert_eq!(built(), 47);
+        assert_eq!(times.len(), 48);
+        assert_eq!(built(), 48);
         for (name, duration) in times {
             eprintln!("lazy pipeline first use: {name}={duration:?}");
         }
