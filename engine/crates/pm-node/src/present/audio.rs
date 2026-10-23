@@ -155,7 +155,7 @@ impl AudioLink {
                     rx,
                     clock: thread_clock,
                     status: thread_status,
-                    doc,
+                    doc: Arc::new(doc),
                     composition,
                     media,
                     playback: None,
@@ -235,7 +235,10 @@ struct Control {
     rx: Receiver<AudioCtl>,
     clock: Arc<Mutex<Option<ClockHandle>>>,
     status: Arc<Mutex<AudioStatus>>,
-    doc: pm_model::Document,
+    /// Shared with the mixer after a project goes out; unshared (copied)
+    /// while the controls rest, so neither an edit nor a Play waits for the
+    /// copy ([`Control::unshare_document`]).
+    doc: Arc<pm_model::Document>,
     composition: String,
     media: MediaMap,
     playback: Option<Playback>,
@@ -339,8 +342,20 @@ impl Control {
             }
             self.send_levels();
             self.report();
+            if rested || !starting {
+                self.unshare_document();
+            }
         }
         self.shutdown();
+    }
+
+    /// Copies the document the mixer shares, between controls, so the next
+    /// edit applies in place: a long project's copy takes milliseconds,
+    /// which an edit and the Play right after it would otherwise wait for.
+    fn unshare_document(&mut self) {
+        if Arc::strong_count(&self.doc) > 1 {
+            Arc::make_mut(&mut self.doc);
+        }
     }
 
     /// Whether the device plays a run (or a grain).
@@ -400,7 +415,7 @@ impl Control {
                 if self.broken && !replace {
                     return true;
                 }
-                self.broken = update.apply_to(&mut self.doc).is_err();
+                self.broken = update.apply_to(Arc::make_mut(&mut self.doc)).is_err();
                 self.dirty = true;
             }
             AudioCtl::Media(media) => {
@@ -661,7 +676,7 @@ impl Control {
             return profiled.then_some(timing);
         }
         self.dirty = false;
-        let doc = Arc::new(self.doc.clone());
+        let doc = self.doc.clone();
         timing.clone_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
         let result = playback.set_project(doc, &self.composition, &self.media);
         timing.build_send_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
@@ -779,7 +794,7 @@ mod tests {
             rx,
             clock: Arc::new(Mutex::new(None)),
             status: status.clone(),
-            doc: pm_model::Document::new(None, 1),
+            doc: Arc::new(pm_model::Document::new(None, 1)),
             composition: "C".into(),
             media: MediaMap::default(),
             playback: Some(playback),
