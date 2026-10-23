@@ -10,7 +10,7 @@
  * file:line, a class, the enclosing scope, and the code.
  *
  *   node scripts/engine-writers.mjs            print the inventory
- *   node scripts/engine-writers.mjs --write    update docs/engine/writers.json
+ *   node scripts/engine-writers.mjs --write    update apps/desktop/scripts/engine-writers.json
  *   node scripts/engine-writers.mjs --check    exit 1 when the snapshot is stale
  *
  * The checked-in snapshot is compared by a unit test, so a new writer fails
@@ -41,7 +41,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const SOURCE_ROOT = path.join(REPO_ROOT, 'apps', 'desktop', 'src');
-export const SNAPSHOT = path.join(REPO_ROOT, 'docs', 'engine', 'writers.json');
+export const SNAPSHOT = path.join(REPO_ROOT, 'apps', 'desktop', 'scripts', 'engine-writers.json');
 
 const desktopRequire = createRequire(path.join(REPO_ROOT, 'apps', 'desktop', 'package.json'));
 const ts = desktopRequire('typescript');

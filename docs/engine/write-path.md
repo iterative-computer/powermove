@@ -91,7 +91,7 @@ How writes reach the barrier:
 
 `scripts/engine-writers.mjs` classifies `PM.touch(paths)`, `PM.doc.write`, and
 `PM.doc.touched`, and records the `PatchOrigin` every writer class reaches the mirror
-with (`origins` in `docs/engine/writers.json`).
+with (`origins` in `apps/desktop/scripts/engine-writers.json`).
 
 ### The tracking Proxy (`engine-doc/proxy.ts`)
 
