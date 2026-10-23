@@ -267,27 +267,38 @@ pub fn check_pixels(
     decoded: &[(u64, EncoderInput)],
     problems: &mut Vec<String>,
 ) -> Vec<PixelCheck> {
+    let sampled = decoded
+        .iter()
+        .flat_map(|(frame, input)| block_means(input, *frame));
+    check_pixel_blocks(codec, blocks, sampled, problems)
+}
+
+/// Compares already extracted decoded block means with the encoder input.
+pub(crate) fn check_pixel_blocks(
+    codec: Codec,
+    blocks: &[BlockSample],
+    decoded: impl IntoIterator<Item = BlockSample>,
+    problems: &mut Vec<String>,
+) -> Vec<PixelCheck> {
     let mut pixels = vec![];
-    for (frame, input) in decoded {
-        for got in block_means(input, *frame) {
-            let Some(want) = blocks
-                .iter()
-                .find(|b| b.frame == *frame && b.x == got.x && b.y == got.y)
-            else {
-                continue;
-            };
-            let error_cv = (0..4)
-                .map(|k| (got.mean[k] - want.mean[k]).abs() * channel_scale(codec, k))
-                .fold(0.0, f64::max);
-            pixels.push(PixelCheck {
-                frame: *frame,
-                x: got.x,
-                y: got.y,
-                expected: want.mean,
-                decoded: got.mean,
-                error_cv,
-            });
-        }
+    for got in decoded {
+        let Some(want) = blocks
+            .iter()
+            .find(|b| b.frame == got.frame && b.x == got.x && b.y == got.y)
+        else {
+            continue;
+        };
+        let error_cv = (0..4)
+            .map(|k| (got.mean[k] - want.mean[k]).abs() * channel_scale(codec, k))
+            .fold(0.0, f64::max);
+        pixels.push(PixelCheck {
+            frame: got.frame,
+            x: got.x,
+            y: got.y,
+            expected: want.mean,
+            decoded: got.mean,
+            error_cv,
+        });
     }
     if pixels.len() != blocks.len() {
         problems.push(format!(

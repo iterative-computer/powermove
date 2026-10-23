@@ -860,6 +860,33 @@ fn open_decoder(st: *mut ff::AVStream, name: Option<&str>) -> Result<Decoder, Er
 }
 
 fn frame_input(f: &ff::AVFrame, alpha: bool) -> Result<EncoderInput, Error> {
+    let (w, h, strides) = frame_layout(f, alpha)?;
+    let dims = [(w, h), (w / 2, h / 2), (w / 2, h / 2), (w, h)];
+    let planes = dims
+        .iter()
+        .enumerate()
+        .take(if alpha { 4 } else { 3 })
+        .map(|(k, &(pw, ph))| copy_frame_plane(f, k, strides[k], 0, 0, pw, ph))
+        .collect();
+    Ok(EncoderInput {
+        format: if alpha {
+            InputFormat::I420a
+        } else {
+            InputFormat::I420
+        },
+        width: w as u32,
+        height: h as u32,
+        planes,
+    })
+}
+
+fn frame_layout(f: &ff::AVFrame, alpha: bool) -> Result<(usize, usize, [usize; 4]), Error> {
+    if f.width <= 0 || f.height <= 0 {
+        return Err(Error::Verify(format!(
+            "invalid decoded frame dimensions {}x{}",
+            f.width, f.height
+        )));
+    }
     let (w, h) = (f.width as usize, f.height as usize);
     let want = if alpha {
         ff::AV_PIX_FMT_YUVA420P
@@ -873,32 +900,108 @@ fn frame_input(f: &ff::AVFrame, alpha: bool) -> Result<EncoderInput, Error> {
             pix_name(want)
         )));
     }
-    let dims = [(w, h), (w / 2, h / 2), (w / 2, h / 2), (w, h)];
-    let mut planes = vec![];
-    for (k, &(pw, ph)) in dims.iter().enumerate().take(if alpha { 4 } else { 3 }) {
-        let stride = f.linesize[k] as usize;
-        let mut v = Vec::with_capacity(pw * ph);
-        for y in 0..ph {
-            v.extend_from_slice(unsafe {
-                std::slice::from_raw_parts(f.data[k].add(y * stride), pw)
+    let widths = [w, w / 2, w / 2, w];
+    let heights = [h, h / 2, h / 2, h];
+    let mut strides = [0; 4];
+    for k in 0..if alpha { 4 } else { 3 } {
+        let stride = usize::try_from(f.linesize[k]).unwrap_or(0);
+        if (widths[k] != 0 && heights[k] != 0 && f.data[k].is_null())
+            || (heights[k] != 0 && stride < widths[k])
+        {
+            return Err(Error::Verify(format!(
+                "invalid decoded plane {k} (stride {}, width {})",
+                f.linesize[k], widths[k]
+            )));
+        }
+        strides[k] = stride;
+    }
+    Ok((w, h, strides))
+}
+
+fn copy_frame_plane(
+    f: &ff::AVFrame,
+    k: usize,
+    stride: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Plane {
+    let mut bytes = Vec::with_capacity(width * height);
+    if width != 0 {
+        for row in y..y + height {
+            bytes.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(f.data[k].add(row * stride + x), width)
             });
         }
-        planes.push(Plane {
-            data: PlaneData::U8(v),
-            row_samples: pw,
-            rows: ph,
-        });
     }
-    Ok(EncoderInput {
-        format: if alpha {
-            InputFormat::I420a
-        } else {
-            InputFormat::I420
-        },
-        width: w as u32,
-        height: h as u32,
-        planes,
-    })
+    Plane {
+        data: PlaneData::U8(bytes),
+        row_samples: width,
+        rows: height,
+    }
+}
+
+fn frame_blocks(
+    f: &ff::AVFrame,
+    alpha: bool,
+    frame: u64,
+    expected_size: (u32, u32),
+) -> Result<Vec<BlockSample>, Error> {
+    let (w, h, strides) = frame_layout(f, alpha)?;
+    if (w as u32, h as u32) != expected_size {
+        return Err(Error::Verify(format!(
+            "decoded frame dimensions {}x{}, expected {}x{}",
+            w, h, expected_size.0, expected_size.1
+        )));
+    }
+    // The existing full-plane conversion handles dimensions for which chroma
+    // crops cannot keep the original 4:2:0 addressing and block geometry.
+    if w < verify::BLOCK as usize
+        || h < verify::BLOCK as usize
+        || !w.is_multiple_of(2)
+        || !h.is_multiple_of(2)
+    {
+        return Ok(verify::block_means(&frame_input(f, alpha)?, frame));
+    }
+    let mut blocks = Vec::with_capacity(9);
+    for region in verify::block_regions(w as u32, h as u32) {
+        let x = region.x as usize;
+        let y = region.y as usize;
+        let width = region.width as usize;
+        let height = region.height as usize;
+        let planes = (0..if alpha { 4 } else { 3 })
+            .map(|k| {
+                let divisor = if k == 1 || k == 2 { 2 } else { 1 };
+                copy_frame_plane(
+                    f,
+                    k,
+                    strides[k],
+                    x / divisor,
+                    y / divisor,
+                    width / divisor,
+                    height / divisor,
+                )
+            })
+            .collect();
+        let crop = EncoderInput {
+            format: if alpha {
+                InputFormat::I420a
+            } else {
+                InputFormat::I420
+            },
+            width: region.width,
+            height: region.height,
+            planes,
+        };
+        let mut block = verify::block_means(&crop, frame)
+            .pop()
+            .expect("a cropped block has one region");
+        block.x = region.x;
+        block.y = region.y;
+        blocks.push(block);
+    }
+    Ok(blocks)
 }
 
 fn pix_name(f: c_int) -> String {
@@ -1129,7 +1232,8 @@ pub fn verify_webm(
     };
     // Sampled pixels, decoded by libvpx (which also decodes the alpha stream).
     let decoded = decode_sampled(fmt, vst, spec, alpha)?;
-    let pixels: Vec<PixelCheck> = verify::check_pixels(spec.codec, blocks, &decoded, &mut problems);
+    let pixels: Vec<PixelCheck> =
+        verify::check_pixel_blocks(spec.codec, blocks, decoded, &mut problems);
     if !problems.is_empty() {
         return Err(Error::Verify(problems.join("; ")));
     }
@@ -1161,18 +1265,21 @@ fn decode_sampled(
     vst: *mut ff::AVStream,
     spec: &ExportSpec,
     alpha: bool,
-) -> Result<Vec<(u64, EncoderInput)>, Error> {
+) -> Result<Vec<BlockSample>, Error> {
     let key_interval = (2.0 * spec.rate.to_f64()).round().max(1.0) as u64;
-    decode_sampled_with_gap(fmt, vst, spec, alpha, key_interval)
+    let sampled = decode_sampled_with_gap_map(fmt, vst, spec, key_interval, |f, n| {
+        frame_blocks(f, alpha, n, (spec.width, spec.height))
+    })?;
+    Ok(sampled.into_iter().flat_map(|(_, blocks)| blocks).collect())
 }
 
-fn decode_sampled_with_gap(
+fn decode_sampled_with_gap_map<T>(
     fmt: *mut ff::AVFormatContext,
     vst: *mut ff::AVStream,
     spec: &ExportSpec,
-    alpha: bool,
     max_sequential_gap: u64,
-) -> Result<Vec<(u64, EncoderInput)>, Error> {
+    mut map: impl FnMut(&ff::AVFrame, u64) -> Result<T, Error>,
+) -> Result<Vec<(u64, T)>, Error> {
     let name = match spec.codec {
         Codec::Vp9 { .. } => "libvpx-vp9",
         _ => "libvpx",
@@ -1208,7 +1315,7 @@ fn decode_sampled_with_gap(
                     let r = ff::avcodec_receive_frame(dec.0, frame);
                     if r == 0 {
                         if (*frame).best_effort_timestamp == target {
-                            found = Some(frame_input(&*frame, alpha)?);
+                            found = Some(map(&*frame, n)?);
                         }
                         continue;
                     }
@@ -1359,11 +1466,12 @@ mod sampled_decode_tests {
         }
     }
 
-    fn decoded_samples(
+    fn decoded_samples_with<T>(
         path: &Path,
         spec: &ExportSpec,
         max_sequential_gap: u64,
-    ) -> Vec<(u64, EncoderInput)> {
+        map: impl FnMut(&ff::AVFrame, u64) -> Result<T, Error>,
+    ) -> Vec<(u64, T)> {
         let p = cstr(&path.to_string_lossy());
         let input = unsafe {
             let mut fmt = ptr::null_mut();
@@ -1386,14 +1494,17 @@ mod sampled_decode_tests {
                 .find(|&st| (*(*st).codecpar).codec_type == ff::AVMEDIA_TYPE_VIDEO)
                 .unwrap()
         };
-        decode_sampled_with_gap(
-            input.0,
-            vst,
-            spec,
-            spec.alpha != AlphaOutput::None,
-            max_sequential_gap,
-        )
-        .unwrap()
+        decode_sampled_with_gap_map(input.0, vst, spec, max_sequential_gap, map).unwrap()
+    }
+
+    fn decoded_samples(
+        path: &Path,
+        spec: &ExportSpec,
+        max_sequential_gap: u64,
+    ) -> Vec<(u64, EncoderInput)> {
+        decoded_samples_with(path, spec, max_sequential_gap, |f, _| {
+            frame_input(f, spec.alpha != AlphaOutput::None)
+        })
     }
 
     #[test]
@@ -1436,8 +1547,8 @@ mod sampled_decode_tests {
             ),
         ] {
             let spec = ExportSpec {
-                width: 32,
-                height: 32,
+                width: 64,
+                height: 48,
                 rate: Rate::FPS_30,
                 frames,
                 codec,
@@ -1473,7 +1584,7 @@ mod sampled_decode_tests {
                         rgba.extend([
                             ((x + n as u32) % 32) as f32 / 31.0 * a,
                             ((y + n as u32) % 32) as f32 / 31.0 * a,
-                            (x ^ y) as f32 / 31.0 * a,
+                            (x ^ y) as f32 / 63.0 * a,
                             a,
                         ]);
                     }
@@ -1493,6 +1604,21 @@ mod sampled_decode_tests {
             let reused = decoded_samples(&delivered.path, &spec, gap);
             let sought = decoded_samples(&delivered.path, &spec, 0);
             assert_eq!(reused, sought, "{name}");
+            let expected: Vec<_> = reused
+                .iter()
+                .flat_map(|(n, input)| verify::block_means(input, *n))
+                .collect();
+            assert_eq!(expected.len(), verify::sampled_frames(frames).len() * 9);
+            for decode_gap in [gap, 0] {
+                let cropped: Vec<_> =
+                    decoded_samples_with(&delivered.path, &spec, decode_gap, |f, n| {
+                        frame_blocks(f, alpha, n, (spec.width, spec.height))
+                    })
+                    .into_iter()
+                    .flat_map(|(_, blocks)| blocks)
+                    .collect();
+                assert_eq!(cropped, expected, "{name} with gap {decode_gap}");
+            }
             assert_eq!(
                 reused.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
                 verify::sampled_frames(frames),
