@@ -70,8 +70,11 @@ export type FromWorker =
   /** A frame handed back through the page (no release port), or, with one,
    *  only when the page must hand it back itself (never sent then). */
   | { type: 'release'; session: number; release: FrameRelease }
+  /** The worker closed these clones after releasing them on its direct
+   * port. The page can now close the references it retained. */
+  | { type: 'released'; session: number; releases: FrameRelease[] }
   /** A frame drawn, with the session's stats after it. */
-  | { type: 'presented'; session: number; frame: PresentedFrame; stats: PresenterStats }
+  | { type: 'presented'; session: number; frame: PresentedFrame; stats: PresenterStats; releases?: FrameRelease[] }
   /** A drawn frame's GPU work finished (its canvas frame is ready to show). */
   | { type: 'done'; session: number; seq: number }
   | { type: 'vsync'; session: number; hint: VsyncHint }
@@ -143,6 +146,10 @@ type Session = {
    *  chrome planes (those go back through the page, whose leases release
    *  color and planes together). */
   outstanding: Map<string, { release: FrameRelease; paired: boolean }>;
+  /** Clone-close acknowledgments piggyback on the next drawn frame, or go
+   * in one batch when presentation pauses. */
+  released: FrameRelease[];
+  releaseTimer: number;
   /** The page waits on `done` (`watchDone`), and the newest frame done. */
   watchDone: boolean;
   lastDone: number;
@@ -161,6 +168,25 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
   const post = (message: FromWorker): void => scope.postMessage(message);
   const requestFrame = (cb: (t: number) => void): number => scope.requestAnimationFrame((t) => cb(t + shift));
   const cancelFrame = (id: number): void => scope.cancelAnimationFrame(id);
+  const timers = options.timers ?? {
+    set: (fn: () => void, ms: number) => setTimeout(fn, ms) as unknown as number,
+    clear: (id: number) => clearTimeout(id)
+  };
+
+  const takeReleased = (s: Session): FrameRelease[] => {
+    if (s.releaseTimer) timers.clear(s.releaseTimer);
+    s.releaseTimer = 0;
+    return s.released.splice(0);
+  };
+  const directRelease = (s: Session, release: FrameRelease): void => {
+    s.direct!(release);
+    s.released.push(release);
+    if (!s.releaseTimer) s.releaseTimer = timers.set(() => {
+      s.releaseTimer = 0;
+      const releases = s.released.splice(0);
+      if (releases.length) post({ type: 'released', session: s.id, releases });
+    }, 50);
+  };
 
   /** A frame this worker will never draw: closed, and its surface handed back to the engine. */
   const giveBack = (message: Extract<ToWorker, { type: 'frame' }>): void => {
@@ -169,7 +195,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
     const s = session && session.id === message.session ? session : null;
     const paired = message.desc.depthId?.encoding === 'chromePlanesV1';
     s?.outstanding.delete(`${release.poolIndex}:${release.seq}`);
-    if (s?.direct && !paired) s.direct(release);
+    if (s?.direct && !paired) directRelease(s, release);
     else post({ type: 'release', session: message.session, release });
   };
 
@@ -197,6 +223,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       const direct = ended.direct;
       if (direct) for (const { release, paired } of ended.outstanding.values()) if (!paired) direct(release);
       ended.outstanding.clear();
+      takeReleased(ended);
       sendStats(ended, true);
       post({ type: 'closed', session: ended.id });
     });
@@ -213,6 +240,8 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       statsSentMs: -Infinity,
       direct: null,
       outstanding: new Map(),
+      released: [],
+      releaseTimer: 0,
       watchDone: false,
       lastDone: 0,
       presenter: new EnginePresenter({
@@ -224,7 +253,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
             const k = `${release.poolIndex}:${release.seq}`;
             const paired = s.outstanding.get(k)?.paired ?? false;
             s.outstanding.delete(k);
-            if (s.direct && !paired) s.direct(release);
+            if (s.direct && !paired) directRelease(s, release);
             else post({ type: 'release', session: id, release });
           }
         },
@@ -256,7 +285,8 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       options.onPresented?.(frame);
       const stats = s.presenter.stats;
       s.statsSentMs = now();
-      post({ type: 'presented', session: id, frame, stats: { ...stats, dropped: { ...stats.dropped } } });
+      const releases = takeReleased(s);
+      post({ type: 'presented', session: id, frame, stats: { ...stats, dropped: { ...stats.dropped } }, ...(releases.length ? { releases } : {}) });
     });
     s.presenter.onDone((seq) => {
       s.lastDone = Math.max(s.lastDone, seq);

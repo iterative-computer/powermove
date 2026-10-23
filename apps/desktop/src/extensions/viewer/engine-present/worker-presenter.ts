@@ -211,8 +211,8 @@ export class WorkerPresenter implements Presenter {
    */
   private readonly local = { received: 0, parked: 0, parkTimeouts: 0, staleGeneration: 0, noImport: 0, released: 0 };
   /**
-   * Frames in the worker that it has not handed back yet, by
-   * `poolIndex:seq`, with the page's own reference to each.
+   * Frames in the worker whose clone-close acknowledgment has not reached
+   * this page, by `poolIndex:seq`, with the page's own reference to each.
    *
    * The worker gets a clone; the page keeps the frame it imported and
    * closes it only after the worker handed its clone back. Electron runs a
@@ -226,13 +226,9 @@ export class WorkerPresenter implements Presenter {
    */
   private readonly inWorker = new Map<string, { release: FrameRelease; frame: VideoFrame; paired?: boolean }>();
   private remote: PresenterStats | null = null;
-  /**
-   * The worker hands frames back to the engine itself (`releasePort`): this
-   * thread hears of no release, so it keeps one reference per pool slot (the
-   * frame the slot last showed) and closes it when the slot's next frame
-   * arrives (the engine reuses a slot only after the worker closed its clone
-   * and released it) or when the session ends.
-   */
+  /** The worker hands frames back to the engine itself (`releasePort`). Its
+   * clone-close acknowledgments return separately, so slot reuse cannot
+   * make this page close its reference before the worker has finished. */
   private direct = false;
 
   constructor(private readonly options: WorkerPresenterOptions) {
@@ -386,18 +382,7 @@ export class WorkerPresenter implements Presenter {
   }
 
   private send(desc: FrameDescriptor, frame: VideoFrame, arrivedMs: number): void {
-    const k = this.direct ? `${desc.poolGeneration}:${desc.poolIndex}` : `${desc.poolIndex}:${desc.seq}`;
-    this.inWorker.get(k)?.frame.close();
-    if (this.direct) {
-      // A frame of this slot sent before the worker had its release port:
-      // the slot came back, so the worker handed it back.
-      for (const [key, entry] of this.inWorker) {
-        if (key !== k && entry.release.poolIndex === desc.poolIndex) {
-          entry.frame.close();
-          this.inWorker.delete(key);
-        }
-      }
-    }
+    const k = `${desc.poolIndex}:${desc.seq}`;
     let clone: VideoFrame;
     try {
       clone = frame.clone();
@@ -455,12 +440,7 @@ export class WorkerPresenter implements Presenter {
         // thread presenter releases its queue on dispose). A frame already
         // handed back for a crashed worker (`abandon`) is not released twice.
         {
-          let k = `${message.release.poolIndex}:${message.release.seq}`;
-          if (this.direct) {
-            // A frame for a session the worker no longer had (its release
-            // port went with it): this thread hands it back.
-            for (const [key, entry] of this.inWorker) if (entry.release.poolIndex === message.release.poolIndex && entry.release.seq === message.release.seq) k = key;
-          }
+          const k = `${message.release.poolIndex}:${message.release.seq}`;
           const held = this.inWorker.get(k);
           if (!held) return;
           this.inWorker.delete(k);
@@ -470,7 +450,11 @@ export class WorkerPresenter implements Presenter {
         this.local.released++;
         this.options.link.release(message.release);
         return;
+      case 'released':
+        for (const release of message.releases) this.closeReleased(release);
+        return;
       case 'presented':
+        for (const release of message.releases ?? []) this.closeReleased(release);
         this.remote = message.stats;
         if (this.disposed) return;
         for (const listener of this.listeners) listener(message.frame);
@@ -500,6 +484,15 @@ export class WorkerPresenter implements Presenter {
         return;
       }
     }
+  }
+
+  /** The worker closed its clone before it sent this acknowledgment. */
+  private closeReleased(release: FrameRelease): void {
+    const k = `${release.poolIndex}:${release.seq}`;
+    const held = this.inWorker.get(k);
+    if (!held) return;
+    this.inWorker.delete(k);
+    held.frame.close();
   }
 
   takeTrace(): Promise<TraceRecord | null> {

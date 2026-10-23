@@ -258,7 +258,7 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(presenter.stats.released).toBe(1);
   });
 
-  it('with a release port, the worker hands frames back to the engine itself and the page closes a slot\'s frame when the slot comes back', async () => {
+  it('with a release port, slot reuse cannot close the page frame before the worker acknowledges its clone', async () => {
     const pair = new Pair();
     const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0 });
     const source = new Source();
@@ -278,19 +278,22 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(pair.painter.draws).toHaveLength(1);
     pair.painter.finishGpu();
     await settle();
-    // Straight to the engine, as the session's own event; nothing through the page.
+    // Straight to the engine, as the session's own event. The page keeps
+    // its reference until the worker separately acknowledges clone close.
     const { decodeEnvelope } = await import('../../../main/engine/protocol');
     const sent = releasedOnPort.map((bytes) => decodeEnvelope(bytes));
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ session: 77, message: { kind: 'event', body: { type: 'releaseFrame', poolIndex: 1, seq: 1 } } });
     expect(link.releases).toEqual([]);
     expect(pair.fromWorker.some((m) => m.type === 'release')).toBe(false);
-    // The page keeps its reference (the last one) until the slot's next frame.
+    // Direct engine release can bring the same slot back before the
+    // worker-to-page acknowledgment arrives.
     expect(source.frames[0]!.closed).toBe(false);
     presenter.receive({ type: 'frame', frame: desc(7) }, 6);
+    expect(source.frames[0]!.closed).toBe(false);
+    await settle();
     expect(source.frames[0]!.closed).toBe(true);
     expect(source.frames[0]!.closedLast).toBe(true);
-    await settle();
     // The session ends: once the GPU let go of them the worker hands back
     // what it held; the page only closes.
     presenter.dispose();
@@ -300,6 +303,30 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(source.frames[1]!.closed).toBe(true);
     expect(link.releases).toEqual([]);
     expect(releasedOnPort.map((bytes) => decodeEnvelope(bytes).message)).toContainEqual({ kind: 'event', body: { type: 'releaseFrame', poolIndex: 1, seq: 7 } });
+  });
+
+  it('acknowledges a directly released final frame when no later frame arrives', async () => {
+    const pair = new Pair();
+    const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0 });
+    const source = new Source();
+    const port = { postMessage: () => {}, close: () => {} };
+    class DirectLink extends Link {
+      releasePort() { return { port: port as unknown as MessagePort, session: 77 }; }
+    }
+    const presenter = host.open({ link: new DirectLink(), source, displayHz: 120 });
+    source.imports.add('1:1');
+    presenter.receive({ type: 'frame', frame: desc(1) }, 0);
+    await settle();
+    pair.painter.finishGpu();
+    await settle();
+    expect(source.frames[0]!.closed).toBe(false);
+    pair.frame(100);
+    await settle();
+    expect(pair.fromWorker.some((m) => m.type === 'released')).toBe(true);
+    expect(source.frames[0]!.closedLast).toBe(true);
+    presenter.dispose();
+    await settle();
+    host.dispose();
   });
 
   it('hands a frame paired with chrome planes back through the page, whose leases release color and planes together', async () => {
