@@ -399,6 +399,20 @@ speed 1.2 (AUDIO-4). The nested-composition silence (a precomposition's `trim`
 channel read as a number, NaN through the mix) is fixed with a regression test
 (`tests/mixer.rs`).
 
+### Allocations in the real-time render (glitch-safety rule)
+
+The producer's render must not allocate once warm. `tests/render_allocations.rs`
+installs a counting allocator and counts the rendering thread's heap allocations over
+200 warm renders of a mix with every kind of voice (keyframed and faded 48 kHz,
+a 44.1 kHz clip in a precomposition, a speed 1.5 stretch, a 5.1 clip): 316,504
+(about 1,580 a render, deterministic). Nearly all come from channel evaluation in
+`pm_eval` (`ev_p`'s key strings and keyframe curves, `Comp::in_root` for every
+composition in `MixGraph::resolve`), the rest from the mixer's per-render views and
+the stretch's. The test is a ratchet (the ceiling only goes down; target 0) until the
+work lands: evaluation moves off the render (control points and envelope values
+computed ahead, on the preparation side) or becomes allocation-free, and the views
+become preallocated. Not done in this round.
+
 ### A7/A8 campaign, today's model build (2026-10-22, 20:00–20:05 PDT)
 
 `tools/playback-gates.ts`, paired hidden apps (today, then the engine, one row
