@@ -15,6 +15,8 @@ import type { JobStatus } from "./JobStatus";
 import type { LeaseUsage } from "./LeaseUsage";
 import type { PatchBatch } from "./PatchBatch";
 import type { PatchesApplied } from "./PatchesApplied";
+import type { PreviewControl } from "./PreviewControl";
+import type { PreviewStatus } from "./PreviewStatus";
 import type { RenderStats } from "./RenderStats";
 import type { ShaderFallbackMessage } from "./ShaderFallbackMessage";
 import type { SlicingPolicy } from "./SlicingPolicy";
@@ -25,4 +27,4 @@ import type { ViewerState } from "./ViewerState";
 /**
  * One-way messages. Each names its direction.
  */
-export type Event = { "type": "applyPatches" } & PatchBatch | { "type": "patchesApplied" } & PatchesApplied | { "type": "frame" } & FrameDescriptor | { "type": "releaseFrame" } & FrameRelease | { "type": "surfacePool" } & SurfacePool | { "type": "viewer" } & ViewerState | { "type": "transport" } & TransportCommand | { "type": "clock" } & ClockSample | { "type": "deadline" } & DeadlineSignal | { "type": "slicing" } & SlicingPolicy | { "type": "failure" } & FailureReport | { "type": "crash" } & CrashReport | { "type": "inFlight" } & InFlight | { "type": "leaseUsage" } & LeaseUsage | { "type": "jobStatus" } & JobStatus | { "type": "blenderProgress" } & BlenderProgress | { "type": "blenderSurface" } & BlenderSurface | { "type": "fact" } & EngineFact | { "type": "audio" } & AudioMessage | { "type": "shaderFallback" } & ShaderFallbackMessage | { "type": "compat" } & CompatMessage | { "type": "renderStats" } & RenderStats;
+export type Event = { "type": "applyPatches" } & PatchBatch | { "type": "patchesApplied" } & PatchesApplied | { "type": "frame" } & FrameDescriptor | { "type": "releaseFrame" } & FrameRelease | { "type": "surfacePool" } & SurfacePool | { "type": "viewer" } & ViewerState | { "type": "transport" } & TransportCommand | { "type": "clock" } & ClockSample | { "type": "deadline" } & DeadlineSignal | { "type": "slicing" } & SlicingPolicy | { "type": "failure" } & FailureReport | { "type": "crash" } & CrashReport | { "type": "inFlight" } & InFlight | { "type": "leaseUsage" } & LeaseUsage | { "type": "jobStatus" } & JobStatus | { "type": "blenderProgress" } & BlenderProgress | { "type": "blenderSurface" } & BlenderSurface | { "type": "fact" } & EngineFact | { "type": "audio" } & AudioMessage | { "type": "shaderFallback" } & ShaderFallbackMessage | { "type": "compat" } & CompatMessage | { "type": "renderStats" } & RenderStats | { "type": "previewControl" } & PreviewControl | { "type": "previewStatus" } & PreviewStatus;

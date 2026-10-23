@@ -47,6 +47,18 @@ const service = (options: Partial<ConstructorParameters<typeof MediaStoreService
   ...options
 });
 
+it('freezes a host save’s blob MIME with its content, even if its key is replaced', async () => {
+  const svc = service(), file = path.join(media, 'converted.bin');
+  await settledFile(file, bytes(1000, 1));
+  const first = await svc.store.putFile(file, { key: 'media:converted', type: 'video/webm' });
+  await svc.bindJob(10, { id: 'P', assets: { a: { id: 'a', storageKey: first.key } } });
+  expect(await svc.resolveAsset('a', { process: 'job', session: 10 })).toMatchObject({ path: svc.store.objectPath(first.hash), type: 'video/webm' });
+  await settledFile(file, bytes(1000, 2));
+  await svc.store.putFile(file, { key: first.key, type: 'image/png' });
+  expect(await svc.resolveAsset('a', { process: 'job', session: 10 })).toMatchObject({ path: svc.store.objectPath(first.hash), type: 'video/webm' });
+  await svc.bindJob(10, null);
+});
+
 describe('ImportClassifier', () => {
   it('links ordinary files, copies agent workspace and app files, and copies camera media', async () => {
     const classifier = new ImportClassifier({ userData, diskInfo: async () => null, mountPoint: async () => '/' });
@@ -182,6 +194,33 @@ describe('MediaStoreService', () => {
     expect(await svc.resolveAsset('a1')).toBeNull();
     await svc.release(2);
     expect(await svc.resolveAsset('a1')).not.toBeNull();
+  });
+
+  it("holds the viewer engine's read of a new asset until its window binds it, so it never draws as offline in the gap", async () => {
+    const svc = service({ bindWaitMs: 5000 });
+    const file = path.join(media, 'model.obj');
+    await settledFile(file, bytes(1000, 3));
+    const record = await svc.store.putFile(file, { key: 'media:v2:model' });
+    const viewer = { process: 'interactive' as const, session: 1 };
+    // The document (and so the engine's read) arrives before the import's bind.
+    const read = svc.resolveAsset('m1', viewer);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    svc.bind(1, 'project-1', { m1: { key: 'media:v2:model', hash: record.hash } });
+    expect((await read)?.path).toBe(svc.store.objectPath(record.hash));
+    // An asset no window binds is offline after the wait; jobs and other callers never wait.
+    const quick = service({ bindWaitMs: 40 });
+    const started = Date.now();
+    expect(await quick.resolveAsset('nobody', viewer)).toBeNull();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(35);
+    const unhurried = Date.now();
+    expect(await svc.resolveAsset('nobody')).toBeNull();
+    expect(await svc.resolveAsset('nobody', { process: 'job', session: 2 })).toBeNull();
+    expect(Date.now() - unhurried).toBeLessThan(1000);
+    // A bound but missing file answers at once (offline media is not a gap).
+    svc.bind(2, 'project-2', { gone: { hash: blake3Hex(bytes(9)) } });
+    const offline = Date.now();
+    expect(await svc.resolveAsset('gone', viewer)).toBeNull();
+    expect(Date.now() - offline).toBeLessThan(1000);
   });
 
   it('keeps snapshot media after a project switch and window close, scoped to its job session', async () => {

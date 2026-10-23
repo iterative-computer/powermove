@@ -56,4 +56,19 @@ describe('view parameters', () => {
     expect(composition.state.view).toBeNull();
     expect(composition.state.viewSeq).toBe(2);
   });
+
+  it('carries a changed editor projection and clears the override in Camera view', () => {
+    const sequencer = new ViewSequencer();
+    const base = { composition: 'c', cssWidth: 100, cssHeight: 50, devicePixelRatio: 2, colorSpace: 'srgb' as const, edr: false };
+    const camera = { view: Array.from({ length: 16 }, (_, i) => (i % 5 === 0 ? 1 : 0)), projection: { kind: 'perspective' as const, fovYDegrees: 50, near: 0.01, far: 1000 } };
+    const editor = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: camera }) });
+    expect(editor.state.view).toEqual({ camera, shading: 'rendered', xray: false, localView: [] });
+    const changedCamera = { ...camera, projection: { ...camera.projection, fovYDegrees: 65 } };
+    const changed = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: changedCamera }) });
+    expect(changed.state.view?.camera).toEqual(changedCamera);
+    expect(changed.changed).toBe(true);
+    const back = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: null }) });
+    expect(back.state.view).toBeNull();
+    expect(back.changed).toBe(true);
+  });
 });

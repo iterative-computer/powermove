@@ -22,7 +22,7 @@ class FakeEngine implements AgentJobsEngine {
   private listeners: Array<{ jobStatus?(s: JobStatus): void; status?(s: unknown): void }> = [];
   /** How submitJob, agentFrames answer. */
   submit: (body: Request) => Response | EngineError = (body) => ({ type: 'jobAccepted', job: (body as { job: string }).job, state: 'queued', position: 0 });
-  frames: (body: Request) => Response | EngineError = () => ({ type: 'agentFrames', outcomes: [], queuedMs: 0 });
+  frames: (body: Request) => Response | EngineError = body => ({ type: 'agentFrames', outcomes: body.type === 'agentFrames' ? body.frames.map((_, index) => ({ status: 'rendered' as const, index, revision: 1, width: 720, height: 405, image: { kind: 'inline' as const, bytes: new Uint8Array([1]) }, blender: 'notUsed' as const })) : [], queuedMs: 0 });
   staged: Array<{ session: number; bytes: number }> = [];
   /** How pushDefinitions answers (the job engine acknowledges each generation). */
   definitions: (body: Request) => Response | EngineError = (body) => ({ type: 'definitionsApplied', generation: (body as { generation: number }).generation, failures: [] });
@@ -94,8 +94,23 @@ it('binds export snapshot media before resync and releases it after success or s
   await tick();
   expect(bindMediaSession).toHaveBeenLastCalledWith(10, null);
   engine.submit = () => error('mediaOffline', 'offline');
-  await jobs.exportVideo(1, 'run', project(), input);
+  await expect(jobs.exportVideo(1, 'run', project(), input)).rejects.toMatchObject({ code: 'mediaOffline' });
   expect(bindMediaSession).toHaveBeenLastCalledWith(11, null);
+  jobs.dispose();
+});
+
+it('packs a save through host services with its own media scope even when rendering is unavailable', async () => {
+  const engine = new FakeEngine(); engine.ready = false;
+  const bindMediaSession = vi.fn(async (_session: number, _project: unknown) => {});
+  const packProject = vi.fn(async () => '/exports/project.pmv');
+  const jobs = new AgentJobs({ engine, bindMediaSession, packProject });
+  await expect(jobs.saveProject(project())).resolves.toBe('/exports/project.pmv');
+  expect(engine.sent).toEqual([]);
+  expect(bindMediaSession).toHaveBeenNthCalledWith(1, -1, expect.objectContaining({ id: 'P1' }));
+  expect(bindMediaSession).toHaveBeenNthCalledWith(2, -1, null);
+  packProject.mockRejectedValueOnce(new Error('mediaOffline: clip'));
+  await expect(jobs.saveProject(project())).rejects.toThrow('mediaOffline');
+  expect(bindMediaSession).toHaveBeenLastCalledWith(-2, null);
   jobs.dispose();
 });
 
@@ -156,7 +171,7 @@ describe('agent exports through the job engine', () => {
     expect(() => jobs.status(8, body.job)).toThrow('No render job');
   });
 
-  it('route unsupported projects to the legacy exporter, before and after acceptance', async () => {
+  it('returns named failures for unsupported and offline exports before and after acceptance', async () => {
     const engine = new FakeEngine();
     const jobs = new AgentJobs({ engine });
     const input = { format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false } as const;
@@ -164,9 +179,9 @@ describe('agent exports through the job engine', () => {
     await tick(); await tick();
     const job = (engine.of('submitJob')[0]!.body as { job: string }).job;
     engine.status(job, 'failed', { error: error('unsupported', 'the new engine cannot render this yet: text layer') });
-    await expect(first).resolves.toEqual({ status: 'routed', reason: 'the new engine cannot render this yet: text layer' });
+    await expect(first).rejects.toMatchObject({ code: 'unsupported', message: 'the new engine cannot render this yet: text layer' });
     engine.submit = () => error('mediaOffline', 'offline');
-    await expect(jobs.exportVideo(1, 'r', project(), input)).resolves.toEqual({ status: 'routed', reason: 'offline' });
+    await expect(jobs.exportVideo(1, 'r', project(), input)).rejects.toMatchObject({ code: 'mediaOffline', message: 'offline' });
     // Real failures are errors, with the engine's sentence.
     engine.submit = (body) => ({ type: 'jobAccepted', job: (body as { job: string }).job, state: 'queued', position: 0 });
     const failing = jobs.exportVideo(1, 'r', project(), input);
@@ -229,6 +244,26 @@ describe('agent exports through the job engine', () => {
     expect(jobs.available).toBe(false);
     await expect(jobs.exportVideo(1, 'r', project(), { format: 'mp4', range: 'all', audio: false, motionBlur: false, alpha: false })).rejects.toThrow('not running');
   });
+
+  it('wait, bounded, for a job engine in its crash backoff instead of failing at once', async () => {
+    const engine = new FakeEngine();
+    const state = (job: string) => { for (const l of (engine as any).listeners) l.status?.({ interactive: { generation: 1, state: 'ready' }, job: { generation: 1, state: job } }); };
+    const jobs = new AgentJobs({ engine, readyWaitMs: 200 });
+    const input = { format: 'mp4', range: 'all' as const, audio: false, motionBlur: false, alpha: false, mode: 'async' as const };
+    engine.ready = false; state('restarting');
+    const pending = jobs.exportVideo(1, 'r', project(), input);
+    await tick();
+    expect(engine.of('openSession')).toHaveLength(0);
+    engine.ready = true; state('ready');
+    await expect(pending).resolves.toMatchObject({ status: 'queued' });
+    // Still down at the bound, or stopped while waiting: the named error.
+    engine.ready = false; state('restarting');
+    await expect(jobs.renderFrames(1, 'r', { project: project(), times: [0], width: 720, revision: 1 })).rejects.toThrow('The job engine is not running.');
+    const stopped = jobs.renderFrames(2, 'r', { project: project(), times: [0], width: 720, revision: 1 });
+    state('stopped');
+    await expect(stopped).rejects.toThrow('The job engine is not running.');
+    jobs.dispose();
+  });
 });
 
 describe('agent frames through the job engine', () => {
@@ -243,7 +278,7 @@ describe('agent frames through the job engine', () => {
     if (first.status !== 'rendered') throw new Error('expected frames');
     expect(first.images.map((i) => [i.time, i.mimeType, [...i.data]])).toEqual([[0, 'image/jpeg', [0xff, 0xd8, 0]], [0.5, 'image/jpeg', [0xff, 0xd8, 1]]]);
     const [request] = engine.of('agentFrames');
-    expect(request!.body).toMatchObject({ run: 'run', maxDimension: 720, format: { kind: 'jpeg', quality: 0.74 }, motionBlur: false, blender: 'cachedOrPending', frames: [{ composition: 'P1-root', time: 0 }, { composition: 'P1-root', time: 352_800_000 }] });
+    expect(request!.body).toMatchObject({ run: 'run#frames-1', maxDimension: 720, format: { kind: 'jpeg', quality: 0.74 }, motionBlur: false, blender: 'cachedOrPending', frames: [{ composition: 'P1-root', time: 0 }, { composition: 'P1-root', time: 352_800_000 }] });
     expect(request!.revision).toBe(1);
     expect(engine.of('openSession')[0]!.body).toMatchObject({ role: 'job' });
     await jobs.renderFrames(4, 'run', { project: project(), times: [1], width: 720, revision: 12 });
@@ -259,11 +294,96 @@ describe('agent frames through the job engine', () => {
     expect(engine.of('closeSession').map((s) => s.session)).toEqual([10]);
   });
 
-  it('route compositions the engine cannot draw, and fail other frame errors', async () => {
+  it('label PNG frames as PNG', async () => {
+    const engine = new FakeEngine();
+    const jobs = new AgentJobs({ engine });
+    const result = await jobs.renderFrames(4, 'run', { project: project(), times: [0], width: 720, revision: 1, imageFormat: 'png' });
+    expect(engine.of('agentFrames')[0]!.body).toMatchObject({ format: { kind: 'png' } });
+    if (result.status !== 'rendered') throw new Error('expected frames');
+    expect(result.images.map(i => i.mimeType)).toEqual(['image/png']);
+    jobs.dispose();
+  });
+
+  it('restores frame order and refuses partial or duplicate outcomes', async () => {
+    const engine = new FakeEngine();
+    const jobs = new AgentJobs({ engine });
+    const plan = { project: project(), times: [0, 1], width: 720, revision: 1 };
+    engine.frames = () => ({ type: 'agentFrames', outcomes: [image(1), image(0)], queuedMs: 0 });
+    const result = await jobs.renderFrames(1, 'r', plan);
+    expect(result.images.map(frame => frame.time)).toEqual([0, 1]);
+    engine.frames = () => ({ type: 'agentFrames', outcomes: [image(0), image(0)], queuedMs: 0 });
+    await expect(jobs.renderFrames(1, 'r', plan)).rejects.toThrow('duplicate frame index');
+    engine.frames = () => ({ type: 'agentFrames', outcomes: [image(0)], queuedMs: 0 });
+    await expect(jobs.renderFrames(1, 'r', plan)).rejects.toThrow('every requested frame');
+    await jobs.forgetOwner(1);
+    jobs.dispose();
+  });
+
+  it('cancel one batch alone through its signal and answer with the frames that finished first', async () => {
+    const engine = new FakeEngine();
+    const jobs = new AgentJobs({ engine });
+    const plan = { project: project(), times: [0, 1, 2, 3], width: 720, revision: 1 };
+    const cancelled = (index: number) => ({ status: 'failed' as const, index, error: error('cancelled', 'The agent run was cancelled.') });
+    let answer!: (response: Response) => void;
+    engine.frames = () => new Promise<Response>((resolve) => { answer = resolve; }) as never;
+    const original = engine.request.bind(engine);
+    engine.request = async (process, body, session, revision) => body.type === 'agentFrames'
+      ? (engine.sent.push({ process, body, session: session ?? null, revision: revision ?? null }), await (engine.frames(body) as unknown as Promise<Response>))
+      : original(process, body, session, revision);
+    const controller = new AbortController();
+    const pending = jobs.renderFrames(2, 'run-s', plan, { signal: controller.signal });
+    await vi.waitFor(() => expect(engine.of('agentFrames')).toHaveLength(1));
+    const wire = (engine.of('agentFrames')[0]!.body as { run: string }).run;
+    expect(wire).not.toBe('run-s');
+    controller.abort();
+    await vi.waitFor(() => expect(engine.of('cancelJobs')).toHaveLength(1));
+    // Only this batch: never the agent run (its exports keep rendering).
+    expect(engine.of('cancelJobs')[0]!.body).toEqual({ type: 'cancelJobs', kind: 'run', run: wire });
+    answer({ type: 'agentFrames', outcomes: [image(0), image(1), cancelled(2), cancelled(3)], queuedMs: 0 });
+    const result = await pending;
+    expect(result.images.map((frame) => frame.time)).toEqual([0, 1]);
+    // A cancel the caller did not ask for (the run was rolled back) is named.
+    engine.frames = () => ({ type: 'agentFrames', outcomes: [image(0), cancelled(1)], queuedMs: 0 });
+    engine.request = original;
+    await expect(jobs.renderFrames(2, 'run-s', { ...plan, times: [0, 1] })).rejects.toMatchObject({ code: 'cancelled' });
+    // An already-aborted batch renders nothing.
+    const done = new AbortController();
+    done.abort();
+    expect((await jobs.renderFrames(2, 'run-s', plan, { signal: done.signal })).images).toEqual([]);
+  });
+
+  it('cancel every frame batch of an agent run with the run, alongside its exports', async () => {
+    const engine = new FakeEngine();
+    const jobs = new AgentJobs({ engine });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const original = engine.request.bind(engine);
+    engine.request = async (process, body, session, revision) => {
+      if (body.type !== 'agentFrames') return original(process, body, session, revision);
+      engine.sent.push({ process, body, session: session ?? null, revision: revision ?? null });
+      await gate;
+      return engine.frames(body) as Response;
+    };
+    const first = jobs.renderFrames(3, 'run-c', { project: project(), times: [0], width: 720, revision: 1 });
+    await vi.waitFor(() => expect(engine.of('agentFrames')).toHaveLength(1));
+    const second = jobs.renderFrames(3, 'run-c', { project: project(), times: [1], width: 720, revision: 1 });
+    await vi.waitFor(() => expect(engine.of('agentFrames')).toHaveLength(2));
+    const wires = engine.of('agentFrames').map((s) => (s.body as { run: string }).run);
+    expect(new Set(wires).size).toBe(2);
+    expect(await jobs.cancelRun('run-c')).toBe(2);
+    expect(engine.of('cancelJobs').map((s) => (s.body as { run: string }).run).sort()).toEqual([...wires].sort());
+    release();
+    await Promise.all([first, second]);
+    // Nothing left in flight: a later cancel sends nothing.
+    expect(await jobs.cancelRun('run-c')).toBe(0);
+    expect(engine.of('cancelJobs')).toHaveLength(2);
+  });
+
+  it('returns named frame failures without routing to another renderer', async () => {
     const engine = new FakeEngine();
     const jobs = new AgentJobs({ engine });
     engine.frames = () => ({ type: 'agentFrames', outcomes: [{ status: 'failed', index: 0, error: error('unsupported', 'text layer') }], queuedMs: 0 });
-    await expect(jobs.renderFrames(1, 'r', { project: project(), times: [0], width: 720, revision: 1 })).resolves.toEqual({ status: 'routed', reason: 'text layer' });
+    await expect(jobs.renderFrames(1, 'r', { project: project(), times: [0], width: 720, revision: 1 })).rejects.toMatchObject({ code: 'unsupported', message: 'text layer' });
     engine.frames = () => ({ type: 'agentFrames', outcomes: [{ status: 'failed', index: 0, error: error('internal', 'GPU lost') }], queuedMs: 0 });
     await expect(jobs.renderFrames(1, 'r', { project: project(), times: [0], width: 720, revision: 1 })).rejects.toThrow('GPU lost');
     engine.frames = () => error('staleRevision', 'late');
@@ -320,7 +440,7 @@ describe('export sheet jobs through the job engine', () => {
     await jobs.cancelJob(5, second.jobId);
     expect(engine.of('cancelJobs')[0]!.body).toEqual({ type: 'cancelJobs', kind: 'job', job: second.jobId });
     engine.status(second.jobId, 'failed', { class: 'userJob', error: error('unsupported', 'text layers') });
-    expect(statuses.at(-1)).toEqual([5, { jobId: second.jobId, state: 'failed', progress: 0.5, error: 'text layers', routed: true }]);
+    expect(statuses.at(-1)).toEqual([5, { jobId: second.jobId, state: 'failed', progress: 0.5, error: 'text layers' }]);
   });
 
   it('do not start an export whose window the job engine\'s font service never takes', async () => {

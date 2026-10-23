@@ -625,134 +625,164 @@ fn features(doc: &pm_model::Document) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn the_static_check_looks_inside_legacy_scenes() {
+/// One frame's pixels and failures (`r` as configured).
+fn frame(r: &mut Renderer, doc: &pm_model::Document) -> (Vec<f32>, Vec<String>) {
     let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
-    let mut r = Renderer::headless().unwrap();
-    let mut render = |doc: &pm_model::Document| {
-        r.render(
+    let f = r
+        .render(
             doc,
             "Ptest-root",
             ticks(0.0),
             &request,
             &MapResolver::default(),
         )
-        .map(|f| f.failures.is_empty())
-    };
+        .unwrap();
+    let failures = f.failures.iter().map(|l| l.layer.clone()).collect();
+    (r.read_rgba(&f).unwrap(), failures)
+}
+
+/// Stored 3D data the scene schema refuses draws as today
+/// (`corrupt-scenes.test.ts` is today's reference): a legacy scene layer
+/// that does not sync is the compositor's missing-definition checkerboard,
+/// and a composition scene that does not build fails every object layer.
+/// Nothing about a 3D layer is a routing reason; a material map's still
+/// meets the image layer checks.
+#[test]
+fn the_static_check_looks_inside_legacy_scenes() {
+    let mut r = Renderer::headless().unwrap();
+    // Built-in definitions, with one extension marked missing: the
+    // reference checkerboard (`shader_layers.rs`).
+    let mut builtins = pm_render::all_builtin_definitions();
+    builtins.missing.push("com.example.absent".into());
+    r.set_definitions(&builtins).unwrap();
     let base = || project(W, H, 2.0, solid_fill("#000000"), vec![legacy_scene_layer()]);
     // As captured: nothing listed, and it renders.
     let doc = load(&base());
     assert_eq!(features(&doc), Vec::<String>::new());
-    assert!(render(&doc).unwrap());
+    let (scene_px, failures) = frame(&mut r, &doc);
+    assert!(failures.is_empty(), "{failures:?}");
+    let checker = {
+        let mut doc = base();
+        doc["layers"][0]["d"]["definition"] = json!("com.example.absent");
+        frame(&mut r, &load(&doc)).0
+    };
+    assert_ne!(scene_px, checker);
 
-    // Each change is listed, and the ones the 3D pass cannot build also
-    // fail at render time: the routing decision holds at every frame.
     let scene = "/layers/0/d/data/scene";
     type Change = Box<dyn Fn(&mut Value)>;
-    let cases: Vec<(&str, Change, bool)> = vec![
+    let refused: Vec<(&str, Change)> = vec![
         (
-            "3D: imported models (legacy scene object cube)",
-            Box::new(move |doc: &mut Value| {
-                *doc.pointer_mut(&format!("{scene}/objects/0/source"))
-                    .unwrap() = json!({ "assetId": "m" });
-                doc["assets"]["m"] =
-                    json!({ "id": "m", "kind": "model", "format": "glb", "name": "m.glb" });
-            }),
-            // Listed while the file cannot be checked; an offline model draws
-            // as the missing-model box, as today (the glTF lane draws the
-            // ones that load).
-            false,
-        ),
-        (
-            "3D: knot primitives (legacy scene object ring)",
+            "an unknown primitive",
             Box::new(move |doc: &mut Value| {
                 *doc.pointer_mut(&format!("{scene}/objects/1/source"))
                     .unwrap() = json!({ "primitive": "knot" });
             }),
-            true,
         ),
         (
-            "3D: hemisphere lights (legacy scene light key)",
+            "an unknown light type",
             Box::new(move |doc: &mut Value| {
                 *doc.pointer_mut(&format!("{scene}/lights/0/type")).unwrap() = json!("hemisphere");
             }),
-            true,
         ),
         (
-            "3D: model-group recipe parts (legacy scene object cube)",
+            "a foreign strict object key",
             Box::new(move |doc: &mut Value| {
                 doc.pointer_mut(&format!("{scene}/objects/0"))
                     .unwrap()
                     .as_object_mut()
                     .unwrap()
-                    .insert(
-                        "generation".into(),
-                        json!({ "groupId": "g", "partId": "p" }),
-                    );
+                    .insert("foreign".into(), json!(true));
             }),
-            false,
         ),
         (
-            "3D: SVG texture maps (legacy scene object ring)",
+            "a material channel outside its range",
             Box::new(move |doc: &mut Value| {
-                *doc.pointer_mut(&format!("{scene}/objects/1/material/maps"))
-                    .unwrap() = json!({ "color": "i" });
-                doc["assets"]["i"] =
-                    json!({ "id": "i", "kind": "image", "format": "svg", "name": "i.svg" });
+                *doc.pointer_mut(&format!("{scene}/objects/0/material/p/roughness/v"))
+                    .unwrap() = json!(2);
             }),
-            false,
         ),
         (
-            "3D: 3D texture map image (media: an image of unrecorded format) (legacy scene object ring)",
-            Box::new(move |doc: &mut Value| {
-                *doc.pointer_mut(&format!("{scene}/objects/1/material/maps"))
-                    .unwrap() = json!({ "roughness": "i" });
-                doc["assets"]["i"] = json!({ "id": "i", "kind": "image", "name": "i" });
-            }),
-            false,
-        ),
-        (
-            "3D: a legacy 3D scene without a scene object",
+            "no scene",
             Box::new(move |doc: &mut Value| {
                 *doc.pointer_mut("/layers/0/d/data/scene").unwrap() = json!(null);
             }),
-            true,
         ),
     ];
-    for (want, change, fails) in cases {
+    for (what, change) in refused {
         let mut doc = base();
         change(&mut doc);
         let doc = load(&doc);
-        assert_eq!(features(&doc), vec![want.to_owned()]);
-        if fails {
-            assert!(
-                !render(&doc).unwrap_or(false),
-                "{want}: the render cannot draw it"
-            );
-        }
+        assert_eq!(features(&doc), Vec::<String>::new(), "{what}");
+        let (px, failures) = frame(&mut r, &doc);
+        assert!(failures.is_empty(), "{what}: {failures:?}");
+        assert!(px == checker, "{what}: the missing-definition checkerboard");
     }
+    // Imported models are drawn, or the missing-model box when the file
+    // does not load (the glTF acceptance table); SVG maps are Chromium's
+    // raster (decision S1). Neither is listed.
+    let mut doc = base();
+    *doc.pointer_mut(&format!("{scene}/objects/0/source"))
+        .unwrap() = json!({ "assetId": "m" });
+    doc["assets"]["m"] = json!({ "id": "m", "kind": "model", "format": "glb", "name": "m.glb" });
+    let doc = load(&doc);
+    assert_eq!(features(&doc), Vec::<String>::new());
+    let (_, failures) = frame(&mut r, &doc);
+    assert!(failures.is_empty(), "{failures:?}");
+    let mut doc = base();
+    *doc.pointer_mut(&format!("{scene}/objects/1/material/maps"))
+        .unwrap() = json!({ "color": "i" });
+    doc["assets"]["i"] = json!({ "id": "i", "kind": "image", "format": "svg", "name": "i.svg" });
+    assert_eq!(features(&load(&doc)), Vec::<String>::new());
+    // A map still without a recorded format reports what an image layer of
+    // the same asset reports.
+    let mut doc = base();
+    *doc.pointer_mut(&format!("{scene}/objects/1/material/maps"))
+        .unwrap() = json!({ "roughness": "i" });
+    doc["assets"]["i"] = json!({ "id": "i", "kind": "image", "name": "i" });
+    let mut image = doc.clone();
+    image["layers"].as_array_mut().unwrap().push(layer(
+        "img",
+        "image",
+        json!({ "asset": "i" }),
+        0.0,
+        0.0,
+        2.0,
+    ));
+    let as_image = features(&load(&image));
+    let as_map = features(&load(&doc));
+    assert_eq!(as_map.len(), 1, "{as_map:?}");
+    assert!(as_image.contains(&as_map[0]), "{as_map:?} {as_image:?}");
+    assert!(!as_map[0].starts_with("3D"), "{as_map:?}");
     // A model asset without a record draws the orange box: not listed.
     let mut doc = base();
     *doc.pointer_mut(&format!("{scene}/objects/0/source"))
         .unwrap() = json!({ "assetId": "gone" });
     let doc = load(&doc);
     assert_eq!(features(&doc), Vec::<String>::new());
-    assert!(render(&doc).unwrap());
+    assert!(frame(&mut r, &doc).1.is_empty());
 
-    // 3D light layers meet the same light check.
-    let mut light = sun("sun", [-3.0, 5.0, 4.0], false, 2.0);
-    light["d"]["data"]["light"]["type"] = json!("hemisphere");
-    let doc = load(&project(
-        W,
-        H,
-        2.0,
-        solid_fill("#000000"),
-        vec![
-            camera("cam", [0.0, 0.0, 6.0], false, 2.0),
-            light,
-            object3d("a", "box", json!({}), "#FF4040", W, H, 2.0),
-        ],
-    ));
-    assert_eq!(features(&doc), vec!["3D: hemisphere lights".to_owned()]);
-    assert!(!render(&doc).unwrap_or(false));
+    // A light layer of an unknown type fails the composition's scene: the
+    // object layer draws nothing and fails; the other layers draw.
+    let scene_doc = |light_type: &str| {
+        let mut light = sun("sun", [-3.0, 5.0, 4.0], false, 2.0);
+        light["d"]["data"]["light"]["type"] = json!(light_type);
+        project(
+            W,
+            H,
+            2.0,
+            solid_fill("#000000"),
+            vec![
+                camera("cam", [0.0, 0.0, 6.0], false, 2.0),
+                light,
+                object3d("a", "box", json!({}), "#FF4040", W, H, 2.0),
+            ],
+        )
+    };
+    let doc = load(&scene_doc("hemisphere"));
+    assert_eq!(features(&doc), Vec::<String>::new());
+    let (px, failures) = frame(&mut r, &doc);
+    assert_eq!(failures, vec!["a".to_owned()]);
+    let mut without = scene_doc("sun");
+    without["layers"][2]["on"] = json!(false);
+    assert!(px == frame(&mut r, &load(&without)).0, "nothing drawn");
 }

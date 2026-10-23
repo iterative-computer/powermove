@@ -240,6 +240,7 @@ impl Glslang {
 
     /// Compiles and links both stages, returning SPIR-V words per stage.
     fn compile(&self, vertex: &str, fragment: &str) -> Result<(Vec<u32>, Vec<u32>)> {
+        pm_perf::bump(pm_perf::Counter::GlslCompiles);
         let codes = [
             CString::new(vertex).map_err(|e| anyhow!("{e}"))?,
             CString::new(fragment).map_err(|e| anyhow!("{e}"))?,

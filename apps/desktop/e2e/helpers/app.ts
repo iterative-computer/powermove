@@ -52,6 +52,9 @@ export type LaunchOptions = {
   normalWindow?: boolean;
   /** Extra Chromium switches (for example `--force-color-profile=srgb`). */
   args?: string[];
+  /** Chromium switches placed before the app path (for example a GPU stress
+   * run's `--disable-gpu-process-crash-limit`). Joined with `args`. */
+  chromiumSwitches?: string[];
 };
 
 export type LaunchedApp = {
@@ -66,6 +69,8 @@ export type LaunchedApp = {
   /** Opens the agent popover under its titlebar launcher. */
   openAgent(): Promise<void>;
   close(): Promise<void>;
+  /** Wall time of the last close: app shutdown, then profile cleanup. */
+  readonly teardown: { appCloseMs: number; cleanupMs: number } | null;
 };
 
 /** The Playwright session builds exactly once in global setup. Direct helper users
@@ -101,6 +106,9 @@ async function startElectron(
   await ensureBuilt();
   const launchEnv = {
     ...process.env,
+    // Fresh test profiles must not download runtimes from a connected account.
+    // Runtime-update specs can opt in with an explicit env override below.
+    POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
     // Offline UI regressions must not depend on the developer's subscription
     // state (or race a real account check that replaces the composer).
     ...(process.env.POWERMOVE_E2E_LIVE ? {} : {
@@ -177,7 +185,8 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     await writeFile(path.join(userData, 'onboarding-v1.json'), '{"version":1}\n', { mode: 0o600 });
   }
   const diagnostics: RendererDiagnostics = { console: [], pageErrors: [] };
-  let active = await startElectron(userData, env, diagnostics, options.normalWindow, options.args);
+  const switches = [...(options.args ?? []), ...(options.chromiumSwitches ?? [])];
+  let active = await startElectron(userData, env, diagnostics, options.normalWindow, switches);
   let closed = false;
 
   const session: LaunchedApp = {
@@ -185,9 +194,10 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     page: active.page,
     userData,
     diagnostics,
+    teardown: null,
     async relaunch() {
       await active.app.close();
-      active = await startElectron(userData, env, diagnostics, options.normalWindow, options.args);
+      active = await startElectron(userData, env, diagnostics, options.normalWindow, switches);
       session.app = active.app;
       session.page = active.page;
     },
@@ -222,8 +232,14 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       // A failed close-decision assertion must not leave its Cancel mock
       // preventing cleanup of this disposable test process.
       await active.app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
+      const started = performance.now();
       await active.app.close().catch(() => undefined);
+      const closedAt = performance.now();
       if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      (session as { teardown: LaunchedApp['teardown'] }).teardown = {
+        appCloseMs: Math.round(closedAt - started),
+        cleanupMs: Math.round(performance.now() - closedAt)
+      };
     }
   };
   return session;
@@ -245,15 +261,22 @@ async function attachDiagnostics(testInfo: TestInfo, diagnostics: RendererDiagno
 
 export const test = base.extend<{ session: LaunchedApp; desktopLaunchOptions: LaunchOptions }>({
   desktopLaunchOptions: [{}, { option: true }],
-  session: async ({ desktopLaunchOptions }, use, testInfo) => {
+  // Native process shutdown and disposable-profile cleanup have their own
+  // lifecycle budget; they must not consume a text interaction's deadline.
+  session: [async ({ desktopLaunchOptions }, use, testInfo) => {
     const session = await launchApp(desktopLaunchOptions);
     try {
       await use(session);
     } finally {
       await session.close();
       await attachDiagnostics(testInfo, session.diagnostics);
+      // Recorded so a slow native shutdown is visible, not only a timeout.
+      await testInfo.attach('session-teardown', {
+        body: Buffer.from(JSON.stringify(session.teardown)),
+        contentType: 'application/json'
+      });
     }
-  }
+  }, { timeout: 60_000 }]
 });
 
 export { expect };

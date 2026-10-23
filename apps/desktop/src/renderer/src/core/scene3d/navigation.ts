@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { engineGeometry } from './engine-access';
 import { compositionRuntime } from './service';
 import { layer3DRole } from './layers';
 import {viewportCamera,viewportPose,applyViewportPose,getViewportMode,setViewportMode,type ViewPose,type ViewMode} from './viewport';
@@ -55,12 +56,33 @@ export function frameView(start:ViewPose,box:THREE.Box3,camera:THREE.Camera):Vie
   return {position:target.clone().addScaledVector(direction,radius*1.25/Math.sin(Math.min(vertical,horizontal))),target,zoom:start.zoom};
 }
 
+/** Today's object bounds for dual-answer native geometry checks. */
+export function runtimeBoxes(PM:any,ids:readonly string[],time:number=PM.time):Record<string,number[]|null> {
+  const runtime=compositionRuntime(PM,time),out:Record<string,number[]|null>={};
+  for(const id of ids){
+    const object=runtime.objects.get(id),bounds=object?new THREE.Box3().expandByObject(object):null;
+    out[id]=bounds&&!bounds.isEmpty()?[bounds.min.x,bounds.min.y,bounds.min.z,bounds.max.x,bounds.max.y,bounds.max.z]:null;
+  }
+  return out;
+}
+
 export function frameComposition(PM:any,selected=true):void {
   const world=compositionRuntime(PM),ids=new Set<string>(PM.sel?.layers || []),box=new THREE.Box3();
+  const members:[string,THREE.Object3D][]=[];
   for(const [id,object] of world.objects){
     const layer=PM.L(id);if(layer3DRole(layer)!=='object')continue;
     if(selected&&!ids.has(id)&&!(PM.groupAncestors?.(layer)||[]).some((g:any)=>ids.has(g.id)))continue;
-    box.expandByObject(object);
+    members.push([id,object]);
+  }
+  if(!members.length)return;
+  const engine=engineGeometry(PM,['objectBoxes3d']);
+  const reference=()=>runtimeBoxes(PM,members.map(([id])=>id));
+  const bounds:Record<string,number[]|null>=engine
+    ?engine.objectBoxes3d(members.map(([id])=>id),PM.time,reference)
+    :reference();
+  for(const [id] of members){
+    const values=bounds[id];
+    if(values)box.union(new THREE.Box3(new THREE.Vector3(values[0],values[1],values[2]),new THREE.Vector3(values[3],values[4],values[5])));
   }
   if(box.isEmpty())return;
   const start=viewportPose(PM);

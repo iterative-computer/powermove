@@ -6,13 +6,14 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+mod chrome;
 mod layer_raster;
 pub use layer_raster::{LayerPixels, LayerRaster};
 
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};
 use pm_model::Document;
-use pm_protocol::color::Precision;
+use pm_protocol::color::{Precision, WorkingEncoding};
 use pm_protocol::common::Ticks;
 
 use crate::assets::AssetResolver;
@@ -78,6 +79,8 @@ fn host_progress(
 
 /// A rendered frame.
 pub struct Frame {
+    /// Scene diagnostics of these pixels, grouped by composition and layer.
+    pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
     /// Premultiplied working values (Standard: E-encoded, Rec.709
     /// primaries), the request's precision, the region's size.
     pub color: Target,
@@ -117,6 +120,7 @@ pub struct PassThrough {
 
 /// What a render into a caller's target reports.
 pub struct Rendered {
+    pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
     pub legend: Vec<String>,
     pub failures: Vec<LayerFailure>,
     pub seconds: f64,
@@ -137,6 +141,14 @@ pub struct Rendered {
     /// the frame again when they arrive. Frames that may not substitute
     /// fail with [`RenderError::SvgRastersPending`] instead.
     pub svg_misses: Vec<crate::vector::svg_rasters::SvgRasterNeed>,
+}
+
+/// Row order in a snapshot target. `Gl` rows are inverted while the mapped
+/// readback is encoded; other callers always receive top-down targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotRows {
+    TopDown,
+    Gl,
 }
 
 /// One drawn quad of a top-level layer ([`Rendered::quads`]).
@@ -265,9 +277,61 @@ pub struct Renderer {
     /// Where a waiting frame gets missing level 1 SVG rasters itself (the
     /// job engine's host services; [`Renderer::set_svg_source`]).
     svg_source: Option<Arc<dyn crate::vector::svg_rasters::SvgRasterSource>>,
+    /// Frames read back one after another (exports): the staging buffer, a
+    /// frame target given back with [`Renderer::recycle`] and pixels given
+    /// back with [`Renderer::give_rgba`] (docs/engine/perfbench.md). Held
+    /// from one frame of an export to the next; dropped by
+    /// [`Renderer::release_frame_reuse`] (the export's end, every one-off
+    /// frame) and by [`Renderer::trim`].
+    frame_reuse: FrameReuse,
+    /// Bind groups kept across frames (`crate::binds`).
+    binds: crate::binds::BindCache,
+}
+
+/// See [`Renderer::read_rgba_reusing`] and [`Renderer::recycle`].
+#[derive(Default)]
+struct FrameReuse {
+    readback: pm_gpu::readback::Readback,
+    target: Option<Target>,
+    /// A pixel buffer given back for the next read ([`Renderer::give_rgba`]).
+    rgba: Option<Vec<f32>>,
 }
 
 impl Renderer {
+    /// A CLI host reading the desktop's persisted per-machine probe store.
+    /// GPU/driver and pipeline identity are the same suffix as `new` uses.
+    pub fn configure_shader_reference(
+        &mut self,
+        browser: &str,
+        directory: Option<std::path::PathBuf>,
+    ) {
+        let environment = format!(
+            "{browser}; {:?}; pipeline {}",
+            self.device.adapter_info(),
+            pm_glsl::pipeline::PIPELINE_REVISION
+        );
+        self.effects.parity.configure(Some(environment), directory);
+    }
+
+    /// Honour the configured probe directory without ever writing to it:
+    /// this renderer's runner is not the browser that directory's
+    /// decisions were made against (`effects::parity` module notes).
+    pub fn read_only_shader_reference(&mut self) {
+        self.effects.parity.set_read_only();
+    }
+
+    /// CLI hosts without an ANGLE environment must fail closed for user
+    /// programs instead of treating the absence of a parity service as proof.
+    /// A host that supplied the desktop environment retains its persisted
+    /// decisions; unknown programs still need a runner before output.
+    pub fn require_shader_reference(&mut self) {
+        if !self.effects.parity.enabled() {
+            self.effects
+                .parity
+                .configure(Some("host-without-ANGLE-reference".into()), None);
+        }
+    }
+
     /// A renderer on a device. The device needs
     /// `pm_gpu::device::required_features()`; 32-bit precision also needs
     /// `FLOAT32_FILTERABLE` and `FLOAT32_BLENDABLE` (`pm_gpu::Gpu` requests
@@ -277,15 +341,19 @@ impl Renderer {
         let media = MediaCache::new(&device);
         let text_gpu = crate::text::gpu::TextGpu::new(&device);
         let mut effects = Effects::new(format!("{}; wgpu 30", std::env::consts::OS));
-        if let Ok(browser) = std::env::var("POWERMOVE_ENGINE_PARITY_ENV") {
+        if let Some(store) =
+            crate::effects::parity::ProbeStore::from_environment(|name| std::env::var_os(name))
+        {
             let environment = format!(
-                "{browser}; {:?}; pipeline {}",
+                "{}; {:?}; pipeline {}",
+                store.browser,
                 device.adapter_info(),
                 pm_glsl::pipeline::PIPELINE_REVISION
             );
-            let directory = std::env::var_os("POWERMOVE_ENGINE_SHADER_CACHE")
-                .map(|d| std::path::PathBuf::from(d).join("angle-parity"));
-            effects.parity.configure(Some(environment), directory);
+            if store.read_only {
+                effects.parity.set_read_only();
+            }
+            effects.parity.configure(Some(environment), store.directory);
         }
         Renderer {
             text: crate::text::TextContext::default(),
@@ -313,6 +381,8 @@ impl Renderer {
             svg_wait: false,
             svg_skip_failed: false,
             svg_source: None,
+            frame_reuse: FrameReuse::default(),
+            binds: crate::binds::BindCache::default(),
         }
     }
 
@@ -823,8 +893,10 @@ impl Renderer {
             let mut attempt = 0;
             let mut waits = 0;
             let failure = loop {
+                pm_perf::bump(pm_perf::Counter::RasterRequests);
                 let failure = match host.run(&job) {
                     Ok(pixels) if pixels.fits(&job.request) => {
+                        pm_perf::bump(pm_perf::Counter::RasterAnswers);
                         self.put_fallback_pixels(key.clone(), pixels);
                         break None;
                     }
@@ -1022,6 +1094,36 @@ impl Renderer {
         self.pool.bytes() + self.pyramids.bytes()
     }
 
+    /// Nominal texel bytes retained by reusable intermediate targets.
+    pub fn target_pool_bytes(&self) -> u64 {
+        self.pool.bytes()
+    }
+
+    /// Reusable targets currently idle in the pool.
+    pub fn target_pool_idle(&self) -> usize {
+        self.pool.idle()
+    }
+
+    /// Targets allocated since this renderer was created.
+    pub fn target_pool_created(&self) -> u64 {
+        self.pool.created()
+    }
+
+    /// Nominal texel bytes retained by image mip pyramids.
+    pub fn pyramid_bytes(&self) -> u64 {
+        self.pyramids.bytes()
+    }
+
+    /// Nominal texel bytes of still and converted-video textures.
+    pub fn media_texture_bytes(&self) -> u64 {
+        self.media.bytes
+    }
+
+    /// Nominal texel bytes of cached text rasters.
+    pub fn text_cache_bytes(&self) -> u64 {
+        self.text_gpu.cached_bytes()
+    }
+
     /// Keeps translated 3D programs (amendment 11's disk program cache) and
     /// translated GLSL (`dir/glsl`, plan section 11) in `dir` across
     /// processes; the engine host passes its shader cache folder.
@@ -1103,6 +1205,11 @@ impl Renderer {
     /// raster cache is kept apart from the pool and trims to `bytes` on its
     /// own (`text_gpu().cached_bytes()`).
     pub fn trim(&mut self, bytes: u64) {
+        // Kept bind groups hold their views (and textures) alive.
+        self.binds.clear();
+        // An export's kept staging buffer, frame target and pixels (the
+        // next frame allocates them again).
+        self.release_frame_reuse();
         self.pool.trim(bytes);
         if self.pool.bytes() + self.pyramids.bytes() > bytes {
             self.pyramids.clear();
@@ -1169,6 +1276,47 @@ impl Renderer {
                 .contains(wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE)
     }
 
+    /// The output format the project asks for, before the device fallback:
+    /// main's Color depth 32 selects float32 over the 16-bit default.
+    /// Callers rendering into their own target use [`Self::device_target_format`]
+    /// to include the shipped compositor's hardware fallback.
+    pub fn target_format(document: &Document, request: &RenderRequest) -> wgpu::TextureFormat {
+        let precision = match document.root() {
+            Some(root) => match project_settings(root) {
+                Ok(c) => {
+                    let precision = effective_precision(request.precision, c.precision);
+                    if precision == Precision::Float16 && crate::composite::color_depth_float32(root) {
+                        Precision::Float32
+                    } else {
+                        precision
+                    }
+                }
+                Err(_) => request.precision,
+            },
+            None => request.precision,
+        };
+        working_format(precision)
+    }
+
+    /// The actual output format on this device ([`Self::project_precision`]):
+    /// main's compositor falls back from 32 to 16 when float32 filtering or
+    /// blending is unavailable. Viewers, snapshots and caller-owned targets
+    /// must use this choice so the frame matches [`Self::render_into`].
+    pub fn device_target_format(
+        &self,
+        document: &Document,
+        request: &RenderRequest,
+    ) -> wgpu::TextureFormat {
+        let precision = match document.root() {
+            Some(root) => match project_settings(root) {
+                Ok(c) => self.project_precision(root, request.precision, c.precision),
+                Err(_) => request.precision,
+            },
+            None => request.precision,
+        };
+        working_format(precision)
+    }
+
     /// Renders `composition` at `time` into a new texture.
     pub fn render(
         &mut self,
@@ -1179,21 +1327,23 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let precision = match document.root() {
-            Some(root) => match project_settings(root) {
-                Ok(c) => self.project_precision(root, request.precision, c.precision),
-                Err(_) => request.precision,
-            },
-            None => request.precision,
+        let format = self.device_target_format(document, request);
+        // A target a finished frame gave back (`recycle`), when it fits.
+        let target = match self.frame_reuse.target.take() {
+            Some(t)
+                if t.width() == size.width && t.height() == size.height && t.format() == format =>
+            {
+                t
+            }
+            _ => Target::new(
+                &self.device,
+                "pm frame",
+                size.width,
+                size.height,
+                format,
+                pm_gpu::target::working_usage(),
+            ),
         };
-        let target = Target::new(
-            &self.device,
-            "pm frame",
-            size.width,
-            size.height,
-            working_format(precision),
-            pm_gpu::target::working_usage(),
-        );
         let depth_id = request.depth_id.then(|| {
             Target::new(
                 &self.device,
@@ -1216,6 +1366,7 @@ impl Renderer {
             depth_id.as_ref(),
         )?;
         Ok(Frame {
+            scene3d_meta: r.scene3d_meta,
             color: target,
             depth_id,
             legend: r.legend,
@@ -1246,6 +1397,115 @@ impl Renderer {
         target: &Target,
         depth_id: Option<&Target>,
     ) -> Result<Rendered, RenderError> {
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            depth_id,
+            SnapshotRows::TopDown,
+            None,
+        )
+    }
+
+    /// Renders a fresh presenter snapshot. In Standard working encoding, the
+    /// target keeps GL row order so its mapped readback can reverse rows
+    /// without recording a second render pass. Linear encoding still uses
+    /// its GPU color-conversion and flip pass.
+    pub fn render_snapshot_into(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_snapshot_into_with_copy(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+        )
+    }
+
+    /// Snapshot variant that queues the fresh target's staging copy in the
+    /// same GPU submission as its render passes. Mapping begins afterward.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_snapshot_into_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: &pm_gpu::readback::ReadbackCopy,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_snapshot_into_with_copy(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            Some(copy),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_snapshot_into_with_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        let rows = if self.bracket.is_none()
+            && document
+                .root()
+                .and_then(|root| project_settings(root).ok())
+                .is_some_and(|color| color.working == WorkingEncoding::Standard)
+        {
+            SnapshotRows::Gl
+        } else {
+            SnapshotRows::TopDown
+        };
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+            rows,
+            copy,
+        )
+        .map(|rendered| (rendered, rows))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_into_rows(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        depth_id: Option<&Target>,
+        rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
+    ) -> Result<Rendered, RenderError> {
         if self.fallback_host.is_none() {
             return self.render_into_svg(
                 document,
@@ -1255,6 +1515,8 @@ impl Renderer {
                 assets,
                 target,
                 depth_id,
+                rows,
+                copy,
             );
         }
         self.effects.fallback.retries.clear();
@@ -1270,6 +1532,8 @@ impl Renderer {
                 assets,
                 target,
                 depth_id,
+                rows,
+                copy,
             );
             let Some(host) = self.fallback_host.clone() else {
                 break result;
@@ -1302,6 +1566,8 @@ impl Renderer {
         assets: &dyn AssetResolver,
         target: &Target,
         depth_id: Option<&Target>,
+        rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         for _ in 0..3 {
             match self.render_into_once(
@@ -1312,6 +1578,8 @@ impl Renderer {
                 assets,
                 target,
                 depth_id,
+                rows,
+                copy,
             ) {
                 Err(RenderError::SvgRastersPending(needs)) if self.svg_source.is_some() => {
                     let source = self.svg_source.clone().expect("checked");
@@ -1343,6 +1611,8 @@ impl Renderer {
             assets,
             target,
             depth_id,
+            rows,
+            copy,
         )
     }
 
@@ -1356,12 +1626,17 @@ impl Renderer {
         assets: &dyn AssetResolver,
         target: &Target,
         depth_id: Option<&Target>,
+        rows: SnapshotRows,
+        copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
         request.validate()?;
+        // One look at each media file per frame (`media::StampFrame`).
+        let _stamps = crate::media::StampFrame::begin();
         let root = document
             .root()
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
+        debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
         let precision = self.project_precision(root, request.precision, color.precision);
         if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
@@ -1471,11 +1746,13 @@ impl Renderer {
         let svg_skip_failed = self.svg_skip_failed && !request.export;
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
+            self.binds.begin_frame();
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,
                 pipelines: &self.pipelines,
                 uniforms: &mut self.uniforms,
+                binds: &mut self.binds,
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,
@@ -1500,15 +1777,18 @@ impl Renderer {
                 failures: Vec::new(),
                 unsupported: Vec::new(),
             };
-            // Frames are drawn in GL row order and flipped once into the
-            // caller's top-down target (see shaders/composite.wgsl).
-            let gl_rows = exec.pool.take(
-                exec.device,
-                size.width,
-                size.height,
-                target.format(),
-                pm_gpu::target::working_usage(),
-            );
+            // Generic renders flip GL rows into the caller's top-down target.
+            // Standard snapshots draw directly into their readback target.
+            let pooled_gl_rows = (rows == SnapshotRows::TopDown).then(|| {
+                exec.pool.take(
+                    exec.device,
+                    size.width,
+                    size.height,
+                    target.format(),
+                    pm_gpu::target::working_usage(),
+                )
+            });
+            let gl_rows = pooled_gl_rows.as_ref().unwrap_or(target);
             // The viewer's frames draw from the kept bottom of the last one
             // when they start with the same draws (`crate::frame_prefix`).
             let (resolved, kept_legend) = if prefix {
@@ -1529,13 +1809,13 @@ impl Renderer {
                     &mut encoder,
                     &plan,
                     region,
-                    &gl_rows,
+                    gl_rows,
                     &mut self.prefix,
                     key,
                 )
             } else {
                 (
-                    exec.render_comp(&mut encoder, &plan, region, &gl_rows),
+                    exec.render_comp(&mut encoder, &plan, region, gl_rows),
                     Vec::new(),
                 )
             };
@@ -1552,10 +1832,12 @@ impl Renderer {
                 && exec.effects.fallback.fatal.is_none()
                 && !held
                 && !svg_waits;
-            if complete {
-                exec.flip_color(&mut encoder, &gl_rows, target);
+            if complete && rows == SnapshotRows::TopDown {
+                exec.flip_color(&mut encoder, gl_rows, target);
             }
-            exec.taken.push(gl_rows);
+            if let Some(gl_rows) = pooled_gl_rows {
+                exec.taken.push(gl_rows);
+            }
             if let Some(ids) = depth_id.filter(|_| complete) {
                 let id_rows = exec.pool.take(
                     exec.device,
@@ -1597,11 +1879,16 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.end(&mut encoder, &target.view);
         }
+        if let Some(copy) = copy {
+            copy.record(&mut encoder, &target.texture);
+        }
         self.queue.submit([encoder.finish()]);
         self.effects.watchdog.submitted(&self.queue);
+        self.binds.end_frame();
         for t in taken {
             self.pool.give(t);
         }
+        let mut scene3d_meta = crate::scene3d::metadata::collect(&plan, &self.scene3d);
         if prefix {
             if unsupported.is_empty() && pending.is_empty() {
                 self.prefix.remember(std::mem::take(&mut plan.draws));
@@ -1612,6 +1899,7 @@ impl Renderer {
         self.media.flush();
         self.media.scrub = scrub;
         failures.extend(exec_failures);
+        crate::scene3d::metadata::failures(document, &failures, &mut scene3d_meta);
         if !unsupported.is_empty() {
             self.vector.svg.take_misses();
             return Err(RenderError::Unsupported(unsupported));
@@ -1640,7 +1928,11 @@ impl Renderer {
             ));
         }
         let svg_misses = self.vector.svg.take_misses();
-        if (request.export || self.svg_wait)
+        if (request.export
+            || self.svg_wait
+            || svg_misses
+                .iter()
+                .any(|need| need.request.key.texture == Some(true)))
             && svg_misses
                 .iter()
                 .any(|m| !(svg_skip_failed && self.vector.svg.is_failed(&m.request.key)))
@@ -1648,6 +1940,7 @@ impl Renderer {
             return Err(RenderError::SvgRastersPending(svg_misses));
         }
         Ok(Rendered {
+            scene3d_meta,
             quads,
             legend,
             failures,
@@ -1692,6 +1985,52 @@ impl Renderer {
             &self.queue,
             &frame.color.texture,
         )?)
+    }
+
+    /// [`Self::read_rgba`] through a staging buffer the renderer keeps for
+    /// the next read (an export reads every frame): the same values, without
+    /// a new GPU buffer and a packed byte copy per frame.
+    pub fn read_rgba_reusing(&mut self, frame: &Frame) -> Result<Vec<f32>, RenderError> {
+        let out = self.frame_reuse.rgba.take().unwrap_or_default();
+        Ok(self.frame_reuse.readback.read_f32_into(
+            &self.device,
+            &self.queue,
+            &frame.color.texture,
+            out,
+        )?)
+    }
+
+    /// Gives a finished frame's pixels back: the next
+    /// [`Self::read_rgba_reusing`] reads into their allocation.
+    pub fn give_rgba(&mut self, rgba: Vec<f32>) {
+        self.frame_reuse.rgba = Some(rgba);
+    }
+
+    /// Gives a finished frame's color target back: the next [`Self::render`]
+    /// of the same size and format draws into it instead of allocating one.
+    /// The frame is consumed, so nothing can read the target after the next
+    /// render overwrites it.
+    pub fn recycle(&mut self, frame: Frame) {
+        if frame.depth_id.is_none() {
+            self.frame_reuse.target = Some(frame.color);
+        }
+    }
+
+    /// Bytes [`Self::read_rgba_reusing`], [`Self::give_rgba`] and
+    /// [`Self::recycle`] keep for the next frame: the staging buffer, the
+    /// frame target and the pixels.
+    pub fn frame_reuse_bytes(&self) -> u64 {
+        let r = &self.frame_reuse;
+        r.readback.capacity_bytes()
+            + r.target.as_ref().map_or(0, |t| t.bytes())
+            + r.rgba.as_ref().map_or(0, |v| (v.capacity() * 4) as u64)
+    }
+
+    /// Drops what [`Self::read_rgba_reusing`], [`Self::give_rgba`] and
+    /// [`Self::recycle`] kept (at the end of an export, after a one-off
+    /// frame, and on [`Self::trim`]).
+    pub fn release_frame_reuse(&mut self) {
+        self.frame_reuse = FrameReuse::default();
     }
 
     /// Reads the depth and id surface back (r depth, g/b id − 1, a coverage).

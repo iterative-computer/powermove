@@ -216,10 +216,14 @@ impl Renderer {
                 self.pool.give(t);
             }
             let pixels = pm_gpu::readback::read_f32(&self.device, &self.queue, view.texture())?;
+            // TextPlan stores edges; the snapshot transport takes an origin
+            // and extent. Keeping the right/bottom edges here changes the
+            // source row stride when the transport restores the full canvas.
+            let [left, top, right, bottom] = quad.plan.crop;
             return Ok(Some(LayerRaster {
                 pixels: LayerPixels::Float {
                     pixels,
-                    crop: quad.plan.crop,
+                    crop: [left, top, right - left, bottom - top],
                 },
                 canvas: (quad.plan.scene.width, quad.plan.scene.height),
                 box_size: (quad.w, quad.h),

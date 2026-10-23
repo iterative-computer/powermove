@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events';
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { IPC, type ChatGPTAccountStatus, type CodexRunRequest } from '../../shared/ipc';
+import * as codexEnv from './env';
+import * as claudeEnv from '../claude/env';
 
 const mocks = vi.hoisted(() => {
   const cancel = vi.fn(async () => true);
@@ -57,6 +59,8 @@ const mocks = vi.hoisted(() => {
   const forgetWorkspace = vi.fn(async () => undefined);
   const sweepWorkspaces = vi.fn(async () => ['orphan']);
   return {
+    installRuntimeIfNewer: vi.fn(async () => null),
+    installLatestRuntime: vi.fn(async (provider: 'claude' | 'codex') => ({ provider, version: '9.0.0' })),
     forgetWorkspace,
     sweepWorkspaces,
     appOnce: vi.fn(),
@@ -131,6 +135,12 @@ vi.mock('./workspace-lifetime', () => ({
   sweepOrphanWorkspaces: mocks.sweepWorkspaces
 }));
 
+vi.mock('../runtime-updates', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../runtime-updates')>(),
+  installRuntimeIfNewer: mocks.installRuntimeIfNewer,
+  installLatestRuntime: mocks.installLatestRuntime
+}));
+
 import { registerCodexIpc } from './index';
 
 class Sender extends EventEmitter {
@@ -188,6 +198,45 @@ describe('registerCodexIpc', () => {
       codexBinaryPref: () => null,
       openExternal: async () => undefined
     }, mocks.account, mocks.account, mocks.appRunner as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it.each([undefined, '0', '1'])('only disables automatic runtime refresh when the switch is 1 (value: %s)', async (value) => {
+    vi.useFakeTimers();
+    vi.stubEnv('POWERMOVE_DISABLE_RUNTIME_UPDATES', value);
+    vi.stubEnv('CODEX_BINARY', undefined);
+    vi.stubEnv('CLAUDE_BINARY', undefined);
+    vi.spyOn(codexEnv, 'discoverCodexBinary').mockResolvedValue('/test/codex');
+    vi.spyOn(claudeEnv, 'discoverClaudeBinary').mockResolvedValue('/test/claude');
+    const sender = new Sender();
+
+    await handlers.get(IPC.chatgptModels)!({ sender }, undefined);
+    await handlers.get(IPC.claudeModels)!({ sender }, undefined);
+
+    expect(vi.getTimerCount()).toBe(value === '1' ? 0 : 2);
+    expect(mocks.installRuntimeIfNewer).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(20_000);
+    if (value === '1') {
+      expect(mocks.accountStatus).not.toHaveBeenCalled();
+      expect(mocks.installRuntimeIfNewer).not.toHaveBeenCalled();
+    } else {
+      expect(mocks.installRuntimeIfNewer).toHaveBeenCalledWith('codex', '/test/codex');
+      expect(mocks.installRuntimeIfNewer).toHaveBeenCalledWith('claude', '/test/claude');
+    }
+  });
+
+  it('keeps explicit runtime updates available when automatic refresh is disabled', async () => {
+    vi.stubEnv('POWERMOVE_DISABLE_RUNTIME_UPDATES', '1');
+    const sender = new Sender();
+    await expect(handlers.get(IPC.agentRuntimeUpdate)!({ sender }, 'claude')).resolves.toEqual({
+      provider: 'claude', version: '9.0.0'
+    });
+    expect(mocks.installLatestRuntime).toHaveBeenCalledWith('claude');
   });
 
   it('registers every frozen Codex, consent, and artifact channel', () => {

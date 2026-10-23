@@ -129,6 +129,61 @@ fn main() {
             .unwrap();
         assert_eq!(fresh.pixels, a.pixels, "{name}: repainted identically");
     }
+    // Glyph images beyond the atlas: an 80 degree skew of 75 px text at 2x
+    // (150 device px) and a 45 degree rotation of a Zapfino glyph whose
+    // upright outline fits a plot. Skia draws both as paths; neither may
+    // reach the A8 atlas (which panicked on masks over 512 px).
+    let animated = |text: &str, font: &str, size: f64, p: serde_json::Value| {
+        json!({
+            "text": text, "font": font, "weight": 400, "size": size, "color": "#101010",
+            "align": "left", "italic": false,
+            "animators": [{"id": "a1", "name": "transform", "enabled": true, "mode": "stagger",
+                "unit": "characters", "order": "forward", "direction": "in", "easing": "linear",
+                "p": p}]
+        })
+    };
+    let stagger = |key: &str, value: f64| {
+        let mut p = json!({"amount": ch(json!(100)), "delay": ch(json!(0)),
+            "duration": ch(json!(1)), "stagger": ch(json!(0))});
+        p[key] = ch(json!(value));
+        p
+    };
+    let oversized = [
+        (
+            "skew80",
+            animated("Hi", "Arial", 75.0, stagger("skew", 80.0)),
+        ),
+        (
+            "rotated",
+            animated("g", "Zapfino", 50.0, stagger("rotation", 45.0)),
+        ),
+    ];
+    for (name, d) in &oversized {
+        let doc = doc_of("text", d);
+        let raster = |r: &mut Renderer| {
+            r.text_raster(&doc, "Ptest-root", "l", 0.0, 2.0, Precision::Float32)
+                .unwrap()
+                .unwrap()
+        };
+        let a = raster(&mut gpu);
+        let ink = a.pixels.chunks_exact(4).filter(|p| p[3] > 0.5).count();
+        println!(
+            "{name:<8} {}x{} beyond-atlas glyphs: {ink} inked px",
+            a.plan.width(),
+            a.plan.height()
+        );
+        if ink == 0 {
+            failures.push(format!("{name}: the oversized glyph drew nothing"));
+        }
+        if a.plan.scene.items.iter().any(|i| {
+            matches!(&i.content, pm_text::render::scene::ItemContent::GlyphMask { mask, .. }
+                if mask.width.max(mask.height) > 256)
+        }) {
+            failures.push(format!("{name}: a direct mask beyond the atlas"));
+        }
+        gpu.text_gpu().clear();
+        assert_eq!(raster(&mut gpu).pixels, a.pixels, "{name}: deterministic");
+    }
     // Without fonts a text layer is refused.
     let mut bare = Renderer::headless().expect("a Metal device");
     let doc = doc_of("text", &docs[1].2);

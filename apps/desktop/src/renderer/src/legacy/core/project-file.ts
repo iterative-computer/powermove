@@ -5,7 +5,6 @@ import { bridge as hostBridge } from '../../kernel/bridge';
 import { isIncrementalProject, readIncrementalIndex, type LinkedRecord, type ProjectRecord, type SaveMedia } from '../../../../shared/project-incremental';
 import { Sha256, sha256HexOf } from '../../../../shared/sha256';
 import type { PowermoveBridge, FileSaveResult } from '../../../../shared/ipc';
-import { applyEngineStamp } from '../../../../shared/engine-stamp';
 
 type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob: Blob, metadata: any, revision?: string): Promise<boolean>;
   getForSave?(asset: any): Promise<{ blob: Blob; revision: string } | null>;
@@ -14,42 +13,8 @@ type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob:
   /** Host media store (new engine): main copies a range of the open project file into the store. */
   putProjectRange?(readToken: string, source: ProjectMediaRange, asset: any, onBytes?: (bytes: number) => void): Promise<boolean> };
 
-const isLinkedAsset = (asset: any) => asset?.storage === 'linked' && !!asset?.link && typeof asset.link.path === 'string';
-
-/**
- * Export › Project and agent `save_project` (section 21): every linked
- * original is embedded, so the exported file is self-contained as before.
- * Embedded linked assets become copied assets in the exported document and
- * the engine stamp is recomputed, so the copy opens in either engine.
- */
-export function embedLinkedAssets(document: any, embedded: ReadonlySet<string>): number {
-  const assets = (document?.proj || document)?.assets;
-  let changed = 0;
-  for (const [id, asset] of Object.entries<any>(assets || {})) {
-    if (!isLinkedAsset(asset) || !embedded.has(id)) continue;
-    if (!asset.contentHash && asset.link.hash) asset.contentHash = asset.link.hash;
-    if (!asset.sourcePath) asset.sourcePath = asset.link.path;
-    delete asset.storage;
-    delete asset.link;
-    changed++;
-  }
-  applyEngineStamp(document?.proj || document);
-  return changed;
-}
-
-/** Include media reachable only by undo/redo, such as a deleted image. */
-function fileAssets(document: any): Record<string, any> {
-  const assets: Record<string, any> = Object.create(null);
-  for (const entry of document.history?.entries || []) {
-    for (const patch of [...(entry.forward || []), ...(entry.backward || [])]) {
-      if (!patch?.exists || !Array.isArray(patch.path)) continue;
-      if (!patch.path.length) Object.assign(assets, patch.value?.assets || {});
-      else if (patch.path[0] === 'assets' && patch.path.length === 1) Object.assign(assets, patch.value || {});
-      else if (patch.path[0] === 'assets' && patch.path.length === 2 && patch.value?.id) assets[patch.path[1]] = patch.value;
-    }
-  }
-  return Object.assign(assets, (document.proj || document).assets || {});
-}
+import { embedLinkedAssets, fileAssets, isLinkedAsset } from '../../../../shared/project-assets';
+export { embedLinkedAssets } from '../../../../shared/project-assets';
 
 /** Pin immutable Blobs and their storage revisions before any native upload.
  * Only the main process decides which prior file ranges may be reused. */

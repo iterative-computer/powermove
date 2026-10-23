@@ -27,7 +27,10 @@
 //! - `text-paths-*`, glyphs above Skia's atlas limit drawn as paths
 //!   (`render.ts --set paths`);
 //! - `text-source-*`, the real project's text layers as source textures at
-//!   the density their world transform asks for (`capture/source.ts`).
+//!   the density their world transform asks for (`capture/source.ts`);
+//! - `text-transformed-*`, skew and rotation animators on both sides of
+//!   Skia's transformed-size and atlas-size path gates
+//!   (`capture/transformed-project.ts`, then `source.ts --hide-layers`).
 //!
 //! Capture each with `pm-electron-lock bun engine/crates/pm-text/capture/...`.
 //! A full run (neither `PM_TEXT_RASTER` nor `PM_TEXT_ONLY`) on a machine
@@ -102,7 +105,13 @@ fn main() {
 
 /// The capture sets a full run gates, by directory prefix (newest of each).
 #[cfg(target_os = "macos")]
-const CAPTURE_SETS: [&str; 4] = ["text-raster-", "text-closure-", "text-paths-", "text-source-"];
+const CAPTURE_SETS: [&str; 5] = [
+    "text-raster-",
+    "text-closure-",
+    "text-paths-",
+    "text-source-",
+    "text-transformed-",
+];
 
 /// Strict 1-CV measurement plus the explicit FONTS-R snapshot ratchet.
 #[cfg(target_os = "macos")]

@@ -1,4 +1,5 @@
-//! Text rasters on the GPU: Vello coverage pages and the float paint pass
+//! Text rasters on the GPU: native Graphite primitives, platform glyph masks
+//! and Vello coverage pages, painted in order into N32 or float canvases
 //! (`shaders/text.wgsl`), with a content-keyed raster cache.
 //!
 //! Vello 0.11 renders only into `Rgba8Unorm` storage textures and submits
@@ -73,6 +74,8 @@ struct Cached {
 }
 
 pub struct TextGpu {
+    graphite: Option<super::graphite::Gpu>,
+    glyph_atlas: super::graphite::atlas::Atlas,
     vello: Option<vello::Renderer>,
     vello_failed: Option<String>,
     coverage: Coverage,
@@ -80,6 +83,7 @@ pub struct TextGpu {
     texture_layout: wgpu::BindGroupLayout,
     paint: [wgpu::RenderPipeline; 2],
     paint_n32: wgpu::RenderPipeline,
+    paint_bgra: wgpu::RenderPipeline,
     filter: crate::composite::path_masks::PathMaskPipelines,
     sampler: wgpu::Sampler,
     images: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
@@ -211,6 +215,13 @@ impl TextGpu {
             wgpu::TextureFormat::Rgba8Unorm,
             Some(over),
         );
+        let paint_bgra = pipeline(
+            &paint_layout,
+            "vs",
+            "fs_paint",
+            wgpu::TextureFormat::Bgra8Unorm,
+            Some(over),
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("pm text bilinear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -220,6 +231,8 @@ impl TextGpu {
             ..Default::default()
         });
         TextGpu {
+            graphite: None,
+            glyph_atlas: super::graphite::atlas::Atlas::new(),
             vello: None,
             vello_failed: None,
             coverage: Coverage::Auto,
@@ -227,6 +240,7 @@ impl TextGpu {
             texture_layout,
             paint,
             paint_n32,
+            paint_bgra,
             filter: crate::composite::path_masks::PathMaskPipelines::rgba(device),
             sampler,
             images: HashMap::new(),
@@ -252,6 +266,7 @@ impl TextGpu {
         self.cache.clear();
         self.cache_bytes = 0;
         self.images.clear();
+        self.glyph_atlas = super::graphite::atlas::Atlas::new();
     }
 
     pub fn cached_bytes(&self) -> u64 {
@@ -448,13 +463,20 @@ impl TextGpu {
         if let Some(c) = self.cache.get_mut(&(plan.key, precision)) {
             c.used = self.tick;
             self.stats.cache_hits += 1;
+            pm_perf::bump(pm_perf::Counter::TextCacheHits);
             return Ok(c.target.view.clone());
         }
+        pm_perf::bump(pm_perf::Counter::TextCacheMisses);
         let scene = &plan.scene;
         let atlas = atlas::pack(scene, MAX_PAGE);
         let pages = self.pages(device, queue, pool, taken, scene, &atlas)?;
         let (tw, th) = (plan.width(), plan.height());
-        let format = working_format(precision);
+        let format = if plan.canvas_n32 {
+            // Chromium SharedImageFormat::N32Format on desktop platforms.
+            wgpu::TextureFormat::Bgra8Unorm
+        } else {
+            working_format(precision)
+        };
         let raster = Target::new(
             device,
             "pm text raster",
@@ -472,8 +494,45 @@ impl TextGpu {
         }
         // Color glyph textures (uploaded before the passes are recorded).
         let mut images: HashMap<usize, (wgpu::TextureView, [f32; 2])> = HashMap::new();
+        self.glyph_atlas.begin_run();
         for (i, item) in scene.items.iter().enumerate() {
-            if let ItemContent::Image { image, .. } = &item.content {
+            if let ItemContent::GlyphMask { mask, image, .. } = &item.content {
+                // Direct A8 and SDF glyphs share Skia's atlas allocator. Even
+                // when the direct mask uses its cached paint texture, its
+                // allocation affects SDF UV interpolation and rounding.
+                self.glyph_atlas
+                    .reserve_mask(device, mask, image_key(image));
+            }
+            // A full Canvas viewport may exceed Metal's texture limit even
+            // when its ink crop fits. Keep the existing CPU primitive image
+            // for those canvases; never shrink the viewport and change AA.
+            if let ItemContent::Graphite { raster, image, .. } = &item.content
+                && raster.width <= device.limits().max_texture_dimension_2d
+                && raster.height <= device.limits().max_texture_dimension_2d
+            {
+                let native = self
+                    .graphite
+                    .get_or_insert_with(|| super::graphite::Gpu::new(device, queue));
+                let drawn = native.render(
+                    device,
+                    queue,
+                    encoder,
+                    pool,
+                    taken,
+                    raster,
+                    &mut self.glyph_atlas,
+                );
+                // A distance field beyond an atlas plot keeps the CPU
+                // primitive image of the same draws.
+                let drawn = match drawn {
+                    Some(drawn) => drawn,
+                    None => self.image(device, queue, image),
+                };
+                images.insert(i, drawn);
+            } else if let ItemContent::Image { image, .. }
+            | ItemContent::GlyphMask { image, .. }
+            | ItemContent::Graphite { image, .. } = &item.content
+            {
                 images.insert(i, self.image(device, queue, image));
             }
         }
@@ -617,7 +676,9 @@ impl TextGpu {
                         });
                     }
                 }
-                ItemContent::Image { transform, .. } => {
+                ItemContent::Image { transform, .. }
+                | ItemContent::GlyphMask { transform, .. }
+                | ItemContent::Graphite { transform, .. } => {
                     let Some((_, isize)) = images.get(&i) else {
                         continue;
                     };
@@ -633,13 +694,24 @@ impl TextGpu {
                         * transform.inverse()
                         * Affine::translate((origin[0], origin[1]));
                     let [a, bb, c, d, e, f] = inv.as_coeffs();
+                    let mask = matches!(item.content, ItemContent::GlyphMask { .. });
+                    let alpha = (item.color[3] * item.opacity) as f32;
                     out.push(Draw {
                         page: None,
                         image: Some(i),
                         u: ItemUniform {
                             rect,
-                            color: [0.0, 0.0, 0.0, (item.color[3] * item.opacity) as f32],
-                            params: [1.0, 1.0, tw, th],
+                            color: if mask {
+                                [
+                                    item.color[0] as f32 * alpha,
+                                    item.color[1] as f32 * alpha,
+                                    item.color[2] as f32 * alpha,
+                                    alpha,
+                                ]
+                            } else {
+                                [0.0, 0.0, 0.0, alpha]
+                            },
+                            params: [if mask { 3.0 } else { 1.0 }, 1.0, tw, th],
                             inv0: [a as f32, c as f32, e as f32, 0.0],
                             inv1: [bb as f32, d as f32, f as f32, 0.0],
                             isize: [isize[0], isize[1], 0.0, 0.0],
@@ -717,10 +789,10 @@ impl TextGpu {
             multiview_mask: None,
         });
         *cleared = true;
-        pass.set_pipeline(if target.format() == wgpu::TextureFormat::Rgba8Unorm {
-            &self.paint_n32
-        } else {
-            &self.paint[format_index(precision)]
+        pass.set_pipeline(match target.format() {
+            wgpu::TextureFormat::Rgba8Unorm => &self.paint_n32,
+            wgpu::TextureFormat::Bgra8Unorm => &self.paint_bgra,
+            _ => &self.paint[format_index(precision)],
         });
         for (k, d) in draws.iter().enumerate() {
             let bind = match (d.page, d.image) {
@@ -772,7 +844,9 @@ impl TextGpu {
                 }
                 u
             }
-            ItemContent::Image { .. } => Some(item.bounds.inflate(1.0, 1.0)),
+            ItemContent::Image { .. }
+            | ItemContent::GlyphMask { .. }
+            | ItemContent::Graphite { .. } => Some(item.bounds.inflate(1.0, 1.0)),
         };
         let Some(own) = own else { return };
         let crop = Rect::new(
@@ -873,7 +947,7 @@ fn vello_page(scene: &TextScene, atlas: &Atlas, page: usize) -> vello::Scene {
 
 /// The CPU reference of a plan's raster (tests).
 pub fn render_cpu(plan: &TextPlan) -> pm_text::render::paint::Image {
-    let full = pm_text::render::paint::render_cpu_with_filter(
+    let full = pm_text::render::paint::render_cpu_with_format(
         &plan.scene,
         Some(&|img, origin, canvas, sigma| {
             use pm_vector::canvas2d::filter::{BlurPlan, Rect};
@@ -912,6 +986,7 @@ pub fn render_cpu(plan: &TextPlan) -> pm_text::render::paint::Image {
                 data,
             }
         }),
+        plan.canvas_n32,
     );
     let (w, h) = (plan.width(), plan.height());
     let mut out = pm_text::render::paint::Image::new(w, h);

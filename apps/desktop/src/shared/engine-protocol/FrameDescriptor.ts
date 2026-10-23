@@ -3,6 +3,7 @@ import type { DepthIdSurface } from "./DepthIdSurface";
 import type { FrameQuality } from "./FrameQuality";
 import type { OverlayGeometry } from "./OverlayGeometry";
 import type { Revision } from "./Revision";
+import type { Scene3dMeta } from "./Scene3dMeta";
 import type { Seq } from "./Seq";
 import type { SurfaceFormat } from "./SurfaceFormat";
 import type { Ticks } from "./Ticks";
@@ -27,7 +28,7 @@ pts: Ticks,
 /**
  * The exact revision rendered (≥ the request's minimum).
  */
-revision: Revision, colorSpace: ViewerColorSpace, format: SurfaceFormat, quality: FrameQuality, overlay: OverlayGeometry | null, depthId: DepthIdSurface | null, 
+revision: Revision, colorSpace: ViewerColorSpace, format: SurfaceFormat, quality: FrameQuality, overlay: OverlayGeometry | null, depthId: DepthIdSurface | null, scene3dMeta: Array<Scene3dMeta>, 
 /**
  * The viewer state the frame shows ([`ViewerState::view_seq`]): with
  * `revision`, it tags the frame so overlays drawn from its geometry match

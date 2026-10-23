@@ -175,6 +175,7 @@ export const WEB = {
 } as const;
 
 export interface WebHello {
+  nativeHidden?: boolean;
   node: string;
   version: string;
   platform: string;

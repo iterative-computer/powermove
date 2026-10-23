@@ -52,6 +52,8 @@ pub mod matte;
 pub mod motion_path;
 pub mod node;
 pub mod parenting;
+pub mod query3d;
+pub mod recipe;
 pub mod retime;
 pub mod scene3d;
 pub mod scope;

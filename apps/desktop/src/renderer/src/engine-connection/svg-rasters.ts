@@ -38,6 +38,7 @@ import type { CompatFrameRequest, SvgRasterKey, SvgRasterRequest } from '../../.
 export const MAX_SVG_BAND_BYTES = 8 * 1024 * 1024;
 /** Largest bucket edge (`svgRasterDimensions`' limit, MAX_SVG_EDGE). */
 export const MAX_SVG_EDGE = 8192;
+export const MAX_SVG_TEXTURE_EDGE = 16384;
 /** Rasters drawn at once for the viewer's asks (each holds a canvas). */
 export const MAX_CONCURRENT = 4;
 /** Viewer asks `SvgRasters.asks` keeps. */
@@ -90,6 +91,41 @@ export class SvgRasterCanvas {
     }
     if (!this.context) throw new SvgRasterError('unavailable', 'This window has no WebGL2 to read SVG rasters back with.');
     return this.context;
+  }
+
+  /** three.js `new Texture(img)`: no canvas intermediate, no premultiply,
+   * flipY enabled, and no browser color conversion. SVG maps use the
+   * image's intrinsic dimensions; 2D SVG bucket pixels have another key. */
+  drawTexture(image: CanvasImageSource, width: number, height: number): Uint8Array {
+    const gl = this.gl(), texture = gl.createTexture(), framebuffer = gl.createFramebuffer();
+    const source = image as HTMLImageElement;
+    let resized: OffscreenCanvas | null = null;
+    // three.js resizeImage: only oversized sources use a 2D canvas.
+    if ((source.width || source.naturalWidth) > width || (source.height || source.naturalHeight) > height) {
+      resized = new OffscreenCanvas(width, height);
+      resized.getContext('2d')!.drawImage(image, 0, 0, width, height);
+    }
+    try {
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, width, height);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, (resized ?? image) as TexImageSource);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new SvgRasterError('unavailable', 'The SVG map could not be read back.');
+      const out = new Uint8Array(width * height * 4);
+      gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, out);
+      return out;
+    } finally {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.deleteFramebuffer(framebuffer);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.deleteTexture(texture);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
+    }
   }
 
   draw(image: CanvasImageSource, width: number, height: number): Uint8Array {
@@ -246,7 +282,7 @@ export interface SvgPostTarget {
   post(event: Record<string, unknown> & { type: string }): boolean;
 }
 
-const keyText = (k: SvgRasterKey) => `${k.content}:${k.width}x${k.height}`;
+const keyText = (k: SvgRasterKey) => `${k.content}:${k.width}x${k.height}${k.texture ? ":texture" : ""}`;
 
 function isSvg(asset: SvgAsset): boolean {
   return asset.format === 'svg' && (asset.kind === undefined || asset.kind === 'image');
@@ -340,8 +376,9 @@ export class SvgRasters {
   }
 
   private validate(key: SvgRasterKey): void {
-    if (!(Number.isInteger(key.width) && Number.isInteger(key.height) && key.width >= 1 && key.height >= 1 && key.width <= MAX_SVG_EDGE && key.height <= MAX_SVG_EDGE)) {
-      throw new SvgRasterError('size', `A ${key.width}×${key.height} SVG raster is outside 1..${MAX_SVG_EDGE}.`);
+    const max = key.texture ? MAX_SVG_TEXTURE_EDGE : MAX_SVG_EDGE;
+    if (!(Number.isInteger(key.width) && Number.isInteger(key.height) && key.width >= 1 && key.height >= 1 && key.width <= max && key.height <= max)) {
+      throw new SvgRasterError('size', `A ${key.width}×${key.height} SVG raster is outside 1..${max}.`);
     }
   }
 
@@ -351,7 +388,8 @@ export class SvgRasters {
     this.validate(request.key);
     const asset = this.options.asset(request.asset);
     const content = asset ? await this.content(asset) : null;
-    const data = this.canvas.draw(this.checked(request, content), request.key.width, request.key.height);
+    const image = this.checked(request, content);
+    const data = request.key.texture ? this.canvas.drawTexture(image, request.key.width, request.key.height) : this.canvas.draw(image, request.key.width, request.key.height);
     this.stats.drawn++;
     return data;
   }
@@ -361,7 +399,8 @@ export class SvgRasters {
   drawSync(request: SvgRasterRequest): Uint8Array {
     this.validate(request.key);
     const asset = this.options.asset(request.asset);
-    const data = this.canvas.draw(this.checked(request, asset ? this.contentSync(asset) : null), request.key.width, request.key.height);
+    const image = this.checked(request, asset ? this.contentSync(asset) : null);
+    const data = request.key.texture ? this.canvas.drawTexture(image, request.key.width, request.key.height) : this.canvas.draw(image, request.key.width, request.key.height);
     this.stats.drawn++;
     return data;
   }
@@ -426,11 +465,11 @@ export class SvgRasters {
   }
 
   /** A job engine frame's raster (main's `compatFrame` ask). */
-  async produce(request: CompatFrameRequest): Promise<{ key: string; width: number; height: number; format: 'rgba8Premultiplied'; origin: [number, number]; scale: number; data: Uint8Array }> {
+  async produce(request: CompatFrameRequest): Promise<{ key: string; width: number; height: number; format: 'rgba8Premultiplied' | 'rgba8Straight'; origin: [number, number]; scale: number; data: Uint8Array }> {
     const svg = request.svg;
     if (!svg) throw new SvgRasterError('missing', 'The ask names no SVG raster.');
     const data = await this.slot(() => this.draw(svg));
     this.stats.produced++;
-    return { key: keyText(svg.key), width: svg.key.width, height: svg.key.height, format: 'rgba8Premultiplied', origin: [0, 0], scale: 1, data };
+    return { key: keyText(svg.key), width: svg.key.width, height: svg.key.height, format: svg.key.texture ? 'rgba8Straight' : 'rgba8Premultiplied', origin: [0, 0], scale: 1, data };
   }
 }

@@ -41,7 +41,7 @@ it('accounts for every document tool in the public spec and every harness dispat
   const names = new Set([...POWERMOVE_AGENT_TOOLS.map(t => t.name), ...[...harness.matchAll(/request.tool === '([^']+)'/g)].map(m => m[1]!), '__composition_info', 'check_project']);
   const covered = new Set(CONTRACT_SEQUENCE.map(c => c.tool));
   // Bridge-internal requests. `__validate_panel_target` is the panel tools' (DOM route) generation check, as `__panel_bounds`.
-  const internal = new Set(['__panel_bounds', '__prepare_panel_input', '__validate_panel_target', '__agent_thread_control', '__mcp_export_video', '__mcp_save_project', '__media_source']);
+  const internal = new Set(['__panel_bounds', '__prepare_panel_input', '__validate_panel_target', '__agent_thread_control', '__mcp_export_video', '__mcp_save_project', '__engine_save_plan', '__media_source']);
   expect([...names].filter(n => !routed.has(n) && !internal.has(n) && !covered.has(n) && !CONTRACT_EXCLUSIONS[n]).sort()).toEqual([]);
   const actions = new Set(CONTRACT_SEQUENCE.filter(c => c.tool === 'manage_media').map(c => c.arguments.operation));
   expect([...actions].sort()).toEqual(['create_folder', 'delete', 'delete_folder', 'move', 'move_folder', 'rename', 'rename_folder']);

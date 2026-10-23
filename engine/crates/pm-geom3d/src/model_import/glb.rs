@@ -116,7 +116,14 @@ impl GlbWriter {
         while !text.len().is_multiple_of(4) {
             text.push(b' ');
         }
-        let total = 12 + 8 + text.len() + if self.bin.is_empty() { 0 } else { 8 + self.bin.len() };
+        let total = 12
+            + 8
+            + text.len()
+            + if self.bin.is_empty() {
+                0
+            } else {
+                8 + self.bin.len()
+            };
         let mut out = Vec::with_capacity(total);
         out.extend_from_slice(b"glTF");
         out.extend_from_slice(&2u32.to_le_bytes());
@@ -140,7 +147,10 @@ mod tests {
     #[test]
     fn writes_a_glb_the_loader_reads() {
         let mut w = GlbWriter::default();
-        let pos = w.floats(&[[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], true);
+        let pos = w.floats(
+            &[[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            true,
+        );
         let idx = w.indices(&[0, 1, 2]);
         let mut doc = Map::new();
         doc.insert("asset".into(), json!({ "version": "2.0" }));
@@ -153,7 +163,10 @@ mod tests {
         let glb = w.finish(doc);
         assert_eq!(glb.len() % 4, 0);
         let (model, _, facts) = crate::model_import::import(&glb).unwrap();
-        assert_eq!(model.meshes[0].primitives[0].indices.as_deref(), Some(&[0, 1, 2][..]));
+        assert_eq!(
+            model.meshes[0].primitives[0].indices.as_deref(),
+            Some(&[0, 1, 2][..])
+        );
         assert_eq!((facts.vertices, facts.triangles), (3, 1));
     }
 }

@@ -554,6 +554,7 @@ export function registerCodexIpc(
   // for a newer runtime and re-announces so the pickers refresh.
   const runtimeChecked = new Set<RuntimeProvider>();
   const refreshRuntime = async (provider: RuntimeProvider): Promise<void> => {
+    if (process.env.POWERMOVE_DISABLE_RUNTIME_UPDATES === '1') return;
     if (runtimeChecked.has(provider)) return;
     runtimeChecked.add(provider);
     // Let the app finish booting before any network or disk work starts.

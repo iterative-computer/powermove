@@ -11,7 +11,17 @@
 //! reproduces today's ANGLE outcome (skipped and reported, turned off, or a
 //! named job error). A transient failure leaves it unknown; the runner's
 //! retry and backoff decide when it is asked for again.
+//!
+//! Only the process whose runner is the reference a namespace names may write
+//! to it. The desktop's interactive and job engines compare against
+//! Electron's WebGL runner and own its `angle-parity` directory. The hidden
+//! MCP host and the CLIs compare against a different browser (Playwright's
+//! Chromium, possibly SwiftShader without a GUI session), so they open that
+//! directory read only ([`Parity::set_read_only`]): they honour the desktop's
+//! runner pins and native verifications, and keep their own first-use
+//! decisions in memory, never as markers the desktop would trust.
 use std::collections::{HashMap, VecDeque};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -20,6 +30,50 @@ use crate::shader_layers::{FallbackFailure, FallbackPixels};
 /// How often a cached native verification looks for a pin another process
 /// wrote (one `stat`-sized read per program per period, not per draw).
 const PIN_CHECK: Duration = Duration::from_millis(500);
+
+/// The browser half of the probe environment (desktop: Electron/Chromium and
+/// engine identity). Setting it enables first-use probing.
+pub const ENVIRONMENT_ENV: &str = "POWERMOVE_ENGINE_PARITY_ENV";
+/// The shader cache whose `angle-parity` directory holds the decisions.
+pub const CACHE_ENV: &str = "POWERMOVE_ENGINE_SHADER_CACHE";
+/// `read-only`: honour the directory's decisions but never write any (hosts
+/// whose runner is not the namespace's reference browser). Any other value
+/// is refused, so a misspelling cannot silently grant write access.
+pub const STORE_ENV: &str = "POWERMOVE_ENGINE_PARITY_STORE";
+
+/// Where a renderer's probe decisions come from, read from its environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeStore {
+    pub browser: String,
+    pub directory: Option<PathBuf>,
+    pub read_only: bool,
+}
+
+impl ProbeStore {
+    /// `None` without [`ENVIRONMENT_ENV`] (probing stays off). An unknown
+    /// [`STORE_ENV`] value fails closed as read only.
+    pub fn from_environment(var: impl Fn(&str) -> Option<OsString>) -> Option<ProbeStore> {
+        let browser = var(ENVIRONMENT_ENV)?.into_string().ok()?;
+        let directory = var(CACHE_ENV).map(|d| PathBuf::from(d).join("angle-parity"));
+        let read_only = match var(STORE_ENV) {
+            None => false,
+            Some(value) if value.is_empty() => false,
+            Some(value) => {
+                if value != "read-only" {
+                    eprintln!(
+                        "{STORE_ENV}={value:?} is not 'read-only'; shader probe decisions stay in memory"
+                    );
+                }
+                true
+            }
+        };
+        Some(ProbeStore {
+            browser,
+            directory,
+            read_only,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -40,6 +94,9 @@ pub struct Parity {
     present: HashMap<String, String>,
     /// When each cached native verification last looked for a pin on disk.
     checked: HashMap<String, Instant>,
+    /// Decisions are kept in memory only; the directory is read, never
+    /// written. Sticky: no later `configure` can grant write access.
+    read_only: bool,
 }
 
 impl Parity {
@@ -53,6 +110,16 @@ impl Parity {
         self.pending_order.clear();
         self.present.clear();
         self.checked.clear();
+    }
+
+    /// Never write a decision to the configured directory again (see the
+    /// module notes). Persisted pins and verifications are still honoured.
+    pub fn set_read_only(&mut self) {
+        self.read_only = true;
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn environment(&self) -> Option<&str> {
@@ -234,6 +301,9 @@ impl Parity {
         let Some(dir) = &self.directory else {
             return;
         };
+        if self.read_only {
+            return;
+        }
         let bytes: &[u8] = if verdict == Verdict::Runner {
             b"runner\n"
         } else {
@@ -366,6 +436,107 @@ mod tests {
         std::thread::sleep(PIN_CHECK);
         assert_eq!(viewer.verdict("stable"), Verdict::Runner);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_read_only_namespace_honours_the_desktop_and_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("pm-parity-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let environment = "desktop electron; gpu; pipeline";
+        let mut desktop = Parity::default();
+        desktop.configure(Some(environment.into()), Some(dir.clone()));
+        desktop.judge("desktop pinned", &pixels(0.5), &pixels(0.8));
+        desktop.judge("desktop verified", &pixels(0.5), &pixels(0.5));
+        let before = listing(&dir);
+        assert_eq!(before.len(), 2);
+
+        let mut hidden = Parity::default();
+        hidden.set_read_only();
+        hidden.configure(Some(environment.into()), Some(dir.clone()));
+        assert!(hidden.read_only(), "configure cannot grant write access");
+        assert_eq!(hidden.verdict("desktop pinned"), Verdict::Runner);
+        assert_eq!(hidden.verdict("desktop verified"), Verdict::NativeVerified);
+        // First probes by a host whose reference is another browser: a match,
+        // a mismatch and a lasting runner failure are decided in memory.
+        assert_eq!(
+            hidden.judge("first probe", &pixels(0.5), &pixels(0.5)),
+            Verdict::NativeVerified
+        );
+        assert_eq!(
+            hidden.judge("first mismatch", &pixels(0.5), &pixels(0.8)),
+            Verdict::Runner
+        );
+        hidden.start("r", "lasting failure", pixels(0.5));
+        hidden.failed(
+            "r",
+            &FallbackFailure {
+                reason: "compile".into(),
+                message: String::new(),
+            },
+        );
+        assert_eq!(hidden.verdict("first probe"), Verdict::NativeVerified);
+        assert_eq!(hidden.verdict("first mismatch"), Verdict::Runner);
+        assert_eq!(hidden.verdict("lasting failure"), Verdict::Runner);
+        assert_eq!(
+            listing(&dir),
+            before,
+            "no marker, temporary or pin was written"
+        );
+
+        // The desktop still has to compare these programs with its own runner.
+        let mut later = Parity::default();
+        later.configure(Some(environment.into()), Some(dir.clone()));
+        for source in ["first probe", "first mismatch", "lasting failure"] {
+            assert_eq!(later.verdict(source), Verdict::Unknown, "{source}");
+        }
+        // A pin the desktop writes later still reaches the read-only host.
+        later.judge("first probe", &pixels(0.5), &pixels(0.9));
+        std::thread::sleep(PIN_CHECK);
+        assert_eq!(hidden.verdict("first probe"), Verdict::Runner);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn listing(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn the_store_mode_is_read_from_the_environment_and_fails_closed() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| OsString::from(*v))
+            }
+        };
+        assert_eq!(
+            ProbeStore::from_environment(env(&[(CACHE_ENV, "/c")])),
+            None
+        );
+        let desktop =
+            ProbeStore::from_environment(env(&[(ENVIRONMENT_ENV, "desktop"), (CACHE_ENV, "/c")]))
+                .unwrap();
+        assert_eq!(desktop.directory, Some(PathBuf::from("/c/angle-parity")));
+        assert!(!desktop.read_only);
+        for mode in ["read-only", "readonly", "0"] {
+            let hidden = ProbeStore::from_environment(|name: &str| match name {
+                ENVIRONMENT_ENV => Some("desktop".into()),
+                STORE_ENV => Some(mode.into()),
+                _ => None,
+            })
+            .unwrap();
+            assert!(hidden.read_only, "{mode}");
+            assert_eq!(hidden.directory, None);
+        }
     }
 
     #[test]

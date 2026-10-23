@@ -289,7 +289,7 @@ impl Profile {
         bitmap_snap: None,
     };
 
-    fn as_path(&self, size: f64) -> bool {
+    pub(crate) fn as_path(&self, size: f64) -> bool {
         // `SubRunContainer`: masks and distance fields only below the
         // maximum size (`approximateDeviceTextSize < maxMaskSize`).
         self.path_above.is_some_and(|p| size >= p)

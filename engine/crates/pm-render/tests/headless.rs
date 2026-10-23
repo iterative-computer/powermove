@@ -8,7 +8,7 @@ mod support;
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::{PixelRect, Size};
-use pm_render::{Feature, MapResolver, RenderRequest, Renderer, unsupported};
+use pm_render::{Feature, MapResolver, RenderRequest, Renderer, SnapshotRows, unsupported};
 use serde_json::{Value, json};
 use support::doc::*;
 use support::{repo_root, ticks};
@@ -500,12 +500,9 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
     assert!(f.contains(&Feature::ProjectColor), "{f:?}");
     // The 3D scene pass draws shadows, every light type, several objects
     // per composition (depth sets), transparency, every primitive and
-    // source kind, missing models, and maps; what it routes is listed.
-    let scene = |f: &[Feature], what: &str| {
-        f.iter()
-            .any(|x| matches!(x, Feature::Scene3d(s) if s.contains(what)))
-    };
-    let no_3d = |f: &[Feature]| !f.iter().any(|x| matches!(x, Feature::Scene3d(_)));
+    // source kind, missing and imported models, and maps: nothing about a
+    // 3D layer is listed (a map's still meets the image layer checks).
+    let no_3d = |f: &[Feature]| f.is_empty();
     let f = variant(|d| {
         let i = layer_at(d, "cam");
         d["layers"][i]["d"]["data"]["environment"]["shadows"] = json!(true);
@@ -536,32 +533,37 @@ fn capability_check_lists_what_the_renderer_cannot_draw() {
         d["layers"][i]["d"]["data"]["object"]["material"]["maps"] = json!({ "color": "tex" });
     });
     assert!(no_3d(&f), "{f:?}");
-    // An imported model that exists is the glTF lane's.
+    // An imported model: drawn, or today's missing-model box when neither
+    // importer loads its file (`gltf-acceptance.test.ts`).
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "assetId": "model" });
         d["assets"]["model"] =
             json!({ "id": "model", "kind": "model", "format": "glb", "name": "m.glb" });
     });
-    assert!(scene(&f, "imported models"), "{f:?}");
+    assert!(no_3d(&f), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["material"]["maps"] = json!({ "color": "tex" });
         d["assets"]["tex"] =
             json!({ "id": "tex", "kind": "image", "format": "svg", "name": "t.svg" });
     });
-    assert!(scene(&f, "SVG texture maps"), "{f:?}");
+    // SVG maps are Chromium's raster (decision S1).
+    assert!(no_3d(&f), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["generation"] =
             json!({ "groupId": "g", "partId": "p" });
     });
-    assert!(scene(&f, "recipe parts"), "{f:?}");
+    // Recipe parts draw natively (`pm_eval::recipe`, the 3D lane's).
+    assert!(no_3d(&f), "{f:?}");
     let f = variant(|d| {
         let i = layer_at(d, "obj");
         d["layers"][i]["d"]["data"]["object"]["source"] = json!({ "primitive": "knot" });
     });
-    assert!(scene(&f, "knot primitives"), "{f:?}");
+    // An unknown primitive fails the composition's object layers at draw
+    // time, as today's `compositionScene` throws (`corrupt-scenes.test.ts`).
+    assert!(no_3d(&f), "{f:?}");
     // Nested compositions are checked too.
     let f = variant(|d| {
         d["comps"]["inner"]["layers"]
@@ -775,6 +777,107 @@ fn render_into_a_callers_target_equals_render() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn snapshot_row_order_matches_generic_render_for_standard_and_linear() {
+    let width = 16;
+    let height = 8;
+    let request = RenderRequest::at_scale(Size::new(width, height), 1.0, Precision::Float16);
+    let resolver = MapResolver::default();
+    let mut renderer = Renderer::headless().unwrap();
+    let mut ring = pm_gpu::readback::ReadbackRing::default();
+    for linear in [false, true] {
+        let mut source = project(
+            width,
+            height,
+            1.0,
+            no_fill(),
+            vec![layer(
+                "tile",
+                "solid",
+                json!({ "color": "#DF7030", "w": 8, "h": 4 }),
+                8.0,
+                0.0,
+                1.0,
+            )],
+        );
+        source["color"] = json!({ "mode": "standard", "linearBlending": linear });
+        let doc = load(&source);
+        let target = || {
+            pm_gpu::Target::new(
+                renderer.device(),
+                "snapshot rows",
+                width,
+                height,
+                wgpu::TextureFormat::Rgba16Float,
+                pm_gpu::target::working_usage(),
+            )
+        };
+        let generic = target();
+        let snapshot = target();
+        renderer
+            .render_into(
+                &doc,
+                "Ptest-root",
+                ticks(0.0),
+                &request,
+                &resolver,
+                &generic,
+                None,
+            )
+            .unwrap();
+        let (ticket, copy) = ring
+            .reserve(renderer.device(), &snapshot.texture, 64 * 1024 * 1024)
+            .unwrap()
+            .unwrap();
+        let (_, rows) = renderer
+            .render_snapshot_into_copy(
+                &doc,
+                "Ptest-root",
+                ticks(0.0),
+                &request,
+                &resolver,
+                &snapshot,
+                &copy,
+            )
+            .unwrap();
+        ring.start_map(ticket, || {});
+        renderer
+            .device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let expected =
+            pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &generic.texture)
+                .unwrap();
+        let raw = ring
+            .try_with_mapped_rows(
+                ticket,
+                |data, row, stride, height| {
+                    (0..height)
+                        .flat_map(|y| data[y * stride..y * stride + row].iter().copied())
+                        .collect::<Vec<_>>()
+                },
+                64 * 1024 * 1024,
+            )
+            .unwrap()
+            .unwrap();
+        let row = width as usize * 8;
+        assert_ne!(&expected[..row], &expected[expected.len() - row..]);
+        let normalized: Vec<_> = match rows {
+            SnapshotRows::TopDown => raw,
+            SnapshotRows::Gl => raw.chunks_exact(row).rev().flatten().copied().collect(),
+        };
+        assert_eq!(
+            rows,
+            if linear {
+                SnapshotRows::TopDown
+            } else {
+                SnapshotRows::Gl
+            }
+        );
+        assert_eq!(normalized, expected);
+    }
 }
 
 #[test]
