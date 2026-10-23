@@ -489,6 +489,59 @@ fn automation_steps_from_the_play_start() {
     drop(playback);
 }
 
+/// A project whose only audio clip is offline plays on a running clock as
+/// today's does (today's transport never waits on a missing clip): the
+/// producer feeds silence, so the device never underruns.
+#[test]
+fn an_offline_only_clip_keeps_the_clock_fed() {
+    native_dsp_diagnostics_enabled();
+    let cache = SourceCache::new(16 << 20, 2);
+    let (mut playback, side) = Playback::start_headless(
+        MixFormat::stereo(SR),
+        cache.clone(),
+        PlaybackConfig::default(),
+        SR,
+        2,
+        LATENCY_US,
+    )
+    .unwrap();
+    let doc = project(
+        30.0,
+        6.0,
+        &[audio("A", "missing", 0.0, 6.0, "", "")],
+        &[],
+        "",
+    );
+    let problems = playback
+        .set_project(Arc::new(doc), "C", &|_: &str| None)
+        .unwrap();
+    assert_eq!(problems.len(), 1, "the clip is reported missing");
+    let mut dev = SimDevice::new(side, SR, 2, 0.0);
+    // Paused with the device open (the app warms it for any audible clip).
+    dev.run(60);
+    let paused = playback.stats();
+    assert_eq!(paused.underruns, 0, "paused: {paused:?}");
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    dev.run(150);
+    let played = playback.stats();
+    assert!(
+        played.played_frames >= paused.played_frames + 150 * 512,
+        "{played:?}"
+    );
+    playback.command(TransportCommand::Pause).unwrap();
+    dev.run(60);
+    let stats = playback.stats();
+    let clock = playback.clock().expect("the clock runs");
+    assert!(clock.media_time.get() > 0, "the playhead advances");
+    assert_eq!(stats.underruns, 0, "{stats:?}");
+    assert!(playback.shutdown());
+    cache.shutdown();
+}
+
 #[test]
 fn pause_seek_loop_and_scrub() {
     let dir = temp_dir("transport");

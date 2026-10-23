@@ -75,6 +75,9 @@ pub struct Ring {
     /// Chunks of older epochs are skipped by the consumer.
     epoch: AtomicU32,
     underruns: AtomicU64,
+    /// Whether the transport runs, so an empty ring is a miss
+    /// ([`Ring::set_expecting`]).
+    expecting: std::sync::atomic::AtomicBool,
     /// Frames the consumer has played (all epochs).
     played: AtomicU64,
     written: AtomicU64,
@@ -126,6 +129,7 @@ impl Ring {
             tail: AtomicUsize::new(0),
             epoch: AtomicU32::new(0),
             underruns: AtomicU64::new(0),
+            expecting: std::sync::atomic::AtomicBool::new(true),
             played: AtomicU64::new(0),
             written: AtomicU64::new(0),
             retired: AtomicU64::new(0),
@@ -189,6 +193,14 @@ impl Ring {
         self.epoch_base
             .store(self.written.load(Ordering::Relaxed), Ordering::Relaxed);
         self.epoch.store(epoch, Ordering::Release);
+    }
+
+    /// Whether the producer is running a playback: a callback that finds
+    /// the ring empty counts as an underrun only then. Paused or stopped,
+    /// the device plays silence by design (today's context does the same
+    /// with nothing scheduled), so an idle open device is not starving.
+    pub fn set_expecting(&self, running: bool) {
+        self.expecting.store(running, Ordering::Release);
     }
 
     pub fn underruns(&self) -> u64 {
@@ -352,7 +364,9 @@ impl Consumer {
             let tail = ring.tail.load(Ordering::Relaxed);
             let head = ring.head.load(Ordering::Acquire);
             if tail == head {
-                ring.underruns.fetch_add(1, Ordering::Relaxed);
+                if ring.expecting.load(Ordering::Acquire) {
+                    ring.underruns.fetch_add(1, Ordering::Relaxed);
+                }
                 break;
             }
             // SAFETY: tail is published and owned by this consumer.

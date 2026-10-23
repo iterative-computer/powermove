@@ -2269,6 +2269,7 @@ impl RenderThread {
                         self.epoch_start =
                             Some((self.transport.epoch(), self.transport.position()));
                         self.ring.set_epoch(self.transport.epoch());
+                        self.ring.set_expecting(true);
                         self.stopped_published = false;
                         self.stop_pending = false;
                         true
@@ -2445,6 +2446,7 @@ impl RenderThread {
             .start_timing
             .running
             .store(false, Ordering::Relaxed);
+        self.ring.set_expecting(false);
         if self.stopped_published {
             return;
         }
@@ -2827,6 +2829,8 @@ impl RenderThread {
                     // run's end position once it has.
                     self.stopped_published = false;
                     self.stop_pending = true;
+                    // What is queued plays out; nothing more is due.
+                    self.ring.set_expecting(false);
                     self.shared
                         .start_timing
                         .running
