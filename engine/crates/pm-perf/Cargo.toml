@@ -1,0 +1,12 @@
+[package]
+name = "pm-perf"
+description = "Deterministic work counters: GPU calls, uploads, readbacks, heap allocations, cache hits (docs/engine/perfbench.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# No dependencies: the vendored wgpu front crate (engine/third_party/wgpu)
+# counts its calls here, and so does every engine crate.
+[dependencies]
