@@ -114,6 +114,7 @@ pub enum Applied {
     /// A band that did not match the raster it continues (another size or
     /// format under the same key): the partial raster starts over.
     Restarted,
+    /// The producer took a layer back: the answers and rasters forgotten.
     Forgot(usize),
     /// The session's producers changed.
     Producers,
@@ -128,16 +129,20 @@ pub enum Applied {
 }
 
 impl Applied {
-    /// Whether a frame waiting on the session's answers may draw now.
-    pub fn unblocks(self) -> bool {
-        matches!(
-            self,
-            Applied::Complete
-                | Applied::Answered
-                | Applied::Evicted
-                | Applied::Producers
-                | Applied::Forgot(_)
-        )
+    /// Whether the message redraws a view. Answers only when a frame
+    /// waits for them (`waiting`: a playback frame kept in its slot, or the
+    /// paused frame): answers for other frames (the lookahead, a preroll)
+    /// would present an already complete paused frame again, a
+    /// `frame:rendered` today's compositor never sends. A changed producer
+    /// list, or answers the producer took back (an invalidation), always:
+    /// what is shown may change.
+    pub fn redraws(self, waiting: bool) -> bool {
+        match self {
+            Applied::Producers => true,
+            Applied::Forgot(n) => n > 0,
+            Applied::Complete | Applied::Answered | Applied::Evicted => waiting,
+            Applied::Band | Applied::Restarted | Applied::Ignored => false,
+        }
     }
 }
 
@@ -266,17 +271,24 @@ impl CompatStore {
     pub fn apply(&mut self, key: Key, message: CompatMessage) -> Applied {
         match message {
             CompatMessage::Forget { composition, layer } => {
+                let answers = self.answers.len();
                 self.answers
                     .retain(|a, _| !(a.0 == key && a.1 == composition && a.2 == layer));
+                let answers = answers - self.answers.len();
                 self.asked
                     .retain(|a, _| !(a.0 == key && a.1 == composition && a.2 == layer));
-                Applied::Forgot(self.forget_layer(key, &composition, &layer))
+                // Pass-through answers count too: the layer may be drawn
+                // differently now.
+                Applied::Forgot(answers + self.forget_layer(key, &composition, &layer))
             }
             CompatMessage::Producers { sources } => {
                 let before = self
                     .producers
                     .insert(key, sources.clone())
                     .unwrap_or_default();
+                // The same list again (a window re-announcing it) changes
+                // nothing that is shown.
+                let changed = before != sources;
                 let gone: Vec<CompatSource> = before
                     .into_iter()
                     .filter(|s| !sources.contains(s))
@@ -301,7 +313,11 @@ impl CompatStore {
                         self.drawn.remove(&k);
                     }
                 }
-                Applied::Producers
+                if changed {
+                    Applied::Producers
+                } else {
+                    Applied::Ignored
+                }
             }
             CompatMessage::Native(n) => {
                 let id = answer_id(
@@ -814,12 +830,45 @@ mod tests {
     }
 
     #[test]
+    fn only_a_waiting_frame_is_redrawn_by_answers() {
+        // Answers for other frames (the lookahead, a preroll) never present
+        // a complete paused frame again.
+        for applied in [Applied::Complete, Applied::Answered, Applied::Evicted] {
+            assert!(applied.redraws(true), "{applied:?}");
+            assert!(!applied.redraws(false), "{applied:?}");
+        }
+        for applied in [
+            Applied::Band,
+            Applied::Restarted,
+            Applied::Ignored,
+            Applied::Forgot(0),
+        ] {
+            assert!(!applied.redraws(true), "{applied:?}");
+        }
+        // What is shown may change.
+        assert!(Applied::Producers.redraws(false));
+        assert!(Applied::Forgot(1).redraws(false));
+        // The same producer list again is not a change.
+        let mut store = CompatStore::default();
+        let producers = || CompatMessage::Producers {
+            sources: vec![CompatSource::RasterOverride],
+        };
+        assert_eq!(store.apply(session(1), producers()), Applied::Producers);
+        assert_eq!(store.apply(session(1), producers()), Applied::Ignored);
+        assert_eq!(
+            store.apply(session(1), CompatMessage::Producers { sources: vec![] }),
+            Applied::Producers
+        );
+    }
+
+    #[test]
     fn forget_drops_a_layer_and_a_closed_session_drops_everything() {
         let mut store = CompatStore::default();
         store.apply(session(1), band(id("L7", "a"), 1, 1, 0, 1, 1));
         store.apply(session(1), band(id("L7", "b"), 1, 1, 0, 1, 1));
         store.apply(session(1), band(id("L8", "a"), 1, 1, 0, 1, 1));
         store.apply(session(1), band(id("L8", "c"), 1, 2, 0, 1, 1));
+        // L7's two rasters and the answer naming its latest one.
         assert_eq!(
             store.apply(
                 session(1),
@@ -828,7 +877,7 @@ mod tests {
                     layer: "L7".into()
                 }
             ),
-            Applied::Forgot(2)
+            Applied::Forgot(3)
         );
         assert_eq!(store.usage().0.values().sum::<usize>(), 1);
         store.forget_session(session(1));
@@ -872,7 +921,7 @@ mod tests {
             },
         );
         assert_eq!(applied, Applied::Evicted);
-        assert!(applied.unblocks(), "the frame tries again");
+        assert!(applied.redraws(true), "the frame tries again");
         // Asked again now, not after ASK_AGAIN.
         assert_eq!(store.to_ask(session(1), r4, vec![need], now).len(), 1);
     }

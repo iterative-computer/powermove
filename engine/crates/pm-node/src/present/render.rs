@@ -910,6 +910,14 @@ struct View {
     /// its slot and is drawn when they arrive, unless the schedule passes
     /// it over first (it could no longer be shown in time).
     compat_blocked: Option<i64>,
+    /// The paused frame is waiting for its compatibility answers: drawn
+    /// again when one arrives, or at this time (host µs) to ask again for
+    /// those a renderer missed ([`super::compat::ASK_AGAIN`]). Answers for
+    /// other frames (the lookahead, a preroll) never redraw a paused frame
+    /// that is already complete: that frame would be presented again, and
+    /// extensions would hear `frame:rendered` for it again, which today's
+    /// compositor never sends.
+    compat_paused_wait: Option<i64>,
     /// The compatibility needs the last render consulted, and the media
     /// time it drew (unwrapped ticks).
     compat_needs: Option<(i64, Vec<pm_protocol::snapshot::CompatNeed>)>,
@@ -2187,13 +2195,16 @@ impl Thread {
                     stats.compat_answers = answers.0 as u64;
                     stats.compat_asked = answers.1 as u64;
                 }
-                // A frame waiting on the producer's answers draws now (and
-                // a changed producer list redraws what it decides).
-                if applied.unblocks()
-                    && let Some(view) = self.views.get_mut(&key)
+                // A frame waiting on the producer's answers draws now; a
+                // changed producer list, or answers the producer took back
+                // (an invalidation), redraw what is shown.
+                if let Some(view) = self.views.get_mut(&key)
+                    && applied
+                        .redraws(view.compat_blocked.is_some() || view.compat_paused_wait.is_some())
                 {
                     view.dirty = true;
                     view.compat_blocked = None;
+                    view.compat_paused_wait = None;
                 }
             }
             Command::LoseDevice => {
@@ -2726,10 +2737,12 @@ impl Thread {
     }
 
     /// Whether the window answered for the first [`PREROLL_FRAMES`] frames
-    /// a run from the stopped line would show: every need the last render
-    /// consulted, at each of those frames' times (a layer's time moves with
-    /// the frame's). Frames past the composition's end are not asked for.
-    fn preroll_ready(&self, key: Key) -> bool {
+    /// a run at `rate` from the stopped line would show: every need the last
+    /// render consulted, at each of those frames' times (a layer's time
+    /// moves with the frame's). A reverse run (J) shows the frames before
+    /// the playhead. Frames past the composition's end, or before its start,
+    /// are not asked for.
+    fn preroll_ready(&self, key: Key, rate: PlaybackRateValue) -> bool {
         let Some(view) = self.views.get(&key) else {
             return true;
         };
@@ -2746,10 +2759,19 @@ impl Thread {
         let f = view.clock.frame_ticks();
         let start = view.clock.snap(view.clock.anchor_media());
         let end = view.clock.end();
+        // Media per shown frame at this rate (at least one frame, in the
+        // run's direction).
+        let den = i128::from(rate.den.max(1));
+        let step = (i128::from(f) * i128::from(rate.num) / den) as i64;
+        let step = if step == 0 {
+            if rate.num < 0 { -f } else { f }
+        } else {
+            step
+        };
         let mut store = self.compat_store();
         for i in 0..PREROLL_FRAMES {
-            let media = start + i * f;
-            if end.is_some_and(|e| media >= e) {
+            let media = view.clock.snap(start + i * step);
+            if end.is_some_and(|e| media >= e) || media < 0 {
                 break;
             }
             let shift = media - drawn;
@@ -2782,7 +2804,7 @@ impl Thread {
             return;
         };
         let t = now();
-        let ready = self.preroll_ready(key);
+        let ready = self.preroll_ready(key, preroll.rate);
         if !ready && t < preroll.until {
             return;
         }
@@ -2854,7 +2876,7 @@ impl Thread {
                     let producers = self.compat_store().has_producers(key);
                     // Answered already (the paused warm-up filled them):
                     // the run starts at once.
-                    if producers && !self.preroll_ready(key) {
+                    if producers && !self.preroll_ready(key, rate) {
                         let view = self.views.get_mut(&key).expect("checked");
                         view.preroll = Some(Preroll {
                             rate,
@@ -3234,6 +3256,7 @@ impl Thread {
             depth: None,
             preroll: None,
             compat_blocked: None,
+            compat_paused_wait: None,
             compat_needs: None,
             #[cfg(feature = "remote-layer")]
             rate: None,
@@ -3805,6 +3828,9 @@ impl Thread {
                 // Answers arriving wake the thread; the bound needs a timer.
                 wake = wake.min(preroll.until.max(now));
             }
+            if let Some(at) = view.compat_paused_wait {
+                wake = wake.min(at.max(now));
+            }
             if let Some(entry) = view.clock.loop_entry_at() {
                 let entry = entry.ceil() as i64;
                 if entry > now {
@@ -4352,6 +4378,14 @@ impl Thread {
                 self.stats().stand_in_redraws += 1;
             }
         }
+        // A paused frame still waiting for compatibility answers asks again
+        // for those a renderer missed.
+        if let Some(view) = self.views.get_mut(&key)
+            && view.compat_paused_wait.is_some_and(|at| at <= now())
+        {
+            view.compat_paused_wait = None;
+            view.dirty = true;
+        }
         // A paused frame that failed for the moment is drawn again on its own.
         if let Some(view) = self.views.get_mut(&key)
             && view.render_failed
@@ -4854,6 +4888,12 @@ impl Thread {
                     let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                     if timing.is_some() {
                         view.compat_blocked = Some(k);
+                    } else if viewer_frame {
+                        // Drawn again when an answer arrives, not on every
+                        // turn until then.
+                        view.dirty = false;
+                        view.compat_paused_wait =
+                            Some(now() + super::compat::ASK_AGAIN.as_micros() as i64);
                     }
                     let fresh =
                         self.compat_store()

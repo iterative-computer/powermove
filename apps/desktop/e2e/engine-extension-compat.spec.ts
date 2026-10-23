@@ -508,6 +508,14 @@ test.describe('Use New Engine: existing extensions', () => {
       const gaps = at.slice(1).map((v, i) => v - at[i]!);
       const sorted = [...gaps].sort((a, b) => a - b);
       const firstFrameMs = Math.round(at.length ? at[0]! - started : 3000);
+      // The run's first advancing frame: the first presented time past the
+      // one presented first (a re-presentation of the start frame is not
+      // the run moving).
+      const advance = times.findIndex((t) => Math.abs(t - times[0]!) > 1e-9);
+      const firstAdvanceMs = Math.round(advance > 0 ? at[advance]! - started : 3000);
+      // Times presented more than once (each extra presentation is a
+      // `frame:rendered` an extension hears again).
+      const repeatCount = times.filter((t, i) => times.indexOf(t) !== i).length;
       // Answers counted by the frame they are for: the window's latest
       // answer for the overridden layer at each presented time, at this
       // revision, wherever it was made (asked by a frame, prepared by the
@@ -517,7 +525,7 @@ test.describe('Use New Engine: existing extensions', () => {
         .filter((a: any) => a && (revision === null || a.revision >= revision));
       const answeredShown = shown.length, rasterShown = shown.filter((a: any) => a.kind !== 'native').length;
       const trace = traced ? { started, hostOffsetUs: PM.EngineConnection?.status?.()?.hostOffsetUs ?? null, lookahead: lookaheadTrace, viewer: await PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.().catch(() => null) ?? null } : undefined;
-      return { answeredShown, rasterShown, trace, longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
+      return { answeredShown, rasterShown, trace, longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, firstAdvanceMs, repeatCount, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
     }, { traced, run });
     const { page } = session;
     await page.waitForFunction((id) => (window as any).PM?.Kernel?.loader?.activeIds?.().includes(id) && Boolean((window as any).PM?.EngineRender), extension);
@@ -575,6 +583,10 @@ test.describe('Use New Engine: existing extensions', () => {
     // Today's longest gap plus one frame at 30 fps, at most.
     expect(engine.maxGap).toBeLessThanOrEqual(today.maxGap + Math.ceil(1000 / 30));
     expect(engine.firstFrameMs).toBeLessThanOrEqual(today.firstFrameMs + Math.ceil(1000 / 30));
+    expect(engine.firstAdvanceMs, 'the run\'s first advancing frame').toBeLessThanOrEqual(today.firstAdvanceMs + Math.ceil(1000 / 30));
+    // Every presentation reaches extensions as `frame:rendered`: the engine
+    // presents no time more often than today (none at the start of a run).
+    expect(engine.repeatCount, `times presented again: ${JSON.stringify(engine.repeats)}`).toBeLessThanOrEqual(today.repeatCount);
     expect(engine.lastMs).toBeLessThanOrEqual(today.lastMs + Math.ceil(1000 / 30));
     // (The two sides can start one frame apart: one frame of alignment.)
     expect(engine.frames).toBeGreaterThanOrEqual(today.frames - 1);
