@@ -41,7 +41,11 @@ import { ViewerPresentation } from '../../../extensions/viewer/engine-present/pr
 import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
 import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
 import { SvgRasters } from './svg-rasters';
+import { BlenderPngs } from './blender-png';
 import { EngineTransport, ticks } from './transport';
+import { EnginePreview, documentWake } from './preview';
+import { EngineSceneMetadata } from './scene-metadata';
+import { previewEngine } from '../core/scene3d/rendering';
 import { followOpenComposition } from './composition-follow';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
@@ -91,6 +95,7 @@ export interface EngineConnectionHandle {
   render: EngineRenderTransport;
   hostClock: HostClock;
   transport: EngineTransport;
+  preview: EnginePreview;
   dispose(): void;
 }
 
@@ -164,14 +169,33 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); }),
     prepare: follower.follow
   });
+  const preview = new EnginePreview(
+    () => current, openComposition, () => Number(PM.time) || 0,
+    () => {
+      const barrier = PM.EngineDoc?.barrier;
+      barrier?.flush();
+      connection?.sendPatches();
+      return barrier?.revision ?? current?.applied ?? 0;
+    },
+    () => previewEngine(PM) === 'eevee' ? 'material' : 'rendered',
+    // `wakeStandby` is declared below; read it when the preview wakes.
+    documentWake(() => wakeStandby(), () => current)
+  );
   /** animVersion per revision sent, for `frame:rendered.version`. */
   const versions = new RevisionVersions();
+  const sceneMetadata = new EngineSceneMetadata(PM);
   const noteVersion = (): void => {
     const barrier = PM.EngineDoc?.barrier;
     if (barrier) versions.note(barrier.revision, PM.animVersion?.());
   };
   const presentedEvents = new PresentedEvents(
     (frame, quality) => {
+      const doc = PM.EngineDoc;
+      doc?.barrier?.flush();
+      if (doc?.enabled && frame.revision === doc.barrier?.revision) {
+        try { doc.api?.syncScene3dFrame(frame.pts / TICKS_PER_SECOND); }
+        catch (error) { log('error', `native 3D scene synchronization: ${error instanceof Error ? error.message : String(error)}`); }
+      }
       PM.CompatContext?.selectFrame?.(frame);
       emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj });
     },
@@ -274,6 +298,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           else if (message.type === 'frame') session.release(message.frame);
         },
         closed: (reason) => {
+          preview.close(session);
           sessions.delete(session);
           if (current === session) {
             current = null;
@@ -291,6 +316,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         for (const listener of clockListeners) listener(sample);
       },
       onAudio: (message) => audio.receive(message, session),
+      onPreviewStatus: (status) => preview.receiveStatus(session, status),
       onStats: (message) => {
         stats.receive(message, performance.now());
         PM.invalidate?.('status');
@@ -404,6 +430,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // The job engine's export and agent frames ask this window for the SVG
   // rasters of the document it has open (main's `compatFrame`).
   const unprovideSvg = renderTransport.provideCompat('svgImage', (request) => svgRasters.produce(request));
+  const blenderPngs=new BlenderPngs({meta:id=>(PM as any).proj.assets[id]??null,blob:meta=>(PM as any).MediaStore.get(meta),image:id=>PM.assets.get(id),canvas:()=>document.createElement('canvas'),decode:blob=>createImageBitmap(blob)});
+  const unprovideBlenderPng=renderTransport.provideCompat('blenderPng',request=>blenderPngs.produce(request));
   (PM as any).EngineSvgRasters = svgRasters;
   // The app's own still captures (the Library's section thumbnails, the
   // agent's look and observe) draw through the engine too: with the new
@@ -478,7 +506,11 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     // Frame events on presentation (presentation-events.ts), at most once
     // per animation frame for the newest frame on screen, as today's frame
     // loop emits them once per frame it draws.
-    presented: (frame, quality) => presentedEvents.push(frame, quality),
+    presented: (frame, quality) => {
+      sceneMetadata.apply(frame, current);
+      if (current) preview.receiveFrame(current, frame);
+      presentedEvents.push(frame, quality);
+    },
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     hostOffsetUs: () => hostClock.offsetUs(),
     revision: () => {
@@ -544,6 +576,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const handle: EngineConnectionHandle = {
     hostClock,
     transport,
+    preview,
     audio,
     render: renderTransport,
     session: () => current,
@@ -579,6 +612,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     dispose: () => {
       offCompatSurface();
       pendingCompatFrames.clear();
+      preview.dispose();
       drawingWarmup.dispose();
       offShaderFallback();
       offPending();
@@ -586,6 +620,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offAssets();
       follower.dispose();
       unprovideSvg();
+      unprovideBlenderPng();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);

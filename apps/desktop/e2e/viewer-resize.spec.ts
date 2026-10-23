@@ -1,7 +1,7 @@
 import { expect, test } from './helpers/app';
 
 test.describe('@viewer direct resize', () => {
-  test('resizes the selected layer in local space with a fixed opposite edge and correct cursors', async ({ session }) => {
+  test('resizes the selected layer in local space with a fixed opposite edge and correct cursors', async ({ session }, testInfo) => {
     await session.openEditor();
     const { page } = session;
     await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
@@ -45,8 +45,9 @@ test.describe('@viewer direct resize', () => {
         east: point(1, .5), west: point(0, .5),
         axis: { x: matrix[0] / axisLength, y: matrix[1] / axisLength },
         eastCursor: viewer.resizeCursorForHandle(matrix, 'e'),
+        content: { w: PM.resolveContent(text, 1).w, h: PM.resolveContent(text, 1).h },
         scaleX: text.p['scale.x'].v, scaleY: text.p['scale.y'].v,
-        scaleYKeys: text.p['scale.y'].kf.length,
+        scaleXKeys: text.p['scale.x'].kf.length, scaleYKeys: text.p['scale.y'].kf.length,
         coverScaleX: cover.p['scale.x'].v,
         parentScaleX: parent.p['scale.x'].v,
       };
@@ -72,16 +73,22 @@ test.describe('@viewer direct resize', () => {
       const x = bounds.x0, y = bounds.y0 + bounds.h * .5;
       return {
         selected: [...PM.sel.layers],
+        content: { w: PM.resolveContent(text, 1).w, h: PM.resolveContent(text, 1).h },
         scaleX: PM.ev(text, 'scale.x', 1), scaleY: PM.ev(text, 'scale.y', 1),
-        scaleYKeys: text.p['scale.y'].kf.length,
+        scaleXKeys: text.p['scale.x'].kf.length, scaleYKeys: text.p['scale.y'].kf.length,
         west: { x: matrix[0] * x + matrix[2] * y + matrix[4], y: matrix[1] * x + matrix[3] * y + matrix[5] },
         coverScaleX: PM.ev(PM.L(coverId), 'scale.x', 1),
         parentScaleX: PM.ev(PM.L(parentId), 'scale.x', 1),
       };
     }, { textId: setup.textId, coverId: setup.coverId, parentId: setup.parentId });
+    await page.locator('#panel-viewer').screenshot({ path: testInfo.outputPath('single-resize-result.png') });
+    await testInfo.attach('Resize values', { body: JSON.stringify({ setup, resized }), contentType: 'application/json' });
     expect(resized.selected).toEqual([setup.textId]);
-    expect(resized.scaleX).toBeGreaterThan(setup.scaleX);
+    expect(resized.content.w).toBeGreaterThan(setup.content.w);
+    expect(resized.content.h).toBe(setup.content.h);
+    expect(resized.scaleX).toBe(setup.scaleX);
     expect(resized.scaleY).toBe(setup.scaleY);
+    expect(resized.scaleXKeys).toBe(setup.scaleXKeys);
     expect(resized.scaleYKeys).toBe(setup.scaleYKeys);
     expect(resized.west.x).toBeCloseTo(setup.west.x, 2);
     expect(resized.west.y).toBeCloseTo(setup.west.y, 2);
@@ -196,7 +203,7 @@ test.describe('@viewer direct resize', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
-  test('resizes and rotates a multi-selection around the common pivot with one-step undo', async ({ session }) => {
+  test('resizes and rotates a multi-selection around the common pivot with one-step undo', async ({ session }, testInfo) => {
     await session.openEditor();
     const { page } = session;
     await page.waitForFunction(() => { const PM = (window as any).PM; const viewer = PM.Kernel.services.get('viewer'); return Boolean(viewer?.ov && (window as any).PM?.GL?.gl); });
@@ -248,6 +255,7 @@ test.describe('@viewer direct resize', () => {
       };
       return {
         shapeId: shape.id, textId: text.id, textChildId: textChild.id,
+        shapeContent: { w: PM.resolveContent(shape, 1).w, h: PM.resolveContent(shape, 1).h },
         shapeScale: [PM.ev(shape, 'scale.x', 1), PM.ev(shape, 'scale.y', 1)],
         shapeTransform: {
           rotation: PM.ev(shape, 'rotation', 1),
@@ -295,6 +303,7 @@ test.describe('@viewer direct resize', () => {
       const selection = viewer.resolveSelectionGeometry();
       return {
         bounds: selection.bounds,
+        shapeContent: { w: PM.resolveContent(shape, 1).w, h: PM.resolveContent(shape, 1).h },
         shapeScale: [PM.ev(shape, 'scale.x', 1), PM.ev(shape, 'scale.y', 1)],
         shapeKeys: [shape.p['scale.x'].kf.length, shape.p['scale.y'].kf.length],
         textSize: text.d.size,
@@ -303,12 +312,14 @@ test.describe('@viewer direct resize', () => {
         textChildScale: [PM.ev(textChild, 'scale.x', 1), PM.ev(textChild, 'scale.y', 1)],
       };
     }, { shapeId: setup.shapeId, textId: setup.textId, textChildId: setup.textChildId });
+    await page.locator('#panel-viewer').screenshot({ path: testInfo.outputPath('multi-resize-result.png') });
+    await testInfo.attach('Resize values', { body: JSON.stringify({ setup, resized }), contentType: 'application/json' });
     expect(resized.bounds.x0).toBeCloseTo(setup.bounds.x0, 1);
     expect(resized.bounds.y0).toBeCloseTo(setup.bounds.y0, 1);
-    expect(resized.shapeScale[0]).toBeGreaterThan(setup.shapeScale[0]);
-    expect(resized.shapeScale[1]).toBeGreaterThan(setup.shapeScale[1]);
-    expect(resized.shapeKeys[0]).toBeGreaterThan(setup.shapeKeys[0]);
-    expect(resized.shapeKeys[1]).toBeGreaterThan(setup.shapeKeys[1]);
+    expect(resized.shapeContent.w).toBeGreaterThan(setup.shapeContent.w);
+    expect(resized.shapeContent.h).toBeGreaterThan(setup.shapeContent.h);
+    expect(resized.shapeScale).toEqual(setup.shapeScale);
+    expect(resized.shapeKeys).toEqual(setup.shapeKeys);
     expect(resized.textSize).toBe(setup.textSize);
     expect(resized.textScale[0]).toBeGreaterThan(setup.textScale[0]);
     expect(resized.textScale[1]).toBeGreaterThan(setup.textScale[1]);
@@ -321,6 +332,7 @@ test.describe('@viewer direct resize', () => {
       const ok = PM.hist.undo(), shape = PM.L(shapeId), text = PM.L(textId), textChild = PM.L(textChildId);
       return {
         ok,
+        shapeContent: { w: PM.resolveContent(shape, 1).w, h: PM.resolveContent(shape, 1).h },
         shapeScale: [PM.ev(shape, 'scale.x', 1), PM.ev(shape, 'scale.y', 1)],
         textSize: text.d.size,
         textScale: [PM.ev(text, 'scale.x', 1), PM.ev(text, 'scale.y', 1)],
@@ -332,7 +344,7 @@ test.describe('@viewer direct resize', () => {
       };
     }, { shapeId: setup.shapeId, textId: setup.textId, textChildId: setup.textChildId });
     expect(resizeUndone).toEqual({
-      ok: true, shapeScale: setup.shapeScale, textSize: setup.textSize,
+      ok: true, shapeContent: setup.shapeContent, shapeScale: setup.shapeScale, textSize: setup.textSize,
       textScale: setup.textScale, textChildScale: setup.textChildScale, positions: setup.positions,
     });
 

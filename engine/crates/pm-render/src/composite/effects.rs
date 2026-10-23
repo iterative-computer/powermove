@@ -104,6 +104,10 @@ pub struct EffectContext<'a> {
     pub working: WorkingEncoding,
     /// The full output size of this level, in pixels.
     pub full: (u32, u32),
+    /// The level's output origin and composition size at today's scale
+    /// (`effectViewportCoordinates` with a preview viewport); `None` at the
+    /// origin.
+    pub view: Option<crate::plan::OutputView>,
     /// Targets to return to the pool after the frame is submitted: every
     /// target a chain takes from `pool`, the one it returns included.
     pub taken: &'a mut Vec<Target>,

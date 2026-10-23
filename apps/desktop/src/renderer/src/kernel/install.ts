@@ -359,6 +359,7 @@ function makeEdit(PM: LegacyPM): EditAPI {
 }
 
 function makeMedia(PM: LegacyPM): MediaAPI {
+  const warnedObject3dAssets = new Set<string>();
   const emptyFonts = {
     bundled: [], system: [], families: [],
     setSystemFamilies: (_values: string[]) => {},
@@ -379,7 +380,14 @@ function makeMedia(PM: LegacyPM): MediaAPI {
       drawWaveform: (...args) => !!PM?.Audio?.drawWaveform?.(...args)
     },
     assets: {
-      get: (id) => PM?.assets?.get?.(id),
+      get: (id) => {
+        const asset = PM?.assets?.get?.(id);
+        if (PM?.EngineDoc?.enabled && asset?.object3d && !warnedObject3dAssets.has(id)) {
+          warnedObject3dAssets.add(id);
+          console.warn('[agent] media.assets.get(id).object3d is deprecated; use api.scene3d.describe(layerId) in new code. The compatibility Object3D keeps working at apiVersion 1–3.');
+        }
+        return asset;
+      },
       add: (...args) => PM?.assets?.add?.(...args) ?? Promise.resolve(undefined),
       kind: (file) => PM?.assetKind?.(file) ?? null,
       // The replacements of the deprecated live fields (live-media.ts).
@@ -494,7 +502,7 @@ function makeRender(PM: LegacyPM): RenderAPI {
         // A viewer that called `init` before the engine connection was up
         // (frozen viewers call it once, at mount) is bound now.
         bindLate(PM, initCanvas.current);
-        PM?.EngineCanvas?.resize?.();
+        PM?.EngineCanvas?.resize?.(width, height, viewport);
         return legacy || !!PM?.EngineCanvas?.bound;
       },
       compileError: (key) => PM?.GL?.compileError?.(key) ?? null,

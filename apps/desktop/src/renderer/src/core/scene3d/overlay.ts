@@ -17,6 +17,8 @@ export interface OverlayFrame {
   camera:THREE.PerspectiveCamera|THREE.OrthographicCamera;
   rect:Rect;
   runtime:SceneRuntime|null;
+  /** Exact engine frame inputs; no scene meshes are rendered by three.js. */
+  native?:{depth:VideoFrame;coverage:VideoFrame}|null;
   /** User view: draw the floor grid against the scene's depth. */
   userView:boolean;
   axis:ViewAxis|null;
@@ -62,14 +64,19 @@ void main(){
 }`;
 const OUTLINE_FRAGMENT=`
 varying vec2 vUv;
-uniform sampler2D uMask;uniform vec2 uTexel;uniform vec3 uSelected;uniform vec3 uActive;uniform float uRadius;
+uniform sampler2D uMask;uniform bool uEngineMask;uniform vec2 uTexel;uniform vec3 uSelected;uniform vec3 uActive;uniform float uRadius;
+vec4 maskAt(vec2 uv){
+  vec4 value=texture2D(uMask,uv);
+  if(uEngineMask)return vec4(value.b>0.25&&value.b<0.75?1.0:0.0,value.b>=0.75?1.0:0.0,0.0,1.0);
+  return value;
+}
 void main(){
-  vec4 here=texture2D(uMask,vUv);
+  vec4 here=maskAt(vUv);
   if(max(here.r,here.g)>0.5)discard;
   float nearSelected=0.0,nearActive=0.0;
   for(int x=-2;x<=2;x++)for(int y=-2;y<=2;y++){
     vec2 offset=vec2(float(x),float(y));if(length(offset)>uRadius+0.01)continue;
-    vec4 sampled=texture2D(uMask,vUv+offset*uTexel);nearSelected=max(nearSelected,sampled.r);nearActive=max(nearActive,sampled.g);
+    vec4 sampled=maskAt(vUv+offset*uTexel);nearSelected=max(nearSelected,sampled.r);nearActive=max(nearActive,sampled.g);
   }
   if(nearActive>0.5)gl_FragColor=vec4(uActive,1.0);
   else if(nearSelected>0.5)gl_FragColor=vec4(uSelected,1.0);
@@ -97,6 +104,10 @@ export class ViewportOverlay {
   private gizmoScene=new THREE.Scene();
   private materials=new Map<string,THREE.LineBasicMaterial>();
   private disposed=false;
+  private nativeDepth:THREE.VideoFrameTexture|null=null;
+  private nativeCoverage:THREE.VideoFrameTexture|null=null;
+  private depthQuad:THREE.Mesh<THREE.PlaneGeometry,THREE.ShaderMaterial>|null=null;
+  private depthScene=new THREE.Scene();
 
   constructor(private stage:HTMLElement){
     this.renderer=new THREE.WebGLRenderer({alpha:true,antialias:true});
@@ -115,7 +126,7 @@ export class ViewportOverlay {
     this.outline=new THREE.ShaderMaterial({
       vertexShader:'varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}',fragmentShader:OUTLINE_FRAGMENT,
       transparent:true,depthTest:false,depthWrite:false,
-      uniforms:{uMask:{value:null},uTexel:{value:new THREE.Vector2()},uSelected:{value:new THREE.Color(SELECTED_COLOR)},uActive:{value:new THREE.Color(ACTIVE_COLOR)},uRadius:{value:1.5}}
+      uniforms:{uMask:{value:null},uEngineMask:{value:false},uTexel:{value:new THREE.Vector2()},uSelected:{value:new THREE.Color(SELECTED_COLOR)},uActive:{value:new THREE.Color(ACTIVE_COLOR)},uRadius:{value:1.5}}
     });
     const quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),this.outline);quad.frustumCulled=false;this.quadScene.add(quad);
   }
@@ -134,6 +145,7 @@ export class ViewportOverlay {
   }
 
   draw(frame:OverlayFrame):void {
+    this.canvas.dataset.sceneOverlaySource = frame.native ? 'engine' : frame.runtime ? 'reference' : 'none';
     if(this.disposed)return;
     const width=Math.max(2,this.stage.clientWidth),height=Math.max(2,this.stage.clientHeight),renderer=this.renderer;
     // Assigning a canvas size reallocates its drawing buffer even when the
@@ -146,16 +158,25 @@ export class ViewportOverlay {
     camera.setViewOffset(rect.width,rect.height,-rect.x,-rect.y,width,height);camera.updateProjectionMatrix();camera.updateMatrixWorld(true);
     const scissor=()=>{renderer.setScissorTest(true);renderer.setScissor(rect.x,height-rect.y-rect.height,rect.width,rect.height);};
     const runtime=frame.runtime;
-    if(frame.overlays&&runtime){
+    const native=frame.native;
+    if(native){
+      this.nativeDepth=this.uploadNative(this.nativeDepth,native.depth);
+      this.nativeCoverage=this.uploadNative(this.nativeCoverage,native.coverage);
+    }
+    if(frame.overlays&&(runtime||native)){
       scissor();
-      const scene=runtime.scene,background=scene.background;
       if(frame.userView&&!frame.xray){
         // Depth of the models, so the floor and wires pass behind them.
-        scene.background=null;scene.overrideMaterial=this.depthMaterial;
-        try{renderer.render(scene,camera);}finally{scene.overrideMaterial=null;scene.background=background;}
+        if(native)this.loadNativeDepth();
+        else if(runtime){
+          const scene=runtime.scene,background=scene.background;
+          scene.background=null;scene.overrideMaterial=this.depthMaterial;
+          try{renderer.render(scene,camera);}finally{scene.overrideMaterial=null;scene.background=background;}
+        }
         this.drawGrid(frame,camera);
       }else if(frame.userView)this.drawGrid(frame,camera);
-      this.drawOutlines(frame,camera,width,height,scissor);
+      if(native)this.drawNativeOutlines(width,height,scissor);
+      else this.drawOutlines(frame,camera,width,height,scissor);
       this.clearLines();
       for(const glyph of frame.glyphs)this.drawGlyph(glyph,frame,camera);
       if(frame.edit)this.drawEdit(frame.edit);
@@ -171,6 +192,63 @@ export class ViewportOverlay {
     }
     renderer.setScissorTest(false);
     if(frame.gizmo){renderer.clearDepth();renderer.render(this.gizmoScene,camera);}
+  }
+
+  /** Completion for reads of shared native planes in this WebGL context. */
+  workDone():Promise<void> {
+    const gl=this.renderer.getContext() as WebGL2RenderingContext;
+    if(gl.isContextLost())return Promise.resolve();
+    const fence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);
+    if(!fence){gl.finish();return Promise.resolve();}
+    gl.flush();
+    return new Promise(resolve=>{
+      const poll=()=>{
+        if(gl.isContextLost()){gl.deleteSync(fence);resolve();return;}
+        const result=gl.clientWaitSync(fence,0,0);
+        if(result===gl.TIMEOUT_EXPIRED){setTimeout(poll,0);return;}
+        // WAIT_FAILED is a lost/invalidated sync: finish any surviving work
+        // before returning ownership. Never time out an active GPU reader.
+        if(result===gl.WAIT_FAILED)gl.finish();
+        gl.deleteSync(fence);resolve();
+      };
+      poll();
+    });
+  }
+
+  private uploadNative(texture:THREE.VideoFrameTexture|null,frame:VideoFrame):THREE.VideoFrameTexture {
+    if(!texture){
+      texture=new THREE.VideoFrameTexture();texture.format=THREE.RGBAFormat;texture.type=THREE.HalfFloatType;
+      texture.internalFormat='RGBA16F';texture.colorSpace=THREE.NoColorSpace;
+      texture.flipY=false;texture.minFilter=texture.magFilter=THREE.NearestFilter;texture.generateMipmaps=false;
+    }
+    texture.setFrame(frame);this.renderer.initTexture(texture);return texture;
+  }
+  private loadNativeDepth():void {
+    if(!this.depthQuad){
+      // Restore exact window-depth bits from the engine's lossless packet.
+      // This is one screen pass; it never rebuilds or draws scene geometry.
+      const material=new THREE.ShaderMaterial({
+        glslVersion:THREE.GLSL3,
+        vertexShader:'void main(){gl_Position=vec4(position.xy,0.0,1.0);}',
+        fragmentShader:`uniform sampler2D uDepth;
+          void main(){
+            uvec3 b=uvec3(round(texelFetch(uDepth,ivec2(gl_FragCoord.xy),0).rgb*2048.0));
+            gl_FragDepth=uintBitsToFloat(b.x|(b.y<<11u)|(b.z<<22u));
+          }`,
+        uniforms:{uDepth:{value:null}},
+        colorWrite:false,depthWrite:true,depthTest:true,depthFunc:THREE.AlwaysDepth
+      });
+      this.depthQuad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),material);
+      this.depthQuad.frustumCulled=false;this.depthScene.add(this.depthQuad);
+    }
+    this.depthQuad.material.uniforms.uDepth!.value=this.nativeDepth;
+    this.renderer.render(this.depthScene,this.quadCamera);
+  }
+  private drawNativeOutlines(width:number,height:number,scissor:()=>void):void {
+    const ratio=this.renderer.getPixelRatio(),w=Math.max(2,Math.floor(width*ratio)),h=Math.max(2,Math.floor(height*ratio));
+    this.outline.uniforms.uEngineMask!.value=true;this.outline.uniforms.uMask!.value=this.nativeCoverage;
+    this.outline.uniforms.uTexel!.value.set(1/w,1/h);this.outline.uniforms.uRadius!.value=ratio>=2?2:1.5;
+    scissor();this.renderer.render(this.quadScene,this.quadCamera);
   }
 
   private drawGrid(frame:OverlayFrame,camera:THREE.Camera):void {
@@ -210,6 +288,7 @@ export class ViewportOverlay {
       camera.layers.set(0);scene.overrideMaterial=null;scene.background=background;this.renderer.setRenderTarget(previous);
       for(const child of marked){child.layers.disable(1);child.layers.disable(2);}
     }
+    this.outline.uniforms.uEngineMask!.value=false;
     this.outline.uniforms.uMask!.value=this.mask.texture;this.outline.uniforms.uTexel!.value.set(1/w,1/h);
     this.outline.uniforms.uRadius!.value=ratio>=2?2:1.5;
     scissor();this.renderer.render(this.quadScene,this.quadCamera);
@@ -293,6 +372,7 @@ export class ViewportOverlay {
     if(this.disposed)return;this.disposed=true;
     this.clearLines();this.grid.geometry.dispose();this.grid.material.dispose();this.depthMaterial.dispose();this.maskMaterial.dispose();
     this.outline.dispose();this.mask?.dispose();this.pointMaterial?.dispose();for(const material of this.materials.values())material.dispose();
+    this.nativeDepth?.dispose();this.nativeCoverage?.dispose();this.depthQuad?.geometry.dispose();this.depthQuad?.material.dispose();
     this.renderer.dispose();this.renderer.forceContextLoss();this.canvas.remove();
   }
 }

@@ -14,7 +14,7 @@ import {
 } from "./service";
 import { compositionScene, layer3DRole } from "./layers";
 import { evaluatedRecipe } from "./modeling";
-import { viewportCamera, getViewportMode } from "./viewport";
+import { viewportCamera, getViewportMode, editorCamera } from "./viewport";
 
 /** Blender's viewport shading: Wireframe and Solid draw natively; Material Preview (EEVEE) and Rendered (the composition's engine) use Blender. */
 export type ViewportShading = "wireframe" | "solid" | "material" | "rendered";
@@ -72,10 +72,11 @@ export const renderSettings = (comp: any): Render3DSettings =>
   render3DSchema.parse(comp?.render3d || {});
 export const renderState = (PM: any): RenderPreviewState => {
   const s = state(PM);
+  const native = PM.EngineConnection?.preview?.state?.();
   return {
     mode: s.mode,
-    busy: s.busy,
-    error: s.error,
+    busy: native ? native.busy || s.busy : s.busy,
+    error: native ? native.error ?? s.error : s.error,
     engine: previewEngine(PM) ?? renderSettings(PM.curComp?.() || PM.proj).engine,
     shading: s.shading,
   };
@@ -112,7 +113,8 @@ export function onRenderState(
   listener: (value: RenderPreviewState) => void,
 ) {
   state(PM).listeners.add(listener);
-  return () => state(PM).listeners.delete(listener);
+  const offNative = PM.EngineConnection?.preview?.subscribe?.(() => listener(renderState(PM)));
+  return () => { state(PM).listeners.delete(listener); offNative?.(); };
 }
 export function setRenderSettings(
   PM: any,
@@ -153,7 +155,10 @@ export function setShading(PM: any, shading: ViewportShading) {
     s.timer = null;
   }
   emit(PM);
-  if (mode === "rendered") schedulePreview(PM);
+  // The native viewer-state update starts or cancels automatic Blender
+  // previews. A toolbar shading change must reach it before any explicit
+  // renderFrame request, including Material Preview's EEVEE choice.
+  if (!nativePreviewEnabled(PM) && mode === "rendered") schedulePreview(PM);
 }
 const frameKey = (
   PM: any,
@@ -211,13 +216,8 @@ export function blenderSurface(
 /** The new engine draws the viewer (Use New Engine): it renders the paused
  *  Blender preview itself (docs/engine/blender.md), so this one would only
  *  run Blender a second time. */
-const engineDrawsViewer = (PM: any): boolean => {
-  try {
-    return PM.EngineConnection?.status?.().route === "engine";
-  } catch {
-    return false;
-  }
-};
+const nativePreviewEnabled = (PM: any): boolean => !!PM.EngineDoc?.enabled || !!PM.EngineConnection;
+const engineDrawsViewer = nativePreviewEnabled;
 export function schedulePreview(PM: any) {
   const s = state(PM);
   if (
@@ -677,6 +677,31 @@ async function cropSurface(blob: Blob): Promise<Surface> {
 
 /** A paused rendered preview includes nested compositions through their own cameras. */
 export async function renderBlenderPreview(PM: any) {
+  if (nativePreviewEnabled(PM)) {
+    if (!PM.EngineConnection?.preview) throw Object.assign(new Error("The native preview controller is unavailable"), { name: "EnginePreviewUnavailable" });
+    state(PM).error = null;
+    const session = PM.EngineConnection.session?.();
+    // A nested 3D composition can render with Blender while the open
+    // composition has no direct 3D layers (and thus no 3D viewer override).
+    const comp = PM.curComp?.() || PM.proj;
+    const cacheOnly = !!PM.playing || state(PM).mode === "draft" ||
+      !comp?.layers?.some((layer: any) => layer3DRole(layer)) ||
+      !session || session.headless || session.route !== "engine";
+    if (!cacheOnly) return PM.EngineConnection.preview.render();
+    const camera = getViewportMode(PM) === "editor" ? editorCamera(PM) : null;
+    camera?.updateMatrixWorld?.(true);
+    const engineCamera = camera ? {
+      view: Array.from(camera.matrixWorldInverse.elements as ArrayLike<number>),
+      projection: camera instanceof THREE.OrthographicCamera
+        ? { kind: "orthographic" as const, halfHeight: 3 / camera.zoom, near: camera.near, far: camera.far }
+        : { kind: "perspective" as const, fovYDegrees: camera.fov, near: camera.near, far: camera.far },
+    } : null;
+    return PM.EngineConnection.preview.render({
+      cacheOnly: true,
+      size: { width: Math.max(1, Math.round(Number(comp?.w) || 1)), height: Math.max(1, Math.round(Number(comp?.h) || 1)) },
+      camera: engineCamera,
+    });
+  }
   const visited = new Set<string>(),
     project = PM.proj;
   const visit = async (comp: any, time: number, depth: number) => {
@@ -842,8 +867,28 @@ export async function cancelBlender(PM: any) {
   s.error = null;
   if (s.timer) clearTimeout(s.timer);
   s.timer = null;
-  await bridge()?.blender?.cancel();
   emit(PM);
+  // The window's Blender worker runs scene3d.model jobs (Regenerate, .blend
+  // import) with the engine on too, so cancelling always stops it, as today.
+  const worker = bridge()?.blender?.cancel();
+  if (nativePreviewEnabled(PM)) {
+    await Promise.all([worker, PM.EngineConnection?.preview ? cancelNativePreview(PM.EngineConnection.preview) : Promise.resolve()]);
+  } else {
+    await worker;
+  }
+}
+/** Cancels the interactive engine's preview. Without a native viewer
+    session (no mounted viewer, a route still pending) there is no native
+    preview to stop, so the cancel resolves as today's does. */
+async function cancelNativePreview(preview: { cancel(): Promise<void> }) {
+  try {
+    await preview.cancel();
+  } catch (error) {
+    const name = (error as Error | null)?.name;
+    // Unavailable: no session to cancel. Cancelled: the session restarted
+    // or a newer control replaced this one, which also ends the preview.
+    if (name !== "EnginePreviewUnavailable" && name !== "EnginePreviewCancelled") throw error;
+  }
 }
 export function disposeBlenderFrames(PM: any) {
   const s = states.get(PM);

@@ -119,6 +119,10 @@ pub(crate) fn premultiplied_f32(raster: &CompatRaster) -> Vec<f32> {
                 out.push(f16_to_f32(u16::from_le_bytes([half[0], half[1]])));
             }
         }
+        // Encoded Blender maps never become layer rasters: the protocol
+        // refuses PNG pixel bands and the job engine refuses PNG layer
+        // answers, so nothing reaches here (transparent if it did).
+        CompatFormat::Png => {}
     }
     out.resize(n * 4, 0.0);
     out

@@ -22,7 +22,9 @@ export function selectionOutlineColor(project: any): string {
 import { beginTextEdit, type TextEditOptions, type TextEditSession } from './text-editor';
 import { drawEditablePaths, startPathEdit } from './path-editing';
 import { ENGINE_SELF_PRESENTS_ATTRIBUTE, ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, ViewerPresentation, type EngineViewerService } from './engine-present/presentation';
-import { viewParamsFor } from './engine-present/view-params';
+import { todaysCanvas, viewParamsFor } from './engine-present/view-params';
+import { EngineCanvasHold, type EngineFrameOnScreen } from './engine-present/canvas-hold';
+import { TICKS_PER_SECOND, type ViewerCanvas } from './engine-present/protocol';
 import { rawDragMoves, supportsRawUpdates } from './engine-present/raw-gestures';
 import { GeometryAtRevision } from './engine-present/revision-geometry';
 /* Ported from js/ui/viewer.js — behavior-preserving. */
@@ -41,6 +43,19 @@ export function previewRenderSize(width: number, height: number, zoom: number, d
     height: Math.max(2, Math.round(safeHeight * scale)),
     scale,
   };
+}
+
+/** The backing size of today's viewer canvas for a layout (`V.layout`): the
+ *  crop's render size when the view is cropped, the composition at the
+ *  quality with an explicit preview resolution, else `previewRenderSize`. */
+export function viewerCanvasSize(
+  compWidth: number, compHeight: number, zoom: number, dpr: number, quality: number,
+  previewResolution: string | number | null | undefined, viewport: { renderWidth: number; renderHeight: number } | null,
+): { width: number; height: number } {
+  if (viewport) return { width: viewport.renderWidth, height: viewport.renderHeight };
+  if (previewResolution && previewResolution !== 'auto') return { width: Math.max(2, Math.round(compWidth * quality)), height: Math.max(2, Math.round(compHeight * quality)) };
+  const { width, height } = previewRenderSize(compWidth, compHeight, zoom, dpr, quality);
+  return { width, height };
 }
 
 /** Effects may use the cropped viewer only when their shader has opted into
@@ -792,6 +807,29 @@ const eventOffs: Array<() => void> = [];
 let enginePresentation: ViewerPresentation | null = null;
 let engineService: EngineViewerService | null = null;
 let engineFrameTag = '';
+/** Today's canvas for the latest layout (`todaysCanvas`, decision V1). */
+let engineCanvas: ViewerCanvas | null = null;
+/** The canvas size and crop committed for the engine: during a paused zoom
+ *  or pan gesture today keeps its canvas (and shows its last frame scaled
+ *  by CSS) until the gesture settles (`canRetainNavigation`), so the engine
+ *  keeps rendering at it too, and follows once it settles (canvas-hold.ts). */
+const engineHold = new EngineCanvasHold<PreviewViewport>({
+  setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+  clearTimeout: (id) => window.clearTimeout(id),
+  now: () => window.performance.now(),
+  gestureUntil: () => zoomGestureUntil,
+  relayout: () => { if (!disposed) V.layout(); },
+});
+/** The engine's frame on screen for the hold: the canvas it was drawn at,
+ *  and whether it shows today's revision and time (not a stand-in). */
+const engineFrameOnScreen = (): EngineFrameOnScreen => {
+  const frame = enginePresentation?.presenting ? enginePresentation.latest : null;
+  if (!frame) return null;
+  const revision = engineService?.revision?.() ?? null;
+  const current = revision !== null && frame.revision === revision && !frame.standIn
+    && frame.pts === Math.max(0, Math.round(api.transport.time() * TICKS_PER_SECOND));
+  return { canvas: enginePresentation!.stateFor(frame.viewSeq)?.canvas, current };
+};
 const syncEnginePresentation = (stage?: { width: number; height: number }) => {
   if (disposed || !V.stage || !V.ov) return;
   const service = api.services.get<EngineViewerService>(ENGINE_VIEWER_SERVICE);
@@ -841,8 +879,8 @@ const syncEnginePresentation = (stage?: { width: number; height: number }) => {
   }
   const scene = api.scene3d?.viewport?.state?.();
   enginePresentation.update(viewParamsFor({
-    shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution,
-    scene3d: scene ? { hasScene: scene.hasScene, shading: scene.shading, xray: scene.xray } : null,
+    shown: V.shown, fit: V.fit, pan: V.pan, previewResolution: api.transport.previewResolution, canvas: engineCanvas,
+    scene3d: scene ? { hasScene: scene.hasScene, shading: scene.shading, xray: scene.xray, overlays: scene.overlays, selected: scene.editMode ? [] : scene.selected, active: scene.editMode ? null : scene.active, camera: scene.engineCamera ?? null, localView: scene.localView ?? null } : null,
   }), stage);
 };
 /** The engine frame on screen: its tags and overlay geometry in stage CSS pixels. */
@@ -868,6 +906,7 @@ const disposeRuntime = () => {
   V.finishCanvasText?.();
   if (presentationFrame) window.cancelAnimationFrame(presentationFrame);
   presentationFrame = 0;
+  engineHold.dispose();
   if (hoverFrame) window.cancelAnimationFrame(hoverFrame);
   hoverFrame = 0; hoverId = null; hoverPointer = null;
   pendingResize = null;
@@ -1010,30 +1049,14 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   let z = V.fit ? Math.min((r.width - pad * 2) / p.w, (r.height - pad * 2) / p.h) : V.zoom;
   z = clamp(z, .02, 8);
   V.shown = z;
-  /* The engine's view first: before this layout writes styles (so the
-     presentation reads no layout) and before the WebGL bookkeeping below,
-     so a gesture's state leaves for the engine as early as it can. */
-  syncEnginePresentation(r);
-  if (V.zoomControl) {
-    const control = V.zoomControl as HTMLSelectElement;
-    control.options[0]!.textContent = `Fit (${Math.round(z * 1000) / 10}%)`;
-    const preset = [...control.options].find(option => Number(option.value) === z);
-    const custom = control.querySelector<HTMLOptionElement>('option[value="custom"]')!;
-    custom.textContent = `${Math.round(z * 1000) / 10}%`; custom.hidden = V.fit || !!preset;
-    control.value = V.fit ? 'fit' : preset?.value ?? 'custom';
-  }
-  /* Keep display geometry fractional so its pixels and `shown` describe the
-     same coordinate system. The GL backing buffer is rounded independently. */
-  const dw = p.w * z, dh = p.h * z;
-  V.inner.style.width = dw + 'px'; V.inner.style.height = dh + 'px';
+  /* Today's render geometry (no styles written): the canvas size and the
+     cropped viewport the compositor draws this view at. The engine renders
+     its frame at that canvas and scales it as the browser scales today's
+     (`todaysCanvas`, decision V1). */
   const position = compositionFramePosition(
     { width: r.width, height: r.height }, { width: p.w, height: p.h }, z,
     { x: V.fit ? 0 : V.pan[0], y: V.fit ? 0 : V.pan[1] },
   );
-  overlayGeometry = { width: r.width, height: r.height, x: position.x, y: position.y };
-  V.inner.style.left = position.x + 'px';
-  V.inner.style.top = position.y + 'px';
-  V.inner.style.transform = '';
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   /* Cropped high-zoom rendering is exact for ordinary 2D source layers and
      effects that opt into the viewport coordinate contract. Keep complex
@@ -1051,24 +1074,53 @@ V.layout = (panOnly = false, gesture = panOnly === true) => {
   }
   const viewportSafe = viewportPlan.safe, effectPadding = viewportPlan.padding;
   const renderDensity = Math.min(2, Math.max(1, dpr)) * Math.max(.25, Math.min(1, api.transport.quality));
+  /* The crop's pan buffer is kept while it covers the view (`previous`).
+     While the engine presents, the compositor's canvas never resizes, so
+     the crop committed for the engine is the previous one. */
+  const previousViewport = (enginePresentation?.presenting ? engineHold.committed?.viewport : api.render.gl.previewViewport as PreviewViewport | null) ?? null;
   const viewport = viewportSafe
-    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, api.transport.quality, 128 + effectPadding / renderDensity, api.render.gl.previewViewport as PreviewViewport | null)
+    ? previewRenderViewport(p.w, p.h, z, r.width, r.height, position.x, position.y, dpr, api.transport.quality, 128 + effectPadding / renderDensity, previousViewport)
     : null;
-  requestedViewport = viewport;
+  const renderSize = viewerCanvasSize(p.w, p.h, z, dpr, api.transport.quality, api.transport.previewResolution, viewport);
   visibleRegion = { x: Math.max(0, -position.x) / z, y: Math.max(0, -position.y) / z,
     right: Math.min(p.w, (r.width - position.x) / z), bottom: Math.min(p.h, (r.height - position.y) / z) };
-  let renderSize: { width: number; height: number };
+  /* A paused zoom or pan gesture keeps the engine's committed canvas by
+     today's `canRetainNavigation` rule (canvas-hold.ts). */
+  const kept = engineHold.layout({
+    gesture, now, gestureUntil: zoomGestureUntil, playing: api.transport.playing(),
+    next: { render: { ...renderSize }, viewport, project: p, compWidth: p.w, compHeight: p.h, version, time, quality: api.transport.quality },
+    visible: visibleRegion, onScreen: engineFrameOnScreen(),
+  });
+  engineCanvas = todaysCanvas(p.w, p.h, kept.render, kept.viewport, position, z);
+  /* The engine's view before this layout writes styles, so the
+     presentation reads no layout. */
+  syncEnginePresentation(r);
+  if (V.zoomControl) {
+    const control = V.zoomControl as HTMLSelectElement;
+    control.options[0]!.textContent = `Fit (${Math.round(z * 1000) / 10}%)`;
+    const preset = [...control.options].find(option => Number(option.value) === z);
+    const custom = control.querySelector<HTMLOptionElement>('option[value="custom"]')!;
+    custom.textContent = `${Math.round(z * 1000) / 10}%`; custom.hidden = V.fit || !!preset;
+    control.value = V.fit ? 'fit' : preset?.value ?? 'custom';
+  }
+  /* Keep display geometry fractional so its pixels and `shown` describe the
+     same coordinate system. The GL backing buffer is rounded independently. */
+  const dw = p.w * z, dh = p.h * z;
+  V.inner.style.width = dw + 'px'; V.inner.style.height = dh + 'px';
+  overlayGeometry = { width: r.width, height: r.height, x: position.x, y: position.y };
+  V.inner.style.left = position.x + 'px';
+  V.inner.style.top = position.y + 'px';
+  V.inner.style.transform = '';
+  requestedViewport = viewport;
   if (viewport) {
     // While a new crop is pending, keep the old pixels in their own source
     // coordinates. Commit the new CSS placement with its GL presentation.
     const retain = presentedViewport && presentedViewport.compWidth === p.w && presentedViewport.compHeight === p.h;
     if (retain) displayViewport(presentedViewport!, z);
     else if (!presentationIsCurrent()) displayViewport(viewport, z);
-    renderSize = { width: viewport.renderWidth, height: viewport.renderHeight };
   } else {
     if (presentedViewport && presentationIsCurrent()) displayViewport(presentedViewport, z);
     else { gl.style.position = ''; gl.style.left = ''; gl.style.top = ''; gl.style.width = '100%'; gl.style.height = '100%'; }
-    renderSize = api.transport.previewResolution && api.transport.previewResolution!=='auto' ? {width:Math.max(2,Math.round(p.w*api.transport.quality)),height:Math.max(2,Math.round(p.h*api.transport.quality))} : previewRenderSize(p.w, p.h, z, dpr, api.transport.quality);
   }
   pendingResize = { ...renderSize, viewport };
   if (!gesture || !canRetainNavigation(now)) commitPendingResize();

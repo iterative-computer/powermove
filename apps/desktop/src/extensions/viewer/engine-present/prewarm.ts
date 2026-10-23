@@ -2,7 +2,8 @@
  * No session, surfaces or animation loop exists until the drawing is claimed.
  * The canvas and its worker stay together: a popout cannot claim another
  * document's OffscreenCanvas. Closing a viewer prepares the next drawing. */
-import { createWebGpuPainter, type FramePainter } from './gpu';
+import type { FramePainter } from './gpu';
+import { createFramePainter } from './painter';
 import { PresentWorker, type WorkerLike } from './worker-presenter';
 
 type Handlers = { onFailed(message: string): void; onLost(message: string): void };
@@ -20,7 +21,7 @@ export class PresentationWarmup {
   private workerUnavailable = false;
 
   constructor(private readonly doc: Document, private readonly createWorker: () => WorkerLike,
-    private readonly createPainter = createWebGpuPainter) {}
+    private readonly createPainter = createFramePainter) {}
 
   warm(): void {
     if (this.disposed || this.prepared) return;

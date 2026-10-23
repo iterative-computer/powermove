@@ -46,6 +46,77 @@ pub struct CompPlan {
     pub background: Background,
     /// Bottom to top.
     pub draws: Vec<Draw>,
+    /// The level's output origin, when it is not `(0, 0)`
+    /// ([`RenderRequest::origin`](crate::RenderRequest::origin)): the
+    /// background gradient and effect coordinates follow it.
+    pub view: Option<OutputView>,
+}
+
+/// Where a level's output sits in its composition at today's scale
+/// (`effectViewportCoordinates`, `backgroundView` with a preview viewport).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputView {
+    /// Output pixel (0, 0) in scaled composition pixels (`viewport.x × sx`).
+    pub origin: [f64; 2],
+    /// The whole composition in output pixels
+    /// (`max(1, comp.w || W) × sx`).
+    pub resolution: [f64; 2],
+}
+
+/// The [`OutputView`] of a level with output origin `origin` (`None` at
+/// `(0, 0)`).
+pub(crate) fn level_view(
+    scope: &Scope<'_, '_>,
+    origin: (f64, f64),
+    width: u32,
+    height: u32,
+    scale: (f64, f64),
+) -> Option<OutputView> {
+    if origin == (0.0, 0.0) {
+        return None;
+    }
+    let (cw, ch) = scope.comp_size();
+    let side = |c: f64, w: u32| {
+        js::max(
+            1.0,
+            if c.is_nan() || c == 0.0 {
+                f64::from(w)
+            } else {
+                c
+            },
+        )
+    };
+    Some(OutputView {
+        origin: [origin.0, origin.1],
+        resolution: [side(cw, width) * scale.0, side(ch, height) * scale.1],
+    })
+}
+
+/// `m` followed by the output origin: composition pixel `(x, y)` at the
+/// level's scale lands at `(x − ox, y − oy)` (today's `scaledWorld` with a
+/// preview viewport). Exact (`m` unchanged) at the origin.
+pub(crate) fn at_origin(m: Mat2d, origin: (f64, f64)) -> Mat2d {
+    if origin == (0.0, 0.0) {
+        return m;
+    }
+    [m[0], m[1], m[2], m[3], m[4] - origin.0, m[5] - origin.1]
+}
+
+/// A plane (column-major homography to output pixels) followed by the
+/// output origin.
+pub(crate) fn plane_at_origin(
+    p: crate::space25d::Plane,
+    origin: (f64, f64),
+) -> crate::space25d::Plane {
+    if origin == (0.0, 0.0) {
+        return p;
+    }
+    let mut q = p;
+    for c in 0..3 {
+        q[c * 3] = p[c * 3] - origin.0 * p[c * 3 + 2];
+        q[c * 3 + 1] = p[c * 3 + 1] - origin.1 * p[c * 3 + 2];
+    }
+    q
 }
 
 /// How a target starts.
@@ -201,6 +272,10 @@ pub struct Build<'r> {
     pub(crate) sampling: crate::sampling::Sampling,
     /// `videoPlaybackTime`'s `endPadding` for this output ([`VideoEnd`]).
     video_padding: f64,
+    /// The output origin of the level being built (the request's at the
+    /// top level, in its groups, mattes, and motion-blur samples; `(0, 0)`
+    /// inside a precomp, which renders its own target).
+    pub(crate) origin: (f64, f64),
     /// What every pass over one composition's layers reads of all of them
     /// (each boundary group is a pass), by the layer list's address and
     /// length (the document is borrowed for the whole build).
@@ -249,6 +324,9 @@ pub struct BuildOptions {
     /// root composition (today's preview source clipping, which a `raster`
     /// override sees as its `crop` argument: `crate::compat_crop`).
     pub preview: Option<crate::compat_crop::PreviewWindow>,
+    /// The top level's output origin
+    /// ([`RenderRequest::origin`](crate::RenderRequest::origin)).
+    pub origin: Option<(f64, f64)>,
 }
 
 /// Today's `PC_MAX_DEPTH`.
@@ -379,6 +457,7 @@ pub(crate) fn build_blender<'r>(
                 blur: options.blur,
                 video_padding: video_padding.to_bits(),
                 view_override: options3d.view.is_some(),
+                origin: options.origin.map(|(x, y)| (x.to_bits(), y.to_bits())),
             },
         );
     }
@@ -400,6 +479,7 @@ pub(crate) fn build_blender<'r>(
         video_center: None,
         sampling: options.sampling,
         video_padding,
+        origin: options.origin.unwrap_or((0.0, 0.0)),
         passes: Vec::new(),
         compat,
         compat_missing: Vec::new(),
@@ -453,6 +533,7 @@ pub(crate) fn comp_pass<'d>(
     } else {
         background(scope.comp)
     };
+    let view = level_view(scope, b.origin, width, height, scale);
     let mut plan = CompPlan {
         composition: comp_id.clone(),
         group: group_parent.is_some(),
@@ -460,6 +541,7 @@ pub(crate) fn comp_pass<'d>(
         height,
         background,
         draws: Vec::new(),
+        view,
     };
     let parent_id = group_parent.map(|g| node::get(g, b"id").to_js());
     let facts = b.pass_facts(scope.layers(), &all);
@@ -676,7 +758,9 @@ fn draw_layer<'d>(
         let Some(effects) = effects else {
             return Ok(None);
         };
-        let masks = layer_masks(scope, layer, time, scale, width, height, has_masks)?;
+        let masks = layer_masks(
+            scope, layer, time, scale, b.origin, width, height, has_masks,
+        )?;
         return Ok(Some(vec![node(composite::Node::Adjustment(
             composite::AdjustmentNode {
                 layer: id.clone(),
@@ -704,7 +788,9 @@ fn draw_layer<'d>(
                 content: Vec<Draw>,
                 composite_alpha: f64|
      -> JsResult<Option<Vec<Draw>>> {
-        let masks = layer_masks(scope, layer, time, scale, width, height, has_masks)?;
+        let masks = layer_masks(
+            scope, layer, time, scale, b.origin, width, height, has_masks,
+        )?;
         let matte = if matted {
             layer_matte(scope, b, layer, time, width, height, scale)?
         } else {
@@ -801,7 +887,7 @@ pub(crate) fn layer_draw<'d>(
     let Some(quad) = content_quad(scope, b, layer, time, width, height, scale)? else {
         return Ok(None);
     };
-    let world = scaled_world(scope, layer, time, scale)?;
+    let world = scaled_world(scope, layer, time, scale, b.origin)?;
     let id = js::layer_id(layer);
     let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
     let ty = js::layer_type(layer);
@@ -821,7 +907,8 @@ pub(crate) fn layer_draw<'d>(
             ay,
         } => {
             let alpha = alpha * a;
-            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?;
+            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
+                .map(|p| plane_at_origin(p, b.origin));
             Draw {
                 layer: id.clone(),
                 matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
@@ -840,7 +927,8 @@ pub(crate) fn layer_draw<'d>(
             ay,
             uv,
         } => {
-            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?;
+            let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
+                .map(|p| plane_at_origin(p, b.origin));
             // Level 2 image, video, and precomp content is resampled; other
             // level 2 content draws at output resolution (`crate::vector`,
             // `crate::text`), except on a plane, where its layer-space raster
@@ -927,11 +1015,13 @@ fn placed(
 
 /// The layer's masks for its node (`None` when nothing is masked). The
 /// path route's coverage canvas is the `width × height` output.
+#[allow(clippy::too_many_arguments)]
 fn layer_masks<'d>(
     scope: &mut Scope<'_, 'd>,
     layer: &'d Node,
     time: f64,
     scale: (f64, f64),
+    origin: (f64, f64),
     width: u32,
     height: u32,
     has_masks: bool,
@@ -939,7 +1029,7 @@ fn layer_masks<'d>(
     if !has_masks {
         return Ok(None);
     }
-    let world = scaled_world(scope, layer, time, scale)?;
+    let world = scaled_world(scope, layer, time, scale, origin)?;
     let plane = if scope.is_3d_layer(layer)? {
         let h = scope.plane_matrix(layer, time, false)?;
         let (sx, sy) = scale;
@@ -954,6 +1044,7 @@ fn layer_masks<'d>(
             h[7] * sy,
             h[8],
         ])
+        .map(|p| plane_at_origin(p, origin))
     } else {
         None
     };
@@ -1017,6 +1108,7 @@ fn matte_pass<'d>(
         height,
         background: Background::Transparent,
         draws: Vec::new(),
+        view: level_view(scope, b.origin, width, height, scale),
     };
     let all = [source];
     let solo = js::flag(source, "solo");
@@ -1031,23 +1123,28 @@ fn matte_pass<'d>(
     plan
 }
 
-/// `scaledWorld(L, T, W, H)` without a preview viewport.
+/// `scaledWorld(L, T, W, H)`: the output origin is the preview viewport's
+/// (`(world[4] − viewport.x) × sx`, as `x · sx − origin`).
 fn scaled_world<'d>(
     scope: &mut Scope<'_, 'd>,
     layer: &'d Node,
     time: f64,
     scale: (f64, f64),
+    origin: (f64, f64),
 ) -> JsResult<Mat2d> {
     let w = scope.world_matrix(layer, time)?;
     let (sx, sy) = scale;
-    Ok([
-        w[0] * sx,
-        w[1] * sy,
-        w[2] * sx,
-        w[3] * sy,
-        w[4] * sx,
-        w[5] * sy,
-    ])
+    Ok(at_origin(
+        [
+            w[0] * sx,
+            w[1] * sy,
+            w[2] * sx,
+            w[3] * sy,
+            w[4] * sx,
+            w[5] * sy,
+        ],
+        origin,
+    ))
 }
 
 enum Quad {
@@ -1154,11 +1251,12 @@ fn native_content_quad<'d>(
                     layer,
                     time,
                     scale,
+                    b.origin,
                     pm_vector::render::scene::PixelRect::new(0, 0, width, height),
                     &mut plan,
                 );
             }
-            let world = vector_world(scope, layer, time, scale)?;
+            let world = vector_world(scope, layer, time, scale, b.origin)?;
             let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
             Ok(plan(scope, &world, target)?.map(device_quad))
         }
@@ -1172,11 +1270,12 @@ fn native_content_quad<'d>(
                     layer,
                     time,
                     scale,
+                    b.origin,
                     pm_vector::render::scene::PixelRect::new(0, 0, width, height),
                     &mut plan,
                 );
             }
-            let world = vector_world(scope, layer, time, scale)?;
+            let world = vector_world(scope, layer, time, scale, b.origin)?;
             let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
             let quad = crate::vector::plan_shape(scope, layer, &d, time, &world, target)?;
             Ok(quad.map(device_quad))
@@ -1247,13 +1346,14 @@ fn native_content_quad<'d>(
                     let bh = js::or_number(js::get(&d, "h"), hf);
                     let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
                     // `svgRasterDimensions(sw, sh, bw, bh, scaledWorld(L, T, W, H))`.
-                    let world = scaled_world(scope, layer, time, scale)?;
+                    let world = scaled_world(scope, layer, time, scale, b.origin)?;
                     let (width, height, _) = pm_vector::render::svg::svg_raster_dimensions(
                         sw, sh, bw, bh, &world, 8192.0,
                     );
                     return Ok(Some(Quad::Texture {
                         source: Source::Vector(Box::new(crate::vector::VectorSource::SvgImage {
                             key: pm_protocol::svg_raster::SvgRasterKey {
+                                texture: None,
                                 content,
                                 width,
                                 height,
@@ -1281,7 +1381,7 @@ fn native_content_quad<'d>(
                 let bw = js::or_number(js::get(&d, "w"), wf);
                 let bh = js::or_number(js::get(&d, "h"), hf);
                 let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
-                let world = vector_world(scope, layer, time, scale)?;
+                let world = vector_world(scope, layer, time, scale, b.origin)?;
                 let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
                 return match crate::vector::svg::plan_svg(&path, bw, bh, uv, &world, target) {
                     Ok(crate::vector::svg::SvgPlan::Drawn(Some(_)))
@@ -1301,6 +1401,7 @@ fn native_content_quad<'d>(
                             layer,
                             time,
                             scale,
+                            b.origin,
                             pm_vector::render::scene::PixelRect::new(0, 0, width, height),
                             &mut plan,
                         )
@@ -1448,6 +1549,10 @@ fn native_content_quad<'d>(
             }
             let inner_scale = derived_scale(&sub, tw, th);
             b.precomp_depth += 1;
+            // A precomp renders its own target from its own origin (today's
+            // preview viewport applies only to the open composition's
+            // canvas).
+            let outer_origin = std::mem::replace(&mut b.origin, (0.0, 0.0));
             b.blender.path.push(scope.comp.id().to_string_lossy());
             let project = scope.project;
             let inner = {
@@ -1465,6 +1570,7 @@ fn native_content_quad<'d>(
                 )
             };
             b.precomp_depth -= 1;
+            b.origin = outer_origin;
             b.blender.path.pop();
             b.video_center = outer_center;
             Ok(Some(Quad::Texture {
@@ -1521,7 +1627,9 @@ fn native_content_quad<'d>(
                         height,
                         b.video_center.is_some(),
                     )? {
-                        Some(crate::blender::Planned::Draw(source, rect)) => {
+                        Some(crate::blender::Planned::Draw(mut source, rect)) => {
+                            source.scene_metadata =
+                                b.pass3d.last().and_then(|p| p.metadata_scene());
                             return Ok(Some(Quad::Device {
                                 source: Source::Blender(Box::new(source)),
                                 rect,
@@ -1541,12 +1649,16 @@ fn native_content_quad<'d>(
                         Ok(plan) => Ok(Some(Quad::Screen {
                             source: Source::Object3d(Box::new(plan)),
                         })),
-                        Err(reason) => {
-                            b.unsupported.push(Unsupported::layer(
-                                &comp_id,
-                                layer,
-                                Feature::Scene3d(reason),
-                            ));
+                        // The composition's scene did not build (today's
+                        // `compositionScene` throws): every object layer
+                        // draws nothing and fails, as the compositor's
+                        // catch does (an export fails with it).
+                        Err(message) => {
+                            b.failures.push(LayerFailure {
+                                composition: comp_id,
+                                layer: js::layer_id(layer),
+                                message,
+                            });
                             Ok(None)
                         }
                     }
@@ -1571,13 +1683,25 @@ fn native_content_quad<'d>(
                         ay: 0.0,
                         uv: [0.0, 0.0, 1.0, 1.0],
                     })),
-                    Some(Err(reason)) => {
-                        b.unsupported.push(Unsupported::layer(
-                            &comp_id,
+                    // A legacy scene that does not sync, or a mesh layer
+                    // that does not build: the compositor's catch falls
+                    // through to the missing-definition checkerboard.
+                    Some(Err(error)) => {
+                        let mut planned = crate::shader_layers::plan::missing_placeholder(
+                            scope,
                             layer,
-                            Feature::Scene3d(reason),
-                        ));
-                        Ok(None)
+                            &d,
+                            time,
+                            (width, height),
+                            scale,
+                            b.shader_fallback,
+                        )?;
+                        if let crate::shader_layers::plan::Planned::Draw { source, .. } =
+                            &mut planned
+                        {
+                            source.scene_error = Some(error);
+                        }
+                        Ok(shader_quad(b, &comp_id, layer, planned))
                     }
                     None => {
                         b.unsupported.push(Unsupported::layer(
@@ -1635,7 +1759,7 @@ fn compat_quad<'d>(
     if ty == "captions" && b.text.as_deref().is_some_and(|t| t.captions_hidden()) {
         return Ok(Some(None));
     }
-    let world = scaled_world(scope, layer, time, scale)?;
+    let world = scaled_world(scope, layer, time, scale, b.origin)?;
     let raster_scale = crate::text::continuous_raster_scale(&world);
     // Today's preview source clipping: the window the compositor passes to
     // `PM.raster` in a viewer frame, or no raster call at all.
@@ -1733,7 +1857,7 @@ fn preview_crop<'d>(
     if scope.is_3d_layer(layer)? {
         return Ok(CropPlan::Full);
     }
-    let mut visible = vector_world(scope, layer, time, scale)?;
+    let mut visible = vector_world(scope, layer, time, scale, b.origin)?;
     visible[4] -= window.x;
     visible[5] -= window.y;
     if ty == "shape" {
@@ -1826,8 +1950,9 @@ fn vector_world<'d>(
     layer: &'d Node,
     time: f64,
     scale: (f64, f64),
+    origin: (f64, f64),
 ) -> JsResult<Mat2d> {
-    let world = scaled_world(scope, layer, time, scale)?;
+    let world = scaled_world(scope, layer, time, scale, origin)?;
     let offset = scope.size_anchor_offset(layer, time)?;
     Ok(mul(&world, &[1.0, 0.0, 0.0, 1.0, offset.x, offset.y]))
 }
@@ -1852,6 +1977,7 @@ fn local_level2<'d>(
     layer: &'d Node,
     time: f64,
     scale: (f64, f64),
+    origin: (f64, f64),
     target: pm_vector::render::scene::PixelRect,
     plan: &mut PlanVector<'_, 'd>,
 ) -> JsResult<Option<Quad>> {
@@ -1878,6 +2004,7 @@ fn local_level2<'d>(
         ..
     } = &first
         && let Some(plane) = crate::space25d::local::content_plane(scope, layer, time, scale)?
+            .map(|p| plane_at_origin(p, origin))
     {
         let projected = crate::space25d::local::project_scene(scene, &plane, dx.max(dy));
         return Ok(projected.pixel_bounds(target).map(|rect| {
@@ -1959,7 +2086,7 @@ fn text_quad<'d>(
     if ty == "captions" && text.captions_hidden() {
         return Ok(None);
     }
-    let world = scaled_world(scope, layer, time, scale)?;
+    let world = scaled_world(scope, layer, time, scale, b.origin)?;
     // `compat` level 2: drawn at output resolution, no raster.
     if node::to_number(node::member(Some(layer), "compat")) >= 2.0 && scope.is_3d_layer(layer)? {
         return local_text(scope, b, layer, ty, time, scale);

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use pm_protocol::common::{Revision, SessionId};
 use pm_protocol::envelope::{Request, Response};
-use pm_protocol::snapshot::{CompatFrameRequest, CompatSource, PixelPayload};
+use pm_protocol::snapshot::{CompatFormat, CompatFrameRequest, CompatSource, PixelPayload};
 use pm_render::compat::{CompatAnswer, CompatRaster, CompatRasters, ticks_of};
 
 /// Answers a job's compatibility layers through the host.
@@ -201,6 +201,7 @@ impl pm_export::render::FramePost for ContextFrames {
                 height,
                 payload,
             }),
+            blender: None,
         };
         match self
             .compat
@@ -289,9 +290,14 @@ impl CompatRasters for JobCompat {
             // (`pm_render::vector::svg_rasters::SvgRasterSource`).
             svg: None,
             frame: None,
+            blender: None,
         };
         let answer = match self.host.call(Request::CompatFrame(request), self.session) {
             Ok(Response::CompatFrame(frame)) if frame.native => CompatAnswer::Native,
+            // Encoded PNG answers are Blender map sources only.
+            Ok(Response::CompatFrame(frame)) if frame.format == CompatFormat::Png => {
+                return self.fail("the window answered a layer's pixels as a PNG".into());
+            }
             Ok(Response::CompatFrame(frame)) => {
                 let bytes = match frame.payload {
                     PixelPayload::Inline { bytes } => Ok(bytes.0),
@@ -334,7 +340,7 @@ impl CompatRasters for JobCompat {
 mod tests {
     use super::*;
     use pm_protocol::common::Bytes;
-    use pm_protocol::snapshot::{CompatFormat, CompatFrame};
+    use pm_protocol::snapshot::CompatFrame;
 
     struct Host {
         calls: Mutex<Vec<CompatFrameRequest>>,

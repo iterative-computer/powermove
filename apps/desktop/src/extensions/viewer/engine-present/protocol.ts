@@ -49,6 +49,11 @@ export type FrameQuality = {
   standIn?: boolean;
 };
 
+export type Scene3dMeta = { composition: string; layers: string[]; warnings: string[]; error: string | null };
+export type ChromeSelection = { selected: string[]; active: string[] };
+export type ChromeGlyph = { id:string; kind:'point'|'sun'|'spot'|'area'|'camera'; position:[number,number,number]; target:[number,number,number]|null; up:[number,number,number]; fov:number; aspect:number; angle:number; size:[number,number] };
+export type DepthIdSurface = { poolIndex:number; seq:number; poolGeneration:number; encoding?:string; coveragePoolIndex?:number; legend?:string[]; glyphs?:ChromeGlyph[]; selection?:ChromeSelection };
+
 export type FrameDescriptor = {
   poolIndex: number;
   poolGeneration: number;
@@ -59,9 +64,10 @@ export type FrameDescriptor = {
   format: SurfaceFormat;
   quality: FrameQuality;
   overlay: OverlayGeometry | null;
-  /** The frame's depth and object-id surface in the depth pool (r depth,
-   *  g/b object id − 1, a coverage), when the viewer asked for it. */
-  depthId: { poolIndex: number; seq: number; poolGeneration: number } | null;
+  /** The frame-aligned lossless depth and ID/selection pair in the depth
+   *  pool (`chromePlanesV1`), when the viewer asked for it. */
+  depthId: DepthIdSurface | null;
+  scene3dMeta?: Scene3dMeta[];
   viewSeq: number;
   /** Ticks; `null` for frames shown at the next refresh. */
   duration: number | null;
@@ -112,7 +118,17 @@ export type ViewerState = {
   vsync?: VsyncHint | null;
   /** Ask for each frame's depth and object-id surface (the 3D chrome). */
   depthId?: boolean | null;
+  chromeSelection?: ChromeSelection;
+  /** Today's viewer canvas (decision V1): the engine renders at its size. */
+  canvas?: ViewerCanvas | null;
+  /** The surface epoch: a change makes the engine replace this view's
+   *  surface pools (the imports cannot be read after a GPU restart). */
+  surfaceEpoch?: number;
 };
+
+/** The WebGL canvas today's viewer draws a view into: its backing size, the
+ *  composition part it holds, and its CSS box in stage CSS pixels. */
+export type ViewerCanvas = { width: number; height: number; crop: Rect; css: Rect };
 
 /** Refreshes (BeginFrame times) fall at `hostTime + n × periodUs` (host µs). */
 export type VsyncHint = { hostTime: number; periodUs: number };

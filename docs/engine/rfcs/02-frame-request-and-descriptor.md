@@ -245,3 +245,110 @@ there is no implicit seek, Play, epoch change or audio-device restart. Explicit
 presentation frame requests fail without a viewer; offscreen captures use the
 snapshot path. See RFC 16 for the renderer lifecycle. The generated build is
 `protocol-2f8d7cab61015d02`; addons and TypeScript must be rebuilt together.
+
+### Version note: native 3D viewport chrome (3D round 5)
+
+`ViewerState.chromeSelection` carries selected and active layer IDs. A change
+advances `viewSeq`, just like an editor-camera change. A requested `depthId`
+pool now contains two RGBA16F surfaces for each color slot. Its slot ownership
+is coupled to the color slot, including out-of-order releases; it is not
+reused by frame-sequence modulo. The transport pool bound is 64 planes,
+while color slots remain bounded at 32; maximum configured render-ahead
+therefore also has a complete depth/coverage pair for every color slot.
+Color completion alone does not release that slot. The viewer retains the
+currently displayed chrome pair through replacement and through the overlay
+WebGL read fences. Retired pool imports wait for those readers as well;
+late imports of a retired generation are released immediately.
+
+`DepthIdSurface.encoding = "chromePlanesV1"` identifies these stage-sized,
+GL-row-order planes. `poolIndex` names depth; `coveragePoolIndex` names IDs and
+selection in the same pool generation. The depth target is Depth32Float.
+Its IEEE f32 window-depth bits are split 11/11/10 into RGB, each divided by
+2048, so RGBA16F transport preserves every bit. Coverage RG stores the
+one-based 22-bit topmost object ID in the same binary fractions. Coverage B
+is 0, .5 or 1 for none, selected or active, from a separate double-sided
+pass without occlusion by other objects. Alpha is 1 on both planes.
+
+The descriptor's `legend` maps IDs to engine layer/object IDs; `glyphs`
+contains evaluated light/camera world geometry, and `selection` contains
+expanded model-group selections. All are evaluated at the color frame's
+revision, time, editor camera and Local View. `depthId.seq` must equal the
+color frame's sequence. The viewer requires the matching revision, view
+sequence and depth generation before consuming them. Grid occlusion and
+outlines use these planes; glyph box selection uses their glyph metadata.
+The new-engine viewport does not reconstruct a scene in three.js.
+This contract builds as `protocol-e0820481c9e45c9e`.
+
+`previewControl` and `previewStatus` are session-scoped events for the
+presenter's Blender preview. A positive generation identifies an explicit
+render/cancel request; `automatic` distinguishes the independent generation
+sequence of automatic Material/Rendered previews. Controls include revision,
+composition, time and shading. A ready status includes the exact frame sequence; the API completes after that
+frame reaches the viewer. Addons and generated TypeScript rebuild together
+because these draft contracts require equal protocol build IDs.
+
+### Scene diagnostics and cache-only preview (THREED-6/7, round 7)
+
+`FrameDescriptor.scene3dMeta` contains `{composition, layers, warnings, error}`
+groups from the render plan that supplied this frame. The viewer applies them
+on presentation, alongside the descriptor's sequence and revision. Empty
+warnings clear the previous warning array; construction errors set the existing
+scene-error/missing metadata. Shared scenes use one group for all their object
+layers. No scene redraw or renderer geometry evaluation supplies these records.
+
+`PreviewControl.cacheOnly` requests native Blender cache preparation without
+changing transport or viewer shading. It carries the full composition `size`
+and optional editor `camera`. Solid/Wireframe, playback, and viewerless
+`renderFrame` use this path. Its explicit `PreviewStatus` has `cacheOnly: true`
+and may be Ready with no `frameSeq`, after the native cache contains all
+requested surfaces. A regular paused Material/Rendered request still completes
+only on the matching presented frame. Render requests never pause or seek.
+
+### Version note: optional viewer canvas (decision V1, 2026-10-19)
+
+`ViewerState.canvas?: ViewerCanvas | null` (Rust `canvas:
+Option<ViewerCanvas>`, `#[serde(default)]`) is the WebGL canvas today's
+viewer draws the view into:
+
+```rust
+pub struct ViewerCanvas {
+    pub width: u32,  // backing size: previewRenderSize, the explicit
+    pub height: u32, // preview resolution, or the crop's renderWidth × renderHeight
+    pub crop: Rect,  // the composition part it holds (the whole composition, or the crop)
+    pub css: Rect,   // its CSS box in stage CSS pixels
+}
+```
+
+With it the engine renders the viewer frame at that canvas's size and
+today's `outputScale` (`width / crop.width`), and scales it into the box
+snapped to whole device pixels with bilinear sampling, as Chromium shows
+today's canvas (docs/engine/bridge.md, "Today's viewer canvas"). Absent or
+null: the composition at zoom × DPR × the preview resolution, as before.
+`width` and `height` 1..16384, `crop` and `css` finite with positive size
+(`ViewerState::validate`). A change of it is a new view (`viewSeq`). It
+replaces the `svgScale` field this branch first added, so the branch moves
+the build id once (`protocol-8433dea27e348b5a`); addons and TypeScript are
+rebuilt together.
+
+### Version note: chrome selection and viewer canvas together (3D merge, 2026-10-22)
+
+`ViewerState` carries both optional fields above: `chromeSelection` (3D
+chrome) and `canvas` (decision V1). Each keeps its own meaning; neither
+depends on the other. The combined contract built as
+`protocol-50a5c6ee43a404de`.
+
+### Version note: `ViewerState.surfaceEpoch` (3D round 11, 2026-10-22)
+
+`ViewerState.surfaceEpoch?: number` (Rust `surface_epoch: Option<u32>`,
+`#[serde(default, skip_serializing_if = "Option::is_none")]`; absent is 0)
+is the viewer's surface epoch. A change replaces the view's color pool and,
+when the view asks for one, its depth/ID pool with new surfaces and new
+generations, even when size, count and format stay the same; the lease is
+charged once because the old pools are released first. A change of it is a
+new view (`viewSeq`), so a paused view draws its frame again into the new
+pool. The viewer moves it when the surfaces it imported can no longer be
+read: after a GPU process restart every `VideoFrame` of an earlier import
+fails to upload (docs/engine/scene3d.md, round 11). The same epoch in a
+later view, and transport replans, keep the pools. Absent on the wire when
+unset, so existing fixtures are unchanged. Builds as
+`protocol-7a0a3449f03f321a`.

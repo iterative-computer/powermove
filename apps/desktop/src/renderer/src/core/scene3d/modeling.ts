@@ -367,6 +367,9 @@ async function saveSource(
     throw new Error("Could not save the Blender source");
   writeDocument(PM, [["assets", id]], () => { PM.proj.assets[id] = asset; });
   PM.assets?.map?.set(id, { ...asset, blob });
+  // As every import does (`ingestAsset`): the host binds the new source
+  // before a layer uses it, so the engine never reads it as offline media.
+  await PM.HostMedia?.flushBindings?.(PM.proj);
   return id;
 }
 export async function editModel(

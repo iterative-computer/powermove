@@ -486,11 +486,82 @@ impl SnapshotQueue {
 /// renderbuffer).
 pub fn encode_rgba8(half: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
     let mut out = Vec::with_capacity(half.len() / 2);
-    for px in half.chunks_exact(8) {
-        let c = |i: usize| pm_gpu::readback::half_to_f32(u16::from_le_bytes([px[i], px[i + 1]]));
-        push_rgba8(&mut out, [c(0), c(2), c(4), c(6)], pixels);
+    append_rgba8(half, pixels, &mut out);
+    out
+}
+
+/// The mapped half/float32 rows of one completed snapshot ticket. This is
+/// the single final allocation, preserving alpha, row-order, and rounding.
+pub fn encode_mapped_rgba8(
+    format: wgpu::TextureFormat,
+    data: &[u8],
+    row: usize,
+    stride: usize,
+    height: usize,
+    pixels: SnapshotPixels,
+    rows: pm_render::SnapshotRows,
+) -> Result<Vec<u8>, pm_gpu::readback::ReadbackError> {
+    match format {
+        wgpu::TextureFormat::Rgba16Float => {
+            Ok(encode_rgba8_rows(data, row, stride, height, pixels, rows))
+        }
+        wgpu::TextureFormat::Rgba32Float => Ok(encode_rgba8_f32_rows(
+            data, row, stride, height, pixels, rows,
+        )),
+        other => Err(pm_gpu::readback::ReadbackError::Format(other)),
+    }
+}
+
+fn encode_rgba8_f32_rows(
+    raw: &[u8],
+    row: usize,
+    stride: usize,
+    height: usize,
+    pixels: SnapshotPixels,
+    rows: pm_render::SnapshotRows,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(row / 4 * height);
+    for y in 0..height {
+        let source_y = match rows {
+            pm_render::SnapshotRows::TopDown => y,
+            pm_render::SnapshotRows::Gl => height - 1 - y,
+        };
+        for px in raw[source_y * stride..source_y * stride + row].chunks_exact(16) {
+            let c = |i: usize| f32::from_le_bytes(px[i..i + 4].try_into().expect("four bytes"));
+            push_rgba8(&mut out, [c(0), c(4), c(8), c(12)], pixels);
+        }
     }
     out
+}
+
+fn encode_rgba8_rows(
+    half: &[u8],
+    row: usize,
+    stride: usize,
+    height: usize,
+    pixels: SnapshotPixels,
+    rows: pm_render::SnapshotRows,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(row / 2 * height);
+    for y in 0..height {
+        let source_y = match rows {
+            pm_render::SnapshotRows::TopDown => y,
+            pm_render::SnapshotRows::Gl => height - 1 - y,
+        };
+        append_rgba8(
+            &half[source_y * stride..source_y * stride + row],
+            pixels,
+            &mut out,
+        );
+    }
+    out
+}
+
+fn append_rgba8(half: &[u8], pixels: SnapshotPixels, out: &mut Vec<u8>) {
+    for px in half.chunks_exact(8) {
+        let c = |i: usize| pm_gpu::readback::half_to_f32(u16::from_le_bytes([px[i], px[i + 1]]));
+        push_rgba8(out, [c(0), c(2), c(4), c(6)], pixels);
+    }
 }
 
 /// [`encode_rgba8`] from premultiplied f32 RGBA (a text raster's readback).
@@ -997,5 +1068,57 @@ mod tests {
         // binary16 value 1/510 × 255 = 0.5 → 0.
         let px = half([1.0 / 510.0, 0.0, 0.0, 1.0]);
         assert_eq!(encode_rgba8(&px, SnapshotPixels::Opaque)[0], 0);
+    }
+
+    #[test]
+    fn mapped_rows_match_tightly_packed_encoding_with_padding() {
+        let top = half([0.5, 0.25, 0.0, 0.5]);
+        let bottom = half([1.0, 0.0, 0.5, 1.0]);
+        let mut padded = top.clone();
+        padded.extend_from_slice(&[0xa5; 8]);
+        padded.extend_from_slice(&bottom);
+        let packed = [top.clone(), bottom.clone()].concat();
+        for pixels in [
+            SnapshotPixels::Opaque,
+            SnapshotPixels::Premultiplied,
+            SnapshotPixels::Straight,
+        ] {
+            assert_eq!(
+                encode_rgba8_rows(&padded, 8, 16, 2, pixels, pm_render::SnapshotRows::TopDown),
+                encode_rgba8(&packed, pixels)
+            );
+            assert_eq!(
+                encode_rgba8_rows(&padded, 8, 16, 2, pixels, pm_render::SnapshotRows::Gl),
+                encode_rgba8(&[bottom.clone(), top.clone()].concat(), pixels)
+            );
+        }
+    }
+
+    #[test]
+    fn mapped_float32_rows_match_float32_encoding_with_padding() {
+        let top = [0.5f32, 0.25, 0.0, 0.5];
+        let bottom = [1.0f32, 0.0, 0.5, 1.0];
+        let mut padded = Vec::new();
+        for value in top {
+            padded.extend_from_slice(&value.to_le_bytes());
+        }
+        padded.extend_from_slice(&[0xa5; 16]);
+        for value in bottom {
+            padded.extend_from_slice(&value.to_le_bytes());
+        }
+        for pixels in [
+            SnapshotPixels::Opaque,
+            SnapshotPixels::Premultiplied,
+            SnapshotPixels::Straight,
+        ] {
+            assert_eq!(
+                encode_rgba8_f32_rows(&padded, 16, 32, 2, pixels, pm_render::SnapshotRows::TopDown,),
+                encode_rgba8_f32(&[top, bottom].concat(), pixels)
+            );
+            assert_eq!(
+                encode_rgba8_f32_rows(&padded, 16, 32, 2, pixels, pm_render::SnapshotRows::Gl),
+                encode_rgba8_f32(&[bottom, top].concat(), pixels)
+            );
+        }
     }
 }

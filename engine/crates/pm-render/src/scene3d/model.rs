@@ -85,6 +85,8 @@ impl Camera3d {
 pub struct Texture3d {
     pub asset: String,
     pub path: PathBuf,
+    /// Chromium SVG map upload (distinct from a 2D SVG bucket).
+    pub svg: Option<pm_protocol::svg_raster::SvgRasterRequest>,
     /// Color and emissive maps decode sRGB (`SRGBColorSpace`); data maps
     /// are linear.
     pub srgb: bool,
@@ -256,10 +258,111 @@ impl Materials {
 
 /// Geometry shared by meshes with the same source (`signature`).
 #[derive(Clone)]
+pub enum GeometryPayload {
+    Standard(Arc<Geometry>),
+    /// glTF attributes remain in the loaded model. Cloning its geometry
+    /// shares the large attribute and index arrays, so building a draw does
+    /// not retain a second copy of every vertex on the CPU.
+    Gltf {
+        source: Arc<pm_geom3d::gltf::Geometry>,
+        /// Line loops and unindexed primitives need a generated index list.
+        generated_indices: Option<Arc<Vec<u32>>>,
+    },
+}
+
+impl GeometryPayload {
+    pub fn vertex_count(&self) -> usize {
+        self.positions().len() / 3
+    }
+
+    pub fn positions(&self) -> &[f32] {
+        match self {
+            Self::Standard(g) => &g.positions,
+            Self::Gltf { source, .. } => source.position.data.as_slice(),
+        }
+    }
+
+    pub fn normals(&self) -> &[f32] {
+        match self {
+            Self::Standard(g) => &g.normals,
+            Self::Gltf { source, .. } => source.normal.as_ref().map_or(&[], |a| a.data.as_slice()),
+        }
+    }
+
+    pub fn uvs(&self) -> &[f32] {
+        match self {
+            Self::Standard(g) => &g.uvs,
+            Self::Gltf { source, .. } => source.uv[0].as_ref().map_or(&[], |a| a.data.as_slice()),
+        }
+    }
+
+    pub fn indices(&self) -> &[u32] {
+        match self {
+            Self::Standard(g) => &g.indices,
+            Self::Gltf {
+                source,
+                generated_indices,
+                ..
+            } => generated_indices.as_ref().map_or_else(
+                || source.index.as_deref().map_or(&[][..], Vec::as_slice),
+                |v| v.as_slice(),
+            ),
+        }
+    }
+
+    pub fn indexed(&self) -> bool {
+        match self {
+            Self::Standard(g) => g.indexed,
+            Self::Gltf { source, .. } => source.index.is_some(),
+        }
+    }
+
+    pub fn groups(&self) -> &[Group] {
+        match self {
+            Self::Standard(g) => &g.groups,
+            Self::Gltf { .. } => &[],
+        }
+    }
+
+    pub fn wireframe_indices(&self) -> Vec<u32> {
+        match self {
+            Self::Standard(g) => g.wireframe_indices(),
+            Self::Gltf { .. } => {
+                let indices = self.indices();
+                let mut out = Vec::with_capacity(indices.len() * 2);
+                for t in indices.chunks_exact(3) {
+                    out.extend_from_slice(&[t[0], t[1], t[1], t[2], t[2], t[0]]);
+                }
+                out
+            }
+        }
+    }
+
+    pub fn bounds(&self) -> Option<([f32; 3], [f32; 3])> {
+        match self {
+            Self::Standard(g) => g.bounds(),
+            Self::Gltf { .. } => {
+                let mut it = self.positions().chunks_exact(3);
+                let first = it.next()?;
+                let mut lo = [first[0], first[1], first[2]];
+                let mut hi = lo;
+                for p in it {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                }
+                Some((lo, hi))
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Geometry3d {
     /// Hash of the source (the GPU mesh cache key).
     pub key: u64,
-    pub geometry: Arc<Geometry>,
+    pub geometry: GeometryPayload,
     /// `geometry.computeBoundingSphere()`: center and radius.
     pub sphere: ([f64; 3], f64),
     /// A glTF geometry's other attributes (tangents, colors, secondary UV
@@ -503,6 +606,9 @@ pub trait TextureSource {
     /// The image file of an image asset, or `None` when it is not an image
     /// asset (`asset.kind !== 'image'`) or offline.
     fn image(&self, asset: &str) -> Option<PathBuf>;
+    fn svg(&self, _asset: &str) -> Option<pm_protocol::svg_raster::SvgRasterRequest> {
+        None
+    }
 }
 
 /// What an object's `assetId` resolves to (`makeObject`).
@@ -519,9 +625,6 @@ pub enum ModelLookup {
     },
     /// A glTF or GLB scene (`asset.object3d`).
     Gltf(Arc<super::gltf::GltfAsset>),
-    /// A glTF or GLB file this engine does not load although the importer
-    /// accepted it (routed to the legacy engine).
-    Unloadable(String),
 }
 
 /// How a scene finds model assets.
@@ -796,7 +899,7 @@ impl SceneBuilder {
         if let Some((g, sphere)) = self.geometries.get(&key) {
             return Geometry3d {
                 key,
-                geometry: g.clone(),
+                geometry: GeometryPayload::Standard(g.clone()),
                 sphere: *sphere,
                 extra: None,
             };
@@ -822,7 +925,7 @@ impl SceneBuilder {
         self.geometries.insert(key, (g.clone(), sphere));
         Geometry3d {
             key,
-            geometry: g,
+            geometry: GeometryPayload::Standard(g),
             sphere,
             extra: None,
         }
@@ -903,6 +1006,7 @@ impl SceneBuilder {
             let id = maps.and_then(|m| text(m, key))?;
             match textures.image(&id) {
                 Some(path) => Some(Texture3d {
+                    svg: textures.svg(&id),
                     asset: id,
                     path,
                     srgb,
@@ -956,6 +1060,8 @@ impl SceneBuilder {
         textures: &dyn TextureSource,
         models: &dyn ModelSource,
     ) -> Result<Scene3d, Unsupported> {
+        pm_geom3d::scene_validation::validate_scene(scene)
+            .map_err(|reason| format!("Invalid 3D scene: {reason}"))?;
         let mut warnings = Vec::new();
         let environment = obj(scene, "environment").ok_or("the 3D environment")?;
         let shadows = boolean(environment, "shadows") != Some(false);
@@ -1002,15 +1108,22 @@ impl SceneBuilder {
                             depth: 1.0,
                         })))
                     }
-                    ModelLookup::Unloadable(why) => return Err(why),
                     ModelLookup::Missing => {
                         warnings.push(format!("Missing model: {asset}"));
                         missing = true;
                         None
                     }
-                    ModelLookup::Obj { key, mesh } => Some(self.obj(key, &mesh)),
+                    ModelLookup::Obj { key, mesh } => {
+                        // `SceneRuntime.sync` sums asset.vertices for OBJ too;
+                        // the asset store records its sourceVertexCount.
+                        imported_vertices += mesh.source_vertex_count;
+                        Some(self.obj(key, &mesh))
+                    }
                 }
             } else {
+                // A primitive the schema does not know fails the scene:
+                // `compositionScene` and a legacy layer's `sync` both run
+                // `parseScene`, which refuses it (`corrupt-scenes.test.ts`).
                 Some(self.geometry(&source_of(source)?))
             };
             let slots = arr(node, "slots");
@@ -1295,7 +1408,7 @@ pub fn obj_geometry(key: u64, mesh: &pm_geom3d::obj::ObjMesh) -> Geometry3d {
     let sphere = bounding_sphere(&g);
     Geometry3d {
         key,
-        geometry: Arc::new(g),
+        geometry: GeometryPayload::Standard(Arc::new(g)),
         sphere,
         extra: None,
     }

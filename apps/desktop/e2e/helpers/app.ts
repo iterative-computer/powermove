@@ -50,6 +50,11 @@ export type LaunchOptions = {
   env?: Record<string, string>;
   /** Use production window preferences while retaining an isolated test profile. */
   normalWindow?: boolean;
+  /** Extra Chromium switches (for example `--force-color-profile=srgb`). */
+  args?: string[];
+  /** Chromium switches placed before the app path (for example a GPU stress
+   * run's `--disable-gpu-process-crash-limit`). Joined with `args`. */
+  chromiumSwitches?: string[];
 };
 
 export type LaunchedApp = {
@@ -95,6 +100,7 @@ async function startElectron(
   env: Record<string, string>,
   diagnostics: RendererDiagnostics,
   normalWindow = false,
+  args: string[] = [],
 ): Promise<{ app: ElectronApplication; page: Page }> {
   await ensureBuilt();
   const launchEnv = {
@@ -115,7 +121,7 @@ async function startElectron(
   // Chromium debugging flag Playwright needs before our app can even start.
   delete (launchEnv as NodeJS.ProcessEnv).ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch({
-    args: ['.'],
+    args: [...args, '.'],
     cwd: repoRoot,
     env: launchEnv
   });
@@ -199,8 +205,9 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     await writeFile(path.join(userData, 'onboarding-v1.json'), '{"version":1}\n', { mode: 0o600 });
   }
   const diagnostics: RendererDiagnostics = { console: [], pageErrors: [] };
+  const switches = [...(options.args ?? []), ...(options.chromiumSwitches ?? [])];
   let active: Awaited<ReturnType<typeof startElectron>>;
-  try { active = await startElectron(userData, env, diagnostics, options.normalWindow); }
+  try { active = await startElectron(userData, env, diagnostics, options.normalWindow, switches); }
   catch (error) {
     if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     throw error;
@@ -214,7 +221,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     diagnostics,
     async relaunch() {
       await closeDisposableApp(active.app);
-      active = await startElectron(userData, env, diagnostics, options.normalWindow);
+      active = await startElectron(userData, env, diagnostics, options.normalWindow, switches);
       session.app = active.app;
       session.page = active.page;
     },

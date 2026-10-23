@@ -33,6 +33,7 @@
 #![allow(clippy::result_large_err)]
 
 pub(crate) mod blender;
+pub(crate) mod blender_png;
 pub(crate) mod compat;
 mod compile;
 mod definitions;
@@ -533,10 +534,17 @@ pub struct StatsHandle(Arc<Shared>);
 
 impl StatsHandle {
     pub fn json(&self) -> serde_json::Value {
+        let gpu_created = self
+            .0
+            .gpu
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
         let st = self.0.lock();
         serde_json::json!({
             "service": st.stats,
             "gate": self.0.gate.stats(),
+            "gpuCreated": gpu_created,
             "queued": {
                 "snapshots": st.snapshots.len(),
                 "agentExports": st.agent_exports.len(),
@@ -1643,6 +1651,7 @@ fn lane_blender<'b>(
     let params = blender::JobParams {
         session: document.session,
         priority: class,
+        foreground_capture: false,
         export: job.clone(),
     };
     let shared_params = blender
@@ -1667,6 +1676,14 @@ fn lane_blender<'b>(
             Box::new(backend),
         ));
     }
+    blender.stage.as_mut().unwrap().converted_assets =
+        Some(Arc::new(blender_png::HostBlenderPng::new(
+            export.media.clone(),
+            shared.clone(),
+            document.session,
+            document.revision,
+            &export.document,
+        )));
     Ok(blender.stage.as_mut())
 }
 

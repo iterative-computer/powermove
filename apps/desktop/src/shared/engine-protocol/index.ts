@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-8a10dfb17b4ff9bc";
+export const PROTOCOL_BUILD = "protocol-c0e7595db32860a2";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -28,6 +28,7 @@ export type { BlenderJobRequest } from "./BlenderJobRequest";
 export type { BlenderModelJob } from "./BlenderModelJob";
 export type { BlenderModelOperation } from "./BlenderModelOperation";
 export type { BlenderOutputFile } from "./BlenderOutputFile";
+export type { BlenderPngRequest } from "./BlenderPngRequest";
 export type { BlenderPolicy } from "./BlenderPolicy";
 export type { BlenderProgress } from "./BlenderProgress";
 export type { BlenderSettings } from "./BlenderSettings";
@@ -44,6 +45,8 @@ export type { CapabilityHandle } from "./CapabilityHandle";
 export type { CapabilityKind } from "./CapabilityKind";
 export type { Caret } from "./Caret";
 export type { ChannelLevels } from "./ChannelLevels";
+export type { ChromeGlyph } from "./ChromeGlyph";
+export type { ChromeSelection } from "./ChromeSelection";
 export type { ClockSample } from "./ClockSample";
 export type { CloseProject } from "./CloseProject";
 export type { ColorMode } from "./ColorMode";
@@ -191,7 +194,11 @@ export type { PlaybackRate } from "./PlaybackRate";
 export type { PoolRole } from "./PoolRole";
 export type { PortId } from "./PortId";
 export type { Precision } from "./Precision";
+export type { PreviewAction } from "./PreviewAction";
+export type { PreviewControl } from "./PreviewControl";
+export type { PreviewPhase } from "./PreviewPhase";
 export type { PreviewResolution } from "./PreviewResolution";
+export type { PreviewStatus } from "./PreviewStatus";
 export type { PriorityClass } from "./PriorityClass";
 export type { ProResProfile } from "./ProResProfile";
 export type { ProbeMedia } from "./ProbeMedia";
@@ -221,6 +228,7 @@ export type { ResyncSource } from "./ResyncSource";
 export type { Retry } from "./Retry";
 export type { Revision } from "./Revision";
 export type { Rgba } from "./Rgba";
+export type { Scene3dMeta } from "./Scene3dMeta";
 export type { SeekMode } from "./SeekMode";
 export type { Seq } from "./Seq";
 export type { SessionId } from "./SessionId";
@@ -262,6 +270,7 @@ export type { ToolResult } from "./ToolResult";
 export type { TransportCommand } from "./TransportCommand";
 export type { TransportState } from "./TransportState";
 export type { ViewOverride } from "./ViewOverride";
+export type { ViewerCanvas } from "./ViewerCanvas";
 export type { ViewerColorSpace } from "./ViewerColorSpace";
 export type { ViewerState } from "./ViewerState";
 export type { VsyncHint } from "./VsyncHint";

@@ -6,15 +6,15 @@ import { ENGINE_VIEWER_SERVICE, type EngineViewerHandlers, type EngineViewerServ
 import type { FrameDescriptor } from './engine-present/protocol';
 import { createViewerRuntime } from './viewer';
 
-// happy-dom has no WebGPU: a test can ask for a painter that draws nothing.
+// happy-dom has no WebGL2: a test can ask for a painter that draws nothing.
 const gpu = vi.hoisted(() => ({ fake: false }));
-vi.mock('./engine-present/gpu', async (original) => {
-  const actual = await original<typeof import('./engine-present/gpu')>();
+vi.mock('./engine-present/painter', async (original) => {
+  const actual = await original<typeof import('./engine-present/painter')>();
   return {
     ...actual,
-    createWebGpuPainter: async (canvas: never) => gpu.fake
+    createFramePainter: async (canvas: never) => gpu.fake
       ? { configure() {}, draw() {}, workDone: () => Promise.resolve(), dispose() {} }
-      : actual.createWebGpuPainter(canvas)
+      : actual.createFramePainter(canvas)
   };
 });
 
@@ -105,8 +105,8 @@ describe('viewer engine presentation hook', () => {
     expect(canvas?.nextSibling).toBe(overlay);
     expect(canvas?.style.visibility).toBe('hidden');
     await new Promise((resolve) => setTimeout(resolve, 0));
-    // happy-dom has no WebGPU: the presentation says so and opens no session.
-    expect(logs).toContain('engine presentation is unavailable: WebGPU is not available');
+    // happy-dom has no WebGL2: the presentation says so and opens no session.
+    expect(logs).toContain('engine presentation is unavailable: WebGL2 F16 presentation is unavailable: WebGL2 context creation failed');
     expect(service.open).not.toHaveBeenCalled();
     runtime.layout();
     expect(stage.querySelectorAll('#engine-present')).toHaveLength(1);

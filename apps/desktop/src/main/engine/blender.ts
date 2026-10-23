@@ -49,6 +49,55 @@ const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const MAX_INPUT_BYTES = 256 * 1024 * 1024;
 const MAX_OUTPUT_BYTES_PER_SURFACE = 8192 * 8192 * 8 + 16 * 1024 * 1024;
 const ASSET_EXTENSIONS = new Set(['.blend', '.glb', '.gltf', '.obj', '.png', '.jpg', '.jpeg', '.webp', '.exr', '.hdr']);
+
+/** OBJ statements a model file starts with (after blank and `#` lines). */
+const OBJ_STATEMENT = /^(?:v|vt|vn|vp|f|l|p|o|g|s|mtllib|usemtl|cstype|deg|curv|curv2|surf|parm|trim|hole|scrv|sp|end|con|bmat|step|mg|lod|usemap|maplib|shadow_obj|trace_obj|ctech|stech|bevel|c_interp|d_interp)\s/;
+const SNIFF_BYTES = 64 * 1024;
+
+/**
+ * The extension a Blender asset is copied in with. Media-store files are
+ * content-addressed and have none, so it is read from the file: today's
+ * renderer named image files from the stored blob's type (`<id>.png|jpg|webp`;
+ * the engine converts every other image to PNG before it gets here, as today
+ * draws them through a canvas) and model files by the asset's name
+ * (`chair.obj`, `scene.gltf`, `model.glb`, `source.blend`), whose formats
+ * are known by their first bytes: binary signatures, glTF JSON (an object
+ * with an `asset` member), and OBJ text (its first statement). Null when it
+ * is not a format the worker loads.
+ */
+export async function assetExtension(file: string): Promise<string | null> {
+  const own = path.extname(file).toLowerCase();
+  if (ASSET_EXTENSIONS.has(own)) return own;
+  const handle = await open(file, 'r').catch(() => null);
+  if (!handle) return null;
+  try {
+    const head = Buffer.alloc(SNIFF_BYTES);
+    const { bytesRead } = await handle.read(head, 0, SNIFF_BYTES, 0);
+    const at = (offset: number, bytes: number[] | string) => {
+      const want = typeof bytes === 'string' ? Buffer.from(bytes, 'latin1') : Buffer.from(bytes);
+      return bytesRead >= offset + want.length && head.subarray(offset, offset + want.length).equals(want);
+    };
+    if (at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return '.png';
+    if (at(0, [0xff, 0xd8, 0xff])) return '.jpg';
+    if (at(0, 'RIFF') && at(8, 'WEBP')) return '.webp';
+    if (at(0, 'glTF')) return '.glb';
+    if (at(0, 'BLENDER')) return '.blend';
+    // Text models: UTF-8, an optional byte order mark.
+    let text = head.subarray(0, bytesRead).toString('utf8');
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    if (text.includes('\u0000')) return null;
+    const trimmed = text.trimStart();
+    if (trimmed.startsWith('{')) return /"asset"\s*:/.test(trimmed) ? '.gltf' : null;
+    for (const raw of text.split(/\r\n|\r|\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      return OBJ_STATEMENT.test(line + ' ') ? '.obj' : null;
+    }
+    return null;
+  } finally {
+    await handle.close();
+  }
+}
 const safeId = /^[a-zA-Z][a-zA-Z0-9_-]{0,159}$/;
 
 export type BlenderLocation = { available: boolean; path?: string; version?: string; error?: string };
@@ -275,7 +324,7 @@ export type EngineBlenderOptions = {
   timeoutMs?: number;
 };
 
-type Queued = { job: string; port: number; cancelled: boolean };
+type Queued = { job: string; port: number; cancelled: boolean; foregroundCapture: boolean };
 
 /** Host services' Blender: status, render jobs, and their cancellation. */
 export class EngineBlender {
@@ -284,6 +333,12 @@ export class EngineBlender {
   private queued: Queued[] = [];
   private current: Queued | null = null;
   private paused = false;
+  private readonly completed: { requested: string; actual: string }[] = [];
+
+  /** Bounded host-worker evidence for diagnostics; no snapshot or file paths. */
+  completedRenders(): readonly { requested: string; actual: string }[] {
+    return this.completed.slice();
+  }
 
   /** This process's scratch parent: `<tmp>/powermove-engine-blender/<pid>`.
    *  Scratch of processes that no longer run is removed at start (an app
@@ -304,18 +359,26 @@ export class EngineBlender {
 
   /** Runs one render job; `send` delivers events to the requesting engine. */
   render(req: BlenderJobRequest, session: number, port: number, send: (event: Event) => void): Promise<void> {
+    if (req.foregroundCapture && req.priority !== 'interactive')
+      return Promise.reject(new ProtocolError('invalidMessage', 'Foreground Blender capture requires interactive priority'));
     if (this.queued.length + (this.current ? 1 : 0) >= MAX_QUEUED_JOBS || this.queued.some((q) => q.job === req.job) || this.current?.job === req.job)
       return Promise.reject(new ProtocolError('blenderFailed', 'Blender queue is full or request already exists'));
-    const entry: Queued = { job: req.job, port, cancelled: false };
+    const entry: Queued = { job: req.job, port, cancelled: false, foregroundCapture: req.foregroundCapture ?? false };
     this.queued.push(entry);
+    this.applyPause();
     const work = this.tail.catch(() => {}).then(async () => {
       this.queued = this.queued.filter((q) => q !== entry);
-      if (entry.cancelled) throw new ProtocolError('cancelled', 'Blender request cancelled');
+      if (entry.cancelled) {
+        this.applyPause();
+        throw new ProtocolError('cancelled', 'Blender request cancelled');
+      }
       this.current = entry;
+      this.applyPause();
       try {
         await this.run(req, session, port, send, entry);
       } finally {
         this.current = null;
+        this.applyPause();
       }
     });
     this.tail = work;
@@ -327,11 +390,13 @@ export class EngineBlender {
     const queued = this.queued.find((q) => q.job === job);
     if (queued) {
       queued.cancelled = true;
+      this.applyPause();
       return true;
     }
     if (this.current?.job === job) {
       this.current.cancelled = true;
       this.worker?.kill();
+      this.applyPause();
       return true;
     }
     return false;
@@ -347,13 +412,22 @@ export class EngineBlender {
    *  plays (`SlicingPolicy.blender` is `pause`, S8). */
   setPaused(paused: boolean): void {
     this.paused = paused;
-    this.worker?.setPaused(paused);
+    this.applyPause();
+  }
+
+  /** A user-requested cache capture can finish without stopping playback.
+   *  The sole worker also has to finish any paused job ahead of it in FIFO. */
+  private applyPause(): void {
+    const foreground = (this.current?.foregroundCapture && !this.current.cancelled) ||
+      this.queued.some((q) => q.foregroundCapture && !q.cancelled);
+    this.worker?.setPaused(this.paused && !foreground);
   }
 
   /** An engine launch ended: its Blender jobs stop. */
   endPort(port: number): void {
     for (const q of this.queued) if (q.port === port) q.cancelled = true;
     if (this.current?.port === port) this.cancel(this.current.job);
+    this.applyPause();
   }
 
   async dispose(): Promise<void> {
@@ -382,7 +456,7 @@ export class EngineBlender {
     if (!info || info.size !== req.snapshot.bytes || info.size > MAX_SNAPSHOT_BYTES) throw new ProtocolError('invalidMessage', 'The Blender snapshot is missing or does not match its size.');
     const snapshot = JSON.parse(await readFile(snapshotPath, 'utf8'));
     // Assets: media files, or converted images in the area.
-    const assets: { id: string; file: string }[] = [];
+    const assets: { id: string; file: string; ext: string }[] = [];
     let inputBytes = 0;
     for (const a of req.assets) {
       const r = this.options.handles.resolve(a.handle, session, port);
@@ -394,15 +468,16 @@ export class EngineBlender {
         if (name) file = path.join(r.path, 'assets', name);
       }
       if (!file) throw new ProtocolError('blenderFailed', `Missing Blender asset ${a.asset}`);
-      if (!ASSET_EXTENSIONS.has(path.extname(file).toLowerCase())) throw new ProtocolError('blenderFailed', 'Unsupported Blender asset format');
+      const ext = await assetExtension(file);
+      if (!ext) throw new ProtocolError('blenderFailed', 'Unsupported Blender asset format');
       inputBytes += (await stat(file)).size;
       if (inputBytes > MAX_INPUT_BYTES) throw new ProtocolError('blenderFailed', 'Blender inputs exceed 256 MB');
-      assets.push({ id: a.asset, file });
+      assets.push({ id: a.asset, file, ext });
     }
     // Today's snapshot rules (sizes, cameras, lights, geometry, materials).
     let checked: any;
     try {
-      checked = validateBlenderJob({ id: 'render_check', operation: 'render', snapshot, assets: assets.map((a) => ({ id: a.id, name: path.basename(a.file), data: new Uint8Array(0) })) } as never);
+      checked = validateBlenderJob({ id: 'render_check', operation: 'render', snapshot, assets: assets.map((a) => ({ id: a.id, name: a.id + a.ext, data: new Uint8Array(0) })) } as never);
     } catch (error) {
       throw new ProtocolError('invalidMessage', error instanceof Error ? error.message : String(error));
     }
@@ -413,7 +488,7 @@ export class EngineBlender {
       await mkdir(this.scratch, { recursive: true, mode: 0o700 });
       this.worker = new PinnedWorker(found.path, this.scratch, this.options.timeoutMs);
     }
-    this.worker.setPaused(this.paused);
+    this.applyPause();
     const worker = this.worker;
     const layers = req.surfaces.map((s) => s.layer);
     const groups = req.batchLayers ? [layers] : layers.map((l) => [l]);
@@ -424,7 +499,7 @@ export class EngineBlender {
       try {
         const files: Record<string, string> = {};
         for (const a of assets) {
-          const target = path.join(dir, a.id + path.extname(a.file).toLowerCase());
+          const target = path.join(dir, a.id + a.ext);
           await copyFile(a.file, target);
           files[a.id] = target;
         }
@@ -455,6 +530,8 @@ export class EngineBlender {
             send({ type: 'blenderProgress', job: req.job, completed, total: req.surfaces.length });
           }
         }
+        this.completed.push({ requested: checked.snapshot.settings.engine, actual: manifest.renderEngine });
+        if (this.completed.length > 32) this.completed.shift();
       } finally {
         await rm(dir, { recursive: true, force: true }).catch(() => {});
       }
