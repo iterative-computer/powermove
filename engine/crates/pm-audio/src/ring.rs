@@ -265,6 +265,11 @@ impl Ring {
 pub struct Consumer {
     ring: Arc<Ring>,
     offset: usize,
+    /// The epoch whose media this consumer has played: an empty ring is an
+    /// underrun only once the run's first chunk was heard (before it, the
+    /// start is still being prepared and nothing audible is missing; the
+    /// start's own accounting reports a late or missing first buffer).
+    heard_epoch: Option<u32>,
 }
 
 /// What the start of a device buffer plays.
@@ -288,7 +293,11 @@ pub struct Publication {
 
 impl Consumer {
     pub fn new(ring: Arc<Ring>) -> Consumer {
-        Consumer { ring, offset: 0 }
+        Consumer {
+            ring,
+            offset: 0,
+            heard_epoch: None,
+        }
     }
 
     pub fn ring(&self) -> &Arc<Ring> {
@@ -364,7 +373,7 @@ impl Consumer {
             let tail = ring.tail.load(Ordering::Relaxed);
             let head = ring.head.load(Ordering::Acquire);
             if tail == head {
-                if ring.expecting.load(Ordering::Acquire) {
+                if ring.expecting.load(Ordering::Acquire) && self.heard_epoch == Some(current) {
                     ring.underruns.fetch_add(1, Ordering::Relaxed);
                 }
                 break;
@@ -391,6 +400,7 @@ impl Consumer {
                     offset: self.offset,
                 });
             }
+            self.heard_epoch = Some(tag.epoch);
             let take = (tag.frames as usize - self.offset).min(frames - done);
             for i in 0..take {
                 let src = &data[(self.offset + i) * rc..(self.offset + i + 1) * rc];
@@ -538,6 +548,29 @@ mod tests {
         assert_eq!(ring.underruns(), 1);
         assert_eq!(out[CHUNK * 2 + 5], 0.0);
         assert_eq!(out[CHUNK + 5], 0.5);
+    }
+
+    /// An empty ring before a run's first chunk is its start being
+    /// prepared, not an underrun; once the run is heard, an empty ring is.
+    #[test]
+    fn underruns_count_after_the_runs_first_chunk() {
+        let ring = Ring::new(4, 1);
+        let mut c = Consumer::new(ring.clone());
+        let mut out = vec![0f32; CHUNK];
+        ring.set_epoch(1);
+        ring.set_expecting(true);
+        c.fill(&mut out, 1);
+        c.fill(&mut out, 1);
+        assert_eq!(ring.underruns(), 0, "waiting for the first chunk");
+        assert!(ring.push(tag(0, 1, CHUNK as u32), &vec![0.5; CHUNK]));
+        c.fill(&mut out, 1);
+        assert_eq!(ring.underruns(), 0);
+        c.fill(&mut out, 1);
+        assert_eq!(ring.underruns(), 1, "heard, then empty");
+        // A new run (epoch) waits for its own first chunk again.
+        ring.set_epoch(2);
+        c.fill(&mut out, 1);
+        assert_eq!(ring.underruns(), 1);
     }
 
     #[test]

@@ -2946,8 +2946,11 @@ fn voices_own_their_waits_and_notifications() {
         held += 512;
         std::thread::sleep(Duration::from_secs_f64(512.0 / rate as f64));
     }
+    // The device called back throughout the hold, but nothing of the run
+    // was heard yet: a start being prepared is not a ring underrun (the
+    // hold is reported by the start timing and the message below).
     let start_underruns = playback.stats().underruns;
-    assert_eq!(start_underruns, held / 512);
+    assert_eq!(start_underruns, 0, "held callbacks are not underruns");
     until(|| side.queued_frames() >= 3072);
     let mut messages = playback.take_errors();
     assert_eq!(
