@@ -238,6 +238,14 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[]): Pr
   // Warm-up: the first frames build caches on both paths.
   for (const spec of specs.slice(0, 4)) await stage('warm-up frame', page.evaluate(pageStep, spec), 60_000);
   const steps: StepRecord[] = [];
+  // $PM_PERFBENCH_RIG_PROFILE=<dir>: a V8 CPU profile of the page over the
+  // measured steps (scripts/cpuprofile-summary.mjs summarizes it).
+  const profileDir = process.env.PM_PERFBENCH_RIG_PROFILE;
+  if (profileDir) {
+    await cdp.send('Profiler.enable');
+    await cdp.send('Profiler.setSamplingInterval', { interval: 250 });
+    await cdp.send('Profiler.start');
+  }
   let report = mode === 'engine' ? await engineReport(session) : null;
   let counts = await page.evaluate(() => (window as any).__pmRig.counts());
   for (const spec of specs) {
@@ -255,6 +263,12 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[]): Pr
     });
     counts = r.counts;
     report = next;
+  }
+  if (profileDir) {
+    const { profile } = await cdp.send('Profiler.stop');
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    await mkdir(profileDir, { recursive: true });
+    await writeFile(path.join(profileDir, `rig-${mode}-${Date.now()}.cpuprofile`), JSON.stringify(profile));
   }
   await cdp.detach().catch(() => undefined);
   return { steps, calibrationMs, beginFrame };
@@ -378,7 +392,7 @@ test.describe('120 Hz rig', () => {
   test('private projects from the runtime manifest: playback, today and the engine', async () => {
     const manifest = process.env.PM_PERFBENCH_PRIVATE;
     test.skip(!manifest || !existsSync(manifest), 'no private manifest ($PM_PERFBENCH_PRIVATE)');
-    test.setTimeout(3_600_000);
+    test.setTimeout(7_200_000);
     const list = JSON.parse(await readFile(manifest!, 'utf8')).projects as { label: string; file: string; extensions?: string; from?: number; steps?: number }[];
     for (const p of list) {
       for (const mode of ['today', 'engine'] as Mode[]) {
@@ -404,9 +418,9 @@ test.describe('120 Hz rig', () => {
               // Not awaited: an open that asks a question (PM.confirm) never resolves by itself.
               void page.evaluate(() => (window as any).PM.openProject()).catch(() => undefined);
               at = 'editor';
-              await stage('the editor opens', page.waitForFunction(() => !(window as any).PM.ProjectsScreen?.isOpen && (window as any).PM.proj?.layers?.length > 0, undefined, { timeout: 0 }), 180_000);
+              await stage('the editor opens', page.waitForFunction(() => !(window as any).PM.ProjectsScreen?.isOpen && (window as any).PM.proj?.layers?.length > 0, undefined, { timeout: 0 }), 900_000);
               at = 'assets';
-              await stage('project assets', page.evaluate(async () => { const PM = (window as any).PM; await PM.projectAssetsReady; PM.pause?.(); }), 180_000);
+              await stage('project assets', page.evaluate(async () => { const PM = (window as any).PM; await PM.projectAssetsReady; PM.pause?.(); }), 900_000);
               at = 'route';
               const route = await waitRoute(page, mode);
               if (route && route.route !== 'engine') {

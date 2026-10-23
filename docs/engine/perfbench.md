@@ -153,12 +153,16 @@ allocation bytes by 6 GB over 120 frames and moved the export by −34%.
 `engine/crates/pm-perfbench/baselines.json` holds, per bench, the highest count
 allowed of every gated counter. `cargo test -p pm-perfbench` (and so
 `cargo test --workspace`) runs every bench in the test profile and fails when
-any count rises above its baseline, printing each rise. Counts are exact (two
-consecutive full runs and four runs of three benches gave identical counts;
-`cargo test -p pm-perfbench -p pm-node`, which builds pm-node with its test
-hooks, too). The only tolerance: `export_120`'s heap counters, 1e-5 relative,
-because the export thread parks waiting on the encoder thread a different
-number of times per run (measured +1 to +2 allocations of 4.9 M).
+any count rises above its baseline, printing each rise. GPU and engine counts are exact (two consecutive full runs and five runs of
+three benches gave identical counts; `cargo test -p pm-perfbench -p pm-node`,
+which builds pm-node with its test hooks, too). The only tolerance is on the
+heap counters, the render thread also runs wgpu-core's bookkeeping of submissions
+in flight, which allocates according to how far the GPU has got when a frame
+polls (measured spread over identical runs: up to 0.011% of allocations and
+0.03% of bytes), and the export thread parks on the encoder thread a
+different number of times per run. Every heap counter has a 0.1% relative
+tolerance for that reason, listed with its evidence in `baselines.json`;
+every other count is exact.
 
 `PM_PERF_RATCHET=update` rewrites the file: every count that went down is
 lowered, a new bench is recorded, and nothing is ever raised. Raising a
@@ -208,6 +212,8 @@ and paired wall-clock, and ratcheted.
 | **Hex colors parsed on the stack** (`pm-color`) | `playback_500` heap allocs 4,866,001 → 4,750,321 (−964 a frame) | within noise |
 | **Draw reuse kept across the project's provenance edits** (`revision`, `edits`; `pm-render` `reuse.rs`) | `inspector_edit_500`: layers planned 33,000 → 2,040; heap allocs 2.70 M → 0.85 M | 5.10–5.23 → 1.68–1.74 ms p50 an edit (−67%) |
 | **Composition passes' bind groups kept across frames** (`pm-render` `binds.rs`) | `playback_500` bind group creations 11,760 → 480 (98 → 4 a frame); heap −1,384 a frame | playback total −1.5% (5 alternating pairs, after faster in 4) |
+| **Each media file's stamp read once per frame and per routing check** (`media::StampFrame`) | `engine.file_stats` (a stat each): `playback_500` 4,320 → 240 (36 → 2 a frame), `drag_500` 3,372 → 240, `open_large_2000` 224 → 4 | after faster in 12 of 12 alternating pairs (playback −2% to −21%, drag −2% to −5%, inspector edit −2% to −8%; load 16) |
+| **Export pixel buffers circulate between render and encoder** (`Renderer::give_rgba`, three buffers) | `export_120` heap bytes 4.32 GB → 0.44 GB (−32.4 MB a frame) | total −5.3% (5 alternating pairs, after faster in 4; load 26–30) |
 
 Correctness evidence: `pm-export` `tests/frame_reuse.rs` (eight successive
 frames through one renderer equal a fresh renderer's bit for bit, opaque and
@@ -220,8 +226,32 @@ and stills.
 
 ## Results
 
-See the lane report for the run-by-run numbers (`/tmp/ne-w5/reports/perfbench.json`
-outside the repository); the synthetic rows are summarized here.
+The rig on the 500-layer synthetic project at 120 fps (240 refreshes plus 4
+warm-up; release addon with the fixes above; 2026-10-22 20:40, load 11–12):
+
+| Row | Fit 8.33 ms | Page main thread p50 / p95 | Engine render thread p50 / p95 | Request → presented p50 / p95 |
+|---|---|---|---|---|
+| Playback, today | 225 of 244 | 6.45 / 8.72 ms | | 8.8 / 11.3 ms |
+| Playback, engine | 0 of 244 | 7.44 / 9.17 ms | 13.27 / 15.81 ms | 14.9 / 22.8 ms |
+| Paused edit (`PM.Edit.apply`), today | 0 of 244 | 24.38 / 30.54 ms | | 22.0 / 26.0 ms |
+| Paused edit, engine | 0 of 244 | 21.71 / 27.66 ms | 7.51 / 8.85 ms | 26.5 / 33.4 ms |
+
+Per frame, today's WebGL viewer makes 548 draws, 597 framebuffer binds and
+2,349 uniform sets; the engine 549 draws in 33 render passes, 32 uploads
+(148 KB), and after the fixes 5 bind group creations, 1 buffer allocation and
+2 file stats. Before the reuse fix the paused edit planned 550 layers a frame
+in the app (engine render 13.0 ms); after it 75 (7.5 ms).
+
+With the engine on, the page's main thread still spends about as long per
+frame as today's whole WebGL frame. A V8 profile of the playback steps
+(`PM_PERFBENCH_RIG_PROFILE`) puts 17% of the sampled time (about 4.3 ms a
+frame) in `getBoundingClientRect` from the timeline's `draw` on each
+presented frame: a forced layout, because the engine path writes the DOM
+(overlay, presentation) before the timeline reads it. The private projects
+did not reach the measured frames: today's viewer on the first one took more
+than 60 s for a warm-up frame and the page stopped answering (twice), and an
+earlier engine run of it never reached its first frame; the rig now records
+the stage where a project stalls.
 
 ## What remains
 
