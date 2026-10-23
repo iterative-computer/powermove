@@ -25,7 +25,7 @@
  */
 import type { PathPart } from '../../../shared/patch';
 import { applyOps, type PatchOp } from '../../../shared/patch-ids';
-import { diffJsonOps as diffOps } from './json-diff';
+import { diffJsonOps as diffOps, JsonMemo } from './json-diff';
 import { encodePatchOps } from '../../../shared/patch-binary';
 import { canonicalHash, canonicalProject, canonicalStringify } from '../../../shared/canonical-json';
 import { canonicalPath } from '../legacy/core/compositions';
@@ -180,6 +180,8 @@ export class DocumentBarrier {
   shapeRevision = 0;
   /** The canonical document exactly as pm-wasm has it. */
   shadow: any = undefined;
+  /** What unchanged shadow elements were last compared equal to. */
+  private memo = new JsonMemo();
   private dirty = new Map<string, PathPart[]>();
   private structural = false;
   private resyncPending = false;
@@ -324,7 +326,7 @@ export class DocumentBarrier {
     const anchored = coverPaths(paths.map(path => anchorPath(this.shadow, live, path)));
     for (const path of anchored) {
       const before = lookup(this.shadow, path), after = lookup(live, path);
-      if (before.exists && after.exists) diffOps(before.value, after.value, path, ops);
+      if (before.exists && after.exists) diffOps(before.value, after.value, path, ops, this.memo);
       else if (after.exists) ops.push({ path: [...path], exists: true, value: after.value === undefined ? undefined : JSON.parse(JSON.stringify(after.value) ?? 'null') });
       else if (before.exists) ops.push({ path: [...path], exists: false });
     }
@@ -372,7 +374,10 @@ export class DocumentBarrier {
     const encodeStarted = this.trace ? performance.now() : 0;
     try {
       body = encodePatchOps(ops);
-      this.shadow = applyOps(this.shadow, ops);
+      for (const op of ops) {
+        this.memo.forgetAlong(this.shadow, op.path);
+        this.shadow = applyOps(this.shadow, [op]);
+      }
       this.trace?.('document encode and shadow', encodeStarted);
     } catch (error) {
       // A value the format cannot carry (a lone surrogate in a key is fine;
