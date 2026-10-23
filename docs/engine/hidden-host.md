@@ -90,6 +90,16 @@ fails closed as read only. The browser module uses
 `ShaderFallbackRunner`, with the desktop's F16 texture, uniform and watchdog
 contract. `powermove render` starts an authenticated loopback service; direct
 bundled `pm-cli` starts the same Node helper and closes it on stdin EOF.
+The same service handles level 1 SVG images at `POST /svg`. It verifies the
+SVG bytes against the planned content hash, then uses the hidden host page's
+`decodeSvg` and `SvgRasterCanvas` to draw today's bucket. The engine receives
+premultiplied, top-down RGBA8 and composites it natively (decision S1). Render
+and scope install this Chromium raster source; `powermove render` and direct
+bundled `pm-cli` use it without an approximation flag. A bare `pm-cli` with no
+helper fails with `svg-chromium-unavailable` on a frame that draws an SVG and
+does not publish an output. `--approximate-svg` opts into resvg only when no
+helper is available, with the named approximate SVG notice and `approximateSvg`
+draw count. A configured helper that cannot draw the raster still fails.
 The desktop and hidden host also atomically persist their winning definitions in
 `Engine Cache/definitions.json`. `powermove render` uses that set unless the
 caller provides `--definitions`; direct `pm-cli` accepts the same snapshot.
@@ -127,6 +137,12 @@ set to one:
   `e2e/engine-agent-observation.spec.ts`, only when machine load is at most 8.
   `POWERMOVE_SHIPPING_ADDON_SHA256` binds the run to the assembled shipping addon;
   the measurement records its hash and start/peak one-minute load.
+- `e2e/engine-svg.spec.ts`, test `powermove render draws level 1 SVG images`,
+  compares desktop PNG exports against both CLI entry points at three animation
+  times: at least 99.9% of pixels within 1 CV and none beyond 4. Build the desktop,
+  CLI host and `pm-cli` first, then wrap only the Playwright command with
+  `~/Library/Caches/powermove-engine/bin/pm-electron-lock` and use
+  `--config playwright.prebuilt.config.ts --workers=1`.
 
 The parity harness captures a real desktop runner pin, compares every decoded
 PNG frame with the hidden export, and compares complete workspace JSON bytes
