@@ -680,16 +680,19 @@
     if (transport && element.querySelector('#engine-present')) {
       const project = PM.proj, time = PM.time;
       const scene = PM.Kernel.api('library-card').scene3d?.viewport?.state?.();
-      const presentation = PM.Kernel.services.get('viewer')?.enginePresentation;
+      const presentedBy = () => PM.Kernel.services.get('viewer')?.enginePresentation
+        ?? (element.contains(PM.EngineCanvas?.bound) ? PM.EngineCanvas?.viewerPresentation : null);
+      const presentation = presentedBy();
       const latest = presentation?.latest;
-      const crop = (latest ? presentation.stateFor(latest.viewSeq)?.canvas?.crop : null) ?? PM.GL?.previewViewport;
+      const state = latest ? presentation.stateFor(latest.viewSeq) : null;
+      const crop = state?.canvas?.crop ?? PM.GL?.previewViewport;
       const cropped = crop && (crop.x !== 0 || crop.y !== 0 || crop.width !== project.w || crop.height !== project.h);
       const sceneView = (state: any) => JSON.stringify(state && [state.engineCamera, state.shading, state.xray, state.localView]);
       const view = sceneView(scene);
-      // SnapshotRequest currently renders whole compositions through their
-      // scene camera. Cropped/3D views retain their presented bitmap until
-      // the snapshot contract can carry the view and crop (consumers.md C3).
-      if (!PM.playing && !cropped && !scene?.hasScene) {
+      if (!PM.playing) {
+        // Presentation and chrome update on separate animation callbacks.
+        // A newly attached viewport has no visible chrome until its first draw.
+        if (scene?.hasScene && element.querySelector<HTMLElement>('.vp-nav')?.hidden) return null;
         // The clone's overlay describes the presented frame. Wait for that
         // frame to catch up before combining it with fresh snapshot pixels.
         const revision = transport.currentRevision();
@@ -707,11 +710,20 @@
           }
           return null;
         }
+        const overlay = element.querySelector<HTMLCanvasElement>('canvas[data-scene-overlay]');
+        if (scene?.hasScene && scene.overlays !== false && overlay
+          && overlay.dataset.sceneOverlayFrame !== `${latest?.revision}:${latest?.viewSeq}`) return null;
+        // Pin the state of the frame whose chrome was cloned above. The
+        // snapshot renders its original canvas, before stage presentation.
+        if ((cropped || scene?.hasScene) && !state?.canvas) return null;
+        const viewer = cropped || scene?.hasScene
+          ? structuredClone({ view: state.view ?? null, canvas: state.canvas, viewSeq: state.viewSeq }) : undefined;
         const captured = await snapshotClonedCanvasBitmaps(element, clone, {
           transport, time, composition: String(project.compId ?? project.id ?? ''),
+          ...(viewer ? { viewer } : {}),
           current: () => current() && PM.EngineRender === transport && PM.proj === project && PM.time === time
             && PM.panelInst?.[id]?.el === element
-            && PM.Kernel.services.get('viewer')?.enginePresentation === presentation
+            && presentedBy() === presentation
             && presentation?.latest?.viewSeq === latest?.viewSeq
             && sceneView(PM.Kernel.api('library-card').scene3d?.viewport?.state?.()) === view,
         });

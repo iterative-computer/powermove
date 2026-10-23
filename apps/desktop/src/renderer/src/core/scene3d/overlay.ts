@@ -19,7 +19,7 @@ export interface OverlayFrame {
   rect:Rect;
   runtime:SceneRuntime|null;
   /** Exact engine frame inputs; no scene meshes are rendered by three.js. */
-  native?:{depth:VideoFrame;coverage:VideoFrame}|null;
+  native?:{depth:VideoFrame;coverage:VideoFrame;/** Native planes cover this stage-relative CSS box; absent means the whole stage. */viewport?:Rect}|null;
   /** User view: draw the floor grid against the scene's depth. */
   userView:boolean;
   axis:ViewAxis|null;
@@ -65,19 +65,21 @@ void main(){
 }`;
 const OUTLINE_FRAGMENT=`
 varying vec2 vUv;
-uniform sampler2D uMask;uniform bool uEngineMask;uniform vec2 uTexel;uniform vec3 uSelected;uniform vec3 uActive;uniform float uRadius;
+uniform sampler2D uMask;uniform bool uEngineMask;uniform bool uBoundMask;uniform vec2 uBoundOffset;uniform vec2 uBoundSize;
+uniform vec2 uTexel;uniform vec3 uSelected;uniform vec3 uActive;uniform float uRadius;
 vec4 maskAt(vec2 uv){
   vec4 value=texture2D(uMask,uv);
   if(uEngineMask)return vec4(value.b>0.25&&value.b<0.75?1.0:0.0,value.b>=0.75?1.0:0.0,0.0,1.0);
   return value;
 }
 void main(){
-  vec4 here=maskAt(vUv);
+  vec2 uv=uBoundMask?(vUv-uBoundOffset)/uBoundSize:vUv;
+  vec4 here=maskAt(uv);
   if(max(here.r,here.g)>0.5)discard;
   float nearSelected=0.0,nearActive=0.0;
   for(int x=-2;x<=2;x++)for(int y=-2;y<=2;y++){
     vec2 offset=vec2(float(x),float(y));if(length(offset)>uRadius+0.01)continue;
-    vec4 sampled=maskAt(vUv+offset*uTexel);nearSelected=max(nearSelected,sampled.r);nearActive=max(nearActive,sampled.g);
+    vec4 sampled=maskAt(uv+offset*uTexel);nearSelected=max(nearSelected,sampled.r);nearActive=max(nearActive,sampled.g);
   }
   if(nearActive>0.5)gl_FragColor=vec4(uActive,1.0);
   else if(nearSelected>0.5)gl_FragColor=vec4(uSelected,1.0);
@@ -127,7 +129,8 @@ export class ViewportOverlay {
     this.outline=new THREE.ShaderMaterial({
       vertexShader:'varying vec2 vUv;void main(){vUv=uv;gl_Position=vec4(position.xy,0.0,1.0);}',fragmentShader:OUTLINE_FRAGMENT,
       transparent:true,depthTest:false,depthWrite:false,
-      uniforms:{uMask:{value:null},uEngineMask:{value:false},uTexel:{value:new THREE.Vector2()},uSelected:{value:new THREE.Color(SELECTED_COLOR)},uActive:{value:new THREE.Color(ACTIVE_COLOR)},uRadius:{value:1.5}}
+      uniforms:{uMask:{value:null},uEngineMask:{value:false},uBoundMask:{value:false},uBoundOffset:{value:new THREE.Vector2()},uBoundSize:{value:new THREE.Vector2(1,1)},
+        uTexel:{value:new THREE.Vector2()},uSelected:{value:new THREE.Color(SELECTED_COLOR)},uActive:{value:new THREE.Color(ACTIVE_COLOR)},uRadius:{value:1.5}}
     });
     const quad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),this.outline);quad.frustumCulled=false;this.quadScene.add(quad);
   }
@@ -168,7 +171,7 @@ export class ViewportOverlay {
       scissor();
       if(frame.userView&&!frame.xray){
         // Depth of the models, so the floor and wires pass behind them.
-        if(native)this.loadNativeDepth();
+        if(native)this.loadNativeDepth(native,width,height);
         else if(runtime){
           const scene=runtime.scene,background=scene.background;
           scene.background=null;scene.overrideMaterial=this.depthMaterial;
@@ -176,7 +179,7 @@ export class ViewportOverlay {
         }
         this.drawGrid(frame,camera);
       }else if(frame.userView)this.drawGrid(frame,camera);
-      if(native)this.drawNativeOutlines(width,height,scissor);
+      if(native)this.drawNativeOutlines(native,width,height,scissor);
       else this.drawOutlines(frame,camera,width,height,scissor);
       this.clearLines();
       for(const glyph of frame.glyphs)this.drawGlyph(glyph,frame,camera);
@@ -228,31 +231,46 @@ export class ViewportOverlay {
     }
     texture.setFrame(frame);this.renderer.initTexture(texture);return texture;
   }
-  private loadNativeDepth():void {
+  private loadNativeDepth(native:NonNullable<OverlayFrame['native']>,width:number,height:number):void {
     if(!this.depthQuad){
       // Restore exact window-depth bits from the engine's lossless packet.
       // This is one screen pass; it never rebuilds or draws scene geometry.
       const material=new THREE.ShaderMaterial({
         glslVersion:THREE.GLSL3,
         vertexShader:'void main(){gl_Position=vec4(position.xy,0.0,1.0);}',
-        fragmentShader:`uniform sampler2D uDepth;
+        fragmentShader:`uniform sampler2D uDepth;uniform bool uBoundDepth;uniform vec2 uBoundOrigin;uniform vec2 uBoundScale;
           void main(){
-            uvec3 b=uvec3(round(texelFetch(uDepth,ivec2(gl_FragCoord.xy),0).rgb*2048.0));
+            ivec2 texel=uBoundDepth?ivec2(floor((gl_FragCoord.xy-uBoundOrigin)*uBoundScale)):ivec2(gl_FragCoord.xy);
+            uvec3 b=uvec3(round(texelFetch(uDepth,texel,0).rgb*2048.0));
             gl_FragDepth=uintBitsToFloat(b.x|(b.y<<11u)|(b.z<<22u));
           }`,
-        uniforms:{uDepth:{value:null}},
+        uniforms:{uDepth:{value:null},uBoundDepth:{value:false},uBoundOrigin:{value:new THREE.Vector2()},uBoundScale:{value:new THREE.Vector2(1,1)}},
         colorWrite:false,depthWrite:true,depthTest:true,depthFunc:THREE.AlwaysDepth
       });
       this.depthQuad=new THREE.Mesh(new THREE.PlaneGeometry(2,2),material);
       this.depthQuad.frustumCulled=false;this.depthScene.add(this.depthQuad);
     }
-    this.depthQuad.material.uniforms.uDepth!.value=this.nativeDepth;
+    const uniforms=this.depthQuad.material.uniforms,viewport=native.viewport;
+    uniforms.uDepth!.value=this.nativeDepth;
+    uniforms.uBoundDepth!.value=!!viewport;
+    if(viewport){
+      const ratio=this.renderer.getPixelRatio();
+      uniforms.uBoundOrigin!.value.set(viewport.x*ratio,(height-viewport.y-viewport.height)*ratio);
+      uniforms.uBoundScale!.value.set(native.depth.displayWidth/(viewport.width*ratio),native.depth.displayHeight/(viewport.height*ratio));
+    }
     this.renderer.render(this.depthScene,this.quadCamera);
   }
-  private drawNativeOutlines(width:number,height:number,scissor:()=>void):void {
+  private drawNativeOutlines(native:NonNullable<OverlayFrame['native']>,width:number,height:number,scissor:()=>void):void {
     const ratio=this.renderer.getPixelRatio(),w=Math.max(2,Math.floor(width*ratio)),h=Math.max(2,Math.floor(height*ratio));
     this.outline.uniforms.uEngineMask!.value=true;this.outline.uniforms.uMask!.value=this.nativeCoverage;
-    this.outline.uniforms.uTexel!.value.set(1/w,1/h);this.outline.uniforms.uRadius!.value=ratio>=2?2:1.5;
+    const viewport=native.viewport;
+    this.outline.uniforms.uBoundMask!.value=!!viewport;
+    if(viewport){
+      this.outline.uniforms.uBoundOffset!.value.set(viewport.x/width,(height-viewport.y-viewport.height)/height);
+      this.outline.uniforms.uBoundSize!.value.set(viewport.width/width,viewport.height/height);
+    }
+    this.outline.uniforms.uTexel!.value.set(1/(viewport?native.coverage.displayWidth:w),1/(viewport?native.coverage.displayHeight:h));
+    this.outline.uniforms.uRadius!.value=ratio>=2?2:1.5;
     scissor();this.renderer.render(this.quadScene,this.quadCamera);
   }
 
@@ -294,6 +312,7 @@ export class ViewportOverlay {
       for(const child of marked){child.layers.disable(1);child.layers.disable(2);}
     }
     this.outline.uniforms.uEngineMask!.value=false;
+    this.outline.uniforms.uBoundMask!.value=false;
     this.outline.uniforms.uMask!.value=this.mask.texture;this.outline.uniforms.uTexel!.value.set(1/w,1/h);
     this.outline.uniforms.uRadius!.value=ratio>=2?2:1.5;
     scissor();this.renderer.render(this.quadScene,this.quadCamera);

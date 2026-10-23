@@ -1,4 +1,6 @@
 import { EngineSnapshotError, type EngineRenderTransport } from '../engine-connection/render-transport';
+import type { SnapshotViewer } from '../../../shared/engine-protocol';
+import { getRetainedViewportOverlayBitmap } from '../core/scene3d/overlay-capture';
 
 const finitePositive = (value: number): boolean => Number.isFinite(value) && value > 0;
 
@@ -38,8 +40,8 @@ function compositionBox(original: HTMLCanvasElement) {
  * card shows the edge of its own canvas element. When the viewer tagged where
  * today's canvas sits, the copy is that composition canvas, at today's box
  * and backing size. Full 2D cards replace that resampled bitmap with an exact
- * backing-size engine snapshot below. Cropped/3D cards retain presentation
- * until snapshots can carry their view (docs/engine/consumers.md, C3).
+ * backing-size engine snapshot below. Paused cropped/3D cards carry the
+ * presented frame's pinned camera, shading and canvas crop.
  * The caller invokes any panel-specific library.render after this copy. */
 export function copyClonedCanvasBitmaps(source: Element, target: Element): void {
   const from = source.querySelectorAll<HTMLCanvasElement>('canvas');
@@ -68,7 +70,8 @@ export function copyClonedCanvasBitmaps(source: Element, target: Element): void 
     }
     canvas.width = original.width;
     canvas.height = original.height;
-    try { canvas.getContext('2d')?.drawImage(original, 0, 0); } catch { /* tainted or GL-only canvas */ }
+    const bitmap = getRetainedViewportOverlayBitmap(original) ?? original;
+    try { canvas.getContext('2d')?.drawImage(bitmap, 0, 0); } catch { /* tainted or GL-only canvas */ }
   });
 }
 
@@ -82,11 +85,13 @@ export async function snapshotClonedCanvasBitmaps(source: Element, target: Eleme
   transport: Pick<EngineRenderTransport, 'thumbnails' | 'currentRevision' | 'toCanvas'>;
   time: number;
   composition: string;
+  viewer?: SnapshotViewer;
   current(): boolean;
 }): Promise<boolean> {
   const originals = [...source.querySelectorAll<HTMLCanvasElement>('canvas')];
   const copies = [...target.querySelectorAll<HTMLCanvasElement>('canvas')];
   const revision = options.transport.currentRevision();
+  const viewer = options.viewer ? structuredClone(options.viewer) : undefined;
   for (let index = 0; index < originals.length; index++) {
     const original = originals[index]!;
     const copy = copies[index];
@@ -99,11 +104,16 @@ export async function snapshotClonedCanvasBitmaps(source: Element, target: Eleme
       copy.width = bound.width;
       copy.height = bound.height;
     }
+    if (viewer) {
+      copy.width = viewer.canvas.width;
+      copy.height = viewer.canvas.height;
+    }
     const request = {
       key: `library-viewer:${++nextCapture}`,
       composition: options.composition, time: options.time,
       width: copy.width, height: copy.height,
       pixels: 'opaque' as const, draft3d: true,
+      ...(viewer ? { viewer } : {}),
       ...(revision !== null ? { minRevision: revision } : {}),
     };
     let result;
@@ -121,7 +131,8 @@ export async function snapshotClonedCanvasBitmaps(source: Element, target: Eleme
         await new Promise(resolve => setTimeout(resolve, 250));
       }
     }
-    if (!result || !options.current() || options.transport.currentRevision() !== revision) return false;
+    if (!result || !options.current() || options.transport.currentRevision() !== revision
+      || (viewer && result.viewSeq !== viewer.viewSeq)) return false;
     // A snapshot belongs in today's original composition canvas. Keep the
     // clone's original canvas hierarchy, without a second presentation layer.
     const originalCanvas = bound?.tagName === 'CANVAS' ? bound : source.querySelector<HTMLCanvasElement>('#gl');

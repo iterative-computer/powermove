@@ -8,6 +8,7 @@ import {viewportPreferences,onViewportSettings,selected3D,activeObject,cursorLoc
 import {resolveTargets,aimPoint,type TransformMode} from './targets';
 import {ModalTransform,fitCamera,toScreen,rayAt,viewForward,type ModalMode,type Rect,type Point} from './modal';
 import {ViewportOverlay,type Glyph} from './overlay';
+import {getRetainedViewportOverlayBitmap} from './overlay-capture';
 import {ViewportChrome} from './chrome';
 import {createTransformGizmo,type TransformGizmo} from './gizmo';
 import {createSceneNavigation,lockedCamera,writeCameraPose,type SceneNavigation} from './navigation';
@@ -139,6 +140,7 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
   let blank:string|null=null;
   function render(){
     frame=0;if(disposed)return;
+    delete overlay.canvas.dataset.sceneOverlayFrame;
     const readFrames:VideoFrame[]=[];
     let releaseChrome:((done?:Promise<unknown>)=>void)|null=null,chromeDone:Promise<void>|undefined;
     try{
@@ -155,13 +157,21 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
       blank=null;
       const view=viewportState(PM);
       const engine=!!PM.EngineDoc?.enabled;
-      const presentation=engine?PM.Kernel?.services?.get?.('viewer')?.enginePresentation:null;
+      const boundCanvas:HTMLCanvasElement|null=engine?PM.EngineCanvas?.bound??null:null;
+      const boundStage=boundCanvas&&stage.contains(boundCanvas)&&PM.EngineCanvas?.viewerPresentation?boundCanvas.parentElement:null;
+      // A pre-engine viewer fork binds the existing interactive presenter to
+      // its own canvas, usually inside #stage-inner. It owns the same engine
+      // channel as the built-in viewer and supplies the chrome planes here.
+      const presentation=engine?(boundStage?PM.EngineCanvas.viewerPresentation:PM.Kernel?.services?.get?.('viewer')?.enginePresentation):null;
+      const stageBounds=boundStage?.getBoundingClientRect(),outerBounds=stage.getBoundingClientRect();
+      const nativeViewport=stageBounds&&stageBounds.width>0&&stageBounds.height>0
+        ?{x:stageBounds.left-outerBounds.left,y:stageBounds.top-outerBounds.top,width:stageBounds.width,height:stageBounds.height}:null;
       if(presentation!==nativePresentation){
         for(const off of nativeOffs)off();nativeOffs=[];nativePresentation=presentation;
         if(presentation){nativeOffs.push(presentation.onPresented(schedule),presentation.onChromeSurface(schedule));}
       }
       const nativeFrame=presentation?.latest,meta=nativeFrame?.depthId;
-      let nativeReady=!engine||!prefs.overlays||!!(presentation?.presenting&&meta?.encoding==='chromePlanesV1'&&nativeFrame.viewSeq===presentation.state?.viewSeq&&nativeFrame.revision>=(PM.EngineDoc?.barrier?.revision??0));
+      let nativeReady=!engine||!prefs.overlays||!!(presentation?.presenting&&(!boundStage||nativeViewport)&&meta?.encoding==='chromePlanesV1'&&nativeFrame.viewSeq===presentation.state?.viewSeq&&nativeFrame.revision>=(PM.EngineDoc?.barrier?.revision??0));
       if(engine&&prefs.overlays&&nativeReady){releaseChrome=presentation.retainChromeFrame(nativeFrame);if(!releaseChrome)nativeReady=false;}
       const depth=engine&&prefs.overlays&&nativeReady?presentation?.depthFrame(nativeFrame):null;
       const coverage=engine&&prefs.overlays&&nativeReady?presentation?.coverageFrame(nativeFrame):null;
@@ -200,8 +210,10 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
         }else frameGlyphs=glyphs(camera,selected,active);
       }
       // Fence even when drawing throws after a shared texture was uploaded.
-      try { overlay.draw({camera,rect,runtime,native:depth&&coverage?{depth,coverage}:null,userView:view.mode==='editor',axis:view.axis,distance:pose.distance,fov:view.fov,overlays:prefs.overlays,
+      try { overlay.draw({camera,rect,runtime,native:depth&&coverage?{depth,coverage,...(nativeViewport?{viewport:nativeViewport}:{})}:null,userView:view.mode==='editor',axis:view.axis,distance:pose.distance,fov:view.fov,overlays:prefs.overlays,
         edit,xray:prefs.xray,selected:editing?new Set():expand(ids),active:editing?new Set():expand(active?[active]:[]),glyphs:frameGlyphs,guides:modal?.guides??[],gizmo:gizmo.attached()?gizmo.helper:null});
+        if(engine&&nativeFrame&&depth&&coverage&&getRetainedViewportOverlayBitmap(overlay.canvas))
+          overlay.canvas.dataset.sceneOverlayFrame=`${nativeFrame.revision}:${nativeFrame.viewSeq}`;
       } finally { if(depth&&coverage)chromeDone=overlay.workDone(); }
     }catch(error){console.error('[scene3d] viewport overlay failed',error);}finally{for(const image of readFrames)image.close();releaseChrome?.(chromeDone);}
   }

@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { copyClonedCanvasBitmaps, snapshotClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
 import { EngineSnapshotError, type EngineSnapshot } from '../engine-connection/render-transport';
+import type { SnapshotViewer } from '../../../shared/engine-protocol';
 
 afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
@@ -100,6 +101,29 @@ describe('Library engine snapshots', () => {
     const current = vi.fn(() => true);
     return { source, clone, bitmap, drawImage, transport, current, result };
   }
+
+  it('renders a pinned cropped editor canvas without reusing the stage scaling or a newer view', async () => {
+    const f = capture();
+    const viewer: SnapshotViewer = { view: { camera: null, shading: 'solid', xray: true, localView: ['cube'] }, viewSeq: 7,
+      canvas: { width: 160, height: 90, crop: { x: 80, y: 40, width: 80, height: 45 }, css: { x: 20, y: 10, width: 320, height: 180 } } };
+    const pin = structuredClone(viewer);
+    Object.assign(f.result, { width: 160, height: 90, viewSeq: 7 });
+    const pending = snapshotClonedCanvasBitmaps(f.source, f.clone, { ...f, transport: f.transport as never, composition: 'comp', time: .5, viewer });
+    viewer.viewSeq = 8; viewer.canvas.crop.x = 0;
+    expect(await pending).toBe(true);
+    expect(f.transport.thumbnails.request).toHaveBeenCalledWith(expect.objectContaining({ width: 160, height: 90, viewer: pin }));
+    expect(f.drawImage).toHaveBeenCalledExactlyOnceWith(f.bitmap, 0, 0);
+    expect([f.clone.querySelector('canvas')!.width, f.clone.querySelector('canvas')!.height]).toEqual([160, 90]);
+  });
+
+  it('does not combine a pinned view’s chrome with pixels tagged as another view', async () => {
+    const f = capture();
+    const viewer: SnapshotViewer = { view: null, viewSeq: 7,
+      canvas: { width: 320, height: 180, crop: { x: 0, y: 0, width: 320, height: 180 }, css: { x: 0, y: 0, width: 640, height: 360 } } };
+    f.result.viewSeq = 8;
+    expect(await snapshotClonedCanvasBitmaps(f.source, f.clone, { ...f, transport: f.transport as never, composition: 'comp', time: .5, viewer })).toBe(false);
+    expect(f.drawImage).not.toHaveBeenCalled();
+  });
 
   it('renders at the cloned backing size and keeps the live overlay untouched', async () => {
     const f = capture();

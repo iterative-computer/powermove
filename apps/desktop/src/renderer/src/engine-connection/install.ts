@@ -24,7 +24,7 @@ import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { EngineBridge } from '../../../shared/engine-ipc';
 import { ENGINE_WINDOW_MESSAGE } from '../../../shared/engine-ipc';
 import type { EngineViewerChannel, EngineViewerHandlers, EngineViewerService } from '../../../extensions/viewer/engine-present/presentation';
-import type { ClockSample } from '../../../shared/engine-protocol';
+import type { ClockSample, EditorCamera } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
@@ -37,6 +37,7 @@ import { installAppCaptures, usesBlender } from './app-captures';
 // kernel's `render.gl.init` binding uses it for viewers that do not present
 // by themselves (old forks of the viewer).
 import { ViewerPresentation } from '../../../extensions/viewer/engine-present/presentation';
+import { viewParamsFor } from '../../../extensions/viewer/engine-present/view-params';
 import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
 import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
 import { SvgRasters } from './svg-rasters';
@@ -511,6 +512,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     service: () => service,
     composition: () => (PM.proj ? { w: Number(PM.proj.w) || 0, h: Number(PM.proj.h) || 0 } : null),
     quality: () => Number(PM.quality ?? 1),
+    view: () => {
+      const scene = PM.Kernel.api('engine-canvas').scene3d.viewport.state();
+      return viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto',
+        scene3d: { ...scene, selected: scene.editMode ? [] : scene.selected, active: scene.editMode ? null : scene.active,
+          camera: (scene.engineCamera as EditorCamera | null) ?? null } });
+    },
     // A bound viewer (a fork or override of the built-in one from before the
     // engine) presents exactly as the built-in viewer does: in a
     // presentation worker. Its canvas is then a placeholder the page reads
@@ -523,6 +530,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     })
   });
   (PM as any).EngineCanvas = canvasBinding;
+  const canvasViewport = PM.Kernel.api('engine-canvas').scene3d.viewport.onChange(() => canvasBinding.refresh());
 
   const handle: EngineConnectionHandle = {
     hostClock,
@@ -585,6 +593,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;
       canvasBinding.unbind();
+      canvasViewport.dispose();
       if ((PM as any).EngineCanvas === canvasBinding) (PM as any).EngineCanvas = null;
       connection?.close('the engine connection was removed');
       connection = null;

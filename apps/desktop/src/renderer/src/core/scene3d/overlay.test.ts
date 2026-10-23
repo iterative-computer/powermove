@@ -15,7 +15,7 @@ vi.mock('three',async importOriginal=>{
     setPixelRatio(ratio:number){this.ratio=ratio;}
     getPixelRatio(){return this.ratio;}
     setSize(width:number,height:number){sizes.push([width,height]);this.domElement.width=Math.floor(width*this.ratio);this.domElement.height=Math.floor(height*this.ratio);}
-    setScissorTest(){}setScissor(){}setClearColor(){}clear(){}clearDepth(){}render(){operations.push('render');}getRenderTarget(){return null;}setRenderTarget(){}
+    setScissorTest(){}setScissor(){}setClearColor(){}clear(){}clearDepth(){}render(){operations.push('render');}getRenderTarget(){return null;}setRenderTarget(){}initTexture(){}
   }
   return {...actual,WebGLRenderer:FakeRenderer};
 });
@@ -67,5 +67,21 @@ describe('ViewportOverlay sizing', () => {
     expect(bitmap).not.toBeNull();
     expect([bitmap?.width,bitmap?.height]).toEqual([overlay.canvas.width,overlay.canvas.height]);
     expect(context.drawImage).toHaveBeenCalledWith(overlay.canvas,0,0);
+  });
+  it('maps bound inner-stage depth and outline pixels into the outer stage',()=>{
+    const context={clearRect:vi.fn(),drawImage:vi.fn()};
+    vi.spyOn(HTMLCanvasElement.prototype,'getContext').mockReturnValue(context as never);
+    const {element}=stage(640,360),overlay=new ViewportOverlay(element);
+    const plane={displayWidth:800,displayHeight:450} as VideoFrame;
+    overlay.draw({...frame(),userView:true,native:{depth:plane,coverage:plane,viewport:{x:100,y:50,width:400,height:225}}});
+    const internals=overlay as unknown as {depthQuad:THREE.Mesh<THREE.PlaneGeometry,THREE.ShaderMaterial>;outline:THREE.ShaderMaterial};
+    const depth=internals.depthQuad.material.uniforms,mask=internals.outline.uniforms;
+    expect(depth.uBoundDepth!.value).toBe(true);
+    expect(depth.uBoundOrigin!.value.toArray()).toEqual([100,85]);
+    expect(depth.uBoundScale!.value.toArray()).toEqual([2,2]);
+    expect(mask.uBoundMask!.value).toBe(true);
+    expect(mask.uBoundOffset!.value.toArray()).toEqual([100/640,85/360]);
+    expect(mask.uBoundSize!.value.toArray()).toEqual([400/640,225/360]);
+    expect(mask.uTexel!.value.toArray()).toEqual([1/800,1/450]);
   });
 });
