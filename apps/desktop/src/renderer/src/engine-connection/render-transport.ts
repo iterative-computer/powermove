@@ -398,6 +398,8 @@ export class EngineRenderTransport {
    * layer's exact need (including scale/crop) and document revision. */
   private readonly ahead = new Map<string, AheadEntry>();
   private pausedEditRevision: number | null = null;
+  /** Collects the preparations `prepareShown` starts. */
+  private startedPreparations: Promise<unknown>[] | null = null;
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private aheadTurn = 0;
   private pumpingAhead = false;
@@ -655,7 +657,7 @@ export class EngineRenderTransport {
     this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
     const began = performance.now();
     this.trace.record('prepare dispatched', revision, time);
-    void Promise.resolve().then(() => prepare(need, revision, { urgent: !this.options.playing?.() && (time === entry.cursor || entry.required.has(time)) })).then(() => {
+    const prepared = Promise.resolve().then(() => prepare(need, revision, { urgent: !this.options.playing?.() && (time === entry.cursor || entry.required.has(time)) })).then(() => {
       this.trace.record('prepare ready', revision, time, began);
       const ms = performance.now() - began;
       this.prepareMs = this.prepareMs === null ? ms : this.prepareMs * 0.75 + ms * 0.25;
@@ -690,6 +692,7 @@ export class EngineRenderTransport {
       // hold its ready pixels behind a Promise.all barrier.
       this.presentedWhilePlaying(warm || [...this.ahead.values()].some(e => e.required.size > 0), warmUntil);
     });
+    this.startedPreparations?.push(prepared);
   }
 
   private scheduleAhead(): void {
@@ -782,11 +785,16 @@ export class EngineRenderTransport {
   }
 
   /** An edit while paused: prepares the frames around the playhead at the
-   *  new revision at once (the paused warm-up the engine's ask would start). */
-  prepareShown(): void {
-    if (this.options.playing?.() || !this.ahead.size || !this.preparers.size) return;
+   *  new revision at once (the paused warm-up the engine's ask would start).
+   *  Settles when the preparations it started have posted their answers. */
+  prepareShown(): Promise<unknown> | null {
+    if (this.options.playing?.() || !this.ahead.size || !this.preparers.size) return null;
     this.pausedEditRevision = this.options.revision();
-    this.presentedWhilePlaying(true);
+    const started: Promise<unknown>[] = [];
+    this.startedPreparations = started;
+    try { this.presentedWhilePlaying(true); }
+    finally { this.startedPreparations = null; }
+    return started.length ? Promise.allSettled(started) : null;
   }
 
   private answerNeed(need: CompatNeed, session: TransportSession, prepared = false, refresh = false, beforePost?: (answer: string) => void): boolean {

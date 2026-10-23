@@ -105,4 +105,26 @@ describe('one patch batch per run', () => {
     await tick();
     expect(port.types()).toHaveLength(4);
   });
+
+  it('holds a run\'s batches until released or until another message goes first', async () => {
+    const port = new Port();
+    const connection = new EngineConnection(1, port, () => {});
+    // A paused edit whose raster answer is made in the same task.
+    connection.patches(batch(3, 4, x), 5, 1 << 20);
+    const release = connection.holdPatches();
+    await tick();
+    expect(port.types()).toEqual([]);
+    connection.event({ type: 'compat', compat: 'native' } as never, 5);
+    expect(port.types()).toEqual(['applyPatches', 'compat']);
+    release();
+    expect(port.types()).toHaveLength(2);
+    // Released with nothing else sent: the batch goes then, once.
+    connection.patches(batch(4, 5, y), 5, 1 << 20);
+    const second = connection.holdPatches();
+    await tick();
+    expect(port.types()).toHaveLength(2);
+    second();
+    second();
+    expect(port.types()).toEqual(['applyPatches', 'compat', 'applyPatches']);
+  });
 });

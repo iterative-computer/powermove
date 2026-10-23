@@ -38,6 +38,7 @@ export class EngineConnection {
   readonly errors: string[] = [];
   /** Patch batches held until the current run ends (`patches`). */
   private heldPatches: Array<{ body: ApplyPatches; session: number }> = [];
+  private patchHolds = 0;
   private heldLimit = Infinity;
   private patchesQueued = false;
 
@@ -90,9 +91,27 @@ export class EngineConnection {
     queueMicrotask(() => this.sendPatches());
   }
 
-  /** Sends the held patch batches now. */
-  sendPatches(): void {
+  /**
+   * Keeps this run's patch batches until `release`, unless another message
+   * goes first (it still sends the batches before itself). A paused edit's
+   * own raster answers are made in the same task as its batch: sent back to
+   * back, the engine draws the revision once, with them, instead of first
+   * planning a frame that can only wait for them.
+   */
+  holdPatches(): () => void {
+    this.patchHolds++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (--this.patchHolds === 0) this.sendPatches();
+    };
+  }
+
+  /** Sends the held patch batches now (`force`: even while held). */
+  sendPatches(force = false): void {
     this.patchesQueued = false;
+    if (!force && this.patchHolds > 0) return;
     if (!this.heldPatches.length) return;
     const held = coalesce(this.heldPatches, this.heldLimit);
     this.heldPatches = [];
@@ -140,7 +159,7 @@ export class EngineConnection {
 
   private post(message: Envelope): void {
     // Batches held from this run go first: the engine sees the page's order.
-    if (this.heldPatches.length) this.sendPatches();
+    if (this.heldPatches.length) this.sendPatches(true);
     this.send(message);
   }
 
