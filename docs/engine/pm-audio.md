@@ -402,6 +402,27 @@ repository. Latency from the edit and Play to the first scheduled presentation, 
 | 4 load threads: speed edit, distinct trims | 30.32 / 32.62 / 32.76 | **32.20 / 33.79 / 33.85** |
 | 4 load threads: cold seek | 29.82 / 32.21 / 32.51 | 28.01 / 28.92 / 29.22 |
 
+Where the loaded distinct-trim time goes (the same campaign's StartTiming, p50 /
+max, ms): request to applied 0.25 / 2.06, applied to ready (sixteen independent
+vocoder pre-rolls) 10.94 / 12.28 (8.49 / 9.59 unloaded), ready to callback 0.99 /
+1.49, callback to device time 2.33, then the device's 15.6 ms output latency. Today
+needs no preparation (it ignores speed) and reports 24 ms output latency. The
+preparation workers run under the callback-matched Mach policy (a 64-frame, 1.33 ms
+period, 95 % computation) and a checkpoint sleeps out the period once a worker has
+used its computation less a reserve of up to 500 µs, so each worker does about
+0.77 ms of DSP per 1.33 ms; under load that duty cycle, not the DSP, sets the
+pre-roll's wall time. Not yet fixed: the candidates are a longer Mach period for
+workers preparing a start that is not yet audible (a multiple of the callback, the
+same reserve), or fewer pre-roll samples per distinct voice; both need a quiet
+qualification window, because the policy also guards the playing producer.
+
+The cold-start bound's measurement (AUDIO-2) was reviewed: the request is stamped
+when the commands are sent, publication is stamped after the ring's head is
+released (an upper bound on visibility), and the measured instant is the earlier
+of that stamp and the observation. The observer used to spin on `yield_now`,
+taking a core from the workers it timed; it now sleeps 100 µs between polls (the
+interval cannot lengthen the measured value).
+
 A7: both 60 s loops (plain and loaded) had 0 underruns, 0 starved renders and 0
 overloads in the engine; today 0 underrun events. Every engine start had 0 program
 underruns, 0 omitted prefix frames and 0 start spread. The loaded distinct-trim row
