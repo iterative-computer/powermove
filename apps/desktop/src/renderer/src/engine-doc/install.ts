@@ -163,6 +163,9 @@ const noopDoc: DocApi = {
   flush: () => {},
 };
 
+/** The least time between two autosaves' consistency checks (ms). */
+export const AUTOSAVE_CHECK_MS = 30_000;
+
 export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {}): EngineDoc {
   const mode = options.mode ?? safeMode();
   if (!mode.evaluator) {
@@ -461,15 +464,25 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
   const whenReady = new Promise<boolean>(resolve => { readyResolve = resolve; });
 
   const startup = { startedAt: performance.now(), moduleMs: 0, instantiateMs: 0, mirrorMs: 0, readyMs: 0 };
+  let lastCheckAt = -Infinity;
   const state: EngineDoc = {
     mode, enabled: true, ready: false, api, edits, barrier: null, wasm: null, auditor, dual, tracker, whenReady,
     strict: !!options.strict,
     settled: () => loading ?? Promise.resolve(state.ready),
     check(reason) {
       if (!state.ready || !barrier) return null;
+      lastCheckAt = performance.now();
       try { return barrier.check(reason); } catch (error) { console.warn('[engine-doc] consistency check failed to run', error); return null; }
     },
-    beforeSave(reason = 'save') { state.check(reason); },
+    beforeSave(reason = 'save') {
+      // An autosave (local recovery, every few seconds while media is
+      // prepared or an export runs) checks at most every AUTOSAVE_CHECK_MS:
+      // the check hashes the whole document (2 s of this window for a large
+      // project, while playback or an export waits on it). Saves, exports
+      // and the idle check always run it.
+      if (reason === 'autosave' && performance.now() - lastCheckAt < AUTOSAVE_CHECK_MS) return;
+      state.check(reason);
+    },
     beforeExport(reason = 'export') { state.check(reason); },
     subscribe(fn) { subscribers.add(fn); return () => { subscribers.delete(fn); }; },
     onPending(fn) { pendingListeners.add(fn); return () => { pendingListeners.delete(fn); }; },

@@ -401,6 +401,21 @@ describe('legacy app install', () => {
     }
   });
 
+  it('holds an autosave write while the engine exports, as while it plays', async () => {
+    const { PM, timers } = appRegistry();
+    const put = vi.spyOn(PM.Projects, PM.Projects.recover ? 'recover' : 'put');
+    PM.engineTransport = () => true;
+    PM.playing = false;
+    PM.Export = { busy: true };
+    PM.proj.name = 'Edited while exporting';
+    PM.autosave();
+    await timers.get(PM.app.saveTimer)();
+    expect(put).not.toHaveBeenCalled();
+    PM.Export.busy = false;
+    await timers.get(PM.app.saveTimer)();
+    expect(put).toHaveBeenCalledOnce();
+  });
+
   it('does not treat overlapping unchanged comparisons as edits', async () => {
     const { PM } = appRegistry();
     const confirmProjectClose = vi.fn(async () => 'cancel');

@@ -5,13 +5,13 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { canonicalProject, canonicalProjectHash, canonicalStringify } from '../../../shared/canonical-json';
 import { applyOps, diffOps } from '../../../shared/patch-ids';
 import { decodePatchOps } from '../../../shared/patch-binary';
 import { makePM } from '../legacy/__tests__/make-pm';
-import { installEngineDoc, type EngineDoc } from './install';
+import { AUTOSAVE_CHECK_MS, installEngineDoc, type EngineDoc } from './install';
 import { parseMode } from './flags';
 
 const MODULE = fileURLToPath(new URL('../../public/engine/pm_wasm.wasm', import.meta.url));
@@ -313,6 +313,29 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
     expect(result.missed.some(p => p.endsWith('.name'))).toBe(true);
     expect(lines.some(line => line.includes('"consistency"'))).toBe(true);
     expect(doc.check('save')!.ok).toBe(true);
+  });
+
+  it('an autosave checks the document at most every AUTOSAVE_CHECK_MS; a save always does', async () => {
+    const { PM, doc } = await editor('on');
+    populate(PM, rng(12), 2);
+    const now = vi.spyOn(performance, 'now');
+    try {
+      let t = 1_000_000;
+      now.mockImplementation(() => t);
+      const checks = () => doc.barrier!.stats.checks;
+      doc.beforeSave('autosave');
+      const first = checks();
+      t += AUTOSAVE_CHECK_MS - 1;
+      doc.beforeSave('autosave');
+      expect(checks()).toBe(first);
+      doc.beforeSave('save');
+      expect(checks()).toBe(first + 1);
+      t += AUTOSAVE_CHECK_MS;
+      doc.beforeSave('autosave');
+      expect(checks()).toBe(first + 2);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it('the auditor reports a write the barrier missed and repairs the mirror', async () => {

@@ -763,7 +763,9 @@ PM.autosave = () => {
     // time the write found playback, not from the edit: a write whose
     // debounce ended during playback (it waits as long as the last write
     // took) still waits.
-    if (PM.playing && PM.engineTransport?.()) {
+    // So does one while the engine exports: the export's frames wait on this
+    // window for a raster override's answers.
+    if ((PM.playing || PM.Export?.busy) && PM.engineTransport?.()) {
       deferredSince ??= Date.now();
       if (Date.now() - deferredSince < AUTOSAVE_PLAYING_DEFER_MS) {
         APP.saveTimer = window.setTimeout(write, 1000);
