@@ -633,7 +633,10 @@ work.
   look-ahead interval. Cadence observes answered frames too, pauses
   speculation when intervals change, and recovers after two stable
   intervals; queued work from the old grid expires. Near frames precede
-  far ones.
+  far ones. An explicit output-frame boundary keeps shutter subsamples
+  out of cadence learning and holds the frame's prune floor across its
+  missing-answer retry. Half- and full-shutter 16-sample regressions keep
+  every first-pass cached answer available for that retry.
   The window still executes a wrapper at every requested time, then caches
   fresh readback bytes under its explicit texture key and unchanged quad
   (4,096 entries, 192 MiB; cleared on revision, reset and chain changes).

@@ -61,6 +61,10 @@ pub enum CompatAnswer {
 /// The compatibility rasters of one session (the interactive engine's
 /// store, the job engine's host answers).
 pub trait CompatRasters: Send + Sync {
+    /// Starts one output frame. A frame may plan more than once while its
+    /// missing rasters are fetched; all those plans share this boundary.
+    fn begin_frame(&self) {}
+
     /// Whether the session has a producer for `source`.
     fn producing(&self, source: CompatSource) -> bool;
     /// The answer for `layer` of `composition` at composition time `time`

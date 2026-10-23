@@ -1639,6 +1639,9 @@ impl Renderer {
         rows: SnapshotRows,
         copy: Option<&pm_gpu::readback::ReadbackCopy>,
     ) -> Result<Rendered, RenderError> {
+        if let Some(compat) = &self.compat {
+            compat.begin_frame();
+        }
         if self.fallback_host.is_none() {
             return self.render_into_svg(
                 document,

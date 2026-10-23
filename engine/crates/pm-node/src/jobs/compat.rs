@@ -96,6 +96,9 @@ pub(crate) struct JobCompat {
 /// What the background fetch asks for next.
 #[derive(Default)]
 struct Ahead {
+    /// The first observed local time of each composition in this output
+    /// frame. Later shutter samples and retry plans use the same boundary.
+    frame_times: HashMap<String, i64>,
     /// The layers seen in missing frames and the last time scheduled for
     /// each. A new layer starts at its own frame, without moving older
     /// layers' cursors backwards and filling the worker queue again.
@@ -235,11 +238,16 @@ impl JobCompat {
             .fetch_sub(freed, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Every rendered answer, including a prefetched hit, observes the
-    /// composition's local clock. Missing fetch batches cannot tell a
-    /// skipped prefetched frame from a larger frame interval.
+    /// The first answer of an output frame, including a prefetched hit,
+    /// observes the composition's local clock. Later shutter samples and
+    /// retry plans may use different local times without changing cadence
+    /// or evicting answers that this frame still needs.
     fn observe(&self, comp: &str, time: i64) {
         let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
+        if ahead.frame_times.contains_key(comp) {
+            return;
+        }
+        ahead.frame_times.insert(comp.to_owned(), time);
         if ahead.cadences.entry(comp.to_owned()).or_default().observe(time) {
             // A changed clock makes every old layer cursor's future grid
             // invalid. Rebuild it from this frame once the clock is stable.
@@ -249,27 +257,29 @@ impl JobCompat {
                 }
             }
         }
-    }
-
-    /// Frame `time` (ticks) of `comp` is being drawn: older answers of the
-    /// composition go, and the next frames are asked for when the
-    /// background fetch is close to running out.
-    fn advance(&self, comp: &str, time: i64) {
-        let Some(me) = self.me.upgrade() else {
-            return;
-        };
-        let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
-        let (step, epoch) = ahead.cadences.get(comp).map_or((0, 0), |cadence| (cadence.step, cadence.epoch));
+        let step = ahead.cadences.get(comp).map_or(0, |cadence| cadence.step);
         let floor = time.saturating_sub(step.max(0));
         let prune = ahead.floors.get(comp).is_none_or(|f| floor > *f);
         if prune {
             ahead.floors.insert(comp.to_owned(), floor);
         }
+        drop(ahead);
+        if prune {
+            self.prune(comp, floor);
+        }
+    }
+
+    /// Ask for future answers on the first local clock of this output frame.
+    /// Fetch may discover new layers at later shutter samples, but may not
+    /// move the frame's prune floor or speculative grid forward.
+    fn advance(&self, comp: &str) {
+        let Some(me) = self.me.upgrade() else {
+            return;
+        };
+        let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(&time) = ahead.frame_times.get(comp) else { return };
+        let (step, epoch) = ahead.cadences.get(comp).map_or((0, 0), |cadence| (cadence.step, cadence.epoch));
         if step <= 0 || ahead.layers.is_empty() {
-            drop(ahead);
-            if prune {
-                self.prune(comp, floor);
-            }
             return;
         }
         let mut keys = Vec::new();
@@ -300,10 +310,6 @@ impl JobCompat {
             {
                 ahead.worker = None;
             }
-        }
-        drop(ahead);
-        if prune {
-            self.prune(comp, floor);
         }
     }
 
@@ -606,6 +612,10 @@ impl pm_export::render::FramePost for ContextFrames {
 }
 
 impl CompatRasters for JobCompat {
+    fn begin_frame(&self) {
+        self.ahead.lock().unwrap_or_else(|e| e.into_inner()).frame_times.clear();
+    }
+
     fn producing(&self, source: CompatSource) -> bool {
         self.sources.contains(&source)
     }
@@ -631,7 +641,7 @@ impl CompatRasters for JobCompat {
             scale.to_bits(),
         );
         self.observe(composition, ticks.get());
-        self.advance(composition, ticks.get());
+        self.advance(composition);
         if let Some(answer) = self
             .answers
             .lock()
@@ -713,12 +723,6 @@ impl CompatRasters for JobCompat {
                 }
             }
         }
-        if !pipelined {
-            // An export moves forward: answers before this frame are done.
-            for (comp, time) in earliest {
-                self.prune(&comp, time - steps[&comp].max(0));
-            }
-        }
         // Those the background fetch is asking for: waited for, then asked
         // here if it could not get them.
         let needed: Vec<AnswerKey> = asks.iter().filter(|a| a.1).map(|a| a.0.clone()).collect();
@@ -749,7 +753,7 @@ impl CompatRasters for JobCompat {
             }
         }
         for n in needs {
-            self.advance(n.composition.as_str(), n.time.get());
+            self.advance(n.composition.as_str());
         }
         self.failure().is_none()
     }
@@ -854,6 +858,7 @@ mod tests {
     }
 
     fn draw_and_fetch(compat: &JobCompat, needs: &[pm_protocol::snapshot::CompatNeed]) {
+        compat.begin_frame();
         for n in needs {
             compat.answer(
                 n.composition.as_str(), n.layer.as_str(),
@@ -972,6 +977,7 @@ mod tests {
         // Those frames are answered without asking again.
         let asked = host.calls.lock().unwrap().len();
         for k in 1..=FETCH_AHEAD {
+            compat.begin_frame();
             let t = step * (1 + k) as f64;
             assert!(!matches!(
                 compat.answer("root", "typed", t, 2.0, CompatSource::RasterOverride, None),
@@ -1043,6 +1049,7 @@ mod tests {
         draw_and_fetch(&compat, &needs(step));
         let mut fetched = 0;
         for k in 2..60 {
+            compat.begin_frame();
             let t = step * k as f64;
             // A frame asks only for what is not answered (or on its way).
             let missing: Vec<_> = layers
@@ -1089,6 +1096,7 @@ mod tests {
         // These rendered frames are cache hits, so there is no intervening
         // fetch batch from which to infer their cadence.
         for k in 2..=4 {
+            compat.begin_frame();
             assert!(matches!(compat.answer("root", "old", k as f64 / 30.0, 1.0, CompatSource::RasterOverride, None), CompatAnswer::Native));
         }
         draw_and_fetch(&compat, &[need("new", 5.0 / 30.0, 1.0)]);
@@ -1118,21 +1126,17 @@ mod tests {
             n.time = pm_protocol::common::Ticks::new(time).unwrap();
             n
         };
-        draw_and_fetch(&compat, &[at("root", "root-old", 0)]);
-        draw_and_fetch(&compat, &[at("root", "root-old", root_step)]);
-        draw_and_fetch(&compat, &[at("nested", "nested-old", nested_offset)]);
-        draw_and_fetch(&compat, &[at("root", "root-mid", 2 * root_step)]);
-        draw_and_fetch(&compat, &[at("nested", "nested-old", nested_offset + nested_step)]);
-        // Both clocks skip four batches because those frames were answered
-        // ahead. New layers must still be asked at their own frame times.
-        for k in 2..=4 {
-            if k > 2 {
-                compat.answer("root", "root-old", k as f64 / 30.0, 1.0, CompatSource::RasterOverride, None);
-            }
+        draw_and_fetch(&compat, &[at("root", "root-old", 0), at("nested", "nested-old", nested_offset)]);
+        draw_and_fetch(&compat, &[at("root", "root-old", root_step), at("nested", "nested-old", nested_offset + nested_step)]);
+        draw_and_fetch(&compat, &[at("root", "root-mid", 2 * root_step), at("nested", "nested-old", nested_offset + 2 * nested_step)]);
+        // Later frame plans observe both local clocks even when their old
+        // layers have already been answered, with no fetch batch between.
+        for k in 3..=4 {
+            compat.begin_frame();
+            compat.answer("root", "root-old", k as f64 / 30.0, 1.0, CompatSource::RasterOverride, None);
             compat.answer("nested", "nested-old", (nested_offset + k * nested_step) as f64 / pm_protocol::common::TICKS_PER_SECOND as f64, 1.0, CompatSource::RasterOverride, None);
         }
-        draw_and_fetch(&compat, &[at("root", "root-new", 5 * root_step)]);
-        draw_and_fetch(&compat, &[at("nested", "nested-new", nested_offset + 5 * nested_step)]);
+        draw_and_fetch(&compat, &[at("root", "root-new", 5 * root_step), at("nested", "nested-new", nested_offset + 5 * nested_step)]);
         let expected = [
             ("root-old", (1 + AHEAD_FRAMES) * root_step),
             ("nested-old", nested_offset + (1 + AHEAD_FRAMES) * nested_step),
@@ -1205,28 +1209,69 @@ mod tests {
         let offset = step * 3 / 5;
         let mut observed = HashSet::new();
         for frame_index in 0..40 {
-            for time in [frame_index * step, frame_index * step + offset] {
+            let needs: Vec<_> = [frame_index * step, frame_index * step + offset].into_iter().map(|time| {
                 observed.insert(time);
                 let mut n = need("shared", 0.0, 1.0);
                 n.time = pm_protocol::common::Ticks::new(time).unwrap();
-                draw_and_fetch(&compat, &[n]);
-            }
+                n
+            }).collect();
+            draw_and_fetch(&compat, &needs);
         }
-        // The first pair can warm up one speculative horizon before the
-        // alternating 0.6/0.4-frame intervals expose the two clocks.
-        // Thereafter an unstable cadence must not keep making guesses.
+        // Both instances are seen within one output frame. Only the first
+        // local clock sets the cadence; the second cannot make a 0.6/0.4
+        // alternation or useless future asks on an off-frame grid.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let calls = host.calls.lock().unwrap();
             if calls.iter().any(|c| c.time.get() == 39 * step + offset) {
                 let waste = calls.iter().filter(|c| !observed.contains(&c.time.get())).count();
                 assert!(waste <= AHEAD_FRAMES as usize,
-                    "unstable instance clocks made {waste} unusable future asks");
+                    "offset instance clocks made {waste} unusable future asks");
                 break;
             }
             assert!(Instant::now() < deadline, "the final observed frame is answered");
             drop(calls);
             std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn shutter_samples_survive_the_compatibility_replan() {
+        let step = ticks_of(1.0 / 30.0).get();
+        for (shutter_denominator, pipelined) in [(16, false), (16, true), (32, false), (32, true)] {
+            let (_, job) = job(|_| Ok(frame(true)));
+            let compat = if pipelined { job.pipelined() } else { Arc::new(job) };
+            for frame_index in 0..2 {
+                let samples: Vec<_> = (0..16).map(|sample| {
+                    let mut n = need("blurred", 0.0, 1.0);
+                    n.time = pm_protocol::common::Ticks::new(
+                        frame_index * step + sample * step / shutter_denominator,
+                    ).unwrap();
+                    n
+                }).collect();
+                // The first subsample was answered ahead. The remaining
+                // samples become missing on the first plan, and the renderer
+                // fetches those needs once before planning the entire frame
+                // again. No cached first-pass answer may be evicted here.
+                assert!(compat.fetch(&samples[..1]));
+                compat.begin_frame();
+                let missing: Vec<_> = samples.iter().filter(|n| {
+                    matches!(compat.answer(
+                        n.composition.as_str(), n.layer.as_str(),
+                        n.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64,
+                        n.scale, n.source, None,
+                    ), CompatAnswer::Missing)
+                }).cloned().collect();
+                assert_eq!(missing.len(), 15, "only the first subsample was cached");
+                assert!(compat.fetch(&missing));
+                for n in &samples {
+                    assert!(matches!(compat.answer(
+                        n.composition.as_str(), n.layer.as_str(),
+                        n.time.get() as f64 / pm_protocol::common::TICKS_PER_SECOND as f64,
+                        n.scale, n.source, None,
+                    ), CompatAnswer::Native), "the retry has every {shutter_denominator}-shutter subsample at {}", n.time.get());
+                }
+            }
         }
     }
 
