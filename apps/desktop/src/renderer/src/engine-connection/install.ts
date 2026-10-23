@@ -31,6 +31,7 @@ import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
 import { EngineRenderTransport } from './render-transport';
+import { EngineSourceMedia, SOURCE_SERVICE } from './source-media';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
 import { installAppCaptures, usesBlender } from './app-captures';
@@ -148,6 +149,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   let viewerHandlers: EngineViewerHandlers | null = null;
   let viewerLease = 0;
   let sessionReady: Promise<void> | null = null;
+  let sourceMedia: EngineSourceMedia | null = null;
   /** The open composition (what Play plays and the viewer shows). */
   const openComposition = (): string => String(PM.proj?.compId ?? PM.proj?.id ?? '');
   /** A viewerless session follows the open composition (composition-follow.ts). */
@@ -294,7 +296,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         transport.refresh();
         for (const listener of clockListeners) listener(sample);
       },
-      onAudio: (message) => audio.receive(message, session),
+      onAudio: (message) => { audio.receive(message, session); sourceMedia?.receive(message); },
       onPreviewStatus: (status) => preview.receiveStatus(session, status),
       onStats: (message) => {
         stats.receive(message, performance.now());
@@ -302,7 +304,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       },
       // Replace a seek queued on the home screen before any old clock can
       // overwrite the replacement document's requested UI position.
-      onLoading: () => transport.seek(Number(PM.time) || 0, false),
+      onLoading: () => { sourceMedia?.reset(); transport.seek(Number(PM.time) || 0, false); },
       onLoaded: () => {
         if (session.headless) session.sendHeadless(openComposition());
         PM.bus?.emit?.('layout');
@@ -375,6 +377,18 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     log
   });
   (PM as any).EngineRender = renderTransport;
+  sourceMedia = new EngineSourceMedia({
+    render: renderTransport, native,
+    project: () => PM.proj,
+    revision: () => renderTransport.currentRevision() ?? 0,
+    session: snapshotSession,
+    wake: wakeStandby,
+    bind: async () => { await (PM as any).HostMedia?.flushBindings?.(PM.proj); },
+    changed: () => PM.bus?.emit?.('assets'),
+    error: error => log('error', `source media: ${error instanceof Error ? error.message : String(error)}`)
+  });
+  (PM as any).EngineSourceMedia = sourceMedia;
+  const sourceRegistration = PM.Kernel.services.register(SOURCE_SERVICE, sourceMedia);
   // The job engine's export and agent frames ask this window for the SVG
   // rasters of the document it has open (main's `compatFrame`).
   const unprovideSvg = renderTransport.provideCompat('svgImage', (request) => svgRasters.produce(request));
@@ -565,6 +579,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       viewerHandlers = null;
       sessionReady = null;
       unrouteCaptures();
+      sourceRegistration.dispose();
+      sourceMedia?.dispose();
+      if ((PM as any).EngineSourceMedia === sourceMedia) (PM as any).EngineSourceMedia = null;
       renderTransport.dispose();
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;

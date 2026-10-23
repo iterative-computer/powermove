@@ -17,6 +17,16 @@ export interface SourcePreview extends KernelSourcePreview {
   readonly playing: boolean;
 }
 interface SourcePreviewHost extends ViewerService { updateRecovery?(): boolean }
+interface SourceElement extends EventTarget {
+  readonly error?: { message: string } | null;
+  readonly duration: number;
+  currentTime: number;
+  readonly paused: boolean;
+  play(): Promise<void>;
+  pause(): void;
+  dispose?(): void;
+}
+interface NativeSourceMedia { monitor(asset: string): SourceElement & { canvas: HTMLCanvasElement } }
 
 const STYLES = `
   #source-preview{position:absolute;inset:0;z-index:6;display:none;background:var(--bg-panel-2);border-radius:inherit;overflow:hidden}
@@ -24,10 +34,11 @@ const STYLES = `
   @keyframes sp-in{from{opacity:0}to{opacity:1}}
   #source-preview .sp-media{position:absolute;inset:0;display:grid;place-items:center;background:#000}
   #source-preview[data-kind="audio"] .sp-media{background:var(--bg-panel-2)}
-  #source-preview .sp-media img,#source-preview .sp-media video{width:100%;height:100%;min-height:0;object-fit:contain;display:block}
+  #source-preview .sp-media img,#source-preview .sp-media video,#source-preview .sp-media canvas{width:100%;height:100%;min-height:0;object-fit:contain;display:block}
   #source-preview .sp-audio{display:flex;flex-direction:column;align-items:center;gap:var(--gap);min-width:0;max-width:calc(100% - 2 * var(--pad));color:var(--tx-4)}
   #source-preview .sp-audio svg{width:32px;height:32px}
   #source-preview .sp-audio .sp-name{flex:none;max-width:100%;padding:0;text-align:center}
+  #source-preview .sp-failure{position:absolute;inset:0;display:grid;place-items:center;padding:var(--pad);color:var(--tx-2);background:var(--bg-panel-2)}
   #source-preview .sp-foot{position:absolute;z-index:2;bottom:var(--pad);left:50%;transform:translateX(-50%);width:min(480px,calc(100% - 2 * var(--pad)));box-sizing:border-box;display:flex;align-items:center;gap:8px;padding:6px;border-radius:calc(var(--r-sm) + 6px);background:var(--bg-float);box-shadow:var(--shadow-float)}
   #source-preview .sp-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx-2);font-size:var(--fs-xs);font-weight:var(--fw-medium);padding-left:4px}
   #source-preview .sp-close,#source-preview .sp-play{flex:none;width:var(--hit);height:var(--hit);display:grid;place-items:center;border:0;border-radius:var(--r-sm);color:var(--tx-2);background:transparent}
@@ -81,6 +92,8 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
   media.className = 'sp-media';
   const foot = document.createElement('div');
   foot.className = 'sp-foot';
+  const failure = document.createElement('div');
+  failure.className = 'sp-failure'; failure.setAttribute('role', 'status'); failure.hidden = true;
   const play = document.createElement('button');
   play.className = 'sp-play';
   play.type = 'button';
@@ -94,11 +107,11 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
   scrub.append(track);
   foot.append(play, name, scrub, close);
 
-  root.append(styles, media, foot);
+  root.append(styles, media, failure, foot);
   (stage.querySelector('#stage-inner') || stage).appendChild(root);
 
   let activeId: string | null = null;
-  let element: HTMLMediaElement | null = null;
+  let element: SourceElement | null = null;
   let audioUrl: string | null = null;
   let frame = 0;
 
@@ -139,10 +152,16 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
   }
 
   function onLoaded(): void {
+    failure.hidden = !element?.error;
+    if (element?.error) failure.textContent = element.error.message;
     paint();
   }
+  function onFailure(event: Event): void {
+    failure.textContent = event instanceof ErrorEvent ? event.message : 'The source could not be previewed.';
+    failure.hidden = false;
+  }
 
-  function bindElement(next: HTMLMediaElement): void {
+  function bindElement(next: SourceElement): void {
     element = next;
     next.addEventListener('play', onPlayState);
     next.addEventListener('pause', onPlayState);
@@ -151,6 +170,7 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
     next.addEventListener('durationchange', paint);
     next.addEventListener('loadeddata', onLoaded);
     next.addEventListener('loadedmetadata', onLoaded);
+    next.addEventListener('error', onFailure);
   }
 
   function clear(): void {
@@ -165,11 +185,14 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
       element.removeEventListener('durationchange', paint);
       element.removeEventListener('loadeddata', onLoaded);
       element.removeEventListener('loadedmetadata', onLoaded);
+      element.removeEventListener('error', onFailure);
+      element.dispose?.();
     }
     if (audioUrl) { URL.revokeObjectURL(audioUrl); audioUrl = null; }
     element = null; activeId = null;
     fill.style.width = '0%';
     media.replaceChildren();
+    failure.hidden = true; failure.textContent = '';
     root.dataset.open = 'false';
     viewer.updateRecovery?.();
   }
@@ -184,8 +207,17 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
     clear();
     foot.insertBefore(name, scrub);
     const kind = record.kind;
+    const native = api.services?.get<NativeSourceMedia>('engine.source');
     const url = liveUrl(live);
-    if (kind === 'image' && url) {
+    if (native && ['image', 'video', 'audio'].includes(kind)) {
+      const monitor = native.monitor(assetId);
+      if (kind === 'audio') {
+        const card = document.createElement('div'); card.className = 'sp-audio';
+        const audioIcon = icon('music'); audioIcon.setAttribute('aria-hidden', 'true');
+        card.append(audioIcon, name); media.append(card);
+      } else media.append(monitor.canvas);
+      bindElement(monitor);
+    } else if (kind === 'image' && url) {
       const img = document.createElement('img'); img.src = url; img.alt = '';
       media.append(img);
     } else if (kind === 'video' && url) {
@@ -207,8 +239,8 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
     name.textContent = String(record.name || assetId);
     name.title = name.textContent;
     root.dataset.kind = kind;
-    play.hidden = scrub.hidden = !element;
-    scrub.tabIndex = element ? 0 : -1;
+    play.hidden = scrub.hidden = !element || kind === 'image';
+    scrub.tabIndex = element && kind !== 'image' ? 0 : -1;
     setPlayIcon();
     paint();
     activeId = assetId;
@@ -220,7 +252,7 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
   }
 
   function playPause(): void {
-    if (!element) return;
+    if (!element || root.dataset.kind === 'image') return;
     if (!element.paused) { element.pause(); return; }
     const duration = Number(element.duration);
     /* Restart rather than sitting on the last frame doing nothing. */

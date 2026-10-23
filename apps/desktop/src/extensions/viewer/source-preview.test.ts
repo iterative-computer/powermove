@@ -44,6 +44,39 @@ afterEach(() => {
 });
 
 describe('source preview', () => {
+  it('keeps native still images inert when their picture is clicked', () => {
+    const ctx = harness({ still: { kind: 'image', name: 'plate.png' } }, new Map());
+    const monitor = Object.assign(new EventTarget(), { canvas: document.createElement('canvas'), duration: 0,
+      currentTime: 0, paused: true, play: vi.fn(async () => {}), pause: vi.fn(), dispose: vi.fn() });
+    (ctx.api as any).services = { get: () => ({ monitor: () => monitor }) };
+    const preview = installSourcePreview(ctx.api, ctx.viewer, stage());
+    preview.toggle('still');
+    document.querySelector('.sp-media')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    expect(monitor.play).not.toHaveBeenCalled();
+    preview.dispose();
+  });
+  it('uses engine source frames and audio with the same keyboard controls and closes its voice', () => {
+    const ctx = harness({ video: { kind: 'video', name: 'clip.mov' } }, new Map());
+    const monitor = Object.assign(new EventTarget(), { canvas: document.createElement('canvas'), duration: 12,
+      currentTime: 1, paused: true, play: vi.fn(async () => {}), pause: vi.fn(), dispose: vi.fn() });
+    const source = { monitor: vi.fn(() => monitor) };
+    (ctx.api as any).services = { get: (id: string) => id === 'engine.source' ? source : undefined };
+    const preview = installSourcePreview(ctx.api, ctx.viewer, stage());
+    expect(preview.show('video')).toBe(true);
+    expect(document.querySelector('.sp-media canvas')).toBe(monitor.canvas);
+    expect(document.querySelector('.sp-media video, .sp-media audio, .sp-media img')).toBeNull();
+    const scrub = document.querySelector<HTMLElement>('.sp-scrub')!;
+    scrub.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    expect(monitor.currentTime).toBe(12);
+    expect(scrub.getAttribute('aria-valuetext')).toBe('0:12 of 0:12');
+    document.querySelector<HTMLButtonElement>('.sp-play')!.click();
+    expect(monitor.play).toHaveBeenCalled();
+    expect(monitor.currentTime).toBe(0);
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(monitor.dispose).toHaveBeenCalledTimes(1);
+    expect(preview.activeId).toBeNull();
+    preview.dispose();
+  });
   it('names the source and offers a way back so the stage never reads as a broken composition', () => {
     const ctx = harness(
       { video: { id: 'video', kind: 'video', name: 'b-roll.mov' } },

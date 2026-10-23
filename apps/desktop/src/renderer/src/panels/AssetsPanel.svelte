@@ -159,6 +159,9 @@
   /* A cached still captured at import. It survives the source bytes going
      missing, so an offline card can still show what the media looked like. */
   function posterUrl(asset: Asset): string {
+    if (PM.EngineSourceMedia && liveAsset(asset) && ['image', 'video'].includes(asset.kind)) {
+      return PM.EngineSourceMedia.posterUrl(asset.id);
+    }
     return String(PM.assets.poster?.(asset.id) || '');
   }
 
@@ -1028,9 +1031,9 @@
             <Icon {PM} name={assetIcon(asset.kind)} />
             {#if posterSrc}
               <img class="asset-poster" src={posterSrc} alt="" />
-            {:else if asset.kind === 'image' && currentAsset?.url}
+            {:else if !PM.EngineSourceMedia && asset.kind === 'image' && currentAsset?.url}
               <img src={currentAsset.url} alt="" />
-            {:else if asset.kind === 'video' && videoSource(currentAsset)}
+            {:else if !PM.EngineSourceMedia && asset.kind === 'video' && videoSource(currentAsset)}
               <video src={videoSource(currentAsset)} muted playsinline preload="auto" use:poster></video>
             {/if}
           {/if}

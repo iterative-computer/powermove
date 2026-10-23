@@ -29,6 +29,7 @@ import { disposeSceneRuntimes } from '../../core/scene3d/service';
 import { parseSvg } from '../core/svg-import';
 import { inspectorService, viewerService } from '../core/services';
 import { capturePoster } from '../core/poster';
+import { persistSourcePoster } from '../../engine-connection/source-posters';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { writeDocument } from '../../engine-doc/write';
 
@@ -1045,7 +1046,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
   }
   let posterBlob: Blob | null = null;
   try {
-    posterBlob = await capturePoster(prepared);
+    posterBlob = (PM as any).EngineSourceMedia ? null : await capturePoster(prepared);
     if (posterBlob) {
       const posterKey = PM.MediaImport.posterKeyFor(storageKey);
       const stored = await PM.MediaStore.put(posterKey, posterBlob, { storageKey: posterKey, type: posterBlob.type });
@@ -1107,6 +1108,7 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
     if (relinkedLayers) PM.bus.emit('layers');
   }
   await PM.HostMedia?.flushBindings?.(targetProject);
+  await persistSourcePoster(PM, asset, setPoster);
   // The import committed above and touched the document. The caller's
   // pre-import revision is now stale because of this successful write.
   // Keep the project/epoch guard across the binding await; pre-commit
@@ -1205,7 +1207,7 @@ PM.assets = {
       if (!persisted) throw new Error('Could not store the replacement media · the original file is unchanged');
       let nextPoster: Blob | null = null;
       try {
-        nextPoster = await capturePoster(prepared);
+        nextPoster = (PM as any).EngineSourceMedia ? null : await capturePoster(prepared);
         if (nextPoster) {
           const posterKey = PM.MediaImport.posterKeyFor(storageKey);
           const stored = await PM.MediaStore.put(posterKey, nextPoster, { storageKey: posterKey, type: nextPoster.type });
@@ -1272,6 +1274,8 @@ PM.assets = {
       }
       PM.assets.errors.delete(id);
       if (kind === 'audio' && PM.Audio) PM.Audio.rebalanceCache();
+      nextPoster = await persistSourcePoster(PM, prepared, setPoster) || nextPoster;
+      if (nextPoster) nextMeta.poster = true;
       return { asset: prepared, previous: previousRuntime, previousName: currentMeta.name, meta: nextMeta, persisted: true };
     } catch (error) {
       if (prepared && PM.assets.map.get(id) !== prepared) disposeAsset(prepared);
@@ -1443,7 +1447,8 @@ PM.assets = {
         if (epoch !== assetEpoch || PM.proj !== project) return;
         const completed = await PM.MediaImport.mapBounded(backfill, 3, async (result: any) => {
           if (epoch !== assetEpoch || PM.proj !== project) return null;
-          const blob = await capturePoster(result.asset);
+          const source = (PM as any).EngineSourceMedia;
+          const blob = source ? await source.poster(result.asset.id) : await capturePoster(result.asset);
           if (!blob || epoch !== assetEpoch || PM.proj !== project) return null;
           const meta = project.assets?.[result.asset.id];
           if (!meta?.storageKey || meta !== result.meta || PM.assets.map.get(result.asset.id) !== result.asset) return null;

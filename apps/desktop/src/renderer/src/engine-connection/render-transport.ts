@@ -85,10 +85,14 @@ export type EngineSnapshotOptions = {
    *  frame an earlier capture prepared or fails with today's error. Async
    *  and idle frames only; ignored with `draft3d`. */
   prepareBlender?: boolean;
+  /** Cancel an asynchronous source request while queued or decoding. */
+  signal?: AbortSignal;
   /** A layer's raster instead of the frame (`render.raster` base pixels).
    *  `content`: the layer object the caller passed, as JSON, when it is not
    *  the document's own (a wrapper's modified copy). */
   layer?: { id: string; scale: number; crop?: { x: number; y: number; width: number; height: number } | null; content?: Uint8Array | null };
+  /** Original media at source time, without composition effects or transforms. */
+  source?: { asset: string; fit?: 'stretch' | 'contain' | 'cover'; color?: 'display' | 'interpreted' };
 };
 
 /** A rendered snapshot. `data` is RGBA8, top-down, in `pixels`'s encoding. */
@@ -167,7 +171,7 @@ export type CompatProducer = (request: CompatFrameRequest) =>
 export type RenderTransportOptions = {
   /** CPU hidden tabs use host-owned document sessions for every snapshot. */
   documentOnly?: boolean;
-  native: Pick<EngineBridge, 'snapshotSync' | 'snapshot' | 'onCompatAsk' | 'answerCompat'>;
+  native: Pick<EngineBridge, 'snapshotSync' | 'snapshot' | 'cancelSnapshot' | 'onCompatAsk' | 'answerCompat'>;
   /** The session snapshots are taken of (the newest viewer session). */
   session: () => TransportSession | null;
   /** The document revision the window has, after flushing pending edits to
@@ -267,10 +271,12 @@ export class EngineRenderTransport {
       composition: options.composition ?? this.options.composition(),
       time: ticks(time),
       outputSize: { width, height },
-      target: layer
+      target: options.source
+        ? { kind: 'source', asset: options.source.asset, fit: options.source.fit ?? 'stretch', color: options.source.color ?? 'display' }
+        : layer
         ? { kind: 'layer', layer: layer.id, scale: layer.scale, crop: layer.crop ?? null, content: layer.content ?? null }
         : { kind: 'frame', motionBlurSamples: Math.max(0, Math.min(256, Math.round(options.motionBlurSamples ?? 0))), background: options.background !== false, draft3d: options.draft3d === true },
-      captionsHidden: !layer && (options.captionsHidden ?? this.options.captionsHidden?.() ?? false),
+      captionsHidden: !layer && !options.source && (options.captionsHidden ?? this.options.captionsHidden?.() ?? false),
       pixels: options.pixels ?? 'opaque',
       class: cls,
       viewSeq: this.options.viewSeq(),
@@ -404,6 +410,7 @@ export class EngineRenderTransport {
       }
       throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
     } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'cancelled') throw error;
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
     }
@@ -483,7 +490,7 @@ export class EngineRenderTransport {
         if (!this.ready) await this.options.wake?.();
       }
       for (let round = 0; round < MAX_ROUNDS; round++) {
-        const reply = await native.snapshot(this.request(options, cls, uploaded));
+        const reply = await this.askSnapshot(this.request(options, cls, uploaded), options.signal);
         if (reply.status === 'rendered') {
           if (cls === 'idle') this.stats.idle++;
           else this.stats.async++;
@@ -507,9 +514,19 @@ export class EngineRenderTransport {
       }
       throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
     } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'cancelled') throw error;
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
     }
+  }
+
+  private async askSnapshot(request: EngineSnapshotRequest, signal?: AbortSignal): Promise<EngineSnapshotReply> {
+    if (signal?.aborted) throw new EngineSnapshotError('cancelled', 'The source request was cancelled.');
+    const requestId = crypto.randomUUID();
+    const cancel = () => { void this.options.native.cancelSnapshot?.(requestId); };
+    signal?.addEventListener('abort', cancel, { once: true });
+    try { return await this.options.native.snapshot!({ ...request, requestId }); }
+    finally { signal?.removeEventListener('abort', cancel); }
   }
 
   private async documentSnapshot(options: EngineSnapshotOptions, cls: Exclude<SnapshotClass, 'sync'>): Promise<EngineSnapshot> {
@@ -522,8 +539,8 @@ export class EngineRenderTransport {
       let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
       let svgPixels: { key: SvgRasterKey; data: Uint8Array }[] = [];
       for (let round = 0; round < MAX_ROUNDS; round++) {
-        const reply = await this.options.native.snapshot!({ ...this.request(options, cls, uploaded, true, revision), session: null,
-          document: { id: doc.id, revision: body.revision, hash: body.hash, json: body.json }, fallbackPixels, svgPixels });
+        const reply = await this.askSnapshot({ ...this.request(options, cls, uploaded, true, revision), session: null,
+          document: { id: doc.id, revision: body.revision, hash: body.hash, json: body.json }, fallbackPixels, svgPixels }, options.signal);
         fallbackPixels = []; svgPixels = [];
         if (reply.status === 'rendered') { this.stats[cls]++; return this.result(reply); }
         if (reply.status === 'empty') throw new EngineSnapshotError('empty', 'The layer draws nothing at that time.');
@@ -546,6 +563,7 @@ export class EngineRenderTransport {
       }
       throw new EngineSnapshotError('internal', `The snapshot still needed the renderer after ${MAX_ROUNDS} rounds.`);
     } catch (error) {
+      if (error instanceof EngineSnapshotError && error.code === 'cancelled') throw error;
       if (error instanceof EngineSnapshotError && error.code === 'empty') throw error;
       throw this.fail(error, 'snapshot');
     }

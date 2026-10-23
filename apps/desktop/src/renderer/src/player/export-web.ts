@@ -90,7 +90,8 @@ export function inspectWebExport(PM: any) {
  * keeps a browser rendition as generated media (section 21): the web export
  * takes the rendition, or the bytes the live asset shows.
  */
-async function browserRendition(PM: any, meta: any): Promise<Blob | null> {
+async function browserRendition(PM: any, meta: any, project: any): Promise<Blob | null> {
+  if (PM.EngineSourceMedia) return PM.EngineSourceMedia.rendition(project, meta.id, meta.kind === 'image' ? 'png' : 'webm');
   // Renditions are named by the original's content hash (a linked original's is its link's).
   const original = typeof meta.contentHash === 'string' ? meta.contentHash : meta.link?.hash;
   const kept = original ? await PM.MediaStore?.rendition?.get?.(original).catch(() => null) : null;
@@ -135,7 +136,7 @@ export async function buildWebExport(PM: any) {
   for (const id of inspection.assets) {
     const meta = findAsset(project, id);
     if (!meta) throw new Error(`Missing media metadata: ${id}`);
-    const blob = meta.rendition === true ? await browserRendition(PM, meta) : await PM.MediaStore.get(meta);
+    const blob = meta.rendition === true ? await browserRendition(PM, meta, project) : await PM.MediaStore.get(meta);
     if (!blob) throw new Error(`The original media for “${meta.name || id}” is missing. Reimport it before exporting.`);
     /* The stored bytes decide the extension: a converted animation or playback
        proxy keeps the name the user chose while holding WebM, and a static host
