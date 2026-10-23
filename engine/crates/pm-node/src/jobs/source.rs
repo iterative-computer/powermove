@@ -67,6 +67,17 @@ pub(super) fn run(
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
+        if matches!(
+            &submit.spec,
+            JobSpec::SourceFilmstrip {
+                color: SourceColor::Compositor,
+                ..
+            }
+        ) {
+            return Err(
+                "Compositor source video planes are available only in source snapshots".into(),
+            );
+        }
         let asset = match &submit.spec {
             JobSpec::SourceFilmstrip { asset, .. } | JobSpec::BrowserRendition { asset, .. } => {
                 asset

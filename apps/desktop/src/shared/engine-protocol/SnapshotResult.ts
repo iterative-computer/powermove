@@ -5,9 +5,11 @@ import type { RasterGeometry } from "./RasterGeometry";
 import type { Revision } from "./Revision";
 import type { Seq } from "./Seq";
 import type { SnapshotPixels } from "./SnapshotPixels";
+import type { SourceVideoFrame } from "./SourceVideoFrame";
 
 /**
- * A rendered snapshot.
+ * A rendered snapshot. `video` is present only for SourceColor::Compositor:
+ * packed native YUV planes for a source-only VideoFrame.
  */
 export type SnapshotResult = { 
 /**
@@ -37,4 +39,4 @@ raster?: RasterGeometry | null, quality: FrameQuality,
  * Time the request waited in the engine (revision and its turn), and
  * rendered, in microseconds.
  */
-waitedUs: number, renderUs: number, };
+waitedUs: number, renderUs: number, video?: SourceVideoFrame | null, };

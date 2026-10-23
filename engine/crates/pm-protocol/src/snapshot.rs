@@ -151,7 +151,11 @@ pub enum SourceFit {
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum SourceColor {
+    /// Browser Canvas2D display pixels, used by posters and filmstrips.
     Display,
+    /// Native decoded video planes and source colour tags for Chromium video
+    /// presentation. Never an RGBA compatibility or composition conversion.
+    Compositor,
     Interpreted,
 }
 
@@ -263,7 +267,14 @@ impl Validate for SnapshotRequest {
             || "too many uploaded keys".into(),
         )?;
         match &self.target {
-            SnapshotTarget::Source { asset, .. } => {
+            SnapshotTarget::Source { asset, color, .. } => {
+                ensure(
+                    *color != SourceColor::Compositor
+                        || (self.class != SnapshotClass::Sync
+                            && self.pixels == SnapshotPixels::Straight),
+                    C,
+                    || "native video presentation requires an async straight source request".into(),
+                )?;
                 ensure(asset.is_valid() && self.time.get() >= 0, C, || {
                     "source snapshots need an asset and nonnegative source time".into()
                 })
@@ -444,7 +455,101 @@ impl Validate for SnapshotOutcome {
     }
 }
 
-/// A rendered snapshot.
+/// Source video planes remain encoded in the stream's colour space. Chromium
+/// samples and colour-manages them exactly as its CSS video compositor does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct SourceVideoFrame {
+    // Native plane format: nv12, nv16, p010le, or planar i420a.
+    pub format: String,
+    // gfx::ColorSpace / WebCodecs identifiers describing the decoded frame.
+    pub primaries: String,
+    pub transfer: String,
+    pub matrix: String,
+    pub range: String,
+    // Visible width when Chromium retains a wider coded row (VP9 stride).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub visible_width: Option<u32>,
+}
+
+impl SourceVideoFrame {
+    /// Packed Y plus interleaved UV, or planar Y,U,V,A for i420a; no padding.
+    pub fn byte_len(&self, width: u32, height: u32) -> Option<u64> {
+        if self.visible_width.is_some_and(|w| w == 0 || w > width) {
+            return None;
+        }
+        let w = u64::from(width);
+        let h = u64::from(height);
+        let chroma_h = if self.format == "nv16" {
+            h
+        } else {
+            h.div_ceil(2)
+        };
+        let bytes = if self.format == "p010le" { 2 } else { 1 };
+        let alpha = if self.format == "i420a" { w * h } else { 0 };
+        (w * h + w.div_ceil(2) * 2 * chroma_h)
+            .checked_mul(bytes)?
+            .checked_add(alpha)
+    }
+}
+
+impl Validate for SourceVideoFrame {
+    fn validate(&self) -> Result<(), Violation> {
+        let ok = self
+            .visible_width
+            .is_none_or(|w| w > 0 && w <= MAX_OUTPUT_DIMENSION)
+            && matches!(self.format.as_str(), "nv12" | "nv16" | "p010le" | "i420a")
+            && matches!(
+                self.primaries.as_str(),
+                "unspecified"
+                    | "bt709"
+                    | "bt470m"
+                    | "bt470bg"
+                    | "smpte170m"
+                    | "smpte240m"
+                    | "film"
+                    | "bt2020"
+                    | "smptest428-1"
+                    | "smptest431-2"
+                    | "p3"
+            )
+            && matches!(
+                self.transfer.as_str(),
+                "unspecified"
+                    | "bt709"
+                    | "gamma18"
+                    | "gamma22"
+                    | "gamma24"
+                    | "gamma28"
+                    | "smpte170m"
+                    | "smpte240m"
+                    | "linear"
+                    | "srgb"
+                    | "pq"
+                    | "hlg"
+            )
+            && matches!(
+                self.matrix.as_str(),
+                "unspecified"
+                    | "bt709"
+                    | "fcc"
+                    | "bt470bg"
+                    | "smpte170m"
+                    | "smpte240m"
+                    | "ycocg"
+                    | "bt2020-ncl"
+            )
+            && matches!(self.range.as_str(), "limited" | "full");
+        ensure(ok, ContractId::Frame, || {
+            "invalid source video format or colour tags".into()
+        })
+    }
+}
+
+/// A rendered snapshot. `video` is present only for SourceColor::Compositor:
+/// packed native YUV planes for a source-only VideoFrame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -475,6 +580,9 @@ pub struct SnapshotResult {
     /// rendered, in microseconds.
     pub waited_us: u32,
     pub render_us: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub video: Option<SourceVideoFrame>,
 }
 
 /// A layer raster's geometry besides its anchor and box (today's
@@ -505,7 +613,20 @@ pub struct RasterGeometry {
 impl Validate for SnapshotResult {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Frame;
-        let expected = u64::from(self.width) * u64::from(self.height) * 4;
+        if let Some(video) = &self.video {
+            video.validate()?;
+            ensure(self.pixels == SnapshotPixels::Straight, C, || {
+                "source planes are straight encoded samples".into()
+            })?;
+        }
+        let expected = self
+            .video
+            .as_ref()
+            .map_or(
+                Some(u64::from(self.width) * u64::from(self.height) * 4),
+                |v| v.byte_len(self.width, self.height),
+            )
+            .unwrap_or(u64::MAX);
         ensure(
             self.width >= 1
                 && self.height >= 1
@@ -516,7 +637,7 @@ impl Validate for SnapshotResult {
         )?;
         ensure(self.payload.len() == expected, C, || {
             format!(
-                "{} pixel bytes for a {}×{} RGBA8 result",
+                "{} pixel bytes for a {}×{} snapshot result",
                 self.payload.len(),
                 self.width,
                 self.height
@@ -967,6 +1088,67 @@ mod tests {
         assert!(source.validate().is_err());
     }
 
+    #[test]
+    fn source_compositor_intent_is_distinct_from_canvas_display() {
+        let mut source = request(160, 90);
+        source.target = SnapshotTarget::Source {
+            asset: "source-a".into(),
+            fit: SourceFit::Contain,
+            color: SourceColor::Compositor,
+        };
+        assert!(source.validate().is_err());
+        source.class = SnapshotClass::Async;
+        source.pixels = SnapshotPixels::Straight;
+        assert!(source.validate().is_ok());
+        let bytes = rmp_serde::to_vec_named(&source).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<SnapshotRequest>(&bytes).unwrap(),
+            source
+        );
+        assert_eq!(
+            serde_json::to_value(&source.target).unwrap()["color"],
+            "compositor"
+        );
+        assert_ne!(SourceColor::Compositor, SourceColor::Display);
+    }
+
+    #[test]
+    fn native_video_planes_are_bounded_and_validate_colour_tags() {
+        let mut video = SourceVideoFrame {
+            format: "nv12".into(),
+            primaries: "smpte170m".into(),
+            transfer: "bt709".into(),
+            matrix: "smpte170m".into(),
+            range: "limited".into(),
+            visible_width: None,
+        };
+        assert!(video.validate().is_ok());
+        assert_eq!(video.byte_len(160, 90), Some(21600));
+        assert_eq!(video.byte_len(3, 3), Some(17));
+        let wire = rmp_serde::to_vec_named(&video).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<SourceVideoFrame>(&wire).unwrap(),
+            video
+        );
+        video.visible_width = Some(160);
+        assert_eq!(video.byte_len(224, 90), Some(30240));
+        assert_eq!(video.byte_len(159, 90), None);
+        video.visible_width = None;
+        video.primaries = "unspecified".into();
+        video.transfer = "unspecified".into();
+        video.matrix = "unspecified".into();
+        assert!(video.validate().is_ok());
+        video.format = "i420a".into();
+        assert_eq!(video.byte_len(160, 90), Some(36000));
+        assert_eq!(video.byte_len(3, 3), Some(26));
+        video.format = "p010le".into();
+        assert_eq!(video.byte_len(160, 90), Some(43200));
+        video.format = "nv16".into();
+        assert_eq!(video.byte_len(160, 90), Some(28800));
+        video.transfer = "guessed-profile".into();
+        assert!(video.validate().is_err());
+    }
+
     fn quality() -> FrameQuality {
         FrameQuality {
             resolution: PreviewResolution::Full,
@@ -1044,6 +1226,7 @@ mod tests {
             height: h,
             pixels: SnapshotPixels::Opaque,
             payload,
+            video: None,
             origin: [0.0, 0.0],
             layer_box: None,
             raster: None,

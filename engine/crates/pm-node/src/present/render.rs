@@ -5537,6 +5537,7 @@ impl Thread {
             height,
             pixels: job.request.pixels,
             payload,
+            video: None,
             origin: [0.0, 0.0],
             layer_box: None,
             raster: None,
@@ -6106,6 +6107,7 @@ impl Thread {
             height,
             pixels: job.request.pixels,
             payload,
+            video: None,
             origin: [raster.anchor.0, raster.anchor.1],
             layer_box: Some([raster.box_size.0, raster.box_size.1]),
             raster: Some(RasterGeometry {

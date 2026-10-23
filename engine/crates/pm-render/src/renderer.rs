@@ -9,6 +9,7 @@ use std::time::Instant;
 mod chrome;
 mod layer_raster;
 mod source;
+mod source_video;
 pub use layer_raster::{LayerPixels, LayerRaster};
 
 use pm_eval::{Comp, Evaluator};

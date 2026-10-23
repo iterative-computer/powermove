@@ -6,6 +6,33 @@ use pm_protocol::snapshot::SourceFit;
 use pm_render::Renderer;
 
 #[test]
+fn compositor_source_returns_coded_nv12_with_chromium_sd_tags() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+    let mut renderer = Renderer::headless().unwrap();
+    let (size, bytes, tags) = renderer.source_video_planes(&fixture, Ticks::ZERO).unwrap();
+    assert_eq!((size.width, size.height), (160, 90));
+    assert_eq!(tags.format, "nv12");
+    assert_eq!(
+        Some(bytes.len() as u64),
+        tags.byte_len(size.width, size.height)
+    );
+    assert_eq!(tags.range, "limited");
+    assert_eq!(tags.primaries, "smpte170m");
+    assert_eq!(tags.matrix, "smpte170m");
+    assert_eq!(tags.transfer, "smpte170m");
+    // A still cannot silently become a P3/Canvas RGBA compositor payload.
+    let dir = tempfile::tempdir().unwrap();
+    let still = dir.path().join("still.png");
+    std::fs::write(
+        &still,
+        include_bytes!("../../../../apps/desktop/e2e/fixtures/still-red.png"),
+    )
+    .unwrap();
+    assert!(renderer.source_video_planes(&still, Ticks::ZERO).is_err());
+}
+
+#[test]
 fn source_stretch_and_contain_preserve_rgba_and_transparent_bars() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("source.png");

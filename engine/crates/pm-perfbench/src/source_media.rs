@@ -117,6 +117,76 @@ pub fn source_scrub_24() -> BenchReport {
     result
 }
 
+/// Source monitor's coded-video path: the same scattered seeks as
+/// `source_scrub_24`, without its RGBA conversion or GPU readback. The CSS
+/// monitor is 320×180; decoded plane dimensions come from the codec.
+pub fn source_compositor_scrub_24() -> BenchReport {
+    pm_perf::count_globally(true);
+    let path = media_path();
+    assert!(path.is_file(), "public H.264 fixture is present");
+    let mut renderer = Renderer::headless().expect("source compositor renderer");
+    renderer
+        .source_video_planes(&path, Ticks::ZERO)
+        .expect("warm coded source frame");
+    let scope = Scope::begin();
+    let mut wall_ms = Vec::with_capacity(FRAMES);
+    let mut fingerprint = 0u64;
+    let mut coded = None;
+    let mut color = None;
+    for k in 0..FRAMES {
+        let began = Instant::now();
+        let (size, bytes, tags) = renderer
+            .source_video_planes(&path, time(k, true))
+            .expect("source compositor scrub frame");
+        wall_ms.push(began.elapsed().as_secs_f64() * 1_000.0);
+        assert_eq!(
+            bytes.len() as u64,
+            tags.byte_len(size.width, size.height)
+                .expect("supported coded video format"),
+            "packed source-video byte length"
+        );
+        assert!(size.width > 0 && size.height > 0);
+        if let Some(previous) = coded {
+            assert_eq!(previous, size, "coded fixture dimensions changed");
+        } else {
+            coded = Some(size);
+        }
+        if let Some(previous) = &color {
+            assert_eq!(
+                previous, &tags,
+                "codec colour changed across fixture frames"
+            );
+        } else {
+            color = Some(tags);
+        }
+        for byte in bytes {
+            fingerprint = fingerprint.wrapping_mul(31).wrapping_add(u64::from(byte));
+        }
+    }
+    let counters = scope.finish();
+    let global = scope.finish_global();
+    let decode = renderer.source_scrub_stats();
+    assert_eq!(decode.stand_ins, 0, "source seeks must use exact frames");
+    let coded = coded.expect("the benchmark decoded frames");
+    let result = report(
+        "source_compositor_scrub_24",
+        "seeks",
+        counters,
+        global,
+        wall_ms,
+        json!({ "fixture": "h264-aac.mp4", "presentationCss": [MONITOR.width, MONITOR.height],
+            "codedSize": [coded.width, coded.height], "fit": "contain (CSS)",
+            "order": "scattered x7 mod24", "timesTicks": times(true),
+            "ticksPerSecond": TICKS_PER_SECOND, "mediaOverride": std::env::var_os("PM_SOURCE_BENCH_MEDIA").is_some(),
+            "fingerprint": fingerprint, "exactDecode": decode,
+            "sourceCodecColor": color.expect("the benchmark decoded colour tags"),
+            "scope": "native exact decode and packed coded YUV planes; excludes IOSurface import, Electron IPC and video compositing" }),
+    );
+    assert_eq!(result.counters.get(Counter::Readbacks), 0);
+    assert_eq!(result.counters.get(Counter::DrawCalls), 0);
+    result
+}
+
 /// Batch source filmstrip: 24 ordered seeks and straight-alpha RGBA8 frames
 /// written to one file, as the job's hot path does after host resolution.
 pub fn source_filmstrip_24() -> BenchReport {

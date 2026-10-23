@@ -31,6 +31,13 @@ use std::sync::{Arc, Mutex, Once};
 pub enum DecodePurpose {
     Display,
     Export,
+    /// Source-only coded planes for Chromium's video compositor. VideoToolbox
+    /// is asked for video-range output, as Chromium's frame converter does.
+    SourceCompositor,
+}
+
+fn output_full_range(stream_full_range: bool, purpose: DecodePurpose) -> bool {
+    stream_full_range && purpose != DecodePurpose::SourceCompositor
 }
 
 /// Sample description extension atoms: (type, payload).
@@ -189,10 +196,10 @@ impl VtConfig {
             b"ap4h" | b"ap4x" => F_Y416,
             b"apch" | b"apcn" | b"apcs" | b"apco" => match purpose {
                 DecodePurpose::Display => F_X422,
-                DecodePurpose::Export => F_V216,
+                DecodePurpose::Export | DecodePurpose::SourceCompositor => F_V216,
             },
             _ if alpha_layer => F_V0A8,
-            _ => match (info.bit_depth > 8, cw, ch, full) {
+            _ => match (info.bit_depth > 8, cw, ch, output_full_range(full, purpose)) {
                 (false, 1, 1, false) => F_420V,
                 (false, 1, 1, true) => F_420F,
                 (true, 1, 1, false) => F_X420,
@@ -825,6 +832,14 @@ impl Drop for VtDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_compositor_requests_limited_range_without_changing_other_purposes() {
+        assert!(output_full_range(true, DecodePurpose::Display));
+        assert!(output_full_range(true, DecodePurpose::Export));
+        assert!(!output_full_range(true, DecodePurpose::SourceCompositor));
+        assert!(!output_full_range(false, DecodePurpose::SourceCompositor));
+    }
 
     #[test]
     fn annexb_rewrites_to_length_prefixes_without_parameter_sets() {

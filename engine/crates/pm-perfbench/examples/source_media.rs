@@ -12,6 +12,7 @@ static ALLOC: pm_perf::CountingAlloc = pm_perf::CountingAlloc;
 fn main() {
     for bench in [
         pm_perfbench::source_media::source_scrub_24,
+        pm_perfbench::source_media::source_compositor_scrub_24,
         pm_perfbench::source_media::source_filmstrip_24,
         pm_perfbench::source_media::source_filmstrip_prepared_24,
         pm_perfbench::source_media::source_filmstrip_batched_24,

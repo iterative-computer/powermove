@@ -412,7 +412,7 @@ impl Thread {
         };
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         let original = doc.media().path(asset.as_str());
-        let path = if color == SourceColor::Display {
+        let path = if color != SourceColor::Interpreted {
             doc.source_media(asset.as_str()).flatten()
         } else {
             original.clone()
@@ -428,7 +428,18 @@ impl Thread {
         };
         let record = pm_eval::node::member(doc.document().root(), "assets")
             .and_then(|assets| pm_eval::node::member(Some(assets), asset.as_str()));
-        if color == SourceColor::Display
+        if color == SourceColor::Compositor
+            && !pm_eval::node::is_str(pm_eval::node::member(record, "kind"), "video")
+        {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::InvalidMessage,
+                "Compositor source colour requires a video asset.",
+            );
+            return;
+        }
+        if color != SourceColor::Interpreted
             && record
                 .is_some_and(|r| pm_eval::node::truthy(pm_eval::node::member(Some(r), "rendition")))
             && original.as_ref() == Some(&path)
@@ -447,7 +458,7 @@ impl Thread {
             None
         };
         let svg_request = match pm_render::Renderer::source_is_svg(&path) {
-            Ok(true) => {
+            Ok(true) if color != SourceColor::Compositor => {
                 let intrinsic = (
                     pm_eval::node::finite_number(pm_eval::node::member(record, "w")).unwrap_or(0.0),
                     pm_eval::node::finite_number(pm_eval::node::member(record, "h")).unwrap_or(0.0),
@@ -467,7 +478,7 @@ impl Thread {
                     }
                 }
             }
-            Ok(false) => None,
+            Ok(_) => None,
             Err(error) => {
                 self.stats().snapshot_failures += 1;
                 self.snapshot_error(&job, ErrorCode::MediaOffline, &error);
@@ -476,6 +487,7 @@ impl Thread {
         };
         let Some(gpu) = self.gpu.as_mut() else { return };
         let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let mut coded_video = None;
         let painted = if let Some(request) = &svg_request {
             composer.renderer().source_svg_rgba8(
                 &request.key,
@@ -483,6 +495,17 @@ impl Thread {
                 fit,
                 interpretation.as_ref(),
             )
+        } else if color == SourceColor::Compositor {
+            match composer
+                .renderer()
+                .source_video_planes(&path, job.request.time)
+            {
+                Ok((size, pixels, video)) => {
+                    coded_video = Some((size, video));
+                    Ok(Some(pixels))
+                }
+                Err(error) => Err(error),
+            }
         } else {
             composer
                 .renderer()
@@ -527,7 +550,9 @@ impl Thread {
         }
         let pixels = match painted {
             Ok(Some(pixels)) => {
-                if svg_request.is_some() {
+                if coded_video.is_some() {
+                    pixels
+                } else if svg_request.is_some() {
                     super::super::snapshot::encode_straight_rgba8_unorm(&pixels, job.request.pixels)
                 } else {
                     super::super::snapshot::encode_rgba8_unorm(&pixels, job.request.pixels)
@@ -547,6 +572,10 @@ impl Thread {
         let Some(payload) = self.share_pixels(&job, pixels) else {
             return;
         };
+        let (size, video) = match coded_video {
+            Some((size, video)) => (size, Some(video)),
+            None => (job.request.output_size, None),
+        };
         let render_us = (now() - started).max(0);
         self.snapshots.observe(render_us as f64);
         {
@@ -559,10 +588,11 @@ impl Thread {
             body: Response::Snapshot(Box::new(SnapshotOutcome::Rendered(SnapshotResult {
                 revision,
                 view_seq: job.request.view_seq,
-                width: job.request.output_size.width,
-                height: job.request.output_size.height,
+                width: size.width,
+                height: size.height,
                 pixels: job.request.pixels,
                 payload,
+                video,
                 origin: [0.0, 0.0],
                 layer_box: None,
                 raster: None,

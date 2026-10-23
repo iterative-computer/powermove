@@ -314,6 +314,46 @@ pub struct PlaneView<'a> {
 }
 
 impl DecodedFrame {
+    /// H.273 codes attached to a VideoToolbox image. Chromium reads these
+    /// attachments before it considers stream defaults; keep them separate
+    /// from the editor's interpreted color.
+    pub fn core_video_color_codes(&self) -> Option<[Option<i32>; 3]> {
+        let Pixels::CoreVideo(buffer) = &self.pixels else {
+            return None;
+        };
+        unsafe fn code(
+            buffer: CVPixelBufferRef,
+            key: CFStringRef,
+            convert: unsafe extern "C" fn(CFStringRef) -> i32,
+        ) -> Option<i32> {
+            let value = unsafe {
+                Cf::from_create(CVBufferCopyAttachment(buffer, key, std::ptr::null_mut()))
+            }?;
+            let code = unsafe { convert(value.as_ptr()) };
+            (code != 2).then_some(code)
+        }
+        let buffer = buffer.as_mut_ptr();
+        Some(unsafe {
+            [
+                code(
+                    buffer,
+                    kCVImageBufferColorPrimariesKey,
+                    CVColorPrimariesGetIntegerCodePointForString,
+                ),
+                code(
+                    buffer,
+                    kCVImageBufferTransferFunctionKey,
+                    CVTransferFunctionGetIntegerCodePointForString,
+                ),
+                code(
+                    buffer,
+                    kCVImageBufferYCbCrMatrixKey,
+                    CVYCbCrMatrixGetIntegerCodePointForString,
+                ),
+            ]
+        })
+    }
+
     /// Whether the planes were copied on the way into GPU-shareable memory.
     pub fn copied(&self) -> bool {
         matches!(&self.pixels, Pixels::Pool(p) if p.copied)

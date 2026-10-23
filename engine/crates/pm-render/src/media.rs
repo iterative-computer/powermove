@@ -21,6 +21,7 @@ use pm_media::decode::scrub::{ScrubStats, ViewerDecode, Want};
 use pm_media::decode::service::{
     DecodeService, MediaLease, MediaSource, MediaUsage, ServiceConfig,
 };
+use pm_media::frame::DecodedFrame;
 use pm_media::image::icc::IccClass;
 use pm_media::interpret::{Interpretation, ToneMap, resolve_video};
 use pm_media::pool::FramePool;
@@ -31,6 +32,7 @@ use pm_protocol::color::{
     AlphaMode, ChromaSiting, ColorDescription, MatrixCoefficients, Precision, Primaries, Transfer,
     WorkingEncoding,
 };
+use pm_protocol::common::Ticks;
 
 use crate::capability::Feature;
 use crate::footage::{Geometry, Orient, Pick, Timing};
@@ -42,6 +44,14 @@ pub use crate::stills::StillReader;
 pub enum ProbeIssue {
     Unsupported(Feature),
     Unreadable(String),
+}
+
+/// Chrome's src= decoder selector prioritizes VideoToolbox for unchanging
+/// H.264/HEVC streams with a visible height of at least 360 pixels. This is
+/// used only by the coded source-video presenter; composition decode is
+/// independent of the browser's decoder policy.
+pub(crate) fn source_platform_priority(codec: &str, visible_height: u32) -> bool {
+    visible_height >= 360 && matches!(codec, "h264" | "hevc")
 }
 
 /// What the source pass needs to know about a source.
@@ -1065,6 +1075,9 @@ pub struct MediaCache {
     /// Interactive source frames use exact Export-purpose decode on a warm
     /// worker. Batch jobs continue to decode on their caller's thread.
     source_viewer: ViewerDecode,
+    /// The coded source presenter asks VideoToolbox for Chrome's limited-
+    /// range output. Keep its decoder/cache separate from Export snapshots.
+    source_compositor_viewer: ViewerDecode,
     /// Scrub frames: a video whose exact frame is not decoded yet shows
     /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
     pub scrub: bool,
@@ -1114,6 +1127,10 @@ impl MediaCache {
             pool: FramePool::new(64 << 20),
             viewer: ViewerDecode::new(service.clone()),
             source_viewer: ViewerDecode::with_purpose(service.clone(), DecodePurpose::Export),
+            source_compositor_viewer: ViewerDecode::with_purpose(
+                service.clone(),
+                DecodePurpose::SourceCompositor,
+            ),
             service,
             scrub: false,
             stand_ins: Vec::new(),
@@ -1288,6 +1305,7 @@ impl MediaCache {
                 if let Some((_, old)) = self.sources.remove(path) {
                     self.viewer.release(Some(old.id));
                     self.source_viewer.release(Some(old.id));
+                    self.source_compositor_viewer.release(Some(old.id));
                     self.service.release(None, Some(old.id));
                 }
                 self.frames.retain(|k, _| k.path != path);
@@ -1386,6 +1404,45 @@ impl MediaCache {
             source_display,
             true,
         )
+    }
+
+    /// The original decoded code planes for Chromium's source-only video
+    /// presenter. Software-priority sources share the exact Export worker;
+    /// VideoToolbox-priority sources use a separate limited-range decode
+    /// purpose. Both retain source-only GOP look-ahead. Composition and
+    /// Canvas2D paths are unaffected.
+    pub(crate) fn source_exact_decoded(
+        &mut self,
+        path: &Path,
+        time: Ticks,
+    ) -> Result<(Arc<MediaSource>, DecodedFrame), MediaFailure> {
+        let source = self.source(path)?;
+        video_supported(&source).map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
+        let frame = source
+            .select(time.get())
+            .ok_or_else(|| MediaFailure::Failed("No source frame at this time".into()))?;
+        let platform = source.probe.video.as_ref().is_some_and(|video| {
+            let visible_height = video
+                .clean_aperture
+                .as_ref()
+                .map(|aperture| aperture.rect.3)
+                .unwrap_or(video.height);
+            source_platform_priority(&video.codec.codec, visible_height)
+        });
+        let worker = if platform {
+            &self.source_compositor_viewer
+        } else {
+            &self.source_viewer
+        };
+        let fetched = worker
+            .fetch(&source, 0, frame, Want::Exact)
+            .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+        if !fetched.exact || fetched.shown != frame {
+            return Err(MediaFailure::Failed(
+                "The source decoder returned a non-exact frame".into(),
+            ));
+        }
+        Ok((source, fetched.frame))
     }
 
     #[allow(clippy::too_many_arguments)]
