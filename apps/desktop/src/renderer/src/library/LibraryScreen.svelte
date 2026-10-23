@@ -15,6 +15,7 @@
   import { panelBelongsInLibrary, panelPreviewSize } from './panel-preview';
   import { copyClonedCanvasBitmaps, snapshotClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
   import { overlayFrameKey, hasOverlayFrameKey } from '../core/scene3d/overlay-frame';
+  import { engineCanvasSceneState } from '../engine-connection/canvas-view';
   import { afterEffectsExtensionIds } from './after-effects-imports';
   import { panelFrameOf } from '../kernel/panel-frame';
   import { placePanel } from '../layout/portal';
@@ -680,7 +681,7 @@
     const transport = PM.EngineRender;
     if (transport && element.querySelector('#engine-present')) {
       const project = PM.proj, time = PM.time;
-      const scene = PM.Kernel.api('library-card').scene3d?.viewport?.state?.();
+      const scene = engineCanvasSceneState(PM as any);
       const presentedBy = () => PM.Kernel.services.get('viewer')?.enginePresentation
         ?? (element.contains(PM.EngineCanvas?.bound) ? PM.EngineCanvas?.viewerPresentation : null);
       const presentation = presentedBy();
@@ -727,7 +728,7 @@
             && PM.panelInst?.[id]?.el === element
             && presentedBy() === presentation
             && (!presentation || hasOverlayFrameKey(presentation.latest, frameKey))
-            && sceneView(PM.Kernel.api('library-card').scene3d?.viewport?.state?.()) === view,
+            && sceneView(engineCanvasSceneState(PM as any)) === view,
         });
         if (!captured) return null;
       }
