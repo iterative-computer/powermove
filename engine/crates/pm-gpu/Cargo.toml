@@ -11,6 +11,8 @@ publish.workspace = true
 # decode_in (feature `decode-in`, on by default) reads pm-media frames.
 pm-media = { path = "../pm-media", optional = true }
 pm-protocol = { path = "../pm-protocol", default-features = false }
+# Work counters (docs/engine/perfbench.md).
+pm-perf = { path = "../pm-perf" }
 thiserror.workspace = true
 wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"] }
 wgpu-hal = { version = "30", features = ["metal"] }

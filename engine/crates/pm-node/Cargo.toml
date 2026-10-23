@@ -14,6 +14,8 @@ publish.workspace = true
 
 [dependencies]
 pm-engine = { path = "../pm-engine" }
+# Work counters in the render thread's stats (docs/engine/perfbench.md).
+pm-perf = { path = "../pm-perf" }
 pm-protocol = { path = "../pm-protocol", default-features = false }
 serde.workspace = true
 serde_json.workspace = true

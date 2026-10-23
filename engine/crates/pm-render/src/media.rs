@@ -57,6 +57,81 @@ pub struct SourceColor {
 }
 
 pub(crate) fn stamp(path: &Path) -> Option<(u64, u128)> {
+    // Within a frame, one look at each file (`StampFrame`).
+    FRAME_STAMPS.with(|f| {
+        let mut f = f.borrow_mut();
+        let FrameStamps {
+            frame,
+            active,
+            seen,
+        } = &mut *f;
+        if !*active {
+            return stat_stamp(path);
+        }
+        if let Some((at, found)) = seen.get_mut(path) {
+            if *at != *frame {
+                *at = *frame;
+                *found = stat_stamp(path);
+            }
+            return *found;
+        }
+        let found = stat_stamp(path);
+        // Bounded: a project with more files than this looks again.
+        if seen.len() >= 4096 {
+            seen.clear();
+        }
+        seen.insert(path.to_path_buf(), (*frame, found));
+        found
+    })
+}
+
+/// The files a thread's frames have looked at (`StampFrame`): kept across
+/// frames so a frame allocates nothing for a file seen before, and valid
+/// only for the frame that read them.
+#[derive(Default)]
+struct FrameStamps {
+    frame: u64,
+    active: bool,
+    seen: HashMap<PathBuf, (u64, Option<(u64, u128)>)>,
+}
+
+thread_local! {
+    static FRAME_STAMPS: std::cell::RefCell<FrameStamps> = std::cell::RefCell::new(FrameStamps::default());
+}
+
+/// While alive, [`stamp`] on this thread reads each file's size and
+/// modification time once (docs/engine/perfbench.md): a frame placing one
+/// image in many layers asked the file system once per layer and per probe.
+/// A frame then sees one state of every file; the next frame looks again.
+pub(crate) struct StampFrame {
+    outer: bool,
+}
+
+impl StampFrame {
+    pub(crate) fn begin() -> StampFrame {
+        let outer = FRAME_STAMPS.with(|f| {
+            let mut f = f.borrow_mut();
+            let outer = !f.active;
+            if outer {
+                f.active = true;
+                f.frame += 1;
+            }
+            outer
+        });
+        StampFrame { outer }
+    }
+}
+
+impl Drop for StampFrame {
+    fn drop(&mut self) {
+        if self.outer {
+            FRAME_STAMPS.with(|f| f.borrow_mut().active = false);
+        }
+    }
+}
+
+fn stat_stamp(path: &Path) -> Option<(u64, u128)> {
+    pm_perf::bump(pm_perf::Counter::FileStats);
     let m = std::fs::metadata(path).ok()?;
     let modified = m
         .modified()
@@ -1092,8 +1167,10 @@ impl MediaCache {
             compat,
         };
         if let Some(t) = self.images.get(&key) {
+            pm_perf::bump(pm_perf::Counter::MediaCacheHits);
             return Ok(t.clone());
         }
+        pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
         let issue = |i: ProbeIssue| match i {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
             ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
@@ -1285,6 +1362,7 @@ impl MediaCache {
         };
         // The newest converted frame of the source (a paused redraw).
         if let Some(t) = self.frames.get(&key_of(n)) {
+            pm_perf::bump(pm_perf::Counter::MediaCacheHits);
             return Ok(Some(t.clone()));
         }
         // Export frames, and deinterlaced frames (the current frame and its
@@ -1326,8 +1404,10 @@ impl MediaCache {
         // A stand-in may be the frame converted last.
         let key = key_of(n);
         if let Some(t) = self.frames.get(&key) {
+            pm_perf::bump(pm_perf::Counter::MediaCacheHits);
             return Ok(Some(t.clone()));
         }
+        pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
         let bitmap = if sequence
             && compat
             && !interprets_video_reading(interp)
@@ -1608,3 +1688,46 @@ impl MediaCache {
 #[cfg(test)]
 #[path = "media/source_storage_tests.rs"]
 mod source_storage_tests;
+
+#[cfg(test)]
+mod stamp_frame_tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_reads_each_file_once_and_the_next_frame_reads_again() {
+        let dir = std::env::temp_dir().join(format!("pm-render-stamps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(dir.clone());
+        let path = dir.join("a.png");
+        std::fs::write(&path, b"one").unwrap();
+        let first = stamp(&path).unwrap();
+        let scope = pm_perf::Scope::begin();
+        {
+            let _frame = StampFrame::begin();
+            assert_eq!(stamp(&path), Some(first));
+            // Changed during the frame: the frame keeps the state it read.
+            std::fs::write(&path, b"three").unwrap();
+            assert_eq!(stamp(&path), Some(first));
+            {
+                // A nested frame (a render inside a render) shares it.
+                let _inner = StampFrame::begin();
+                assert_eq!(stamp(&path), Some(first));
+            }
+            assert_eq!(stamp(&path), Some(first));
+        }
+        assert_eq!(scope.finish().get(pm_perf::Counter::FileStats), 1);
+        // The next frame, and any read outside a frame, look again.
+        let _frame = StampFrame::begin();
+        assert_eq!(stamp(&path).map(|s| s.0), Some(5));
+        drop(_frame);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(stamp(&path), None);
+    }
+}

@@ -34,6 +34,7 @@ wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"],
 
 [dev-dependencies]
 pm-text = { path = "../pm-text", default-features = false, features = ["render", "system"] }
+pm-skia-path = { path = "../pm-skia-path" }
 png = "0.18"
 # Exact float parsing for the bit-for-bit vector comparisons.
 serde_json = { workspace = true, features = ["float_roundtrip"] }
