@@ -735,7 +735,11 @@ what the previous code did. Two tests prove it:
   (`POWERMOVE_CRASH_SEED` 1 to 11) gave 165 kills: 110 with the setting off
   and 55 with it on, from 40 ms to 5.9 s into the open plus 22 after it
   settled. 86 recovered the document (62 off, 24 on), 79 recovered nothing,
-  and none recovered another document or quarantined a file. Opening now
+  and none recovered another document or quarantined a file. After the
+  recheck fixes (failed-checkpoint semantics, deterministic keyframe ids),
+  5 more seeds (12 to 16) at 037b44cf7 gave 75 kills (50 off,
+  25 on, 10 settled), 36 recovering the document, all
+  clean. Opening now
   replaces a repeated or missing keyframe id deterministically (`kA.2`,
   `k<index>`), so a document with real duplicates also opens to the same
   document every time.
