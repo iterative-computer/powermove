@@ -96,13 +96,6 @@ export async function askAboutOfflineMedia(
   return 'cancel';
 }
 
-/** "This composition renders with Blender…" (appendix D) when a composition
- *  needs Blender and none is installed. */
-export const BLENDER_REQUIRED = {
-  message: 'This composition renders with Blender',
-  detail: 'Install Blender 4.5 or later, or set its renderer to Native.'
-} as const;
-
 /** Whether any layer the composition reaches renders with Blender
  *  (`render3d.enabled` on the composition or a nested one). */
 export function needsBlender(project: Project, composition: string = project['compId']): boolean {

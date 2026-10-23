@@ -68,8 +68,6 @@ const BOUNDS_OPS = new Set(['gl.bounds', 'groups.bounds']);
 const TEXT_OPS = new Set(['textLayout', 'rasterMetrics']);
 const MAX_SAMPLES_PER_OP = 20;
 
-export const FRAGILE_OPS = new Set(['gl.bounds', 'groups.bounds', 'gl.pick']);
-
 function tolerance(op: string): (a: number, b: number) => boolean {
   if (BOUNDS_OPS.has(op)) return (a, b) => Math.abs(a - b) <= 1e-6;
   if (TEXT_OPS.has(op)) return (a, b) => Math.abs(a - b) <= 0.25;
