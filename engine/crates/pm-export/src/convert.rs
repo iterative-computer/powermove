@@ -235,13 +235,22 @@ fn legacy_png_rgba(p: [f32; 4]) -> [u8; 4] {
         return [0; 4];
     }
     let mut out = [0, 0, 0, a as u8];
+    let normalized_a = a as f32 * (1.0f32 / 255.0);
+    let reciprocal_a = 1.0f32 / normalized_a;
     for c in 0..3 {
         let straight = (q[c] * 255 / a).min(255);
-        // Canvas2D stores the ImageData in premultiplied N32. PNG's
-        // SkUnPreMultiply converts it back using a rounded reciprocal.
+        // Canvas2D stores ImageData in premultiplied N32. Chromium 152's
+        // ARM64 SkConvertPixels uses SkSwizzler's RP-simulating unpremul:
+        // normalize each byte in f32, divide by normalized alpha, scale
+        // back, then round to even. An integer reciprocal table differs
+        // on half codes (e.g. 5/6 -> 212, 11/22 -> 128, 38/60 -> 161).
+        // Preserve these separate f32 operations; exact rational division
+        // and reassociating the scale both change existing PNG pixels.
         let premul = (straight * a + 127) / 255;
-        let scale = ((255u64 << 24) + u64::from(a) / 2) / u64::from(a);
-        out[c] = ((u64::from(premul) * scale + (1 << 23)) >> 24).min(255) as u8;
+        let normalized_c = premul as f32 * (1.0f32 / 255.0);
+        out[c] = ((normalized_c * reciprocal_a) * 255.0)
+            .min(255.0)
+            .round_ties_even() as u8;
     }
     out
 }
@@ -843,6 +852,39 @@ mod tests {
         );
         assert_eq!(c, [0.0; 3]);
         assert!((a - 1e-4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn canvas_png_keeps_skia_float32_half_code_rounding() {
+        // Captured through Chromium 152 Canvas2D putImageData -> PNG.
+        // These witnesses distinguish the float32 RP sequence from an
+        // integer reciprocal, exact division, half-up, and unconditional floor.
+        for (input, expected) in [
+            ([4u8, 3, 5, 6], [170, 128, 212, 6]),
+            ([14, 11, 17, 22], [162, 128, 197, 22]),
+            ([38, 29, 47, 60], [161, 123, 200, 60]),
+        ] {
+            let p = input.map(|c| c as f32 / 255.0);
+            assert_eq!(legacy_png_rgba(p), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn canvas_png_matches_every_captured_channel_alpha_pair() {
+        let reference = include_bytes!("../tests/fixtures/canvas-alpha-arm64.bin");
+        assert_eq!(reference.len(), 256 * 256);
+        for a in 0..=255u32 {
+            for c in 0..=255u32 {
+                let p = [c, c, c, a].map(|v| v as f32 / 255.0);
+                let actual = legacy_png_rgba(p);
+                let expected = reference[(a * 256 + c) as usize];
+                assert_eq!(
+                    actual,
+                    [expected, expected, expected, a as u8],
+                    "c={c}, a={a}"
+                );
+            }
+        }
     }
 
     #[test]
