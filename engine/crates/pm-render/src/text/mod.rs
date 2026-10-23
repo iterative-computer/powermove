@@ -672,7 +672,7 @@ impl TextContext {
                         blur,
                     );
                 }
-                painter.multisample_pass(&mut scene.items, false);
+                painter.resolve_canvas_pass(&mut scene.items, false);
                 unsupported.append(&mut painter.unsupported);
                 let anchor = (raster.anchor_x, raster.anchor_y);
                 return Ok(self
@@ -716,7 +716,7 @@ impl TextContext {
             let refs = run_refs(&runs, &faces);
             painter.fill_text(&mut scene.items, &refs, origin, m, fill, 1.0, 0.0);
         }
-        painter.multisample_pass(&mut scene.items, false);
+        painter.resolve_canvas_pass(&mut scene.items, false);
         unsupported.append(&mut painter.unsupported);
         Ok(self
             .finish(scene, true)
@@ -994,7 +994,7 @@ impl TextContext {
                 painter.fill_text(&mut scene.items, &refs, (x, y), m, fill, state.alpha, 0.0);
             }
         }
-        painter.multisample_pass(&mut scene.items, box_msaa);
+        painter.resolve_canvas_pass(&mut scene.items, box_msaa);
         unsupported.append(&mut painter.unsupported);
     }
 }
