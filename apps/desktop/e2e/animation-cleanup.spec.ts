@@ -95,6 +95,7 @@ for (const mode of ['skip', 'escape', 'reduce'] as const) {
     const userData = await mkdtemp(path.join(os.tmpdir(), 'pm-motion-onboard-'));
     const env = { ...process.env as Record<string, string>, POWERMOVE_USER_DATA: userData,
       POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_TEST_ONBOARDING: '1', POWERMOVE_DEVTOOLS: '0',
+      POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
       CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'), POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' };
     delete env.ELECTRON_RUN_AS_NODE;
     const app = await _electron.launch({ args: ['.'], cwd: repoRoot, env });
