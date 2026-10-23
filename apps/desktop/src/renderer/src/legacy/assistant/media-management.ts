@@ -1,5 +1,5 @@
 import type { PMRegistry } from '../registry';
-import { readLocalMediaSource } from '../core/cloud-media';
+import { cloudSourcePaths, readLocalMediaSource } from '../core/cloud-media';
 import { createFolder, deleteFolder, folderList, isWithin, moveItems, renameFolder, validFolder } from '../core/asset-folders';
 
 const MAX_FILE_BYTES = 512 * 1024 * 1024;
@@ -84,8 +84,20 @@ export async function alreadyImported(PM: PMRegistry, project: any, fingerprint:
   return null;
 }
 
+/** A host-supplied file as readLocalMediaSource returns one: named after the
+ *  path, untyped, with its source path recorded (cloud-media.ts readSourceFile). */
+function providedSource(provided: File, path: string): File {
+  if (provided.size > MAX_FILE_BYTES) throw new Error(`Media file exceeds the ${MAX_FILE_BYTES} byte import limit`);
+  const file = new window.File([provided], path.split(/[\\/]/).pop()!);
+  cloudSourcePaths.set(file, path);
+  return file;
+}
+
 /** Only file bytes cross native IPC, in bounded chunks; never extension source. */
-export async function importMedia(PM: PMRegistry, args: Record<string, unknown>, replace: boolean, active: () => boolean = () => true) {
+/** `provided`: the file at `args.path`, when the host hands it over instead of
+ *  this window reading it (the macOS hidden host's tab, which cannot open host
+ *  paths itself); it is read exactly as a desktop read of that path would be. */
+export async function importMedia(PM: PMRegistry, args: Record<string, unknown>, replace: boolean, active: () => boolean = () => true, provided?: File) {
   const project = PM.proj, baseRevision = revision(PM);
   const baseAnimation = PM.animVersion?.();
   const historyMark = JSON.stringify(PM.hist.mark?.());
@@ -103,7 +115,8 @@ export async function importMedia(PM: PMRegistry, args: Record<string, unknown>,
   assertCurrent();
   if (replace && PM.assets.loading?.has?.(assetId)) throw new Error('This media is still loading. Wait before replacing it.');
   if (replace && args.missingOnly === true && PM.assets.get(assetId)) return { status: 'already_available', assetId, persisted: meta.persisted === true };
-  const file = await readLocalMediaSource({ id: assetId || 'agent-import', name: path.split(/[\\/]/).pop()!, sourcePath: path }, () => {
+  if (PM.HostImportMedia) return PM.HostImportMedia(args, replace, assertCurrent);
+  const file = provided ? providedSource(provided, path) : await readLocalMediaSource({ id: assetId || 'agent-import', name: path.split(/[\\/]/).pop()!, sourcePath: path }, () => {
     try { assertCurrent(); return true; } catch { return false; }
   }, MAX_FILE_BYTES);
   assertCurrent();

@@ -320,7 +320,7 @@ async function main(): Promise<void> {
         const o = cfg.agentSnapshots;
         const t0 = performance.now();
         const r = await installed.agentJobs.renderFrames(-2, 'measure-agent-run', { project: snapshotProject(o.layers, 0, o.heavy), times: Array.from({ length: o.frames }, (_, i) => i / 24), width: o.width, revision: 0 });
-        result['agentWarmup'] = { status: r.status, ms: +(performance.now() - t0).toFixed(1), ...(r.status === 'routed' ? { reason: r.reason } : {}) };
+        result['agentWarmup'] = { status: r.status, ms: +(performance.now() - t0).toFixed(1) };
       }
       await call(`window.__measure.transport({ command: 'play', rate: { num: 1, den: 1 } })`);
       await sleep(1500);
@@ -411,8 +411,7 @@ function agentSnapshots(installed: InstalledNativeEngine, opts: NonNullable<Conf
       const times = Array.from({ length: opts.frames }, (_, i) => ((turn * opts.frames + i) % 96) / 24);
       try {
         const r = await jobs.renderFrames(-2, 'measure-agent-run', { project: snapshotProject(opts.layers, turn, opts.heavy), times, width: opts.width, revision: turn });
-        if (r.status === 'routed') stats.routed.push(r.reason);
-        else {
+        {
           stats.batches++;
           stats.frames += r.images.length;
           stats.queuedMs.push(r.queuedMs);

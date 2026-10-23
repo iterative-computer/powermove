@@ -103,8 +103,9 @@ describe('MediaStore', () => {
     expect(await store.record('media:v2:70000:abc')).toMatchObject({ hash: record.hash });
     // The original is untouched.
     expect(new Uint8Array(await readFile(source))).toEqual(data);
-    // Same bytes under another key: one object.
-    const again = await store.putFile(source, { key: 'other' });
+    // Importing an immutable object under another key must leave it read-only.
+    const again = await store.putFile(object, { key: 'other' });
+    expect((await stat(object)).mode & 0o777).toBe(0o400);
     expect(again.hash).toBe(record.hash);
     expect((await store.records()).map((r) => r.key).sort()).toEqual(['media:v2:70000:abc', 'other']);
   });

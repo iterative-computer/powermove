@@ -8,7 +8,7 @@
  * the document into the store slot the renderer autosaves to, so a tab that
  * joins later, or the agent engine, starts from the latest state.
  */
-import { applyPatch, isPatchList, type Patch } from '../shared/patch';
+import { applyPatch, clonePatchValue, isPatchList, type Patch } from '../shared/patch';
 
 export interface SessionMember {
   id: number;
@@ -153,8 +153,20 @@ export class ProjectSessions {
   }
 
   private readSlot(projectId: string): unknown | null {
-    const raw = this.store.read(`${PROJECT_SLOT}${projectId}`) as { proj?: unknown } | null | undefined;
-    return raw && typeof raw === 'object' && raw.proj ? raw.proj : null;
+    // Match Projects.get: a checkpoint is followed by its ordered recovery
+    // journal. A native worker joins without bringing a browser's recovered
+    // copy, so reading only the checkpoint would silently lose recent edits.
+    let raw = this.store.read(`${PROJECT_SLOT}${projectId}`);
+    if (!raw) return null;
+    if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { return null; } }
+    const envelope = raw as { proj?: unknown };
+    let project = clonePatchValue(envelope?.proj && typeof envelope.proj === 'object' ? envelope.proj : raw);
+    const journal = this.store.read(`projectJournal.${projectId}`);
+    for (const entry of Array.isArray(journal) ? journal : []) {
+      const patches = entry.patches || [];
+      project = applyPatch(project, patches.filter((patch: Patch) => Array.isArray(patch.path)));
+    }
+    return project;
   }
 
   private writeSlot(projectId: string, doc: unknown): void {

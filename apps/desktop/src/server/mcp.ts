@@ -1,12 +1,14 @@
-import { mkdir, open, readFile, rm, stat } from 'node:fs/promises';
+import { nativeHiddenHostEnabled } from './hidden-engine-policy';
+import { mkdir, open, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
 import { serve, type ServeOptions, type RunningServer } from './index';
 import { connectMcpHost } from '../main/agent-tools/mcp-client.mjs';
 import { startMcpStdio } from '../main/agent-tools/mcp-stdio.mjs';
 import { EXTERNAL_MCP_INSTRUCTIONS } from '../main/agent-tools/external-spec';
+import { importFileInPage } from './page-import';
 
-async function profileLock(userData: string) {
+export async function profileLock(userData: string) {
   await mkdir(userData, { recursive: true, mode: 0o700 });
   const file = path.join(userData, 'mcp-host.lock');
   const acquire = async () => { const handle = await open(file, 'wx', 0o600); await handle.writeFile(String(process.pid)); await handle.close(); };
@@ -26,6 +28,10 @@ async function profileLock(userData: string) {
 /** Runtime rendering is intentionally done in Chromium using the production
  * editor, never a parallel implementation of Powermove's document model. */
 export async function runHeadlessMcp(options: ServeOptions): Promise<void> {
+  if (await nativeHiddenHostEnabled(options.userData)) {
+    const { runNativeHiddenMcp } = await import('./native/mcp');
+    return runNativeHiddenMcp(options);
+  }
   const unlock = await profileLock(options.userData);
   let browser: Browser | undefined, host: RunningServer | undefined, page: Page | undefined;
   let external: { close(): Promise<void> } | undefined;
@@ -43,7 +49,7 @@ export async function runHeadlessMcp(options: ServeOptions): Promise<void> {
   process.once('SIGINT', signal); process.once('SIGTERM', signal);
   try {
     browser = await chromium.launch({ headless: true, channel: 'chromium', args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] }).catch(error => {
-      throw new Error(`Could not start the hidden renderer. Run powermove mcp-install-browser once, then retry. ${String(error)}`);
+      throw new Error(`chromium-unavailable: Could not start the hidden renderer. Run powermove mcp-install-browser once, then retry. ${String(error)}`);
     });
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: false });
     page = await context.newPage();
@@ -70,54 +76,14 @@ export async function runHeadlessMcp(options: ServeOptions): Promise<void> {
             if (args.action === 'press') await current.keyboard.press(String(args.key));
           }
         },
-        importMedia: async (_owner, args) => {
-          const file = path.resolve(String(args.path));
-          const info = await stat(file);
-          if (info.size > 512 * 1024 * 1024) throw new Error('Local media imports are limited to 512 MiB.');
-          if (!info.isFile()) throw new Error('Import a regular media file.');
-          if (!/\.(?:mp4|mov|m4v|webm|mkv|avi|mp3|wav|m4a|aac|aif|aiff|flac|ogg|png|jpg|jpeg|webp|gif|svg|avif|bmp|tif|tiff|heic|heif|glb|gltf|obj|fbx|blend)$/i.test(file)) throw new Error('Unsupported media file type.');
-          const current = requirePage();
-          await current.evaluate(() => { const input = document.createElement('input'); input.type = 'file'; input.id = 'powermove-mcp-import'; input.hidden = true; document.body.appendChild(input); });
-          try {
-            await current.locator('#powermove-mcp-import').setInputFiles(file);
-            return await current.evaluate(async ({ at, assetOnly, folderId, expectedFingerprint, sourcePath, projectId }) => {
-              const PM = (window as any).PM;
-              if (PM.proj.id !== projectId) throw new Error('The session project changed before import.');
-              const beforeLayers = new Set(PM.proj.layers.map((layer: any) => layer.id));
-              const beforeAssets = new Set(Object.keys(PM.proj.assets || {}));
-              const input = document.getElementById('powermove-mcp-import') as HTMLInputElement;
-              if (assetOnly) {
-                const project = PM.proj, source = input.files![0]!;
-                const revision = project.revision, animation = PM.animVersion?.(), history = JSON.stringify(PM.hist.mark?.());
-                const assertCurrent = () => { if (PM.proj !== project || project.revision !== revision || PM.animVersion?.() !== animation || JSON.stringify(PM.hist.mark?.()) !== history) throw new Error('The project changed during import.'); };
-                if (folderId !== undefined && folderId !== null && !Object.hasOwn(project.assetFolders || {}, folderId)) throw new Error('Choose an existing media folder.');
-                const fingerprint = await PM.MediaImport.fingerprint(source);
-                assertCurrent();
-                if (expectedFingerprint !== undefined && fingerprint !== expectedFingerprint) throw new Error('The chosen file does not match expectedFingerprint.');
-                const existing = Object.values<any>(project.assets || {}).find(asset => asset.fingerprint === fingerprint && asset.persisted && PM.assets.get(asset.id));
-                if (existing) return { status: 'already_imported', assetId: existing.id, persisted: true };
-                const result = (await PM.assets.add(source, { requirePersisted: true, newAsset: true, assertCurrent })).importResult;
-                if (PM.proj !== project) throw new Error('The project changed during import.');
-                const id = result.asset.id, asset = project.assets?.[id];
-                if (!result.persisted || !asset || !PM.assets.get(id)) throw new Error('Media import was not verified in durable storage.');
-                asset.sourcePath = sourcePath;
-                if (folderId) asset.folder = folderId;
-                PM.bus.emit('assets'); PM.invalidate?.('all'); PM.autosave?.();
-                return { status: 'imported', assetId: id, name: asset.name, persisted: true, fingerprint };
-              }
-              await PM.importFiles(Array.from(input.files!), { placement: at === undefined ? null : { at } });
-              const assets = Object.values<any>(PM.proj.assets || {}).filter(asset => !beforeAssets.has(asset.id)).map(asset => ({ id: asset.id, name: asset.name, kind: asset.kind }));
-              const layers = PM.proj.layers.filter((layer: any) => !beforeLayers.has(layer.id)).map((layer: any) => ({ id: layer.id, name: layer.name, type: layer.type }));
-              if (!assets.length && !layers.length) throw new Error('Powermove did not import the file. Inspect get_workspace_state for errors.');
-              return { assets, layers };
-            }, { at: args.at as number | undefined, assetOnly: args.assetOnly === true, folderId: args.folderId as string | null | undefined, expectedFingerprint: args.expectedFingerprint as string | undefined, sourcePath: file, projectId: String(args.projectId) });
-          } finally { await current.locator('#powermove-mcp-import').evaluate(element => element.remove()).catch(() => {}); }
-        }
+        importMedia: async (_owner, args) => importFileInPage(requirePage(), args)
       }
     });
     await context.addCookies([{ name: 'pm_session', value: host.token, url: new URL(host.url).origin }]);
     await page.goto(new URL(host.url).origin, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => { const PM = (window as any).PM; return PM?.newBlankProject && PM?.Export && PM?.Edit && PM?.GL; }, { timeout: 60000 });
+    await page.waitForFunction(() => !!(window as any).PM?.Kernel?.loader, { timeout: 60000 });
+    await page.evaluate(async () => { const PM = (window as any).PM; await PM.EngineDoc?.whenReady; await PM.Kernel.loader.boot(); await PM.Kernel.loader.whenIdle(); });
     await Promise.race([ready, new Promise<never>((_resolve, reject) => { const timer = setTimeout(() => reject(new Error('The local MCP bridge did not start.')), 10000); timer.unref(); })]);
     const client = await connectMcpHost(options.userData);
     await startMcpStdio({ ...client, instructions: EXTERNAL_MCP_INSTRUCTIONS, close: async () => { await client.close(); await close(); } });

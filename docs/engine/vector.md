@@ -343,17 +343,22 @@ change so a synchronous snapshot can check one), and answers:
   the editor window that has this project open; open the project in a window
   to export it." Nothing else is drawn.
 
-**Hosts without Chromium.** `pm-cli` sets `SvgRasterizer::Resvg`: resvg draws
-each bucket (`SvgDocument::raster`, the user space stretched over the bucket as
-`drawImage` does) and every draw is counted; `render` and `scope` print
+**Hosts without Chromium.** `powermove render` and bundled `pm-cli` use the
+on-demand Chromium service (`server/native/angle.ts`, `POST /svg`) to draw each
+bucket with the hidden host's `decodeSvg` and `SvgRasterCanvas`, after checking
+the SVG bytes' content hash. Render and scope configure this source through
+`pm-cli/src/angle.rs`; the native hidden MCP host uses its on-demand tab and
+the same module (see [hidden-host.md](hidden-host.md)). A bare `pm-cli` with no
+helper fails with `svg-chromium-unavailable` when a frame draws a level 1 SVG;
+an export publishes no output. Only an explicit `--approximate-svg` permits
+`SvgRasterizer::Resvg` when no helper is available: resvg draws each bucket
+(`SvgDocument::raster`, the user space stretched over the bucket as `drawImage`
+does) and every draw is counted. Render and scope print
 `pm-cli: notice (approximate SVG): N level 1 SVG image draw(s) were rasterized
 by resvg, not Chromium; …` and the render summary carries `approximateSvg`.
 `pm-cli parity render --svg-rasters DIR` draws Chromium's captured rasters
-instead (`RasterDir`, below). The hidden MCP host renders in Playwright
-Chromium today (the legacy path there is this same code); the native hidden
-host of section 22 does not exist yet, and its on-demand Chromium is where
-`svg-rasters.ts` runs for it (it needs no Electron: `decodeSvg` and
-`SvgRasterCanvas` work in any Chromium page).
+instead (`RasterDir`, below). A configured Chromium helper's failure never
+silently switches to resvg.
 
 **Captured rasters for headless comparison.** `RasterDir` reads
 `<content>-<w>x<h>.rgba` files and lists the ones it lacks in the directory's

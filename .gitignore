@@ -48,3 +48,6 @@ apps/desktop/native/
 
 # pm-wasm build output (node engine/crates/pm-wasm/scripts/build.mjs)
 apps/desktop/src/renderer/public/engine/
+
+# Locally assembled Node CLI native runtimes (copied into dist for packaging)
+packages/cli/prebuilds/

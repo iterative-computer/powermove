@@ -111,13 +111,23 @@ describe('RunOwner', () => {
     expect(built.hub.targetFor('get_workspace_state', built.owner)).toBe(onProject);
     built = make(engine, { p2: [elsewhere] });
     expect(built.hub.targetFor('__media_source', built.owner)).toBe(engine);
-    expect(built.hub.targetFor('get_workspace_state', built.owner)).toBe(engine);
+    expect(built.hub.targetFor('get_workspace_state', built.owner)).toBeNull();
     built = make(null, { p2: [elsewhere] });
     expect(built.hub.targetFor('__media_source', built.owner)).toBeNull();
     onProject.destroy();
     built = make(engine, { p1: [onProject] });
     expect(built.hub.targetFor('__media_source', built.owner)).toBe(engine);
-    expect(built.hub.targetFor('get_workspace_state', built.owner)).toBe(engine);
+    expect(built.hub.targetFor('get_workspace_state', built.owner)).toBeNull();
+  });
+
+  it('pins DOM and document tab routes and never substitutes a worker workspace', () => {
+    const engine = fakeClient(9), right = fakeClient(1), wrong = fakeClient(2);
+    const hub = new RunHub({ engine: () => engine, tabs: () => [wrong, right], tabsOn: id => id === 'p1' ? [right] : [], respond: () => {} });
+    const owner = hub.begin(request, right);
+    for (const tool of ['capture_panel', 'set_panel_layout', 'get_workspace_state', 'render_frames']) expect(hub.targetFor(tool, owner)).toBe(right);
+    right.destroy();
+    for (const tool of ['capture_panel', 'get_workspace_state']) expect(hub.targetFor(tool, owner)).toBeNull();
+    expect(hub.targetFor('apply_commands', owner)).toBe(engine);
   });
 
   it('routes conversation controls to the real tab rather than the document engine', () => {
