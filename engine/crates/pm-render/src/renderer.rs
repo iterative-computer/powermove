@@ -281,6 +281,8 @@ pub struct Renderer {
     /// a frame target given back with [`Renderer::recycle`]
     /// (docs/engine/perfbench.md).
     frame_reuse: FrameReuse,
+    /// Bind groups kept across frames (`crate::binds`).
+    binds: crate::binds::BindCache,
 }
 
 /// See [`Renderer::read_rgba_reusing`] and [`Renderer::recycle`].
@@ -337,6 +339,7 @@ impl Renderer {
             svg_skip_failed: false,
             svg_source: None,
             frame_reuse: FrameReuse::default(),
+            binds: crate::binds::BindCache::default(),
         }
     }
 
@@ -1159,6 +1162,8 @@ impl Renderer {
     /// raster cache is kept apart from the pool and trims to `bytes` on its
     /// own (`text_gpu().cached_bytes()`).
     pub fn trim(&mut self, bytes: u64) {
+        // Kept bind groups hold their views (and textures) alive.
+        self.binds.clear();
         self.pool.trim(bytes);
         if self.pool.bytes() + self.pyramids.bytes() > bytes {
             self.pyramids.clear();
@@ -1641,11 +1646,13 @@ impl Renderer {
         let svg_skip_failed = self.svg_skip_failed && !request.export;
         let (legend, taken, unsupported, exec_failures, timer, pending) = {
             self.uniforms.reset();
+            self.binds.begin_frame();
             let mut exec = Exec {
                 device: &self.device,
                 queue: &self.queue,
                 pipelines: &self.pipelines,
                 uniforms: &mut self.uniforms,
+                binds: &mut self.binds,
                 media: &mut self.media,
                 pool: &mut self.pool,
                 scene3d: &mut self.scene3d,
@@ -1777,6 +1784,7 @@ impl Renderer {
         }
         self.queue.submit([encoder.finish()]);
         self.effects.watchdog.submitted(&self.queue);
+        self.binds.end_frame();
         for t in taken {
             self.pool.give(t);
         }

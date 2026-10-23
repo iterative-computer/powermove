@@ -2,12 +2,12 @@
   "about": "Highest allowed pm-perf counts per bench (docs/engine/perfbench.md). Lowered by PM_PERF_RATCHET=update; raised only by hand with the change that needs it.",
   "benches": {
     "drag_500": {
-      "cpu.heap_alloc_bytes": 103669357,
-      "cpu.heap_allocs": 955465,
+      "cpu.heap_alloc_bytes": 99380799,
+      "cpu.heap_allocs": 908445,
       "engine.comp_passes": 1800,
       "engine.layers_planned": 2040,
       "gpu.bind_group_binds": 19907,
-      "gpu.bind_group_creations": 3875,
+      "gpu.bind_group_creations": 649,
       "gpu.buffer_alloc_bytes": 48128,
       "gpu.draw_calls": 17304,
       "gpu.pipeline_binds": 17304,
@@ -16,12 +16,12 @@
       "gpu.uploads": 1272
     },
     "edit_playback_500": {
-      "cpu.heap_alloc_bytes": 179473920,
-      "cpu.heap_allocs": 2525281,
+      "cpu.heap_alloc_bytes": 171973440,
+      "cpu.heap_allocs": 2442241,
       "engine.comp_passes": 1800,
       "engine.layers_planned": 33000,
       "gpu.bind_group_binds": 36840,
-      "gpu.bind_group_creations": 5880,
+      "gpu.bind_group_creations": 240,
       "gpu.buffer_alloc_bytes": 15360,
       "gpu.draw_calls": 32880,
       "gpu.pipeline_binds": 32880,
@@ -30,12 +30,12 @@
       "gpu.uploads": 1920
     },
     "export_120": {
-      "cpu.heap_alloc_bytes": 4337467188,
-      "cpu.heap_allocs": 4783520,
+      "cpu.heap_alloc_bytes": 4322530808,
+      "cpu.heap_allocs": 4618285,
       "engine.comp_passes": 3600,
       "engine.layers_planned": 66000,
       "gpu.bind_group_binds": 73560,
-      "gpu.bind_group_creations": 11640,
+      "gpu.bind_group_creations": 420,
       "gpu.buffer_alloc_bytes": 16850960,
       "gpu.draw_calls": 65640,
       "gpu.pipeline_binds": 65640,
@@ -46,12 +46,12 @@
       "gpu.uploads": 3722
     },
     "import_3d_600k": {
-      "cpu.heap_alloc_bytes": 50896965,
-      "cpu.heap_allocs": 110144,
+      "cpu.heap_alloc_bytes": 50871009,
+      "cpu.heap_allocs": 109866,
       "engine.comp_passes": 11,
       "engine.layers_planned": 33,
       "gpu.bind_group_binds": 88,
-      "gpu.bind_group_creations": 88,
+      "gpu.bind_group_creations": 68,
       "gpu.buffer_alloc_bytes": 9625952,
       "gpu.draw_calls": 66,
       "gpu.pipeline_binds": 66,
@@ -62,12 +62,12 @@
       "gpu.uploads": 69
     },
     "inspector_edit_500": {
-      "cpu.heap_alloc_bytes": 71735048,
-      "cpu.heap_allocs": 845886,
+      "cpu.heap_alloc_bytes": 71641448,
+      "cpu.heap_allocs": 845166,
       "engine.comp_passes": 1800,
       "engine.layers_planned": 2040,
       "gpu.bind_group_binds": 180,
-      "gpu.bind_group_creations": 240,
+      "gpu.bind_group_creations": 180,
       "gpu.buffer_alloc_bytes": 15360,
       "gpu.draw_calls": 120,
       "gpu.pipeline_binds": 120,
@@ -76,12 +76,12 @@
       "gpu.uploads": 180
     },
     "open_large_2000": {
-      "cpu.heap_alloc_bytes": 149808014,
-      "cpu.heap_allocs": 882158,
+      "cpu.heap_alloc_bytes": 149728796,
+      "cpu.heap_allocs": 880286,
       "engine.comp_passes": 117,
       "engine.layers_planned": 2196,
       "gpu.bind_group_binds": 2418,
-      "gpu.bind_group_creations": 355,
+      "gpu.bind_group_creations": 238,
       "gpu.buffer_alloc_bytes": 919824,
       "gpu.draw_calls": 2182,
       "gpu.pipeline_binds": 2182,
@@ -92,12 +92,12 @@
       "gpu.uploads": 121
     },
     "playback_500": {
-      "cpu.heap_alloc_bytes": 356486400,
-      "cpu.heap_allocs": 4750321,
+      "cpu.heap_alloc_bytes": 341476800,
+      "cpu.heap_allocs": 4584241,
       "engine.comp_passes": 3600,
       "engine.layers_planned": 66000,
       "gpu.bind_group_binds": 73680,
-      "gpu.bind_group_creations": 11760,
+      "gpu.bind_group_creations": 480,
       "gpu.buffer_alloc_bytes": 30720,
       "gpu.draw_calls": 65760,
       "gpu.pipeline_binds": 65760,
@@ -106,12 +106,12 @@
       "gpu.uploads": 3840
     },
     "scrub_24": {
-      "cpu.heap_alloc_bytes": 1519676,
-      "cpu.heap_allocs": 14512,
+      "cpu.heap_alloc_bytes": 1489762,
+      "cpu.heap_allocs": 14208,
       "engine.comp_passes": 24,
       "engine.layers_planned": 48,
       "gpu.bind_group_binds": 190,
-      "gpu.bind_group_creations": 166,
+      "gpu.bind_group_creations": 141,
       "gpu.buffer_alloc_bytes": 11664,
       "gpu.draw_calls": 96,
       "gpu.pipeline_binds": 142,
@@ -122,12 +122,12 @@
       "gpu.uploads": 118
     },
     "typing_60": {
-      "cpu.heap_alloc_bytes": 90176045,
-      "cpu.heap_allocs": 138699,
+      "cpu.heap_alloc_bytes": 90100445,
+      "cpu.heap_allocs": 137979,
       "engine.comp_passes": 60,
       "engine.layers_planned": 60,
       "gpu.bind_group_binds": 480,
-      "gpu.bind_group_creations": 420,
+      "gpu.bind_group_creations": 360,
       "gpu.buffer_alloc_bytes": 30720,
       "gpu.draw_calls": 300,
       "gpu.pipeline_binds": 300,
@@ -151,6 +151,7 @@
     }
   },
   "ungated": {
+    "cache.bind_group.misses": "Each miss is a bind group creation, which gpu.bind_group_creations already bounds.",
     "cache.draw_reuse.misses": "Turning the reuse off makes it zero while wall-clock rises (1 of 9 pairs agree): it measures the reuse, not the cost.",
     "cache.frame_prefix.misses": "As cache.draw_reuse.misses (1 of 9 pairs).",
     "cache.media.misses": "No paired run moved it (rank correlation 0.30).",

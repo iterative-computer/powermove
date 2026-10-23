@@ -155,6 +155,9 @@ counters! {
     /// Viewer frames drawn from a kept bottom of the last frame.
     FramePrefixHits = "cache.frame_prefix.hits",
     FramePrefixMisses = "cache.frame_prefix.misses",
+    /// Bind groups kept across frames, given back / made.
+    BindCacheHits = "cache.bind_group.hits",
+    BindCacheMisses = "cache.bind_group.misses",
     /// Pooled render targets reused / allocated.
     TargetPoolHits = "cache.target_pool.hits",
     TargetPoolMisses = "cache.target_pool.misses",
