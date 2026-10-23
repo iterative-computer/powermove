@@ -8,7 +8,7 @@
 struct Params {
     rows: array<vec4<f32>, 3>,
     primaries: array<vec4<f32>, 3>,
-    // planar, reserved.
+    // planar, direct BT.2020 accumulation, reserved, biplanar alpha.
     flags: vec4<u32>,
 };
 @group(0) @binding(0) var y_plane: texture_2d<f32>;
@@ -22,7 +22,9 @@ struct Params {
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(out);
     if (any(id.xy >= size)) { return; }
-    let coord = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(size);
+    // Software decoder planes can include coded rows beyond the displayed
+    // crop. Filter over that coded extent before cropping the RGB result.
+    let coord = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(textureDimensions(y_plane));
     let y = textureLoad(y_plane, vec2<i32>(id.xy), 0).r;
     var uv = textureSampleLevel(uv_plane, linear_sampler, coord, 0.0).rg;
     if (P.flags.x != 0u) {
@@ -34,8 +36,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let bias = vec3<f32>(P.rows[0].w, P.rows[1].w, P.rows[2].w);
     var rgb = fma(vec3<f32>(uv.y), c2,
         fma(vec3<f32>(uv.x), c1, fma(vec3<f32>(y), c0, bias)));
+    if (P.flags.y != 0u) {
+        // Direct shared-image conversion applies the translation after the
+        // matrix product; the Canvas hardware source has a different fused
+        // accumulation. These differ at exact half-code boundaries.
+        rgb = fma(vec3<f32>(y), c0, fma(vec3<f32>(uv.x), c1, uv.y * c2)) + bias;
+    }
     rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-    textureStore(out, vec2<i32>(id.xy), vec4<f32>(rgb, 1.0));
+    var alpha = 1.0;
+    if (P.flags.w != 0u) {
+        alpha = textureLoad(v_plane, vec2<i32>(id.xy), 0).r;
+        rgb *= alpha;
+    }
+    textureStore(out, vec2<i32>(id.xy), vec4<f32>(rgb, alpha));
 }
 
 @compute @workgroup_size(8, 8)

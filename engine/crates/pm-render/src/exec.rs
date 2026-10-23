@@ -141,7 +141,7 @@ fn m3(m: &[f64; 6]) -> [[f32; 4]; 3] {
 }
 
 /// A deterministic session instance per layer (FNV-1a of its id).
-fn instance_of(layer: &str) -> u64 {
+pub(crate) fn instance_of(layer: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in layer.bytes() {
         h ^= u64::from(b);

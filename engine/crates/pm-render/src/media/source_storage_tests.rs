@@ -116,59 +116,59 @@ fn captured_source(
 }
 
 #[test]
-fn wide_video_canvas_and_live_uploads_do_not_share_converted_pixels() {
+fn canvas_and_live_video_uploads_do_not_share_converted_pixels() {
     use std::io::Read;
     let gpu = pm_gpu::Gpu::new("video Canvas/live cache parity").unwrap();
     let pipelines = Pipelines::new(&gpu.device);
     let mut media = MediaCache::new(&gpu.device);
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video-parity");
-    let path = fixtures.join("h264-2020-limited.mp4");
-    for i in 0..3 {
-        for canvas in [true, false, true] {
-            media.canvas_video = canvas;
-            let suffix = if canvas { "" } else { ".live" };
-            let compressed =
-                std::fs::read(fixtures.join(format!("h264-2020-limited-{i}{suffix}.rgba.zlib")))
-                    .unwrap();
-            let mut reference = Vec::new();
-            flate2::read::ZlibDecoder::new(&compressed[..])
-                .read_to_end(&mut reference)
-                .unwrap();
-            let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            let target = media
-                .video(
-                    &gpu.device,
-                    &gpu.queue,
-                    &pipelines,
-                    &mut encoder,
-                    &path,
-                    1,
-                    [0.125, 0.625, 1.125][i],
-                    true,
-                    WorkingEncoding::Standard,
-                    Precision::Float32,
-                    None,
-                    pm_time::Rate::FPS_30,
-                    false,
-                    true,
-                )
-                .unwrap()
-                .unwrap();
-            gpu.queue.submit([encoder.finish()]);
-            let actual = read_raw(&gpu.device, &gpu.queue, &target.texture).unwrap();
-            let max = actual
-                .iter()
-                .zip(&reference)
-                .map(|(a, b)| a.abs_diff(*b))
-                .max()
-                .unwrap();
-            // Canvas is exact. The separately captured live upload retains
-            // its pre-existing 1-CV bound; one direct-upload pixel is still
-            // different (video-parity.md), never counted as an exact capture.
-            let bound = if canvas { 0 } else { 1 };
-            assert!(max <= bound, "sample {i}, Canvas={canvas}: {max}");
+    for source in ["h264-2020-limited", "h264-709-full"] {
+        let path = fixtures.join(format!("{source}.mp4"));
+        for i in 0..3 {
+            for precision in [Precision::Float16, Precision::Float32] {
+                for canvas in [true, false, true] {
+                    media.canvas_video = canvas;
+                    let suffix = if canvas { "" } else { ".live" };
+                    let compressed =
+                        std::fs::read(fixtures.join(format!("{source}-{i}{suffix}.rgba.zlib")))
+                            .unwrap();
+                    let mut reference = Vec::new();
+                    flate2::read::ZlibDecoder::new(&compressed[..])
+                        .read_to_end(&mut reference)
+                        .unwrap();
+                    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+                    let target = media
+                        .video(
+                            &gpu.device,
+                            &gpu.queue,
+                            &pipelines,
+                            &mut encoder,
+                            &path,
+                            1,
+                            [0.125, 0.625, 1.125][i],
+                            true,
+                            WorkingEncoding::Standard,
+                            precision,
+                            None,
+                            pm_time::Rate::FPS_30,
+                            false,
+                            true,
+                        )
+                        .unwrap()
+                        .unwrap();
+                    gpu.queue.submit([encoder.finish()]);
+                    let actual = read_raw(&gpu.device, &gpu.queue, &target.texture).unwrap();
+                    let max = actual
+                        .iter()
+                        .zip(&reference)
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max()
+                        .unwrap();
+                    assert_eq!(max, 0, "{source}, sample {i}, Canvas={canvas}");
+                }
+                media.flush();
+            }
         }
-        media.flush();
     }
 }
 

@@ -8,7 +8,9 @@ use std::time::Instant;
 
 mod chrome;
 mod layer_raster;
+mod media_prepare;
 pub use layer_raster::{LayerPixels, LayerRaster};
+pub use media_prepare::MediaPreparation;
 
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};

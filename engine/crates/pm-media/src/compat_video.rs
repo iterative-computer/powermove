@@ -1,4 +1,4 @@
-//! Chromium's software full-range BT.709 I420 Canvas upload.
+//! Chromium's software full-range I420 Canvas upload.
 //! libyuv is already pinned and linked by the native media build. This
 //! conversion deliberately precedes spatial filtering and keeps its integer
 //! coefficients, nearest chroma, clipping and rounding intact.
@@ -6,7 +6,7 @@ use crate::frame::{DecodedFrame, Layout, PlaneFormat};
 use crate::image::{Rgba, pool_rgba};
 use crate::pool::FramePool;
 use crate::{MediaError, Result};
-use pm_protocol::color::Range;
+use pm_protocol::color::{MatrixCoefficients, Range};
 
 #[repr(C)]
 struct YuvConstants {
@@ -14,6 +14,8 @@ struct YuvConstants {
 }
 unsafe extern "C" {
     static kYuvF709Constants: YuvConstants;
+    static kYuvJPEGConstants: YuvConstants;
+    static kYuvV2020Constants: YuvConstants;
     fn I420ToARGBMatrix(
         y: *const u8,
         ys: i32,
@@ -42,7 +44,17 @@ unsafe extern "C" {
 
 /// The caller selects Chromium's software Canvas path from codec and tags.
 /// Accept native planar I420 or VideoToolbox's equivalent biplanar 420f.
-pub fn full_range_709_bitmap(frame: &DecodedFrame, pool: &FramePool) -> Result<DecodedFrame> {
+pub fn full_range_bitmap(
+    frame: &DecodedFrame,
+    pool: &FramePool,
+    matrix: MatrixCoefficients,
+) -> Result<DecodedFrame> {
+    let constants = match matrix {
+        MatrixCoefficients::Bt601 => &raw const kYuvJPEGConstants,
+        MatrixCoefficients::Bt709 => &raw const kYuvF709Constants,
+        MatrixCoefficients::Bt2020Ncl => &raw const kYuvV2020Constants,
+        _ => return Err(MediaError::invalid("unsupported full-range video matrix")),
+    };
     let f = &frame.format;
     let planar = f.layout == Layout::Planar
         && f.planes.len() == 3
@@ -59,7 +71,7 @@ pub fn full_range_709_bitmap(frame: &DecodedFrame, pool: &FramePool) -> Result<D
         || f.has_alpha()
     {
         return Err(MediaError::invalid(
-            "Chromium full-range BT.709 bitmap requires opaque 8-bit 4:2:0",
+            "Chromium full-range bitmap requires opaque 8-bit 4:2:0",
         ));
     }
     let w = i32::try_from(f.width).map_err(|_| MediaError::invalid("video bitmap width"))?;
@@ -91,7 +103,7 @@ pub fn full_range_709_bitmap(frame: &DecodedFrame, pool: &FramePool) -> Result<D
                     strides[2],
                     rgba.as_mut_ptr(),
                     stride,
-                    &kYuvF709Constants,
+                    constants,
                     w,
                     h,
                 )
@@ -103,7 +115,7 @@ pub fn full_range_709_bitmap(frame: &DecodedFrame, pool: &FramePool) -> Result<D
                     strides[1],
                     rgba.as_mut_ptr(),
                     stride,
-                    &kYuvF709Constants,
+                    constants,
                     w,
                     h,
                 )
@@ -111,7 +123,7 @@ pub fn full_range_709_bitmap(frame: &DecodedFrame, pool: &FramePool) -> Result<D
         };
         if rc != 0 {
             return Err(MediaError::decode(format!(
-                "libyuv full-range BT.709 bitmap: {rc}"
+                "libyuv full-range bitmap: {rc}"
             )));
         }
         Ok(())
@@ -127,7 +139,7 @@ pub fn full_range_709_bitmap(frame: &DecodedFrame, pool: &FramePool) -> Result<D
         Rgba::U8(&rgba),
         true,
         8,
-        "Chromium full-range BT.709 rgba8".into(),
+        "Chromium full-range rgba8".into(),
     )?;
     bitmap.pts = frame.pts;
     Ok(bitmap)
@@ -238,4 +250,63 @@ pub fn alpha_bitmap(
     )?;
     bitmap.pts = frame.pts;
     Ok(Some(bitmap))
+}
+
+/// Place planar 10-bit codes in the same unorm storage as Chromium's P010
+/// hardware surfaces, before the texture's interpolation precision is applied.
+pub fn aligned_planar_10(frame: &DecodedFrame, pool: &FramePool) -> Result<DecodedFrame> {
+    use crate::frame::{Pixels, PoolFrame, PoolPlane};
+    use pm_protocol::color::SampleAlignment;
+    use std::sync::Arc;
+    let f = &frame.format;
+    if f.layout != Layout::Planar
+        || f.bits != 10
+        || f.planes.len() != 3
+        || f.alignment != SampleAlignment::Lsb
+        || f.has_alpha()
+        || !f.planes.iter().all(|p| p.format == PlaneFormat::R16)
+    {
+        return Err(MediaError::invalid("planar 10-bit alignment"));
+    }
+    let planes = frame.with_planes(|src| -> Result<Vec<PoolPlane>> {
+        src.iter()
+            .map(|p| {
+                let stride = (p.desc.width * 2).div_ceil(256) * 256;
+                let slot = pool.acquire(stride * p.desc.height)?;
+                for y in 0..p.desc.height {
+                    for x in 0..p.desc.width {
+                        unsafe {
+                            let code = p
+                                .ptr
+                                .add(y * p.stride + x * 2)
+                                .cast::<u16>()
+                                .read_unaligned();
+                            slot.ptr()
+                                .add(y * stride + x * 2)
+                                .cast::<u16>()
+                                .write_unaligned(code << 6);
+                        }
+                    }
+                }
+                Ok(PoolPlane {
+                    slot,
+                    offset: 0,
+                    stride,
+                    decoder_ptr: 0,
+                })
+            })
+            .collect()
+    })??;
+    let mut format = (**f).clone();
+    format.alignment = SampleAlignment::MsbIn16;
+    Ok(DecodedFrame {
+        pts: frame.pts,
+        format: Arc::new(format),
+        pixels: Pixels::Pool(Arc::new(PoolFrame {
+            planes,
+            owner: None,
+            copied: true,
+        })),
+        color: frame.color,
+    })
 }

@@ -37,6 +37,8 @@ use crate::footage::{Geometry, Orient, Pick, Timing};
 use crate::pipelines::{Pipelines, SourceUniform, bytes_of};
 pub use crate::stills::StillReader;
 
+#[path = "media/prewarm.rs"]
+mod prewarm;
 #[path = "media/video_compat.rs"]
 mod video_compat;
 
@@ -142,6 +144,16 @@ fn stat_stamp(path: &Path) -> Option<(u64, u128)> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_nanos();
+    #[cfg(unix)]
+    let modified = {
+        use std::hash::{Hash, Hasher};
+        use std::os::unix::fs::MetadataExt;
+        // Keep replacement and same-size edits observable even if a caller
+        // restores mtime. Frame-local memoization still issues one stat.
+        let mut version = std::collections::hash_map::DefaultHasher::new();
+        (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()).hash(&mut version);
+        (u128::from(version.finish()) << 64) | (modified & u128::from(u64::MAX))
+    };
     Some((m.len(), modified))
 }
 
@@ -633,7 +645,7 @@ fn video_supported(src: &MediaSource) -> Result<(), String> {
     let c = &src.color;
     if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) {
         return Err(format!(
-            "HDR video (today's viewer is not measured yet; {WHEN})"
+            "HDR video (Chromium tone-map parity remains unresolved; {WHEN})"
         ));
     }
     // Rec.709 is the identity; BT.601 primaries read as Rec.709 in Standard
@@ -1075,6 +1087,7 @@ pub const DEFAULT_FRAME_CACHE: usize = 64 << 20;
 pub struct MediaCache {
     pool: FramePool,
     service: Arc<DecodeService>,
+    background: Option<prewarm::BackgroundPrepare>,
     /// Display frames decode on workers (docs/engine/scrub.md); export
     /// frames decode here, on the caller's thread.
     viewer: ViewerDecode,
@@ -1130,7 +1143,8 @@ impl MediaCache {
         MediaCache {
             pool: FramePool::new(64 << 20),
             viewer: ViewerDecode::new(service.clone()),
-            service,
+            service: service.clone(),
+            background: None,
             scrub: false,
             canvas_video: true,
             stand_ins: Vec::new(),
@@ -1297,6 +1311,7 @@ impl MediaCache {
     }
 
     fn source(&mut self, path: &Path) -> Result<Arc<MediaSource>, MediaFailure> {
+        self.drain_prepared();
         let stamp = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
         match self.sources.get(path) {
@@ -1395,21 +1410,16 @@ impl MediaCache {
         // neighbors: random access includes neighboring fields), decode on
         // this thread; other display frames come from the scrub workers.
         let deinterlaced = timing.deinterlaced();
-        let decode_reading = if compat
-            && !sequence
-            && !deinterlaced
-            && working == WorkingEncoding::Standard
-            && v.codec.codec == "hevc"
-            && v.codec.bit_depth == 10
-            && v.color.tagged.full_range == Some(true)
-            && !interprets_video_color(interp)
-            && !self.interpretations.contains_key(path)
-            && !matches!(reading.color.transfer, Transfer::Pq | Transfer::Hlg)
-        {
-            pm_media::decode::DecodeReading::Chromium
-        } else {
-            pm_media::decode::DecodeReading::Native
-        };
+        let decode_reading = self.decode_reading(
+            v,
+            interp,
+            path,
+            compat,
+            sequence,
+            deinterlaced,
+            working,
+            reading.color.transfer,
+        );
         let (n, frame, fields) = if export || deinterlaced {
             let purpose = if export {
                 DecodePurpose::Export
@@ -1449,14 +1459,36 @@ impl MediaCache {
             return Ok(Some(t.clone()));
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
+        let frame = if compat
+            && !sequence
+            && working == WorkingEncoding::Standard
+            && v.codec.codec == "vp9"
+            && frame.format.bits == 10
+            && frame.format.layout == pm_media::frame::Layout::Planar
+            && frame.format.alignment == pm_protocol::color::SampleAlignment::Lsb
+            && !frame.format.has_alpha()
+            && !interprets_video_color(interp)
+            && !self.interpretations.contains_key(path)
+            && fields.is_none()
+            && !matches!(reading.color.transfer, Transfer::Pq | Transfer::Hlg)
+        {
+            pm_media::compat_video::aligned_planar_10(&frame, &self.pool)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?
+        } else {
+            frame
+        };
         let full_range_bitmap = compat
             && self.canvas_video
             && !sequence
             && working == WorkingEncoding::Standard
-            && v.codec.codec == "h264"
-            && v.color.tagged.primaries == Some(1)
-            && v.color.tagged.transfer == Some(1)
-            && v.color.tagged.matrix == Some(1)
+            && matches!(v.codec.codec.as_str(), "h264" | "vp9")
+            && matches!(
+                video_compat::color(v, reading.color).matrix,
+                MatrixCoefficients::Bt601
+                    | MatrixCoefficients::Bt709
+                    | MatrixCoefficients::Bt2020Ncl
+            )
+            && !matches!(reading.color.transfer, Transfer::Pq | Transfer::Hlg)
             && frame.format.bits == 8
             && frame.format.range == pm_protocol::color::Range::Full
             && !frame.format.has_alpha()
@@ -1473,8 +1505,12 @@ impl MediaCache {
             && !matches!(reading.color.transfer, Transfer::Pq | Transfer::Hlg);
         let bitmap = if full_range_bitmap {
             Some(
-                pm_media::compat_video::full_range_709_bitmap(&frame, &self.pool)
-                    .map_err(|e| MediaFailure::Failed(e.to_string()))?,
+                pm_media::compat_video::full_range_bitmap(
+                    &frame,
+                    &self.pool,
+                    video_compat::color(v, reading.color).matrix,
+                )
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?,
             )
         } else if alpha_bitmap {
             pm_media::compat_video::alpha_bitmap(
@@ -1558,6 +1594,7 @@ impl MediaCache {
                 _ => None,
             },
         };
+        let bitmap_gamut = full_range_bitmap && color.primaries == Primaries::Bt2020;
         let color = if source_bitmap {
             SourceColor {
                 transfer: pm_protocol::color::Transfer::DisplayE,
@@ -1582,8 +1619,8 @@ impl MediaCache {
         let compatibility_bitmap = compat
             && !sequence
             && working == WorkingEncoding::Standard
-            && !frame.format.has_alpha()
-            && color.alpha == AlphaMode::Opaque
+            && ((!frame.format.has_alpha() && color.alpha == AlphaMode::Opaque)
+                || frame.format.label == "v0a8")
             && !interprets_video_color(interp)
             && !self.interpretations.contains_key(path)
             && fields.is_none()
@@ -1605,8 +1642,8 @@ impl MediaCache {
             .iter()
             .position(|t| t.width() == w && t.height() == h && t.format() == format)
             .map(|i| self.free_frames.swap_remove(i));
-        let converted = if compatibility_bitmap
-            && video_compat::Upload::supports(&imported, color.matrix)
+        let converted = if bitmap_gamut
+            || (compatibility_bitmap && video_compat::Upload::supports(&imported, color.matrix))
         {
             let upload = self
                 .video_upload
@@ -1616,7 +1653,7 @@ impl MediaCache {
                 encoder,
                 &imported,
                 color.matrix,
-                color.primaries == Primaries::Bt2020,
+                bitmap_gamut || color.primaries == Primaries::Bt2020,
                 reuse,
             )
         } else {
@@ -1812,6 +1849,37 @@ mod composed_parity_tests;
 #[cfg(test)]
 mod stamp_frame_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn same_size_edits_with_restored_mtime_invalidate_retained_sources() {
+        let dir =
+            std::env::temp_dir().join(format!("pm-render-source-version-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _clean = Clean(dir.clone());
+        let path = dir.join("source");
+        std::fs::write(&path, b"one").unwrap();
+        let before = stamp(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, b"two").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            modified
+        );
+        assert_ne!(stamp(&path).unwrap(), before);
+    }
 
     #[test]
     fn a_frame_reads_each_file_once_and_the_next_frame_reads_again() {

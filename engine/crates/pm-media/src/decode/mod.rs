@@ -19,6 +19,7 @@ pub mod scrub;
 pub mod service;
 pub mod session;
 pub mod skip;
+pub mod startup;
 
 use crate::dav1d::Dav1dDecoder;
 use crate::error::{MediaError, Result};
@@ -33,8 +34,10 @@ use arbiter::{HardwareArbiter, HwCodec, HwPermit};
 use serde::Serialize;
 
 /// Which decoder output the caller needs. Chromium's VideoToolbox session
-/// requests video-range biplanar surfaces even for full-range bitstreams;
-/// native decoding follows the stream's range.
+/// requests video-range biplanar HEVC surfaces even for full-range streams.
+/// Its full-range H.264 software decoder exposes cleared, aligned coded
+/// planes before the visible crop. Native decoding keeps its usual backend
+/// selection, stream range and visible plane geometry.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DecodeReading {
@@ -282,7 +285,24 @@ pub fn open_with_reading(
     prefer: Option<Backend>,
     reading: DecodeReading,
 ) -> Result<(Decoder, Vec<String>)> {
-    let mut order = backends(spec.info, spec.index);
+    let chromium_h264_full = reading == DecodeReading::Chromium
+        && spec.info.codec == "h264"
+        && spec.info.bit_depth == 8
+        && spec.info.full_range
+        && (spec.info.log2_chroma_w, spec.info.log2_chroma_h) == (1, 1);
+    // For the measured SDR H.264 compatibility class through HD, a
+    // direct software decoder avoids a multi-millisecond hardware-session
+    // startup. Native/high-depth readings retain their backend policy.
+    let chromium_h264_software = reading == DecodeReading::Chromium
+        && spec.info.codec == "h264"
+        && spec.info.bit_depth == 8
+        && (spec.info.log2_chroma_w, spec.info.log2_chroma_h) == (1, 1)
+        && (chromium_h264_full || (spec.info.width <= 1920 && spec.info.height <= 1080));
+    let mut order = if chromium_h264_software {
+        vec![Backend::Ffmpeg]
+    } else {
+        backends(spec.info, spec.index)
+    };
     if let Some(p) = prefer {
         if !order.contains(&p) {
             return Err(MediaError::unsupported(format!(
@@ -298,6 +318,13 @@ pub fn open_with_reading(
         let r = match b {
             Backend::VideoToolbox => open_vt(spec, purpose, reading, arbiter, pool),
             Backend::Ffmpeg => FfDecoder::new(spec.input, spec.stream, None, pool.clone(), threads)
+                .and_then(|decoder| {
+                    if chromium_h264_full {
+                        decoder.with_chromium_h264_padding()
+                    } else {
+                        Ok(decoder)
+                    }
+                })
                 .map(Decoder::Ff),
             Backend::Dav1d => Dav1dDecoder::new(pool.clone(), threads).map(Decoder::Dav1d),
             Backend::FfmpegAlphaPair => {

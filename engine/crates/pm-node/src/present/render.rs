@@ -53,6 +53,8 @@ use super::document::{Route, ViewDocument};
 use super::schedule::{Next, Phase, Schedule};
 use super::view;
 
+mod media_prepare;
+
 /// Stand-in for the C′ prototype's layer in builds without it (feature
 /// `remote-layer`): uninhabited, so a pool never has a remote layer.
 #[cfg(not(feature = "remote-layer"))]
@@ -2015,6 +2017,7 @@ impl Thread {
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
                 }
+                self.prepare_video_media(key);
             }
             Command::ShaderFallback { key, message } => self.shader_fallback(key, message),
             Command::FrameCache { bytes } => {
@@ -2435,6 +2438,7 @@ impl Thread {
     /// A document update: the mirror, the audio thread's mirror, the frame
     /// grid, and a redraw.
     fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64) {
+        let preparing = media_prepare::changes_video_sources(&update);
         let traced = i64::try_from(update.revision().get()).unwrap_or(i64::MAX);
         let doc = self.docs.entry(key).or_default();
         if let Err(error) = doc.update(&update) {
@@ -2468,6 +2472,9 @@ impl Thread {
             }
         }
         self.refresh_timing(key);
+        if preparing {
+            self.prepare_video_media(key);
+        }
         if let Some(view) = self.views.get_mut(&key) {
             view.dirty = true;
             // A paused headless session has no frame to announce this
@@ -2931,6 +2938,7 @@ impl Thread {
     ) {
         // A new state or pool comes after the frames of the old one.
         self.drain_frames();
+        let first_view = !self.views.contains_key(&key);
         let frame_ticks = self.frame_ticks;
         let view = self.views.entry(key).or_insert_with(|| View {
             key,
@@ -3008,6 +3016,9 @@ impl Thread {
             self.refresh_timing(key);
         }
         self.warm_audio(key);
+        if first_view || composition_changed || attached {
+            self.prepare_video_media(key);
+        }
         if self.views[&key].state.headless == Some(true) {
             if let Some(blender) = &self.blender {
                 // Presentation leaves; captures still belong to this session.

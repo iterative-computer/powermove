@@ -4,6 +4,7 @@
 //! nominal rate; decode cost, poster, and filmstrip seed. Waveform peaks are
 //! in [`peaks`]; the content hash in [`crate::hash`].
 
+pub mod cache;
 pub mod color;
 pub mod peaks;
 pub mod timing;
@@ -227,8 +228,16 @@ fn kind(t: ff::AVMediaType) -> StreamKind {
 
 /// Probes a file.
 pub fn probe(path: &Path) -> Result<Probed> {
+    probe_with_input(path).map(|(probed, _)| probed)
+}
+
+/// Probe while retaining its opened demuxer for the first decoder session.
+/// This avoids reopening the same source after indexing on first use.
+pub(crate) fn probe_with_input(path: &Path) -> Result<(Probed, Input)> {
     let size = std::fs::metadata(path)?.len();
-    let input = Input::open(path)?;
+    let input = crate::decode::startup::timed(crate::decode::startup::Stage::ProbeInput, || {
+        Input::open(path)
+    })?;
     let container = input.format_name();
     let mut streams = Vec::new();
     for i in 0..input.streams() {
@@ -319,11 +328,14 @@ pub fn probe(path: &Path) -> Result<Probed> {
             k.contains("content.identifier") || k == "content_identifier"
         }),
         creation_time: find(&|k| k == "creation_time"),
-        sampled_fingerprint: crate::hash::sampled_fingerprint(path)?,
+        sampled_fingerprint: crate::decode::startup::timed(
+            crate::decode::startup::Stage::Fingerprint,
+            || crate::hash::sampled_fingerprint(path),
+        )?,
         streams,
         video,
     };
-    Ok(Probed { probe, index })
+    Ok((Probed { probe, index }, input))
 }
 
 fn audio_probe(path: &Path, input: &Input, i: usize, container: &str) -> AudioProbe {
@@ -362,7 +374,9 @@ fn audio_probe(path: &Path, input: &Input, i: usize, container: &str) -> AudioPr
 
 fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, FrameIndex)> {
     let info = input.codec_info(v);
-    let idx = index::build(path, input, v)?;
+    let idx = crate::decode::startup::timed(crate::decode::startup::Stage::Index, || {
+        index::build(path, input, v)
+    })?;
     let side = SideData::read(input, v);
     let atom = |n: &[u8; 4]| idx.config.atom(n);
     let hvcc_layers = atom(b"hvcC").map(crate::vt::hevc_max_layers).unwrap_or(1);

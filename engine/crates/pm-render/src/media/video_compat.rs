@@ -6,13 +6,18 @@ use pm_protocol::color::{ColorDescription, MatrixCoefficients, Range};
 
 pub(super) fn bt2020_upload(video: &VideoProbe) -> bool {
     let tags = &video.color.tagged;
-    matches!(
+    (matches!(
         (video.codec.codec.as_str(), video.codec.bit_depth),
         ("h264", 8) | ("hevc", 10)
     ) && tags.primaries == Some(9)
         && tags.transfer == Some(1)
-        && tags.matrix == Some(9)
-        && (tags.full_range == Some(false) || video.codec.codec == "hevc")
+        && tags.matrix == Some(9))
+        || (video.codec.codec == "vp9"
+            && video.codec.bit_depth == 10
+            && !video.codec.full_range
+            && tags.matrix == Some(9)
+            && tags.primaries.is_none()
+            && tags.transfer.is_none())
 }
 
 pub(super) fn color(video: &VideoProbe, mut desc: ColorDescription) -> ColorDescription {
@@ -34,6 +39,15 @@ pub(super) fn color(video: &VideoProbe, mut desc: ColorDescription) -> ColorDesc
     // untagged SD to Rec.601; that remains the level 2 / Interpret reading.
     if video.codec.codec == "vp9" && tags.matrix.is_none() {
         desc.matrix = MatrixCoefficients::Bt709;
+    }
+    // VP9's bitstream color-space value couples its 2020 matrix and
+    // primaries even when the WebM color elements are absent.
+    if video.codec.codec == "vp9"
+        && tags.matrix == Some(9)
+        && tags.primaries.is_none()
+        && tags.transfer.is_none()
+    {
+        desc.primaries = pm_protocol::color::Primaries::Bt2020;
     }
     desc
 }
@@ -64,9 +78,17 @@ pub(super) struct Upload {
 
 impl Upload {
     pub fn supports(frame: &ImportedFrame, matrix: MatrixCoefficients) -> bool {
-        !frame.format.has_alpha()
-            && matches!(frame.format.layout, Layout::Biplanar | Layout::Planar)
-            && (frame.format.bits == 8 || matches!(frame.format.label.as_str(), "x420" | "xf20"))
+        (!frame.format.has_alpha() || frame.format.label == "v0a8")
+            && matches!(
+                frame.format.layout,
+                Layout::Biplanar | Layout::Planar | Layout::BiplanarAlpha
+            )
+            && (frame.format.bits == 8
+                || (frame.format.bits == 10
+                    && frame.format.layout == Layout::Planar
+                    && frame.format.alignment == pm_protocol::color::SampleAlignment::MsbIn16
+                    && frame.format.range == Range::Limited)
+                || matches!(frame.format.label.as_str(), "x420" | "xf20"))
             && matches!(
                 matrix,
                 MatrixCoefficients::Bt601
@@ -253,14 +275,20 @@ impl Upload {
         let params = Params {
             rows,
             primaries: std::array::from_fn(|j| [p[0][j], p[1][j], p[2][j], 0.0]),
-            flags: [u32::from(frame.format.layout == Layout::Planar), 0, 0, 0],
+            flags: [
+                u32::from(frame.format.layout == Layout::Planar),
+                u32::from(matrix == MatrixCoefficients::Bt2020Ncl && !gamut),
+                0,
+                u32::from(frame.format.layout == Layout::BiplanarAlpha),
+            ],
         };
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Skia video upload"),
             contents: bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let source = if gamut {
+        let bitmap = frame.format.layout == Layout::Rgba;
+        let source = if gamut && !bitmap {
             Target::new(
                 device,
                 "Skia video source bitmap",
@@ -287,11 +315,13 @@ impl Upload {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&views[1]),
+                    resource: wgpu::BindingResource::TextureView(views.get(1).unwrap_or(&views[0])),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(views.get(2).unwrap_or(&views[1])),
+                    resource: wgpu::BindingResource::TextureView(
+                        views.get(2).or_else(|| views.get(1)).unwrap_or(&views[0]),
+                    ),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -311,30 +341,33 @@ impl Upload {
                 },
             ],
         });
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Skia video upload"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
-        drop(pass);
+        if !bitmap {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Skia video upload"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+            drop(pass);
+        }
         if gamut {
+            let source_view = if bitmap { &views[0] } else { &source.view };
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Skia Canvas gamut"),
                 layout: &self.layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&source.view),
+                        resource: wgpu::BindingResource::TextureView(source_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&source.view),
+                        resource: wgpu::BindingResource::TextureView(source_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&source.view),
+                        resource: wgpu::BindingResource::TextureView(source_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,

@@ -5,6 +5,7 @@
 
 use super::arbiter::{HardwareArbiter, LocalArbiter};
 use super::session::Session;
+use super::startup::{self, Stage};
 use super::{Backend, DecodeReading, DecoderInfo, StreamSpec, open_with_reading};
 use crate::cache::{CacheStats, FrameCache, FrameKey};
 use crate::error::{MediaError, Result};
@@ -46,6 +47,8 @@ pub struct MediaSource {
     pub index: Arc<FrameIndex>,
     pub info: CodecInfo,
     pub extradata: Vec<u8>,
+    /// The probe's already-open FFmpeg context serves the first decoder.
+    startup_input: Arc<Mutex<Option<Input>>>,
     pub nominal: NominalRate,
     pub color: ColorDescription,
     /// Presented PTS in presentation order.
@@ -53,28 +56,58 @@ pub struct MediaSource {
 }
 
 impl MediaSource {
+    /// Prepare a stable file's content-hash-keyed probe and frame index at
+    /// import time. The first [`open`](Self::open) can reuse that work; no
+    /// decoded or converted frame is retained by this cache.
+    pub fn prewarm(path: &Path) -> Result<()> {
+        crate::probe::cache::prewarm(path)
+    }
+
+    /// Interruptible import preparation for a renderer background worker.
+    pub fn prewarm_cancelled(path: &Path, cancel: &std::sync::atomic::AtomicBool) -> Result<()> {
+        crate::probe::cache::prewarm_cancelled(path, cancel)
+    }
+
     /// Probes and indexes a file's best video stream.
     pub fn open(path: &Path) -> Result<Arc<MediaSource>> {
-        let Probed { probe, index } = crate::probe::probe(path)?;
+        startup::source_opened();
+        let prepared = crate::probe::cache::lookup(path)?;
+        let (probe, index, extradata, startup_input) = match prepared {
+            Some(prepared) => (
+                prepared.probe,
+                prepared.index,
+                prepared.extradata,
+                prepared.input,
+            ),
+            None => {
+                let (Probed { probe, index }, input) =
+                    startup::timed(Stage::Probe, || crate::probe::probe_with_input(path))?;
+                let index = Arc::new(index.ok_or_else(|| MediaError::invalid("no video index"))?);
+                let stream = probe
+                    .video_stream
+                    .ok_or_else(|| MediaError::invalid("no video stream"))?;
+                let extradata = input.extradata(stream);
+                (probe, index, extradata, Arc::new(Mutex::new(Some(input))))
+            }
+        };
         let stream = probe
             .video_stream
             .ok_or_else(|| MediaError::invalid("no video stream"))?;
-        let index = index.ok_or_else(|| MediaError::invalid("no video index"))?;
         let video = probe.video.as_ref().unwrap();
         let nominal = video.nominal_rate.clone().ok_or_else(|| {
             MediaError::invalid("the stream has no nominal rate (fewer than two frames)")
         })?;
-        let input = Input::open(path)?;
         let pts = index.presented_pts();
         Ok(Arc::new(MediaSource {
             id: NEXT_SOURCE.fetch_add(1, Ordering::Relaxed),
             stream,
             info: video.codec.clone(),
-            extradata: input.extradata(stream),
+            extradata,
+            startup_input,
             nominal,
             color: video.color.interpreted,
             pts,
-            index: Arc::new(index),
+            index,
             probe,
         }))
     }
@@ -281,7 +314,8 @@ impl SessionGuard<'_> {
             return Ok(Some(f));
         }
         let s = self.session.as_mut().unwrap();
-        let f = s.sample_with(sample, stop);
+        startup::frame_decoded();
+        let f = startup::timed(Stage::FrameDecode, || s.sample_with(sample, stop));
         // Everything the session decoded on the way is cached too.
         for (k, fr) in s.window_frames() {
             let key = FrameKey {
@@ -447,6 +481,20 @@ impl DecodeService {
         self.session_with_options(source, instance, purpose, reading, None)
     }
 
+    /// Open a decoder during import/project preparation and return it to the
+    /// idle pool. The first render for this source, instance, purpose and
+    /// reading reuses the session. No frame is decoded or converted here.
+    pub fn prewarm_session(
+        &self,
+        source: &Arc<MediaSource>,
+        instance: InstanceId,
+        purpose: DecodePurpose,
+        reading: DecodeReading,
+    ) -> Result<DecoderInfo> {
+        let session = self.session_with_reading(source, instance, purpose, reading)?;
+        Ok(session.info())
+    }
+
     /// As [`session`](DecodeService::session) with a backend preference.
     pub fn session_with(
         &self,
@@ -481,7 +529,16 @@ impl DecodeService {
         let session = match reused {
             Some(s) => s,
             None => {
-                let input = Input::open(source.path())?;
+                startup::session_created();
+                let input = source
+                    .startup_input
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .map(Ok)
+                    .unwrap_or_else(|| {
+                        startup::timed(Stage::SessionInput, || Input::open(source.path()))
+                    })?;
                 let spec = StreamSpec {
                     input: &input,
                     stream: source.stream,
@@ -489,17 +546,23 @@ impl DecodeService {
                     index: &source.index,
                     extradata: &source.extradata,
                 };
-                let (decoder, _skipped) = open_with_reading(
-                    &spec,
-                    purpose,
-                    &self.pool,
-                    self.arbiter.as_ref(),
-                    self.config.threads,
-                    prefer,
-                    reading,
-                )?;
-                let reader = PacketReader::new(source.path(), source.stream)?;
-                let mut s = Session::new(source.index.clone(), reader, decoder, Some(source.color));
+                let (decoder, _skipped) = startup::timed(Stage::DecoderCreate, || {
+                    open_with_reading(
+                        &spec,
+                        purpose,
+                        &self.pool,
+                        self.arbiter.as_ref(),
+                        self.config.threads,
+                        prefer,
+                        reading,
+                    )
+                })?;
+                let reader = startup::timed(Stage::PacketReader, || {
+                    PacketReader::new(source.path(), source.stream)
+                })?;
+                let mut s = startup::timed(Stage::SessionBuild, || {
+                    Session::new(source.index.clone(), reader, decoder, Some(source.color))
+                });
                 s.set_window(self.config.session_window);
                 self.open_sessions.fetch_add(1, Ordering::Relaxed);
                 s

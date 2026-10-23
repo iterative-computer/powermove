@@ -26,7 +26,8 @@ const report = { endpoint: 'HTMLVideoElement seek or load to WebGL texImage2D, c
   versions: null, rows: [] };
 try {
   const env = { ...process.env, POWERMOVE_USER_DATA: userData, POWERMOVE_BACKGROUND_TEST: '1',
-    POWERMOVE_DEVTOOLS: '0', POWERMOVE_NEW_ENGINE: '0', POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' };
+    POWERMOVE_DEVTOOLS: '0', POWERMOVE_NEW_ENGINE: '0', POWERMOVE_FAKE_CHATGPT_STATUS: 'connected',
+    POWERMOVE_DISABLE_RUNTIME_UPDATES: '1' };
   delete env.ELECTRON_RUN_AS_NODE;
   app = await _electron.launch({ args: [path.join(desktop, 'out/main/index.js')], cwd: desktop, env, timeout: 120_000 });
   const page = await app.firstWindow();

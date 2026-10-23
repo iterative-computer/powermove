@@ -175,6 +175,7 @@ impl PlanarLayout {
 
 struct Opaque {
     pool: FramePool,
+    chromium_h264_padding: bool,
 }
 
 unsafe extern "C" fn get_buffer2(
@@ -198,6 +199,11 @@ unsafe extern "C" fn get_buffer2(
             return ff::averror(libc::ENOMEM);
         };
         let base = slot.ptr();
+        if op.chromium_h264_padding {
+            // Chromium's software H.264 buffer starts cleared. Reused pool
+            // slots must have the same untouched macroblock-edge pixels.
+            ptr::write_bytes(base, 0, slot.len());
+        }
         let n = layout.planes.len();
         for p in 0..n {
             let start = layout.planes[p].offset;
@@ -285,6 +291,7 @@ pub struct FfDecoder {
     name: String,
     dr1: bool,
     internal_copy: bool,
+    chromium_h264_padding: bool,
     draining: bool,
     /// Frames copied into the pool (decoders without direct rendering, or
     /// formats converted for the importer).
@@ -336,7 +343,10 @@ impl FfDecoder {
             }
             (*ctx).pkt_timebase = (*input.st(stream)).time_base;
             (*ctx).thread_count = threads;
-            let op = Box::into_raw(Box::new(Opaque { pool: pool.clone() }));
+            let op = Box::into_raw(Box::new(Opaque {
+                pool: pool.clone(),
+                chromium_h264_padding: false,
+            }));
             (*ctx).opaque = op as *mut c_void;
             (*ctx).get_format = Some(get_format);
             (*ctx).get_buffer2 = Some(get_buffer2);
@@ -359,6 +369,7 @@ impl FfDecoder {
                 name,
                 dr1,
                 internal_copy,
+                chromium_h264_padding: false,
                 draining: false,
                 copies: 0,
                 corrupt: 0,
@@ -374,6 +385,23 @@ impl FfDecoder {
     /// The decoder writes its output into pool frames itself.
     pub fn direct(&self) -> bool {
         self.dr1
+    }
+
+    /// Chromium's full-range 8-bit H.264 software decoder exposes its
+    /// cleared, aligned coded YUV planes while retaining visible geometry.
+    /// The option is set before the first packet and never affects native
+    /// decoding or other codecs.
+    pub fn with_chromium_h264_padding(mut self) -> Result<Self> {
+        if self.name != "h264" || !self.dr1 {
+            return Err(MediaError::unsupported(
+                "Chromium H.264 coded padding requires FFmpeg's direct h264 decoder",
+            ));
+        }
+        self.chromium_h264_padding = true;
+        unsafe {
+            (*(self.ctx.as_ref().unwrap().opaque as *mut Opaque)).chromium_h264_padding = true;
+        }
+        Ok(self)
     }
 
     /// Sends one packet (`None` drains) and appends every frame now available.
@@ -476,11 +504,64 @@ impl FfDecoder {
             let label = cstr(ff::av_get_pix_fmt_name(fmt)).unwrap_or_default();
             let full = (*f).color_range == ff::AVCOL_RANGE_JPEG || label.starts_with("yuvj");
             let range = if full { Range::Full } else { Range::Limited };
-            if let Some(layout) = PlanarLayout::for_format(fmt, (*f).width, (*f).height) {
+            if let Some(mut layout) = PlanarLayout::for_format(fmt, (*f).width, (*f).height) {
+                if self.chromium_h264_padding {
+                    if layout.rgb
+                        || layout.depth != 8
+                        || layout.log2_chroma_w != 1
+                        || layout.log2_chroma_h != 1
+                    {
+                        return Err(MediaError::unsupported(
+                            "Chromium H.264 coded padding requires planar 8-bit 4:2:0",
+                        ));
+                    }
+                    let (mut coded_w, mut coded_h) = ((*f).width, (*f).height);
+                    let mut align = [0 as c_int; 8];
+                    ff::avcodec_align_dimensions2(
+                        self.ctx,
+                        &mut coded_w,
+                        &mut coded_h,
+                        align.as_mut_ptr(),
+                    );
+                    for plane in &mut layout.planes {
+                        plane.width = ceil_rshift(coded_w as usize, plane.log2_w);
+                        plane.height = ceil_rshift(coded_h as usize, plane.log2_h);
+                    }
+                }
                 let slots: Option<Vec<SlotRef>> = (0..layout.planes.len())
                     .map(|p| self.pool.find_containing((*f).data[p]))
                     .collect();
                 if let Some(slots) = slots {
+                    if self.chromium_h264_padding {
+                        for (p, slot) in slots.iter().enumerate() {
+                            let offset = (*f).data[p].offset_from(slot.ptr()) as usize;
+                            let stride = (*f).linesize[p] as usize;
+                            let plane = &layout.planes[p];
+                            let end = offset
+                                .checked_add(
+                                    (plane.height - 1).checked_mul(stride).ok_or_else(|| {
+                                        MediaError::invalid("coded plane overflow")
+                                    })?,
+                                )
+                                .and_then(|n| {
+                                    plane
+                                        .width
+                                        .checked_mul(plane.bytes_per_sample)
+                                        .and_then(|width| n.checked_add(width))
+                                })
+                                .ok_or_else(|| MediaError::invalid("coded plane overflow"))?;
+                            let next = if p + 1 < slots.len() && slots[p + 1].ptr() == slot.ptr() {
+                                (*f).data[p + 1].offset_from(slot.ptr()) as usize
+                            } else {
+                                slot.len()
+                            };
+                            if end > next || next > slot.len() {
+                                return Err(MediaError::decode(
+                                    "Chromium H.264 coded plane exceeds pool slot",
+                                ));
+                            }
+                        }
+                    }
                     // Rendered into our slots by the decoder (or copied there by
                     // a wrapper that advertises DR1 but copies internally).
                     if self.internal_copy {
@@ -498,7 +579,16 @@ impl FfDecoder {
                         .collect();
                     return Ok(DecodedFrame {
                         pts,
-                        format: Arc::new(layout.pixel_format(w, h, range, label)),
+                        format: Arc::new(layout.pixel_format(
+                            w,
+                            h,
+                            range,
+                            if self.chromium_h264_padding {
+                                "Chromium I420 coded".into()
+                            } else {
+                                label
+                            },
+                        )),
                         pixels: Pixels::Pool(Arc::new(PoolFrame {
                             planes,
                             owner: Some(Box::new(owner)),
@@ -506,6 +596,11 @@ impl FfDecoder {
                         })),
                         color: None,
                     });
+                }
+                if self.chromium_h264_padding {
+                    return Err(MediaError::unsupported(
+                        "Chromium H.264 coded padding needs direct pool planes",
+                    ));
                 }
                 // The decoder used its own memory: one copy of the planes.
                 let mut l = layout.clone();

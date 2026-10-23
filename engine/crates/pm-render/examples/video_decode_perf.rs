@@ -63,6 +63,7 @@ fn measure(
         (seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64,
     )?;
     let scope = pm_perf::Scope::begin();
+    pm_media::decode::startup::begin();
     let start = Instant::now();
     let frame = renderer.render(document, comp_id, ticks, request, resolver)?;
     if !frame.failures.is_empty() {
@@ -73,10 +74,12 @@ fn measure(
     let total_ms = start.elapsed().as_secs_f64() * 1000.0;
     let local = scope.finish();
     let global = scope.finish_global();
+    let stages = pm_media::decode::startup::finish();
     renderer.recycle(frame);
     Ok(json!({"phase":phase,"round":round,"time":seconds,
         "submitMs":submit_ms,"gpuWaitMs":total_ms-submit_ms,"totalMs":total_ms,
-        "counts":counters(&local),"allThreads":counters(&global)}))
+        "counts":counters(&local),"allThreads":counters(&global),
+        "startupStages":stages}))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -87,12 +90,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ancestors()
         .nth(3)
         .expect("workspace root");
+    let prewarm = match args.next().as_deref() {
+        None => false,
+        Some("--prewarm") => true,
+        _ => return Err("optional third argument must be --prewarm".into()),
+    };
     if args.next().is_some()
         || !Path::new(&fixtures).is_absolute()
         || !Path::new(&output).is_absolute()
         || Path::new(&output).starts_with(repo)
     {
-        return Err("usage: video_decode_perf ABSOLUTE_FIXTURES ABSOLUTE_REPORT".into());
+        return Err(
+            "usage: video_decode_perf ABSOLUTE_FIXTURES ABSOLUTE_REPORT [--prewarm]".into(),
+        );
     }
     let dir = Path::new(&fixtures);
     let sources: Vec<Value> = serde_json::from_slice(&std::fs::read(dir.join("sources.json"))?)?;
@@ -101,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut report = json!({
         "endpoint":"Renderer::render(video layer) + Renderer::wait_idle; includes source open, FFmpeg/VideoToolbox decode, source conversion, and layer composite",
         "coldDefinition":"Renderer/device and video shader primed on the source, then a fresh path alias opens an independent media source and decoder session; alias removed on drop",
+        "preparedImportColdDefinition":"Optional single import-prepared first render per row: Renderer::prepare_media queues source hash/probe/index and decoder startup; finish_media_preparation explicitly waits outside the first-render timer. Preparation wall time includes the wait; preparation-plus-frame is reported separately. Ordinary cold remains the regression gate",
         "allocationCountersInstalled":pm_perf::alloc_counting_installed(),
         "rows": []
     });
@@ -162,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut samples = vec![];
         let mut error = None;
+        let mut prepare_ms = None;
         for round in 0..3 {
             let mut renderer = Renderer::headless()?;
             if let Err(e) = measure(
@@ -194,6 +206,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => {
                     error = Some(e.to_string());
                     break;
+                }
+            }
+        }
+        if prewarm && error.is_none() {
+            let mut renderer = Renderer::headless()?;
+            if let Err(e) = measure(
+                &mut renderer,
+                &document,
+                comp_id,
+                &request,
+                &resolver,
+                "prime",
+                0,
+                times[1 % times.len()],
+            ) {
+                error = Some(format!("prewarmed renderer prime: {e}"));
+            } else {
+                let alias =
+                    SourceAlias::new(&dir.join(effective_file), Path::new(&output), id, 99)?;
+                let mut prepared_resolver = MapResolver::default();
+                prepared_resolver
+                    .paths
+                    .insert("clip".into(), alias.0.clone());
+                let ticks = pm_protocol::common::Ticks::new(
+                    (times[0] * pm_time::TICKS_PER_SECOND as f64).round() as i64,
+                )?;
+                let start = Instant::now();
+                let prepared = renderer.prepare_media(
+                    &document,
+                    comp_id,
+                    ticks,
+                    &request,
+                    &prepared_resolver,
+                )?;
+                let preparation_failures = renderer.finish_media_preparation();
+                prepare_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
+                if !prepared.failures.is_empty()
+                    || !preparation_failures.is_empty()
+                    || prepared.queued_videos != 1
+                {
+                    error = Some(format!(
+                        "import preparation failed: {prepared:?}, worker: {preparation_failures:?}"
+                    ));
+                }
+                if error.is_none() {
+                    match measure(
+                        &mut renderer,
+                        &document,
+                        comp_id,
+                        &request,
+                        &prepared_resolver,
+                        "preparedImportCold",
+                        0,
+                        times[0],
+                    ) {
+                        Ok(mut s) => {
+                            s["prepareMs"] = prepare_ms.unwrap().into();
+                            s["prepareAndFrameMs"] =
+                                (prepare_ms.unwrap() + s["totalMs"].as_f64().unwrap()).into();
+                            samples.push(s);
+                        }
+                        Err(e) => error = Some(e.to_string()),
+                    }
                 }
             }
         }
@@ -265,7 +340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error.get_or_insert_with(|| format!("wrong selected PTS at {seconds}s"));
             }
         }
-        if samples.len() != 21 {
+        if samples.len() != 21 + usize::from(prewarm) {
             error.get_or_insert_with(|| "incomplete cold/warm samples".into());
         }
         let uptime = std::process::Command::new("uptime")
@@ -273,7 +348,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
         let mut result = json!({"id":id,"file":file,"effectiveFile":effective_file,
-            "samples":samples,"load":uptime,
+            "samples":samples,"load":uptime,"prepareMs":prepare_ms,
             "browserPlayback":playback});
         if let Some(error) = error {
             result["error"] = error.into();
