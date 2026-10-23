@@ -14,6 +14,16 @@
  * prepared controls and requires the immutable first output to predate Play.
  * Each run continues 120 ms after its first clock so late-voice omission
  * spans include re-entry; PM_AUDIO_START_OBSERVE_MS overrides this window.
+ * PM_AUDIO_START_SPEED (default 1.5) sets every clip's speed (a speed edit
+ * toggles it by +0.1). PM_AUDIO_CLIP_SECONDS (default 10) sets the clips'
+ * and project's length. PM_AUDIO_START_KEYFRAMED=gain keys each clip's gain
+ * every PM_AUDIO_KEY_STEP seconds (default 1) along the whole clip, and a
+ * gain edit scales the keys. PM_AUDIO_START_LAYER=video plays the file as a
+ * video layer's soundtrack (embedded audio). PM_AUDIO_START_TARGETS lists
+ * the seek targets (seconds, comma separated; the defaults are 4, or 2 and
+ * 3 for cold seeks), cycled per sample. PM_AUDIO_LOOP_RANGE (default 4,6)
+ * sets the work area. PM_AUDIO_SETTLE_MS waits after the warm Play (both
+ * apps) so whole-file decodes finish before measuring.
  * All load processes are joined on exit. Run under pm-electron-lock.
  * bun engine/crates/pm-audio/tools/playback-gates.ts <wav> <outside-repo.json> [runs]
  * Build the app and native addons first. The corpus Node bridge hosts
@@ -38,6 +48,17 @@ if (!Number.isFinite(readyWaitMs) || readyWaitMs < 0) throw new Error('PM_AUDIO_
 const observeMs = Number(process.env.PM_AUDIO_START_OBSERVE_MS ?? 120);
 const distinct = process.env.PM_AUDIO_START_DISTINCT ?? 'none';
 const order = process.env.PM_AUDIO_START_ORDER ?? 'today-native';
+const speed = Number(process.env.PM_AUDIO_START_SPEED ?? 1.5);
+const clipSeconds = Number(process.env.PM_AUDIO_CLIP_SECONDS ?? 10);
+const keyframed = process.env.PM_AUDIO_START_KEYFRAMED ?? 'none';
+const keyStep = Number(process.env.PM_AUDIO_KEY_STEP ?? 1);
+const layerKind = process.env.PM_AUDIO_START_LAYER ?? 'audio';
+const loopRange = (process.env.PM_AUDIO_LOOP_RANGE ?? '4,6').split(',').map(Number);
+const settleMs = Number(process.env.PM_AUDIO_SETTLE_MS ?? 0);
+if (!(speed > 0) || !(clipSeconds > 0) || !(keyStep > 0) || !(settleMs >= 0)) throw new Error('invalid speed, clip length, key step or settle time');
+if (keyframed !== 'none' && keyframed !== 'gain') throw new Error('PM_AUDIO_START_KEYFRAMED must be none or gain');
+if (layerKind !== 'audio' && layerKind !== 'video') throw new Error('PM_AUDIO_START_LAYER must be audio or video');
+if (loopRange.length !== 2 || !(loopRange[1] > loopRange[0])) throw new Error('PM_AUDIO_LOOP_RANGE must be start,end');
 const activeStress = new Set<Bun.Subprocess>();
 let stoppingStress: Promise<void> | undefined;
 function stopStress(): Promise<void> {
@@ -65,7 +86,9 @@ for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130], ['SIGHUP', 129]
 if (distinct !== 'none' && distinct !== 'trim') throw new Error('PM_AUDIO_START_DISTINCT must be none or trim');
 if (order !== 'today-native' && order !== 'native-today') throw new Error('PM_AUDIO_START_ORDER must be today-native or native-today');
 const trimStep = distinct === 'trim' ? 0.0613 : 0;
-const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs, observeMs, voices, speed: 1.5, edit, loopSeconds, stressThreads, distinct, trims: Array.from({ length: voices }, (_, i) => i * trimStep), targets: waitMs === 0 ? [2, 3] : [4] };
+const targets = process.env.PM_AUDIO_START_TARGETS ? process.env.PM_AUDIO_START_TARGETS.split(',').map(Number) : waitMs === 0 ? [2, 3] : [4];
+if (!targets.length || targets.some(t => !(t >= 0 && t < clipSeconds))) throw new Error('PM_AUDIO_START_TARGETS must lie within the clips');
+const result: Record<string, unknown> = { method: 'PM.play → scheduled program sample at device output; no acoustic loopback', seekToPlayMs: waitMs, observeMs, voices, speed, clipSeconds, keyframed, keyStep, layerKind, loopRange, settleMs, edit, loopSeconds, stressThreads, distinct, trims: Array.from({ length: voices }, (_, i) => i * trimStep), targets };
 result.controlReadyWaitMs = readyWaitMs;
 const modes = process.env.PM_AUDIO_START_MODE === 'today' ? [false] : process.env.PM_AUDIO_START_MODE === 'native' ? [true] : order === 'today-native' ? [false, true] : [true, false];
 result.modeOrder = modes.map(native => native ? 'native' : 'today');
@@ -97,9 +120,9 @@ for (const native of modes) {
       const doc = (window as any).PM?.EngineDoc;
       return Boolean(doc && (!doc.enabled || doc.ready));
     });
-    await page.evaluate(() => {
+    await page.evaluate(({ clipSeconds }) => {
       const PM = (window as any).PM;
-      PM.replaceProject(PM.mkProject({ name: 'A7-A8 measurement', w: 160, h: 90, fps: 30, dur: 10 }));
+      PM.replaceProject(PM.mkProject({ name: 'A7-A8 measurement', w: 160, h: 90, fps: 30, dur: clipSeconds }));
       PM.loop = false;
       const original = AudioBufferSourceNode.prototype.start;
       (window as any).__a6starts = [];
@@ -111,27 +134,36 @@ for (const native of modes) {
         (window as any).__a6starts.push({ ctx, called, when, stamp, baseLatency: ctx.baseLatency, outputLatency: ctx.outputLatency });
         return original.apply(this, args);
       };
-    });
+    }, { clipSeconds });
     await page.evaluate(() => {
       const input = document.createElement('input');
       input.type = 'file'; input.id = 'a6-media'; input.style.display = 'none';
       document.body.appendChild(input);
     });
     await session.setInputFiles('#a6-media', [file]);
-    const installed = await page.evaluate(async ({ voices, trimStep }) => {
+    const installed = await page.evaluate(async ({ voices, trimStep, speed, clipSeconds, keyframed, keyStep, layerKind, loopRange }) => {
       const PM = (window as any).PM;
       const input = document.getElementById('a6-media') as HTMLInputElement;
       const asset = await PM.assets.add(input.files![0], { newAsset: true, silent: true });
+      // Gain keys along the whole clip, alternating levels, linear.
+      const gainOf = (base: number) => keyframed !== 'gain' ? base : {
+        v: base, expr: null,
+        kf: Array.from({ length: Math.floor(clipSeconds / keyStep) + 1 }, (_, k) => ({
+          t: k * keyStep, v: base * (k % 2 ? 0.5 : 1), i: `g${k}`, inInterp: 'linear', outInterp: 'linear',
+          inEase: { speed: 0, influence: 16.666666666666668 }, outEase: { speed: 0, influence: 16.666666666666668 } })),
+      };
       for (let i = 0; i < voices; i++) {
-        const layer = PM.mkLayer('audio', { from: 0, dur: 10, d: { asset: asset.id, gain: 1 / voices, trim: i * trimStep, fadeIn: 0, fadeOut: 0, speed: 1.5 } }, PM.proj);
+        const layer = layerKind === 'video'
+          ? PM.mkLayer('video', { from: 0, dur: clipSeconds, d: { asset: asset.id, fit: 'contain', w: 160, h: 90, trim: i * trimStep, speed, embeddedAudio: true, audioGain: gainOf(1 / voices) } }, PM.proj)
+          : PM.mkLayer('audio', { from: 0, dur: clipSeconds, d: { asset: asset.id, gain: gainOf(1 / voices), trim: i * trimStep, fadeIn: 0, fadeOut: 0, speed } }, PM.proj);
         PM.proj.layers.push(layer);
       }
-      PM.proj.work = [4, 6];
+      PM.proj.work = loopRange;
       PM.touch();
       PM.bus.emit('layers'); PM.bus.emit('project');
       PM.invalidate();
       return { projectId: PM.proj.id, layerCount: PM.proj.layers.length };
-    }, { voices, trimStep });
+    }, { voices, trimStep, speed, clipSeconds, keyframed, keyStep, layerKind, loopRange });
     if (native) {
       await page.waitForFunction(() => {
         const PM = (window as any).PM;
@@ -143,7 +175,7 @@ for (const native of modes) {
       });
       await page.waitForFunction(() => (window as any).PM.EngineConnection.status().driving);
       await page.waitForFunction(() => Boolean((window as any).PM.EngineConnection.status().hostOffsetUs));
-    } else {
+    } else if (layerKind === 'audio') {
       await page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((a: any) => a.audioBuffer));
     }
     const fixture = await page.evaluate(() => {
@@ -182,6 +214,9 @@ for (const native of modes) {
     // First play opens/resumes the device; subsequent measured runs are warm.
     await page.evaluate(() => (window as any).PM.play());
     await page.waitForTimeout(300);
+    // A soundtrack decodes when first played today.
+    if (!native) await page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((a: any) => a.audioBuffer));
+    if (settleMs > 0) await page.waitForTimeout(settleMs);
     if (native) {
       const warmDeadline = performance.now() + 60_000;
       for (;;) {
@@ -212,7 +247,7 @@ for (const native of modes) {
         return ctx ? { baseLatency: ctx.baseLatency, stats: JSON.parse(JSON.stringify(ctx.playbackStats)) } : null;
       });
       if (loopSeconds > 0) {
-        await page.evaluate(() => { const PM = (window as any).PM; PM.loop = true; PM.setTime(4); });
+        await page.evaluate(t => { const PM = (window as any).PM; PM.loop = true; PM.setTime(t); }, loopRange[0]);
         await Bun.sleep(1500);
         await page.evaluate(() => (window as any).PM.play());
         await Bun.sleep(1000);
@@ -237,13 +272,13 @@ for (const native of modes) {
       result[native ? 'native' : 'today'] = { samples, n: 0, partial: true };
       for (let run = 0; run < Number(count); run++) {
         await assertFixture();
-        const target = waitMs === 0 ? (run % 2 === 0 ? 2 : 3) : 4;
+        const target = targets[run % targets.length];
         if (waitMs > 0) {
           await page.evaluate(t => { const PM = (window as any).PM; PM.pause(); PM.setTime(t); }, target);
           await page.waitForTimeout(waitMs);
         }
         const preEditAudio: any = native ? activeAudio(await nativeReport(), activeNativeSessionId!).audio : null;
-        const sample = await page.evaluate(async ({ native, target, inline, edit, run, readyWaitMs, projectId, voices, sessionId }) => {
+        const sample = await page.evaluate(async ({ native, target, inline, edit, run, readyWaitMs, speed, projectId, voices, sessionId }) => {
           const PM = (window as any).PM;
           if (PM.proj?.id !== projectId || PM.proj?.layers?.length !== voices
             || (native && PM.EngineConnection?.session()?.id !== sessionId)) {
@@ -255,8 +290,13 @@ for (const native of modes) {
           // Seek and Play in the same task: no paused preparation time.
           if (inline) { PM.pause(); PM.setTime(target); }
           for (const layer of PM.proj.layers) {
-            if (edit === 'gain') layer.d.gain = (run % 2 ? 0.5 : 1) / PM.proj.layers.length;
-            if (edit === 'speed') layer.d.speed = run % 2 ? 1.6 : 1.5;
+            const key = layer.type === 'video' ? 'audioGain' : 'gain';
+            const level = (run % 2 ? 0.5 : 1) / PM.proj.layers.length;
+            if (edit === 'gain' && typeof layer.d[key] === 'object') {
+              layer.d[key].kf.forEach((k: any, i: number) => { k.v = level * (i % 2 ? 0.5 : 1); });
+              layer.d[key].v = level;
+            } else if (edit === 'gain') layer.d[key] = level;
+            if (edit === 'speed') layer.d.speed = run % 2 ? speed + 0.1 : speed;
           }
           if (edit !== 'none') { PM.touch(); PM.bus.emit('layers'); PM.invalidate(); }
           // Only the separately named prepared control rows enable this.
@@ -285,7 +325,7 @@ for (const native of modes) {
             }
             await new Promise(r => setTimeout(r, 1));
           }
-        }, { native, target, inline: waitMs === 0, edit, run, readyWaitMs,
+        }, { native, target, inline: waitMs === 0, edit, run, readyWaitMs, speed,
           projectId: fixture.projectId, voices, sessionId: activeNativeSessionId });
         const captured: any = { ...sample, preEditAudio };
         samples.push(captured);
