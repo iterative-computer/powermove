@@ -44,7 +44,9 @@ RGBA8, concatenated without a header. The protocol's batch limit is 512 MiB;
 the app additionally caps each frame at 16 MiB and each edge at 8192 pixels.
 Fit and color follow RFC 16's source target. SVG
 sources request Chromium rasters through `CompatFrame`, using the frozen
-document id to find the owning editor window.
+document id to find the owning editor window. Their `sourceFit` key names
+the final output canvas and its fit mode; the host returns straight pixels
+drawn once at the fitted rectangle, which the job packs without refiltering.
 
 `browserRendition { session, asset, format }` converts the frozen original
 to `png` or `webm` with today's browser-rendition converter flags. It does

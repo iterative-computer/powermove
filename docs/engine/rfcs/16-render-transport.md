@@ -50,7 +50,8 @@ class, viewSeq, waitMs, blenderWaitMs?, captionsHidden?, uploaded }`:
   `color: display` matches the browser source surface, including its stored
   browser rendition through the session-scoped `sourceRead` capability.
   `interpreted` reads the frozen original and applies its source interpretation.
-  Source SVGs use the Chromium raster exchange below at the actual draw size.
+  Source SVGs use the Chromium raster exchange below at the final output size,
+  with a source-fit key preserving the fractional fitted rectangle.
   Missing sources and required renditions fail by name; no composition or
   legacy frame substitutes for them.
 - `pixels`: the RGBA8 encoding of the result, rows top-down: `opaque`
@@ -238,6 +239,18 @@ frame's revision. Other sessions and the audio clock continue running. TypeScrip
 gains `svg?: SvgRasterRequest[]`; `RenderTransportOptions.svgRasters`
 (`TransportSvgRasters`: `drawSync`, `draw`, `post`); `SessionOptions.svgRasters`;
 `PM.EngineSvgRasters` (`SvgRasters`, with `stats`).
+
+#### Source SVG rasters
+
+`SvgRasterKey.sourceFit?: SourceFit` requests the source monitor's final-size
+Canvas2D pixels. Width and height are the output canvas size; Chromium draws
+the SVG once at the corresponding, potentially fractional fit rectangle.
+These keys are distinct from composition buckets and material maps, append
+`:source:<fit>` to upload and `CompatFrame` keys, and carry top-down
+`rgba8Straight` pixels. The engine preserves them without another fit/filter
+or premultiply/unpremultiply round trip. `sourceFit` and `texture: true`
+cannot be combined. Omitting both fields retains the composition-bucket
+contract and key encoding.
 
 #### SVG material-map uploads
 

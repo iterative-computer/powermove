@@ -18,12 +18,21 @@ decoder/cache and source GPU pass. Snapshot cancellation removes queued work;
 a decode/readback already running on the render thread completes before the
 next command is handled.
 
-Source SVGs use the existing Chromium SVG raster exchange. The source request
-hashes the frozen SVG bytes and asks for a raster at the actual draw size;
-the interactive snapshot returns `NeedsRenderer.svg` until the window uploads
-it. Source filmstrip jobs fetch the same raster through the existing
-`CompatFrame` host service. The native SVG decoder is deliberately not used
-for these display pixels.
+Untagged VP9 display renditions use Chromium's existing I420-to-RGBA8
+conversion before fitting. The source-display cache identity is separate
+from composition frames; explicit colour tags and interpretations retain
+their existing conversion paths. This preserves the browser's clipped
+8-bit source pixels without changing composition colour conversion.
+
+Source SVGs use the existing Chromium SVG raster exchange. Source keys add
+the fit mode and final output size: Chromium draws the frozen SVG once into
+that canvas at the fitted, potentially fractional rectangle and returns
+straight `getImageData` pixels. The engine returns those bytes without a
+second fit/filter or unpremultiplication. The interactive snapshot returns
+`NeedsRenderer.svg` until the window supplies the raster; source filmstrip
+jobs fetch it through `CompatFrame`. Composition SVG buckets retain their
+existing premultiplied GPU path. The native SVG decoder is deliberately not
+used for these display pixels.
 
 `AudioMessage::SourceMonitor` runs on a separate `pm-audio` link from project
 playback. Its generation-tagged `SourceStatus` reports heard time and levels,
@@ -58,12 +67,17 @@ before waiting for a cold engine and remove their scratch output and media
 session after success, failure, or cancellation.
 
 `e2e/engine-source-media.spec.ts` is the app gate for both settings: exact
-source and encoded-poster pixel comparisons, ordered video/SVG filmstrips,
-light/dark Assets and source-viewer captures, source audio levels and natural
-end, silent video, keyboard controls, browser-play invocation guards, code
-rendition jobs, and source-scrub/filmstrip wall clocks. Targeted Rust and unit
-passes do not certify this app parity or its relative performance. Those
-gates and direct heard-PCM parity remain required before cutover.
+source, encoded-poster, actual inline-image and monitor-canvas comparisons,
+fractional SVG fits, ordered video/SVG filmstrips, both-theme media previews,
+decoded/mixed PCM, source audio levels and natural end, silent video, keyboard
+controls and decoded picture/audio identity for code renditions.
+`engine-source-guard.spec.ts` independently rejects legacy video capture,
+playback and host export conversion. `engine-source-performance.spec.ts`
+pairs alternating app sessions with native `pm-perfbench` counters on one
+24-frame fixture/grid. Build `source_monitor_pcm` and `source_media` release
+examples before running these specs under `pm-electron-lock`; no build runs
+inside the lock. Targeted Rust and unit passes do not certify app parity,
+relative performance or direct device/DAC output.
 
 Production media I/O for plan section 13, built from the S6 spike
 (`docs/engine/spikes/S6.md`, `engine/spikes/s6-decode`). Crates:
