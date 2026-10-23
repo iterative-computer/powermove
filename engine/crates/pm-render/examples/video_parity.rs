@@ -93,10 +93,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let micros = started.elapsed().as_micros();
             let counts = scope.finish();
-            let rgba: Vec<u8> = renderer
-                .read_rgba(&frame)?
+            let floats = renderer.read_rgba(&frame)?;
+            std::fs::write(
+                dir.join(format!("{id}-{i}.render.rgba32f")),
+                floats
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )?;
+            // The app's capture maps Float32Array values with JavaScript
+            // Math.round: promote to binary64 before scaling by 255.
+            // Scaling in f32 first creates false ties at e.g. 84.50000256.
+            let rgba: Vec<u8> = floats
                 .into_iter()
-                .map(|v| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8)
+                .map(|v| (f64::from(v.clamp(0.0, 1.0)) * 255.0).round() as u8)
                 .collect();
             std::fs::write(dir.join(format!("{id}-{i}.render.rgba")), &rgba)?;
             let reference = std::fs::read(

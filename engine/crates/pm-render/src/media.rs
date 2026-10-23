@@ -1806,6 +1806,10 @@ impl MediaCache {
 mod source_storage_tests;
 
 #[cfg(test)]
+#[path = "media/composed_parity_tests.rs"]
+mod composed_parity_tests;
+
+#[cfg(test)]
 mod stamp_frame_tests {
     use super::*;
 

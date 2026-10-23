@@ -1,0 +1,68 @@
+{
+  "width": 320,
+  "height": 180,
+  "source": "../video-parity/handoff.mp4",
+  "references": [
+    {
+      "depth": 8,
+      "time": 0.5,
+      "file": "depth8-5.rgba32f.zlib",
+      "sha256": "f04e7d3a1f4f6f0a8ef3930fe0477005193828541b2534da62c9ca2d8a2608c8",
+      "rgba8": {
+        "file": "depth8-5.rgba8.zlib",
+        "sha256": "f294dceb2e4b3fe4cfae8a77d4dc2cba7e9043aeebadbad34eb7016a5b059310"
+      }
+    },
+    {
+      "depth": 8,
+      "time": 1.5,
+      "file": "depth8-15.rgba32f.zlib",
+      "sha256": "cd035d7d20187cc952a33a2124eff1cbc0fac3cba4cdd60e9d45eb6605827ece",
+      "rgba8": {
+        "file": "depth8-15.rgba8.zlib",
+        "sha256": "d06cfce975febdab075b110f60e566df300f6b67950827f179a926062117b03f"
+      }
+    },
+    {
+      "depth": 16,
+      "time": 0.5,
+      "file": "depth16-5.rgba32f.zlib",
+      "sha256": "425522e9809ac8430a9eff7de9bfc0f77fb902c6523f4bc3127324368fce9cdd",
+      "rgba8": {
+        "file": "depth16-5.rgba8.zlib",
+        "sha256": "3e68a1cbd715cf589efcd73c4a61fbf0c5e873d77610948624b2da297c3ef3c5"
+      }
+    },
+    {
+      "depth": 16,
+      "time": 1.5,
+      "file": "depth16-15.rgba32f.zlib",
+      "sha256": "e21ebc6d157661a37d657c5e9f627caaaa56fd4c10e1bb45c39082b188c32314",
+      "rgba8": {
+        "file": "depth16-15.rgba8.zlib",
+        "sha256": "e9c9ef6e83ee0e946d4a7aa075a4698ae3f62de9b8c541f6a6c02d8ae16d48e7"
+      }
+    },
+    {
+      "depth": 32,
+      "time": 0.5,
+      "file": "depth32-5.rgba32f.zlib",
+      "sha256": "ac8a2ae44a2d138103408394aae66ecf88708cee6fe7aa807807325b122e3945",
+      "rgba8": {
+        "file": "depth32-5.rgba8.zlib",
+        "sha256": "f294dceb2e4b3fe4cfae8a77d4dc2cba7e9043aeebadbad34eb7016a5b059310"
+      }
+    },
+    {
+      "depth": 32,
+      "time": 1.5,
+      "file": "depth32-15.rgba32f.zlib",
+      "sha256": "73e797d997f7661628631d1c0c1d9ba41be9b655c0b6dd38e1c18f6118cce7b6",
+      "rgba8": {
+        "file": "depth32-15.rgba8.zlib",
+        "sha256": "d06cfce975febdab075b110f60e566df300f6b67950827f179a926062117b03f"
+      }
+    }
+  ],
+  "sourceSha256": "8156e98be47f96df52becc880b5564f41c3f1f98e3a52a538e045a182ec4fc08"
+}
