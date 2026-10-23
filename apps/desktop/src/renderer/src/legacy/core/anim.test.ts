@@ -97,6 +97,14 @@ describe('legacy animation install', () => {
     expect(result[1].t).toBe(2);
   });
 
+  it('replaces missing and repeated ids deterministically when opening a document', () => {
+    const PM = animRegistry();
+    const keys = () => [{ t: 0, v: 1, i: 'kA' }, { t: 1, v: 2, i: 'kA' }, { t: 2, v: 3 }, { t: 3, v: 4, i: 'kA' }];
+    const opened = PM.normalizeKeyframes(keys(), 0, 30, 0, { stable: true }).map((key: any) => key.i);
+    expect(PM.normalizeKeyframes(keys(), 0, 30, 0, { stable: true }).map((key: any) => key.i)).toEqual(opened);
+    expect(opened).toEqual(['kA', 'kA.2', 'k2', 'kA.3']);
+  });
+
   it('preserves keys before a trimmed layer while rejecting times before the composition', () => {
     const PM = animRegistry();
     const keys = [{ t: -3, v: 10 }, { t: -1, v: 20 }, { t: 0, v: 30 }];

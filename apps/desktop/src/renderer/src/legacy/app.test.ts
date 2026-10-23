@@ -255,6 +255,25 @@ describe('legacy app install', () => {
     expect(hydrated.edits).toEqual([{ id: 'bulk', summary: ['Cut out subject'], operations: [], payloadOmitted: true }]);
   });
 
+  it('opens a document with repeated or missing keyframe ids to the same document every time', () => {
+    const { PM } = appRegistry();
+    const key = (t: number, i?: string) => ({ t, v: t * 10, eo: [0.33, 0], ei: [0.67, 1], hold: false, ...(i === undefined ? {} : { i }) });
+    const layer = (id: string, kf: any[]) => {
+      const made = { ...PM.mkLayer('shape', {}, PM.proj), id, name: id, from: 0, dur: 2 };
+      made.p.opacity = { ...PM.P(100), kf };
+      return made;
+    };
+    // The same id twice in one channel, and across layers; one id is already what a rename would derive.
+    const source = JSON.stringify({ ...PM.proj, layers: [layer('L1', [key(0, 'kA'), key(0.5, 'kA'), key(1, 'kB')]), layer('L2', [key(0, 'kA'), key(1, 'kA.2')])] });
+    const opened = (): string => JSON.stringify(PM.hydrateProject(JSON.parse(source)));
+    const first = opened();
+    expect(opened()).toBe(first);
+    const ids = JSON.parse(first).layers.flatMap((layer: any) => Object.values(layer.p ?? {}).flatMap((prop: any) => (prop?.kf ?? []).map((k: any) => k.i)));
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toHaveLength(5);
+    expect(ids).toEqual(expect.arrayContaining(['kA', 'kB']));
+  });
+
   it('keeps today\'s export format ids in the document for apiVersion 1 to 3 readers (issue P1)', () => {
     const { PM } = appRegistry();
     const hydrated = PM.hydrateProject({ ...PM.proj, exportDefaults: { format: 'prores', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: true, audio: true, alpha: true } });

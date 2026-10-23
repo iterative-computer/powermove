@@ -5,6 +5,7 @@ import type { PMRegistry } from '../registry';
 import { canAnimateContent, contentLabel, isProperty, resolveContent } from './content-properties';
 import { compileExpression } from './expression';
 import { temporalKeys, temporalValue, temporalEvaluate } from './temporal-bridge';
+import { derivedId } from './derived-id';
 
 export function install(PM: PMRegistry): void {
 const Ease = PM.Ease, clamp = PM.clamp;
@@ -77,8 +78,9 @@ function evalKfs(kf: any, t: any, interpolateColor = false) {
 PM.evalKfs = evalKfs;
 PM.resolveContent = (layer: any, time = PM.time) => resolveContent(PM, layer, time);
 
-/** Normalize persisted keyframes without discarding extension-owned fields. */
-PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) => {
+/** Normalize persisted keyframes without discarding extension-owned fields.
+ *  `stable`: a missing or repeated id is replaced deterministically (opening a document). */
+PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0, options: { stable?: boolean } = {}) => {
   const expected = typeof fallbackValue;
   const validValue = (value: any) => {
     if (expected === 'number') return typeof value === 'number' && Number.isFinite(value);
@@ -96,7 +98,7 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) 
     .map(({ key, index, time }: any) => ({
       ...key,
       t: time === 0 ? 0 : time,
-      i: (typeof key.i === 'string' && key.i) || PM.uid('k'),
+      i: (typeof key.i === 'string' && key.i) || (options.stable ? `k${index}` : PM.uid('k')),
       eo: pair(key.eo, pair(defaultHandles.eo, [.33, 0])),
       ei: pair(key.ei, pair(defaultHandles.ei, [.67, 1])),
       hold: key.hold === true,
@@ -109,7 +111,7 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) 
     const previous = collapsed[collapsed.length - 1];
     const clean = { ...key };
     delete clean.__order;
-    if (ids.has(clean.i)) clean.i = PM.uid('k');
+    if (ids.has(clean.i)) clean.i = options.stable ? derivedId(clean.i, ids) : PM.uid('k');
     ids.add(clean.i);
     if (previous && Math.abs(previous.t - clean.t) <= 1e-6) {
       ids.delete(previous.i);

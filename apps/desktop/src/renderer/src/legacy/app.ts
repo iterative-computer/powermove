@@ -25,6 +25,7 @@ import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requir
 import { notifyDocument, touchedDocument, writeDocument } from '../engine-doc/write';
 import { documentPending, waitForDocumentReady } from '../engine-doc/readiness';
 import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../../shared/engine-stamp';
+import { derivedId } from './core/derived-id';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
@@ -262,9 +263,13 @@ function hydrate(p: any) {
       return value !== undefined && value !== null;
     };
     prop.v = valid(prop.v) ? prop.v : fallback;
-    prop.kf = PM.normalizeKeyframes(prop.kf, fallback, base.fps, minTime);
+    prop.kf = PM.normalizeKeyframes(prop.kf, fallback, base.fps, minTime, { stable: true });
+    /* A repeated id gets a new one derived from it and its place in the
+       document, never a random one: every open of the same file gives the
+       same document, so its checkpoint can be checked rather than rewritten
+       and its fingerprint is stable. */
     prop.kf.forEach((key: any) => {
-      if (keyIds.has(key.i)) key.i = PM.uid('k');
+      if (keyIds.has(key.i)) key.i = derivedId(key.i, keyIds);
       keyIds.add(key.i);
     });
     prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
