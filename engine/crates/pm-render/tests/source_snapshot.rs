@@ -285,6 +285,17 @@ fn source_scrub_reuses_decoded_video_and_counts_work() {
     );
     assert!(counters.get(pm_perf::Counter::DrawCalls) >= times.len() as u64);
     assert!(counters.get(pm_perf::Counter::Readbacks) >= times.len() as u64);
+    let source_buffers = renderer.frame_reuse_bytes();
+    assert!(
+        source_buffers > 0,
+        "source target and staging buffer are reusable"
+    );
+    renderer.trim(64 << 20);
+    assert_eq!(
+        renderer.frame_reuse_bytes(),
+        source_buffers,
+        "a prepared source keeps its bounded readback across job work"
+    );
     let end = renderer
         .source_rgba8(
             &path,
@@ -304,9 +315,45 @@ fn source_scrub_reuses_decoded_video_and_counts_work() {
         )
         .unwrap();
     assert_eq!(end, last, "an End seek holds the last presented picture");
+    renderer.trim(0);
+    assert_eq!(renderer.frame_reuse_bytes(), 0);
     eprintln!(
         "source scrub: 6 frames in {:.3} ms; {}",
         elapsed.as_secs_f64() * 1000.0,
         counters.to_json()
+    );
+}
+
+#[test]
+fn source_batch_matches_individual_video_frames_in_order() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+    let size = Size::new(160, 90);
+    let times = [0, 13, 27, 40, 13, 53, 0]
+        .map(|frame| Ticks::new(frame * pm_protocol::common::TICKS_PER_SECOND / 30).unwrap());
+    let mut individual = Renderer::headless().unwrap();
+    let expected: Vec<_> = times
+        .iter()
+        .map(|&time| {
+            individual
+                .source_rgba8(&path, time, size, SourceFit::Stretch, None)
+                .unwrap()
+        })
+        .collect();
+    let decode = individual.source_scrub_stats();
+    assert_eq!(decode.stand_ins, 0);
+    assert_eq!(decode.workers, 1, "adjacent seeks share one decoder worker");
+    let mut batched = Renderer::headless().unwrap();
+    let scope = pm_perf::Scope::begin();
+    let actual = batched
+        .source_rgba8_batch(&path, &times, size, SourceFit::Stretch, None)
+        .unwrap();
+    let counters = scope.finish();
+    assert_eq!(actual, expected);
+    assert_eq!(counters.get(pm_perf::Counter::Submits), 1);
+    assert_eq!(counters.get(pm_perf::Counter::Readbacks), 1);
+    assert_eq!(
+        counters.get(pm_perf::Counter::DrawCalls),
+        times.len() as u64
     );
 }

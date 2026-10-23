@@ -1062,6 +1062,9 @@ pub struct MediaCache {
     /// Display frames decode on workers (docs/engine/scrub.md); export
     /// frames decode here, on the caller's thread.
     viewer: ViewerDecode,
+    /// Interactive source frames use exact Export-purpose decode on a warm
+    /// worker. Batch jobs continue to decode on their caller's thread.
+    source_viewer: ViewerDecode,
     /// Scrub frames: a video whose exact frame is not decoded yet shows
     /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
     pub scrub: bool,
@@ -1110,6 +1113,7 @@ impl MediaCache {
         MediaCache {
             pool: FramePool::new(64 << 20),
             viewer: ViewerDecode::new(service.clone()),
+            source_viewer: ViewerDecode::with_purpose(service.clone(), DecodePurpose::Export),
             service,
             scrub: false,
             stand_ins: Vec::new(),
@@ -1283,6 +1287,7 @@ impl MediaCache {
                 // Replaced on disk: drop the stale index and frames.
                 if let Some((_, old)) = self.sources.remove(path) {
                     self.viewer.release(Some(old.id));
+                    self.source_viewer.release(Some(old.id));
                     self.service.release(None, Some(old.id));
                 }
                 self.frames.retain(|k, _| k.path != path);
@@ -1322,6 +1327,86 @@ impl MediaCache {
         sequence: bool,
         compat: bool,
         source_display: bool,
+    ) -> Result<Option<Target>, MediaFailure> {
+        self.video_inner(
+            device,
+            queue,
+            pipelines,
+            encoder,
+            path,
+            instance,
+            seconds,
+            export,
+            working,
+            precision,
+            interpret,
+            composition,
+            sequence,
+            compat,
+            source_display,
+            false,
+        )
+    }
+
+    /// Exact interactive source decode preserves Export-purpose pixel format
+    /// while keeping the decoder and its nearby frames warm across seeks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn source_exact_video(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &Pipelines,
+        encoder: &mut wgpu::CommandEncoder,
+        path: &Path,
+        instance: u64,
+        seconds: f64,
+        working: WorkingEncoding,
+        precision: Precision,
+        interpret: Option<&Interpretation>,
+        composition: pm_time::Rate,
+        sequence: bool,
+        compat: bool,
+        source_display: bool,
+    ) -> Result<Option<Target>, MediaFailure> {
+        self.video_inner(
+            device,
+            queue,
+            pipelines,
+            encoder,
+            path,
+            instance,
+            seconds,
+            true,
+            working,
+            precision,
+            interpret,
+            composition,
+            sequence,
+            compat,
+            source_display,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn video_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &Pipelines,
+        encoder: &mut wgpu::CommandEncoder,
+        path: &Path,
+        instance: u64,
+        seconds: f64,
+        export: bool,
+        working: WorkingEncoding,
+        precision: Precision,
+        interpret: Option<&Interpretation>,
+        composition: pm_time::Rate,
+        sequence: bool,
+        compat: bool,
+        source_display: bool,
+        source_exact: bool,
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
         let none = Interpretation::default();
@@ -1373,7 +1458,13 @@ impl MediaCache {
         // neighbors: random access includes neighboring fields), decode on
         // this thread; other display frames come from the scrub workers.
         let deinterlaced = timing.deinterlaced();
-        let (n, frame, fields) = if export || deinterlaced {
+        let (n, frame, fields) = if source_exact && !deinterlaced {
+            let fetched = self
+                .source_viewer
+                .fetch(&src, instance, n, Want::Exact)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+            (n, fetched.frame, None)
+        } else if export || deinterlaced {
             let purpose = if export {
                 DecodePurpose::Export
             } else {
@@ -1669,6 +1760,12 @@ impl MediaCache {
     /// The display decode workers' counters.
     pub fn scrub_stats(&self) -> ScrubStats {
         self.viewer.stats()
+    }
+
+    /// Exact Export-purpose source decoder counters, separate from the
+    /// composition viewer and its Display-purpose cache.
+    pub fn source_scrub_stats(&self) -> ScrubStats {
+        self.source_viewer.stats()
     }
 
     /// Applies the renderer's shares of the engine's lease to its decode

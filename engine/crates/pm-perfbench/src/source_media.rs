@@ -42,8 +42,12 @@ fn report(
     counters: pm_perf::Counters,
     global: pm_perf::Counters,
     wall_ms: Vec<f64>,
-    notes: serde_json::Value,
+    mut notes: serde_json::Value,
 ) -> BenchReport {
+    notes
+        .as_object_mut()
+        .expect("source bench notes are an object")
+        .insert("wallSamplesMs".into(), json!(wall_ms));
     BenchReport {
         name: name.into(),
         units: FRAMES as u32,
@@ -84,6 +88,8 @@ pub fn source_scrub_24() -> BenchReport {
     }
     let counters = scope.finish();
     let global = scope.finish_global();
+    let decode = renderer.source_scrub_stats();
+    assert_eq!(decode.stand_ins, 0, "source seeks must use exact frames");
     let result = report(
         "source_scrub_24",
         "seeks",
@@ -94,6 +100,7 @@ pub fn source_scrub_24() -> BenchReport {
             "fit": "contain", "order": "scattered x7 mod24", "timesTicks": times(true),
             "ticksPerSecond": TICKS_PER_SECOND, "mediaOverride": std::env::var_os("PM_SOURCE_BENCH_MEDIA").is_some(),
             "fingerprint": fingerprint,
+            "exactDecode": decode,
             "scope": "native source decode, GPU draw and readback; excludes IPC and canvas" }),
     );
     assert_eq!(result.counters.get(Counter::Readbacks), FRAMES as u64);
@@ -103,6 +110,26 @@ pub fn source_scrub_24() -> BenchReport {
 /// Batch source filmstrip: 24 ordered seeks and straight-alpha RGBA8 frames
 /// written to one file, as the job's hot path does after host resolution.
 pub fn source_filmstrip_24() -> BenchReport {
+    filmstrip_24(false, false)
+}
+
+/// The same batch after a real source frame has prepared the decoder, shader
+/// and bounded readback resources, as an idle source monitor can do.
+pub fn source_filmstrip_prepared_24() -> BenchReport {
+    filmstrip_24(true, false)
+}
+
+/// The production job's bounded GPU chunks, with one map per admission.
+pub fn source_filmstrip_batched_24() -> BenchReport {
+    filmstrip_24(false, true)
+}
+
+/// Bounded chunks after a genuine source-frame prepare.
+pub fn source_filmstrip_batched_prepared_24() -> BenchReport {
+    filmstrip_24(true, true)
+}
+
+fn filmstrip_24(prepared: bool, batched: bool) -> BenchReport {
     pm_perf::count_globally(true);
     let path = media_path();
     assert!(path.is_file(), "public H.264 fixture is present");
@@ -110,35 +137,78 @@ pub fn source_filmstrip_24() -> BenchReport {
     let output = dir.path().join("frames.rgba");
     let mut writer = BufWriter::new(File::create(&output).expect("filmstrip output"));
     let mut renderer = Renderer::headless().expect("filmstrip renderer");
+    if prepared {
+        renderer
+            .source_rgba8_export(&path, Ticks::ZERO, STRIP, SourceFit::Stretch, None)
+            .expect("prepare real source frame");
+        renderer.trim(64 << 20);
+    }
     let scope = Scope::begin();
     let mut wall_ms = Vec::with_capacity(FRAMES);
+    let mut chunk_wall_ms = Vec::new();
     let mut fingerprint = 0u64;
     let frame_bytes = STRIP.width as usize * STRIP.height as usize * 4;
-    for k in 0..FRAMES {
-        let began = Instant::now();
-        let frame = renderer
-            .source_rgba8(&path, time(k, false), STRIP, SourceFit::Stretch, None)
-            .expect("filmstrip source frame");
-        let straight =
-            pm_node::present::snapshot::encode_rgba8_unorm(&frame, SnapshotPixels::Straight);
-        assert_eq!(straight.len(), frame_bytes);
-        writer.write_all(&straight).expect("write filmstrip frame");
-        wall_ms.push(began.elapsed().as_secs_f64() * 1_000.0);
-        fingerprint = fingerprint
-            .wrapping_mul(31)
-            .wrapping_add(u64::from(straight[k * 4]));
+    if batched {
+        let chunk = Renderer::source_batch_limit(STRIP);
+        for start in (0..FRAMES).step_by(chunk) {
+            let end = (start + chunk).min(FRAMES);
+            let ticks: Vec<_> = (start..end).map(|k| time(k, false)).collect();
+            let began = Instant::now();
+            let frames = renderer
+                .source_rgba8_batch(&path, &ticks, STRIP, SourceFit::Stretch, None)
+                .expect("bounded source batch");
+            for (offset, frame) in frames.into_iter().enumerate() {
+                let straight = pm_node::present::snapshot::encode_rgba8_unorm(
+                    &frame,
+                    SnapshotPixels::Straight,
+                );
+                assert_eq!(straight.len(), frame_bytes);
+                writer.write_all(&straight).expect("write filmstrip frame");
+                fingerprint = fingerprint
+                    .wrapping_mul(31)
+                    .wrapping_add(u64::from(straight[(start + offset) * 4]));
+            }
+            let elapsed = began.elapsed().as_secs_f64() * 1_000.0;
+            chunk_wall_ms.push(elapsed);
+            wall_ms.extend(std::iter::repeat_n(
+                elapsed / (end - start) as f64,
+                end - start,
+            ));
+        }
+    } else {
+        for k in 0..FRAMES {
+            let began = Instant::now();
+            let frame = renderer
+                .source_rgba8_export(&path, time(k, false), STRIP, SourceFit::Stretch, None)
+                .expect("filmstrip source frame");
+            let straight =
+                pm_node::present::snapshot::encode_rgba8_unorm(&frame, SnapshotPixels::Straight);
+            assert_eq!(straight.len(), frame_bytes);
+            writer.write_all(&straight).expect("write filmstrip frame");
+            wall_ms.push(began.elapsed().as_secs_f64() * 1_000.0);
+            fingerprint = fingerprint
+                .wrapping_mul(31)
+                .wrapping_add(u64::from(straight[k * 4]));
+        }
     }
     writer.flush().expect("flush filmstrip");
     let counters = scope.finish();
     let global = scope.finish_global();
     let result = report(
-        "source_filmstrip_24",
+        match (batched, prepared) {
+            (false, false) => "source_filmstrip_24",
+            (false, true) => "source_filmstrip_prepared_24",
+            (true, false) => "source_filmstrip_batched_24",
+            (true, true) => "source_filmstrip_batched_prepared_24",
+        },
         "frames",
         counters,
         global,
         wall_ms,
         json!({ "fixture": "h264-aac.mp4", "output": [STRIP.width, STRIP.height],
             "fit": "stretch", "order": "ascending", "timesTicks": times(false),
+            "prepared": prepared,
+            "batched": batched, "chunkWallMs": chunk_wall_ms,
             "ticksPerSecond": TICKS_PER_SECOND, "mediaOverride": std::env::var_os("PM_SOURCE_BENCH_MEDIA").is_some(),
             "bytes": FRAMES * frame_bytes,
             "fingerprint": fingerprint,
@@ -149,6 +219,13 @@ pub fn source_filmstrip_24() -> BenchReport {
         std::fs::metadata(&output).unwrap().len() as usize,
         FRAMES * frame_bytes
     );
-    assert_eq!(result.counters.get(Counter::Readbacks), FRAMES as u64);
+    assert_eq!(
+        result.counters.get(Counter::Readbacks),
+        if batched {
+            FRAMES.div_ceil(Renderer::source_batch_limit(STRIP)) as u64
+        } else {
+            FRAMES as u64
+        }
+    );
     result
 }

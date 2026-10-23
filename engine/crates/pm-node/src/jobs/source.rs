@@ -36,11 +36,20 @@ pub(super) fn run(
     document: &JobDocument,
     cancel: &Arc<AtomicBool>,
 ) {
+    let started = Instant::now();
+    let media_ms;
+    let mut source_ms = 0.0;
+    let mut destination_ms = 0.0;
+    let mut body_ms = 0.0;
+    let mut commit_ms = 0.0;
     shared.status(host, job, |r| {
         r.state = JobState::Running;
         r.progress = 0.0;
     });
+    let start_status_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    let media_started = Instant::now();
     let media = resolve_media(shared, document);
+    media_ms = media_started.elapsed().as_secs_f64() * 1_000.0;
     let token = {
         let mut st = shared.lock();
         st.next_token += 1;
@@ -68,6 +77,7 @@ pub(super) fn run(
             .paths
             .get(asset.as_str())
             .ok_or_else(|| "The source media is offline".to_owned())?;
+        let source_started = Instant::now();
         let source = if matches!(
             &submit.spec,
             JobSpec::SourceFilmstrip {
@@ -79,6 +89,7 @@ pub(super) fn run(
         } else {
             original.clone()
         };
+        source_ms = source_started.elapsed().as_secs_f64() * 1_000.0;
         let record = pm_eval::node::member(document.document.root(), "assets")
             .and_then(|assets| pm_eval::node::member(Some(assets), asset.as_str()));
         if matches!(
@@ -97,7 +108,10 @@ pub(super) fn run(
             .output
             .as_ref()
             .ok_or("The source job needs an output")?;
+        let destination_started = Instant::now();
         let dest = destination(shared, job, session, choice, false).map_err(|e| e.message)?;
+        destination_ms = destination_started.elapsed().as_secs_f64() * 1_000.0;
+        let body_started = Instant::now();
         let result = match &submit.spec {
             JobSpec::SourceFilmstrip {
                 times,
@@ -142,6 +156,7 @@ pub(super) fn run(
             }),
             _ => unreachable!(),
         };
+        body_ms = body_started.elapsed().as_secs_f64() * 1_000.0;
         let (bytes, codec, frames) = match result {
             Ok(answer) if !cancel.load(Ordering::Relaxed) => answer,
             Ok(_) => {
@@ -153,6 +168,7 @@ pub(super) fn run(
                 return Err(error);
             }
         };
+        let commit_started = Instant::now();
         let committed = shared
             .call(
                 Request::CommitOutput(CommitOutput {
@@ -169,6 +185,7 @@ pub(super) fn run(
                 Some(session),
             )
             .map_err(|e| e.message)?;
+        commit_ms = commit_started.elapsed().as_secs_f64() * 1_000.0;
         match committed {
             Response::OutputCommitted(placed) => placed
                 .path
@@ -176,6 +193,13 @@ pub(super) fn run(
             _ => Err("The host answered commitOutput with another response".into()),
         }
     })();
+    if std::env::var_os("PM_SOURCE_PROFILE").is_some() {
+        eprintln!(
+            "pm source job start_status_ms={start_status_ms:.3} media_ms={media_ms:.3} source_ms={source_ms:.3} destination_ms={destination_ms:.3} body_ms={body_ms:.3} commit_ms={commit_ms:.3} total_ms={:.3} ok={}",
+            started.elapsed().as_secs_f64() * 1_000.0,
+            output.is_ok(),
+        );
+    }
     let mut st = shared.lock();
     st.outbox.work.push(WorkNote::Ended { token });
     if let Some(record) = st.jobs.get_mut(job) {
@@ -273,6 +297,7 @@ fn filmstrip(
     output: &Path,
     cancel: &AtomicBool,
 ) -> Result<u64, String> {
+    let setup_started = Instant::now();
     let record = pm_eval::node::member(document.document.root(), "assets")
         .and_then(|assets| pm_eval::node::member(Some(assets), asset));
     let interpretation = if color == SourceColor::Interpreted {
@@ -317,37 +342,95 @@ fn filmstrip(
             .map_err(|e| e.to_string())?,
     );
     let mut bytes = 0u64;
-    for (index, &time) in times.iter().enumerate() {
+    let setup = setup_started.elapsed();
+    let mut gate_wait = Duration::ZERO;
+    let mut render = Duration::ZERO;
+    let mut encode = Duration::ZERO;
+    let mut write = Duration::ZERO;
+    let mut progress = Duration::ZERO;
+    let mut chunks = 0usize;
+    let mut index = 0usize;
+    let pass = 0x534f_5552_4345_u64 ^ u64::from(size.width) ^ (u64::from(size.height) << 32);
+    while index < times.len() {
         if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        // One source frame is a single GPU submission. The user-job lane
-        // yields to snapshots and playback between frames.
-        let pass = 0x534f_5552_4345_u64 ^ u64::from(size.width) ^ (u64::from(size.height) << 32);
-        if gate.admit(pass, 1, cancel).is_none() {
+        // The gate may grant fewer frames during playback, down to one.
+        // Bound idle submissions too, so a higher-priority waiter gets its
+        // turn between short chunks rather than after an entire filmstrip.
+        let limit = if svg.is_some() {
+            1
+        } else {
+            Renderer::source_batch_limit(size)
+        };
+        let requested = limit.min(times.len() - index) as u32;
+        let stage = Instant::now();
+        let admitted = gate.admit(pass, requested, cancel).ok_or("cancelled")?;
+        let count = admitted.min(requested) as usize;
+        gate_wait += stage.elapsed();
+        let started = Instant::now();
+        let frames = if let Some(key) = &svg {
+            renderer
+                .source_svg_rgba8(key, size, fit, interpretation.as_ref())
+                .and_then(|pixels| {
+                    pixels.ok_or_else(|| {
+                        "The source SVG raster was evicted before drawing".to_owned()
+                    })
+                })
+                .map(|pixels| vec![pixels])
+        } else if count == 1 {
+            renderer
+                .source_rgba8_export(source, times[index], size, fit, interpretation.as_ref())
+                .map(|pixels| vec![pixels])
+        } else {
+            renderer.source_rgba8_batch(
+                source,
+                &times[index..index + count],
+                size,
+                fit,
+                interpretation.as_ref(),
+            )
+        };
+        gate.finished(pass, count as u32, started.elapsed().as_micros() as f64);
+        render += started.elapsed();
+        chunks += 1;
+        if cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        let started = Instant::now();
-        let pixels = if let Some(key) = &svg {
-            renderer
-                .source_svg_rgba8(key, size, fit, interpretation.as_ref())?
-                .ok_or_else(|| "The source SVG raster was evicted before drawing".to_owned())
-        } else {
-            renderer.source_rgba8(source, time, size, fit, interpretation.as_ref())
-        };
-        gate.finished(pass, 1, started.elapsed().as_micros() as f64);
-        let pixels = if svg.is_some() {
-            pixels?
-        } else {
-            crate::present::snapshot::encode_rgba8_unorm(&pixels?, SnapshotPixels::Straight)
-        };
-        file.write_all(&pixels).map_err(|e| e.to_string())?;
-        bytes += pixels.len() as u64;
-        shared.status(host, job, |r| {
-            r.progress = ((index + 1) as f64 / times.len() as f64).min(0.999)
-        });
+        for (offset, pixels) in frames?.into_iter().enumerate() {
+            let stage = Instant::now();
+            let pixels = if svg.is_some() {
+                pixels
+            } else {
+                crate::present::snapshot::encode_rgba8_unorm(&pixels, SnapshotPixels::Straight)
+            };
+            encode += stage.elapsed();
+            let stage = Instant::now();
+            file.write_all(&pixels).map_err(|e| e.to_string())?;
+            bytes += pixels.len() as u64;
+            write += stage.elapsed();
+            let stage = Instant::now();
+            shared.status(host, job, |r| {
+                r.progress = ((index + offset + 1) as f64 / times.len() as f64).min(0.999)
+            });
+            progress += stage.elapsed();
+        }
+        index += count;
     }
     file.flush().map_err(|e| e.to_string())?;
+    if std::env::var_os("PM_SOURCE_PROFILE").is_some() {
+        eprintln!(
+            "pm source filmstrip frames={} chunks={} setup_ms={:.3} gate_wait_ms={:.3} render_ms={:.3} encode_ms={:.3} write_ms={:.3} status_ms={:.3}",
+            times.len(),
+            chunks,
+            setup.as_secs_f64() * 1000.0,
+            gate_wait.as_secs_f64() * 1000.0,
+            render.as_secs_f64() * 1000.0,
+            encode.as_secs_f64() * 1000.0,
+            write.as_secs_f64() * 1000.0,
+            progress.as_secs_f64() * 1000.0,
+        );
+    }
     Ok(bytes)
 }
 

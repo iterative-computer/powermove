@@ -13,6 +13,9 @@ fn main() {
     for bench in [
         pm_perfbench::source_media::source_scrub_24,
         pm_perfbench::source_media::source_filmstrip_24,
+        pm_perfbench::source_media::source_filmstrip_prepared_24,
+        pm_perfbench::source_media::source_filmstrip_batched_24,
+        pm_perfbench::source_media::source_filmstrip_batched_prepared_24,
     ] {
         println!("{}", bench().to_json());
     }

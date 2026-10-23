@@ -882,13 +882,42 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
         gate: shared.gate.clone(),
         lane,
     };
-    let mut renderer: Option<Renderer> = None;
+    // The user lane is about to serve source preparation and user jobs. Its
+    // Metal device and pipelines take far longer than one source frame on a
+    // cold process, so build them on this lane as soon as the job runtime
+    // starts. Other lanes stay lazy; a transient device failure is retried
+    // when actual work arrives.
+    let mut renderer = if lane == USER_LANE {
+        let init_started = Instant::now();
+        let result = shared.renderer();
+        if std::env::var_os("PM_SOURCE_PROFILE").is_some() {
+            eprintln!(
+                "pm job renderer lane={} eager=true init_ms={:.3} ready={}",
+                lane,
+                init_started.elapsed().as_secs_f64() * 1000.0,
+                result.is_ok()
+            );
+        }
+        result.ok()
+    } else {
+        None
+    };
     let mut blender = LaneBlender::default();
     let mut definitions = definitions::LaneDefinitions::default();
     while let Some(work) = next_work(shared, lane) {
         if renderer.is_none() {
+            let init_started = Instant::now();
             match shared.renderer() {
-                Ok(r) => renderer = Some(r),
+                Ok(r) => {
+                    if std::env::var_os("PM_SOURCE_PROFILE").is_some() {
+                        eprintln!(
+                            "pm job renderer lane={} eager=false init_ms={:.3}",
+                            lane,
+                            init_started.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    renderer = Some(r);
+                }
                 Err(message) => {
                     fail_work(shared, work, ErrorCode::DeviceLost, &message);
                     continue;
