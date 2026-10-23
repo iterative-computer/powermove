@@ -534,12 +534,58 @@ impl Composer {
         loaded: (usize, u64),
     ) {
         let parity = &self.renderer.effects().parity;
-        effects.parity.configure(
-            parity.environment().map(str::to_owned),
-            parity.directory().map(std::path::Path::to_path_buf),
-        );
+        if effects.parity.environment() != parity.environment()
+            || effects.parity.directory() != parity.directory()
+        {
+            effects.parity.configure(
+                parity.environment().map(str::to_owned),
+                parity.directory().map(std::path::Path::to_path_buf),
+            );
+        }
         self.parked
             .insert(owner_hash(owner), (effects, Some(loaded)));
+    }
+
+    /// Polls all owners before their CPU definition state leaves this device.
+    /// An owner may have been parked while its last frame was in flight.
+    pub fn definitions_quiescent(&mut self) -> bool {
+        let device = self.renderer.device().clone();
+        let queue = self.renderer.queue().clone();
+        self.renderer
+            .effects_mut()
+            .watchdog
+            .collect(&device, &queue, false);
+        for (effects, _) in self.parked.values_mut() {
+            effects.watchdog.collect(&device, &queue, false);
+        }
+        self.renderer.effects().watchdog.frames_in_flight() == 0
+            && self
+                .parked
+                .values()
+                .all(|(effects, _)| effects.watchdog.frames_in_flight() == 0)
+    }
+
+    /// Moves one owner's translated definitions out of a retiring composer.
+    /// Programs and query objects are discarded; source preparation,
+    /// watchdog judgments and parity decisions survive until reattachment.
+    pub fn take_prepared_definitions(
+        &mut self,
+        owner: impl std::hash::Hash,
+    ) -> Option<(Effects, (usize, u64))> {
+        let owner = owner_hash(owner);
+        let (mut effects, loaded) = if self.definitions.map(|d| d.0) == Some(owner) {
+            let (_, loaded) = self.definitions.take().expect("owner above");
+            let mut empty = self.renderer.effects().sibling();
+            self.renderer.swap_effects(&mut empty);
+            (empty, loaded)
+        } else {
+            self.parked.remove(&owner)?
+        };
+        if !effects.release_device() {
+            self.parked.insert(owner, (effects, loaded));
+            return None;
+        }
+        loaded.map(|loaded| (effects, loaded))
     }
 
     /// Puts `owner`'s definition set in the renderer (parking the one it

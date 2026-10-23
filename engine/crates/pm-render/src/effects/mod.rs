@@ -533,6 +533,24 @@ impl Effects {
             .is_some_and(|e| e.program.is_some())
     }
 
+    /// Keeps translated sources and per-definition policy while releasing
+    /// resources bound to a retiring GPU device. A successful CPU translation
+    /// whose GPU pipeline failed may be tried again on the next device.
+    pub fn release_device(&mut self) -> bool {
+        if !self.watchdog.release_device() {
+            return false;
+        }
+        for entry in self.entries.values_mut() {
+            entry.program = None;
+            if entry.prepared.is_some() && matches!(entry.status, Status::NeedsFallback(_)) {
+                entry.status = Status::Ready;
+            }
+        }
+        self.dummies.clear();
+        self.simple.clear();
+        true
+    }
+
     /// The source hash of a definition's program (content keys).
     pub fn source_key(&self, kind: DefinitionKind, id: &str) -> Option<pm_glsl::Key> {
         self.entries

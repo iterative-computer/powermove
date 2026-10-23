@@ -1098,6 +1098,13 @@ impl PreparedDefinitions {
             self.base = None;
         }
     }
+
+    fn stage(&mut self, key: Key, effects: Effects, loaded: (usize, u64)) {
+        if self.base.is_none() {
+            self.base = Some(effects.sibling());
+        }
+        self.owners.insert(key, (effects, loaded));
+    }
 }
 
 /// How long the presenter must have drawn nothing (no frame, snapshot, or
@@ -1319,7 +1326,10 @@ impl Thread {
             || self.snapshots.waiting()
             || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
             || self.views.values().any(|v| {
-                v.clock.is_playing() || v.dirty || v.awaiting.is_some() || !v.requests.is_empty()
+                v.clock.is_playing()
+                    || (v.dirty && v.state.headless != Some(true))
+                    || v.awaiting.is_some()
+                    || !v.requests.is_empty()
             });
         let Some(gpu) = self.gpu.as_mut() else {
             self.rest.released = true;
@@ -1328,10 +1338,36 @@ impl Thread {
         if busy || gpu.snapshot_readback.in_flight() {
             return;
         }
-        if self.views.is_empty() && self.docs.is_empty() {
-            // The completion thread no longer owns a submitted frame's
-            // device, and every session's readback was cancelled on close.
-            // A later project creates a fresh device through `gpu()`.
+        let no_presenter = (self.views.is_empty() && self.docs.is_empty())
+            || (!self.views.is_empty()
+                && self.views.values().all(|view| {
+                    view.state.headless == Some(true)
+                        && view.pool.is_none()
+                        && view.depth.is_none()
+                        && !view.clock.is_playing()
+                        && view.awaiting.is_none()
+                        && view.retry.is_none()
+                        && view.external_wait.is_none()
+                }));
+        if no_presenter {
+            // A queued headless capture may need this device on its next
+            // turn. Keep the rest pending rather than marking it released.
+            if !self.cache_requested.is_empty() || !self.cache_previews.is_empty() {
+                return;
+            }
+            // Headless sessions keep their document and translated sources,
+            // but no presentation surface needs this device. All submitted
+            // frames and readbacks have finished at this point.
+            if let Some(composer) = gpu.composer.as_mut() {
+                if !composer.definitions_quiescent() {
+                    return;
+                }
+                for key in self.docs.keys().copied() {
+                    if let Some((effects, loaded)) = composer.take_prepared_definitions(key) {
+                        self.prepared.stage(key, effects, loaded);
+                    }
+                }
+            }
             self.gpu = None;
             self.rest.released = true;
             self.stats().rest_releases += 1;
@@ -2592,10 +2628,13 @@ impl Thread {
         self.docs.remove(&key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
-        if self.views.is_empty() && self.docs.is_empty() {
+        if self
+            .views
+            .values()
+            .all(|view| view.state.headless == Some(true))
+        {
             // A still-open session may already have completed its idle
-            // cleanup. Start a new rest when the final session closes so
-            // the device is retired even if no more frames arrive.
+            // cleanup. Start a new rest when the final attached viewer closes.
             self.rest = Rest::default();
         }
         if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
@@ -3183,6 +3222,7 @@ impl Thread {
         }
         self.warm_audio(key);
         if self.views[&key].state.headless == Some(true) {
+            self.rest = Rest::default();
             if let Some(blender) = &self.blender {
                 // Presentation leaves; captures still belong to this session.
                 blender.submit(key, None, self.views[&key].revision, None, None);
@@ -6550,6 +6590,140 @@ mod tests {
         (PortId(1), SessionId::new(2).unwrap())
     }
 
+    fn headless_test_state(headless: bool) -> ViewerState {
+        use pm_protocol::color::ViewerColorSpace;
+        use pm_protocol::frame::MediaPreference;
+        ViewerState {
+            headless: Some(headless),
+            composition: "main".into(),
+            size: Size::new(320, 180),
+            device_pixel_ratio: 1.0,
+            zoom: 1.0,
+            pan: [0.0, 0.0],
+            resolution: PreviewResolution::Full,
+            media: MediaPreference::Automatic,
+            color_space: ViewerColorSpace::Srgb,
+            view: None,
+            play_every_frame: false,
+            edr: false,
+            view_seq: Seq::new(1).unwrap(),
+            vsync: None,
+            depth_id: None,
+            chrome_selection: None,
+            canvas: None,
+            surface_epoch: None,
+        }
+    }
+
+    #[test]
+    fn headless_rest_retires_device_and_reuses_cpu_definitions() {
+        let (mut thread, _) = preview_thread();
+        let a = preview_key();
+        let b = (PortId(2), SessionId::new(3).unwrap());
+        let mut set = pm_render::effects::builtin_definitions();
+        set.definitions.truncate(1);
+        let def = set.definitions[0].clone();
+        let set = Arc::new(set);
+        for key in [a, b] {
+            thread.apply(Command::Definitions {
+                key,
+                set: set.clone(),
+                registered: vec![],
+            });
+            thread.configure(key, headless_test_state(false), None, None);
+            thread.views.get_mut(&key).unwrap().dirty = false;
+        }
+        assert!(thread.gpu().is_some());
+        let device = thread.gpu.as_ref().unwrap().device.clone();
+        let composer = thread.gpu.as_mut().unwrap().composer_with(
+            &thread.config,
+            thread.frame_cache,
+            &mut thread.prepared,
+        );
+        let a_defs = thread.docs[&a].definitions().cloned();
+        let b_defs = thread.docs[&b].definitions().cloned();
+        assert!(composer.use_definitions(a, a_defs.as_ref(), &[]).is_none());
+        assert!(
+            composer
+                .renderer()
+                .effects_mut()
+                .build(&device, def.kind, def.id.as_str())
+                .is_none()
+        );
+        assert!(
+            composer
+                .renderer()
+                .effects()
+                .has_program(def.kind, def.id.as_str())
+        );
+        composer
+            .renderer()
+            .effects_mut()
+            .watchdog
+            .set_budget(Duration::from_millis(7));
+        assert!(composer.use_definitions(b, b_defs.as_ref(), &[]).is_none());
+        composer
+            .renderer()
+            .effects_mut()
+            .watchdog
+            .set_budget(Duration::from_millis(9));
+        drop(device);
+        let metal_before = pm_gpu::device::allocated_bytes(&thread.gpu.as_ref().unwrap().device);
+        let t0 = 1_000_000;
+        thread.release_at_rest(t0);
+        thread.release_at_rest(t0 + REST_RELEASE_US + 1);
+        assert!(thread.gpu.is_some(), "an attached viewer keeps the device");
+
+        for key in [a, b] {
+            thread.configure(key, headless_test_state(true), None, None);
+        }
+        thread.cache_previews.insert(
+            1,
+            CachePreview {
+                key: a,
+                revision: Revision::ZERO,
+                generation: Seq::new(1).unwrap(),
+            },
+        );
+        thread.release_at_rest(t0 + 2 * REST_RELEASE_US);
+        thread.release_at_rest(t0 + 4 * REST_RELEASE_US);
+        assert!(thread.gpu.is_some(), "pending preview keeps the device");
+        thread.cache_previews.clear();
+        thread.release_at_rest(t0 + 4 * REST_RELEASE_US + 1);
+        assert!(thread.gpu.is_none());
+        thread.snapshot_allocations(t0 + 4 * REST_RELEASE_US + 1);
+        assert!(!thread.stats().allocations.gpu_created);
+        assert_eq!(thread.stats().allocations.metal_allocated_bytes, None);
+        assert!(metal_before.is_some_and(|bytes| bytes > 0));
+        assert_eq!(thread.prepared.owners.len(), 2);
+        for (key, budget) in [(a, 7), (b, 9)] {
+            let effects = &thread.prepared.owners[&key].0;
+            assert!(effects.source_key(def.kind, def.id.as_str()).is_some());
+            assert!(!effects.has_program(def.kind, def.id.as_str()));
+            assert_eq!(
+                effects.watchdog.budget(),
+                Some(Duration::from_millis(budget))
+            );
+        }
+
+        thread.configure(a, headless_test_state(false), None, None);
+        let started = std::time::Instant::now();
+        assert!(thread.gpu().is_some());
+        let composer = thread.gpu.as_mut().unwrap().composer_with(
+            &thread.config,
+            thread.frame_cache,
+            &mut thread.prepared,
+        );
+        assert!(composer.use_definitions(a, a_defs.as_ref(), &[]).is_none());
+        let resumed_us = started.elapsed().as_micros();
+        eprintln!("headless device reattach: {resumed_us} us; prior Metal bytes: {metal_before:?}");
+        assert!(resumed_us < 50_000, "headless reattach exceeded 50 ms");
+        assert_eq!(
+            composer.renderer().effects().watchdog.budget(),
+            Some(Duration::from_millis(7))
+        );
+    }
+
     #[test]
     fn definitions_prepare_without_a_gpu_and_transfer_per_owner() {
         let (mut thread, _) = preview_thread();
@@ -6818,6 +6992,54 @@ mod tests {
             "first frame after scratch rest: {resumed_us} us; Metal bytes before/rest/after: {allocated_before:?}/{allocated_at_rest:?}/{allocated_after:?}"
         );
         assert!(resumed_us < 50_000, "first resumed frame exceeded 50 ms");
+
+        // Closing the viewer leaves a headless session. Its surfaces are
+        // retired; attaching again must use a fresh pool generation and
+        // reproduce the exact pixels on the new device.
+        let mut state = thread.views[&key].state.clone();
+        state.headless = Some(true);
+        thread.configure(key, state.clone(), None, None);
+        assert!(thread.views[&key].pool.is_none());
+        thread.release_at_rest(t0 + 2 * REST_RELEASE_US);
+        thread.release_at_rest(t0 + 4 * REST_RELEASE_US + 1);
+        assert!(thread.gpu.is_none());
+        state.headless = None;
+        thread.configure(key, state, None, None);
+        let new_spec = PoolSpec {
+            generation: spec.generation + 1,
+            ..spec
+        };
+        let live = {
+            let gpu = thread.gpu().expect("a new Metal device");
+            Live {
+                spec: new_spec,
+                pool: SurfacePool::new(
+                    &gpu.device,
+                    new_spec.generation,
+                    size,
+                    new_spec.format,
+                    new_spec.count,
+                )
+                .unwrap(),
+                ledger: PoolLedger::new(new_spec.count as usize),
+                working: Some(WorkingTexture::new(&gpu.device, size)),
+                source: Some(TestSource::new(&gpu.device, size, 0)),
+                remote: None,
+            }
+        };
+        let view = thread.views.get_mut(&key).unwrap();
+        view.pool = Some(live);
+        view.next_seq = first.seq.get();
+        view.dirty = false;
+        let third = thread.render(key, 0, -1, None, false, false).unwrap();
+        let live = thread.views[&key].pool.as_ref().unwrap();
+        assert_eq!(live.spec.generation, spec.generation + 1);
+        assert_eq!(
+            first_pixels,
+            live.pool.surfaces[third.pool_index as usize]
+                .iosurface
+                .read()
+        );
     }
 
     #[test]
