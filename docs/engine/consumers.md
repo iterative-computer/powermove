@@ -4,6 +4,14 @@ The consumer lane uses the bridge's snapshot, presentation and stats contracts
 (RFC 16). The flag-off compositor remains available. No consumer change removes
 an unsupported reason or approves a visible difference.
 
+The orchestrator's current scope decisions (2026-10-23) transfer C4/C19
+(Assets posters, filmstrips and inline media), C5 (the source monitor), and
+C28 (job-engine web renditions) to the new `mediaframes` lane. Their missing
+engine contracts are outside this consumer lane. C18 RAM preview belongs to
+Phase 4a and is done on `feat/ne-phase4a`; that completion is not claimed to
+be merged into this branch. Earlier C18 failures below remain historical
+run results, with ownership transferred to Phase 4a.
+
 ## Implemented in this lane
 
 Composition thumbnails reject results after a project, revision, engine or
@@ -59,7 +67,8 @@ matching browser rendition, freezing a live URL before the first await so a
 relink cannot substitute its bytes. Conversion tries main's source reference
 before reading/uploading an original. The engine-off browser-copy path and its
 missing-copy error remain, with no new persistence. This is not yet the
-requested job-engine rendition pipeline.
+requested job-engine rendition pipeline, which now belongs to `mediaframes`
+(C28) rather than this lane.
 
 Pointer actions inside a focusable dialog release the clicked button to that
 dialog, preserving its Escape and Tab handling instead of exposing the editor’s
@@ -138,15 +147,16 @@ its presentation canvas with today's canvas box (1.2.10, below).
   to the dataset). Absence is now copied as absence.
 - `settings/install.ts` imports the Settings page type from `settings/pages.ts`
   instead of keeping a copy.
-- Behaviour changes made earlier in this lane and not described before:
-  `X.addToQueue` (export queue) refuses with "Export already running" while
-  `X.busy`, and `X.busy` covers the whole media preparation and queue
-  submission. During that window `PM.Export.snapshot` throws (as it does during
-  any export) and `locateMedia` prompts are suppressed. With the engine off,
-  `projectThumb` schedules a retry for the end of the five-second capture limit
-  instead of dropping a capture requested inside it, so the saved thumbnail
-  follows the last save; previously a save within five seconds of the last
-  capture kept the older thumbnail.
+- Queue and thumbnail decisions, updated by the orchestrator (2026-10-23):
+  `X.addToQueue` accepts a queue addition while an export is busy, matching
+  today's behaviour. The earlier "Export already running" queue rejection
+  and queue writes to the foreground export's `X.busy`/`X.cancel` state are
+  reverted. Queue media preparation has operation-local cancellation, so
+  cancelling or finishing it does not cancel or clear the foreground export.
+  The guard arrived with the preparation UI; no prior queue bug was proven.
+  With the engine off, `projectThumb` still retries at the end of the
+  five-second capture limit, so the saved thumbnail follows the last save
+  instead of keeping an older capture. This is an accepted beta bug fix.
 - Commit `11f75ca00` ("perf(3d): reuse depth prepasses") duplicates the 3D
   lane's `4fea55d37`; it leaves no tree difference from `feat/native-engine`.
 - `timeline.spec.ts:55` (one failure in six engine-on runs): the spec read
@@ -231,31 +241,42 @@ Every case of the 1.0.18 fork fails at activation on this branch (above).
   - The fork of shipped viewer 1.0.18 fails to activate on this branch (see
     the round 5 notes); its cases fail until `feat/ne-mainmerge` lands.
   - Private-corpus customized forks remain unqualified by this lane.
-Re-checked after merging `feat/native-engine` (2026-10-22, `49cc9e41d`):
-`pm-protocol`, the renderer engine connection and the generated TypeScript
-have no source-frame, poster, filmstrip or browser-rendition request; neither
-do `feat/ne-mediaclose`, `feat/ne-bridge` or `feat/ne-phase4a`. The rows below
-stay open until their owners land those contracts or the orchestrator
-re-scopes them.
 
-- C4/C19: `pm-media::preview::PreviewReader` and probe filmstrip seeds exist in
-  Rust, but the renderer bridge has no asset frame/poster/filmstrip request or
-  response. Posters still come from `legacy/core/poster.ts`, Assets inline media
-  from browser renditions. Engine peaks are integrated; native poster and
-  filmstrip parity is not claimed. The media/bridge owner must expose source
-  frames with source identity, interpretation, time, generation and cancellation.
-- C5: no independent engine source-audio/frame monitor contract. The working
-  shipped source monitor remains. See [source-preview.md](source-preview.md).
-- C18: the native frame-cache lease (`pm-node/src/present/mod.rs`,
-  `viewer_frame_cache`) budgets `pm-media` decode neighbourhoods. There is no
-  composed preview-frame cache or renderer warm/play/clear API. `PreviewControl`
-  cache-only requests prepare Blender surfaces; they do not cache composed
-  frames. The existing RAM preview still uses ImageBitmaps and WebAudio and is
-  not native-complete. Section 15 assigns the composed cache to Phase 4a; the
-  consumer requirement cannot be met by relabeling the decode cache.
-- C28: existing host conversion is functional, but the job protocol has no
-  browser-rendition job/output contract. Unmarked native-only originals and
-  source-audio codecs without browser support still need that media/job service.
+## Contracts transferred out of consumers
+
+The inventory after merging `feat/native-engine` (2026-10-22, `49cc9e41d`)
+found no source-frame, poster, filmstrip or browser-rendition request in
+`pm-protocol`, the renderer engine connection or the generated TypeScript;
+the checked `feat/ne-mediaclose`, `feat/ne-bridge` and `feat/ne-phase4a` trees
+also lacked those media contracts. The orchestrator has now re-scoped the
+following rows; these are ownership boundaries, not consumer acceptance
+blockers or claims that the missing contracts have landed here.
+
+- C4/C19 — `mediaframes`: `pm-media::preview::PreviewReader` and probe
+  filmstrip seeds exist in Rust, but the renderer bridge has no asset
+  frame/poster/filmstrip request or response. Posters still come from
+  `legacy/core/poster.ts`, Assets inline media from browser renditions. Engine
+  peaks are integrated; native poster and filmstrip parity is not claimed.
+  The `mediaframes` lane owns source frames with source identity,
+  interpretation, time, generation and cancellation.
+- C5 — `mediaframes`: no independent engine source-audio/frame monitor
+  contract. The working shipped source monitor remains. See
+  [source-preview.md](source-preview.md).
+- C18 — Phase 4a: RAM preview is done on `feat/ne-phase4a`, outside this lane;
+  this branch does not claim that completion is merged. Earlier runs here
+  lacked the composed preview-frame cache and renderer warm/play/clear API:
+  the native `viewer_frame_cache` lease budgeted decode neighbourhoods,
+  `PreviewControl` cache-only requests prepared Blender surfaces, and the
+  existing RAM preview used ImageBitmaps and WebAudio. Those observations and
+  failed runs are historical, not an outstanding consumers implementation
+  requirement. Phase 4a owns integration and follow-up qualification.
+- C28 — `mediaframes`: existing host conversion is functional, but the job
+  protocol has no browser-rendition job/output contract. Unmarked native-only
+  originals and source-audio codecs without browser support need that lane's
+  media/job service.
+
+## Other owner qualifications
+
 - Shared controls: destroying a color picker during an active preview can leave
   its edit transaction open. Cancelling during destruction can reenter document
   replacement through history rollback; the editing/controls owners must settle
@@ -316,9 +337,10 @@ Earlier rounds:
 
 Final-HEAD serial runs (2026-10-22, 698 cases each, one worker, no
 quarantine): engine on 588 passed, 60 failed, 50 skipped; engine off 631
-passed, 17 failed, 50 skipped. No consumer-owned failure remains with the
-engine off; with it on, the remaining consumer results are the four C18
-RAM-preview cases. Every failed result is owned in the
+passed, 17 failed, 50 skipped. No consumer-owned failure remained with the
+engine off; the engine-on run included four C18 RAM-preview failures,
+historical results now owned by Phase 4a (done on `feat/ne-phase4a`, not
+claimed merged here). Every failed result is owned in the
 [e2e ledger](e2e-ledger.md). The history below records earlier runs.
 
 The complete first default-on suite ran 691 cases: 529 passed, 112 failed and
@@ -336,7 +358,8 @@ measured J/K/L frame-clock error was 3.701 ms, with zero frames outside 10 ms.
 All three mixer cases passed; retune, master, mute and solo use fresh native
 levels and require zero legacy voices. Restored-project audio remains positive
 through quality changes after the meter's stale interval, while the separate
-native-pressure and composed RAM-preview gaps remain asserted.
+native-pressure and composed RAM-preview gaps remained asserted in that
+historical run; C18 qualification now belongs to Phase 4a.
 
 The 1,000-layer native profile presented 72 playback frames over 2.4 seconds;
 95th-percentile presentation gap was 35.7 ms. Engine rolling mean frame costs

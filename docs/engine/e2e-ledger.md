@@ -256,6 +256,26 @@ the complete serial suite to finish. Existing optional-fixture skips remain
 reported separately. The gate sets `POWERMOVE_NEW_ENGINE=1` or `0` as the default;
 specs that explicitly exercise a particular engine retain that declared mode.
 
+### Current ownership decisions (2026-10-23)
+
+The orchestrator has re-scoped C4/C19 (Assets posters, filmstrips and inline
+media), C5 (the source monitor), and C28 (job-engine web renditions) out of
+consumers to the new `mediaframes` lane. That lane owns the missing engine
+contracts and their qualification. The existing browser compatibility paths
+remain; recording their coverage does not claim the new contracts exist.
+
+C18 RAM preview belongs to Phase 4a and is done on `feat/ne-phase4a`. This
+consumer branch does not claim that work is merged. C18 failures in the run
+tables below are historical results from the tested builds, with ownership
+transferred to Phase 4a; their counts and observed symptoms are preserved.
+
+`X.addToQueue` continues to accept a queue addition while a foreground export
+is busy. The preparation UI's queue-only busy rejection is reverted; queue
+preparation uses operation-local cancellation and does not alter the export's
+busy/cancel state. No prior queue bug was proven by that guard. The
+`projectThumb` retry at the end of the five-second capture window is retained
+as an accepted beta bug fix.
+
 To reproduce without rebuilding while holding the Electron slot:
 
 ```sh
@@ -299,7 +319,7 @@ complete default-off run are recorded separately below when measured.
 | `agent-canvas-capture.spec.ts` | 1 | consumers | thumbnail request not observed on pre-refresh native thumbnail port (source lines 85) |
 | `agent-media-management.spec.ts` | 1 | agents | body assertion (source lines 57) |
 | `agent-media-tools.spec.ts` | 1 | agents | body assertion (source lines 42) |
-| `automatic-preview-memory.spec.ts` | 1 | consumers | stale legacy preview-cache instrumentation (source lines 153) |
+| `automatic-preview-memory.spec.ts` | 1 | phase4a (C18; formerly consumers) | Historical C18 result: stale legacy preview-cache instrumentation (source lines 153) |
 | `captions-ui.spec.ts` | 2 | consumers | ambiguous test selector + unvalidated port (source lines 42) |
 | `chatgpt-connection.spec.ts` | 1 | agents | ambiguous test selector (source lines 5) |
 | `cloud-media.spec.ts` | 1 | consumers | cloud state assertion on pre-refresh offload port (source lines 6) |
@@ -349,8 +369,8 @@ complete default-off run are recorded separately below when measured.
 | `pan-presentation.spec.ts` | 2 | bridge | legacy GL presentation probe; native presentation unverified (source lines 60, 104) |
 | `panel-popout.spec.ts` | 1 | consumers | ambiguous test selector + unvalidated port (source lines 3) |
 | `panel-workflow.spec.ts` | 1 | consumers | panel library count expectation on pending library:false port (source lines 19) |
-| `playback-audio.spec.ts` | 1 | consumers | body timeout (source lines 15) |
-| `playback-audio.spec.ts` | 1 | consumers | body failure + teardown (source lines 72) |
+| `playback-audio.spec.ts` | 1 | phase4a (C18; formerly consumers) / bridge | Historical C18 result: body timeout (source lines 15) |
+| `playback-audio.spec.ts` | 1 | phase4a (C18; formerly consumers) | Historical C18 result: body failure + teardown (source lines 72) |
 | `playback-audio.spec.ts` | 1 | consumers | stale legacy audio voice instrumentation (source lines 100) |
 | `playback-source-warmup.spec.ts` | 5 | mediaclose | stale legacy raster/cache instrumentation (source lines 5, 60) |
 | `precomp.spec.ts` | 1 | consumers | stale layer-menu expectation (source lines 46) |
@@ -390,9 +410,11 @@ The initial four-case Library attempt failed before acceptance: two fork cases
 had a test installation path error, and two current-viewer cases sampled an
 unsettled overlay. These are retained as failed attempts, not visual passes.
 
-The source-frame/poster/filmstrip, independent source-audio monitor, composed
-RAM-preview cache and job-engine browser-rendition contracts are still missing.
-The working browser compatibility paths remain. See [consumers.md](consumers.md)
+At this historical run, the source-frame/poster/filmstrip, independent
+source-audio monitor, composed RAM-preview cache and job-engine browser-rendition
+contracts were missing. Current ownership is `mediaframes` for C4/C19, C5 and
+C28, and Phase 4a for C18, as recorded above. The working browser compatibility
+paths remain. See [consumers.md](consumers.md)
 and [source-preview.md](source-preview.md) for code-level boundaries. The frozen
 web-v1 export test compares against its legacy editor reference and does not
 qualify native editor pixels or native-only source renditions. Native cadence
@@ -412,7 +434,7 @@ resolve eight of the 21 original failed results; they are not another complete
 | Spec and run line | Owner | Result or measured follow-up |
 |---|---|---|
 | `ae-audit-implementation.spec.ts:9` | consumers | Native preview-size probe fixed; focused recheck passes |
-| `ae-audit-implementation.spec.ts:50` | consumers | C18: composed RAM preview does not become active |
+| `ae-audit-implementation.spec.ts:50` | phase4a (C18; formerly consumers) | Historical C18 result: composed RAM preview does not become active |
 | `consumer-surfaces.spec.ts:44` | consumers | Synthetic solid position and fork installer fixed; all four native cases pass |
 | `consumer-surfaces.spec.ts:44` | consumers | Synthetic solid position and fork installer fixed; all four native cases pass |
 | `consumer-surfaces.spec.ts:44` | consumers | Synthetic solid position and fork installer fixed; all four native cases pass |
@@ -424,8 +446,8 @@ resolve eight of the 21 original failed results; they are not another complete
 | `graph-editor-review.spec.ts:3` | consumers | Active evaluator probe fixed; focused recheck passes with 1086 cold / 2 warm calls |
 | `legacy-blurred-video-export.spec.ts:27` | derouter / mediaclose | Actual sharp ProRes end frame 200 vs source 210; unchanged limit is less than 7 |
 | `media-bulk-selection.spec.ts:20` | consumers | Undo retained list scroll; visible pointer start restored and focused recheck passes |
-| `playback-audio.spec.ts:15` | consumers / bridge | Native-pressure qualification still uses legacy GL/voice instrumentation |
-| `playback-audio.spec.ts:72` | consumers / bridge | C18: cached preview/audio handoff lacks a composed native cache |
+| `playback-audio.spec.ts:15` | phase4a (C18; formerly consumers) / bridge | Historical C18 result: native-pressure qualification still uses legacy GL/voice instrumentation |
+| `playback-audio.spec.ts:72` | phase4a (C18; formerly consumers) | Historical C18 result: cached preview/audio handoff lacks a composed native cache |
 | `precomp.spec.ts:46` | consumers / captions | Import Captions menu contribution exists only on timeline; exact parity assertion retained |
 | `shell.spec.ts:260` | consumers | Library top is 32 px after animation, below the unchanged 44 px titlebar requirement |
 | `viewer-recovery.spec.ts:18` | bridge / consumers | Legacy canvas instrumentation; actual native recovery pixels still unqualified |
@@ -506,10 +528,11 @@ for the timeline mode ring, Library titlebar clearance, canvas/timeline menu
 parity, easing grid, nested group disclosure, extension stopwatches, direct
 resize and the flat-control walk pass (see [consumers.md](consumers.md)).
 
-Consumer-owned failures with the engine on are the four C18 results (no
-composed native RAM-preview cache or cached-preview audio voice). The
-multi-selection rotate is triaged to the document host: its native mirror
-answers an undone resize during the next gesture.
+The engine-on run included four C18 failures (no composed native RAM-preview
+cache or cached-preview audio voice in that build). These are historical
+results now owned by Phase 4a, done on `feat/ne-phase4a` and not claimed
+merged here. The multi-selection rotate is triaged to the document host:
+its native mirror answers an undone resize during the next gesture.
 
 New since the previous runs: `engine-blender-png-transport.spec.ts:15`
 crashes the renderer in both modes and `engine-present-recovery.spec.ts:132`
@@ -521,10 +544,10 @@ Engine on, every failed result:
 
 | Spec and line | Results | Owner | Observed |
 |---|---:|---|---|
-| `ae-audit-implementation.spec.ts:51` | 1 | phase4a (C18) | Preview cache never becomes active: no composed native RAM-preview cache |
+| `ae-audit-implementation.spec.ts:51` | 1 | phase4a (C18; historical) | Preview cache never becomes active: no composed native RAM-preview cache |
 | `agent-media-management.spec.ts:57` | 1 | agents / media store | Import aborted: "Media operation stopped because the project or agent run changed" |
 | `agent-media-tools.spec.ts:42` | 1 | agents | Request carries 8 images, spec expects 4 (Phase 0 row) |
-| `automatic-preview-memory.spec.ts:153` | 1 | phase4a (C18) | Zero remembered-frame hits during playback/back-scrub: composed cache absent |
+| `automatic-preview-memory.spec.ts:153` | 1 | phase4a (C18; historical) | Zero remembered-frame hits during playback/back-scrub: composed cache absent |
 | `chatgpt-connection.spec.ts:5` | 1 | agents | Two Disconnect buttons match the exact locator |
 | `composited-video-sync.spec.ts:9` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
 | `continuous-rasterization.spec.ts:4` | 1 | extcompat / renderer | Legacy raster source metadata absent (`undefined` density) |
@@ -558,8 +581,8 @@ Engine on, every failed result:
 | `native-still-orientation-parity.spec.ts:264` | 1 | derouter | Route expected legacy, got engine; pixel metrics exact |
 | `pan-presentation.spec.ts:60` | 1 | bridge | Legacy GL presentation probe: refined=false |
 | `pan-presentation.spec.ts:104` | 1 | bridge | Legacy GL presentation probe: redraw flags false |
-| `playback-audio.spec.ts:15` | 1 | phase4a (C18) / bridge | Adaptive-quality pressure still measured through legacy GL/voice instrumentation; body timeout |
-| `playback-audio.spec.ts:72` | 1 | phase4a (C18) | Cached playback has frames but no cached-preview audio voice (`cached.audio.running` false) |
+| `playback-audio.spec.ts:15` | 1 | phase4a (C18; historical) / bridge | Adaptive-quality pressure still measured through legacy GL/voice instrumentation; body timeout |
+| `playback-audio.spec.ts:72` | 1 | phase4a (C18; historical) | Cached playback has frames but no cached-preview audio voice (`cached.audio.running` false) |
 | `playback-source-warmup.spec.ts:5` | 4 | mediaclose | Legacy raster/cache warm-up instrumentation |
 | `playback-source-warmup.spec.ts:60` | 1 | mediaclose | Legacy raster/cache warm-up instrumentation |
 | `project-file-media.spec.ts:9` | 1 | mediaclose | Phase 0 flaky row: metadata-only re-save returns false |
@@ -673,10 +696,10 @@ Engine on, every failed result:
 | Spec and line | Results | Owner | Observed |
 |---|---:|---|---|
 | `ae-audit-implementation.spec.ts:9` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
-| `ae-audit-implementation.spec.ts:51` | 1 | phase4a (C18) | Preview cache never becomes active: no composed native RAM-preview cache |
+| `ae-audit-implementation.spec.ts:51` | 1 | phase4a (C18; historical) | Preview cache never becomes active: no composed native RAM-preview cache |
 | `agent-media-management.spec.ts:57` | 1 | agents / media store | Import aborted: "Media operation stopped because the project or agent run changed" |
 | `agent-media-tools.spec.ts:42` | 1 | agents | Request carries 8 images, spec expects 4 (Phase 0 row) |
-| `automatic-preview-memory.spec.ts:153` | 1 | phase4a (C18) | Zero remembered-frame hits during playback/back-scrub: composed cache absent |
+| `automatic-preview-memory.spec.ts:153` | 1 | phase4a (C18; historical) | Zero remembered-frame hits during playback/back-scrub: composed cache absent |
 | `canvas-text.spec.ts:48` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
 | `canvas-text.spec.ts:85` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
 | `canvas-text.spec.ts:116` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
@@ -724,8 +747,8 @@ Engine on, every failed result:
 | `native-still-orientation-parity.spec.ts:264` | 1 | derouter | Route expected legacy, got engine; pixel metrics exact |
 | `pan-presentation.spec.ts:60` | 1 | bridge | Legacy GL presentation probe: refined=false |
 | `pan-presentation.spec.ts:104` | 1 | bridge | Legacy GL presentation probe: redraw flags false |
-| `playback-audio.spec.ts:15` | 1 | phase4a (C18) / bridge | Adaptive-quality pressure still measured through legacy GL/voice instrumentation; body timeout |
-| `playback-audio.spec.ts:72` | 1 | phase4a (C18) | Cached playback has frames but no cached-preview audio voice (`cached.audio.running` false) |
+| `playback-audio.spec.ts:15` | 1 | phase4a (C18; historical) / bridge | Adaptive-quality pressure still measured through legacy GL/voice instrumentation; body timeout |
+| `playback-audio.spec.ts:72` | 1 | phase4a (C18; historical) | Cached playback has frames but no cached-preview audio voice (`cached.audio.running` false) |
 | `playback-source-warmup.spec.ts:5` | 4 | mediaclose | Legacy raster/cache warm-up instrumentation |
 | `playback-source-warmup.spec.ts:60` | 1 | mediaclose | Legacy raster/cache warm-up instrumentation |
 | `project-file-media.spec.ts:9` | 1 | mediaclose | Phase 0 flaky row: metadata-only re-save returns false |
