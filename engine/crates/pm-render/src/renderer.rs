@@ -659,6 +659,7 @@ impl Renderer {
     pub fn swap_effects(&mut self, effects: &mut Effects) {
         std::mem::swap(&mut self.effects, effects);
         self.effects.fallback.runner = self.shaders.fallback_runner;
+        self.refresh_meshes();
     }
 
     /// Runs `f` with an effect context over the renderer's own definitions,

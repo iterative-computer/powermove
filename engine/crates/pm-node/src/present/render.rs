@@ -37,6 +37,7 @@ use pm_protocol::clock::{AudioMessage, SeekMode, TransportCommand, TransportStat
 use pm_protocol::codec;
 use pm_protocol::color::WorkingEncoding;
 use pm_protocol::common::{RequestId, Revision, Seq, SessionId, Size, TICKS_PER_SECOND, Ticks};
+use pm_protocol::definitions::{DefinitionKind, DefinitionSetSnapshot};
 use pm_protocol::envelope::{Envelope, Event, Message, Response};
 use pm_protocol::error::{EngineError, ErrorCode, ErrorDetail, ErrorScope, FailureReport, Retry};
 use pm_protocol::frame::{
@@ -46,6 +47,7 @@ use pm_protocol::frame::{
 use pm_protocol::host::PortId;
 use pm_protocol::interop::SurfaceFormat;
 use pm_protocol::preview::{PreviewAction, PreviewControl, PreviewPhase, PreviewStatus};
+use pm_render::effects::Effects;
 use serde::Serialize;
 
 use super::audio::{AudioCtl, AudioLink, AudioStatus};
@@ -716,9 +718,16 @@ struct Gpu {
 impl Gpu {
     /// The device's composer (made on first use), its renderer holding
     /// fonts of the broker's current generation (`crate::fonts::render`).
-    fn composer_with(&mut self, config: &ThreadConfig, frame_cache: usize) -> &mut Composer {
+    fn composer_with(
+        &mut self,
+        config: &ThreadConfig,
+        frame_cache: usize,
+        prepared: &mut PreparedDefinitions,
+    ) -> &mut Composer {
         if self.composer.is_none() {
-            self.composer = Some(composer(&self.device, &self.queue, config, frame_cache));
+            let mut composer = composer(&self.device, &self.queue, config, frame_cache);
+            prepared.install(&mut composer);
+            self.composer = Some(composer);
             self.fonts_installed = None;
         }
         let composer = self.composer.as_mut().expect("made above");
@@ -732,12 +741,13 @@ impl Gpu {
         &mut self,
         config: &ThreadConfig,
         frame_cache: usize,
+        prepared: &mut PreparedDefinitions,
     ) -> (
         &mut Composer,
         &mut pm_gpu::readback::ReadbackRing,
         &mut Option<pm_gpu::Target>,
     ) {
-        self.composer_with(config, frame_cache);
+        self.composer_with(config, frame_cache, prepared);
         (
             self.composer.as_mut().expect("made above"),
             &mut self.snapshot_readback,
@@ -961,6 +971,8 @@ struct Thread {
     stats: Arc<Mutex<Stats>>,
     bridge: Option<Client>,
     gpu: Option<Gpu>,
+    /// GLSL translation and validation completed before the first GPU frame.
+    prepared: PreparedDefinitions,
     views: BTreeMap<Key, View>,
     /// Each session's document (document source), kept from its first
     /// update, which may come before the viewer state.
@@ -1029,6 +1041,63 @@ struct Rest {
     since: i64,
     /// Idle memory was released since then.
     released: bool,
+}
+
+/// Definition sets prepared on the presenter thread before a GPU device exists.
+/// Each owner retains its watchdog and unchanged translated programs; the
+/// translation cache is shared across owners just as it is in `Composer`.
+#[derive(Default)]
+struct PreparedDefinitions {
+    base: Option<Effects>,
+    owners: BTreeMap<Key, (Effects, (usize, u64))>,
+}
+
+impl PreparedDefinitions {
+    fn prepare(
+        &mut self,
+        key: Key,
+        definitions: &(Arc<DefinitionSetSnapshot>, u64),
+        registered: &[(DefinitionKind, pm_protocol::common::DefinitionId)],
+        shader_cache: Option<&PathBuf>,
+    ) -> Vec<EngineError> {
+        let base = self.base.get_or_insert_with(|| {
+            let mut effects = Effects::new(format!("{}; wgpu 30", std::env::consts::OS));
+            effects.set_cache_dir(shader_cache.map(|dir| dir.join("glsl")));
+            effects
+        });
+        let (set, version) = definitions;
+        let loaded = (Arc::as_ptr(set) as usize, *version);
+        let (mut effects, previous) = self
+            .owners
+            .remove(&key)
+            .unwrap_or_else(|| (base.sibling(), (0, 0)));
+        for (kind, id) in registered {
+            effects.watchdog.forget(*kind, id);
+        }
+        let failures = if previous == loaded {
+            Vec::new()
+        } else {
+            effects.set_snapshot(set).unwrap_or_default()
+        };
+        self.owners.insert(key, (effects, loaded));
+        failures
+    }
+
+    fn install(&mut self, composer: &mut Composer) {
+        for (key, (effects, loaded)) in std::mem::take(&mut self.owners) {
+            composer.park_prepared_definitions(key, effects, loaded);
+        }
+        // The installed owners hold the shared cache. Do not keep it alive
+        // independently after the final session and its composer close.
+        self.base = None;
+    }
+
+    fn forget(&mut self, key: Key) {
+        self.owners.remove(&key);
+        if self.owners.is_empty() {
+            self.base = None;
+        }
+    }
 }
 
 /// How long the presenter must have drawn nothing (no frame, snapshot, or
@@ -1111,6 +1180,7 @@ pub fn run(
         stats,
         bridge: None,
         gpu: None,
+        prepared: PreparedDefinitions::default(),
         views: BTreeMap::new(),
         docs: BTreeMap::new(),
         audio: BTreeMap::new(),
@@ -2073,13 +2143,20 @@ impl Thread {
                 // definition that fails (contract 10; the kernel fills the
                 // shader UI from these).
                 let mut failures = Vec::new();
-                if self.config.document
-                    && let Some(gpu) = self.gpu.as_mut()
-                {
-                    let composer = gpu.composer_with(&self.config, self.frame_cache);
-                    failures = composer
-                        .use_definitions(key, definitions.as_ref(), &registered)
-                        .unwrap_or_default();
+                if self.config.document {
+                    if let Some(composer) = self.gpu.as_mut().and_then(|gpu| gpu.composer.as_mut())
+                    {
+                        failures = composer
+                            .use_definitions(key, definitions.as_ref(), &registered)
+                            .unwrap_or_default();
+                    } else if let Some(definitions) = definitions.as_ref() {
+                        failures = self.prepared.prepare(
+                            key,
+                            definitions,
+                            &registered,
+                            self.config.shader_cache.as_ref(),
+                        );
+                    }
                 } else if let Some(doc) = self.docs.get_mut(&key) {
                     // Applied with the view's next frame.
                     doc.keep_registered(registered);
@@ -2211,7 +2288,7 @@ impl Thread {
                     let (w, h) = (raster.width, raster.height);
                     let stored = match self.gpu.as_mut() {
                         Some(gpu) => gpu
-                            .composer_with(&self.config, self.frame_cache)
+                            .composer_with(&self.config, self.frame_cache, &mut self.prepared)
                             .renderer()
                             .put_svg_raster(raster, data),
                         None => Err("the engine has no GPU device".into()),
@@ -2382,7 +2459,7 @@ impl Thread {
     fn svg_failed(&mut self, raster: pm_protocol::svg_raster::SvgRasterKey, why: &str) {
         let log = self.svg.failed(&raster, now());
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.composer_with(&self.config, self.frame_cache)
+            gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared)
                 .renderer()
                 .fail_svg_raster(raster.clone());
         }
@@ -2461,6 +2538,7 @@ impl Thread {
     }
 
     fn forget_session(&mut self, key: Key) {
+        self.prepared.forget(key);
         self.cancel_cache_preview(key);
         self.preview_controls.forget(key);
         self.preview_candidates.retain(|(k, _), _| *k != key);
@@ -3743,7 +3821,8 @@ impl Thread {
             let revision = Some(view.revision);
             let needs = view.svg_without.clone();
             if let Some(gpu) = self.gpu.as_mut() {
-                let composer = gpu.composer_with(&self.config, self.frame_cache);
+                let composer =
+                    gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
                 if Self::ask_svg(
                     &mut self.svg,
                     &self.sink,
@@ -4409,7 +4488,7 @@ impl Thread {
         let mut preview_failure: Option<String> = None;
         if document {
             let doc = self.docs.get_mut(&key)?;
-            let composer = gpu.composer_with(&self.config, self.frame_cache);
+            let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
             let composition = view.state.composition.as_str().to_owned();
             // The renderer draws with this view's definitions (one renderer
             // serves every view on the device).
@@ -5260,7 +5339,7 @@ impl Thread {
         if doc.revision() != control.revision.get() {
             return Err("The preview document changed before Blender could start.".into());
         }
-        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
         let _ = composer.use_definitions(key, doc.definitions(), &[]);
         let renderer = composer.renderer();
         renderer.set_scrub(false);
@@ -5619,7 +5698,7 @@ impl Thread {
                 .iter()
                 .any(|u| u.feature == pm_render::Feature::Blender);
         let (composer, readback, snapshot_target) =
-            gpu.composer_and_snapshot_resources(&self.config, self.frame_cache);
+            gpu.composer_and_snapshot_resources(&self.config, self.frame_cache, &mut self.prepared);
         // The session's definitions, without consuming the re-registrations
         // its viewer's next frame applies.
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
@@ -5972,7 +6051,7 @@ impl Thread {
             },
             None => None,
         };
-        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         let composition = job.request.composition.as_str();
@@ -6431,6 +6510,7 @@ mod tests {
             stats: Arc::new(Mutex::new(Stats::default())),
             bridge: None,
             gpu: None,
+            prepared: PreparedDefinitions::default(),
             views: BTreeMap::new(),
             docs: BTreeMap::new(),
             audio: BTreeMap::new(),
@@ -6468,6 +6548,115 @@ mod tests {
 
     fn preview_key() -> Key {
         (PortId(1), SessionId::new(2).unwrap())
+    }
+
+    #[test]
+    fn definitions_prepare_without_a_gpu_and_transfer_per_owner() {
+        let (mut thread, _) = preview_thread();
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let received = reports.clone();
+        thread.sink = Arc::new(move |actions| {
+            for action in actions {
+                if let Action::Send { bytes, .. } = action {
+                    let envelope = codec::decode(&bytes).unwrap();
+                    if let Message::Event {
+                        body: Event::Failure(report),
+                    } = envelope.message
+                    {
+                        received.lock().unwrap().push(report);
+                    }
+                }
+            }
+        });
+        let owner_a = preview_key();
+        let owner_b = (PortId(2), SessionId::new(3).unwrap());
+        let mut set = pm_render::effects::builtin_definitions();
+        set.definitions.truncate(1);
+        let valid = set.definitions[0].clone();
+        let mut invalid = valid.clone();
+        invalid.id = "invalid-before-gpu".into();
+        invalid
+            .glsl
+            .as_mut()
+            .expect("effect GLSL")
+            .source
+            .push_str("\nthis is invalid GLSL;");
+        set.definitions.push(invalid.clone());
+        let set = Arc::new(set);
+        assert!(thread.apply(Command::Definitions {
+            key: owner_a,
+            set: set.clone(),
+            registered: vec![(valid.kind, valid.id.clone())],
+        }));
+        assert!(thread.gpu.is_none());
+        assert_eq!(reports.lock().unwrap().len(), 1);
+        assert_eq!(
+            reports.lock().unwrap()[0].revision.get(),
+            set.generation.get()
+        );
+        let prepared = &thread.prepared.owners[&owner_a].0;
+        assert!(prepared.source_key(valid.kind, valid.id.as_str()).is_some());
+        assert!(prepared.status(invalid.kind, invalid.id.as_str()).is_some());
+        assert!(!prepared.has_program(valid.kind, valid.id.as_str()));
+
+        // A second registration keeps each unchanged translation and reports
+        // an unchanged invalid source at its current definitions generation.
+        assert!(thread.apply(Command::Definitions {
+            key: owner_a,
+            set: set.clone(),
+            registered: vec![(invalid.kind, invalid.id.clone())],
+        }));
+        let (_, loaded) = &thread.prepared.owners[&owner_a];
+        assert_eq!(loaded.1, 2);
+        assert_eq!(reports.lock().unwrap().len(), 2);
+
+        let mut other = (*set).clone();
+        other.definitions.pop();
+        let other = Arc::new(other);
+        assert!(thread.apply(Command::Definitions {
+            key: owner_b,
+            set: other,
+            registered: vec![],
+        }));
+        assert_eq!(thread.prepared.owners.len(), 2);
+        assert_eq!(reports.lock().unwrap().len(), 2);
+
+        let gpu = pm_gpu::Gpu::new("prepared definitions test").expect("a Metal device");
+        let mut composer = composer(&gpu.device, &gpu.queue, &thread.config, thread.frame_cache);
+        composer
+            .renderer()
+            .effects_mut()
+            .parity
+            .configure(Some("prepared-test".into()), None);
+        thread.prepared.install(&mut composer);
+        assert!(thread.prepared.owners.is_empty());
+        assert!(thread.prepared.base.is_none());
+        let a = thread.docs[&owner_a].definitions().cloned();
+        let b = thread.docs[&owner_b].definitions().cloned();
+        assert!(composer.use_definitions(owner_a, a.as_ref(), &[]).is_none());
+        assert_eq!(
+            composer.renderer().effects().parity.environment(),
+            Some("prepared-test")
+        );
+        composer
+            .renderer()
+            .effects_mut()
+            .watchdog
+            .set_budget(Duration::from_millis(7));
+        assert!(composer.use_definitions(owner_b, b.as_ref(), &[]).is_none());
+        assert_eq!(composer.renderer().effects().watchdog.budget(), None);
+        assert!(composer.use_definitions(owner_a, a.as_ref(), &[]).is_none());
+        assert_eq!(
+            composer.renderer().effects().watchdog.budget(),
+            Some(Duration::from_millis(7))
+        );
+        assert!(
+            composer
+                .renderer()
+                .effects()
+                .source_key(valid.kind, valid.id.as_str())
+                .is_some()
+        );
     }
 
     #[test]
