@@ -333,7 +333,7 @@ impl Effects {
 
     /// A definition requiring a first-use probe, or already pinned.
     pub(crate) fn parity_source(&self, kind: DefinitionKind, id: &str) -> Option<String> {
-        if !self.fallback.runner || !self.parity.enabled() {
+        if !self.parity.enabled() {
             return None;
         }
         let d = self.get(kind, id)?;

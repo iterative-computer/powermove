@@ -14,12 +14,12 @@
  */
 import type { MediaPathLookupRequest, MediaPathResult } from '../../shared/media-tools';
 
-interface AssetRecord { id: string; kind?: string; dur?: number; w?: number; h?: number; hasAudio?: boolean; storageKey?: string; fingerprint?: string; sourcePath?: string; path?: string; size?: number }
+interface AssetRecord { [key: string]: unknown; id: string; kind?: string; dur?: number; w?: number; h?: number; hasAudio?: boolean; storageKey?: string; fingerprint?: string; sourcePath?: string; path?: string; size?: number }
 
 /** What document code reads from a decoded asset. */
-export interface MediaView { id: string; dur: number | undefined; w: number | undefined; h: number | undefined; hasAudio: boolean }
+export interface MediaView extends AssetRecord { hasAudio: boolean }
 
-const KINDS = new Set(['video', 'audio', 'image']);
+const KINDS = new Set(['video', 'audio', 'image', 'model']);
 
 export class WorkerMedia {
   readonly map = new Map<string, MediaView>();
@@ -49,7 +49,9 @@ export class WorkerMedia {
     for (const meta of Object.values(assets ?? {})) {
       if (!meta || typeof meta.id !== 'string' || !KINDS.has(String(meta.kind))) continue;
       live.add(meta.id);
-      const key = JSON.stringify([meta.storageKey, meta.fingerprint, meta.sourcePath ?? meta.path, meta.size, meta.dur, meta.w, meta.h, meta.hasAudio]);
+      // Format, SVG/editable-path, poster, animation and model metadata are
+      // document facts too. A replacement can change them without changing size.
+      const key = JSON.stringify(meta);
       if (this.checked.get(meta.id) === key) continue;
       this.checked.set(meta.id, key);
       this.loading.add(meta.id);
@@ -63,7 +65,7 @@ export class WorkerMedia {
       };
       jobs.push(this.lookup(request).then((found) => {
         if (this.checked.get(meta.id) !== key) return;
-        if (found?.path) this.map.set(meta.id, { id: meta.id, dur: meta.dur, w: meta.w, h: meta.h, hasAudio: meta.kind === 'audio' || meta.hasAudio === true });
+        if (found?.path) this.map.set(meta.id, { ...meta, hasAudio: meta.kind === 'audio' || meta.hasAudio === true });
         else this.map.delete(meta.id);
       }, (error) => {
         if (this.checked.get(meta.id) !== key) return;

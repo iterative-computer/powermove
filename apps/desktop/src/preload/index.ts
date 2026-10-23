@@ -584,6 +584,9 @@ const bridge: PowermoveBridge = {
       bytes: request.bytes
     }) as Promise<StageDocumentResult>,
     pushDefinitions: (update) => ipcRenderer.send(ENGINE_IPC.definitions, update),
+    agentFrames: (request) => ipcRenderer.invoke(ENGINE_IPC.agentFrames, {
+      project: String(request.project), revision: request.revision, width: request.width, times: [...request.times]
+    }),
     exportVideo: (request) => ipcRenderer.invoke(ENGINE_IPC.exportVideo, {
       project: String(request.project),
       name: String(request.name),

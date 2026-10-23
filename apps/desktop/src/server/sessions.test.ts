@@ -90,3 +90,26 @@ describe('ProjectSessions', () => {
     expect(b.sent).toHaveLength(1);
   });
 });
+
+it('recovers the checkpoint journal for a native member that has no browser document to bring', () => {
+  const checkpoint = { id: 'p1', revision: 0, layers: [] };
+  const expected = { id: 'p1', revision: 2, layers: [{ id: 'l1', name: 'Recovered', effects: ['user.effect'] }] };
+  const journal = [
+    { revision: 1, patches: [{ path: ['layers'], exists: true, value: [{ id: 'l1', name: 'Recovered' }] }, { path: ['revision'], exists: true, value: 1 }] },
+    { revision: 2, patches: [{ path: ['layers', 0, 'effects'], exists: true, value: ['user.effect'] }, { path: ['revision'], exists: true, value: 2 }] }
+  ];
+  const { sessions, store, slot } = harness({ 'project.p1': { v: 't', proj: checkpoint }, 'projectJournal.p1': journal });
+  expect(sessions.document('p1')).toEqual(expected);
+  expect(sessions.document('p1')).toEqual(expected);
+  expect(sessions.join(member(1), 'p1', null).doc).toEqual(expected);
+  expect(checkpoint).toEqual({ id: 'p1', revision: 0, layers: [] });
+  expect(slot['projectJournal.p1']).toEqual(journal);
+  expect(store.set).not.toHaveBeenCalled();
+});
+
+it('reads old bare or string project slots with the same journal recovery semantics', () => {
+  for (const raw of [{ id: 'p1', revision: 1, name: 'Before' }, JSON.stringify({ v: 'old', proj: { id: 'p1', revision: 1, name: 'Before' } })]) {
+    const { sessions } = harness({ 'project.p1': raw, 'projectJournal.p1': [{ revision: 2, patches: [{ path: ['name'], exists: true, value: 'After' }, { path: ['revision'], exists: true, value: 2 }] }] });
+    expect(sessions.join(member(1), 'p1', null).doc).toEqual({ id: 'p1', revision: 2, name: 'After' });
+  }
+});

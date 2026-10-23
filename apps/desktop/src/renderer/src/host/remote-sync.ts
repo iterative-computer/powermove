@@ -11,6 +11,7 @@
  */
 import { applyPatch, diffPatches, type Patch } from '../../../shared/patch';
 import { WEB } from '../../../shared/wire';
+import { bridge } from '../kernel/capture-bridge';
 
 export interface SyncLink {
   invoke<T = unknown>(channel: string, ...args: unknown[]): Promise<T>;
@@ -23,6 +24,7 @@ const SYNC_DEBOUNCE_MS = 250;
 interface RemotePatch { projectId: string; seq: number; patches: Patch[]; from: number }
 
 type Registry = {
+  RemoteSync?: { flush(): Promise<void>; refresh(): Promise<void>; ready(): Promise<void> };
   proj?: { id?: string; assets?: Record<string, { id: string }> } & Record<string, unknown>;
   assets?: { get(id: string): unknown };
   restoreProjectAssets?(project: unknown, warn?: boolean): Promise<unknown>;
@@ -33,7 +35,11 @@ type Registry = {
   toast?(text: string, ms?: number, options?: { error?: boolean }): void;
 };
 
-export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
+export function attachRemoteSync(link: SyncLink, PM: Registry, options: { deferWrites?: boolean } = {}): () => void {
+  // A native DOM tab is a view of the authoritative worker document. During
+  // extension boot, hydration can temporarily mark valid effects missing.
+  // Join/pull immediately, but never publish that boot state to the worker.
+  let writesHeld = options.deferWrites ?? (bridge()?.nativeHidden === true);
   let joined: string | null = null;
   let applying = false;
   let joining: Promise<void> | null = null;
@@ -42,6 +48,7 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
   let synced = '';
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let sending: Promise<void> = Promise.resolve();
+  let failure: unknown = null;
 
   const current = (): string | null => (PM.isHomeProject?.() ? null : PM.proj?.id ?? null);
   const snapshot = (): string => { try { return JSON.stringify(PM.proj ?? null); } catch { return ''; } };
@@ -62,7 +69,7 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
   const flush = (): void => {
     flushTimer = null;
     const projectId = joined;
-    if (!projectId || applying || joining || current() !== projectId) return;
+    if (writesHeld || !projectId || applying || joining || current() !== projectId) return;
     const before = synced;
     const after = snapshot();
     if (!after || after === before) return;
@@ -72,10 +79,10 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
     if (!patches.length) return;
     sending = sending
       .then(() => link.invoke<number>(WEB.syncPatch, { projectId, patches }))
-      .then((next) => { seq = next; }, (error) => console.warn('[remote-sync] patch rejected', error));
+      .then((next) => { seq = next; }, (error) => { failure = error; console.warn('[remote-sync] patch rejected', error); });
   };
   const schedule = (): void => {
-    if (flushTimer || !joined) return;
+    if (writesHeld || flushTimer || !joined) return;
     flushTimer = setTimeout(flush, SYNC_DEBOUNCE_MS);
   };
 
@@ -132,8 +139,31 @@ export function attachRemoteSync(link: SyncLink, PM: Registry): () => void {
     track();
   });
 
+  // A newly booted DOM tab may have restored a stale local document after its
+  // first join. Before accepting tools, discard that unsent boot state and pull
+  // the current authoritative session (which may be newer than its seed).
+  const refresh = async (): Promise<void> => {
+    await joining; await sending;
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (joined) link.send(WEB.syncLeave, joined);
+    joined = null; failure = null;
+    track(); await joining;
+  };
+  const sync = { refresh, ready: async () => {
+    if (!writesHeld) return;
+    await refresh();
+    writesHeld = false;
+    synced = snapshot();
+  }, flush: async () => {
+    await joining;
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    flush(); await sending;
+    if (failure) throw new Error(`project-sync-failed: ${String(failure)}`);
+  } };
+  PM.RemoteSync = sync;
   track();
   return () => {
+    if (PM.RemoteSync === sync) delete PM.RemoteSync;
     for (const off of offs) off();
     offRemote();
     offReconnect();
