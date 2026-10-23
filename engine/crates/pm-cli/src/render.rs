@@ -529,6 +529,7 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
             end: seconds_to_ticks(end)?,
         },
         audio: !options.no_audio && !format.is_image(),
+        audio_index_playhead: None,
         motion_blur: false,
         color,
         precision,

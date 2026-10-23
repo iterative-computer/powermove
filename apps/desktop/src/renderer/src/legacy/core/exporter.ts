@@ -547,7 +547,7 @@ function sheetOptions(opts: any): any {
   return {
     format: opts.format, alpha: !!opts.alpha && supportsAlpha(opts.format, opts.delivery), fps: Number(opts.fps), scale: Number(opts.scale) || 1,
     start: opts.format === 'still' ? PM.time : t0, end: opts.format === 'still' ? PM.time + 1 / Math.max(1, Number(opts.fps) || p.fps || 30) : t1,
-    audio: opts.audio !== false, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
+    audio: opts.audio !== false, audioIndexPlayhead: PM.Audio?.indexPlayhead?.() ?? PM.time, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
     delivery: normalizeDelivery(opts.delivery), hideCaptions: opts.captionsBurn === false
   };
 }

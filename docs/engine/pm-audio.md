@@ -250,8 +250,9 @@ longer stands. What remains, with its status:
 
 Matched since 2026-10-22: a negative layer start is clamped to 0 as `audioLayers` does
 (the clip plays from 0, shifted, with its local time from there); an animated `trim`
-is read once where the range or the run starts (`plan()`), and a video's from its own
-start; a conformed frame rate (Interpret Footage) is ignored, as today plays a
+on an audio layer is read once where the range or the run starts (`plan()`);
+a video's embedded trim is frozen at the audio index build playhead, with the
+original video as its evaluation scope; a conformed frame rate (Interpret Footage) is ignored, as today plays a
 video's soundtrack at its own rate and pitch. A precomposition's animated `trim`:
 today's `audioLayers` reads it with the precomposition at `PM.time`, the playhead
 when it last built its audio index (captures `precomp-trim` with the playhead at 0 and
@@ -267,12 +268,11 @@ Seeks, loop wraps and later Plays keep it. The producer keeps that playhead
 (`RenderThread::today_index`): each new project invalidates it (set to the playhead
 heard then when playing, else cleared), a run start with none sets it to the run's
 start, and seeks, wraps and later runs keep it
-(`a_precomposition_animated_trim_reads_at_todays_index_build`). Three cases still
-differ, listed under Gaps: the export job does not receive the app's index playhead
-(no `ExportSettings` field), a project's first open builds today's index at the
-playhead of that moment through the context warm-up (the engine builds it at the first
-Play), and a document change today announces with neither event (asset metadata, for
-example) invalidates the engine's index but not today's.
+(`a_precomposition_animated_trim_reads_at_todays_index_build`). Embedded video trims follow the same lifetime
+(`embedded_video_animated_trim_reads_at_todays_index_build`). Exports carry the
+app's cached index playhead in `ExportSettings.audioIndexPlayhead` (ticks),
+independently of the export range. Headless clients may omit it to use the range
+start. The first-open warm-up and event-specific invalidation gaps remain below.
 
 **Beta list (bug fixes against today, orchestrator decisions):**
 
@@ -282,10 +282,14 @@ example) invalidates the engine's index but not today's.
   (BS.775) instead of keeping only their first two channels; channels without a
   speaker meaning sum with equal power. 1, 2, 4 and 6 channel folds, the wide-bus
   up-mix, and mono beside a quad at −6 dB stay today's.
-- LONG-1 (proposed in review round 9, pending the orchestrator): a file whose decoded
-  buffer exceeds today's 128 MiB `audio` budget plays (Powermove's random-access
-  decoder, block-cache memory) instead of being refused with "too long to decode
-  safely" and playing nothing. Files today plays are unaffected.
+- LONG-1 (approved, beta list): the engine plays long files through bounded
+  sample blocks; exceeding today's decode limit never refuses an engine stream.
+
+| LONG-1, same file | Today | Engine |
+|---|---|---|
+| Decoded buffer fits 128 MiB | Plays the decoded buffer | Plays; inactive sample blocks obey the same 128 MiB budget |
+| Decoded buffer exceeds 128 MiB (about 5.8 min stereo at 48 kHz), any codec including MP3, WAV and FLAC | Silence and toast: “This audio file is too long to decode safely” | Plays through the bounded block cache; other inactive samples are evicted |
+
 
 Everything else matches today exactly (below): automation stepping and ramps, the
 decode resampler, in-points and starts between samples, switches, channel folds and
@@ -410,7 +414,7 @@ estimates today's buffer (container frames at the lower of the file's rate and
 44.1 kHz, × channels × 4) so a file today plays is never sent to the fallback; those
 over it decode through `pm_media::audio` with block-cache memory (the plan's "no length
 limit"; samples about −93 dBFS from what Chromium's FFmpeg would give; LONG-1 on the
-beta list above, pending the orchestrator). A stream without a container length can also spool without a resident-memory length limit.
+approved beta list above). A stream without a container length can also spool without a resident-memory length limit.
 
 Playback opens a source with the container's length until the whole decode ends; the
 next mix build takes today's length (up to about 700 frames at a clip's end in
@@ -1359,7 +1363,8 @@ scheduled presentation, ms. Raw JSON is outside the repository
   eight runs (engine p50 20.6–22.1 ms against today's 29.1–30.4 ms), with no A4 fire.
 - **A8 misses.** The speed-edit, distinct-trim speed-edit, cold-seek and keyed
   key-edit rows miss today in 14 of 16 runs (one stressed speed run beat it, one stopped
-  on its scheduling gate), mostly by 1–6 ms at p95/max; the cold seek's p50 is at or
+  on its scheduling gate). The keyed key-edit reaches +12.2 ms p95
+  (44.90 vs 32.70) and +11.9 ms max (45.15 vs 33.21). The cold seek's p50 is at or
   below today's in two of four runs. The keyed cold seek beats today in three of four
   runs (stressed run 1 has one 43.4 ms maximum). Two causes, measured:
   1. **Upstream of the audio path, in the merged integration branch.** The time from
@@ -1417,7 +1422,9 @@ campaign rows or other lanes' builds overlapped and are not counted.
 
 - **A8 latency misses (blocker, needs escalation):** the speed-edit, distinct-trim
   speed-edit and cold-seek rows on today's 16-voice fixture and the keyed key-edit row
-  miss today's p50, p95 or max in 14 of 16 runs, by up to 6 ms (table above). The audio
+  miss today's p50, p95 or max in 14 of 16 runs. The keyed cold seek also misses
+  once (43.40 vs 33.41 ms max): **five scenarios** miss, 15 of 20 runs. The largest
+  keyed-edit miss is **+12.2 ms p95**, not 6 ms (table above). The audio
   path after the request is equal or faster than round 8's apart from the distinct
   pre-rolls; the added time is before the request, in the merged integration branch
   (the render lane's Play pool replan, and for the keyed row the document update
@@ -1427,7 +1434,7 @@ campaign rows or other lanes' builds overlapped and are not counted.
   period change, not attempted (DECISION, as in round 8).
 - **Real-time allocations:** 316,504 per 200 warm renders, unchanged (DECISION; the
   follow-up lane).
-- **LONG-1 (DECISION, proposed for the beta list):** files longer than today plays
+- **LONG-1 (approved for the beta list; side-by-side above):** files longer than today plays
   (decoded buffer past its 128 MiB `audio` budget) play in the engine through
   Powermove's random-access decoder (the plan's "no length limit"); today refuses
   them, so there is no today sample to match.
@@ -1458,10 +1465,8 @@ campaign rows or other lanes' builds overlapped and are not counted.
   each engine launch decodes again.
 - **`cargo-deny`** is not installed on this Mac; `pm-stretch` adds only the `cc` build
   dependency (already in the lockfile) and MIT sources (vendor README).
-- **Today's index playhead outside playback.** The export job does not receive the
-  playhead of the app's last `audioLayers` build (no `ExportSettings` field; protocol and
-  export lanes), so an export of a precomposition with an animated `trim` matches today
-  only when that playhead is the range start. In playback, a project's first open builds
+- **Today's first-open index playhead.** Exports now receive the cached app index
+  playhead; playback still builds its own index. A project's first open builds
   today's index through the context warm-up at that moment's playhead (the engine builds
   it at the first Play), and a document change today announces with neither a `layers`
   nor a `project` event invalidates the engine's index but not today's. The exact fix is

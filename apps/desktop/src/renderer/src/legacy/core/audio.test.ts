@@ -125,3 +125,15 @@ describe('legacy audio install', () => {
     expect(PM.Audio.gainAt(layer, 4)).toBe(0);
   });
 });
+
+it('exposes the cached index playhead for native exports until today invalidates it', () => {
+  const PM = audioRegistry();
+  PM.time = 2;
+  expect(PM.Audio.indexPlayhead()).toBe(2);
+  PM.time = 9;
+  expect(PM.Audio.indexPlayhead()).toBe(2);
+  PM.bus.emit('layers');
+  expect(PM.Audio.indexPlayhead()).toBe(9);
+  PM.Audio.destroy();
+  vi.unstubAllGlobals();
+});

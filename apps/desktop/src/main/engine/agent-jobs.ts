@@ -206,6 +206,7 @@ export function wireSettings(input: {
   start: number;
   end: number;
   audio: boolean;
+  audioIndexPlayhead?: number;
   motionBlur: boolean;
   hideCaptions?: boolean;
   draft?: boolean;
@@ -226,6 +227,7 @@ export function wireSettings(input: {
     frameRate: { num: input.rate.num, den: input.rate.den },
     range: { start: toTicks(Math.max(0, input.start)), end: toTicks(input.end) },
     audio: input.audio && !image,
+    ...(input.audioIndexPlayhead !== undefined ? { audioIndexPlayhead: toTicks(input.audioIndexPlayhead) } : {}),
     motionBlur: input.motionBlur,
     color: wireColor(format, delivery),
     precision: 'float32',
@@ -296,7 +298,7 @@ export function userExportSettings(projectValue: unknown, options: UserExportOpt
   return wireSettings({
     format, delivery, alpha: o.alpha, quality: o.quality, size, rate,
     start: o.start, end: format === 'still' ? Math.max(o.end, o.start + 1 / (rate.num / rate.den)) : o.end,
-    audio: o.audio, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
+    audio: o.audio, audioIndexPlayhead: o.audioIndexPlayhead, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
     ...(extra.preview ? { preview: true } : {}),
     ...(extra.sequenceName ? { sequenceName: extra.sequenceName } : {})
   });

@@ -531,6 +531,7 @@ pub fn export_settings() -> ExportSettings {
             end: ticks(7_056_000_000),
         },
         audio: true,
+        audio_index_playhead: None,
         motion_blur: true,
         color: OutputColor::Rec709Broadcast,
         precision: Precision::Float32,

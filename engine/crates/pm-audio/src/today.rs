@@ -701,7 +701,23 @@ impl Shape {
             window.1.min(natural_start + dur),
         );
         let d = node::member(Some(layer), "d");
-        let trim = finite(&static_value(node::member(d, "trim")), 0.0).max(0.0);
+        let trim_node = node::member(d, "trim");
+        let trim = if plan.kind == VoiceKind::Embedded && is_property(trim_node) {
+            // audioLayers freezes embedded trim with the original video at
+            // PM.time, exactly like the precomposition trim above.
+            precomp_trim_animated = true;
+            match &mut at {
+                Some((ev, t)) => finite(
+                    &ev.ev_p(comp, Some(layer), trim_node, *t, &JsString::from("c.trim"))
+                        .ok()?,
+                    0.0,
+                ),
+                None => finite(&static_value(trim_node), 0.0),
+            }
+        } else {
+            finite(&static_value(trim_node), 0.0)
+        }
+        .max(0.0);
         let layers = comp.layers();
         let level_keys: &[&str] = match plan.kind {
             VoiceKind::Audio => &["gain", "fadeIn", "fadeOut"],
@@ -795,8 +811,8 @@ impl Shape {
         let (name, value) = match (self.kind, key) {
             (VoiceKind::Embedded, "gain") => ("audioGain", node::member(d, "audioGain")),
             (VoiceKind::Embedded, "trim") => {
-                // `audioLayers` reads a video's trim with the video itself
-                // (its own start), at the time it is asked for.
+                // Shape::new freezes this at audioLayers' index playhead.
+                // This branch remains for field evaluation outside that shape.
                 let v = node::member(d, "trim");
                 if !is_property(v) {
                     return Ok(node::js_value_opt(v));
@@ -973,7 +989,7 @@ impl Clip {
         let source_duration = len as f64 / rate;
         // `plan`: the trim as `resolveContent` gives it where the range
         // starts (inside the clip), read once.
-        let trim = if is_property(shape.trim_node(comps)) {
+        let trim = if shape.kind != VoiceKind::Embedded && is_property(shape.trim_node(comps)) {
             finite(
                 &shape.field(ev, comps, "trim", layer_start.max(range.t0))?,
                 0.0,

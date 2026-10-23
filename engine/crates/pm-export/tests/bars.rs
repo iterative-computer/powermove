@@ -136,6 +136,7 @@ fn settings_sized(
             end: Ticks::new(frames as i64 * 1001 * TICKS_PER_SECOND / 24000).unwrap(),
         },
         audio: false,
+        audio_index_playhead: None,
         motion_blur: false,
         color: OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,

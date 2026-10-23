@@ -29,6 +29,7 @@ const state: any = {
 };
 let audioCacheProject: any = null;
 let audioCache: any[] | null = null;
+let audioIndexPlayhead = 0;
 let audioById: Map<string, any> | null = null;
 
 const clamp: any = (value: any, min: any, max: any) => Math.max(min, Math.min(max, value));
@@ -111,6 +112,7 @@ function audioLayers(project: any = PM.proj) {
   };
   visit(project, 0, 0, Infinity, '', 0);
   if (project === PM.proj) {
+    audioIndexPlayhead = finite(PM.time);
     audioCacheProject = project;
     audioCache = output;
     audioById = new Map(output.map((layer: any) => [layer.id, layer]));
@@ -1054,6 +1056,7 @@ const Audio: any = PM.Audio = {
   supportsOpus,
   encodeOpus,
   hasAudibleLayers,
+  indexPlayhead: () => { audioLayers(); return audioIndexPlayhead; },
   retune,
   setMonitorSolo,
   monitorSolo: () => [...state.monitorSolo],

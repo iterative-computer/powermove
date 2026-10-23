@@ -132,6 +132,7 @@ fn settings(format: ExportFormat, alpha: WireAlpha, dur: f64) -> ExportSettings 
             end: seconds(dur),
         },
         audio: !image,
+        audio_index_playhead: None,
         motion_blur: false,
         color: if image {
             OutputColor::SrgbImage

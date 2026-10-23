@@ -154,6 +154,7 @@ fn settings(frames: u32) -> ExportSettings {
             end: seconds(f64::from(frames) / 30.0),
         },
         audio: false,
+        audio_index_playhead: None,
         motion_blur: false,
         color: OutputColor::SrgbImage,
         precision: Precision::Float32,

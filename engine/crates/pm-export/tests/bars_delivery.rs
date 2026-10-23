@@ -91,6 +91,7 @@ fn settings(
             .unwrap(),
         },
         audio: false,
+        audio_index_playhead: None,
         motion_blur: false,
         color: if image {
             OutputColor::SrgbImage

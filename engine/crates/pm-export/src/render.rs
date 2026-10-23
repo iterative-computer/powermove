@@ -1140,6 +1140,11 @@ where
         );
         // Today's OfflineAudioContext starts at the range's start.
         mixer.set_today_range(a.range.0.max(0.0), a.range.1, first);
+        mixer.set_today_playhead(
+            job.settings
+                .audio_index_playhead
+                .map(|t| t.get() as f64 / TICKS_PER_SECOND as f64),
+        );
         (
             mixer,
             a.sample_rate,
