@@ -20,6 +20,15 @@ use crate::error::{AudioError, Result};
 /// Samples per channel in a block (about 1.4 s at 48 kHz).
 pub const BLOCK: usize = 1 << 16;
 
+/// How long a block a playback read, checked, or asked for again survives
+/// a memory-pressure grant ([`SourceCache::playback_memory_pressure`]).
+/// A playing transport asks for its whole look-ahead again each quarter
+/// second of media (at least every 250 ms: J/K/L rates are 1x or faster),
+/// and a paused, prepared start asks again every second (the producer's
+/// `PAUSED_REFRESH`); this covers both with margin. Today's
+/// `trimDecodedCache` likewise never evicts the assets of active voices.
+const PLAYBACK_PRESSURE_HOT: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// One decodable stream of one file.
 pub struct Source {
     id: u64,
@@ -128,6 +137,7 @@ type SourceIdentity = (u64, Option<(u64, Option<std::time::SystemTime>)>);
 struct Entry {
     block: Arc<Block>,
     used: u64,
+    /// Last read, readiness check, or prefetch request (memory pressure).
     read_at: std::time::Instant,
 }
 
@@ -551,11 +561,14 @@ impl SourceCache {
         self.trim_pressure(std::time::Duration::ZERO);
     }
 
-    /// A live playback also protects its current/prerolled input across the
-    /// short gap between readiness checks and the next render. This grace
-    /// does not increase the 128 MiB LRU budget.
+    /// A live playback also protects the input it is reading and the input
+    /// its look-ahead and prepared starts still want: blocks read, checked
+    /// or asked for again within [`PLAYBACK_PRESSURE_HOT`]. A prefetched
+    /// block not read yet is the input the render reaches next; evicting it
+    /// would starve that render. This grace does not increase the 128 MiB
+    /// LRU budget.
     pub(crate) fn playback_memory_pressure(&self) {
-        self.trim_pressure(std::time::Duration::from_millis(250));
+        self.trim_pressure(PLAYBACK_PRESSURE_HOT);
     }
 
     fn trim_pressure(&self, hot_for: std::time::Duration) {
@@ -732,13 +745,17 @@ impl SourceCache {
         }
     }
 
-    /// Queues blocks for the decode workers (in order of need).
+    /// Queues blocks for the decode workers (in order of need). A block
+    /// already decoded is still wanted: memory pressure keeps it (its LRU
+    /// order is unchanged until it is read).
     pub fn prefetch(&self, source: &Arc<Source>, indexes: impl IntoIterator<Item = u64>) {
         let mut blocks = lock(&self.blocks);
         let mut added = false;
+        let now = std::time::Instant::now();
         for index in indexes {
             let key = (source.id, index);
-            if blocks.map.contains_key(&key) {
+            if let Some(entry) = blocks.map.get_mut(&key) {
+                entry.read_at = now;
                 continue;
             }
             if blocks.in_flight.contains(&key) {
@@ -963,7 +980,7 @@ mod pressure_tests {
                 );
             }
             blocks.map.get_mut(&(1, 0)).unwrap().read_at =
-                std::time::Instant::now() - std::time::Duration::from_secs(1);
+                std::time::Instant::now() - PLAYBACK_PRESSURE_HOT;
         }
         cache.playback_memory_pressure();
         {
@@ -976,5 +993,61 @@ mod pressure_tests {
         }
         cache.memory_pressure();
         assert_eq!(cache.stats().bytes, 0);
+    }
+
+    /// A playing look-ahead prefetches blocks the render reads seconds
+    /// later. Asking for a decoded block again keeps it through playback
+    /// pressure; a block nobody asked for since is reclaimed.
+    #[test]
+    fn playback_pressure_keeps_blocks_the_look_ahead_still_wants() {
+        let dir = std::env::temp_dir().join(format!(
+            "pm-audio-pressure-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("two-blocks.wav");
+        {
+            let frames = BLOCK + 1000;
+            let interleaved: Vec<f32> = (0..frames * 2).map(|i| (i % 7) as f32 * 0.01).collect();
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = crate::offline::WavWriter::new(
+                std::io::BufWriter::new(file),
+                crate::offline::PcmFormat::F32,
+                2,
+                48_000,
+            )
+            .unwrap();
+            writer.write(0, &interleaved).unwrap();
+            writer.finish().unwrap();
+        }
+        let cache = SourceCache::new(128 << 20, 0);
+        let source = cache.open(&path, None).unwrap();
+        for index in [0, 1] {
+            cache.block(&source, index, true).unwrap().unwrap();
+        }
+        let cold = std::time::Instant::now() - PLAYBACK_PRESSURE_HOT;
+        {
+            let mut blocks = lock(&cache.blocks);
+            for index in [0, 1] {
+                blocks.map.get_mut(&(source.id, index)).unwrap().read_at = cold;
+            }
+        }
+        // The look-ahead asks for block 1 again; block 0 is behind it.
+        cache.prefetch(&source, [1]);
+        cache.playback_memory_pressure();
+        {
+            let blocks = lock(&cache.blocks);
+            assert!(!blocks.map.contains_key(&(source.id, 0)));
+            assert!(blocks.map.contains_key(&(source.id, 1)));
+            assert!(
+                blocks.queue.is_empty(),
+                "a decoded block is not queued again"
+            );
+        }
+        drop(source);
+        cache.memory_pressure();
+        assert_eq!(cache.stats().bytes, 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

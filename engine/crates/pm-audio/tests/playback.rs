@@ -431,6 +431,74 @@ fn playback_equals_the_offline_render() {
     );
 }
 
+/// The host's memory-pressure grant releases inactive sample blocks
+/// (`Playback::memory_pressure`). Today's `trimDecodedCache` never evicts
+/// the assets of playing voices. Here the grant arrives every few callbacks,
+/// once while paused on a prepared start and then throughout the run: what
+/// is heard stays the offline render, complete from its first sample, with
+/// no ring underrun and no starved render.
+#[test]
+fn memory_pressure_during_playback_keeps_it_whole() {
+    let dir = temp_dir("pressure");
+    let f44 = dir.join("t44.wav");
+    write_wav(
+        &f44,
+        44_100,
+        &[
+            tone(44_100, 6.0, 997.0, 0.5),
+            tone(44_100, 6.0, 1503.0, 0.3),
+        ],
+    );
+    let (playback, mut dev, rig) = setup(&f44, 6.0, SR, 0.0);
+    playback
+        .command(TransportCommand::Seek {
+            time: ticks(2.5),
+            mode: SeekMode::Exact,
+        })
+        .unwrap();
+    // Paused: the start is prepared, then the grant takes what it may.
+    until(|| {
+        playback
+            .prepared_starts()
+            .contains(&((2.5 * SR as f64) as i64))
+    });
+    playback.memory_pressure();
+    playback
+        .command(TransportCommand::Play {
+            rate: PlaybackRate::NORMAL,
+        })
+        .unwrap();
+    for _ in 0..50 {
+        dev.run(3);
+        playback.memory_pressure();
+    }
+    let stats = playback.stats();
+    assert_eq!(stats.underruns, 0, "{stats:?}");
+    assert_eq!(stats.starved_renders, 0, "{stats:?}");
+    let played: Vec<f32> = dev
+        .log
+        .iter()
+        .flat_map(|(_, b)| b.iter().step_by(2).copied())
+        .collect();
+    let start = played.iter().position(|v| *v != 0.0).expect("audio played");
+    let doc = project(30.0, 6.0, &[audio("A", "s", 0.0, 6.0, "", "")], &[], "");
+    let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
+    let n = 60_000;
+    let offline = rig.render(
+        &mut m,
+        (2.5 * SR as f64) as i64,
+        (2.5 * SR as f64) as i64 + n as i64,
+        4096,
+    );
+    let lead = offline[0].iter().position(|v| *v != 0.0).unwrap();
+    assert!(start >= lead);
+    let played = &played[start - lead..start - lead + n];
+    assert!(
+        played == &offline[0][..],
+        "audio played through memory pressure differs from the offline render"
+    );
+}
+
 /// Today schedules a clip's gain envelope when playback starts, from the
 /// playhead: points one composition frame apart from there. A play from a
 /// time between frames therefore hears the eased key on the grid that starts
