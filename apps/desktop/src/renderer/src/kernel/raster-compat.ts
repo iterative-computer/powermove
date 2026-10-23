@@ -277,7 +277,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   let unanswer: (() => void) | null = null;
   /** The key last posted per layer, time and density (for `reuse`). */
   const posted = new Map<string, string>();
-  const ready = new Map<string, { layer: unknown; answer: CompatAnswerResult; bytes: number }>();
+  const ready = new Map<string, { layer: unknown; answer: CompatAnswerResult; bytes: number; retained: boolean }>();
   type Dependency = { key: string; layer: any; scale: number; time: number; crop?: RasterWindowLike };
   // A missing base unwinds only this preparation attempt. Retry with its
   // real pixels; never hand a wrapper a placeholder it could cache.
@@ -398,9 +398,15 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         // A reset/eviction cannot turn an asynchronous playback answer into
         // a synchronous raster wait on the presentation thread.
         if (!completed || completed.layer !== layer) return null;
-        ready.delete(preparedKey);
+        // A native need sent before the proactive answer can arrive after
+        // its readback finished. Repost that exact paused viewer answer;
+        // don't run the wrapper and GPU readback a second time per edit.
+        if (!completed.retained) ready.delete(preparedKey);
         return completed.answer;
       }
+      // Explicit captures and redraws run the wrapper again, including one
+      // whose own state changed without changing the document revision.
+      if (!preparation) ready.delete(preparedKey);
       // A layer the window no longer has: the engine draws its own.
       if (!layer) return { kind: 'native' };
       const chain = options.chain();
@@ -483,6 +489,9 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const layer = findLayer(PM, String(need.composition), String(need.layer));
       if (!layer || (layer.type === 'captions' && PM?.captionsHidden)) return;
       const key = sampleKey(need, revision);
+      // Only duplicate required viewer needs share a retained answer.
+      // Async captures keep today's fresh wrapper evaluation semantics.
+      if (!prepareOptions?.urgent && ready.get(key)?.retained) ready.delete(key);
       if (ready.get(key)?.layer === layer) return;
       const existing = preparing.get(key);
       if (existing) { if (existing.layer === layer) await existing.promise; return; }
@@ -536,7 +545,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
               }
               if (!valid()) return;
               if (answer?.kind === 'native') stats.passThroughSkips++;
-              ready.set(key, { layer, answer, bytes: answer?.kind === 'raster' ? answer.data.byteLength : 0 });
+              ready.set(key, { layer, answer, bytes: answer?.kind === 'raster' ? answer.data.byteLength : 0, retained: !!prepareOptions?.urgent });
               keepReady();
               return;
             }
@@ -595,6 +604,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       clearReady();
       chainChange.dispose();
       offFonts?.();
+      offPresented?.();
       unanswer?.();
       unanswer = null;
       transport = null;
@@ -621,5 +631,11 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   const chainChange = options.onChainChange(sync);
   const fontsOff = PM?.bus?.on?.('fonts', () => handle.reset());
   const offFonts = typeof fontsOff === 'function' ? fontsOff : null;
+  // The sharing window ends at presentation: a later seek to the same time
+  // or a redraw must run stateful wrappers again, just as today's viewer.
+  const presentedOff = PM?.bus?.on?.('preview:presented', () => {
+    for (const [key, entry] of ready) if (entry.retained) ready.delete(key);
+  });
+  const offPresented = typeof presentedOff === 'function' ? presentedOff : null;
   return handle;
 }

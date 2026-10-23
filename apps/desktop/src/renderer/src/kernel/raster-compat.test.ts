@@ -42,6 +42,34 @@ function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: 
 }
 
 describe('the raster override producer', () => {
+  it('shares a paused viewer readback with a delayed duplicate need, but refreshes captures and redraws', async () => {
+    const { PM, services, compat, need, readPixels } = setup(true, (layer, scale) => JSON.stringify([layer.d, scale]));
+    const original = services.get<any>('raster');
+    let state = 'first';
+    const wrapper = vi.fn((...args: any[]) => ({ ...original(...args), key: state }));
+    services.register('raster', wrapper);
+    const n = need('box');
+    await compat.prepare(n, 4, { urgent: true });
+    expect(compat.answer(n, 4, { prepared: true })).toMatchObject({ key: 'first' });
+    const calls = wrapper.mock.calls.length;
+    await compat.prepare(n, 4, { urgent: true });
+    expect(compat.answer(n, 4, { prepared: true })).toMatchObject({ key: 'first' });
+    expect(wrapper).toHaveBeenCalledTimes(calls);
+    expect(readPixels).toHaveBeenCalledTimes(1);
+    PM.bus.on.mock.calls.find(([name]: [string]) => name === 'preview:presented')[1]();
+    state = 'next-frame';
+    await compat.prepare(n, 4, { urgent: true });
+    expect(compat.answer(n, 4, { prepared: true })).toMatchObject({ key: 'next-frame' });
+    state = 'capture';
+    await compat.prepare(n, 4);
+    expect(compat.answer(n, 4, { prepared: true })).toMatchObject({ key: 'capture' });
+    state = 'redraw';
+    expect(compat.answer(n, 4)).toMatchObject({ key: 'redraw' });
+    await compat.prepare(n, 4, { urgent: true });
+    expect(compat.answer(n, 4, { prepared: true })).toMatchObject({ key: 'redraw' });
+    compat.dispose();
+  });
+
   it('does not put a required paused raster behind background scheduler work', async () => {
     const postTask = vi.fn(async () => {});
     vi.stubGlobal('scheduler', { postTask });
