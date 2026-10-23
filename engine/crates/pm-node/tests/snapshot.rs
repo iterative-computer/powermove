@@ -890,6 +890,79 @@ fn child_viewer_snapshot() {
     let pixels = pixels_of(&ordinary);
     assert_eq!(at(&pixels, 320, 120, 70), BOX);
     assert_eq!(at(&pixels, 320, 80, 60), BACKGROUND);
+
+    // The pinned canvas uses the live viewer's top-down color pass. On a
+    // full canvas it must retain the same exact 8-bit colors as an ordinary
+    // snapshot, while keeping its own selected sequence.
+    let mut full = frame_request(
+        SnapshotClass::Sync,
+        Size::new(320, 180),
+        SnapshotPixels::Opaque,
+        5_000,
+    );
+    full.view_seq = None;
+    full.viewer = Some(SnapshotViewer {
+        view: None,
+        canvas: ViewerCanvas {
+            width: 320,
+            height: 180,
+            crop: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+            css: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+        },
+        view_seq: Seq::new(6).unwrap(),
+    });
+    c.snapshot(52, full, Some(1), WINDOW, c.session);
+    let full = rendered(c.inbox.wait(Duration::from_secs(20), answer(52)));
+    assert_eq!(full.view_seq, Some(Seq::new(6).unwrap()));
+    assert_eq!(pixels_of(&full), pixels);
+
+    // Project Float32 raises render intermediates, while the live viewer
+    // still writes its composition into an F16 display working texture.
+    let mut high_precision = project(100.0);
+    high_precision["color"] =
+        json!({ "mode": "standard", "linearBlending": true, "precision": "float32" });
+    c.resync(53, 2, &high_precision);
+    let mut high_precision_pin = frame_request(
+        SnapshotClass::Sync,
+        Size::new(320, 180),
+        SnapshotPixels::Opaque,
+        5_000,
+    );
+    high_precision_pin.viewer = Some(SnapshotViewer {
+        view: None,
+        canvas: ViewerCanvas {
+            width: 320,
+            height: 180,
+            crop: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+            css: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 180.0,
+            },
+        },
+        view_seq: Seq::new(7).unwrap(),
+    });
+    high_precision_pin.view_seq = None;
+    c.snapshot(54, high_precision_pin, Some(2), WINDOW, c.session);
+    let high_precision = rendered(c.inbox.wait(Duration::from_secs(20), answer(54)));
+    assert_eq!(high_precision.view_seq, Some(Seq::new(7).unwrap()));
+    assert_eq!(at(&pixels_of(&high_precision), 320, 120, 70), BOX);
     println!("CHILD-OK");
 }
 

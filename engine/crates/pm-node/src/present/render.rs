@@ -5671,7 +5671,14 @@ impl Thread {
         }
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         let size = request.target_size();
-        let format = pm_render::Renderer::target_format(doc.document(), &request);
+        // The live viewer's composition region always lands in this display
+        // working format, even when project settings raise its intermediate
+        // calculations to Float32. A pinned canvas captures those pixels.
+        let format = if job.request.viewer.is_some() {
+            pm_gpu::bridge_out::display::WORKING_FORMAT
+        } else {
+            pm_render::Renderer::target_format(doc.document(), &request)
+        };
         let target = snapshot_output_target(
             snapshot_target,
             renderer.device(),
@@ -5706,8 +5713,8 @@ impl Thread {
         // the window for them).
         let rendered = {
             let mut renderer = renderer.svg_waiting();
-            renderer
-                .render_snapshot_into_copy(
+            let rendered = if job.request.viewer.is_some() {
+                renderer.render_viewer_snapshot_into_copy(
                     doc.document(),
                     job.request.composition.as_str(),
                     job.request.time,
@@ -5716,7 +5723,18 @@ impl Thread {
                     &target,
                     &copy,
                 )
-                .map(|(_, rows)| (target.width(), target.height(), rows))
+            } else {
+                renderer.render_snapshot_into_copy(
+                    doc.document(),
+                    job.request.composition.as_str(),
+                    job.request.time,
+                    &request,
+                    doc.media(),
+                    &target,
+                    &copy,
+                )
+            };
+            rendered.map(|(_, rows)| (target.width(), target.height(), rows))
         };
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
             readback.cancel(ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
