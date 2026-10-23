@@ -641,6 +641,10 @@ work.
   fresh readback bytes under its explicit texture key and unchanged quad
   (4,096 entries, 192 MiB; cleared on revision, reset and chain changes).
   Export callers receive independent copies, never a preview-only reuse.
+  Offline-media checks follow the output's audio setting: a silent video
+  or image output does not need standalone audio assets. Video and image
+  assets remain required through nested compositions. The window's
+  preflight and the job's initial and repeated checks use the same rule.
 - Private baseline runs exposed the shared-texture HandleScope abort again.
   Direct pool release can return a slot before the page knows the worker
   closed its clone. The page now retains each frame by sequence until an

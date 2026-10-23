@@ -642,6 +642,90 @@ fn offline_media_is_listed_by_clip() {
     assert!(names.contains(&"tone".to_string()) && names.contains(&"far".to_string()));
 }
 
+#[test]
+fn silent_exports_still_require_nested_video_and_image_but_not_audio() {
+    let (mut doc, media) = project_with(0.5, false);
+    composition(
+        &mut doc,
+        "inner",
+        64,
+        36,
+        0.5,
+        vec![
+            layer(
+                "nested-video",
+                "video",
+                json!({ "asset": "far", "w": 64, "h": 36 }),
+                32.0,
+                18.0,
+                0.5,
+            ),
+            layer(
+                "nested-image",
+                "image",
+                json!({ "asset": "art", "w": 64, "h": 36 }),
+                32.0,
+                18.0,
+                0.5,
+            ),
+            audio("nested-audio", "voice", 0.0, 0.5),
+        ],
+    );
+    doc["layers"].as_array_mut().unwrap().push(layer(
+        "pre",
+        "precomp",
+        json!({ "comp": "inner", "w": 64, "h": 36 }),
+        32.0,
+        18.0,
+        0.5,
+    ));
+    asset(&mut doc, "far", "video", "mov", 64, 36, 1.0);
+    asset(&mut doc, "art", "image", "png", 64, 36, 0.0);
+    asset(&mut doc, "voice", "audio", "wav", 0, 0, 1.0);
+    let document = load(&doc);
+    let assets = |include_audio| {
+        offline_media_with_audio(&document, "Ptest-root", &media, include_audio)
+            .into_iter()
+            .map(|clip| clip.asset)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(assets(false), vec!["far".to_owned(), "art".to_owned()]);
+    assert_eq!(
+        assets(true),
+        vec!["far".to_owned(), "art".to_owned(), "voice".to_owned()]
+    );
+    assert_eq!(
+        offline_media(&document, "Ptest-root", &media)
+            .into_iter()
+            .map(|clip| clip.asset)
+            .collect::<Vec<_>>(),
+        assets(true)
+    );
+
+    let mut missing_root_audio = media.clone();
+    missing_root_audio.paths.remove("tone");
+    let silent: Vec<_> =
+        offline_media_with_audio(&document, "Ptest-root", &missing_root_audio, false)
+            .into_iter()
+            .map(|clip| clip.asset)
+            .collect();
+    assert_eq!(silent, vec!["far".to_owned(), "art".to_owned()]);
+    let with_audio: Vec<_> =
+        offline_media_with_audio(&document, "Ptest-root", &missing_root_audio, true)
+            .into_iter()
+            .map(|clip| clip.asset)
+            .collect();
+    assert_eq!(
+        with_audio,
+        vec![
+            "tone".to_owned(),
+            "far".to_owned(),
+            "art".to_owned(),
+            "voice".to_owned()
+        ]
+    );
+}
+
 /// Section 14.6: preview renders through the same renderer (Half and Quarter
 /// at 16-bit float, sliced and whole) leave nothing an export reads: the export
 /// after them equals one from a fresh renderer byte for byte, as encoder input

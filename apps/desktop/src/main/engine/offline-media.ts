@@ -7,15 +7,22 @@
  * check (`pm_export::render::offline_media`).
  */
 import { dialog, type BrowserWindow } from 'electron';
+import { formatInfo, migrateFormat } from '../../shared/delivery';
 
 export type OfflineClip = { asset: string; name: string };
 
 type Project = Record<string, any>;
+type OfflineMediaOptions = { includeAudio?: boolean };
 
-/** Video, image, and audio assets the open composition (and every composition
- *  it nests) uses, in first-use order. Layers whose asset has no record draw
- *  nothing, as today, and are skipped. */
-export function referencedClips(project: Project, composition: string = project['compId']): OfflineClip[] {
+/** Standalone audio is needed only when the output carries an audio track. */
+export function exportUsesAudio(options: { audio: boolean; format: unknown }): boolean {
+  return options.audio && formatInfo(migrateFormat(options.format)).category !== 'images';
+}
+
+/** Video, image, and optionally audio assets the open composition (and every
+ *  composition it nests) uses, in first-use order. Layers whose asset has no
+ *  record draw nothing, as today, and are skipped. */
+export function referencedClips(project: Project, composition: string = project['compId'], options: OfflineMediaOptions = {}): OfflineClip[] {
   const assets: Record<string, any> = project['assets'] && typeof project['assets'] === 'object' ? project['assets'] : {};
   const comps: Record<string, any> = project['comps'] && typeof project['comps'] === 'object' ? project['comps'] : {};
   const open = typeof project['compId'] === 'string' ? project['compId'] : project['id'];
@@ -38,7 +45,7 @@ export function referencedClips(project: Project, composition: string = project[
       if (layer.type === 'precomp' && d.comp) {
         const target = String(d.comp);
         if (!(target === open && Array.isArray(project['layers']))) stack.push(target);
-      } else if ((layer.type === 'video' || layer.type === 'image' || layer.type === 'audio') && d.asset != null) {
+      } else if ((layer.type === 'video' || layer.type === 'image' || (options.includeAudio !== false && layer.type === 'audio')) && d.asset != null) {
         const asset = String(d.asset);
         const record = assets[asset];
         if (!record || seen.has(asset)) continue;
@@ -51,8 +58,8 @@ export function referencedClips(project: Project, composition: string = project[
 }
 
 /** The referenced clips whose files the media store cannot resolve. */
-export async function offlineClips(project: Project, resolve: (asset: string) => Promise<unknown>): Promise<OfflineClip[]> {
-  const clips = referencedClips(project);
+export async function offlineClips(project: Project, resolve: (asset: string) => Promise<unknown>, options: OfflineMediaOptions = {}): Promise<OfflineClip[]> {
+  const clips = referencedClips(project, project['compId'], options);
   const results = await Promise.all(clips.map(async (clip) => ({ clip, ok: await resolve(clip.asset).catch(() => null) })));
   return results.filter((r) => !r.ok).map((r) => r.clip);
 }

@@ -29,7 +29,7 @@ import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
-import { askAboutOfflineMedia, offlineClips } from './offline-media';
+import { askAboutOfflineMedia, exportUsesAudio, offlineClips } from './offline-media';
 import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
 import { SnapshotService } from './snapshots';
@@ -548,7 +548,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
    *  Resolves the options to export with, or the outcome to answer. */
   const checkOffline = async (window: BrowserWindow, sender: WebContents, project: Record<string, any>, request: EngineExportRequest): Promise<EngineExportRequest['options'] | EngineExportStart> => {
     if (!options.resolveAsset || request.options.draft) return request.options;
-    const clips = await offlineClips(project, (asset) => options.resolveAsset!(asset));
+    const clips = await offlineClips(project, (asset) => options.resolveAsset!(asset), { includeAudio: exportUsesAudio(request.options) });
     if (!clips.length) return request.options;
     let proxies = !!options.resolveProxy;
     if (proxies) {

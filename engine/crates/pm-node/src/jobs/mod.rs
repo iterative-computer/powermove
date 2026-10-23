@@ -52,8 +52,8 @@ use pm_engine::jobs::{Drained, HostRequest, JobDocument, JobService, WorkNote};
 use pm_engine::priority::Scheduler;
 use pm_export::render::{
     ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
-    encode_jpeg, encode_png, offline_media, plan_export_for, render_still, run_export_with_blender,
-    sink_for, to_rgba8,
+    encode_jpeg, encode_png, offline_media_with_audio, plan_export_for, render_still,
+    run_export_with_blender, sink_for, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
 use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
@@ -1399,7 +1399,13 @@ fn run_job(
     // Offline media (section 14.8): agent exports go to the current exporter
     // (`mediaOffline`), draft renders fail when even proxies are missing, and
     // queued user jobs wait for the media.
-    let offline = offline_media(&document.document, composition.as_str(), &export.media);
+    let include_audio = settings.audio && !settings.format.is_image();
+    let offline = offline_media_with_audio(
+        &document.document,
+        composition.as_str(),
+        &export.media,
+        include_audio,
+    );
     if !offline.is_empty() {
         let message = offline_message(&offline);
         if submit.class == PriorityClass::AgentExport {
@@ -1426,6 +1432,7 @@ fn run_job(
             job,
             document,
             composition.as_str(),
+            include_audio,
             cancel,
             &message,
         ) {
@@ -1811,6 +1818,7 @@ fn wait_for_media(
     job: &JobId,
     document: &JobDocument,
     composition: &str,
+    include_audio: bool,
     cancel: &AtomicBool,
     message: &str,
 ) -> Option<MediaPaths> {
@@ -1831,7 +1839,8 @@ fn wait_for_media(
             std::thread::sleep(Duration::from_millis(50));
         }
         let media = resolve_media(shared, document);
-        let offline = offline_media(&document.document, composition, &media);
+        let offline =
+            offline_media_with_audio(&document.document, composition, &media, include_audio);
         if offline.is_empty() {
             return Some(media);
         }

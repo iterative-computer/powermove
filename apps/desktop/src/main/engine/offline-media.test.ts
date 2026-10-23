@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({ dialog: { showMessageBox: vi.fn() } }));
 
-import { askAboutOfflineMedia, needsBlender, offlineClips, offlineMessage, offlineTitle, referencedClips } from './offline-media';
+import { askAboutOfflineMedia, exportUsesAudio, needsBlender, offlineClips, offlineMessage, offlineTitle, referencedClips } from './offline-media';
 
 const layer = (id: string, type: string, d: Record<string, unknown>) => ({ id, type, d });
 
@@ -37,6 +37,21 @@ describe('offline media at export', () => {
     const online = new Set(['a1']);
     const clips = await offlineClips(project(), async (asset) => (online.has(asset) ? { path: '/x' } : null));
     expect(clips.map((c) => c.asset)).toEqual(['a2', 'a3']);
+  });
+
+  it('checks visual dependencies in nested compositions for silent video and image outputs', async () => {
+    const resolve = vi.fn(async (_asset: string) => null);
+    const silent = { includeAudio: exportUsesAudio({ audio: false, format: 'h264' }) };
+    expect((await offlineClips(project(), resolve, silent)).map((c) => c.asset)).toEqual(['a1', 'a2']);
+    expect(resolve.mock.calls.map(([asset]) => asset)).toEqual(['a1', 'a2']);
+    expect(referencedClips(project(), 'root', silent).map((c) => c.asset)).toEqual(['a1', 'a2']);
+
+    expect(exportUsesAudio({ audio: true, format: 'png' })).toBe(false);
+    expect(exportUsesAudio({ audio: true, format: 'still' })).toBe(false);
+    expect(exportUsesAudio({ audio: true, format: 'h264' })).toBe(true);
+    expect((await offlineClips(project(), async () => null, { includeAudio: exportUsesAudio({ audio: true, format: 'png' }) }))
+      .map((c) => c.asset)).toEqual(['a1', 'a2']);
+    expect((await offlineClips(project(), async () => null, { includeAudio: true })).map((c) => c.asset)).toEqual(['a1', 'a2', 'a3']);
   });
 
   it('asks with the native three-button message, or two without proxies', async () => {

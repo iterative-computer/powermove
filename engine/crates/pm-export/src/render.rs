@@ -762,6 +762,17 @@ pub fn offline_media(
     composition: &str,
     media: &MediaPaths,
 ) -> Vec<OfflineClip> {
+    offline_media_with_audio(document, composition, media, true)
+}
+
+/// The job's offline dependencies, excluding standalone audio when the
+/// output has no audio track. Video and image layers always remain required.
+pub fn offline_media_with_audio(
+    document: &Document,
+    composition: &str,
+    media: &MediaPaths,
+    include_audio: bool,
+) -> Vec<OfflineClip> {
     use pm_eval::node;
     let Some(root) = document.root() else {
         return vec![];
@@ -800,6 +811,7 @@ pub fn offline_media(
                         }
                     }
                 }
+                "audio" if !include_audio => {}
                 "video" | "image" | "audio" => {
                     let Some(asset) = node::member(d, "asset").map(|a| string(Some(a))) else {
                         continue;
@@ -825,7 +837,8 @@ pub fn offline_media(
 /// Validates `job` and builds its plan: capability routing (pm-render's
 /// `unsupported_with_media`, audio sources pm-audio cannot open), the encoder
 /// spec, and the audio graph. Offline media is not checked here; the job
-/// engine asks [`offline_media`] first (queued jobs wait for it, section 14.8).
+/// engine asks [`offline_media_with_audio`] first (queued jobs wait for it,
+/// section 14.8).
 pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
     plan_export_with(job, false)
 }
