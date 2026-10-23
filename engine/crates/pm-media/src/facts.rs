@@ -10,7 +10,9 @@ use crate::pool::FramePool;
 use crate::probe::color::HdrFormat;
 use crate::probe::{FieldOrder, MediaProbe, StreamKind, VideoProbe};
 use pm_protocol::color::{AlphaMode, Subsampling};
-use pm_protocol::media::{FactLine, FactOrigin, InterpretSetting, MediaFacts, MediaKind};
+use pm_protocol::media::{
+    AudioFacts, FactLine, FactOrigin, InterpretSetting, MediaFacts, MediaKind,
+};
 use serde::Serialize;
 use std::path::Path;
 
@@ -126,6 +128,18 @@ pub fn media_facts(path: &Path, interpret: Option<&str>) -> Result<MediaFacts> {
         None if p.audio_stream.is_some() => Ok(audio_facts(p, issues)),
         None => Err(MediaError::invalid("no video, image, or audio stream")),
     }
+}
+
+fn audio_metadata(p: &MediaProbe) -> Option<AudioFacts> {
+    let audio = p
+        .audio_stream
+        .and_then(|i| p.streams.get(i))?
+        .audio
+        .as_ref()?;
+    Some(AudioFacts {
+        sample_rate: audio.sample_rate.try_into().ok().filter(|r| *r > 0)?,
+        channels: audio.channels.try_into().ok().filter(|c| *c > 0)?,
+    })
 }
 
 fn audio_lines(p: &MediaProbe, out: &mut Vec<FactLine>) {
@@ -307,6 +321,7 @@ fn video_facts(
     };
     MediaFacts {
         kind: MediaKind::Video,
+        audio: audio_metadata(p),
         facts,
         settings,
         issues,
@@ -378,6 +393,7 @@ fn still_facts(path: &Path, interp: &Interpretation, issues: Vec<String>) -> Res
     }
     Ok(MediaFacts {
         kind: MediaKind::Still,
+        audio: None,
         facts,
         settings,
         issues,
@@ -403,6 +419,7 @@ fn audio_facts(p: &MediaProbe, issues: Vec<String>) -> MediaFacts {
     identity_lines(p, &mut facts);
     MediaFacts {
         kind: MediaKind::Audio,
+        audio: audio_metadata(p),
         facts,
         settings: vec![],
         issues,
@@ -414,6 +431,56 @@ fn audio_facts(p: &MediaProbe, issues: Vec<String>) -> MediaFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_metadata_uses_numeric_channels_for_named_and_custom_layouts() {
+        let mut p = MediaProbe {
+            path: "fixture.wav".into(),
+            size: 0,
+            container: "wav".into(),
+            duration_us: Some(1_000_000),
+            start_us: None,
+            streams: vec![crate::probe::StreamProbe {
+                index: 0,
+                id: 0,
+                kind: StreamKind::Audio,
+                codec: "pcm_s16le".into(),
+                timebase: [1, 48000],
+                start_pts: Some(0),
+                duration_pts: Some(48000),
+                default: true,
+                attached_picture: false,
+                metadata: vec![],
+                audio: Some(crate::probe::AudioProbe {
+                    codec: "pcm_s16le".into(),
+                    sample_rate: 48000,
+                    channels: 6,
+                    channel_layout: Some("5.1(side)".into()),
+                    sample_format: None,
+                    priming: None,
+                }),
+            }],
+            video_stream: None,
+            audio_stream: Some(0),
+            video: None,
+            timecode: None,
+            reel: None,
+            umid: None,
+            content_identifier: None,
+            creation_time: None,
+            sampled_fingerprint: "fixture".into(),
+        };
+        assert_eq!(
+            audio_facts(&p, vec![]).audio,
+            Some(AudioFacts {
+                sample_rate: 48000,
+                channels: 6
+            })
+        );
+        p.streams[0].audio.as_mut().unwrap().channel_layout =
+            Some("custom FL+FR+TFL+TFR+LFE+BC".into());
+        assert_eq!(audio_facts(&p, vec![]).audio.unwrap().channels, 6);
+    }
 
     #[test]
     fn clocks_and_rates_read_well() {

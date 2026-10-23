@@ -15,7 +15,8 @@
   "scripts": {
     "build": "node ../../apps/desktop/scripts/build-serve.mjs",
     "prepack": "node ../../apps/desktop/scripts/build-serve.mjs",
-    "start": "node bin/powermove.mjs serve"
+    "start": "node bin/powermove.mjs serve",
+    "build:native": "node scripts/assemble-native.mjs"
   },
   "engines": {
     "node": ">=22"

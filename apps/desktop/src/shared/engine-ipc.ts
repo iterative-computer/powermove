@@ -59,6 +59,8 @@ export const ENGINE_IPC = {
   /** renderer → main (invoke): the same, asynchronously (async siblings,
    *  thumbnails, library cards, posters, the project thumbnail). */
   snapshot: 'engine:snapshot',
+  /** renderer → main: one revision-pinned agent frame batch, without stopping playback. */
+  agentFrames: 'engine:agent-frames',
   /** main → renderer: the job engine needs a layer's compatibility pixels
    *  for an export frame (`EngineCompatAsk`); the window answers with
    *  `compatAnswer`. */
@@ -72,6 +74,12 @@ export const ENGINE_IPC = {
   /** renderer → main (send): the runner's answer (`{ id, ok, rgba16f }` or `{ id, ok: false, reason, message }`). */
   shaderFallbackResult: 'engine:shader-fallback-result'
 } as const;
+
+export type EngineAgentFramesRequest = { project: string; revision: number; times: number[]; width: number };
+export type EngineAgentFramesReply = {
+  status: 'rendered'; revision: number; queuedMs: number;
+  images: Array<{ time: number; data: Uint8Array; mimeType: 'image/jpeg' | 'image/png'; width: number; height: number }>;
+};
 
 /** The `window.postMessage` types the preload uses to hand things to the page. */
 export const ENGINE_WINDOW_MESSAGE = {
@@ -351,6 +359,8 @@ export interface EngineBridge {
   snapshotSync?(request: EngineSnapshotRequest): EngineSnapshotReply;
   /** A snapshot, asynchronously. Never rejects: failures are `status: 'failed'`. */
   snapshot?(request: EngineSnapshotRequest): Promise<EngineSnapshotReply>;
+  /** Agent observations use the job engine at a pinned document revision. */
+  agentFrames?(request: EngineAgentFramesRequest): Promise<EngineAgentFramesReply>;
   /** Compatibility pixels the job engine needs for an export frame; the
    *  listener answers with `answerCompat`. Returns an unsubscribe. */
   onCompatAsk?(listener: (ask: EngineCompatAsk) => void): () => void;

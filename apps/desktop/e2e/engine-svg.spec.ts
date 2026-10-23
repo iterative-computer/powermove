@@ -18,6 +18,8 @@ import { requestJobEngine } from './helpers/job-engine';
  *   pm-electron-lock bunx playwright test e2e/engine-svg.spec.ts --workers=1
  */
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { inflateSync } from 'node:zlib';
 import os from 'node:os';
 import path from 'node:path';
@@ -351,6 +353,74 @@ test('an export in the job engine gets the rasters from the window: the still eq
     expect({ svg }).toEqual({ svg: { differ: 0, max: 0 } });
   } finally {
     if (!keep) await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('powermove render draws level 1 SVG images within the desktop export corpus bound', async () => {
+  test.setTimeout(180_000);
+  const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-cli-svg-'));
+  let session: LaunchedApp | undefined;
+  const repo = path.resolve(__dirname, '../../..');
+  const binary = process.env.POWERMOVE_PM_CLI ?? path.join(repo, 'engine/target/debug/pm-cli');
+  const dist = path.join(repo, 'packages/cli/dist');
+  const run = promisify(execFile);
+  try {
+    session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '0' } });
+    await session.openEditor();
+    await svgProject(session.page);
+    const projectFile = path.join(root, 'svg.pmv');
+    await session.app.evaluate(({ dialog }, filePath) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    }, projectFile);
+    await session.page.evaluate(async () => { await (window as any).PM.saveProject(); });
+    for (const time of [0, 1, 1.5]) {
+      const desktopFile = path.join(root, `desktop-${time}.png`);
+      await session.app.evaluate(({ dialog }, filePath) => {
+        dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+      }, desktopFile);
+      const result = await session.page.evaluate(async time => {
+        const PM = (window as any).PM;
+        PM.setTime(time, { raw: true, force: true });
+        return PM.Export.run({ format: 'still', scale: 1, fps: 30, range: 'all', quality: 'high', mblur: false, audio: false });
+      }, time);
+      expect(result).toEqual({ cancelled: false });
+      const desktop = decodePng(await readFile(desktopFile));
+      for (const entry of ['powermove', 'pm-cli'] as const) {
+        const file = path.join(root, `${entry}-${time}.png`);
+        const options = ['--format', 'still', '--range', `${time}:${time + 1 / 30}`];
+        const command = entry === 'powermove' ? process.execPath : binary;
+        const args = entry === 'powermove'
+          ? [path.join(repo, 'packages/cli/bin/powermove.mjs'), 'render', projectFile, file, ...options]
+          : ['render', projectFile, '-o', file, ...options];
+        const output = await run(command, args, {
+          timeout: 45_000,
+          env: { ...process.env, POWERMOVE_PM_CLI: binary, POWERMOVE_USER_DATA: session.userData,
+            POWERMOVE_ANGLE_ENDPOINT: undefined, POWERMOVE_ANGLE_TOKEN: undefined,
+            POWERMOVE_ANGLE_HELPER: path.join(dist, 'native-angle-child.cjs') },
+        });
+        expect(output.stderr).not.toContain('approximate SVG');
+        expect(JSON.parse(output.stdout).approximateSvg).toBe(0);
+        const cli = decodePng(await readFile(file));
+        expect([cli.width, cli.height]).toEqual([640, 360]);
+        expect([desktop.width, desktop.height]).toEqual([cli.width, cli.height]);
+        let withinOne = 0, max = 0, nonBackground = 0;
+        for (let i = 0; i < desktop.data.length; i += 4) {
+          let delta = 0;
+          for (let c = 0; c < 4; c++) delta = Math.max(delta, Math.abs(desktop.data[i + c]! - cli.data[i + c]!));
+          if (delta <= 1) withinOne++;
+          max = Math.max(max, delta);
+          if (desktop.data[i] !== 0x20 || desktop.data[i + 1] !== 0x30 || desktop.data[i + 2] !== 0x40) nonBackground++;
+        }
+        const fraction = withinOne / (cli.width * cli.height);
+        console.log(`SVG desktop export vs ${entry}: ${JSON.stringify({ time, withinOne, fraction, max, nonBackground })}`);
+        expect(nonBackground).toBeGreaterThan(20_000);
+        expect(fraction).toBeGreaterThanOrEqual(0.999);
+        expect(max).toBeLessThanOrEqual(4);
+      }
+    }
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  } finally {
+    try { await session?.close(); } finally { await rm(root, { recursive: true, force: true }); }
   }
 });
 

@@ -19,6 +19,7 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$(cd "${1:-$HERE/out}" && pwd)" || { echo "error: no build output at ${1:-$HERE/out}" >&2; exit 1; }
+ARCH="${PM_FFMPEG_ARCH:-arm64}"
 FFMPEG="$OUT/bin/ffmpeg"
 FFPROBE="$OUT/bin/ffprobe"
 COMPONENTS="$HERE/required-components.tsv"
@@ -67,7 +68,7 @@ before_binaries=$failures
 for bin in "${binaries[@]}"; do
   rel="${bin#"$OUT"/}"
   archs="$(lipo -archs "$bin" 2>/dev/null)"
-  [[ "$archs" == "arm64" ]] || fail "$rel architectures: '$archs' (want arm64)"
+  [[ "$archs" == "$ARCH" ]] || fail "$rel architectures: '$archs' (want $ARCH)"
   minos="$(otool -l "$bin" | awk '/cmd LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
   [[ "$minos" == "13.0" ]] || fail "$rel minimum macOS $minos (want 13.0)"
   codesign --verify --strict "$bin" 2>/dev/null || fail "$rel code signature is invalid"
@@ -100,7 +101,7 @@ for bin in "${binaries[@]}"; do
   leaks="$(strings -a "$bin" | grep -E "/Users/|/opt/homebrew|/usr/local|$WORK" | sort -u | head -n 5)"
   [[ -z "$leaks" ]] || fail "$rel contains local paths: $(tr '\n' ' ' <<<"$leaks")"
 done
-(( failures == before_binaries )) && pass "${#binaries[@]} binaries: arm64, macOS 13.0, signed, only @rpath and system libraries, no local paths"
+(( failures == before_binaries )) && pass "${#binaries[@]} binaries: $ARCH, macOS 13.0, signed, only @rpath and system libraries, no local paths"
 
 # Libraries the executables and dylibs link, for the report.
 printf '      linked system libraries: %s\n' "$(for bin in "${binaries[@]}"; do otool -L "$bin" | tail -n +2; done \
@@ -152,7 +153,7 @@ int main(void) {
   return 0;
 }
 EOF
-  if clang -arch arm64 -mmacosx-version-min=13.0 "$TMP/link.c" -I"$inc" -L"$lib" -lavfilter -lavformat -lavcodec -lavutil \
+  if clang -arch "$ARCH" -mmacosx-version-min=13.0 "$TMP/link.c" -I"$inc" -L"$lib" -lavfilter -lavformat -lavcodec -lavutil \
        -Wl,-rpath,"$OUT/lib" -o "$TMP/link" 2>"$TMP/link.log" \
      && env -u DYLD_LIBRARY_PATH "$TMP/link"; then
     pass "pkg-config files are relocatable; a C program links and runs against the dylibs (LGPL, dav1d, vpx, drawtext, mov; no x264 or prores_ks)"
