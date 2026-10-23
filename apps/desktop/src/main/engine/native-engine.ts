@@ -207,6 +207,7 @@ export class NativeEngine {
   private jobActivity = 0;
   private jobIdleTimer: { cancel(): void } | null = null;
   private jobRunHolds = new Map<string, { cancel(): void }>();
+  private jobUtilityHolds = new Set<symbol>();
   /** Set while main checks an idle job utility and stops it; job requests
    *  wait for it, then start a new utility if it stopped. */
   private retiring: Promise<void> | null = null;
@@ -299,6 +300,7 @@ export class NativeEngine {
     this.jobIdleTimer = null;
     for (const hold of this.jobRunHolds.values()) hold.cancel();
     this.jobRunHolds.clear();
+    this.jobUtilityHolds.clear();
     for (const cancel of this.cancelReadiness) cancel();
     await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop(), this.blender?.dispose()]);
   }
@@ -541,12 +543,25 @@ export class NativeEngine {
     if (!this.jobRunHolds.size) this.touchJob();
   }
 
+  /** Keep the job utility available while a user-facing export sheet or save
+   *  panel is open. The owner releases this non-expiring hold on close or loss;
+   *  acquiring it alone does not start a utility. */
+  holdJobUtility(): () => void {
+    if (!this.started || this.stopping) return () => {};
+    const hold = Symbol();
+    this.jobUtilityHolds.add(hold);
+    this.touchJob();
+    return () => {
+      if (this.jobUtilityHolds.delete(hold)) this.touchJob();
+    };
+  }
+
   /** Records job activity and restarts the idle countdown. */
   private touchJob(): void {
     this.jobActivity++;
     if (this.options.eagerJobs || !this.started || this.stopping) return;
     this.jobIdleTimer?.cancel();
-    if (this.jobRunHolds.size) {
+    if (this.jobRunHolds.size || this.jobUtilityHolds.size) {
       this.jobIdleTimer = null;
       return;
     }
@@ -569,7 +584,7 @@ export class NativeEngine {
    */
   private async retireIdleJob(): Promise<void> {
     const launch = this.supervisors.job.current;
-    if (!launch || launch.exiting || this.stopping || !this.started || this.retiring || this.jobOutstanding || this.jobRunHolds.size ||
+    if (!launch || launch.exiting || this.stopping || !this.started || this.retiring || this.jobOutstanding || this.jobRunHolds.size || this.jobUtilityHolds.size ||
       this.readiness.has('job')) return;
     const stamp = this.jobActivity;
     let release = (): void => {};
@@ -577,7 +592,7 @@ export class NativeEngine {
     let retired = false;
     try {
       const report = await launch.report(2000);
-      if (stamp !== this.jobActivity || this.jobOutstanding || this.jobRunHolds.size || this.supervisors.job.current !== launch || !jobReportIdle(report)) return;
+      if (stamp !== this.jobActivity || this.jobOutstanding || this.jobRunHolds.size || this.jobUtilityHolds.size || this.supervisors.job.current !== launch || !jobReportIdle(report)) return;
       this.jobDemanded = false;
       await this.supervisors.job.stop();
       retired = true;

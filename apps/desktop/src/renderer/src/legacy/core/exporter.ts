@@ -160,6 +160,20 @@ const engineOn = (): boolean => deliveryEngineOn();
 /** The exact export frame rate when it is the composition's own. */
 const RATE_LABEL = (f: number) => (Number.isInteger(f) ? String(f) : f.toFixed(3)) + ' fps';
 
+let nextExportHold = 0;
+/** Each settings sheet and export preflight owns a separate warm-job lease. */
+function holdExportJob(): () => void {
+  const engine = engineOn() ? hostBridge()?.nativeEngine : undefined;
+  const id = `export-${++nextExportHold}`;
+  engine?.exportSheet?.(id, true);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    engine?.exportSheet?.(id, false);
+  };
+}
+
 X.dialog = () => {
   const p: any = PM.proj;
   const engine = engineOn();
@@ -449,14 +463,19 @@ X.dialog = () => {
   }
   sync();
   let unmountCorners: (() => void) | undefined;
+  let releaseJob = () => {};
   const actions: any[] = [{ label: 'Cancel' }];
   actions.push({ label: 'Add to Queue', run: () => { X.remember(opts); window.setTimeout(() => void X.addToQueue(opts), 0); } });
   actions.push({ label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); window.setTimeout(() => void run(opts), 0); } });
   m = PM.modal({
     title: 'Export', body, width: 620,
-    onClose: () => unmountCorners?.(),
+    onClose: () => {
+      releaseJob();
+      unmountCorners?.();
+    },
     actions,
   });
+  if (engine) releaseJob = holdExportJob();
   m.el.classList.add('export-modal');
   unmountCorners = mountSquircles(m.el, `${SQUIRCLE_SELECTOR}, .export-destinations, .export-destination, .btn`);
   sync();
@@ -576,6 +595,7 @@ async function run(opts: any) {
   X.busy = true;
   X.cancel = false;
   const bridge = (hostBridge() as any);
+  const releaseJob = isRenderFormat(opts.format) && !opts.reportPath ? holdExportJob() : () => {};
   try {
     const p = PM.proj;
     // With Use New Engine on, every render format runs in the job engine; a
@@ -627,6 +647,7 @@ async function run(opts: any) {
       sequenceDirectory = null;
       PM.captionsHidden = false;
       X.busy = false;
+      releaseJob();
     }
   }
 }
@@ -756,6 +777,7 @@ X.addToQueue = async (rawOpts: any) => {
     ...(sidecars.length ? { sidecars } : {}),
     ...(opts.preset ? { preset: String(opts.preset) } : {})
   };
+  const releaseJob = holdExportJob();
   try {
     await PM.HostMedia?.flushBindings(project);
     // The queued job keeps this window's definitions as they are now.
@@ -766,7 +788,7 @@ X.addToQueue = async (rawOpts: any) => {
   } catch (error) {
     PM.toast('Could not add to the render queue: ' + (error instanceof Error ? error.message : String(error)), 5000);
     return null;
-  }
+  } finally { releaseJob(); }
 };
 
 async function deliver(blob: Blob, name: string): Promise<boolean> {

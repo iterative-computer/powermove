@@ -66,6 +66,45 @@ afterEach(() => {
 });
 
 describe('export delivery', () => {
+  it('prewarms while the export settings sheet is open and releases on close', () => {
+    const { X, PM } = setup();
+    const exportSheet = vi.fn();
+    (window as any).powermove = { nativeEngine: { enabledSync: () => true, exportSheet } };
+    let close!: () => void;
+    PM.modal = (options: any) => {
+      close = options.onClose;
+      return { el: document.createElement('div') };
+    };
+    X.dialog();
+    expect(exportSheet).toHaveBeenCalledExactlyOnceWith('export-1', true);
+    close();
+    expect(exportSheet.mock.calls).toEqual([['export-1', true], ['export-1', false]]);
+  });
+
+  it.each(['run', 'addToQueue'])('keeps %s preflight warm while media bindings and definitions settle', async action => {
+    const { X, PM } = setup();
+    const exportSheet = vi.fn();
+    const submit = vi.fn(async () => ({ status: 'cancelled' }));
+    let bound!: () => void, settled!: () => void;
+    PM.HostMedia = { flushBindings: vi.fn(() => new Promise<void>(resolve => { bound = resolve; })) };
+    PM.EngineDefinitions = { settle: vi.fn(() => new Promise<void>(resolve => { settled = resolve; })) };
+    (window as any).powermove = { nativeEngine: {
+      enabledSync: () => true, exportSheet, status: async () => ({ enabled: true }),
+      onExportStatus: () => () => {}, exportVideo: submit, queueAdd: submit
+    } };
+    const exporting = X[action]({ ...options, format: 'h264' });
+    await vi.waitFor(() => expect(PM.HostMedia.flushBindings).toHaveBeenCalledOnce());
+    expect(exportSheet.mock.calls).toEqual([['export-1', true]]);
+    bound();
+    await vi.waitFor(() => expect(PM.EngineDefinitions.settle).toHaveBeenCalledOnce());
+    expect(submit).not.toHaveBeenCalled();
+    expect(exportSheet.mock.calls).toEqual([['export-1', true]]);
+    settled();
+    await exporting;
+    expect(submit).toHaveBeenCalledOnce();
+    expect(exportSheet.mock.calls).toEqual([['export-1', true], ['export-1', false]]);
+  });
+
   it('waits for the native destination before showing progress or rendering', async () => {
     const { X, PM } = setup();
     PM.modal = vi.fn(PM.modal);

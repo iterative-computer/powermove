@@ -30,6 +30,8 @@ export const ENGINE_IPC = {
   definitions: 'engine:definitions',
   /** renderer → main (invoke): export from the export sheet through the job engine. */
   exportVideo: 'engine:export-video',
+  /** renderer → main: a named export sheet/preflight opens or closes a warm-job hold. */
+  exportSheet: 'engine:export-sheet',
   /** renderer → main (invoke): cancel one of the window's export jobs. */
   cancelExport: 'engine:export-cancel',
   /** main → renderer: an export job's status (`EngineExportStatus`). */
@@ -339,6 +341,8 @@ export interface EngineBridge {
   stageDocument(request: StageDocumentRequest): Promise<StageDocumentResult>;
   pushDefinitions(update: import('./engine-protocol').DefinitionsUpdate): void;
   exportVideo(request: EngineExportRequest): Promise<EngineExportStart>;
+  /** Independent ids let stacked sheets and export preflight overlap safely. */
+  exportSheet(sheet: string, open: boolean): void;
   /** Adds an export to the render queue (main asks for its destination). */
   queueAdd(request: EngineQueueRequest): Promise<{ status: 'added'; id: string } | { status: 'cancelled' } | { status: 'unavailable'; reason: string }>;
   queueList(): Promise<RenderQueueState>;

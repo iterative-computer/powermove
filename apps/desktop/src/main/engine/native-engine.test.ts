@@ -866,6 +866,35 @@ describe('job engine retirement when unused', () => {
     expect(child.dead).toBe(true);
   });
 
+  it('keeps overlapping export UI holds warm until the final panel closes, without an expiry', async () => {
+    const closeSheet = host.holdJobUtility();
+    await host.ensureReady('job');
+    const child = jobs()[0]!;
+    const closeSavePanel = host.holdJobUtility();
+    await advance(JOB_RUN_HOLD_MS + 60_000);
+    expect(child.dead).toBe(false);
+    closeSheet();
+    closeSheet();
+    await fire();
+    expect(child.dead).toBe(false);
+    closeSavePanel();
+    await fire();
+    expect(child.dead).toBe(true);
+  });
+
+  it('ignores an already queued idle callback while an export panel holds the job', async () => {
+    await host.ensureReady('job');
+    await settle();
+    const idle = timers.filter((t) => !t.cancelled && t.ms === 1000).at(-1)!;
+    const release = host.holdJobUtility();
+    idle.fn();
+    await settle();
+    expect(jobs()[0]!.dead).toBe(false);
+    release();
+    await fire();
+    expect(jobs()[0]!.dead).toBe(true);
+  });
+
   it('expires an orphaned run hold and ignores a cancelled earlier expiry', async () => {
     host.holdJobRun('agent-run');
     await host.ensureReady('job');

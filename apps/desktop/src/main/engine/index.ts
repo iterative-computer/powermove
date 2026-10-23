@@ -7,8 +7,8 @@ import { installAgentFramesIpc } from './agent-frames';
  *
  * With the flag off this registers one read-only IPC handler that reports
  * the engine as disabled, and nothing else: no utility process, no ports.
- * With it on, main starts the interactive and job engine processes, gives
- * every editor window a port to each (main frame only, never extension
+ * With it on, main eagerly starts the interactive utility and starts jobs on
+ * demand, gives every editor window a port to each (main frame only, never extension
  * sandbox frames), tells windows about crashes and restarts, and serves
  * the engines' host requests (native-engine.ts).
  */
@@ -40,6 +40,7 @@ import { SnapshotService } from './snapshots';
 import { WindowSnapshotSessions } from './window-sessions';
 import { CompatFrames } from './compat-frames';
 import { ShaderFallbackRelay } from './shader-fallback-relay';
+import { ExportJobWarmth, installExportJobWarmthIpc } from './export-job-warmth';
 import type { ChildLike, PortLike } from './ports';
 
 export { FONT_CLIENT_ID, JOB_FONT_CLIENT_ID } from '../engine-fonts';
@@ -549,13 +550,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     status: (status) => { if (status.job.state === 'ready' || status.interactive.state === 'ready') renderQueue?.engineReady(); }
   });
 
-  /** Starts a cold job utility while the user answers the offline message
-   *  and the save panel, so the export does not wait for its launch. */
-  const prepareJobEngine = (): void => {
-    void engine?.ensureReady('job').catch((error: unknown) => {
-      log('warn', `the job engine did not start ahead of an export: ${error instanceof Error ? error.message : String(error)}`);
-    });
-  };
+  const exportWarmth = new ExportJobWarmth(engine, log);
+  const removeExportWarmthIpc = installExportJobWarmthIpc(options.ipc, exportWarmth, options.isTrustedSender);
 
   /** The offline message before an interactive export (section 14.8).
    *  Resolves the options to export with, or the outcome to answer. */
@@ -583,29 +579,30 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!agentJobs.available) return { status: 'unavailable', reason: 'The job engine is not running.' };
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || window.isDestroyed()) throw new Error('Export window is unavailable');
-    prepareJobEngine();
-    const project = JSON.parse(request.project);
-    const checked = await checkOffline(window, event.sender, project, request);
-    if ('status' in checked) return checked;
-    const format = migrateFormat(checked.format);
-    const delivery = normalizeDelivery(checked.delivery ?? {});
-    const panel = savePanel(format, delivery, request.name);
-    const chosen = await dialog.showSaveDialog(window, panel.options);
-    if (chosen.canceled || !chosen.filePath || window.isDestroyed()) return { status: 'cancelled' };
-    const file = panel.extension === null || path.extname(chosen.filePath).toLowerCase() === `.${panel.extension}`
-      ? chosen.filePath
-      : `${chosen.filePath}.${panel.extension}`;
-    try {
-      const started = await agentJobs.exportUser(event.sender.id, project, checked, file);
-      userDestinations.set(started.jobId, file);
-      keepAwake(started.jobId);
-      return { status: 'accepted', jobId: started.jobId, frames: started.frames, path: file };
-    } catch (error) {
-      if (!(error instanceof AgentJobError)) throw error;
-      // The current exporter writes the file the user just chose.
-      routeToCurrentExporter(event.sender.id, file);
-      return { status: 'unavailable', reason: error.message };
-    }
+    return exportWarmth.during<EngineExportStart>(event.sender.id, async () => {
+      const project = JSON.parse(request.project);
+      const checked = await checkOffline(window, event.sender, project, request);
+      if ('status' in checked) return checked;
+      const format = migrateFormat(checked.format);
+      const delivery = normalizeDelivery(checked.delivery ?? {});
+      const panel = savePanel(format, delivery, request.name);
+      const chosen = await dialog.showSaveDialog(window, panel.options);
+      if (chosen.canceled || !chosen.filePath || window.isDestroyed()) return { status: 'cancelled' };
+      const file = panel.extension === null || path.extname(chosen.filePath).toLowerCase() === `.${panel.extension}`
+        ? chosen.filePath
+        : `${chosen.filePath}.${panel.extension}`;
+      try {
+        const started = await agentJobs.exportUser(event.sender.id, project, checked, file);
+        userDestinations.set(started.jobId, file);
+        keepAwake(started.jobId);
+        return { status: 'accepted', jobId: started.jobId, frames: started.frames, path: file };
+      } catch (error) {
+        if (!(error instanceof AgentJobError)) throw error;
+        // The current exporter writes the file the user just chose.
+        routeToCurrentExporter(event.sender.id, file);
+        return { status: 'unavailable', reason: error.message };
+      }
+    });
   });
   options.ipc.handle(ENGINE_IPC.cancelExport, async (event, jobId: unknown) => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -620,27 +617,28 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!validExportRequest(request)) throw new Error('A queued export names a project and its settings.');
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window || window.isDestroyed()) throw new Error('Export window is unavailable');
-    prepareJobEngine();
-    const queueRequest = request as EngineQueueRequest;
-    const format = migrateFormat(queueRequest.options.format);
-    const delivery = normalizeDelivery(queueRequest.options.delivery ?? {});
-    const panel = savePanel(format, delivery, queueRequest.name);
-    const chosen = await dialog.showSaveDialog(window, { ...panel.options, buttonLabel: 'Add to Queue' });
-    if (chosen.canceled || !chosen.filePath) return { status: 'cancelled' as const };
-    const file = panel.extension === null || path.extname(chosen.filePath).toLowerCase() === `.${panel.extension}`
-      ? chosen.filePath
-      : `${chosen.filePath}.${panel.extension}`;
-    const id = await renderQueue!.add({
-      owner: event.sender.id,
-      name: path.basename(file),
-      project: options.snapshotMedia ? await options.snapshotMedia(JSON.parse(queueRequest.project)) : JSON.parse(queueRequest.project),
-      options: queueRequest.options,
-      destination: file,
-      ...(queueRequest.sidecars ? { sidecars: queueRequest.sidecars } : {}),
-      ...(typeof queueRequest.preset === 'string' ? { preset: queueRequest.preset.slice(0, 120) } : {}),
-      definitions: engine!.definitions.current(event.sender.id)?.updates(1) ?? []
+    return exportWarmth.during(event.sender.id, async () => {
+      const queueRequest = request as EngineQueueRequest;
+      const format = migrateFormat(queueRequest.options.format);
+      const delivery = normalizeDelivery(queueRequest.options.delivery ?? {});
+      const panel = savePanel(format, delivery, queueRequest.name);
+      const chosen = await dialog.showSaveDialog(window, { ...panel.options, buttonLabel: 'Add to Queue' });
+      if (chosen.canceled || !chosen.filePath || window.isDestroyed()) return { status: 'cancelled' as const };
+      const file = panel.extension === null || path.extname(chosen.filePath).toLowerCase() === `.${panel.extension}`
+        ? chosen.filePath
+        : `${chosen.filePath}.${panel.extension}`;
+      const id = await renderQueue!.add({
+        owner: event.sender.id,
+        name: path.basename(file),
+        project: options.snapshotMedia ? await options.snapshotMedia(JSON.parse(queueRequest.project)) : JSON.parse(queueRequest.project),
+        options: queueRequest.options,
+        destination: file,
+        ...(queueRequest.sidecars ? { sidecars: queueRequest.sidecars } : {}),
+        ...(typeof queueRequest.preset === 'string' ? { preset: queueRequest.preset.slice(0, 120) } : {}),
+        definitions: engine!.definitions.current(event.sender.id)?.updates(1) ?? []
+      });
+      return { status: 'added' as const, id };
     });
-    return { status: 'added' as const, id };
   });
   options.ipc.handle(ENGINE_IPC.queueList, async (event) => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -674,6 +672,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     // A page load (first load or reload) gets fresh ports; ports given to
     // a page die with it.
     contents.on('did-finish-load', () => {
+      exportWarmth.forget(id);
       // A new page starts its document revisions again.
       windowSessions.forget(id);
       if (!engine) return;
@@ -682,12 +681,18 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       attached = true;
     });
     window.once('closed', () => {
+      exportWarmth.forget(id);
       fallbackRelay.forget(id);
       engine?.removeClient(id);
       windowSessions.forget(id);
       compatFrames.windowGone(id);
       void agentJobs.forgetOwner(id);
     });
+    contents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument) exportWarmth.forget(id);
+    });
+    contents.on('render-process-gone', () => exportWarmth.forget(id));
+    contents.once('destroyed', () => exportWarmth.forget(id));
     // A page that goes away never reports its frame surfaces released.
     if (frameBridge) {
       const gone = (): void => frameBridge.receiverGone(id);
@@ -707,6 +712,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     snapshots,
     attachWindow,
     dispose: async () => {
+      removeExportWarmthIpc();
       removeAgentFramesIpc();
       removeSnapshotIpc();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
