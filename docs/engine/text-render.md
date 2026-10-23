@@ -2023,6 +2023,21 @@ Regression tests (pm-vector `canvas2d::text`):
   translucent one, the image's box keeps the original order pixel for
   pixel and the rest is the merged pass.
 
+App replay (2026-10-23, release thin-LTO addon, hidden app,
+`native-engine-text-app-parity.spec.ts` with a private manifest that adds
+the transformed set, replayed in capture order): with Use New Engine on,
+all eight transformed rasters are within 1 CV of the capture (maxima 0–1,
+0 pixels over), and the earlier paper, distance-field, path, source,
+composed and isolated groups still pass: 7 of 7 "on" tests. With the
+setting off, today's renderer differs from its own capture on the 55°
+distance-field case: 3 pixels at 2 CV (5 pixels in a second session). The
+app session's own text (UI, preview) fills Chromium's glyph atlas first,
+so today's pixels for that case vary between sessions by up to 2 CV on
+distance-field quad edges. That is a property of today's renderer; the
+gated capture fixes the history (hidden layers) and the engine reproduces
+it. The off-mode check of that case fails the 1-CV bound and is reported,
+not loosened.
+
 The CPU primitive images of Graphite items (kept for viewports beyond the
 GPU texture limit) are not exact. Forcing them for every case: the main
 set still passes; `sdf-sizes-0004` (4 px, 2 CV), `path-stroke-0000`
