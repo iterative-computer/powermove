@@ -22,13 +22,13 @@ function rect(el: Element, r: { left: number; top: number; width: number; height
   (el as HTMLElement).getBoundingClientRect = () => ({ ...r, x: r.left, y: r.top, right: r.left + r.width, bottom: r.top + r.height, toJSON: () => r }) as DOMRect;
 }
 
-function setup(view?: () => Partial<ViewParams>) {
+function setup(view?: () => Partial<ViewParams>, composition: () => { w: number; h: number } | null = () => ({ w: 1920, h: 1080 })) {
   const made: FakePresentation[] = [];
   const service = { exclusive: true } as unknown as EngineViewerService;
   let enabled = true;
   const binding = new EngineCanvasBinding({
     service: () => (enabled ? service : null),
-    composition: () => ({ w: 1920, h: 1080 }),
+    composition,
     quality: () => 0.5,
     view,
     present: ({ stage, before }) => {
@@ -69,6 +69,37 @@ describe('EngineCanvasBinding (render.gl.init/resize with the engine on)', () =>
     binding.refresh();
     expect(made).toHaveLength(1);
     expect(binding.presenting).toBe(false);
+  });
+
+  it('does not turn a former self-presenting viewer into a binding on refresh', () => {
+    const { binding, made, stage, canvas } = setup();
+    stage.setAttribute(ENGINE_SELF_PRESENTS_ATTRIBUTE, '');
+    binding.bind(canvas);
+    binding.resize(1464, 824);
+    expect(made).toHaveLength(0);
+
+    stage.removeAttribute(ENGINE_SELF_PRESENTS_ATTRIBUTE);
+    binding.refresh(); // A view notification after the viewer extension unloads.
+    expect(binding.bound).toBe(canvas);
+    expect(binding.presenting).toBe(false);
+    expect(made).toHaveLength(0);
+
+    binding.resize(960, 540); // A replacement caller actually places the canvas.
+    expect(made).toHaveLength(1);
+  });
+
+  it('does not activate a dormant binding when composition appears on refresh', () => {
+    let ready = false;
+    const { binding, made, canvas } = setup(undefined, () => ready ? { w: 1920, h: 1080 } : null);
+    binding.bind(canvas);
+    binding.resize(960, 540);
+    expect(made).toHaveLength(0);
+
+    ready = true;
+    binding.refresh();
+    expect(made).toHaveLength(0);
+    binding.resize(960, 540);
+    expect(made).toHaveLength(1);
   });
 
   it('refreshes a fork’s camera and shading on its existing presenter without changing its canvas crop', () => {

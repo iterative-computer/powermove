@@ -112,12 +112,11 @@ export class EngineCanvasBinding {
   }
 
   private lastSize: [number | undefined, number | undefined, { x: number; y: number; width: number; height: number } | null | undefined] = [undefined, undefined, undefined];
-  private resized = false;
-
   refresh(): void {
-    // An init alone can leave a built-in viewer's canvas in the workspace
-    // after its extension unloads. Only its own resize makes it a presenter.
-    if (!this.resized) return;
+    // A built-in viewer can leave its canvas behind after unloading, even
+    // after resizing it. View changes update an existing presenter only;
+    // a caller's own resize is what starts a new one.
+    if (!this.presentation) return;
     this.resize(...this.lastSize);
   }
 
@@ -170,7 +169,6 @@ export class EngineCanvasBinding {
     this.lastSize = [width, height, viewport ? { ...viewport } : viewport];
     const canvas = this.canvas;
     if (!canvas) return;
-    this.resized = true;
     if (!canvas.isConnected) {
       this.unbind();
       return;
@@ -236,6 +234,5 @@ export class EngineCanvasBinding {
     this.stopWatching();
     this.canvas = null;
     this.lastSize = [undefined, undefined, undefined];
-    this.resized = false;
   }
 }
