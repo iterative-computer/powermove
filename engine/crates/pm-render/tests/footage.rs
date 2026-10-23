@@ -79,6 +79,7 @@ fn document(
             dur,
         )],
     );
+    doc["colorDepth"] = json!(32);
     doc["fps"] = json!(fps);
     asset(&mut doc, "clip", "video", "mov", w, h, dur);
     if let Some(i) = interpret {
@@ -96,6 +97,7 @@ fn render(r: &mut Renderer, doc: &Value, size: (u32, u32), t: f64, res: &MapReso
         .render(&load(doc), "Ptest-root", ticks(t), &request, res)
         .unwrap_or_else(|e| panic!("render: {e:?}"));
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba32Float);
     r.read_rgba(&frame).unwrap()
 }
 
@@ -695,6 +697,7 @@ fn still_document(
             1.0,
         )],
     );
+    doc["colorDepth"] = json!(32);
     let format = path
         .extension()
         .and_then(|e| e.to_str())

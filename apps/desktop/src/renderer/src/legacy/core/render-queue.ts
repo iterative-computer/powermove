@@ -1,3 +1,5 @@
+const pcmLittleEndian = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
 export function installRenderQueue(PM:any,X:any) {
   const saved=PM.store.get('renderQueue',[]);X.queue=Array.isArray(saved)?saved.map((job:any)=>({...job,status:job.status==='rendering'?'pending':job.status})):[];
   const persist=()=>{PM.store.set('renderQueue',X.queue);PM.bus.emit('renderqueue');};
@@ -15,5 +17,32 @@ export function installRenderQueue(PM:any,X:any) {
 export function wavBytes(buffer:AudioBuffer):Uint8Array {
   const channels=buffer.numberOfChannels,frames=buffer.length,data=new Uint8Array(44+frames*channels*2),view=new DataView(data.buffer),text=(offset:number,s:string)=>{for(let i=0;i<s.length;i++)data[offset+i]=s.charCodeAt(i);};
   text(0,'RIFF');view.setUint32(4,data.length-8,true);text(8,'WAVEfmt ');view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,channels,true);view.setUint32(24,buffer.sampleRate,true);view.setUint32(28,buffer.sampleRate*channels*2,true);view.setUint16(32,channels*2,true);view.setUint16(34,16,true);text(36,'data');view.setUint32(40,data.length-44,true);
-  const planes=Array.from({length:channels},(_,i)=>buffer.getChannelData(i));for(let i=0;i<frames;i++)for(let c=0;c<channels;c++){const value=Math.max(-1,Math.min(1,planes[c]![i]!));view.setInt16(44+(i*channels+c)*2,Math.round(value*(value<0?32768:32767)),true);}return data;
+  const planes=Array.from({length:channels},(_,i)=>buffer.getChannelData(i));
+  // WAV stores little-endian PCM. Typed stores avoid a DataView call for each
+  // sample on supported hosts; retain explicit byte order on other machines.
+  if (!pcmLittleEndian) {
+    for(let i=0;i<frames;i++)for(let c=0;c<channels;c++){const value=Math.max(-1,Math.min(1,planes[c]![i]!));view.setInt16(44+(i*channels+c)*2,Math.round(value*(value<0?32768:32767)),true);}
+    return data;
+  }
+  const samples = new Int16Array(data.buffer, 44, frames * channels);
+  if (channels === 1) {
+    const mono = planes[0]!;
+    for (let i = 0; i < frames; i++) {
+      const value = Math.max(-1, Math.min(1, mono[i]!));
+      samples[i] = Math.round(value * (value < 0 ? 32768 : 32767));
+    }
+  } else if (channels === 2) {
+    const left = planes[0]!, right = planes[1]!;
+    for (let i = 0, offset = 0; i < frames; i++, offset += 2) {
+      const l = Math.max(-1, Math.min(1, left[i]!)), r = Math.max(-1, Math.min(1, right[i]!));
+      samples[offset] = Math.round(l * (l < 0 ? 32768 : 32767));
+      samples[offset + 1] = Math.round(r * (r < 0 ? 32768 : 32767));
+    }
+  } else {
+    for (let i = 0; i < frames; i++) for (let c = 0; c < channels; c++) {
+      const value = Math.max(-1, Math.min(1, planes[c]![i]!));
+      samples[i * channels + c] = Math.round(value * (value < 0 ? 32768 : 32767));
+    }
+  }
+  return data;
 }

@@ -117,7 +117,7 @@ export class LazyNativeBrowser implements NativeBrowser {
     }, request);
     return result.status === 'pixels' ? { ...result, data: new Uint8Array(result.data as number[]) } : result;
   }
-  async shader(session: number, request: ShaderFallbackRequest, textures: Uint16Array[]): Promise<ShaderFallbackResult> {
+  async shader(session: number, request: ShaderFallbackRequest, textures: (Uint16Array | Float32Array)[]): Promise<ShaderFallbackResult> {
     const project = this.host().native!.projectForSession(session);
     let runner = this.runners.get(project);
     if (!runner) {
@@ -137,7 +137,10 @@ export class LazyNativeBrowser implements NativeBrowser {
     }, { request, textures: textures.map(p => Buffer.from(p.buffer, p.byteOffset, p.byteLength).toString('base64')) });
     if (!result.ok) return result;
     const bytes = Buffer.from(result.pixels, 'base64');
-    return { ok: true, rgba16f: new Uint16Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)) };
+    const pixels = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    return request.colorDepth === 32
+      ? { ok: true, rgba16f: new Uint16Array(0), rgba32f: new Float32Array(pixels) }
+      : { ok: true, rgba16f: new Uint16Array(pixels) };
   }
   async close(): Promise<void> { await this.browser?.close(); this.browser = null; this.context = null; this.pages.clear(); this.runners.clear(); }
 }

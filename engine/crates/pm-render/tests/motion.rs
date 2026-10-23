@@ -350,7 +350,7 @@ fn motion_corpus_parity() {
 }
 
 /// A white solid sliding right over a transparent background.
-fn slider(blur: bool, samples_field: Option<serde_json::Value>) -> pm_model::Document {
+fn slider(blur: bool, samples_field: Option<serde_json::Value>, color_depth: u32) -> pm_model::Document {
     let mut l = layer(
         "s",
         "solid",
@@ -371,6 +371,7 @@ fn slider(blur: bool, samples_field: Option<serde_json::Value>) -> pm_model::Doc
     );
     l["mblur"] = json!(blur);
     let mut doc = project(160, 40, 4.0, no_fill(), vec![l]);
+    doc["colorDepth"] = json!(color_depth);
     if let Some(f) = samples_field {
         doc["motionBlurSamples"] = f;
     }
@@ -407,16 +408,24 @@ impl pm_render::AssetResolver for MapResolverEmpty {
 #[test]
 fn accumulation_counts_covered_samples() {
     let mut renderer = Renderer::headless().unwrap();
-    let doc = slider(true, None);
     let t = 0.2;
     // f16 accumulation rounds every partial sum (as today's RGBA16F
     // target does): at most half an ulp of a value ≤ 1 per sample.
-    for (precision, per_sample) in [(Precision::Float16, 4.9e-4), (Precision::Float32, 6e-8)] {
+    for (precision, color_depth, per_sample, format) in [
+        (Precision::Float16, 16, 4.9e-4, wgpu::TextureFormat::Rgba16Float),
+        (Precision::Float32, 32, 6e-8, wgpu::TextureFormat::Rgba32Float),
+    ] {
+        let doc = slider(true, None, color_depth);
         for n in [1u32, 4, 7, 16, 20] {
             let tolerance = per_sample * f64::from(n);
             let mut request = RenderRequest::sized(Size::new(160, 40), precision);
             request.motion_blur = MotionBlur::Samples(n);
-            let rgba = render(&mut renderer, &doc, t, &request);
+            let frame = renderer
+                .render(&doc, "Ptest-root", ticks(t), &request, &MapResolverEmpty)
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            assert_eq!(frame.color.format(), format);
+            let rgba = renderer.read_rgba(&frame).unwrap();
             for x in 0..160usize {
                 // The rasterizer covers a pixel center when it lies in
                 // [left, left + 20).
@@ -444,13 +453,13 @@ fn accumulation_counts_covered_samples() {
 #[test]
 fn one_sample_is_the_sharp_frame_and_off_draws_sharp() {
     let mut renderer = Renderer::headless().unwrap();
-    let doc = slider(true, None);
+    let doc = slider(true, None, 16);
     let mut request = RenderRequest::sized(Size::new(160, 40), Precision::Float16);
     let sharp = render(&mut renderer, &doc, 0.5, &request);
     request.motion_blur = MotionBlur::Samples(1);
     assert_eq!(render(&mut renderer, &doc, 0.5, &request), sharp);
     // The switch off: the same as no blur at any count.
-    let off = slider(false, None);
+    let off = slider(false, None, 16);
     request.motion_blur = MotionBlur::Samples(12);
     assert_eq!(render(&mut renderer, &off, 0.5, &request), sharp);
     request.motion_blur = MotionBlur::Samples(12);
@@ -460,7 +469,7 @@ fn one_sample_is_the_sharp_frame_and_off_draws_sharp() {
 #[test]
 fn sample_counts_follow_the_output_kind() {
     let mut renderer = Renderer::headless().unwrap();
-    let doc = slider(true, Some(json!({ "export": 3, "previewPlaying": 2 })));
+    let doc = slider(true, Some(json!({ "export": 3, "previewPlaying": 2 })), 16);
     let base = RenderRequest::sized(Size::new(160, 40), Precision::Float16);
     let with = |m: MotionBlur| {
         let mut r = base.clone();

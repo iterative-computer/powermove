@@ -658,6 +658,20 @@ impl Watchdog {
         self.inflight.len()
     }
 
+    /// Drops query and marker objects before a renderer moves its definition
+    /// state to a future device. Judged times and disabled programs remain.
+    pub fn release_device(&mut self) -> bool {
+        if !self.inflight.is_empty() {
+            return false;
+        }
+        self.marker = None;
+        self.slots.clear();
+        self.last_tick = 0;
+        self.last_done = None;
+        self.held_frame = false;
+        true
+    }
+
     /// The timer for a frame: spans are always recorded (the hang guard);
     /// GPU queries are added when the device can time passes, no test
     /// source is set, and a query slot is free.
@@ -1106,8 +1120,28 @@ pub(crate) fn plausible_spans(
 
 #[cfg(test)]
 mod tests {
-    use super::{SpanTime, plausible_spans};
+    use super::{Inflight, SpanTime, Stage, Watchdog, plausible_spans};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    #[test]
+    fn device_release_waits_for_unjudged_frame_and_keeps_policy() {
+        let mut watchdog = Watchdog::default();
+        watchdog.set_budget(Duration::from_millis(7));
+        watchdog.inflight.push_back(Inflight {
+            spans: Vec::new(),
+            slot: None,
+            stage: Stage::Encoded,
+            submitted: None,
+            completed: Arc::new(Mutex::new(None)),
+            suspect: false,
+        });
+        assert!(!watchdog.release_device());
+        assert_eq!(watchdog.frames_in_flight(), 1);
+        watchdog.inflight.clear();
+        assert!(watchdog.release_device());
+        assert_eq!(watchdog.budget(), Some(Duration::from_millis(7)));
+    }
 
     fn ms(v: f64) -> SpanTime {
         SpanTime::Measured(Duration::from_secs_f64(v / 1000.0))

@@ -85,6 +85,8 @@ export interface CodexIpcContext {
   refreshExtensions?(ids: string[]): Promise<void>;
   /** The Store as the agent uses it; null/absent when cloud is unconfigured. */
   storeAgent?(): StoreAgentGateway | null;
+  /** Keep a project's store payloads warm until its run/session is finished. */
+  acquireProject?(id: string): () => void;
   /** Standalone MCP shim copied beside the packaged app resources. */
   agentToolServerPath?: string;
   /** Defaults to process.execPath (Electron with ELECTRON_RUN_AS_NODE=1). */
@@ -474,12 +476,14 @@ export function registerCodexIpc(
       extensionsDir: ctx.extensionsDir, apiPackFiles: ctx.apiPackFiles,
       refreshExtensions: ctx.refreshExtensions, importMedia: ctx.externalMcp?.importMedia,
       attach: async (request, session) => {
+        const releaseProject = ctx.acquireProject?.(request.projectId);
         owners.set(request.id, session.owner); rootToolSessions.set(request.id, session);
         const workspaceId = `mcp-${session.runId}`;
         activeChildWorkspaces.add(workspaceId);
         runningProjects.set(request.projectId, (runningProjects.get(request.projectId) ?? 0) + 1);
         let detach: (() => Promise<void>) | undefined;
         const remove = () => {
+          releaseProject?.();
           activeChildWorkspaces.delete(workspaceId);
           owners.delete(request.id); rootToolSessions.delete(request.id);
           const remaining = (runningProjects.get(request.projectId) ?? 1) - 1;
@@ -618,6 +622,7 @@ export function registerCodexIpc(
     const threadWorkspaceId = req.threadId?.startsWith('agent-thread-') ? `thread-${req.threadId}` : undefined;
     if (threadWorkspaceId) activeChildWorkspaces.add(threadWorkspaceId);
     runningProjects.set(req.projectId, (runningProjects.get(req.projectId) ?? 0) + 1);
+    const releaseProject = ctx.acquireProject?.(req.projectId);
     let toolSession: PowermoveAgentToolSession | null = null;
     const emitTrace = (step: CodexTraceEvent): void => {
       if (!owner.isDestroyed()) owner.send(IPC.codexEvent, { id: req.id, kind: 'trace', step });
@@ -664,7 +669,7 @@ export function registerCodexIpc(
         });
       if (toolSession) {
         const changedBeforeFinish = toolSession.changed;
-        const finish = await toolSession.finish(result.ok || preserveRunEdits.has(req.id));
+        const finish = await toolSession.finish(result.ok || result.preserveLiveEdits === true || preserveRunEdits.has(req.id));
         toolSession = null;
         if (result.ok && req.mode === 'autonomous') {
           result = {
@@ -686,6 +691,7 @@ export function registerCodexIpc(
       runEnded.abort();
       approvals.closeRun(req.id);
       if (toolSession) await toolSession.finish(false).catch(() => undefined);
+      releaseProject?.();
       rootToolSessions.delete(req.id);
       if (threadWorkspaceId) activeChildWorkspaces.delete(threadWorkspaceId);
       preserveRunEdits.delete(req.id);

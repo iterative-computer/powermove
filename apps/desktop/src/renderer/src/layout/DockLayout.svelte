@@ -5,6 +5,7 @@
   import type { DockSpec, PanelSpec, Workspace } from './model';
   import PanelPool from './PanelPool.svelte';
   import Splitter from './Splitter.svelte';
+  import { scrollSideDock, sideDockBeside } from './side-scroll';
   import UIPlacementGhost from '../panels/agent/UIPlacementGhost.svelte';
 
   let { PM }: { PM: PMRegistry } = $props();
@@ -19,20 +20,10 @@
       // Only the empty outer gutter belongs to this handler. Panel contents,
       // dividers and overlays retain their own scrolling behavior.
       const gutter = event.target === body || (event.target as Element | null)?.matches?.('.dock-stack, .dock-row');
-      if (!gutter || event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY) return;
-      for (const side of ['left', 'right']) {
-        const dock = document.getElementById(`dock-${side}`);
-        if (!dock || !dock.clientHeight) continue;
-        const rect = dock.getBoundingClientRect();
-        if (event.clientY < rect.top || event.clientY >= rect.bottom) continue;
-        if (side === 'left' ? event.clientX >= rect.left : event.clientX < rect.right) continue;
-        if (dock.scrollHeight <= dock.clientHeight) return;
-        const unit = event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? dock.clientHeight
-          : event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
-        event.preventDefault();
-        dock.scrollTop += event.deltaY * unit;
-        return;
-      }
+      if (!gutter) return;
+      const docks = ['left', 'right'].map((side) => document.getElementById(`dock-${side}`)).filter((dock) => !!dock);
+      const dock = sideDockBeside(event.clientX, event.clientY, docks);
+      if (dock) scrollSideDock(dock, event);
     };
     body.addEventListener('wheel', onWheel, { passive: false });
     return () => body.removeEventListener('wheel', onWheel);

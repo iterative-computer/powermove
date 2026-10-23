@@ -444,6 +444,9 @@ impl Host {
                         payload: pm_protocol::snapshot::PixelPayload::Inline {
                             bytes: Bytes(fill.repeat((k.width * k.height) as usize)),
                         },
+                        native: false,
+                        size: None,
+                        uv: None,
                     },
                 )))
             }

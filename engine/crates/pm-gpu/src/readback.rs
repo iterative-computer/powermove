@@ -262,6 +262,17 @@ impl ReadbackRing {
         self.slots.iter().map(|s| s.capacity).sum()
     }
 
+    /// Frees the staging buffers of free slots (a viewer at rest); the
+    /// next copy allocates again. Slots with a copy in flight keep theirs.
+    pub fn release_idle(&mut self) {
+        for slot in &mut self.slots {
+            if matches!(slot.state, SlotState::Free) {
+                slot.buffer = None;
+                slot.capacity = 0;
+            }
+        }
+    }
+
     pub fn in_flight(&self) -> bool {
         self.slots
             .iter()
@@ -530,13 +541,19 @@ impl Readback {
                 depth_or_array_layers: 1,
             },
         );
-        queue.submit([encoder.finish()]);
+        let submission = queue.submit([encoder.finish()]);
         let slice = buffer.slice(..size);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        // Wait for this copy's own submission (and what the queue ran before
+        // it), not for work other threads submitted after it: a reader off the
+        // presentation thread does not wait for the frames it renders meanwhile.
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        });
         rx.recv()
             .map_err(|e| ReadbackError::Map(e.to_string()))?
             .map_err(|e| ReadbackError::Map(e.to_string()))?;

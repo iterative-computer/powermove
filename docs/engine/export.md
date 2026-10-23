@@ -31,7 +31,7 @@ muxers, verification, atomic output), [pm-render.md](pm-render.md), and
 ```text
 JobDocument (frozen Arc<Document> at the session's revision)
   → plan_export: capability check (pm_render::unsupported_with_media + pm-audio's mix graph problems)
-  → per frame: GpuGate admits bands → pm-render (float, Standard) → readback
+  → per frame: GpuGate admits bands → pm-render (project depth, Standard) → readback
       ─(sync_channel(1))→ encoder input (convert.rs: matrix, siting, dither; row-parallel)
                          + pm-audio offline mix for the frame's samples
                          → VideoToolbox → AVAssetWriter → verify → rename over the host's file
@@ -50,11 +50,11 @@ JobDocument (frozen Arc<Document> at the session's revision)
   `convert.rs`, split across rows on scoped threads that first take the
   calling thread's QoS (utility in the job engine, so it never competes with
   the interactive engine for CPU).
-- **Dither**: on for H.264 (8-bit), off for ProRes unless asked, never on
-  alpha (delivery.md has the tile and its tests).
-- **Precision**: exports render at 32-bit (amendment 8 asks for 32-bit
-  whenever a source exceeds 10 bits; agent exports do not inspect sources
-  first, so they always do).
+- **Dither**: the desktop enables it for delivery formats at 8 bits or less;
+  it is never applied to alpha (delivery.md has the tile and its tests).
+- **Precision**: saved `project.colorDepth` selects 8-bit normalized, 16-bit
+  float, or 32-bit float working targets. The desktop still sends a Float32
+  request hint for wire compatibility; it does not promote project depth.
 - **Audio**: `pm_audio::MixGraph` over the composition with a source cache;
   the samples of export frame n are `[sample(tick(n)), sample(tick(n + 1)))`
   at the project rate, so totals equal `round(duration × sr)`. Audio

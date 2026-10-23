@@ -327,6 +327,56 @@ describe('AssetsPanel', () => {
     expect(rows()).toHaveLength(2);
   });
 
+  it.each([
+    { name: 'selected media together', index: 0, selected: ['true', 'true', 'false'], moved: ['destination', 'destination', null], remaining: [VIDEO.id] },
+    { name: 'an unselected card alone', index: 2, selected: ['false', 'false', 'true'], moved: [null, null, 'destination'], remaining: [IMAGE.id, AUDIO.id] }
+  ])('drags $name into a folder in one undoable edit', ({ index, selected, moved, remaining }) => {
+    const { PM, project } = setup([IMAGE, AUDIO, VIDEO]);
+    (project as any).assetFolders = { destination: { id: 'destination', name: 'Destination', parent: null } };
+    doc.bump('assets');
+    flushSync();
+    const media = () => [...target.querySelectorAll<HTMLElement>('[data-asset-id]')];
+    media()[0]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    media()[1]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, metaKey: true }));
+    flushSync();
+    // A real drag begins with another press on the already-selected card.
+    const card = media()[index]!;
+    card.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    const dragStart = new DragEvent('dragstart', { bubbles: true });
+    Object.defineProperty(dragStart, 'dataTransfer', { value: { setData: vi.fn(), setDragImage: vi.fn(), types: [] } });
+    card.dispatchEvent(dragStart);
+    flushSync();
+    expect(media().map(row => row.getAttribute('aria-selected'))).toEqual(selected);
+    let before: string | undefined;
+    PM.hist.do.mockImplementation((_label: string, operation: () => unknown) => {
+      before = JSON.stringify(project.assets);
+      return operation();
+    });
+    const folder = target.querySelector<HTMLElement>('[data-folder-id="destination"]')!;
+    folder.dispatchEvent(new DragEvent('drop', { bubbles: true }));
+    card.dispatchEvent(new DragEvent('dragend', { bubbles: true }));
+    flushSync();
+    expect(Object.values(project.assets).map(asset => (asset as any).folder ?? null)).toEqual(moved);
+    expect(PM.hist.do).toHaveBeenCalledOnce();
+    expect(media().map(row => row.dataset.assetId)).toEqual(remaining);
+    project.assets = JSON.parse(before!);
+    doc.bump('history');
+    flushSync();
+    expect(media().map(row => row.dataset.assetId)).toEqual([IMAGE.id, AUDIO.id, VIDEO.id]);
+    expect(Object.values(project.assets).every(asset => !(asset as any).folder)).toBe(true);
+  });
+
+  it('a normal click on selected media reduces the batch to one card', () => {
+    setup([IMAGE, AUDIO, VIDEO]);
+    rows()[0]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    rows()[1]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, metaKey: true }));
+    flushSync();
+    rows()[0]!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    rows()[0]!.click();
+    flushSync();
+    expect(rows().map(row => row.getAttribute('aria-selected'))).toEqual(['true', 'false', 'false']);
+  });
+
   it('selects intersecting media with a box and keeps keyboard deletion in the panel', () => {
     const { removeAsset } = setup([IMAGE, AUDIO, VIDEO]);
     const list = target.querySelector<HTMLElement>('.asset-list')!;

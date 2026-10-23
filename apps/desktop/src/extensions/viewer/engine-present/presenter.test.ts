@@ -579,3 +579,28 @@ it('fits an unknown 120 Hz clock even when the initial 60 Hz commit deadline is 
   expect(painter.draws).toHaveLength(1);
   presenter.dispose();
 });
+
+it('presents timed frames when commit timers are delayed past the following animation frame', () => {
+  let now = 0;
+  let tick: ((t: number) => void) | null = null;
+  const pending = new Map<number, () => void>();
+  let nextTimer = 0;
+  const source = new Source(), painter = new Painter(), link = new Link();
+  const presenter = new EnginePresenter({ link, source, painter, displayHz: 120,
+    drawOnArrival: true, commitPhaseRefreshes: .75, now: () => now,
+    timers: { set: run => { pending.set(++nextTimer, run); return nextTimer; }, clear: id => { pending.delete(id); } }
+  });
+  presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 1, state: 'playing', hostTime: 0, mediaTime: 0,
+    rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, 0);
+  source.arrive(1, 1);
+  presenter.receive({ type: 'frame', frame: desc(1, { duration: TICKS_PER_SECOND }) });
+  presenter.start(cb => { tick = cb; return 1; }, () => {});
+  try {
+    // CPU contention lets BeginFrame overtake timer callbacks repeatedly.
+    // Timed frames must still draw; a later rAF must not erase an overdue commit.
+    for (let i = 0; i < 12; i++) { now = i * 1000 / 120; tick!(now); }
+    expect(painter.draws).toHaveLength(1);
+    expect(pending.size).toBeLessThanOrEqual(1);
+  } finally { presenter.dispose(); }
+  expect(pending.size).toBe(0);
+});

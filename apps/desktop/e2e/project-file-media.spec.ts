@@ -50,16 +50,28 @@ test('saved project files restore imported video without the original session me
   expect(restored.pixel[0]).toBeLessThan(30);
   // Reopening retains the persisted media revision, so the next metadata-only
   // save must not read/upload that video again.
-  expect(await session.page.evaluate(async () => {
+  const resaved = await session.page.evaluate(async () => {
     const PM = (window as any).PM, original = PM.MediaStore.getForSave;
+    const records: any[] = [], uploaded: string[] = [];
     PM.MediaStore.getForSave = async (asset: any) => {
       const saved = await original(asset);
-      if (saved) Object.defineProperty(saved.blob, 'slice', { value: () => { throw new Error('Reopened media was uploaded again'); } });
+      if (saved) {
+        records.push({ id: asset.id, storageKey: asset.storageKey, revision: saved.revision, size: saved.blob.size, type: saved.blob.type });
+        Object.defineProperty(saved.blob, 'slice', { value: () => { uploaded.push(asset.id); throw new Error('Reopened media was uploaded again'); } });
+      }
       return saved;
     };
-    try { PM.Projects.rename(PM.proj.id, 'Reopened and saved'); return await PM.saveProject(); }
+    try {
+      PM.Projects.rename(PM.proj.id, 'Reopened and saved');
+      const file = { ...PM.projectFileState() };
+      const saved = await PM.saveProject();
+      return { saved, projectId: PM.proj.id, file: { path: file.path, dirty: file.dirty }, records, uploaded };
+    }
     finally { PM.MediaStore.getForSave = original; }
-  })).toBe(true);
+  });
+  expect(resaved.saved, JSON.stringify({ ...resaved, previousMedia: document.media.map(source => ({
+    id: source.id, revision: (source as { revision?: string }).revision, type: source.type, size: source.data.length,
+  })) })).toBe(true);
 });
 
 test('saved project files restore imported audio without the original session media', async ({ session }) => {
@@ -157,6 +169,10 @@ test('leaving a local project for another and coming back keeps imported audio',
 
 test('local recovery keeps imported audio after closing and relaunching Powermove', async ({ session }) => {
   await importFixture(session.page, 'tone.wav');
+  await session.app.evaluate(({ dialog }, filePath) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+  }, path.join(session.userData, 'Audio recovery.pmv'));
+  expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
   const projectId = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
     await PM.flushProject();

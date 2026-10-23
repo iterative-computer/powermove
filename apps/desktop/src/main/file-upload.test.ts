@@ -1,7 +1,7 @@
 import { mkdtemp, readdir, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { FileUpload, FILE_CHUNK_BYTES } from './file-upload';
 import { atomicWrite } from './project-files';
 
@@ -38,4 +38,20 @@ it('allows multi-gigabyte declarations without allocating them and cleans up abo
     expect(await readdir(directory)).toEqual([]);
     expect(() => upload.write(new Uint8Array([1]))).toThrow('Invalid save chunk');
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+it('retries a transient macOS read deadlock while copying a completed upload', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'pm-upload-retry-'));
+  const upload = await FileUpload.create(4, directory);
+  try {
+    await upload.write(new Uint8Array([1, 2, 3, 4]));
+    const handle = (upload as unknown as { handle: { read: (...args: unknown[]) => Promise<unknown> } }).handle;
+    const originalRead = handle.read.bind(handle);
+    const deadlock = Object.assign(new Error('Unknown system error -11, read'), { errno: -11, code: 'Unknown system error -11' });
+    const read = vi.spyOn(handle, 'read').mockRejectedValueOnce(deadlock).mockImplementation(originalRead);
+    const destination = path.join(directory, 'result');
+    await atomicWrite(destination, upload.claim());
+    expect([...await readFile(destination)]).toEqual([1, 2, 3, 4]);
+    expect(read).toHaveBeenCalledTimes(2);
+  } finally { await upload.dispose(); await rm(directory, { recursive: true, force: true }); }
 });

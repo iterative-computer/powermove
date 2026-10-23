@@ -1,7 +1,7 @@
-/* The native connection prepares one detached drawing before a viewer opens.
+/* A connection can prepare one detached drawing before a viewer opens.
  * No session, surfaces or animation loop exists until the drawing is claimed.
  * The canvas and its worker stay together: a popout cannot claim another
- * document's OffscreenCanvas. Closing a viewer prepares the next drawing. */
+ * document's OffscreenCanvas. */
 import type { FramePainter } from './gpu';
 import { createFramePainter } from './painter';
 import { PresentWorker, type WorkerLike } from './worker-presenter';
@@ -72,7 +72,7 @@ export class PresentationWarmup {
     void prepared.painter?.then(painter => painter?.dispose());
     if (this.disposed || this.prepared !== prepared) return;
     this.prepared = null;
-    // Failure in worker WebGPU does not imply the page cannot draw.
+    // Failure in the worker does not imply the page cannot draw.
     this.workerUnavailable = true;
     this.warm();
   }

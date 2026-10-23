@@ -55,14 +55,26 @@ it('restores the previous version when the updated extension fails to load', asy
   expect(h.PM.toast.mock.calls.at(-1)![0]).toContain('previous version was restored');
 });
 
-it('checks sandbox compatibility and rolls back a failing result', async () => {
+it('checks a sandboxed Store install\'s sandbox compatibility and rolls back a failing result', async () => {
   const h = harness();
   Object.assign(h.PM.Kernel, { deps: {} });
+  Object.assign(h.record, { trust: 'store' });
   sandbox.mockResolvedValue({ ok: false, skipped: false });
   await h.update('custom-tool');
   expect(sandbox).toHaveBeenCalledWith(h.PM, 'custom-tool');
   expect(h.restoreChangeSet).toHaveBeenCalledOnce();
   expect(h.PM.toast.mock.calls.at(-1)![2].action.label).toBe('Update with agent');
+});
+
+it('does not sandbox-check a local fork, which runs in the editor with the trusted API', async () => {
+  const h = harness();
+  Object.assign(h.PM.Kernel, { deps: {} });
+  Object.assign(h.record, { trust: 'local' });
+  sandbox.mockResolvedValue({ ok: false, skipped: false });
+  await h.update('custom-tool');
+  expect(sandbox).not.toHaveBeenCalled();
+  expect(h.restoreChangeSet).not.toHaveBeenCalled();
+  expect(h.PM.toast.mock.calls.at(-1)![0]).toContain('customizations were kept');
 });
 
 it('serializes multiple updates and ignores duplicate clicks', async () => {

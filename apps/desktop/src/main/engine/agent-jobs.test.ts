@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { canonicalHash, canonicalProject } from '../../shared/canonical-json';
 import type { EngineError, EngineProcess, JobStatus, Request, Response } from '../../shared/engine-protocol';
-import { AgentJobError, AgentJobs, exportSettingsFor, suggestedName, userExportSettings, type AgentJobsEngine, type UserExportStatus } from './agent-jobs';
+import { AgentJobError, AgentJobs, exportSettingsFor, snapshotLayer, suggestedName, userExportSettings, type AgentJobsEngine, type UserExportStatus } from './agent-jobs';
 import { DefinitionRelay } from './definitions';
 import { RemoteError } from './protocol';
 
@@ -18,6 +18,11 @@ type Sent = { process: EngineProcess; body: Request; session: number | null; rev
 class FakeEngine implements AgentJobsEngine {
   sent: Sent[] = [];
   ready = true;
+  ensureReady?: (process: EngineProcess) => Promise<void>;
+  holds: string[] = [];
+  releases: string[] = [];
+  holdJobRun(run: string): void { this.holds.push(run); }
+  releaseJobRun(run: string): void { this.releases.push(run); }
   private nextSession = 10;
   private listeners: Array<{ jobStatus?(s: JobStatus): void; status?(s: unknown): void }> = [];
   /** How submitJob, agentFrames answer. */
@@ -78,6 +83,69 @@ class FakeEngine implements AgentJobsEngine {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+it('prepares an agent run through the job utility readiness path', async () => {
+  const engine = new FakeEngine();
+  const ensureReady = vi.fn(async (_process: EngineProcess) => {});
+  engine.ensureReady = ensureReady;
+  const jobs = new AgentJobs({ engine });
+  await jobs.prepareRun('run-1');
+  expect(ensureReady).toHaveBeenCalledWith('job');
+  expect(engine.holds).toEqual(['run-1']);
+  await jobs.finishRun('run-1');
+  expect(engine.releases).toEqual(['run-1']);
+  jobs.dispose();
+});
+
+it('releases a run hold when job startup fails', async () => {
+  const engine = new FakeEngine();
+  engine.ensureReady = async () => { throw new Error('addon load failed'); };
+  const jobs = new AgentJobs({ engine });
+  await expect(jobs.prepareRun('run-1')).rejects.toThrow('addon load failed');
+  expect(engine.releases).toEqual(['run-1']);
+  jobs.dispose();
+});
+
+it('does not restore a run hold when startup finishes after the run', async () => {
+  const engine = new FakeEngine();
+  let ready!: () => void;
+  engine.ensureReady = () => new Promise<void>((resolve) => { ready = resolve; });
+  const jobs = new AgentJobs({ engine });
+  const startup = jobs.prepareRun('run-1');
+  await jobs.finishRun('run-1');
+  ready();
+  await startup;
+  expect(engine.holds).toEqual(['run-1']);
+  expect(engine.releases).toEqual(['run-1']);
+  jobs.dispose();
+});
+
+it('closes an agent frame session after the last run using its owner finishes', async () => {
+  const engine = new FakeEngine();
+  const jobs = new AgentJobs({ engine });
+  const plan = { project: project(), times: [0], width: 320, revision: 1 };
+  await jobs.renderFrames(4, 'run-a', plan);
+  await jobs.renderFrames(4, 'run-b', plan);
+  await jobs.finishRun('run-a');
+  expect(engine.of('closeSession')).toHaveLength(0);
+  await jobs.finishRun('run-b');
+  expect(engine.of('closeSession').map((s) => s.session)).toEqual([10]);
+  jobs.dispose();
+});
+
+it('closes the frame session even when media unbinding fails at run finish', async () => {
+  const engine = new FakeEngine();
+  const jobs = new AgentJobs({
+    engine,
+    bindMediaSession: async (_session, projectValue) => {
+      if (projectValue === null) throw new Error('media unbind failed');
+    }
+  });
+  await jobs.renderFrames(4, 'run-a', { project: project(), times: [0], width: 320, revision: 1 });
+  await expect(jobs.finishRun('run-a')).rejects.toThrow('media unbind failed');
+  expect(engine.of('closeSession').map((s) => s.session)).toEqual([10]);
+  jobs.dispose();
+});
+
 it('binds export snapshot media before resync and releases it after success or submission failure', async () => {
   const engine = new FakeEngine();
   const bindMediaSession = vi.fn(async (_session: number, _project: unknown) => {});
@@ -130,6 +198,20 @@ describe('export settings', () => {
     expect(prores.range).toEqual({ start: 0, end: 4 * 705_600_000 });
     expect(() => exportSettingsFor(project(), { format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: true })).toThrow('ProRes');
     expect(() => exportSettingsFor({ name: 'x' }, { format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false })).toThrow(AgentJobError);
+  });
+
+  it('name the window\'s compatibility producers, so the job asks it for those layers', () => {
+    const settings = exportSettingsFor(project(), { format: 'mp4', range: 'all', audio: false, motionBlur: false, alpha: false }, ['rasterOverride', 'bogus' as never, 'rasterOverride']);
+    expect(settings.delivery?.compat).toEqual(['rasterOverride']);
+    expect(exportSettingsFor(project(), { format: 'mp4', range: 'all', audio: false, motionBlur: false, alpha: false }).delivery?.compat).toBeUndefined();
+  });
+
+  it('find a snapshot\'s layer in its root or a nested composition', () => {
+    const p = { id: 'P', compId: 'root', layers: [{ id: 'a', d: 1 }], comps: { inner: { layers: [{ id: 'b', d: 2 }] } } };
+    expect(snapshotLayer(p, 'root', 'a')).toEqual({ id: 'a', d: 1 });
+    expect(snapshotLayer(p, 'inner', 'b')).toEqual({ id: 'b', d: 2 });
+    expect(snapshotLayer(p, 'inner', 'a')).toBeNull();
+    expect(snapshotLayer(p, 'gone', 'a')).toBeNull();
   });
 
   it('suggest bare file names', () => {
@@ -267,6 +349,24 @@ describe('agent exports through the job engine', () => {
 });
 
 describe('agent frames through the job engine', () => {
+  it('keeps the first cold frame session across the startup generation announcement', async () => {
+    const engine = new FakeEngine();
+    engine.ready = false;
+    engine.ensureReady = async () => {
+      if (engine.ready) return;
+      engine.ready = true;
+      engine.generation(1);
+    };
+    const jobs = new AgentJobs({ engine });
+    try {
+      const plan = { project: project(), times: [0], width: 720, revision: 1 };
+      await jobs.renderFrames(4, 'cold-first', plan);
+      await jobs.renderFrames(4, 'cold-second', plan);
+      expect(engine.of('openSession')).toHaveLength(1);
+      expect(engine.of('resync')).toHaveLength(1);
+    } finally { jobs.dispose(); }
+  });
+
   const image = (index: number) => ({ status: 'rendered' as const, index, revision: 1, width: 720, height: 405, image: { kind: 'inline' as const, bytes: new Uint8Array([0xff, 0xd8, index]) }, blender: 'notUsed' as const });
 
   it('render at the agent revision in one batch and reuse the window session until the project changes', async () => {

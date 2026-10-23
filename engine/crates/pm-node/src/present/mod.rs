@@ -28,6 +28,7 @@ pub mod document;
 mod layer_reports;
 pub mod peaks;
 mod preview_control;
+pub mod rasters;
 pub mod render;
 pub mod schedule;
 pub mod snapshot;

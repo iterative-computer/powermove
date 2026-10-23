@@ -96,6 +96,7 @@ impl Renderer {
             build_options(&comp, request, self.shaders.fallback_runner),
             blender,
             None,
+            None,
         );
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));

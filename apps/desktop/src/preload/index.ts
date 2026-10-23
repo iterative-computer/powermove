@@ -64,7 +64,7 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
     if (json) plain.document.json = json;
   }
   if (Array.isArray(request?.fallbackPixels)) {
-    plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0) }));
+    plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0), ...(p?.rgba32f !== undefined ? { rgba32f: bytes(p.rgba32f) ?? new Uint8Array(0) } : {}) }));
   }
   if (Array.isArray(request?.svgPixels)) {
     plain.svgPixels = request.svgPixels.map((p) => ({ key: { content: String(p?.key?.content), width: Number(p?.key?.width), height: Number(p?.key?.height) }, data: bytes(p?.data) ?? new Uint8Array(0) }));
@@ -203,15 +203,10 @@ const bridge: PowermoveBridge = {
   clipboardWriteText: (text) => ipcRenderer.invoke(IPC.clipboardWriteText, text) as Promise<void>,
   pasteMedia: () => ipcRenderer.invoke(IPC.mediaPaste) as Promise<boolean>,
 
-  blender: {
-    status: () => ipcRenderer.invoke(IPC.blenderStatus),
-    choose: () => ipcRenderer.invoke(IPC.blenderChoose),
-    run: job => ipcRenderer.invoke(IPC.blenderRun, job),
-    cancel: () => ipcRenderer.invoke(IPC.blenderCancel),
-  },
   render: {
     start: options => ipcRenderer.invoke(IPC.renderStart,options),
-    write: (token,data,audio) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio}),
+    write: (token,data,audio,retain) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio,retain}),
+    repeat: (token,count) => ipcRenderer.invoke(IPC.renderWrite,{token,repeat:count}),
     finish: token => ipcRenderer.invoke(IPC.renderFinish,{token}),
     cancel: token => ipcRenderer.invoke(IPC.renderCancel,{token}),
   },
@@ -374,6 +369,7 @@ const bridge: PowermoveBridge = {
     snapshotSerializedSync: () => ipcRenderer.sendSync(IPC.storeSnapshotSerializedSync) as Record<string, string>,
     bootstrapSerializedSync: () => ipcRenderer.sendSync(IPC.storeBootstrapSync) as Record<string, string>,
     getEncodedSync: (key) => ipcRenderer.sendSync(IPC.storeGetEncodedSync, { key }) as string | null,
+    getEncoded: (key) => ipcRenderer.invoke(IPC.storeGetEncoded, { key }) as Promise<string | null>,
     snapshot: () => ipcRenderer.invoke(IPC.storeSnapshot) as Promise<StoreSnapshot>,
     set: (key, value) => {
       ipcRenderer.send(IPC.storeSet, { key, value });
@@ -587,6 +583,7 @@ const bridge: PowermoveBridge = {
     agentFrames: (request) => ipcRenderer.invoke(ENGINE_IPC.agentFrames, {
       project: String(request.project), revision: request.revision, width: request.width, times: [...request.times]
     }),
+    exportSheet: (sheet, open) => ipcRenderer.send(ENGINE_IPC.exportSheet, sheet, open === true),
     exportVideo: (request) => ipcRenderer.invoke(ENGINE_IPC.exportVideo, {
       project: String(request.project),
       name: String(request.name),
@@ -643,13 +640,13 @@ const bridge: PowermoveBridge = {
     // The job engine's fallback requests, run in this window's runner
     // (main/engine/shader-fallback-relay.ts).
     onShaderFallback: (run) => {
-      const handler = (_event: Electron.IpcRendererEvent, job: { id: number; request: never; textures: Uint16Array[] }) => {
+      const handler = (_event: Electron.IpcRendererEvent, job: { id: number; request: never; textures: (Uint16Array | Float32Array)[] }) => {
         // Acknowledged at once: main passes over a window that does not.
         ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, received: true });
         void Promise.resolve()
           .then(() => run({ request: job.request, textures: job.textures }))
           .then(
-            (rgba16f) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, ok: true, rgba16f }),
+            (pixels) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, ok: true, ...pixels }),
             (error: { reason?: unknown; message?: unknown }) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, {
               id: job.id, ok: false, reason: String(error?.reason ?? 'unavailable'), message: String(error?.message ?? error)
             })

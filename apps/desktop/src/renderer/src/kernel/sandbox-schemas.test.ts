@@ -3,6 +3,17 @@ import { registrationSchemas } from './sandbox-schemas';
 
 const base = { id: 'x.fx', label: 'FX', group: 'Stylize', params: [], frag: 'void main(){}' };
 
+it('accepts large parameter and UI lists for installed layers, effects, and transitions', () => {
+  const params = Array.from({ length: 100 }, (_, i) => ({ k: `p${i}`, label: `Parameter ${i}`, def: 0, min: 0, max: 1 }));
+  const ui = params.map(param => ({ kind: 'param', key: param.k }));
+  const definitions = [
+    [registrationSchemas.effects, { ...base, params, ui }],
+    [registrationSchemas.transitions, { id: 'x.transition', label: 'Transition', params, ui, frag: base.frag }],
+    [registrationSchemas.layers, { id: 'x.layer', label: 'Layer', version: 1, params, ui, renderer: { kind: 'fragment', fragment: base.frag } }],
+  ] as const;
+  for (const [schema, value] of definitions) expect(schema.safeParse(value).success).toBe(true);
+});
+
 it('accepts every documented EffectDefinition field in the sandbox', () => {
   // These are all optional fields on the public EffectDefinition (kernel/api.ts);
   // the sandbox registration schema is .strict(), so any it omits would reject a

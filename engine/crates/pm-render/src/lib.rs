@@ -25,6 +25,8 @@ pub mod assets;
 mod binds;
 pub mod blender;
 pub mod capability;
+pub mod compat;
+pub mod compat_crop;
 pub mod composite;
 pub mod effects;
 mod error;

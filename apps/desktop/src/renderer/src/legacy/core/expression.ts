@@ -34,6 +34,10 @@ export interface ExpressionContext {
   param: (name: string) => unknown;
   ch: string;
   idx: number;
+  /** Bounded access to raw source channels; cannot recurse through expressions. */
+  sample?: (layerId: string, channel: string, localTime: number) => unknown;
+  /** Original-curve position at an arc-length fraction; never runs expressions. */
+  motionPath?: (layerId: string, channel: string, progress: number, start: number, end: number) => number;
 }
 
 export interface CompiledExpression {
@@ -310,11 +314,13 @@ function helper(name: string, args: unknown[], context: ExpressionContext): unkn
       return position < duration ? position : duration * 2 - position;
     }
     case 'param': return context.param(String(args[0] ?? ''));
+    case 'sample': return context.sample?.(String(args[0] ?? ''), String(args[1] ?? ''), Number(args[2] ?? context.t));
+    case 'motionPath': return context.motionPath?.(String(args[0] ?? ''), String(args[1] ?? ''), Number(args[2]), Number(args[3]), Number(args[4]));
     default: return undefined;
   }
 }
 
-const HELPERS = new Set(['clamp', 'lerp', 'linear', 'ease', 'random', 'wiggle', 'bounce', 'loop', 'pingpong', 'param']);
+const HELPERS = new Set(['clamp', 'lerp', 'linear', 'ease', 'random', 'wiggle', 'bounce', 'loop', 'pingpong', 'param', 'sample', 'motionPath']);
 
 function identifier(name: string, context: ExpressionContext): unknown {
   if (name === 'time') return context.T;

@@ -1,4 +1,5 @@
 import type { PMRegistry } from '../legacy/registry';
+import { SIDE_DOCKS } from './side-scroll';
 
 export type PanelSpec = {
   id: string;
@@ -175,15 +176,36 @@ export function movePanelBy(ws: Workspace, id: string, delta: number): boolean {
  * their panels stop crushing, so this floor is what makes the overflow real —
  * and it must match `clampPanelHeight`'s, or a splitter drag would fight the
  * DOM minimum it is dragging against.
+ *
+ * In a side column a fluid panel stops at a usable height instead: the column
+ * scrolls before Properties or Media crush into a sliver with its own tiny
+ * scroller, which made the two scroll levels fight.
  */
-export function panelMinHeight(spec: PanelSpec, def: Record<string, any> = {}): number {
-  return Math.max(72, Number(spec.min ?? def.min) || 88);
+export const SIDE_FLUID_MIN_HEIGHT = 200;
+const isFluid = (spec: PanelSpec, def: Record<string, any>): boolean => !!(spec.flex || (!spec.size && !def.size));
+export function panelMinHeight(
+  spec: PanelSpec,
+  def: Record<string, any> = {},
+  dockId?: string,
+  fluid = isFluid(spec, def)
+): number {
+  const floor = Math.max(72, Number(spec.min ?? def.min) || 88);
+  return SIDE_DOCKS.has(dockId ?? '') && fluid ? Math.max(floor, SIDE_FLUID_MIN_HEIGHT) : floor;
 }
 
-export function applyPanelSize(el: HTMLElement, spec: PanelSpec, def: Record<string, any>): void {
-  el.style.flex = spec.flex || (!spec.size && !def.size)
-    ? '1 1 auto'
-    : `0 0 ${spec.size || def.size}px`;
+/* A side column scrolls, so its fluid panel fills spare height but never
+   shrinks below its set height (or the floor): when the column overflows it
+   keeps the length it was dragged to and the column scrolls instead. */
+export function panelFlex(spec: PanelSpec, def: Record<string, any>, dockId?: string): string {
+  if (!isFluid(spec, def)) return `0 0 ${spec.size || def.size || 180}px`;
+  if (!SIDE_DOCKS.has(dockId ?? '')) return '1 1 auto';
+  return `1 0 ${Math.max(spec.size || 0, panelMinHeight(spec, def, dockId, true))}px`;
+}
+
+export function applyPanelSize(el: HTMLElement, spec: PanelSpec, def: Record<string, any>, dockId?: string): void {
+  el.style.flex = panelFlex(spec, def, dockId);
+  // A panel turning fluid or fixed changes its floor in a side column.
+  if (dockId && el.dataset.collapsed !== '1') el.style.minHeight = `${panelMinHeight(spec, def, dockId)}px`;
 }
 
 export function setPanelCollapsed(PM: PMRegistry, id: string, collapsed: boolean, emit = true): boolean {
@@ -196,11 +218,11 @@ export function setPanelCollapsed(PM: PMRegistry, id: string, collapsed: boolean
   if ((PM.PANELS[id] ?? inst.def)?.headless) collapsed = false;
   current.spec.collapsed = !!collapsed;
   inst.el.dataset.collapsed = collapsed ? '1' : '0';
-  inst.el.style.minHeight = collapsed ? 'var(--hdr-h)' : `${panelMinHeight(current.spec, inst.def)}px`;
+  inst.el.style.minHeight = collapsed ? 'var(--hdr-h)' : `${panelMinHeight(current.spec, inst.def, current.dock.id)}px`;
   inst.body.style.display = collapsed ? 'none' : '';
   inst.el.style.flex = collapsed
     ? '0 0 var(--hdr-h)'
-    : (current.spec.flex ? '1 1 auto' : `0 0 ${current.spec.size || inst.def.size || 180}px`);
+    : panelFlex(current.spec, inst.def, current.dock.id);
   if (emit) {
     PM.WS.save();
     PM.bus.emit('layout:applied');

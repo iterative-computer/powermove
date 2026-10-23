@@ -612,6 +612,8 @@ fn level2_edges_are_the_exact_pixel_coverage() {
         set(&mut l, "scale.y", json!(scale * 100.0));
         l["compat"] = json!(2);
         let mut doc = project(200, 160, 4.0, no_fill(), vec![l]);
+        // This test's exact edge-coverage bar needs the 32-bit working target.
+        doc["colorDepth"] = json!(32);
         asset(&mut doc, "src", "image", "png", 64, 64, 0.0);
         let mut resolver = MapResolver::default();
         resolver.paths.insert("src".into(), path.clone());
@@ -620,7 +622,12 @@ fn level2_edges_are_the_exact_pixel_coverage() {
             let mut request = RenderRequest::sized(Size::new(200, 160), Precision::Float32);
             request.background = false;
             request.sampling = sampling;
-            let rgba = render(&mut renderer, &doc, &resolver, &request);
+            let frame = renderer
+                .render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
+                .unwrap();
+            assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+            assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba32Float);
+            let rgba = renderer.read_rgba(&frame).unwrap();
             let (sin, cos) = f64::to_radians(rotation).sin_cos();
             let corner = |u: f64, v: f64| {
                 let (x, y) = ((u - 32.0) * scale, (v - 32.0) * scale);

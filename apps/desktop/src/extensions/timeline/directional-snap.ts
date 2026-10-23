@@ -20,6 +20,18 @@ export interface DirectionalSnapResult {
   lock: DirectionalSnapLock | null;
 }
 
+type IndexedTarget = { target: DirectionalSnapTarget; time: number; order: number };
+
+function targetBound(targets: IndexedTarget[], time: number, inclusive = false): number {
+  let lo = 0, hi = targets.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (targets[mid]!.time < time || (inclusive && targets[mid]!.time === time)) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 /** A gesture-local latch. Nearby edges never attract the pointer: an anchor
  * must cross a target to acquire it. Continuing past the release distance or
  * reversing direction releases it, allowing precise movement beside an edge.
@@ -58,12 +70,36 @@ export function createDirectionalSnapper(initialDelta = 0) {
       }
       if (!direction) return { delta: raw, lock };
 
+      // A large clip selection can otherwise compare every moving edge with
+      // every project edge on each pointer sample. Index this sample's targets
+      // so only nearby edges enter the unchanged crossing/tie checks below.
+      // Rebuilding also observes in-place changes and the live playhead.
+      const indexed = anchors.length >= 128 && targets.length >= 128 && anchors.length * targets.length > 16384
+        ? targets.map((target, order) => ({ target, time: target.time, order }))
+          .filter(target => Number.isFinite(target.time)).sort((a, b) => a.time - b.time)
+        : null;
       let bestDistance = Infinity;
       let bestWeight = -Infinity;
       for (let index = 0; index < anchors.length; index++) {
         const anchor = anchors[index]!;
         if (!Number.isFinite(anchor.time)) continue;
-        for (const target of targets) {
+        let nearby = targets;
+        if (indexed) {
+          // Translation can round differently from target.time - anchor.time.
+          // Widen the search conservatively, then use the exact old checks.
+          const margin = 8 * Number.EPSILON * (Math.abs(anchor.time) + Math.abs(raw) + radius) + epsilon;
+          const left = anchor.time + raw - radius - margin;
+          const right = anchor.time + raw + radius + margin;
+          if (Number.isFinite(left) && Number.isFinite(right)) {
+            const first = targetBound(indexed, left), end = targetBound(indexed, right, true);
+            if (end - first < targets.length / 2) {
+              // Stable source order matters for equal distances/weights and
+              // epsilon ties; sorting by time must not change that preference.
+              nearby = indexed.slice(first, end).sort((a, b) => a.order - b.order).map(item => item.target);
+            }
+          }
+        }
+        for (const target of nearby) {
           if (!Number.isFinite(target.time) || (target.edge && target.edge !== anchor.edge)) continue;
           if (released?.anchor === index && released.target === target.time) continue;
           const at = target.time - anchor.time;

@@ -102,6 +102,39 @@ describe('agent popover', () => {
     expect(surface.style.height).toBe(`${300 - 43 - 12}px`);
   });
 
+  it('keeps a moved panel open and fully visible after the window shrinks', () => {
+    const { PM, panel, outside } = fixture();
+    let drag: any;
+    Object.assign(PM, {
+      WS: { current: { layout: { docks: [] } } },
+      PANELS: { agent: { title: 'Agent' } },
+      Layout: { findPanel: () => null, buildDockDropTargets: () => [], hitTestDockPlacement: () => null },
+      clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
+      drag: (_event: unknown, handlers: unknown) => { drag = handlers; return { cancel: () => drag.cancel() }; },
+      toast: vi.fn()
+    });
+    const bar = document.createElement('div');
+    bar.className = 'thread-bar';
+    panel.querySelector('.body')!.prepend(bar);
+    shell = installAgentShell(PM);
+    shell.open();
+    bar.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 220, clientY: 60 }));
+    const release = new PointerEvent('pointerup', { clientX: 320, clientY: 85 });
+    drag.move(100, 25, release);
+    drag.up(100, 25, release);
+    const surface = document.getElementById('agent-popover')!;
+    expect(surface.style.left).toBe('300px');
+    expect(surface.style.top).toBe('68px');
+    outside.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    expect(shell.isOpen()).toBe(true);
+    vi.stubGlobal('innerWidth', 400);
+    vi.stubGlobal('innerHeight', 300);
+    window.dispatchEvent(new Event('resize'));
+    expect(surface.style.left).toBe('12px');
+    expect(surface.style.top).toBe('12px');
+    expect(surface.style.height).toBe('276px');
+  });
+
   it('collapses into the launcher on send and pulses it when already closed', async () => {
     const { PM, events } = fixture();
     shell = installAgentShell(PM);

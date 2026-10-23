@@ -5,6 +5,72 @@ import type { EditBinding } from './gesture';
 import type { PowermoveAPI } from '../kernel/api';
 import type { PMRegistry } from '../legacy/registry';
 
+type LegacyControl = { connected: boolean; after: number; remove(): void };
+const legacyControls = new Map<HTMLElement, LegacyControl>();
+let lifecycleObserver: MutationObserver | null = null;
+let earlierMutations: MutationRecord[] = [], cleanupQueued = false;
+
+function cleanRemovedControls(records: MutationRecord[]): void {
+  const mutations = earlierMutations.concat(records);
+  earlierMutations = [];
+  const pending: Array<[HTMLElement, LegacyControl]> = [];
+  for (const [target, control] of legacyControls) {
+    if (target.isConnected) control.connected = true;
+    else if (!control.connected) pending.push([target, control]);
+  }
+  if (pending.length) {
+    // Mutation records describe historical parent changes. Current containment
+    // cannot prove a field was connected: it may have entered an already
+    // detached subtree, which remains observed until this notification.
+    const parents = new Map<Node, Node | null>();
+    const wasConnected = (target: Node) => {
+      const seen = new Set<Node>();
+      for (let node: Node | null = target; node && !seen.has(node);) {
+        if (node.nodeType === Node.DOCUMENT_NODE) return true;
+        seen.add(node);
+        node = parents.has(node) ? parents.get(node)! : node.parentNode;
+      }
+      return false;
+    };
+    for (let i = mutations.length - 1; i >= 0; i--) {
+      const record = mutations[i]!;
+      for (const node of record.addedNodes) parents.set(node, null);
+      for (const node of record.removedNodes) parents.set(node, record.target);
+      for (const [target, control] of pending) {
+        if (!control.connected && i >= control.after && wasConnected(target)) control.connected = true;
+      }
+    }
+  }
+  for (const [target, control] of legacyControls) {
+    control.after = 0;
+    if (control.connected && !target.isConnected) {
+      legacyControls.delete(target);
+      try { control.remove(); }
+      catch (error) { console.error('[legacy control] cleanup failed', error); }
+    }
+  }
+  if (!legacyControls.size) { lifecycleObserver?.disconnect(); lifecycleObserver = null; }
+}
+
+function watchLegacyControl(target: HTMLElement, remove: () => void): void {
+  if (!lifecycleObserver) {
+    lifecycleObserver = new MutationObserver(cleanRemovedControls);
+    lifecycleObserver.observe(document.body, { childList: true, subtree: true });
+  } else {
+    // Existing records may describe a detached container before this control
+    // was created. Retain them for older fields, but exclude them for this one.
+    earlierMutations.push(...lifecycleObserver.takeRecords());
+    if (earlierMutations.length && !cleanupQueued) {
+      cleanupQueued = true;
+      queueMicrotask(() => {
+        cleanupQueued = false;
+        if (lifecycleObserver) cleanRemovedControls(lifecycleObserver.takeRecords());
+      });
+    }
+  }
+  legacyControls.set(target, { connected: target.isConnected, after: earlierMutations.length, remove });
+}
+
 /** Keep old DOM-based callers on the same controls as the Svelte inspector. */
 export function legacyColorField(PM: PMRegistry, fill: boolean, get: () => unknown, set: (value: unknown) => void, opt: any = {}) {
   const target = document.createElement('div') as HTMLDivElement & { sync(): void };
@@ -30,11 +96,6 @@ export function legacyColorField(PM: PMRegistry, fill: boolean, get: () => unkno
     api, get: () => { void revision; return get(); }, edit, label, ...(fill ? { fallback: opt.fallback } : {})
   } });
   // Legacy surfaces detach their DOM rather than calling Svelte unmount.
-  let connected = false;
-  const observer = new MutationObserver(() => {
-    if (target.isConnected) connected = true;
-    else if (connected) { observer.disconnect(); void unmount(component); }
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
+  watchLegacyControl(target, () => { void unmount(component); });
   return target;
 }

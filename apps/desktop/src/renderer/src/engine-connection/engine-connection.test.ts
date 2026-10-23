@@ -122,6 +122,34 @@ describe('the engine connection', () => {
     await expect(new EngineConnection(1, wrong, () => {}).open()).rejects.toThrow(/interactiveEngine/);
   });
 
+  it('keeps an invalid raster density in failures and sends the named report to the viewer', async () => {
+    const { connection, port } = await connected();
+    const messages: unknown[] = [];
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {},
+      handlers: { message: (m) => messages.push(m), closed: () => {} } });
+    await session.start();
+    const reason = 'The compatibility raster request could not be sent: compatibility raster scale 33 outside 0..=32.';
+    port.deliver(envelope({ kind: 'event', body: { type: 'failure', revision: 3,
+      error: { code: 'invalidMessage', scope: { kind: 'session', session: 5 }, message: reason, retry: { kind: 'never' }, detail: null } } } as never, 5));
+    expect(session.failures).toEqual([`invalidMessage: ${reason}`]);
+    expect(messages).toContainEqual({ type: 'failure', reason: `invalidMessage: ${reason}` });
+    session.close();
+    connection.close('test done');
+  });
+
+  it('records a failed extension snapshot without taking the viewer\'s frame off the stage', async () => {
+    const { connection } = await connected();
+    const messages: unknown[] = [];
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {},
+      handlers: { message: (m) => messages.push(m), closed: () => {} } });
+    await session.start();
+    session.reportFailure('invalidMessage', 'The layer raster could not be made: no layer L1.', performance.now(), false);
+    expect(session.failures).toEqual(['invalidMessage: The layer raster could not be made: no layer L1.']);
+    expect(messages.filter((m) => (m as { type: string }).type === 'failure')).toEqual([]);
+    session.close();
+    connection.close('test done');
+  });
+
   it('opens a session, resyncs the document, and follows the patch stream in order', async () => {
     const { connection, port } = await connected();
     const doc = stream();
@@ -505,6 +533,38 @@ describe('the transport driver', () => {
     driver.play(0.5);
     const after = port.events('transport').slice(before).map((e) => (e.message as { body: { command: string } }).body.command);
     expect(after).toEqual(['seek', 'play']);
+  });
+
+  it('starts a run from where a stopped line rests without seeking it there again', async () => {
+    const { connection, port } = await connected();
+    const session = new DocumentSession({ connection, stream: stream(), documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+    await session.start();
+    const clock = new HostClock(async () => 0);
+    (clock as unknown as { best: { offsetUs: number; rttUs: number } }).best = { offsetUs: 0, rttUs: 10 };
+    const driver = new EngineTransport(() => session, clock);
+    port.deliver(envelope({ kind: 'event', body: { type: 'frame', poolIndex: 0, revision: 3 } } as never, 5));
+    driver.refresh();
+    const moves = () => port.events('transport').map((e) => (e.message as { body: { command: string } }).body.command).filter((c) => c !== 'audioScrub');
+    const stopped = (seq: number, epoch: number, at: number) => port.deliver(envelope({ kind: 'event', body: { type: 'clock', seq, epoch, state: 'stopped', hostTime: 0, mediaTime: ticks(at), rate: { num: 0, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } } as never, 5));
+    stopped(1, 1, 1.5);
+    // Resting at 1.5: Play only (a seek would present the paused frame again).
+    driver.play(1.5);
+    expect(moves()).toEqual(['play']);
+    // Paused again, before any newer sample: where it rests is not known yet.
+    driver.pause();
+    driver.play(1.5);
+    expect(moves()).toEqual(['play', 'pause', 'seek', 'play']);
+    // A newer stopped sample elsewhere, then a seek back to it: the seek counts.
+    driver.pause();
+    stopped(2, 2, 2);
+    driver.seek(1.5, false);
+    driver.play(1.5);
+    expect(moves().slice(-2)).toEqual(['seek', 'play']);
+    // Resting where the latest sample says and nothing sent since: Play only.
+    driver.pause();
+    stopped(3, 3, 1.5);
+    driver.play(1.5);
+    expect(moves().slice(-2)).toEqual(['pause', 'play']);
   });
 
   it('sends J/K/L rates, play around, and the audio scrub switch, and follows a line at any rate', async () => {

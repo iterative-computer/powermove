@@ -331,9 +331,11 @@ pub enum Event {
     /// shader fallback runner's requests and pixels (contract 10,
     /// [`ShaderFallbackMessage`]).
     ShaderFallback(ShaderFallbackMessage),
-    /// Renderer → interactive engine (session-bound): compatibility pixels
+    /// Interactive engine ↔ renderer (session-bound): compatibility pixels
     /// of one layer at one frame (a `raster` override's result, an
-    /// extension's compatibility WebGL2 context), and their disposal.
+    /// extension's compatibility WebGL2 context), their disposal, the
+    /// session's producers, and the engine's asks for them
+    /// ([`crate::snapshot::CompatMessage`]).
     Compat(crate::snapshot::CompatMessage),
     /// Interactive engine → renderer (session-bound): presentation stats
     /// for the status bar and the performance panel.

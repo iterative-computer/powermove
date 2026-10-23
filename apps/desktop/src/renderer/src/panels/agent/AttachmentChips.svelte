@@ -24,7 +24,7 @@
       type="button"
       aria-label={item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in Finder`}
       title={item.dataUrl ? `View ${item.name}` : `Reveal ${item.name} in Finder`}
-      onclick={() => void activatePromptAttachment(PM, item)}
+      onclick={(event) => void activatePromptAttachment(PM, item, event.currentTarget)}
     >
       {#if item.dataUrl}
         <img src={item.dataUrl} alt={item.name} />

@@ -20,6 +20,7 @@ import {
   isRenderFormat,
   migrateFormat,
   normalizeDelivery,
+  storedFormatId,
   type DeliveryOptions,
   type ExportQuality as SharedQuality,
   type ExportRange as SharedRange,
@@ -203,4 +204,18 @@ export function normalizeExportDefaults(raw: unknown, fallbackFps = 30): ExportD
     alpha: bool(source.alpha, false),
     delivery: normalizeDelivery(source.delivery)
   };
+}
+
+/**
+ * Export defaults as the project document stores them: `format` keeps today's
+ * id where one exists (issue P1: apiVersion 1 to 3 extensions read
+ * `project.exportDefaults` as today's app wrote it). Read them back through
+ * `normalizeExportDefaults`, which migrates the id. `previous` is the stored
+ * value being replaced, so an alias of the same format is kept.
+ */
+export type StoredExportDefaults = Omit<ExportDefaults, 'format'> & { format: string };
+
+export function storedExportDefaults(defaults: ExportDefaults, previous?: unknown): StoredExportDefaults {
+  const before = previous && typeof previous === 'object' ? (previous as { format?: unknown }).format : previous;
+  return { ...defaults, format: storedFormatId(defaults.format, before) };
 }

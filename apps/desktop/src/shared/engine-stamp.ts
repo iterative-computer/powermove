@@ -12,7 +12,7 @@
  * Native-only features, from the section 6 table, as their fields exist
  * today: linked media (asset `storage: "linked"` or `link`), interpretation
  * overrides (asset `interpret`), non-default project color settings
- * (root `color`: linear blending, 32-bit precision), and a clip whose pitch
+ * (root `color`: linear blending and blend-domain overrides), and a clip whose pitch
  * follows its speed (`d.pitch: "follow"`). Lanes that add the other
  * native-only fields (precomp `keepFrameRate`) add a check to
  * NATIVE_ONLY_CHECKS.

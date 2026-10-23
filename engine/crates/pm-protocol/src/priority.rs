@@ -549,6 +549,15 @@ pub struct DeliveryOptions {
     /// PNG sequences: the name frame files start with (`<name>_00000.png`),
     /// usually the destination folder's name. A bare name.
     pub sequence_name: Option<String>,
+    /// Compatibility producers the exporting window has (a `raster`
+    /// override): the job asks the host for those layers' pixels at each
+    /// frame (`Request::CompatFrame`). Empty: every layer is the engine's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::snapshot::CompatSource>>", optional)
+    )]
+    pub compat: Vec<crate::snapshot::CompatSource>,
 }
 
 impl ExportFormat {

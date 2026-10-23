@@ -26,6 +26,50 @@ it('keeps both sides of the history cursor through a saved file and fresh editor
   reopened.hist.redo(); expect(reopened.proj.value).toBe(3);
 });
 
+it('prepares history without replacing the outgoing tab and preserves Undo and Redo', async () => {
+  const PM = editor();
+  PM.hist.do('Two', () => { PM.proj.value = 2; });
+  const saved = { version: 1, paths: 'composition', index: 0, entries: [{ label: 'Three',
+    forward: [{ path: ['value'], exists: true, value: 3 }], backward: [{ path: ['value'], exists: true, value: 2 }] }] };
+  const token = await PM.hist.prepareImport(saved);
+  expect(PM.hist.list()).toEqual(['Two']);
+  PM.proj.value = 3;
+  expect(PM.hist.import(saved, token)).toBe(true);
+  PM.hist.undo(); expect(PM.proj.value).toBe(2);
+  PM.hist.redo(); expect(PM.proj.value).toBe(3);
+});
+
+it('rejects unsafe or superseded prepared history without touching the current Undo stack', async () => {
+  const PM = editor();
+  PM.hist.do('Two', () => { PM.proj.value = 2; });
+  const saved = { version: 1, index: 0, entries: [{ label: 'Unsafe',
+    forward: [{ path: ['__proto__'], exists: true, value: {} }], backward: [] }] };
+  expect(await PM.hist.prepareImport(saved)).toBeUndefined();
+  expect(await PM.hist.prepareImport({ version: 1, index: -1, entries: [] }, () => false)).toBeUndefined();
+  expect(PM.hist.list()).toEqual(['Two']);
+});
+
+it('accounts for background Undo under the shared budget while retaining each latest edit', () => {
+  const PM = editor();
+  let memory: any;
+  const parked: any[] = [];
+  PM.Memory = { budget: () => 128 * 1024 * 1024, register: (_name: string, provider: any) => memory = provider };
+  PM.parkedHistories = () => parked;
+  install(PM);
+  for (const value of [2, 3, 4]) PM.hist.do(`Value ${value}`, () => { PM.proj.value = value; });
+  const background = PM.hist.suspend();
+  parked.push(background);
+  PM.hist.do('Value 5', () => { PM.proj.value = 5; });
+  expect(memory.entries()).toBe(4);
+  expect(memory.bytes()).toBe(background.totalBytes + PM.hist.stats().bytes);
+  memory.trim(PM.hist.stats().bytes + background.stack.at(-1).bytes);
+  expect(background.stack).toHaveLength(1);
+  expect(memory.entries()).toBe(2);
+  PM.hist.undo(); expect(PM.proj.value).toBe(4);
+  parked.pop(); PM.hist.resume(background);
+  PM.hist.undo(); expect(PM.proj.value).toBe(3);
+});
+
 it('retains grouped edits and drops the redo branch after a new edit', () => {
   const PM = editor();
   const mark = PM.hist.mark();

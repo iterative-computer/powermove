@@ -1,8 +1,8 @@
 import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import { afterEach, expect, it, vi } from 'vitest';
-import { createCloudMedia, cloudSourcePaths, readLocalMediaSource } from './cloud-media';
+import { createCloudMedia, cloudSourcePaths, readLocalMediaSource, prepareCloudImport } from './cloud-media';
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); resetBridgeForTests(); });
 function setup(automatic = false) {
   const meta = { id: 'a', name: 'clip.mp4', sourcePath: '/cloud/clip.mp4' };
   const project = { assets: { a: meta } };
@@ -152,4 +152,70 @@ it('rejects oversized agent imports before reading bytes and releases the native
   await expect(readLocalMediaSource(meta, () => true, 512 * 1024 * 1024)).rejects.toThrow('import limit');
   expect(media.readCloudSource).not.toHaveBeenCalled();
   expect(media.releaseCloudSource).toHaveBeenCalledWith('large-token');
+});
+
+
+it('replaces a stale picker snapshot with downloaded bytes and reports both stages', async () => {
+  const { media } = setup();
+  const stale = new File([], 'clip.mp4');
+  cloudSourcePaths.set(stale, '/cloud/clip.mp4');
+  const stage = vi.fn();
+  const downloaded = await prepareCloudImport(stale, () => {}, stage);
+  expect(downloaded).not.toBe(stale);
+  expect([...new Uint8Array(await downloaded.arrayBuffer())]).toEqual([1, 2, 3, 4, 5]);
+  expect(cloudSourcePaths.get(downloaded)).toBe('/cloud/clip.mp4');
+  expect(stage).toHaveBeenCalledWith('Downloading from iCloud…');
+  expect(stage).toHaveBeenCalledWith('Loading downloaded file', { completed: 5, total: 5 });
+  expect(media.releaseCloudSource).toHaveBeenCalledExactlyOnceWith('token');
+});
+
+it.each(['metadata', 'download', 'read'] as const)('times out stalled cloud %s and allows retry', async step => {
+  vi.useFakeTimers();
+  const { media } = setup();
+  const stale = new File([], 'clip.mp4');
+  cloudSourcePaths.set(stale, '/cloud/clip.mp4');
+  if (step === 'metadata') media.cloudStatus.mockImplementationOnce(() => new Promise(() => {}));
+  if (step === 'download') media.downloadCloudSource.mockImplementationOnce(() => new Promise(() => {}));
+  if (step === 'read') media.readCloudSource.mockImplementationOnce(() => new Promise(() => {}));
+  const failure = expect(prepareCloudImport(stale, () => {})).rejects.toThrow('timed out');
+  await vi.advanceTimersByTimeAsync(5 * 60_000);
+  await failure;
+  expect((await prepareCloudImport(stale, () => {})).size).toBe(5);
+  if (step === 'read') expect(media.releaseCloudSource).toHaveBeenCalledTimes(2);
+});
+
+it('releases a download that completes after its timeout', async () => {
+  vi.useFakeTimers();
+  const { media } = setup();
+  const stale = new File([], 'clip.mp4');
+  cloudSourcePaths.set(stale, '/cloud/clip.mp4');
+  let finish!: (result: { token: string; size: number }) => void;
+  media.downloadCloudSource.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const failure = expect(prepareCloudImport(stale, () => {})).rejects.toThrow('timed out');
+  await vi.advanceTimersByTimeAsync(5 * 60_000);
+  await failure;
+  finish({ token: 'late', size: 5 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(media.releaseCloudSource).toHaveBeenCalledExactlyOnceWith('late');
+  expect(media.readCloudSource).not.toHaveBeenCalled();
+});
+
+it('releases downloaded bytes when cancellation or a project switch stops import', async () => {
+  const { media } = setup();
+  const stale = new File([], 'clip.mp4');
+  cloudSourcePaths.set(stale, '/cloud/clip.mp4');
+  let current = true;
+  media.downloadCloudSource.mockImplementationOnce(async () => { current = false; return { token: 'token', size: 5 }; });
+  await expect(prepareCloudImport(stale, () => { if (!current) throw new Error('Import cancelled'); })).rejects.toThrow('cancelled');
+  expect(media.releaseCloudSource).toHaveBeenCalledExactlyOnceWith('token');
+  expect(media.readCloudSource).not.toHaveBeenCalled();
+});
+
+it('keeps local files on the existing path without downloading', async () => {
+  const { media } = setup();
+  media.cloudStatus.mockResolvedValue({ '/cloud/clip.mp4': 'local' });
+  const local = new File(['bytes'], 'clip.mp4');
+  cloudSourcePaths.set(local, '/cloud/clip.mp4');
+  expect(await prepareCloudImport(local, () => {})).toBe(local);
+  expect(media.downloadCloudSource).not.toHaveBeenCalled();
 });

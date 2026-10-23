@@ -1,6 +1,14 @@
 import { expect } from '@playwright/test';
-import { chooseNativeMenu, test } from './helpers/app';
+import { chooseNativeMenu, test, type LaunchedApp } from './helpers/app';
 import type { Page } from '@playwright/test';
+import path from 'node:path';
+
+async function saveFixtureProject(session: LaunchedApp, name: string) {
+  await session.app.evaluate(({ dialog }, filePath) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+  }, path.join(session.userData, name));
+  expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
+}
 
 async function scaleFixture(page: Page) {
   await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline?.cv); });
@@ -84,10 +92,11 @@ test('Scale keys move outside the layer, delete together, and never delete their
   expect(await page.evaluate((id) => (window as any).PM.L(id).p['scale.y'].kf.length, id)).toBe(2);
   await page.evaluate(async () => {
     const PM = (window as any).PM;
-    // replaceProject sets fixture data; this window already owns that document,
-    // so the relaunch below restores it rather than the welcome demo.
     await PM.flushProject();
   });
+  // The hidden harness chooses Don't Save on close. Save this document first
+  // so relaunch verifies persistence rather than discarding an unsaved fixture.
+  await saveFixtureProject(session, 'Scale timeline.pmv');
   await session.relaunch();
   await session.openEditor();
   expect(await session.page.evaluate((id) => {
@@ -117,7 +126,8 @@ test('the easing grid applies a curve to both Scale dimensions and preserves lin
   expect(boxes[4]!.x).toBe(boxes[0]!.x);
   await testInfo.attach('easing-grid', { body: await grid.screenshot(), contentType: 'image/png' });
   await grid.getByRole('menuitem', { name: 'Ease out', exact: true }).click();
-  expect(await page.evaluate((id) => {
+  await expect(grid).toHaveCount(0);
+  await expect.poll(() => page.evaluate((id) => {
     const L = (window as any).PM.L(id);
     return [L.p['scale.x'].kf[0].ei, L.p['scale.y'].kf[0].ei];
   }, id)).toEqual([[.58, 1], [.58, 1]]);
@@ -469,6 +479,7 @@ test('project rename is available from the tab menu and persists the live docume
   await expect(chip).toContainText('Renamed composition');
   await page.evaluate(() => (window as any).PM.flushProject());
   expect(await page.evaluate((id) => (window as any).PM.Projects.get(id).name, id)).toBe('Renamed composition');
+  await saveFixtureProject(session, 'Renamed composition.pmv');
   await session.relaunch();
   await session.openEditor();
   await expect(session.page.locator('#tabs .project-doc.on')).toContainText('Renamed composition');

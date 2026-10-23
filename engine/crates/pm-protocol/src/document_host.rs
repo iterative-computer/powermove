@@ -138,6 +138,9 @@ pub enum ToolRoute {
 
 /// DOM tools (section 22): the hidden host starts Chromium on demand for
 /// them and fails with a named error when Chromium is missing.
+/// `manage_project` and `publish_visual_reply` act on an editor window (its
+/// project library and window ownership; the run's thread attachments), not
+/// on the document, so a document host refuses them as for the panel tools.
 pub const DOM_TOOLS: &[&str] = &[
     "capture_panel",
     "computer_use_panel",
@@ -146,6 +149,8 @@ pub const DOM_TOOLS: &[&str] = &[
     "open_panel",
     "get_panel_layout",
     "set_panel_layout",
+    "manage_project",
+    "publish_visual_reply",
 ];
 
 /// Tools served by host services. Mirrors what the desktop bridge runs in

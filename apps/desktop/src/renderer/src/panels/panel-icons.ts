@@ -4,7 +4,7 @@ export const PANEL_ICONS: Record<string, string> = {
   perf: 'speedometer', 'layer-effects': 'diamond', pexels: 'image', agent: 'sparkle', inspector: 'sliders',
   shader: 'code', takes: 'layers', timeline: 'timeline', toolbar: 'tools', workspaces: 'grid',
   captions: 'captions',
-  mixer: 'speaker'
+  mixer: 'speaker', easing: 'graph'
 };
 
 export function panelIcons(panels: Array<{ id: string; title?: string; icon?: string }>, icons: Record<string, unknown>) {

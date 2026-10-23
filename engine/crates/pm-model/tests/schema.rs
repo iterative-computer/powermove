@@ -377,15 +377,36 @@ fn animated_content_fields_decode_as_channels() {
     assert!(axis[&JsString::from("wdth")].as_channel().is_some());
 }
 
+const MATERIAL_SAMPLE: &str = r##"{
+  "id":"product_paint",
+  "name":"Product paint",
+  "graph":{
+    "nodes":[
+      {"id":"noise","type":"ShaderNodeTexNoise","inputs":{"Scale":5,"Detail":2}},
+      {"id":"bump","type":"ShaderNodeBump","inputs":{"Strength":0.2,"Distance":0.1}},
+      {"id":"surface","type":"ShaderNodeBsdfPrincipled","inputs":{"Base Color":"#FF6B30","Roughness":0.3,"Metallic":0.15}},
+      {"id":"output","type":"ShaderNodeOutputMaterial"}
+    ],
+    "links":[
+      {"from":"noise","output":"Fac","to":"bump","input":"Height"},
+      {"from":"bump","output":"Normal","to":"surface","input":"Normal"},
+      {"from":"surface","output":"BSDF","to":"output","input":"Surface"}
+    ]
+  },
+  "inputs":[
+    {"id":"scale","label":"Pattern scale","kind":"number","node":"noise","socket":"Scale","min":0.01,"max":100},
+    {"id":"color","label":"Color","kind":"color","node":"surface","socket":"Base Color"}
+  ],
+  "p":{"scale":{"v":5,"kf":[],"expr":null},"color":{"v":"#FF6B30","kf":[],"expr":null}}
+}
+"##;
+
 #[test]
 fn scene3d_doc_material_sample_decodes() {
-    let doc = std::fs::read_to_string(repo().join("apps/desktop/docs/SCENE3D.md")).unwrap();
-    let start = doc
-        .find("```json\n{\n  \"id\":\"product_paint\"")
-        .expect("material sample");
-    let body = &doc[start + "```json\n".len()..];
-    let end = body.find("```").unwrap();
-    let value = parse(&body[..end]).unwrap();
+    // The Blender material sample from apps/desktop/docs/SCENE3D.md before
+    // main retired Blender (2b1fa379a) and rewrote that page without it; the
+    // schema stays while the engine keeps its Blender crates.
+    let value = parse(MATERIAL_SAMPLE).unwrap();
     let material = assert_lossless::<BlenderMaterial>("SCENE3D.md material", &value);
     assert!(
         mismatches(&material).is_empty(),

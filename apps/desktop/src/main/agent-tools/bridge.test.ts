@@ -16,11 +16,13 @@ class FakeIpcMain extends EventEmitter {}
 
 class FakeWebContents extends EventEmitter {
   destroyed = false;
+  crashed = false;
   readonly requests: AgentToolRequestEvent[] = [];
 
   constructor(private readonly ipc: FakeIpcMain) { super(); }
 
   isDestroyed(): boolean { return this.destroyed; }
+  isCrashed(): boolean { return this.crashed; }
 
   send(channel: string, request: AgentToolRequestEvent): void {
     expect(channel).toBe(IPC.agentToolRequest);
@@ -58,6 +60,71 @@ async function rpc(child: ChildProcessWithoutNullStreams, message: Record<string
 }
 
 describe('native Powermove agent tool bridge', () => {
+  it('publishes via the authenticated renderer lane in app and planning runs without widening edit access', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '' });
+    try {
+      const session = await bridge.openSession({ runId: 'visual-planning', owner: owner as never, baseRevision: 0, context:'app', inspectionOnly:true });
+      expect((await bridge.callTool(session,'publish_visual_reply',{title:'Palette',html:'<h1>Palette</h1>'})).ok).toBe(true);
+      expect(owner.requests[0]?.tool).toBe('publish_visual_reply');
+      await expect(bridge.callTool(session,'apply_commands',{commands:[]})).rejects.toThrow('only inspect');
+      await session.finish(false);
+      await expect(bridge.callTool(session,'publish_visual_reply',{})).rejects.toThrow('not active');
+    } finally { await bridge.shutdown(); }
+  });
+
+  it('starts the render utility for project runs, including read-only frame inspection', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    let finishStartup!: () => void;
+    const startup = new Promise<void>((resolve) => { finishStartup = resolve; });
+    const prepareRun = vi.fn((_run: string) => startup);
+    const finishRun = vi.fn(async (_run: string) => {});
+    const cancelRun = vi.fn(async (_run: string) => 0);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      mcpServerPath: '',
+      engineJobs: { available: true, prepareRun, finishRun, cancelRun } as never
+    });
+    try {
+      const project = await bridge.openSession({ runId: 'editable', owner: owner as never, baseRevision: 0 });
+      expect(project.runId).toBe('editable');
+      await Promise.resolve();
+      expect(prepareRun).toHaveBeenCalledWith('editable');
+      await bridge.openSession({ runId: 'inspect-plan', owner: owner as never, baseRevision: 0, inspectionOnly: true });
+      await bridge.openSession({ runId: 'app-run1', owner: owner as never, baseRevision: 0, context: 'app' });
+      await bridge.openSession({ runId: 'transaction', owner: owner as never, baseRevision: 0, transactionSession: project });
+      expect(prepareRun).toHaveBeenCalledTimes(2);
+      expect(prepareRun).toHaveBeenCalledWith('inspect-plan');
+      await bridge.callTool(project, 'get_project_state', {});
+      await Promise.resolve();
+      expect(prepareRun).toHaveBeenCalledTimes(3);
+      await project.finish(true);
+      await Promise.resolve();
+      expect(finishRun).toHaveBeenCalledWith('editable');
+      expect(cancelRun).not.toHaveBeenCalledWith('editable');
+    } finally {
+      finishStartup();
+      await bridge.shutdown();
+    }
+  });
+
+  it('releases a warm run if its renderer disappears before finishing', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    const prepareRun = vi.fn(async (_run: string) => {});
+    const cancelRun = vi.fn(async (_run: string) => 0);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      mcpServerPath: '', engineJobs: { available: true, prepareRun, cancelRun } as never
+    });
+    try {
+      const session = await bridge.openSession({ runId: 'owner-gone', owner: owner as never, baseRevision: 0 });
+      await Promise.resolve();
+      owner.emit('render-process-gone');
+      await Promise.resolve();
+      expect(session.isClosed()).toBe(true);
+      expect(cancelRun).toHaveBeenCalledWith('owner-gone');
+      expect(owner.listenerCount('render-process-gone')).toBe(0);
+    } finally { await bridge.shutdown(); }
+  });
+
   it('routes default delivery tools through the production exporter and keeps planning read-only', async () => {
     const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
     const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '' });
@@ -109,7 +176,7 @@ describe('native Powermove agent tool bridge', () => {
     // The renderer stand-in answers the private plan and context tools.
     owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
       this.requests.push(request);
-      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(project), home: false }
+      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(project), home: false, compat: ['rasterOverride'] }
         : request.tool === '__engine_frames_plan' ? { times: [0, 0.5], width: 320, project: JSON.stringify(project), revision: 4 }
         : { tool: request.tool };
       queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 4 }));
@@ -133,7 +200,8 @@ describe('native Powermove agent tool bridge', () => {
       const session = await bridge.openSession({ runId: 'engine-run', owner: owner as never, baseRevision: 0 });
       const done = await bridge.callTool(session, 'export_video', { name: 'P', audio: false });
       expect(JSON.parse((done.content[0] as { text: string }).text)).toEqual({ path: '/exports/P.mp4', projectId: 'P', width: 320, height: 180, fps: 30, jobId: 'job-1' });
-      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, { name: 'P', format: 'mp4', range: 'all', audio: false, motionBlur: true, alpha: false, mode: 'wait' }, undefined);
+      // The window's raster override goes with the job (its layers are drawn by the window).
+      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, { name: 'P', format: 'mp4', range: 'all', audio: false, motionBlur: true, alpha: false, mode: 'wait' }, undefined, ['rasterOverride']);
       const queued = await bridge.callTool(session, 'export_video', { mode: 'async' });
       expect(JSON.parse((queued.content[0] as { text: string }).text)).toEqual({ status: 'queued', jobId: 'job-1', projectId: 'P' });
       const status = await bridge.callTool(session, 'get_render_status', { jobId: 'job-1' });
@@ -153,6 +221,36 @@ describe('native Powermove agent tool bridge', () => {
       // Rolling back the run cancels its jobs.
       await session.finish(false);
       expect(engineJobs.cancelRun).toHaveBeenCalledWith('engine-run');
+    } finally { await bridge.shutdown(); }
+  });
+
+  it('exports the full project through the job engine when the agent context is only an index', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    // Over 2 MB of layers: the full document crosses the ordinary tool reply bound.
+    const project = { id: 'P', name: 'P', compId: 'P-root', w: 320, h: 180, fps: 30, dur: 1,
+      layers: Array.from({ length: 3 }, (_, i) => ({ id: `L${i}`, name: 'x'.repeat(1_000_000) })) };
+    const index = { id: 'P', name: 'P', agentSnapshot: { complete: false, note: 'index' }, layerCount: 3, layers: [] };
+    owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
+      this.requests.push(request);
+      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(index), home: false }
+        : request.tool === '__engine_frames_plan' ? { times: [0], width: 720, project: JSON.stringify(project), revision: 4 }
+        : { tool: request.tool };
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 4 }));
+    } as never;
+    (owner as unknown as { id: number }).id = 3;
+    const engineJobs = {
+      available: true,
+      exportVideo: vi.fn(async () => ({ status: 'done' as const, jobId: 'job-1', path: '/exports/P.mp4', width: 320, height: 180, fps: 30 })),
+      renderFrames: vi.fn(), status: vi.fn(), cancelRun: vi.fn(async () => 0)
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', engineJobs: engineJobs as never });
+    try {
+      const session = await bridge.openSession({ runId: 'engine-run', owner: owner as never, baseRevision: 0 });
+      const done = await bridge.callTool(session, 'export_video', { name: 'P' });
+      expect(JSON.parse((done.content[0] as { text: string }).text)).toMatchObject({ path: '/exports/P.mp4', projectId: 'P' });
+      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, expect.anything(), undefined, []);
+      expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', '__engine_frames_plan']);
     } finally { await bridge.shutdown(); }
   });
 
@@ -248,7 +346,8 @@ describe('native Powermove agent tool bridge', () => {
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
       ...ORCHESTRATION_TOOL_NAMES,
-      'save_project', 'export_video', 'get_render_status', 'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'list_media', 'replace_media', 'import_media', 'manage_media', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
+      'publish_visual_reply',
+      'get_timeline', 'edit_layer_strips', 'manage_project', 'save_project', 'export_video', 'get_render_status', 'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'list_media', 'replace_media', 'import_media', 'manage_media', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
       'probe_media', 'sample_media_frames', 'media_contact_sheet', 'media_waveform', 'transcribe_media', 'check_project',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish',
       'generate_captions', 'export_captions'
@@ -293,7 +392,8 @@ describe('native Powermove agent tool bridge', () => {
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
       ...ORCHESTRATION_TOOL_NAMES,
-      'fork_builtin_extension', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'validate_effect', 'stage_fork_rebase',
+      'publish_visual_reply',
+      'manage_project', 'fork_builtin_extension', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'validate_effect', 'stage_fork_rebase',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish'
     ]);
     for (const name of ['get_project_state', 'apply_commands']) {
@@ -799,6 +899,7 @@ describe('native Powermove agent tool bridge', () => {
     bridges.push(bridge);
     const session = await bridge.openSession({ runId: 'native-run-large', owner: owner as never, baseRevision: 0 });
     await expect(bridge.callRenderer(session, 'get_project_state', {})).rejects.toThrow('oversized response');
+    await expect(bridge.callRenderer(session, '__mcp_context', {})).resolves.toMatchObject({ ok: true });
     const plan = await bridge.callRenderer(session, '__engine_save_plan', {});
     expect((plan.content[0] as { text: string }).text.length).toBe(2_000_001);
     owner.destroyed = true;
@@ -815,6 +916,19 @@ describe('native Powermove agent tool bridge', () => {
     owner.destroyed = true;
   });
 
+  it('rejects calls to an already crashed renderer without sending or waiting for a timeout', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    owner.crashed = true;
+    const send = vi.spyOn(owner, 'send').mockImplementation(() => {});
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', timeoutMs: 30 });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'native-run-already-crashed', owner: owner as never, baseRevision: 0 });
+    await expect(bridge.callRenderer(session, 'get_project_state', {})).rejects.toThrow('renderer is unavailable');
+    expect(send).not.toHaveBeenCalled();
+    await session.finish(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('marks the window driven by the agent in main and the renderer for all of computer_use_panel', async () => {
     const ipc = new FakeIpcMain();
     const log: string[] = [];
@@ -825,8 +939,8 @@ describe('native Powermove agent tool bridge', () => {
       if (channel === IPC.agentToolInput) { log.push(`renderer ${payload}`); return; }
       const request = payload as AgentToolRequestEvent;
       log.push(request.tool);
-      const text = request.tool === '__prepare_panel_input' ? { points: [{ x: 5, y: 6 }] }
-        : request.tool === '__panel_bounds' ? { x: 0, y: 0, width: 10, height: 10 } : {};
+      const text = request.tool === '__prepare_panel_input' ? { points: [{ x: 5, y: 6 }], target: 'panel-1' }
+        : request.tool === '__panel_bounds' ? { x: 0, y: 0, width: 10, height: 10, target: 'panel-1' } : {};
       queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, {
         runId: request.runId, callId: request.callId, ok: true, revision: 1, content: [{ type: 'text', text: JSON.stringify(text) }]
       }));
@@ -840,14 +954,14 @@ describe('native Powermove agent tool bridge', () => {
     await bridge.callTool(session, 'computer_use_panel', { panelId: 'ext.panel', action: 'click', points: [{ x: 5, y: 6 }] });
     expect(input.drive).toHaveBeenCalledExactlyOnceWith(owner);
     expect(log).toEqual([
-      'drive', 'renderer true', '__prepare_panel_input',
+      'drive', 'renderer true', '__prepare_panel_input', '__validate_panel_target',
       'mouseMove (driven)', 'mouseDown (driven)', 'mouseUp (driven)',
-      'get_project_state', '__panel_bounds', 'release', 'renderer false'
+      '__validate_panel_target', 'get_project_state', '__panel_bounds', '__validate_panel_target', 'release', 'renderer false'
     ]);
     log.length = 0;
     owner.sendInputEvent = () => { throw new Error('no input'); };
     await expect(bridge.callTool(session, 'computer_use_panel', { panelId: 'ext.panel', action: 'click', points: [{ x: 5, y: 6 }] })).rejects.toThrow('no input');
-    expect(log).toEqual(['drive', 'renderer true', '__prepare_panel_input', 'release', 'renderer false']);
+    expect(log).toEqual(['drive', 'renderer true', '__prepare_panel_input', '__validate_panel_target', 'release', 'renderer false']);
     owner.destroyed = true;
   });
 

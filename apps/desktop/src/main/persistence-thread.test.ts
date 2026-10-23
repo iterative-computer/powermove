@@ -129,6 +129,34 @@ describe('store on the persistence worker thread', () => {
     expect(JSON.parse(await fs.readFile(path.join(directory, 'projectState.demo.json'), 'utf8')).time).toBe(2);
   });
 
+  it('reads heavy keys on demand, quarantines a corrupt one, and keeps history across eviction', async () => {
+    const directory = await temporaryDirectory();
+    const history = { version: 1, index: 0, entries: [{ label: 'Edit', forward: [], backward: [] }] };
+    await fs.writeFile(path.join(directory, 'projectState.a.json'), JSON.stringify({ history, time: 1 }));
+    await fs.writeFile(path.join(directory, 'project.b.json'), '{"b":true}');
+    await fs.writeFile(path.join(directory, 'project.c.json'), '{"c":true}');
+    await fs.writeFile(path.join(directory, 'projectHistory.broken.json'), '{"truncated":');
+    await fs.writeFile(path.join(directory, 'projects.json'), '[{"id":"b"},{"id":"c"}]');
+    const store = createStore(directory, { thread: startThread(), heavyCacheBytes: 0 });
+    const errors: string[] = [];
+    store.onError(event => errors.push(event.error));
+    await store.load();
+    expect(errors).toEqual([]);
+    expect(JSON.parse(store.bootstrapSerialized!().__powermoveLazyKeys!).sort()).toEqual(['project.b', 'project.c', 'projectHistory.broken', 'projectState.a']);
+    await store.preloadProject!('a');
+    expect(store.get!('projectState.a')).toEqual({ history, time: 1 });
+    // Reading another session of the same kind evicts this one, here and in the engine.
+    await store.set('projectState.other', { time: 0 }); await store.flushAll();
+    await store.set('projectState.a', { time: 2 });
+    expect(store.get!('projectState.a')).toEqual({ history, time: 2 });
+    expect(await store.getEncodedSerializedAsync!('project.b')).toBe('{"b":true}');
+    expect(store.get!('project.c')).toEqual({ c: true });
+    expect(store.get!('projectHistory.broken')).toBeUndefined();
+    expect(errors).toEqual([expect.stringContaining('quarantined')]);
+    await store.flushAll();
+    expect(JSON.parse(await fs.readFile(path.join(directory, 'projectState.a.json'), 'utf8'))).toEqual({ history, time: 2 });
+  });
+
   it('replaces a stopped worker and writes every value it had not saved yet', async () => {
     const directory = await temporaryDirectory();
     const thread = startThread();

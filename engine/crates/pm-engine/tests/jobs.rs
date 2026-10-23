@@ -49,6 +49,7 @@ type Submitted = (SubmitJob, Option<(SessionId, u64, String)>);
 #[derive(Default)]
 struct Seen {
     submitted: Vec<Submitted>,
+    probes: Vec<RequestId>,
     frames: Vec<(PortId, RequestId, u64, AgentFrameRequest)>,
     cancels: Vec<CancelJobs>,
     signals: Vec<DeadlineSignal>,
@@ -101,6 +102,16 @@ impl JobService for Fake {
             .unwrap()
             .frames
             .push((port, id, document.revision.get(), request));
+        Ok(())
+    }
+
+    fn probe_media(
+        &mut self,
+        _port: PortId,
+        id: RequestId,
+        _probe: pm_protocol::media::ProbeMedia,
+    ) -> Result<(), Box<EngineError>> {
+        self.0.lock().unwrap().probes.push(id);
         Ok(())
     }
 
@@ -547,6 +558,36 @@ fn cancels_signals_and_closes_reach_the_service() {
 #[test]
 fn the_interactive_engine_never_runs_jobs() {
     let mut engine = Engine::new(EngineConfig::new(EngineProcess::Interactive));
-    engine.set_job_service(Box::new(Fake::default()));
+    let fake = Fake::default();
+    engine.set_job_service(Box::new(fake.clone()));
     assert!(!engine.has_job_service());
+    engine.attach(HOST, PeerKind::Host);
+    engine.receive(HOST, &hello(PeerRole::Host), at(0));
+    let probe = pm_protocol::media::ProbeMedia {
+        handle: pm_protocol::host::CapabilityHandle::from_random_bytes([1; 16]),
+        interpret: None,
+    };
+    engine.receive(
+        HOST,
+        &request(1, Request::ProbeMedia(probe), None, None),
+        at(1),
+    );
+    assert_eq!(
+        fake.0.lock().unwrap().probes,
+        vec![RequestId::new(1).unwrap()]
+    );
+    let cancelled = engine.receive(
+        HOST,
+        &request(
+            2,
+            Request::CancelJobs(CancelJobs::Job {
+                job: "job-1".into(),
+            }),
+            None,
+            None,
+        ),
+        at(2),
+    );
+    assert_eq!(code(&answer(&cancelled, HOST)), ErrorCode::Unsupported);
+    assert!(fake.0.lock().unwrap().cancels.is_empty());
 }

@@ -7,8 +7,7 @@ by Powermove from the four effect params.
 1. Copy this folder into the run's extension staging directory. Rename the
    folder, manifest id, and effect id for the requested effect.
 2. Implement the complete `definition` object. Read `../../api.ts` for its types.
-   Effect ids match `/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/`. Use at most **32 params**,
-   each with a unique key matching `/^[a-z][a-zA-Z0-9]*$/`. Passes must be 1–8;
+   Effect ids match `/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/`. Each parameter must have a unique key matching `/^[a-z][a-zA-Z0-9]*$/`. Passes must be 1–8;
    the non-empty fragment body is limited to 65,536 characters.
 3. Call `validate_effect` with `{ "definition": <complete definition> }` before
    returning the extension. This runs the real registration validator without

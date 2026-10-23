@@ -272,7 +272,7 @@ fn chromium_older_direct_video_uploads_match_all_62_live_frames() {
             } else {
                 fixture.join(media_file)
             };
-            for precision in [Precision::Float16, Precision::Float32] {
+            for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
                 let mut encoder = gpu.device.create_command_encoder(&Default::default());
                 let target = match media.video(
                     &gpu.device,

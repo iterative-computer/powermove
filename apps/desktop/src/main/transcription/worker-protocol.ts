@@ -29,13 +29,16 @@ export type WorkerRequest =
   }
   | { type: 'cancel'; id: string }
   /** Load the model ahead of the first request, so the one-time Metal
-   *  shader compile happens off the critical path. Answered with 'loaded'. */
-  | { type: 'warm'; model: WorkerModel; threads: number; runtime?: string };
+   *  shader compile happens off the critical path. Answers 'loaded' or 'warm-error'. */
+  | { type: 'warm'; id: string; model: WorkerModel; threads: number; runtime?: string };
 
 export type WorkerResponse =
   | { type: 'ready' }
   /** A model finished loading (the first load in a fresh app compiles the Metal shaders, ~15 s). */
   | { type: 'loaded'; file: string }
+  /** A background model load failed; identify its attempt so an old failure
+   * cannot release a newer load or transcription using the same process. */
+  | { type: 'warm-error'; id: string; file: string }
   | { type: 'progress'; id: string; progress: number }
   | { type: 'done'; id: string; duration: number; segments: TranscriptSegment[]; /** Detected by the model, when it says. */ language?: string }
   | { type: 'error'; id: string; message: string }

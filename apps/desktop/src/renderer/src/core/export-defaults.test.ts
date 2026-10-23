@@ -6,7 +6,8 @@ import {
   exportActionLabel,
   exportFieldSupport,
   normalizeExportDefaults,
-  planExport
+  planExport,
+  storedExportDefaults
 } from './export-defaults';
 
 describe('normalizeExportDefaults', () => {
@@ -116,4 +117,29 @@ describe('planExport', () => {
 it('clamps the project frame rate when stored fps is absent or invalid', () => {
   expect(normalizeExportDefaults({}, 900).fps).toBe(240);
   expect(normalizeExportDefaults({ fps: -1 }, 900).fps).toBe(240);
+});
+
+describe('the document form of export defaults (issue P1)', () => {
+  it('stores today\'s format ids where they exist and reads back the migrated ids', () => {
+    for (const [today, sheet] of [['prores', 'prores-4444'], ['mp4', 'h264'], ['webm', 'webm-vp9'], ['png', 'png'], ['still', 'still'], ['web', 'web'], ['json', 'json']] as const) {
+      const read = normalizeExportDefaults({ format: today }, 30);
+      expect(read.format).toBe(sheet);
+      const stored = storedExportDefaults(read);
+      expect(stored.format).toBe(today);
+      expect(normalizeExportDefaults(stored, 30)).toEqual(read);
+    }
+  });
+
+  it('keeps a stored alias that still means the same format, and the new id for formats today has none', () => {
+    expect(storedExportDefaults(normalizeExportDefaults({ format: 'rec' }, 30), { format: 'rec' }).format).toBe('rec');
+    expect(storedExportDefaults(normalizeExportDefaults({ format: 'mp4' }, 30), { format: 'rec' }).format).toBe('mp4');
+    expect(storedExportDefaults(normalizeExportDefaults({ format: 'prores-hq' }, 30)).format).toBe('prores-hq');
+    expect(storedExportDefaults(normalizeExportDefaults({ format: 'prores-4444' }, 30), { format: 'prores-4444' }).format).toBe('prores');
+  });
+
+  it('round-trips today\'s stored values unchanged apart from additive fields', () => {
+    const today = { format: 'prores', scale: 1, fps: 24, range: 'all', quality: 'max', mblur: false, audio: true, alpha: true };
+    const stored = storedExportDefaults(normalizeExportDefaults(today, 24), today);
+    expect({ ...stored, delivery: undefined }).toEqual({ ...today, delivery: undefined });
+  });
 });

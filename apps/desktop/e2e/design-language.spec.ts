@@ -5,9 +5,11 @@ test('flat controls remain consistent across home, editor, settings, library, an
   await page.setViewportSize({ width: 1440, height: 1000 });
   async function inspect(name: string) {
     const raised = await page.locator('button:visible').evaluateAll(buttons => buttons.filter(button => {
+      // Library previews can replace nodes between locating and inspection.
+      if (!button.isConnected) return false;
       const style = getComputedStyle(button);
       // Preserve selection underlines and the uniform boundary that makes color swatches readable.
-      const selectionCue = button.matches('.export-destination[aria-pressed="true"], .color-choice');
+      const selectionCue = button.matches('.export-destination[aria-pressed="true"], .color-choice, .tl-mode-button.on');
       return style.backgroundImage.includes('gradient') || style.boxShadow !== 'none' && !button.matches(':focus-visible') && !selectionCue;
     }).map(button => ({ label: button.getAttribute('aria-label') || button.textContent?.trim(), className: button.className, shadow: getComputedStyle(button).boxShadow, image: getComputedStyle(button).backgroundImage })));
     expect(raised, name).toEqual([]);
@@ -50,7 +52,8 @@ test('flat controls remain consistent across home, editor, settings, library, an
     const color = page.getByRole('dialog', { name: 'Background', exact: true });
     await expect(color).toBeVisible();
     await inspect(`color-${theme}`);
-    await color.getByRole('button', { name: 'OK', exact: true }).click();
+    await page.keyboard.press('Escape');
+    await expect(color).toBeHidden();
     await composition.getByRole('button', { name: 'Cancel', exact: true }).click();
   }
   expect(session.diagnostics.pageErrors).toEqual([]);

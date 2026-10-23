@@ -111,7 +111,7 @@ export async function createPlayer(options: PlayerOptions) {
       if (dead) return;
       display?.update();
       PM.time = time;
-      await prepareFrame(PM, time);
+      await prepareFrame(PM, time, PM.proj, {mblur:true,mbSamples:6,shutter:PM.proj.shutter??.5});
       if (dead) return;
       PM.GL.render(time, { transparent: !!options.transparent, mblur: true, mbSamples: 6, shutter: PM.proj.shutter ?? .5 });
       if (PM.GL.errors.size) throw new Error([...PM.GL.errors.values()].join('\n'));

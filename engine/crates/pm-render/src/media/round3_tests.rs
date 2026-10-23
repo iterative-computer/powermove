@@ -58,7 +58,7 @@ fn chromium_round3_video_sources_match_all_captured_bytes() {
                 "{source} at {seconds}s {reading}"
             );
             media.canvas_video = canvas;
-            for precision in [Precision::Float16, Precision::Float32] {
+            for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
                 let mut encoder = gpu.device.create_command_encoder(&Default::default());
                 let target = match media.video(
                     &gpu.device,

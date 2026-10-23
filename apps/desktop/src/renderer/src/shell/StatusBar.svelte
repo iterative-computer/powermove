@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { kernelSignals } from '../kernel/signals.svelte';
   import { frameBus } from '../runtime/frame-bus';
   import { doc } from '../state/document.svelte';
@@ -55,14 +56,15 @@
       return total + props.reduce((count: number, entry: any) => count + (entry?.prop?.kf ?? entry?.kf ?? []).length, 0);
     }, 0);
   });
-  const webglLive = $derived.by(() => {
+  const nativeEngine = $derived(!!PM.EngineConnection);
+  const rendererLive = $derived.by(() => {
     refreshToken;
-    return !!PM.GL?.gl;
+    return nativeEngine ? PM.EngineConnection.status().connected : !!PM.GL?.gl;
   });
   const playbackStatus = $derived.by(() => {
     refreshToken;
-    if (PM.GL?.contextLost) return 'Restoring GPU preview…';
-    if (PM.GL?.compiling) return `Preparing ${PM.GL.compiling} shader${PM.GL.compiling === 1 ? '' : 's'}…`;
+    if (!nativeEngine && PM.GL?.contextLost) return 'Restoring GPU preview…';
+    if (!nativeEngine && PM.GL?.compiling) return `Preparing ${PM.GL.compiling} shader${PM.GL.compiling === 1 ? '' : 's'}…`;
     if (PM.Preview?.preparing) return 'Preparing preview';
     if (PM.Preview?.active) return 'Cached preview';
     if (!transport.playing) return 'Playback paused';
@@ -98,10 +100,26 @@
   $effect(() => {
     const events = ['layers', 'project', 'history', 'assets'];
     const offs = events.map((event) => PM.bus?.on?.(event, () => refreshToken++));
-    const interval = window.setInterval(() => PM.invalidate?.('status'), 1000);
+    let interval: number | undefined, initialized = false;
+    const syncPolling = () => untrack(() => {
+      const visible = !document.hidden && !PM.ProjectsScreen?.isOpen && !PM.SettingsUI?.isOpen;
+      if (visible && interval === undefined) {
+        // Time-based extension text and expired telemetry refresh as soon as
+        // the editor returns, then keep their normal foreground cadence.
+        if (initialized) refreshToken++;
+        interval = window.setInterval(() => PM.invalidate?.('status'), 1000);
+      } else if (!visible && interval !== undefined) {
+        window.clearInterval(interval); interval = undefined;
+      }
+      initialized = true;
+    });
+    const screenOffs = ['projects:screen', 'settings:screen'].map(event => PM.bus?.on?.(event, syncPolling));
+    document.addEventListener('visibilitychange', syncPolling);
+    syncPolling();
     return () => {
-      offs.forEach((off) => off?.());
-      window.clearInterval(interval);
+      offs.forEach((off) => off?.()); screenOffs.forEach(off => off?.());
+      document.removeEventListener('visibilitychange', syncPolling);
+      if (interval !== undefined) window.clearInterval(interval);
     };
   });
 </script>
@@ -117,7 +135,9 @@
 {/each}
 <span class="sp" aria-hidden="true"></span>
 <span class="status-field">
-  {#if webglLive}<b class="live" aria-hidden="true">●</b> WebGL2{:else}WebGL unavailable{/if}
+  {#if nativeEngine}
+    {#if rendererLive}<b class="live" aria-hidden="true">●</b> Native engine{:else}Native engine starting{/if}
+  {:else if rendererLive}<b class="live" aria-hidden="true">●</b> WebGL2{:else}WebGL unavailable{/if}
 </span>
 <span class="status-field" title="Measured preview redraws per second during playback">{playbackStatus}</span>
 <span class="status-field" title="Preview render time">{frameMs} ms</span>

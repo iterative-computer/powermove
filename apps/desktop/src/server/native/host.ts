@@ -9,8 +9,7 @@ import { cliProbeEnvironment, shaderCacheDirectory } from '../../main/engine/sha
 /** macOS hidden host: in-process host services, supervised native engines and
  * one production document worker per project. Chromium is a lazy DOM service. */
 import { existsSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
-import { discoverBlender } from '../../main/blender-service';
+import { stat } from 'node:fs/promises';
 import { validCompatAnswer } from '../../main/engine/compat-frames';
 import os from 'node:os';
 import path from 'node:path';
@@ -37,7 +36,7 @@ export type NativeSnapshot = { project: Record<string, any>; document: unknown; 
 export interface NativeBrowser {
   call(project: string, request: AgentToolRequestEvent): Promise<AgentToolResponseEvent>;
   compat(project: string, request: import('../../shared/engine-protocol').CompatFrameRequest): Promise<import('../../shared/engine-ipc').EngineCompatAnswer>;
-  shader(session: number, request: import('../../shared/engine-protocol').ShaderFallbackRequest, textures: Uint16Array[]): Promise<import('../../main/engine/shader-fallback-relay').ShaderFallbackResult>;
+  shader(session: number, request: import('../../shared/engine-protocol').ShaderFallbackRequest, textures: (Uint16Array | Float32Array)[]): Promise<import('../../main/engine/shader-fallback-relay').ShaderFallbackResult>;
   /** Agent import_media/replace_media: today's editor import in the project's tab (engine/document-host/import-media.ts). */
   importMedia(project: string, args: Record<string, unknown>, replace: boolean): Promise<Record<string, unknown>>;
   close(): Promise<void>;
@@ -111,17 +110,18 @@ export class NativeHiddenHost {
     })(role);
     this.engine = new NativeEngine({ spawn: role => role === 'interactive'
       ? this.snapshotBridge.spawn(env => spawn(role, env)) : spawn(role), channel: transport.channel,
+      // Headless renders are this host's work: keep the job engine resident
+      // (the desktop starts it on demand to hold its idle footprint).
+      eagerJobs: true,
       cacheDirectory: path.join(userData, 'Engine Cache'), automaticOutputDirectory: options.exportsDir,
       physicalMemory: os.totalmem(), hostNow: this.nowUs,
       log: (level, message) => log(`[native:${level}] ${message}`), resolveAsset: (id, context) => context?.process === 'interactive' && this.interactiveProjects.has(context.session)
         ? this.resolveProjectAsset(this.interactiveProjects.get(context.session)!, id) : this.media.resolveAsset(id, context),
-      blender: { tempRoot: os.tmpdir(), locate: async () => {
-        const configured = await readFile(path.join(userData, 'blender-path.json'), 'utf8').then(raw => { const value = JSON.parse(raw)?.path; return typeof value === 'string' && path.isAbsolute(value) ? value : undefined; }).catch(() => undefined);
-        return discoverBlender(configured);
-      } },
       compatFrame: async request => {
         const answer = await options.browser.compat(request.document, request);
         if (!validCompatAnswer(answer)) throw new Error('invalidMessage: The compatibility runner returned invalid pixels.');
+        // The producer passed the layer through: the job draws it itself (compat-frames.ts).
+        if (answer.status === 'native') return { type: 'compatFrame', key: 'native', width: 1, height: 1, format: 'rgba8Premultiplied', origin: [0, 0], scale: request.scale, payload: { kind: 'inline', bytes: new Uint8Array(0) }, native: true };
         if (answer.status !== 'pixels') throw new Error(`notHeadlessRenderable: ${answer.message}`);
         let payload: import('../../shared/engine-protocol').PixelPayload = { kind: 'inline', bytes: answer.data };
         if (answer.data.length > 1024 * 1024) { const name = loaded.publishPixels(answer.data); const timer = setTimeout(() => { loaded.unlinkPixels(name); this.sharedPixels.delete(name); }, 60_000); timer.unref(); this.sharedPixels.set(name, timer); payload = { kind: 'sharedMemory', name, length: answer.data.length }; }

@@ -1,4 +1,4 @@
-import type { ExportDefaults } from '../export-defaults';
+import type { StoredExportDefaults } from '../export-defaults';
 import type { CaptionsContent } from './captions';
 
 export type { CaptionCue, CaptionStyle, CaptionWord, CaptionsContent } from './captions';
@@ -163,6 +163,7 @@ export interface TextContent {
   weight: number;
   size: number;
   tracking: number;
+  /** Line height as a multiple of size: 1.2 means 120%, not 120. */
   leading: number;
   color: string;
   align: 'left' | 'center' | 'right';
@@ -448,7 +449,8 @@ export interface Comp {
    * mix wherever the composition plays: preview, export, and when nested. */
   audioGain?: number;
   /** Per-project export settings; nested comps carry the field but never use it. */
-  exportDefaults?: ExportDefaults;
+  /** Stored with today's format ids (`storedExportDefaults`); read through `normalizeExportDefaults`. */
+  exportDefaults?: StoredExportDefaults;
   /** The legacy library module installs this lazily. */
   library?: Record<string, unknown>;
   /** Free-form project notes are persisted by the demo and user projects. */
@@ -456,6 +458,8 @@ export interface Comp {
 }
 
 export interface Project extends Comp {
+  /** Project-wide working precision; absent in older projects means 16-bit float. */
+  colorDepth?: import('../color-depth').ColorDepth;
   /** Id of the composition open in the Timeline; the other compositions live in `comps`. */
   compId?: string;
   /** Name of the open composition (`name` is the project's). */

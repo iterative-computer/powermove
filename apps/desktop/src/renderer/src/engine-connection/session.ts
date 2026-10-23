@@ -18,16 +18,16 @@
  */
 import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import type { EngineConnection, Log } from './connection';
-import { ShaderFallbackError, type ShaderFallbackRequest } from './shader-fallback';
+import { ShaderFallbackError, type FallbackTexture, type ShaderFallbackPixels, type ShaderFallbackRequest } from './shader-fallback';
 import type { PreviewStatus } from './preview';
 
 /** What the session needs of the shader fallback runner (`ShaderFallbackRunner`). */
 export interface FallbackRunner {
-  render(request: ShaderFallbackRequest, textures?: Uint16Array[]): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array }>;
+  render(request: ShaderFallbackRequest, textures?: FallbackTexture[]): Promise<ShaderFallbackPixels>;
 }
 
 /** A request whose textures are still arriving (`input` bands). */
-interface WaitingFallback { request: ShaderFallbackRequest; textures: Uint16Array[]; rows: Set<number>[] }
+interface WaitingFallback { request: ShaderFallbackRequest; textures: FallbackTexture[]; rows: Set<number>[] }
 
 /** Largest pixel band in one message (pm_protocol shader_fallback::MAX_BAND_BYTES). */
 export const MAX_FALLBACK_BAND_BYTES = 8 * 1024 * 1024;
@@ -62,7 +62,8 @@ export type ViewerMessage =
   | { type: 'frame'; frame: FrameDescriptor }
   | { type: 'surfacePool'; pool: SurfacePool }
   | { type: 'clock'; sample: ClockSample }
-  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number };
+  | { type: 'routed'; route: 'legacy'; reason: string; revision?: number; seq?: number }
+  | { type: 'failure'; reason: string };
 
 /** The kernel's definition stream (`PM.EngineDefinitions`, kernel/engine-definitions.ts; contract 10). */
 export interface DefinitionsSource {
@@ -111,6 +112,9 @@ export type SessionOptions = {
   onAudio?: (message: AudioMessage) => void;
   /** The engine's presentation stats (`RenderStats`, at most 2 Hz). */
   onStats?: (stats: RenderStats) => void;
+  /** The engine's asks for compatibility answers (`CompatMessage` `needs`:
+   *  the `raster` override's layers a viewer frame waits for). */
+  onCompat?: (message: Record<string, unknown>) => void;
   /** One explicit paused Blender preview's progress or completion. */
   onPreviewStatus?: (status: PreviewStatus) => void;
   /**
@@ -476,13 +480,16 @@ export class DocumentSession {
           }
           this.fallbackWaiting.set(request.key, {
             request,
-            textures: Array.from({ length: n }, () => new Uint16Array(request.width * request.height * 4)),
+            textures: Array.from({ length: n }, () => request.colorDepth === 32
+              ? new Float32Array(request.width * request.height * 4)
+              : new Uint16Array(request.width * request.height * 4)),
             rows: Array.from({ length: n }, () => new Set<number>())
           });
         }
         return;
       }
       case 'compat': {
+        if (event['compat'] === 'needs') { this.options.onCompat?.(event); return; }
         // Level 1 SVG rasters a frame drew without (decision S1).
         if (event['compat'] !== 'svgRequests') return;
         const requests = (event['requests'] as SvgRasterRequest[]) ?? [];
@@ -506,8 +513,7 @@ export class DocumentSession {
           this.options.handlers.message({ type: 'routed', route: 'legacy', reason: error.message, revision, seq }, arrivedMs);
           return;
         }
-        this.failures.push(`${error.code}: ${error.message}`);
-        if (this.failures.length > 32) this.failures.shift();
+        this.reportFailure(error.code, error.message, arrivedMs);
         // Shader meta and compile errors at the report's revision.
         this.options.definitions?.()?.failure(event as unknown as FailureReport, this.definitions);
         if (error.retry.kind === 'afterResync' || error.code === 'staleRevision') {
@@ -532,18 +538,20 @@ export class DocumentSession {
     const row = Number(event['row']);
     const rows = Number(event['rows']);
     const width = Number(event['width']);
-    const bytes = event['rgba16f'] as Uint8Array;
+    const bytes = (request: ShaderFallbackRequest) => request.colorDepth === 32 ? event['rgba32f'] : event['rgba16f'];
     const target = waiting.textures[texture];
     const { request } = waiting;
+    const data = bytes(request);
+    const stride = request.colorDepth === 32 ? 16 : 8;
     if (!target || width !== request.width || Number(event['height']) !== request.height
-      || !(bytes instanceof Uint8Array) || bytes.byteLength !== width * rows * 8 || row + rows > request.height) {
+      || !(data instanceof Uint8Array) || data.byteLength !== width * rows * stride || row + rows > request.height
+      || (request.colorDepth === 32 && (event['rgba16f'] as Uint8Array)?.byteLength !== 0)
+      || (request.colorDepth !== 32 && event['rgba32f'] !== undefined)) {
       this.fallbackWaiting.delete(key);
       void this.runFallback(request, null);
       return;
     }
-    const values = new Uint16Array(bytes.byteLength / 2);
-    new Uint8Array(values.buffer).set(bytes);
-    target.set(values, row * width * 4);
+    new Uint8Array(target.buffer, target.byteOffset + row * width * stride, data.byteLength).set(data);
     for (let r = row; r < row + rows; r++) waiting.rows[texture]!.add(r);
     if (waiting.rows.every((set) => set.size === request.height)) {
       this.fallbackWaiting.delete(key);
@@ -564,16 +572,35 @@ export class DocumentSession {
 
   /** Posts a fallback program's pixels on the session's port in row bands
    *  that fit a message (the viewer's asks and the snapshot path). */
-  uploadFallback(pixels: { key: string; width: number; height: number; rgba16f: Uint16Array }): void {
+  uploadFallback(pixels: ShaderFallbackPixels): void {
     const session = this.id;
     if (session === null || this.closed) return;
-    const rowBytes = pixels.width * 8;
+    const float32 = pixels.rgba32f !== undefined;
+    const rowBytes = pixels.width * (float32 ? 16 : 8);
     const rowsPerBand = Math.max(1, Math.floor(MAX_FALLBACK_BAND_BYTES / rowBytes));
-    const bytes = new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength);
+    const values = float32 ? pixels.rgba32f! : pixels.rgba16f;
+    const bytes = new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
     for (let row = 0; row < pixels.height; row += rowsPerBand) {
       const rows = Math.min(rowsPerBand, pixels.height - row);
-      this.options.connection.event({ type: 'shaderFallback', fallback: 'pixels', key: pixels.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: bytes.slice(row * rowBytes, (row + rows) * rowBytes) } as never, session);
+      const band = bytes.slice(row * rowBytes, (row + rows) * rowBytes);
+      this.options.connection.event({ type: 'shaderFallback', fallback: 'pixels', key: pixels.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: float32 ? new Uint8Array(0) : band, ...(float32 ? { rgba32f: band } : {}) } as never, session);
     }
+  }
+
+  /**
+   * Local compatibility failures and engine reports share one diagnostic
+   * surface. A failure of the viewer's own frame (`frame`: the engine's
+   * report on the session, a raster producer answering the compositor) that
+   * is an invalid request also names itself on the stage. A failure of a
+   * snapshot an extension asked for (`render.raster`, `render.snapshot`,
+   * `renderFrameTo`) is the caller's: it is recorded and logged, and the
+   * viewer keeps its frame, as today's viewer never hears of it.
+   */
+  reportFailure(code: string, message: string, arrivedMs = performance.now(), frame = true): void {
+    const reason = `${code}: ${message}`;
+    if (this.failures.at(-1) !== reason) this.failures.push(reason);
+    if (this.failures.length > 32) this.failures.shift();
+    if (frame && code === 'invalidMessage') this.options.handlers.message({ type: 'failure', reason }, arrivedMs);
   }
 
   /** Posts an event on the session's port (compatibility uploads). */
@@ -590,7 +617,7 @@ export class DocumentSession {
    * 11, decision 19), or tells the engine why it could not. `null`
    * textures: they arrived damaged (the request fails as `size`).
    */
-  private async runFallback(request: ShaderFallbackRequest, textures: Uint16Array[] | null): Promise<void> {
+  private async runFallback(request: ShaderFallbackRequest, textures: FallbackTexture[] | null): Promise<void> {
     const session = this.id;
     if (session === null || this.closed) return;
     const send = (body: Record<string, unknown>) => {

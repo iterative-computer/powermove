@@ -5,7 +5,7 @@ type WarmupState = {
   blocked: boolean;
 };
 type Window = [number, number];
-type Candidate = { layer: any; windows: Window[]; index: number; at: number; checkedAt?: number };
+type Candidate = { layer: any; windows: Window[]; index: number; at: number; checkedAt?: number; cut?: boolean };
 
 const intersect = (left: Window[], right: Window[]): Window[] => {
   const result: Window[] = [];
@@ -56,10 +56,11 @@ export function createPreviewWarmup(
   let project: any, key = '', lastTime = -Infinity, lastScan = -Infinity, pending = false;
   let queue: Candidate[] = [], attempted = new Set<any>();
   let windows = new Map<any, Window[]>();
+  let scaleCuts = new Map<any, number[]>(), preparedCuts = new Map<any, Set<number>>();
   const nextFrame = (time: number) => (Math.floor(time * Math.max(1, Number(project?.fps) || 30) + 1e-7) + 1) / Math.max(1, Number(project?.fps) || 30);
   const reset = (current: WarmupState) => {
     project = current.project; key = current.key; attempted = new Set(); queue = []; lastScan = -Infinity;
-    windows = new Map();
+    windows = new Map(); scaleCuts = new Map(); preparedCuts = new Map();
     const layers: any[] = project?.layers || [];
     const byId = new Map(layers.map(layer => [layer.id, layer]));
     const groups = new Map<any, Window[]>(), visiting = new Set<any>();
@@ -77,6 +78,29 @@ export function createPreviewWarmup(
       let result = intersect([[from, from + Number(layer.dur)]], opacityWindows(layer));
       if (layer.group) result = intersect(result, groupWindows(byId.get(layer.group)));
       if (result.length) windows.set(layer, result);
+      // A held scale key can change every child's source density on one
+      // frame, even while the scene is already visible. Prepare that variant
+      // with the same bounded queue used for new scene entrances.
+      const cuts = new Set<number>(), seen = new Set<any>();
+      const visit = (node: any) => {
+        if (!node || seen.has(node)) return;
+        seen.add(node);
+        for (const channel of ['scale.x', 'scale.y']) {
+          const prop = node.p?.[channel];
+          if (prop?.expr) continue;
+          const keys = prop?.kf || [];
+          for (let i = 1; i < keys.length; i++) {
+            const a = keys[i - 1], b = keys[i];
+            if (a.v !== b.v && (a.hold === true || a.outInterp === 'hold' || b.inInterp === 'hold')) {
+              const at = (Number(node.from) || 0) + Number(b.t);
+              if (Number.isFinite(at) && result.some(([start, end]) => start <= at && at < end)) cuts.add(at);
+            }
+          }
+        }
+        visit(byId.get(node.parent)); visit(byId.get(node.group));
+      };
+      visit(layer);
+      if (cuts.size) scaleCuts.set(layer, [...cuts].sort((a, b) => a - b));
     }
   };
   const advance = (candidate: Candidate, time: number, after = false): boolean => {
@@ -95,9 +119,14 @@ export function createPreviewWarmup(
     if (queue.length || current.time < lastScan + .25) return;
     lastScan = current.time;
     for (const [layer, spans] of windows) {
-      if (attempted.has(layer)) continue;
-      const candidate: Candidate = { layer, windows: spans, index: 0, at: 0 };
-      if (advance(candidate, current.time)) queue.push(candidate);
+      if (!attempted.has(layer)) {
+        const candidate: Candidate = { layer, windows: spans, index: 0, at: 0 };
+        if (advance(candidate, current.time)) queue.push(candidate);
+      }
+      for (const at of scaleCuts.get(layer) || []) {
+        if (at <= current.time || at > current.time + 2 || preparedCuts.get(layer)?.has(at)) continue;
+        queue.push({ layer, windows: spans, index: 0, at, cut: true });
+      }
     }
     queue.sort((a, b) => a.at - b.at);
   };
@@ -123,24 +152,31 @@ export function createPreviewWarmup(
         try {
           // Current sources belong to the visible render. Check ancestors with
           // the engine predicate, without multiplying scene-size frame scans.
-          if (candidate.checkedAt !== current.time) {
+          if (!candidate.cut && candidate.checkedAt !== current.time) {
             candidate.checkedAt = current.time;
             const currentVisible = visible ? visible(layer, current.time)
               : candidate.windows.some(([from, end]) => from <= current.time && current.time < end);
             if (currentVisible) { attempted.add(layer); continue; }
           }
+          if (candidate.cut && candidate.at <= current.time) continue;
           if (candidate.at <= current.time && !advance(candidate, current.time)) continue;
           if (candidate.at > current.time + 2) continue;
           if (visible && !visible(layer, candidate.at)) {
+            if (candidate.cut) { markCut(candidate); continue; }
             if (advance(candidate, current.time, true)) queue.unshift(candidate);
             continue;
           }
-          attempted.add(layer);
+          if (candidate.cut) markCut(candidate); else attempted.add(layer);
           prepare(layer, candidate.at);
-        } catch { attempted.add(layer); /* Normal rendering owns source errors. */ }
+        } catch { if (candidate.cut) markCut(candidate); else attempted.add(layer); /* Normal rendering owns source errors. */ }
       }
       if (queue.length) request();
     });
+  };
+  const markCut = ({ layer, at }: Candidate) => {
+    let times = preparedCuts.get(layer);
+    if (!times) preparedCuts.set(layer, times = new Set());
+    times.add(at);
   };
   return request;
 }

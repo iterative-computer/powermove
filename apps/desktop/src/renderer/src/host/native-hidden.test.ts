@@ -1,39 +1,38 @@
-import { createHash } from 'node:crypto';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const raster = vi.hoisted(() => ({ draw: vi.fn(), drawTexture: vi.fn(), decode: vi.fn() }));
-vi.mock('../engine-connection/shader-fallback', () => ({ ShaderFallbackRunner: class {} }));
-vi.mock('../engine-connection/svg-rasters', async importOriginal => {
-  const actual = await importOriginal<typeof import('../engine-connection/svg-rasters')>();
-  return { ...actual, decodeSvg: raster.decode, SvgRasterCanvas: class { draw = raster.draw; drawTexture = raster.drawTexture; } };
-});
-import { runSvgRaster } from './native-hidden';
+const render = vi.hoisted(() => vi.fn());
+vi.mock('../engine-connection/shader-fallback', () => ({
+  ShaderFallbackRunner: class { render = render; }
+}));
 
-const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>');
-const key = { content: createHash('sha256').update(svg).digest('hex'), width: 1, height: 1 };
-beforeEach(() => {
-  vi.clearAllMocks();
-  raster.decode.mockResolvedValue('decoded image');
-  raster.draw.mockReturnValue(Uint8Array.of(32, 0, 0, 128));
-  raster.drawTexture.mockReturnValue(Uint8Array.of(64, 0, 0, 128));
-});
+import { runShader } from './native-hidden';
 
-it('draws a content-verified canvas bucket with the app module', async () => {
-  expect(await runSvgRaster(key, svg.toString('base64'))).toEqual({ ok: true, pixels: Buffer.from([32, 0, 0, 128]).toString('base64') });
-  expect(raster.decode).toHaveBeenCalledWith(new Uint8Array(svg));
-  expect(raster.draw).toHaveBeenCalledWith('decoded image', 1, 1);
-  expect(raster.drawTexture).not.toHaveBeenCalled();
-});
+describe('direct CLI ANGLE transport', () => {
+  beforeEach(() => render.mockReset());
 
-it('preserves the straight-alpha material-map upload from the merged protocol', async () => {
-  expect(await runSvgRaster({ ...key, texture: true }, svg.toString('base64'))).toEqual({ ok: true, pixels: Buffer.from([64, 0, 0, 128]).toString('base64') });
-  expect(raster.drawTexture).toHaveBeenCalledWith('decoded image', 1, 1);
-  expect(raster.draw).not.toHaveBeenCalled();
-});
+  it('carries depth-32 input and output as exact binary32 bytes', async () => {
+    const bits = new Uint32Array([0x3f80_0001, 0x3f00_0001, 0x0000_0001, 0xbf80_0001]);
+    render.mockResolvedValueOnce({ rgba16f: new Uint16Array(0), rgba32f: new Float32Array(bits.buffer) });
+    const input = Buffer.from(bits.buffer).toString('base64');
+    const result = await runShader({ colorDepth: 32 }, [input]);
+    expect(result.ok).toBe(true);
+    const textures = render.mock.calls[0]![1] as Float32Array[];
+    expect(textures[0]).toBeInstanceOf(Float32Array);
+    expect(new Uint32Array(textures[0]!.buffer)).toEqual(bits);
+    if (!result.ok) throw new Error(result.message);
+    const output = Buffer.from(result.pixels, 'base64');
+    expect(new Uint32Array(Uint8Array.from(output).buffer)).toEqual(bits);
+  });
 
-it('refuses changed bytes before decoding or drawing them under the planned hash', async () => {
-  expect(await runSvgRaster(key, Buffer.from('<svg/>').toString('base64'))).toMatchObject({ ok: false, reason: 'stale' });
-  expect(raster.decode).not.toHaveBeenCalled();
-  expect(raster.draw).not.toHaveBeenCalled();
-  expect(raster.drawTexture).not.toHaveBeenCalled();
+  it('keeps depth-8 codes in the u16 wire slots', async () => {
+    const codes = new Uint16Array([0, 127, 255, 255]);
+    render.mockResolvedValueOnce({ rgba16f: codes });
+    const result = await runShader({ colorDepth: 8 }, [Buffer.from(codes.buffer).toString('base64')]);
+    expect(result.ok).toBe(true);
+    const textures = render.mock.calls[0]![1] as Uint16Array[];
+    expect(textures[0]).toBeInstanceOf(Uint16Array);
+    expect(textures[0]).toEqual(codes);
+    if (!result.ok) throw new Error(result.message);
+    expect(Buffer.from(result.pixels, 'base64')).toEqual(Buffer.from(codes.buffer));
+  });
 });

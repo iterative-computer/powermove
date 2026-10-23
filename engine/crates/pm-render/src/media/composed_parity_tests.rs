@@ -34,11 +34,25 @@ fn transformed_midtone_video_matches_app_float_readback() {
     let mut renderer = Renderer::headless().unwrap();
     let mut compared = 0;
 
-    for precision in [Precision::Float16, Precision::Float32] {
+    for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
         let depth = match precision {
+            Precision::Unorm8 => 8,
             Precision::Float16 => 16,
             Precision::Float32 => 32,
         };
+        let format = match precision {
+            Precision::Unorm8 => wgpu::TextureFormat::Rgba8Unorm,
+            Precision::Float16 => wgpu::TextureFormat::Rgba16Float,
+            Precision::Float32 => wgpu::TextureFormat::Rgba32Float,
+        };
+        let selected: Vec<_> = references.iter().filter(|r| r["depth"] == depth).collect();
+        assert_eq!(
+            selected.len(),
+            2,
+            "both captured timestamps at depth {depth}"
+        );
+        assert_eq!(selected[0]["time"], 0.5);
+        assert_eq!(selected[1]["time"], 1.5);
         let mut project = document.clone();
         project["colorDepth"] = depth.into();
         let parsed = pm_model::json::parse(&project.to_string()).unwrap();
@@ -51,10 +65,12 @@ fn transformed_midtone_video_matches_app_float_readback() {
             export: true,
             video_end: VideoEnd::Final,
             sampling: Sampling::Final,
-            ..RenderRequest::at_scale(Size::new(width, height), 1.0, precision)
+            // Exports may still pass the former Float32 hint. The saved
+            // document depth owns the working format at all three depths.
+            ..RenderRequest::at_scale(Size::new(width, height), 1.0, Precision::Float32)
         };
 
-        for reference in references.iter().filter(|r| r["depth"] == depth) {
+        for reference in selected {
             compared += 1;
             let seconds = reference["time"].as_f64().unwrap();
             let compressed =
@@ -83,6 +99,7 @@ fn transformed_midtone_video_matches_app_float_readback() {
                 "{depth}-bit at {seconds}s: {:?}",
                 frame.failures
             );
+            assert_eq!(frame.color.format(), format, "{depth}-bit working format");
             let actual_f32 = renderer.read_rgba(&frame).unwrap();
             let actual: Vec<u8> = actual_f32.iter().flat_map(|v| v.to_le_bytes()).collect();
             assert_eq!(
@@ -114,5 +131,5 @@ fn transformed_midtone_video_matches_app_float_readback() {
             );
         }
     }
-    assert_eq!(compared, 4, "both timestamps at both supported precisions");
+    assert_eq!(compared, 6, "both timestamps at all three project depths");
 }

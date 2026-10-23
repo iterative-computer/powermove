@@ -91,3 +91,19 @@ describe('agent video editing', () => {
     expect(run({ operation: 'insert', assetId: 'footage', from: 10, sourceIn: 19, duration: 3 }).ok).toBe(false);
   });
 });
+
+it('extends trims using source handles and slips the source without moving animation or the strip', () => {
+  const { PM, video, run } = editor();
+  PM.proj.assets.footage = { id: 'footage', kind: 'video', dur: 30 };
+  video.d.trim = PM.P(4);
+  PM.setKeyOn(video.p['position.x'], 2, 90, 'linear', 30);
+  expect(run({ operation: 'trim', start: 1, end: 11 }).ok).toBe(true);
+  expect(video.from).toBe(1); expect(video.dur).toBe(10); expect(video.d.trim.v).toBe(2);
+  expect(video.p['position.x'].kf[0].t).toBe(3);
+  expect(run({ operation: 'slip', sourceIn: 5 }).ok).toBe(true);
+  expect(video.from).toBe(1); expect(video.dur).toBe(10); expect(video.d.trim.v).toBe(5);
+  expect(video.p['position.x'].kf[0].t).toBe(3);
+  const before = JSON.stringify(PM.proj);
+  expect(run({ operation: 'slip', sourceIn: 20 }).ok).toBe(false);
+  expect(JSON.stringify(PM.proj)).toBe(before);
+});

@@ -60,4 +60,25 @@ describe('provenance', () => {
     expect(await fs.readFile(path.join(dir, PROVENANCE_FILE), 'utf8')).toBe('{not json');
     await expect(store.get('../x')).rejects.toThrow(/Invalid extension id/);
   });
+
+  it('returns complete caller results and continues queued writes in order after a failure', async () => {
+    const dir = await tempDir(), store = createProvenanceStore(dir);
+    const initial = { localId: 'serial', envKey: 'local:serial', future: { steps: ['first'], kept: { nested: true } } };
+    const order: string[] = [], failure = new Error('Synthetic mutation failed');
+    const first = store.update('serial', () => { order.push('first'); return initial; });
+    const failed = store.update('serial', () => { order.push('failed'); throw failure; });
+    const rejected = expect(failed).rejects.toBe(failure);
+    const last = store.update('serial', current => {
+      order.push('last');
+      const previous = current as typeof initial;
+      return { ...previous, future: { ...previous.future, steps: [...previous.future.steps, 'last'] } };
+    });
+    expect(await first).toEqual(initial);
+    await rejected;
+    expect(await last).toEqual({ ...initial, future: { ...initial.future, steps: ['first', 'last'] } });
+    expect(order).toEqual(['first', 'failed', 'last']);
+    const result = await store.read();
+    expect(result.serial).toEqual({ ...initial, future: { ...initial.future, steps: ['first', 'last'] } });
+    expect(initial.future.steps).toEqual(['first']);
+  });
 });

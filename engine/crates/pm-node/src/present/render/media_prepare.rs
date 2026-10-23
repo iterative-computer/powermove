@@ -74,11 +74,11 @@ impl Thread {
             return;
         }
         let doc = self.docs.get(&key).expect("checked above");
-        let composer = self
-            .gpu
-            .as_mut()
-            .expect("created above")
-            .composer_with(&self.config, self.frame_cache);
+        let composer = self.gpu.as_mut().expect("created above").composer_with(
+            &self.config,
+            self.frame_cache,
+            &mut self.prepared,
+        );
         let _ = composer.use_definitions(key, doc.definitions(), &[]);
         match composer.renderer().prepare_media(
             doc.document(),

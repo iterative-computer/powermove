@@ -17,6 +17,8 @@ export interface AgentOption {
 export interface AgentMessage {
   role: 'user' | 'assistant' | 'trace';
   text?: string;
+  /** Immutable, bounded visual artifacts travel with their durable assistant message. */
+  visualReplies?: import('../../../../shared/visual-reply').VisualReply[];
   /** A user follow-up or trace checkpoint captured while a run was steered. */
   steering?: boolean;
   /** role 'trace': sealed activity steps from a run or steering checkpoint. */
@@ -226,6 +228,13 @@ function reconcileTrace(next: TraceStep[]): void {
       assignChangedFields(currentStep, nextStep, ['label', 'live', 'startedAt', 'endedAt']);
     } else if (nextStep.kind === 'text') {
       assignChangedFields(currentStep, nextStep, ['text']);
+    } else if (nextStep.kind === 'question' && currentStep.kind === 'question') {
+      assignChangedFields(currentStep, nextStep, ['questions', 'transport', 'blocking', 'requestId', 'status']);
+      // A settled status without its answer renders as "Skipped". Keep the
+      // acknowledgement with the same live row, including when it is cleared.
+      if (!jsonEqual(currentStep.answers, nextStep.answers)) {
+        currentStep.answers = nextStep.answers ? { ...nextStep.answers } : undefined;
+      }
     } else {
       assignChangedFields(currentStep, nextStep, [
         'toolName', 'label', 'status', 'detail', 'output', 'startedAt', 'endedAt', 'task'
@@ -251,6 +260,7 @@ function reconcileSteps(next: AgentStep[]): void {
 function cloneMessage(message: AgentMessage): AgentMessage {
   return {
     ...message,
+    visualReplies: message.visualReplies?.map((artifact) => ({ ...artifact })),
     modResult: message.modResult ? { ...message.modResult } : undefined,
     steps: message.steps?.map((step) => ({ ...step })),
     focusLabels: message.focusLabels ? [...message.focusLabels] : undefined,
@@ -258,6 +268,12 @@ function cloneMessage(message: AgentMessage): AgentMessage {
       typeof attachment === 'string' ? attachment : { ...attachment }
     )
   };
+}
+
+function sameVisualReply(current: NonNullable<AgentMessage['visualReplies']>[number] | undefined, artifact: NonNullable<AgentMessage['visualReplies']>[number]): boolean {
+  return !!current && current.id === artifact.id && current.version === artifact.version
+    && current.runId === artifact.runId && current.title === artifact.title
+    && current.html === artifact.html && current.height === artifact.height;
 }
 
 function reconcileConversation(next: AgentMessage[]): void {
@@ -271,6 +287,15 @@ function reconcileConversation(next: AgentMessage[]): void {
     assignChangedFields(currentMessage, nextMessage, [
       'text', 'steering', 'entering', 'error', 'notice', 'fixExtensionId', 'requiresProject', 'durationMs'
     ]);
+    const visuals = nextMessage.visualReplies;
+    if (currentMessage.visualReplies?.length !== visuals?.length || visuals?.some((artifact, i) => {
+      return !sameVisualReply(currentMessage.visualReplies?.[i], artifact);
+    })) {
+      currentMessage.visualReplies = visuals?.map((artifact) => {
+        const current = currentMessage.visualReplies?.find(reply => reply.id === artifact.id);
+        return sameVisualReply(current, artifact) ? current! : { ...artifact };
+      });
+    }
     if (!jsonEqual(currentMessage.modResult, nextMessage.modResult)) {
       currentMessage.modResult = nextMessage.modResult ? { ...nextMessage.modResult } : undefined;
     }

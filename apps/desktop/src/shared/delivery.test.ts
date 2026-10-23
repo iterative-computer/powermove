@@ -175,3 +175,17 @@ describe('size estimates', () => {
     expect(formatBytes(3_110)).toBe('≈ 3 KB');
   });
 });
+
+describe('storedFormatId (issue P1)', () => {
+  it('is today\'s id where one exists and the sheet id otherwise', async () => {
+    const { storedFormatId } = await import('./delivery');
+    expect(storedFormatId('prores-4444')).toBe('prores');
+    expect(storedFormatId('h264')).toBe('mp4');
+    expect(storedFormatId('webm-vp9')).toBe('webm');
+    expect(storedFormatId('webm-vp9', 'rec')).toBe('rec');
+    expect(storedFormatId('webm-vp9', 'mp4')).toBe('webm');
+    expect(storedFormatId('prores-hq')).toBe('prores-hq');
+    expect(storedFormatId('webm-vp8')).toBe('webm-vp8');
+    expect(storedFormatId('png')).toBe('png');
+  });
+});

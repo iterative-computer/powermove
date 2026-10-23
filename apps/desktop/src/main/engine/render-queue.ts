@@ -7,7 +7,7 @@
  * User jobs are stored under `<userData>/Render Queue`: `queue.json` (the
  * jobs and whether the queue was running) and one owner-only project
  * snapshot per job. A job running when the app quit returns as pending, and
- * a queue that was running resumes once the job engine is ready. Agent
+ * a queue that was running resumes once the engines are up. Agent
  * exports (`export_video`) appear while they run and are not persisted:
  * agent jobs never resume (section 17).
  *
@@ -263,8 +263,8 @@ export class RenderQueue {
     this.changed();
   }
 
-  /** Called when the job engine becomes ready: a queue that was running at
-   *  quit resumes (unattended runs). */
+  /** Called when an engine becomes ready: a queue that was running at quit
+   *  resumes (unattended runs); its next job starts a stopped job engine. */
   engineReady(): void {
     if (this.running) void this.pump();
   }

@@ -2,16 +2,20 @@ import net from 'node:net';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-export async function connectMcpHost(userData) {
+async function openConnection(userData) {
   let descriptor;
   try { descriptor = JSON.parse(await readFile(path.join(userData, 'mcp', 'connection.json'), 'utf8')); }
   catch { throw new Error('No Powermove MCP host is running in this profile. Open Powermove, or use powermove mcp to start a hidden host.'); }
   if (descriptor.version !== 1 || !Number.isInteger(descriptor.port) || descriptor.port < 1 || descriptor.port > 65535 || !/^[a-f0-9]{64}$/.test(descriptor.token)) throw new Error('Invalid Powermove MCP connection file. Restart the host.');
   const socket = net.createConnection({ host: '127.0.0.1', port: descriptor.port });
   socket.setEncoding('utf8');
-  let nextId = 0, buffer = '';
+  let nextId = 0, buffer = '', disconnected = false;
   const pending = new Map();
-  const fail = () => { for (const call of pending.values()) call.reject(new Error('Powermove MCP host disconnected. Inspect the project before repeating edits.')); pending.clear(); };
+  const fail = () => {
+    disconnected = true;
+    for (const call of pending.values()) call.reject(new Error('Powermove MCP host disconnected. Its session ended and the action outcome is unknown. Reconnect with start_session and inspect the project before repeating edits.'));
+    pending.clear();
+  };
   socket.on('error', fail); socket.on('close', fail);
   socket.on('data', chunk => {
     buffer += chunk;
@@ -28,7 +32,7 @@ export async function connectMcpHost(userData) {
     }
   });
   const call = (method, args = {}) => new Promise((resolve, reject) => {
-    if (socket.destroyed) { reject(new Error('Powermove MCP host is closed.')); return; }
+    if (disconnected || socket.destroyed) { reject(new Error('Powermove MCP host is closed.')); return; }
     const id = ++nextId; pending.set(id, { resolve, reject });
     socket.write(`${JSON.stringify({ id, method, ...args })}\n`);
   });
@@ -36,5 +40,27 @@ export async function connectMcpHost(userData) {
     await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject); });
     await call('connect', { token: descriptor.token });
   } catch (error) { socket.destroy(); throw error; }
-  return { listTools: () => call('tools/list'), callTool: (name, args) => call('tools/call', { name, arguments: args }), close: async () => { socket.destroy(); } };
+  return { call, isClosed: () => disconnected || socket.destroyed, close: () => socket.destroy() };
+}
+
+/** Re-discover a restarted app on the next request; never replay a sent call. */
+export async function connectMcpHost(userData) {
+  let connection = await openConnection(userData), connecting = null, closed = false;
+  const ensureConnection = async () => {
+    if (closed) throw new Error('This Powermove MCP connection is closed.');
+    if (!connection.isClosed()) return connection;
+    connecting ??= openConnection(userData).finally(() => { connecting = null; });
+    connection = await connecting;
+    if (closed) { connection.close(); throw new Error('This Powermove MCP connection is closed.'); }
+    return connection;
+  };
+  return {
+    listTools: async () => (await ensureConnection()).call('tools/list'),
+    callTool: async (name, args) => (await ensureConnection()).call('tools/call', { name, arguments: args }),
+    close: async () => {
+      closed = true;
+      connection.close();
+      await connecting?.then(next => { next.close(); }, () => {});
+    }
+  };
 }
