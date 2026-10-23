@@ -509,3 +509,152 @@ fn a_cli_first_probe_leaves_no_decision_in_the_desktop_namespace() {
     // this exact program would be read (the pin-store harness checks pixels).
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// `pm-cli scope` draws with `render`'s setup (DEFS-4): the same probe store,
+/// definitions, and Chromium runner, so its waveform, parade, vectorscope and
+/// scope.json never come from a user program drawn natively unverified.
+fn scope(args: &[&str], helper: Option<&str>, cache: &Path) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pm-cli"));
+    command
+        .arg("scope")
+        .args(args)
+        .env_remove("POWERMOVE_ANGLE_ENDPOINT")
+        .env_remove("POWERMOVE_ANGLE_TOKEN")
+        .env_remove("POWERMOVE_ENGINE_PARITY_ENV")
+        .env_remove("POWERMOVE_ENGINE_PARITY_STORE")
+        // An empty probe namespace: nothing is verified natively.
+        .env("POWERMOVE_ENGINE_SHADER_CACHE", cache);
+    match helper {
+        Some(helper) => command.env("POWERMOVE_ANGLE_HELPER", helper),
+        None => command.env_remove("POWERMOVE_ANGLE_HELPER"),
+    };
+    command.output().unwrap()
+}
+
+fn shader_layer_project(dir: &Path) -> PathBuf {
+    let file = dir.join("p.json");
+    let mut p = project(json!([]));
+    p["layers"][0]["type"] = json!("shader");
+    p["layers"][0]["d"] = json!({ "code": "void main(){ fragColor = vec4(0.25, 0.5, 0.75, 1.0); }", "uniforms": {}, "w": 320, "h": 180 });
+    std::fs::write(&file, p.to_string()).unwrap();
+    file
+}
+
+#[test]
+fn scope_never_measures_an_unverified_shader_layer_drawn_natively() {
+    let dir = scratch("scope-unverified-layer");
+    let file = shader_layer_project(&dir);
+    let cache = dir.join("Shader Cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let out = dir.join("scopes");
+    let run = scope(
+        &[file.to_str().unwrap(), "-o", out.to_str().unwrap()],
+        None,
+        &cache,
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(4), "{stderr}");
+    assert!(stderr.contains("not headless-renderable"), "{stderr}");
+    assert!(stderr.contains("fallback runner"), "{stderr}");
+    assert!(stderr.contains("layer bg"), "{stderr}");
+    assert!(
+        !out.join("scope.json").exists(),
+        "no scopes of native pixels"
+    );
+}
+
+#[test]
+fn scope_takes_definitions_and_refuses_a_runner_only_program_without_a_helper() {
+    let dir = scratch("scope-runner");
+    let file = dir.join("p.json");
+    let fx = json!([{ "id": "fx1", "type": "acme.sky", "on": true, "p": {} }]);
+    std::fs::write(&file, project(fx).to_string()).unwrap();
+    let source = "#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nuniform samplerCube u_sky;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_st) + texture(u_sky, vec3(0.0, 0.0, 1.0)); }\n";
+    let defs = definitions_file(&dir, |set| {
+        set["definitions"].as_array_mut().unwrap().push(json!({
+            "id": "acme.sky", "kind": "effect", "version": 0, "origin": "local", "renderer": null,
+            "glsl": { "source": source, "bodyLineOffset": 0, "bodyUtf16Len": source.encode_utf16().count(), "bodyUtf8Len": source.len() },
+            "params": [],
+            "flags": { "passes": 1, "keepOrig": false, "backdrop": false, "rawShader": true, "viewportSafe": false, "viewportPadding": [], "clamp": false }
+        }));
+    });
+    let cache = dir.join("Shader Cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let out = dir.join("scopes");
+    let run = scope(
+        &[
+            file.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+            "--definitions",
+            defs.to_str().unwrap(),
+        ],
+        None,
+        &cache,
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(4), "{stderr}");
+    assert!(stderr.contains("acme.sky"), "{stderr}");
+    assert!(!out.join("scope.json").exists());
+    // Built-in effects now draw in scope from the built-in set (they were
+    // routed before scope took definitions), with render's warning.
+    std::fs::write(&file, project(invert()).to_string()).unwrap();
+    let run = scope(
+        &[file.to_str().unwrap(), "-o", out.to_str().unwrap()],
+        None,
+        &cache,
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("drawing the built-in definitions"),
+        "{stderr}"
+    );
+    let stats: Value = serde_json::from_slice(&run.stdout).unwrap();
+    // #3FCF8E inverted: #C03071.
+    let mean = |c: &str| stats[c]["mean"].as_f64().unwrap();
+    assert!(
+        (mean("red") - f64::from(0xC0u8) / 255.0).abs() < 2.0 / 255.0,
+        "{stats}"
+    );
+    assert!(
+        (mean("green") - f64::from(0x30u8) / 255.0).abs() < 2.0 / 255.0,
+        "{stats}"
+    );
+    assert!(
+        (mean("blue") - f64::from(0x71u8) / 255.0).abs() < 2.0 / 255.0,
+        "{stats}"
+    );
+}
+
+#[test]
+fn scope_measures_an_unverified_shader_layer_through_the_chromium_runner() {
+    let Some(helper) = angle_helper() else {
+        return;
+    };
+    let dir = scratch("scope-runner-layer");
+    let file = shader_layer_project(&dir);
+    let cache = dir.join("Shader Cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let out = dir.join("scopes");
+    let run = scope(
+        &[file.to_str().unwrap(), "-o", out.to_str().unwrap()],
+        Some(&helper),
+        &cache,
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "{stderr}");
+    let stats: Value = serde_json::from_slice(&run.stdout).unwrap();
+    for (channel, want) in [("red", 0.25), ("green", 0.5), ("blue", 0.75)] {
+        for k in ["min", "max"] {
+            let got = stats[channel][k].as_f64().unwrap();
+            assert!((got - want).abs() <= 1.0 / 255.0, "{channel} {k}: {stats}");
+        }
+    }
+    assert!(out.join("scope.json").exists());
+    // A first probe leaves no decision the desktop would trust.
+    let left: Vec<_> = std::fs::read_dir(cache.join("angle-parity"))
+        .map(|d| d.map(|e| e.unwrap().file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+}
