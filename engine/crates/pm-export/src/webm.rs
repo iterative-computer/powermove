@@ -199,6 +199,34 @@ pub(crate) fn canvas_rgba_to_i420(
     })
 }
 
+/// The WebCodecs path consumes premultiplied canvas bytes for opaque video.
+/// For straight-alpha WebM, divide working RGB by alpha before the REC709
+/// conversion; premultiplied alpha keeps its requested encoding. Carry the
+/// alpha byte separately. There is no legacy alpha-WebM byte boundary.
+fn canvas_bytes(
+    frame: &WorkingFrame,
+    working: crate::settings::WorkingEncoding,
+    alpha: AlphaOutput,
+) -> Vec<u8> {
+    if alpha == AlphaOutput::None {
+        return crate::render::to_rgba8(frame.rgba);
+    }
+    let mut rgba = Vec::with_capacity(frame.rgba.len());
+    for pixel in frame.rgba.chunks_exact(4) {
+        let (rgb, a) =
+            crate::convert::output_rgba([pixel[0], pixel[1], pixel[2], pixel[3]], working, alpha);
+        for value in [rgb[0], rgb[1], rgb[2], a] {
+            let value = if value.is_nan() {
+                0.0
+            } else {
+                value.clamp(0.0, 1.0)
+            };
+            rgba.push((value * 255.0).round_ties_even() as u8);
+        }
+    }
+    rgba
+}
+
 /// Opt-in parity capture of the exact native boundaries fed to the encoders.
 /// The caller owns and removes the directory on either success or failure.
 struct InputCapture {
@@ -709,7 +737,7 @@ impl Sink for WebmSink {
     type Output = Delivered;
 
     fn video_rgba(&mut self, index: u64, frame: &WorkingFrame) -> Result<bool, Error> {
-        let rgba = crate::render::to_rgba8(frame.rgba);
+        let rgba = canvas_bytes(frame, self.spec.working, self.spec.alpha);
         if let Some(capture) = self.capture.as_mut() {
             capture
                 .rgba
@@ -1209,6 +1237,53 @@ fn decode_sampled(
 #[cfg(test)]
 mod canvas_conversion_tests {
     use super::*;
+
+    #[test]
+    fn alpha_webm_stores_straight_rgb_with_zero_half_and_full_alpha() {
+        // Working RGB is premultiplied. The translucent red must retain its
+        // full red value when a decoder composites it using the alpha stream.
+        let pixels = [
+            0.1, 0.2, 0.3, 0.0, // transparent, with hidden RGB to test the alpha guard
+            0.5, 0.0, 0.0, 0.5, // translucent red
+            0.0, 1.0, 0.0, 1.0, // opaque green
+            0.5, 0.0, 0.0, 0.5, // translucent red
+        ];
+        let frame = WorkingFrame {
+            width: 2,
+            height: 2,
+            rgba: &pixels,
+        };
+        let rgba = canvas_bytes(
+            &frame,
+            crate::settings::WorkingEncoding::Standard,
+            AlphaOutput::Straight,
+        );
+        assert_eq!(
+            rgba,
+            [0, 0, 0, 0, 255, 0, 0, 128, 0, 255, 0, 255, 255, 0, 0, 128,]
+        );
+        let input = canvas_rgba_to_i420(&rgba, 2, 2, true).unwrap();
+        assert_eq!(input.planes[0].u8().unwrap()[1], 63); // REC709 red, not premultiplied red
+        assert_eq!(input.planes[3].u8().unwrap(), &[0, 128, 255, 128]);
+    }
+
+    #[test]
+    fn opaque_webm_keeps_premultiplied_canvas_bytes() {
+        let pixels = [0.5, 0.0, 0.0, 0.5];
+        let frame = WorkingFrame {
+            width: 1,
+            height: 1,
+            rgba: &pixels,
+        };
+        assert_eq!(
+            canvas_bytes(
+                &frame,
+                crate::settings::WorkingEncoding::Standard,
+                AlphaOutput::None,
+            ),
+            [128, 0, 0, 128]
+        );
+    }
 
     #[test]
     fn chromium_canvas_matrix_uses_rgba_bytes_and_bt709_codes() {
