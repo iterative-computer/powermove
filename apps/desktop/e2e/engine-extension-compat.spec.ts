@@ -762,20 +762,21 @@ test.describe('Use New Engine: existing extensions', () => {
       const layer = PM.proj.layers.find((l: any) => l.id === 'tinted');
       let presented: (() => void) | null = null;
       const off: any = api.events.on('frame:rendered', () => { presented?.(); presented = null; });
-      const latencies: number[] = [];
+      const latencies: number[] = [], missed: number[] = [];
       try {
         for (let i = 0; i < 60; i++) {
           const began = performance.now();
           const shown = new Promise<boolean>((resolve) => { presented = () => resolve(true); setTimeout(() => resolve(false), 2000); });
           layer.p['position.x'].v = 200 + i * 4;
+          // As the app's own edits do (anim.ts): the edit, then a redraw.
           PM.touch();
-          PM.invalidate?.('canvas');
-          if (await shown) latencies.push(performance.now() - began);
+          PM.invalidate();
+          if (await shown) latencies.push(performance.now() - began); else missed.push(i);
         }
       } finally { if (typeof off === 'function') off(); else off?.dispose?.(); }
       const sorted = [...latencies].sort((a, b) => a - b);
       const q = (p: number) => Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)] ?? 0);
-      return { moves: 60, shown: latencies.length, p50: q(0.5), p95: q(0.95), max: q(1) };
+      return { moves: 60, shown: latencies.length, missed, p50: q(0.5), p95: q(0.95), max: q(1) };
     });
     await cp(path.join(__dirname, FIXTURE['shape-tint']!), path.join(session.userData, 'extensions', 'shape-tint'), { recursive: true });
     await session.relaunch();
