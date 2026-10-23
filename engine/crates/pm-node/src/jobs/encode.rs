@@ -228,6 +228,9 @@ impl<P: HostPort + ?Sized + 'static> EncodeHost for HostEncoder<P> {
     }
 
     fn finish(&mut self) -> Result<(), Error> {
+        if let Some(gpu) = &self.gpu {
+            gpu.log_profile();
+        }
         if std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1") {
             eprintln!(
                 "[export timing] gpu_conversion_ms={:.3} host_video_ms={:.3}",

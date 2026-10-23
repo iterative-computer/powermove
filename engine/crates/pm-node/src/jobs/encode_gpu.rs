@@ -19,6 +19,18 @@ const SLOTS: u32 = 5; // main acknowledges after at most four unanswered frames
 static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
 static NEXT_GENERATION: AtomicU32 = AtomicU32::new(1);
 
+#[derive(Default)]
+struct Timings {
+    setup_ns: u128,
+    pool_ns: u128,
+    admission_ns: u128,
+    submission_ns: u128,
+    timestamp_ns: u128,
+    gpu_us: f64,
+    gpu_samples: u64,
+    submissions: u64,
+}
+
 pub(crate) fn connect() -> Result<Option<&'static Client>, String> {
     let Some(name) = std::env::var(ENV).ok().filter(|s| !s.is_empty()) else {
         return Ok(None);
@@ -40,10 +52,13 @@ pub(crate) struct GpuEncoder {
     cancel: Arc<AtomicBool>,
     pass: u64,
     span: Option<pm_export::gpu_time::GpuSpan>,
+    timings: Option<Timings>,
 }
 
 impl GpuEncoder {
     pub(crate) fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let started = Instant::now();
+        let profile = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("WebM canvas bytes"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -97,6 +112,10 @@ impl GpuEncoder {
             cancel: Arc::new(AtomicBool::new(false)),
             pass: 0,
             span: None,
+            timings: profile.then(|| Timings {
+                setup_ns: started.elapsed().as_nanos(),
+                ..Default::default()
+            }),
         }
     }
 
@@ -107,7 +126,11 @@ impl GpuEncoder {
         pass: u64,
     ) -> Self {
         if gate.measures() {
+            let started = Instant::now();
             self.span = pm_export::gpu_time::GpuSpan::new(&self.device, &self.queue);
+            if let Some(t) = &mut self.timings {
+                t.setup_ns += started.elapsed().as_nanos();
+            }
         }
         self.gate = gate;
         self.cancel = cancel;
@@ -124,6 +147,7 @@ impl GpuEncoder {
             .map_err(Error::Encode)?
             .ok_or_else(|| Error::Encode("the export GPU bridge is missing".into()))?;
         if self.pool.is_none() {
+            let started = Instant::now();
             let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
             if generation == 0 {
                 return Err(Error::Encode("export surface generations exhausted".into()));
@@ -160,11 +184,14 @@ impl GpuEncoder {
                     )
                     .map_err(|e| Error::Encode(e.to_string()))?;
             }
+            if let Some(t) = &mut self.timings {
+                t.pool_ns += started.elapsed().as_nanos();
+            }
         }
         self.draw(index, source)
     }
 
-    fn draw(&self, index: u64, source: &wgpu::Texture) -> Result<(u32, u32), Error> {
+    fn draw(&mut self, index: u64, source: &wgpu::Texture) -> Result<(u32, u32), Error> {
         let pool = self.pool.as_ref().unwrap();
         if pool.size != Size::new(source.width(), source.height()) {
             return Err(Error::InvalidFrame("export GPU size changed".into()));
@@ -183,11 +210,15 @@ impl GpuEncoder {
         let mut y = 0;
         while y < source.height() {
             let remaining = (source.height() - y).div_ceil(BAND_ROWS);
+            let started = self.timings.as_ref().map(|_| Instant::now());
             let admitted = self
                 .gate
                 .admit(self.pass, remaining, &self.cancel)
                 .ok_or(Error::Cancelled)?
                 .clamp(1, remaining);
+            if let (Some(t), Some(started)) = (&mut self.timings, started) {
+                t.admission_ns += started.elapsed().as_nanos();
+            }
             self.gate.sync_worker_qos();
             struct Admission<'a> {
                 gate: &'a dyn GpuGate,
@@ -252,10 +283,22 @@ impl GpuEncoder {
                     Error::Encode(format!("the export GPU frame did not complete: {e}"))
                 })?;
             let wall_us = started.elapsed().as_secs_f64() * 1e6;
+            if let Some(t) = &mut self.timings {
+                t.submission_ns += started.elapsed().as_nanos();
+                t.submissions += 1;
+            }
+            let started = self.timings.as_ref().map(|_| Instant::now());
             let gpu_us = self
                 .span
                 .as_ref()
                 .and_then(|s| s.read_us(&self.device, &self.queue));
+            if let (Some(t), Some(started)) = (&mut self.timings, started) {
+                t.timestamp_ns += started.elapsed().as_nanos();
+                if let Some(us) = gpu_us {
+                    t.gpu_us += us;
+                    t.gpu_samples += 1;
+                }
+            }
             self.gate.finished_timed(
                 self.pass,
                 admitted,
@@ -266,6 +309,22 @@ impl GpuEncoder {
             y += rows;
         }
         Ok((pool.generation, slot))
+    }
+
+    pub(crate) fn log_profile(&self) {
+        if let Some(t) = &self.timings {
+            eprintln!(
+                "[export timing] gpu_setup_ms={:.3} gpu_pool_ms={:.3} gpu_admission_ms={:.3} gpu_submission_wait_ms={:.3} gpu_timestamp_read_ms={:.3} gpu_execution_ms={:.3} gpu_samples={} gpu_submissions={}",
+                t.setup_ns as f64 / 1e6,
+                t.pool_ns as f64 / 1e6,
+                t.admission_ns as f64 / 1e6,
+                t.submission_ns as f64 / 1e6,
+                t.timestamp_ns as f64 / 1e6,
+                t.gpu_us / 1e3,
+                t.gpu_samples,
+                t.submissions,
+            );
+        }
     }
 }
 
