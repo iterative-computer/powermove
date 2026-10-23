@@ -18,8 +18,9 @@ working precisions. Round 3 adds 48 fresh frames from 16 recipes: all 36
 SDR Canvas frames are exact, bringing the source total to 98. Of the 36 new
 SDR live frames, all 36 are exact. Round 4's six HEVC SDR P3/BT.2020 control
 frames also match Canvas and live exactly, bringing the Canvas total to 104.
-Today decodes the other 12 HDR/P3 frames, while their native compatibility
-conversion remains an explicit blocker.
+All 12 captured PQ/HLG/P3 frames now match Canvas and live exactly, bringing
+the total to 116 exact Canvas frames. The independent RGB transfer oracle
+also matches all 36,374 colors for HLG BT.2020, PQ BT.2020, and PQ P3.
 
 ## Conversion order and precision
 
@@ -161,10 +162,9 @@ All 16 recipes decode in today's app, including HEVC alpha, deep VP9/AV1,
 full-range 8-bit BT.601/709/2020, BT.2020 PQ/HLG and P3 PQ.
 
 The registered Round 3 test compares Canvas and live at both precisions for
-every captured case, then aggregates all failures. Its current strict gate
-fails on all 48 HDR/P3 reading/precision attempts. It has no skipped or ignored
-case. All 36 SDR Canvas frames and 36 SDR live frames match, with all 144
-SDR comparisons exact. The separate alpha-interpretation regression verifies compatibility
+every captured case, then aggregates all failures. All 192 comparisons are
+exact, including HDR. It has no skipped or ignored case. The separate
+alpha-interpretation regression verifies compatibility
 cannot change the native reading's pixels or visible sampling domain.
 
 Round 4 adds seven HDR/P3 controls at three timestamps, including six new
@@ -307,12 +307,19 @@ The last Round 3 SDR gap, VP9 10-bit BT.2020 live at 1.125 seconds,
 pixel (86,107), is closed by the matrix order above: native and today both
 produce `[35,203,84,255]`. The captured reference is unchanged.
 
-HDR/P3 strict-zero native conversion remains open: a pinned
-Skia PQ/HLG, D50-gamut and default RWTMO prototype reached max 1 but did not
-match all bytes. Its experimental code stays outside the renderer. The
-existing explicit HDR capability reason remains; no alternate renderer or
-weakened bound is used. Detailed captures, failing strict runner results and
-synthetic comparison panels are listed in the external lane report.
+Default HDR conversion is exact for the captured 10-bit AV1/HEVC PQ/HLG
+BT.2020 and PQ P3 sources. `media/hdr_compat.rs` and its shader preserve
+Skia's sequence: stored N32 source -> destination sRGB -> linear Rec.2020
+working format -> default RWTMO gain curve -> sRGB. Collapsing the first
+two gamut transforms loses one-code ties. HLG also requires the CPU's exact
+byte-to-float values, reconstructed transfer constants, and reverse-nested
+FMA luminance accumulation. Direct HDR uses the same dot-before-translation
+matrix order as deep VP9, and retains encoded RGB. All 84 Round 4 source
+comparisons and the independent three-signal RGB oracle are exact.
+
+Mastering/content-light driven gain curves, Dolby Vision, and unmeasured HDR
+codec/primaries classes retain explicit capability gates. Interpret Footage
+color overrides and compatibility level 2 keep the native color contract.
 
 ## Transparent PNG export
 

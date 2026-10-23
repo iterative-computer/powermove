@@ -1172,28 +1172,26 @@ fn interpreted_probes_are_kept_per_file_stamp() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Routing (section 25: a feature leaves `pm_render::unsupported` only with
-/// a parity test against today's viewer). HDR, interlaced, rotated,
-/// non-square-pixel, cropping-clean-aperture, and wide-gamut video are drawn
-/// natively only when the asset carries Interpret Footage overrides (which
-/// only this engine reads); without them they route to the legacy renderer.
+/// Capability reasons leave only with exact app references. Default AV1 PQ
+/// and HEVC HLG are now measured; metadata-driven HDR and other unmeasured
+/// readings retain their reasons. Interpretation continues to draw all cases.
 #[test]
-fn uncompared_video_routes_to_legacy_unless_interpreted() {
+fn video_capability_gate_tracks_measured_classes_and_interpretation() {
     let cases = [
-        ("hdr/hdr10.mov", "HDR video"),
-        ("hdr/hlg.mov", "HDR video"),
-        ("hdr/pq-av1.mkv", "HDR video"),
-        ("hdr/pq-vp9.webm", "HDR video"),
-        ("hdr/dovi-8.4.mov", "HDR video"),
-        ("video/interlaced-bff.mxf", "interlaced video"),
-        ("video/interlaced-tff.mov", "interlaced video"),
-        ("video/dv-pal.dv", "interlaced video"),
-        ("video/geom-rot90.mov", "rotated video"),
-        ("video/geom-rot180.mov", "rotated video"),
-        ("video/geom-rot270.mov", "rotated video"),
-        ("video/geom-clap.mov", "a cropping clean aperture"),
-        ("video/meta-pasp.mov", "non-square pixels"),
-        ("video/color-p3.mov", "primaries"),
+        ("hdr/hdr10.mov", Some("HDR video")),
+        ("hdr/hlg.mov", None),
+        ("hdr/pq-av1.mkv", None),
+        ("hdr/pq-vp9.webm", Some("HDR video")),
+        ("hdr/dovi-8.4.mov", Some("HDR video")),
+        ("video/interlaced-bff.mxf", Some("interlaced video")),
+        ("video/interlaced-tff.mov", Some("interlaced video")),
+        ("video/dv-pal.dv", Some("interlaced video")),
+        ("video/geom-rot90.mov", Some("rotated video")),
+        ("video/geom-rot180.mov", Some("rotated video")),
+        ("video/geom-rot270.mov", Some("rotated video")),
+        ("video/geom-clap.mov", Some("a cropping clean aperture")),
+        ("video/meta-pasp.mov", Some("non-square pixels")),
+        ("video/color-p3.mov", Some("primaries")),
     ];
     let (restated, _) = Interpretation::from_json(&json!({ "cleanAperture": false }));
     for (file, reason) in cases {
@@ -1201,10 +1199,13 @@ fn uncompared_video_routes_to_legacy_unless_interpreted() {
             return;
         };
         let routed = pm_render::media::probe_video(&path);
-        assert!(
-            routed.as_ref().is_err_and(|m| m.contains(reason)),
-            "{file}: {routed:?}"
-        );
+        match reason {
+            Some(reason) => assert!(
+                routed.as_ref().is_err_and(|m| m.contains(reason)),
+                "{file}: {routed:?}"
+            ),
+            None => assert_eq!(routed, Ok(()), "{file}: measured HDR class"),
+        }
         assert_eq!(
             pm_render::media::probe_interpreted_video(&path, &restated),
             Ok(()),

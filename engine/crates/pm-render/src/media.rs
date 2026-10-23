@@ -37,6 +37,8 @@ use crate::footage::{Geometry, Orient, Pick, Timing};
 use crate::pipelines::{Pipelines, SourceUniform, bytes_of};
 pub use crate::stills::StillReader;
 
+#[path = "media/hdr_compat.rs"]
+mod hdr_compat;
 #[path = "media/prewarm.rs"]
 mod prewarm;
 #[path = "media/video_compat.rs"]
@@ -546,9 +548,8 @@ pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
 /// these other readings are drawn only when the
 /// asset carries Interpret Footage overrides, which only this engine reads:
 ///
-/// - HDR (PQ, HLG): section 9 tone maps with BT.2446 Method A, but today's
-///   Chromium handling has not been measured (`docs/engine/corpus.md`, "Not
-///   covered yet"), so the difference has no appendix A item or corpus case;
+/// - HDR outside the captured default AV1/HEVC PQ/HLG/P3 classes (including
+///   metadata-driven gain curves); native Interpret uses BT.2446 Method A;
 /// - interlaced sources (bwdif, equal to FFmpeg's; today's viewer shows the
 ///   woven frame);
 /// - display rotations, non-square pixels, and a cropping clean aperture
@@ -606,6 +607,34 @@ pub fn probe_interpreted_video_issue(
         .map_err(|m| ProbeIssue::Unsupported(Feature::Media(m)))
 }
 
+/// Measured Chromium default Canvas tone-map class. Metadata-driven gain
+/// curves and Dolby Vision retain their explicit parity gate.
+fn chromium_hdr_signal(video: &VideoProbe) -> Option<hdr_compat::Signal> {
+    if !matches!(video.codec.codec.as_str(), "av1" | "hevc")
+        || video.codec.bit_depth != 10
+        || (video.codec.log2_chroma_w, video.codec.log2_chroma_h) != (1, 1)
+        || video.codec.full_range
+        || video.codec.alpha_mode
+        || video.codec.pix_fmt_alpha
+        || video.color.mastering.is_some()
+        || video.color.content_light.is_some()
+        || matches!(video.color.hdr, Some(HdrFormat::DolbyVision { .. }))
+        || !matches!(
+            video.color.interpreted.primaries,
+            Primaries::Bt2020 | Primaries::DisplayP3
+        )
+    {
+        return None;
+    }
+    match video.color.interpreted.transfer {
+        Transfer::Pq => Some(hdr_compat::Signal::Pq),
+        Transfer::Hlg if video.color.interpreted.primaries == Primaries::Bt2020 => {
+            Some(hdr_compat::Signal::Hlg)
+        }
+        _ => None,
+    }
+}
+
 fn video_supported(src: &MediaSource) -> Result<(), String> {
     video_drawable(src, &Interpretation::default())?;
     let Some(v) = src.probe.video.as_ref() else {
@@ -643,7 +672,7 @@ fn video_supported(src: &MediaSource) -> Result<(), String> {
         ));
     }
     let c = &src.color;
-    if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) {
+    if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) && chromium_hdr_signal(v).is_none() {
         return Err(format!(
             "HDR video (Chromium tone-map parity remains unresolved; {WHEN})"
         ));
@@ -654,6 +683,7 @@ fn video_supported(src: &MediaSource) -> Result<(), String> {
         c.primaries,
         Primaries::Bt709 | Primaries::Bt601_525 | Primaries::Bt601_625
     ) && !video_compat::sdr_gamut_upload(v)
+        && chromium_hdr_signal(v).is_none()
     {
         return Err(format!(
             "{:?} primaries (wide-gamut footage is {WHEN})",
@@ -1117,6 +1147,7 @@ pub struct MediaCache {
     /// bwdif on normalized planes (interlaced sources), made on first use.
     deinterlacer: Option<Deinterlacer>,
     video_upload: Option<video_compat::Upload>,
+    hdr_canvas: Option<hdr_compat::ToneMap>,
     /// The display geometry pass (clean aperture, rotation), made on first use.
     orient: Option<Orient>,
     /// Bytes of converted textures held (stills and frames).
@@ -1157,6 +1188,7 @@ impl MediaCache {
             interpretations: BTreeMap::new(),
             deinterlacer: None,
             video_upload: None,
+            hdr_canvas: None,
             orient: None,
             bytes: 0,
         }
@@ -1614,8 +1646,8 @@ impl MediaCache {
         // The Canvas export and sequence paths keep their libyuv conversion;
         // live VP9/HEVC alpha samples the YUV and alpha planes before its store.
         // Level 2 and colour interpretations (Interpret Footage's
-        // colour members or a file's colour override), and HDR retain
-        // native precision. Overrides that only choose or place frames
+        // colour members or a file's colour override), and unmatched HDR
+        // retain native precision. Overrides that only choose or place frames
         // (frame rate, field order, pixel aspect, clean aperture) keep the
         // upload, so they cannot change a level 1 video's colours.
         let compatibility_bitmap = compat
@@ -1635,7 +1667,19 @@ impl MediaCache {
             && !matches!(color.transfer, Transfer::Pq | Transfer::Hlg)
             && (matches!(color.primaries, Primaries::Bt709 | Primaries::Unspecified)
                 || video_compat::sdr_gamut_upload(v));
-        let format = if compatibility_bitmap || full_range_bitmap || (alpha_bitmap && source_bitmap)
+        let compatibility_hdr = compat
+            && !sequence
+            && working == WorkingEncoding::Standard
+            && !frame.format.has_alpha()
+            && !interprets_video_color(interp)
+            && !self.interpretations.contains_key(path)
+            && fields.is_none()
+            && chromium_hdr_signal(v).is_some()
+            && video_compat::Upload::supports(&imported, color.matrix);
+        let format = if compatibility_bitmap
+            || compatibility_hdr
+            || full_range_bitmap
+            || (alpha_bitmap && source_bitmap)
         {
             wgpu::TextureFormat::Rgba8Unorm
         } else {
@@ -1649,7 +1693,44 @@ impl MediaCache {
             .iter()
             .position(|t| t.width() == w && t.height() == h && t.format() == format)
             .map(|i| self.free_frames.swap_remove(i));
-        let converted = if bitmap_gamut
+        let converted = if compatibility_hdr {
+            let source = self
+                .video_upload
+                .get_or_insert_with(|| video_compat::Upload::new(device))
+                .run(
+                    device,
+                    encoder,
+                    &imported,
+                    color.matrix,
+                    video_compat::UploadReading {
+                        gamut: None,
+                        separate_matrix: !self.canvas_video,
+                        canvas_source_bias_first: self.canvas_video,
+                    },
+                    if self.canvas_video {
+                        None
+                    } else {
+                        reuse.clone()
+                    },
+                );
+            if self.canvas_video {
+                self.hdr_canvas
+                    .get_or_insert_with(|| hdr_compat::ToneMap::new(device))
+                    .run(
+                        device,
+                        encoder,
+                        &source,
+                        chromium_hdr_signal(v).expect("checked HDR reading"),
+                        color.primaries,
+                        reuse,
+                    )
+                    .ok_or_else(|| {
+                        MediaFailure::Failed("invalid Chromium HDR source texture".into())
+                    })?
+            } else {
+                source
+            }
+        } else if bitmap_gamut
             || (compatibility_bitmap && video_compat::Upload::supports(&imported, color.matrix))
         {
             let upload = self
@@ -1871,6 +1952,10 @@ mod round3_tests;
 #[cfg(test)]
 #[path = "media/round4_tests.rs"]
 mod round4_tests;
+
+#[cfg(test)]
+#[path = "media/hdr_parity_tests.rs"]
+mod hdr_parity_tests;
 
 #[cfg(test)]
 mod stamp_frame_tests {

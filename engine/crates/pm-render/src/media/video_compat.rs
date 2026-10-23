@@ -327,8 +327,8 @@ impl Upload {
         // Skia's named D50 gamuts, concatenated in f32 by pinned skcms.
         let p = match reading.gamut {
             Some(Primaries::DisplayP3) => [
-                [1.2248164f32, -0.22511479, 4.0233135e-6],
-                [-0.042038292, 1.0421473, 1.1311844e-5],
+                [1.2248164f32, f32::from_bits(0xbe66847e), 4.0233135e-6],
+                [f32::from_bits(0xbd2c3058), 1.0421473, 1.1311844e-5],
                 [-0.019623475, -0.07863566, 1.0984193],
             ],
             _ => [
