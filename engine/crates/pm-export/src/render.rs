@@ -1265,7 +1265,7 @@ where
     pipeline.set_legacy_png(crate::png_compat::has_level1_content(&document));
     let mut mixer = audio.map(|a| {
         let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
-        let mut mixer = pm_audio::Mixer::new(
+        let mut mixer = pm_audio::Mixer::new_legacy_export(
             pm_audio::MixFormat::stereo(a.sample_rate),
             document.clone(),
             a.graph,
