@@ -56,6 +56,7 @@ use crate::pipelines::bytes_of;
 use pm_gpu::decode_in::ImportedFrame;
 use pm_gpu::target::Target;
 use pm_media::frame::Layout;
+use std::sync::OnceLock;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -77,8 +78,88 @@ pub(super) struct Upload {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     gamut_pipeline: wgpu::ComputePipeline,
+    shader: wgpu::ShaderModule,
+    planar_alpha: OnceLock<PlanarAlphaPipeline>,
     sampler: wgpu::Sampler,
     decode_lut: wgpu::Buffer,
+}
+
+struct PlanarAlphaPipeline {
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::ComputePipeline,
+}
+
+fn upload_layout(device: &wgpu::Device, planar_alpha: bool) -> wgpu::BindGroupLayout {
+    let textures = (0..3).map(|binding| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    });
+    let mut entries: Vec<_> = textures
+        .chain([
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ])
+        .collect();
+    if planar_alpha {
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+    }
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(if planar_alpha {
+            "Skia video planar alpha upload"
+        } else {
+            "Skia video upload"
+        }),
+        entries: &entries,
+    })
 }
 
 impl Upload {
@@ -105,69 +186,7 @@ impl Upload {
     }
 
     pub fn new(device: &wgpu::Device) -> Self {
-        let textures = (0..3).map(|binding| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Skia video upload"),
-            entries: &textures
-                .chain([
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 5,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 6,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 7,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                ])
-                .collect::<Vec<_>>(),
-        });
+        let layout = upload_layout(device, false);
         let source = format!(
             "{}\n{}",
             pm_color::wgsl::COLOR,
@@ -214,9 +233,31 @@ impl Upload {
             layout,
             pipeline,
             gamut_pipeline,
+            shader,
+            planar_alpha: OnceLock::new(),
             sampler,
             decode_lut,
         }
+    }
+
+    fn planar_alpha(&self, device: &wgpu::Device) -> &PlanarAlphaPipeline {
+        self.planar_alpha.get_or_init(|| {
+            let layout = upload_layout(device, true);
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Skia video planar alpha upload"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Skia video planar alpha upload"),
+                layout: Some(&pipeline_layout),
+                module: &self.shader,
+                entry_point: Some("main_planar_alpha"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            PlanarAlphaPipeline { layout, pipeline }
+        })
     }
 
     pub fn run(
@@ -323,60 +364,66 @@ impl Upload {
             .iter()
             .map(|t| t.create_view(&Default::default()))
             .collect();
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Skia video upload"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&views[0]),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(views.get(1).unwrap_or(&views[0])),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(
-                        views.get(2).or_else(|| views.get(1)).unwrap_or(&views[0]),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&source.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: self.decode_lut.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
+        let planar_alpha = (frame.format.layout == Layout::Planar && frame.format.has_alpha())
+            .then(|| self.planar_alpha(device));
+        let entries = [
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&views[0]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(views.get(1).unwrap_or(&views[0])),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(
+                    views.get(2).or_else(|| views.get(1)).unwrap_or(&views[0]),
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(&self.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(&source.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: self.decode_lut.as_entire_binding(),
+            },
+        ];
+        let bind = if let Some(alpha) = planar_alpha {
+            let entries = entries
+                .into_iter()
+                .chain([wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: wgpu::BindingResource::TextureView(
-                        views
-                            .get(if frame.format.layout == Layout::Planar {
-                                3
-                            } else {
-                                2
-                            })
-                            .unwrap_or(&views[0]),
-                    ),
-                },
-            ],
-        });
+                    resource: wgpu::BindingResource::TextureView(&views[3]),
+                }])
+                .collect::<Vec<_>>();
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Skia video planar alpha upload"),
+                layout: &alpha.layout,
+                entries: &entries,
+            })
+        } else {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Skia video upload"),
+                layout: &self.layout,
+                entries: &entries,
+            })
+        };
         if !bitmap {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Skia video upload"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(planar_alpha.map_or(&self.pipeline, |alpha| &alpha.pipeline));
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
             drop(pass);
@@ -414,10 +461,6 @@ impl Upload {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: self.decode_lut.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::TextureView(source_view),
                     },
                 ],
             });

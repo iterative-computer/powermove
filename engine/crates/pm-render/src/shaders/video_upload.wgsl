@@ -19,10 +19,7 @@ struct Params {
 @group(0) @binding(5) var out: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(6) var<storage, read> decode_lut: array<f32, 256>;
 @group(0) @binding(7) var alpha_plane: texture_2d<f32>;
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let size = textureDimensions(out);
-    if (any(id.xy >= size)) { return; }
+fn upload_pixel(id: vec3<u32>, alpha: f32) {
     // Software decoder planes can include coded rows beyond the displayed
     // crop. Filter over that coded extent before cropping the RGB result.
     let coord = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(textureDimensions(y_plane));
@@ -53,12 +50,25 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             fma(vec3<f32>(1.0), fma(vec3<f32>(1.0), p0, p1), p2), bias);
     }
     rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    rgb *= alpha;
+    textureStore(out, vec2<i32>(id.xy), vec4<f32>(rgb, alpha));
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (any(id.xy >= textureDimensions(out))) { return; }
     var alpha = 1.0;
     if (P.flags.w != 0u) {
-        alpha = textureLoad(alpha_plane, vec2<i32>(id.xy), 0).r;
-        rgb *= alpha;
+        // HEVC biplanar alpha uses the third plane, already bound at 2.
+        alpha = textureLoad(v_plane, vec2<i32>(id.xy), 0).r;
     }
-    textureStore(out, vec2<i32>(id.xy), vec4<f32>(rgb, alpha));
+    upload_pixel(id, alpha);
+}
+
+@compute @workgroup_size(8, 8)
+fn main_planar_alpha(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (any(id.xy >= textureDimensions(out))) { return; }
+    upload_pixel(id, textureLoad(alpha_plane, vec2<i32>(id.xy), 0).r);
 }
 
 @compute @workgroup_size(8, 8)
