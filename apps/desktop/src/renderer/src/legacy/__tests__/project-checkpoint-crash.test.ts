@@ -641,7 +641,9 @@ describe('a disk that stays full', () => {
     await settle(PM, store, { failing: true });
     expect(PM.toast).toHaveBeenCalledTimes(2);
     full = false;
-    // An error nothing writes again ends its episode at the next flush: a later failure is shown.
+    // The disk recovers again; the next autosave's slot reopens the journal (SAVE-1b), and the
+    // episode ends at the next flush without a new error: a later failure is shown.
+    PM.Projects.recover(project);
     await settle(PM, store);
     await settle(PM, store);
     full = true;

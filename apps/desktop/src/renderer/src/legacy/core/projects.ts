@@ -448,8 +448,10 @@ function append(entry: { projectId: string; revision: number; patches: any[] }) 
     state.entries.push(item);
     state.sizes.push(journalBytes(item));
     written = state;
-    // Past the store's limit main refuses entries anyway: stop accumulating.
-    if (measure() > STORE_JOURNAL_BYTES) { journalFull.add(id); state.entries = []; state.sizes = []; }
+    /* Past the store's limit this copy (only a measure for the bound) is
+       dropped; main, which holds the real journal, refuses what it cannot
+       keep and closes it (journalFull follows from that refusal). */
+    if (measure() > STORE_JOURNAL_BYTES) { state.entries = []; state.sizes = []; }
     /* Past the bound the project is checkpointed, unless its slot writes are
        failing: then main's journal holds these edits on disk. */
     if (measure() > MAX_JOURNAL_BYTES && !unsaved.has(id) && PM.proj?.id === id) R.put(PM.proj);
