@@ -110,6 +110,8 @@ struct Measured {
 enum Ceiling {
     /// The whole mix.
     Mix(f64),
+    /// The mix outside spans (seconds) where a decided fix changes it.
+    Outside(f64, &'static [(f64, f64)]),
 }
 
 /// Each project's residual ceiling (dBFS). Today's export model
@@ -128,7 +130,11 @@ fn ceiling(name: &str) -> Ceiling {
         // feed one bus channel at once its own captures differ by an ulp
         // from run to run (−149 dBFS between two captures of
         // `corpus-media-audio`): that spread is the ceiling there.
-        "wide-quad" | "wide-71" => Ceiling::Mix(-145.0),
+        "wide-quad" => Ceiling::Mix(-145.0),
+        // Decision LAYOUT-1: a 7.1 clip folds by BS.775 instead of keeping
+        // only its first two channels; the mix differs from today by design
+        // while it is connected (1 s to 2 s), and only there.
+        "wide-71" => Ceiling::Outside(-145.0, &[(1.0, 2.01)]),
         n if n.starts_with("real-") => Ceiling::Mix(-240.0),
         _ => Ceiling::Mix(-240.0),
     }
@@ -313,6 +319,22 @@ fn offline_mixes_match_todays_export_audio() {
         // (docs/engine/pm-audio.md) are accounted for, as regression guards.
         let (residual, ceiling) = match ceiling(&name) {
             Ceiling::Mix(db) => (m.rms_diff_db, db),
+            Ceiling::Outside(ceil, spans) => {
+                let mut e = 0f64;
+                let mut k = 0usize;
+                for i in 0..n {
+                    let t = i as f64 / rate as f64;
+                    if spans.iter().any(|(a, b)| t >= *a && t < *b) {
+                        continue;
+                    }
+                    for c in 0..2 {
+                        let l = &legacy[c.min(lc - 1)];
+                        e += (ours[c][i] as f64 - l[i] as f64).powi(2);
+                    }
+                    k += 2;
+                }
+                (db((e / k.max(1) as f64).sqrt()), ceil)
+            }
         };
         m.guarded_db = residual;
         if residual > ceiling {

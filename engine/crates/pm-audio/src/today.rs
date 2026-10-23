@@ -468,6 +468,35 @@ pub fn up_mix(from: usize, to: usize) -> Vec<Vec<f32>> {
     m
 }
 
+/// The stereo fold of a bus of `n` channels named by `speakers` (the
+/// widest clip's layout) for the counts Web Audio would fold discretely
+/// (decision LAYOUT-1): ITU-R BS.775 / SMPTE coefficients by speaker
+/// (`layout::matrix`), and an equal-power sum of every channel into both
+/// sides when the channels have no speaker meaning. Rows L and R.
+pub fn stereo_fold(speakers: &[pm_media::audio::Speaker], n: usize) -> Vec<Vec<f32>> {
+    use pm_media::audio::Speaker;
+    let named = speakers.len() == n && speakers.iter().any(|s| !matches!(s, Speaker::Other(_)));
+    if named {
+        return crate::layout::matrix(speakers, &crate::layout::stereo());
+    }
+    let w = (1.0 / n.max(1) as f32).sqrt();
+    vec![vec![w; n], vec![w; n]]
+}
+
+/// Adds `bus` folded through `m` (rows L, R) into `out` frames `[0, n)`.
+pub fn matrix_fold(bus: &[Vec<f32>], m: &[Vec<f32>], out: &mut [Vec<f32>], n: usize) {
+    for (o, row) in out.iter_mut().zip(m) {
+        for (c, &g) in row.iter().enumerate() {
+            if g == 0.0 {
+                continue;
+            }
+            for i in 0..n {
+                o[i] += bus[c][i] * g;
+            }
+        }
+    }
+}
+
 /// Folds a bus of `bus.len()` channels to stereo as the destination does
 /// (`AudioBus::SumFromByDownMixing`, in its operation order), adding into
 /// `out` frames `[at, at + n)` from bus frames `[0, n)`.

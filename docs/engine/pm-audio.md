@@ -253,6 +253,15 @@ longer stands. What remains, with its status:
 4. AAC and Opus decode about −93 dBFS from today's (FFmpeg 9.0.2 against Chromium's
    FFmpeg fork and libopus). See "Decoders" below; open.
 
+**Beta list (bug fixes against today, orchestrator decisions):**
+
+- AUDIO-4: audio follows clip speed and time remapping (today plays it at 1×, out of
+  sync with the retimed picture).
+- LAYOUT-1: files of 3, 5, 7, 8 or more channels fold to stereo by their layout
+  (BS.775) instead of keeping only their first two channels; channels without a
+  speaker meaning sum with equal power. 1, 2, 4 and 6 channel folds, the wide-bus
+  up-mix, and mono beside a quad at −6 dB stay today's.
+
 Everything else matches today exactly (below): automation stepping and ramps, the
 decode resampler, in-points and starts between samples, switches, channel folds and
 the wide bus, the playback alignment, and MP3, FLAC and PCM decoding.
@@ -286,10 +295,14 @@ today's exporter builds in an `OfflineAudioContext` (`legacy/core/audio.ts`
   channel-count rules (`AudioBus::SumFromByUpMixing`), applies the master there and
   folds to stereo at the destination (`SumFromByDownMixing`, with the fused
   multiply-adds Chromium's NEON `Vsma` compiles to). So beside a 5.1 file, mono plays
-  through the center at −3 dB; beside a quad, at −6 dB; beside 7.1 (folded
-  discretely), on the left only; a lone 3, 5, 7 or 8 channel file keeps its first two
-  channels. All of these are today's behaviour; dropping channels of discrete
-  layouts is a candidate bug fix for the orchestrator (LAYOUT-1), not made here.
+  through the center at −3 dB; beside a quad, at −6 dB (today's, kept). Web Audio
+  folds every other count discretely, keeping only the first two channels, so a 7.1
+  file loses its center and surrounds today. Decision LAYOUT-1 (a bug fix, on the beta
+  list): those buses fold by the widest clip's layout with ITU-R BS.775 / SMPTE
+  coefficients (`today::stereo_fold`, `layout::matrix`), and channels without a
+  speaker meaning sum into both sides with equal-power weights (1/√n). The up-mix
+  into such a bus stays Web Audio's (discrete: mono beside 7.1 lands in its front
+  left, as today).
 - **Ranges.** An export's context starts at its range (`Mixer::set_today_range`). In
   playback, each producer run (Play, a seek, a loop wrap) starts today's model at the
   playhead, as today's `sync(time, true)` schedules every clip and envelope from it
@@ -339,7 +352,8 @@ earlier capture with the real project, residual rms against today's float mix:
 | clicks-30, clicks-2997, clicks-44k, gain-fades, precomp-nesting, solo, mute-groups | −240 (identical) |
 | app-channels, eased-24, eased-60, fractional, rates, layouts, wide-51 | −240 (identical) |
 | real project (87.4 s, a 44.1 kHz MP3 in three clips, a keyframed fade) | −240 (identical; was −71.7) |
-| wide-quad, wide-71 | −168.6, −166.0 (summation order, below today's own −149) |
+| wide-quad | −168.6 (summation order, below today's own −149) |
+| wide-71 | −240 outside its 7.1 clip; inside, LAYOUT-1's fold by design |
 | mono (seven sources, two lossy) | −156.3 (AAC, Opus) |
 | embedded (AAC soundtrack) | −110.9 (AAC) |
 | corpus-media-audio (five codecs) | −93.6 (AAC, Opus) |

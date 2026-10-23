@@ -274,6 +274,8 @@ pub struct Mixer {
     /// The bus width of the band being rendered when today's bus is wider
     /// than stereo (0 otherwise; [`Self::render_current`]).
     bus: usize,
+    /// The voice whose layout names the wide band's channels.
+    bus_lead: Option<usize>,
     /// Scratch for wide bands.
     wide_out: Vec<Vec<f32>>,
     band_out: Vec<Vec<f32>>,
@@ -869,6 +871,7 @@ impl Mixer {
             today_range: crate::today::Range::default(),
             today_src: vec![],
             bus: 0,
+            bus_lead: None,
             wide_out: vec![],
             band_out: vec![],
             band_strips: vec![],
@@ -1783,7 +1786,7 @@ impl Mixer {
     /// connected to today's bus, with its channel count: from the range's
     /// start (export) or a second before the clip (playback) until its
     /// source node is disconnected ([`crate::today::SourceRead::disconnected`]).
-    fn wide_spans(&mut self, comps: &[pm_eval::Comp<'_>]) -> Result<Vec<(i64, i64, usize)>> {
+    fn wide_spans(&mut self, comps: &[pm_eval::Comp<'_>]) -> Result<Vec<(i64, i64, usize, usize)>> {
         let graph = self.graph.clone();
         let p = self.format.sample_rate as f64;
         let range = self.today_range;
@@ -1805,7 +1808,7 @@ impl Mixer {
                     } else {
                         range.origin
                     };
-                    spans.push((from, range.origin + clip.read.disconnected(), channels));
+                    spans.push((from, range.origin + clip.read.disconnected(), channels, vi));
                 }
                 _ => {
                     // Time-mapped clips: connected while their window lasts.
@@ -1816,6 +1819,7 @@ impl Mixer {
                             .max(a.saturating_sub((p * crate::today::LIVE_LOOKAHEAD) as i64)),
                         b.saturating_add(128),
                         channels,
+                        vi,
                     ));
                 }
             }
@@ -1846,13 +1850,13 @@ impl Mixer {
         };
         let spans: Vec<_> = spans
             .into_iter()
-            .filter(|&(a, b, _)| a < end && b > start)
+            .filter(|&(a, b, _, _)| a < end && b > start)
             .collect();
         if spans.is_empty() {
             return self.render_band(start, frames, out, options, monitor_solo, 0);
         }
         let mut cuts = vec![start, end];
-        for &(a, b, _) in &spans {
+        for &(a, b, _, _) in &spans {
             cuts.extend([a, b].into_iter().filter(|&x| x > start && x < end));
         }
         cuts.sort_unstable();
@@ -1876,12 +1880,16 @@ impl Mixer {
         let mut report = RenderReport::default();
         for w in cuts.windows(2) {
             let (a, b) = (w[0], w[1]);
-            let bus = spans
-                .iter()
-                .filter(|&&(x, y, _)| x <= a && y > a)
-                .map(|&(_, _, c)| c)
-                .max()
-                .unwrap_or(0);
+            // The widest connected clip sets the bus (the first of equals).
+            let lead = spans.iter().filter(|&&(x, y, _, _)| x <= a && y > a).fold(
+                None::<(usize, usize)>,
+                |best, &(_, _, c, vi)| match best {
+                    Some((bc, _)) if bc >= c => best,
+                    _ => Some((c, vi)),
+                },
+            );
+            let bus = lead.map_or(0, |(c, _)| c);
+            self.bus_lead = lead.map(|(_, vi)| vi);
             let r = self.render_band(
                 a,
                 (b - a) as usize,
@@ -1968,12 +1976,25 @@ impl Mixer {
                 c.clear();
                 c.resize(frames, 0.0);
             }
-            crate::today::down_mix(&wide_out, out, 0, frames);
-            // The meters read each strip as a stereo tap does (a 2-channel
-            // speakers node: the same fold).
+            // Web Audio defines the stereo fold of 1, 2, 4 and 6 channels
+            // (kept as today). Other counts it folds discretely, dropping
+            // every channel past the first two; that loses content (a 7.1
+            // file's center), so they fold by their layout instead
+            // (decision LAYOUT-1, `today::stereo_fold`).
+            let fold = (!matches!(bus, 1 | 2 | 4 | 6))
+                .then(|| self.bus_lead)
+                .flatten()
+                .and_then(|vi| self.graph.voices.get(vi))
+                .map(|plan| crate::today::stereo_fold(&plan.source.info.speakers, bus));
+            let fold_into = |bus: &[Vec<f32>], out: &mut [Vec<f32>]| match &fold {
+                Some(m) => crate::today::matrix_fold(bus, m, out, frames),
+                None => crate::today::down_mix(bus, out, 0, frames),
+            };
+            fold_into(&wide_out, out);
+            // The meters read each strip folded the same way.
             for strip in self.strips.iter_mut() {
                 let mut folded = vec![vec![0f32; frames]; 2];
-                crate::today::down_mix(strip, &mut folded, 0, frames);
+                fold_into(strip, &mut folded);
                 *strip = folded;
             }
         }

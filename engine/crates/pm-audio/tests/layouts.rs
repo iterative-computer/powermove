@@ -1,9 +1,10 @@
 //! Every channel layout our FFmpeg build names (the layouts files reach the
 //! engine with; today's engine takes any of them through Chromium's decode)
-//! decodes with its speakers and folds into the stereo bus as today's Web
-//! Audio graph folds it: by channel count alone (Chromium's
-//! `AudioBus::SumFromByDownMixing`): 4 channels as quad, 6 as 5.1, every
-//! other count keeping its first two channels.
+//! decodes with its speakers and folds into the stereo bus: 1, 2, 4 and 6
+//! channels by count, as today's Web Audio graph folds them (Chromium's
+//! `AudioBus::SumFromByDownMixing`); every other count by its layout's
+//! ITU-R BS.775 coefficients, so no channel but LFE is dropped (decision
+//! LAYOUT-1: today keeps only their first two channels).
 
 mod common;
 
@@ -134,7 +135,10 @@ fn every_named_layout_folds_into_stereo() {
         let doc = project(30.0, 1.0, &[audio("A", "s", 0.0, 1.0, "", "")], &[], "");
         let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
         let out = rig.render(&mut m, 0, SR as i64, 1 << 16);
-        let want = web_audio_fold(channels);
+        let want = match channels {
+            1 | 2 | 4 | 6 => web_audio_fold(channels).to_vec(),
+            n => pm_audio::today::stereo_fold(&speakers, n),
+        };
         for (c, s) in speakers.iter().enumerate() {
             let f = 300.0 + 100.0 * c as f64;
             let (l, r) = (
@@ -146,6 +150,10 @@ fn every_named_layout_folds_into_stereo() {
                 (l - el).abs() < 1e-4 && (r - er).abs() < 1e-4,
                 "{name} channel {c} ({s:?}): heard L {l:.4} R {r:.4}, matrix L {el:.4} R {er:.4}"
             );
+            if !matches!(channels, 1 | 2 | 4 | 6) {
+                let lfe = matches!(s, Speaker::LowFrequency | Speaker::LowFrequency2);
+                assert!(lfe || l + r > 0.05, "{name}: {s:?} is dropped");
+            }
         }
         summary.push(format!("{name} ({channels} ch, {named} named)"));
     }
