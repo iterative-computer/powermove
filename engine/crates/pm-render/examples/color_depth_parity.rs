@@ -175,7 +175,6 @@ fn main() {
                 &ref_bytes,
             );
             println!("{id} exported PNG: different={different}");
-            failures += usize::from(different != 0);
             Some(different)
         } else {
             None
@@ -186,8 +185,7 @@ fn main() {
             .map(|(a, b)| f64::from((a - b).abs()) * 255.0)
             .fold(0.0, f64::max);
         // Pixel-exact is the DEPTH-1 bar, with no corpus exceptions.
-        let pass = different == 0;
-        failures += usize::from(!pass);
+        let mut pass = different == 0 && export_different.is_none_or(|n| n == 0);
         let mut source_result = serde_json::Value::Null;
         if let Some(source) = s.get("source") {
             let source_w = source["width"].as_u64().unwrap() as usize;
@@ -240,6 +238,7 @@ fn main() {
                 &reference_source,
             );
             println!("{id} source: different={source_different}, max={source_max} CV");
+            pass &= source_different == 0;
             source_result = json!({"differentPixels":source_different,"maxCv":source_max});
         }
         support::write_png(&dir.join(format!("{id}.native.png")), w, h, &native);
@@ -276,6 +275,7 @@ fn main() {
             timings[6],
             r.target_pool_bytes()
         );
+        failures += usize::from(!pass);
         results.push(json!({"id":id,"depth":s["depth"],"pass":pass,"differentPixels":different,"exportDifferentPixels":export_different,"maxCv":max_cv,"source":source_result,"p50Ms":timings[6],"targetPoolBytes":r.target_pool_bytes(),"outputBytes":frame.color.bytes()}));
     }
     std::fs::write(

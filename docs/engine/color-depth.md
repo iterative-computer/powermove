@@ -30,7 +30,9 @@ choice. This does not change the saved depth.
 The CLI's explicit `--precision 8|16|32` remains functional: it sets Color depth
 on a private in-memory render copy. Without that flag, exports use the saved
 project depth. Request hints no longer silently promote an 8-bit or 16-bit
-project when a source or delivery format has more bits.
+project when a source or delivery format has more bits. The direct CLI's ANGLE
+sidecar and the native hidden host carry binary32 input and output for depth-32
+shader fallback, and retain u16 wire slots for depth 8 and 16.
 
 
 ## Storage and render boundaries
@@ -112,18 +114,29 @@ with a 2D overlay, source conversion/cache isolation, and actual session frame
 snapshots. Settings/migration and runner unit tests pass. Protocol fixtures and
 generated TypeScript are regenerated from the contract sources.
 
-The original video/3D gate adds two flat red/green video frames and one visible
-three.js cube with a translucent 2D overlay at every depth. All nine samples
-match both output bytes and raw float values exactly. The video reference must
-show the fixture's expected image, and the 3D reference must contain visible
-geometry and settle to two identical frames. The expanded gate
-(`color-depth-media.ts`, `color_depth_media`) also prepares a mid-tone detailed
-clip with scaling, rotation and partial opacity; those additional six captures
-are pending shared app access. Its source pixels are recorded separately from
-composition sampling. `color-depth-alpha.ts` likewise prepares an actual
-legacy transparent PNG export with overlapping solids and a blurred layer;
-comparison of that PNG is pending. Capture preparation happens outside the
-Electron lock, while app execution waits for a normal shared slot.
+The video/3D gate (`color-depth-media.ts`, `color_depth_media`) captures
+15 samples: two flat red/green frames, two detailed mid-tone frames with
+scaling, rotation and partial opacity, and a visible three.js cube with a
+translucent 2D overlay, each at all three depths. Source Canvas pixels are
+recorded separately from composition sampling. The flat video and 3D samples
+match output bytes and raw float values. The detailed source revealed a
+Chromium/native YUV conversion difference at all depths. The dedicated
+video-parity lane owns that engine-wide source issue; the depth lane retains
+all six failing comparisons and their source evidence. No tolerance is applied
+to that gate.
+
+`color-depth-alpha.ts` captures an actual legacy transparent PNG with
+overlapping solids and a blurred layer. The reference has 113 alpha codes.
+The premultiplied frame is exact; the decoded PNG differs at 176 pixels by
+one RGB code, with unchanged alpha. The existing level-1 Canvas compatibility
+conversion applies to RGBA8 PNG delivery from every project depth. That shared
+image-export issue is routed to the video/image lane; the gate retains the
+failure independently from composition parity. Fresh rotated
+text sources and compositions are exact at all three depths, including a
+new runner retention run with zero differing byte codes or binary32 bits.
+Capture preparation happens outside the Electron lock; a prebuilt opt-in
+Playwright batch holds a shared slot only for actual app execution. Each app
+profile is removed in `finally`.
 The seven depth-8 slice projects also export through the native PNG job with
 the app's Float32 request hint and dither enabled; all decoded PNG pixels
 match the app readback. The full 8-bit delivery matrix, independent codec
@@ -132,7 +145,57 @@ decoding and half-alpha witnesses are described in `color-depth-export.md`.
 At 320×180, one output texture uses 230,400 / 460,800 / 921,600 bytes at
 8 / 16 / 32 bits respectively. The warmed target pools of this slice have the
 same 1:2:4 ratio. Concurrent debug-build timings are diagnostic only; no general
-throughput win is claimed. The `pm-perfbench` counters are not yet on the merged
-integration base; the paired upload, texture-allocation and pass-count gate
-remains pending that merge. These synthetic qualification scenes do not replace
-the integration owner's complete native-app corpus gate.
+throughput win is claimed. On the same seven projects at depths 8 and 16,
+`pm-perfbench` counted one cold frame per project, then two unmeasured warm-up
+frames and twelve measured frames, recycling each output target as production
+exports do. The cold totals at depth 8 versus 16 were 12,726,988 versus
+21,021,412 texture-allocation bytes (0.605 ratio), 132,852 versus 132,884
+upload bytes, 47 versus 49 render passes, and 4 versus 4 compute passes.
+Warm twelve-frame totals were zero texture-allocation bytes at both depths,
+203,136 upload bytes, 552 render passes, and 48 compute passes. Depth 8 did
+not exceed depth 16 on any guarded counter in any project or phase. The
+retained output-frame targets were 1,612,800 versus 3,225,600 bytes across
+the seven pairs. The source and counts are `pm-perfbench/examples/color_depth.rs`;
+timings are informational under concurrent machine load. These synthetic
+qualification scenes do not replace the integration owner's complete native-app
+corpus gate.
+
+
+For comparison with today's compositor, the counter example also has a
+`--composition` mode using the production `render_snapshot_into` endpoint.
+Both endpoints return project-depth GL-row targets, complete GPU work and
+recycle the output; neither includes readback or presentation. The native
+caller-owned target is allocated inside the cold span. Unmeasured readback
+and CPU row reversal verify all 14 outputs byte for byte. The generic
+frame/export counts above retain their GPU row-reversal pass.
+
+`color-depth-today-counters.ts` opens a fresh app/context for each project and
+depth, suppresses automatic preview before project replacement, rejects warm
+source textures and working targets, and measures one cold frame, two
+discarded warmups and twelve warm frames. The measured cold texture bytes
+for the composition endpoints are:
+
+| Depth | Native | Today WebGL |
+| --- | ---: | ---: |
+| 8 | 11,114,188 | 4,586,544 |
+| 16 | 17,795,812 | 8,964,144 |
+
+Warm texture allocation is zero for both engines at both depths. Over the
+84 warm frames, native records 444 draws, 468 render passes and 48 compute
+passes; today records 456 draws, 372 clears and 336 framebuffer changes.
+These API operations have distinct meanings. Native upload counts are
+195,072 bytes at either depth; today has no image/buffer upload and 50,640
+bytes of uniform setter payload. Packed/aligned wgpu buffers and WebGL
+uniform setters are different units; neither measures physical bus traffic.
+
+The native-versus-today allocation no-regression gate is **not met**. The
+largest differences are the blend-stack's retained intermediate targets
+(2,995,200 versus 691,200 bytes at depth 8), and native text's glyph atlas
+(4,578,964 versus 355,328 bytes). Today's Canvas2D text rasterization happens
+below the instrumented WebGL compositor and its private atlas is excluded,
+so these counts are not total VRAM. Both raw results must be retained; the
+8-versus-16 improvement does not establish parity with today's costs. No
+throughput win or complete engine performance qualification is claimed. The
+blend pool and text atlas follow the same allocation paths at depths 8 and 16;
+these shared costs are routed to the performance lanes. Depth 8 has no extra
+target or pass count compared with depth 16 in any measured project or phase.
