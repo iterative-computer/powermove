@@ -87,6 +87,18 @@ describe('the raster override producer', () => {
     } finally { compat.dispose(); vi.unstubAllGlobals(); }
   });
 
+  it('reads a paused edit\'s own answer back on the window\'s thread, and other preparations on the worker', async () => {
+    const readPixelsAsync = vi.fn(async (source: { width: number; height: number }) => ({ width: source.width, height: source.height, format: 'rgba8Premultiplied' as const, data: new Uint8Array(source.width * source.height * 4) }));
+    const { services, compat, readPixels, need } = setup(true, undefined, readPixelsAsync);
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => ({ ...original(...args), key: 'tinted' }));
+    await compat.prepare(need('box'), 4, { urgent: true });
+    expect([readPixels.mock.calls.length, readPixelsAsync.mock.calls.length]).toEqual([1, 0]);
+    await compat.prepare(need('box', 1), 4);
+    expect([readPixels.mock.calls.length, readPixelsAsync.mock.calls.length]).toEqual([1, 1]);
+    compat.dispose();
+  });
+
   it('reuses unchanged shape bases across edits while wrappers still run, and fetches changed content', async () => {
     const { PM, services, compat, engineRaster, engineRasterAsync, need } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.d, scale, crop]));
     const original = services.get<any>('raster');

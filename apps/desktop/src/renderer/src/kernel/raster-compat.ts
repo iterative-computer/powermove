@@ -282,7 +282,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   // A missing base unwinds only this preparation attempt. Retry with its
   // real pixels; never hand a wrapper a placeholder it could cache.
   const suspended = Symbol('raster preparation suspended');
-  let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object>; readback: (() => Promise<CompatAnswerResult>) | null } | null = null;
+  let preparation: { samples: Map<string, any>; missing: Dependency | null; tainted: WeakSet<object>; urgent: boolean; readback: (() => Promise<CompatAnswerResult>) | null } | null = null;
   const preparing = new Map<string, { layer: unknown; promise: Promise<void> }>();
   const running = new Set<Promise<void>>();
   const bases = new Map<string, { surface: any; bytes: number; persistent: boolean }>();
@@ -470,12 +470,16 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         return { kind: 'raster', key, ...pixels, anchor, size: [w, h], ...(uv ? { uv } : {}) };
       };
       if (preparation) {
-        // Keep the completed canvas. Reading it back on this thread can
-        // wait hundreds of milliseconds on the GPU under load; the worker
-        // uses the same premultiplied WebGL upload/readback as sync callers.
+        // Keep the completed canvas. During playback and speculative work,
+        // reading it back on this thread can wait hundreds of milliseconds
+        // on the GPU under load; the worker uses the same premultiplied
+        // WebGL upload/readback as sync callers. A paused edit's own frame
+        // waits for these pixels: read them here, without the worker's two
+        // message hops (measured 3 ms of a 5 ms round trip under load).
+        const urgent = preparation.urgent;
         preparation.readback = async () => {
           const began = performance.now();
-          try { return finish(await readPixelsAsync(source, (stage, at, computeMs) => transport?.trace?.record(stage, revision, need.time, at, computeMs))); }
+          try { return finish(urgent ? readPixels(source) : await readPixelsAsync(source, (stage, at, computeMs) => transport?.trace?.record(stage, revision, need.time, at, computeMs))); }
           finally { transport?.trace?.record('override readback', revision, need.time, began); }
         };
         return null;
@@ -519,7 +523,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
             await preparationTurn(prepareOptions?.urgent);
             transport?.trace?.record('wrapper scheduling', revision, need.time, queued, phase);
             if (!valid()) return;
-            const attempt = { samples, tainted, missing: null as Dependency | null, readback: null as (() => Promise<CompatAnswerResult>) | null };
+            const attempt = { samples, tainted, urgent: !!prepareOptions?.urgent, missing: null as Dependency | null, readback: null as (() => Promise<CompatAnswerResult>) | null };
             let answer: CompatAnswerResult = null;
             preparation = attempt;
             const beganCpu = performance.now();
