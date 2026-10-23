@@ -170,7 +170,7 @@ describe('legacy Electron shim install', () => {
 
     expect(PM.store.set('project.demo', { v: '1.0.0', proj: project })).toBe(true);
     expect(clone).not.toHaveBeenCalled();
-    project.layers[0].points.push(3);
+    project.layers[0]!.points.push(3);
     expect(sent).toEqual({ key: 'project.demo', value: { v: '1.0.0', proj: {
       id: 'demo', layers: [{ id: 'first', points: [1, 2] }],
     } } });
