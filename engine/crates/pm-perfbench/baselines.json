@@ -1,134 +1,152 @@
 {
-  "about": "Highest allowed pm-perf counts per bench (docs/engine/perfbench.md). Lowered by PM_PERF_RATCHET=update; raised only by hand with the change that needs it.",
+  "about": "Highest allowed pm-perf counts per bench, on the bench thread (thread) and every thread (all_threads), for the recorded units (docs/engine/perfbench.md). Lowered by PM_PERF_RATCHET=update; raised only by hand with the change that needs it.",
   "benches": {
-    "drag_500": {
-      "units": 60,
-      "unit": "moves",
-      "thread": {
-        "cpu.heap_alloc_bytes": 99370093,
-        "cpu.heap_allocs": 908445,
-        "engine.comp_passes": 1800,
-        "engine.file_stats": 240,
-        "engine.layers_planned": 2040,
-        "gpu.bind_group_binds": 19907,
-        "gpu.bind_group_creations": 649,
-        "gpu.buffer_alloc_bytes": 48128,
-        "gpu.draw_calls": 17304,
-        "gpu.pipeline_binds": 17304,
-        "gpu.render_passes": 1272,
-        "gpu.upload_bytes": 4700736,
-        "gpu.uploads": 1272
-      },
+    "blend_stack_cold": {
       "all_threads": {
-        "cpu.heap_alloc_bytes": 99380799,
-        "cpu.heap_allocs": 908445,
+        "cpu.heap_alloc_bytes": 376638,
+        "cpu.heap_allocs": 3025,
+        "engine.comp_passes": 1,
+        "engine.layers_planned": 12,
+        "gpu.bind_group_binds": 23,
+        "gpu.bind_group_creations": 24,
+        "gpu.buffer_alloc_bytes": 58752,
+        "gpu.draw_calls": 22,
+        "gpu.pipeline_binds": 22,
+        "gpu.render_passes": 23,
+        "gpu.texture_alloc_bytes": 141078792,
+        "gpu.texture_allocs": 15,
+        "gpu.upload_bytes": 9440,
+        "gpu.uploads": 23
+      },
+      "thread": {
+        "cpu.heap_alloc_bytes": 376638,
+        "cpu.heap_allocs": 3025,
+        "engine.comp_passes": 1,
+        "engine.layers_planned": 12,
+        "gpu.bind_group_binds": 23,
+        "gpu.bind_group_creations": 24,
+        "gpu.buffer_alloc_bytes": 58752,
+        "gpu.draw_calls": 22,
+        "gpu.pipeline_binds": 22,
+        "gpu.render_passes": 23,
+        "gpu.texture_alloc_bytes": 141078792,
+        "gpu.texture_allocs": 15,
+        "gpu.upload_bytes": 9440,
+        "gpu.uploads": 23
+      },
+      "unit": "frames",
+      "units": 1
+    },
+    "drag_500": {
+      "all_threads": {
+        "cpu.heap_alloc_bytes": 93785615,
+        "cpu.heap_allocs": 894176,
         "engine.comp_passes": 1800,
         "engine.file_stats": 240,
         "engine.layers_planned": 2040,
-        "gpu.bind_group_binds": 19907,
-        "gpu.bind_group_creations": 649,
+        "gpu.bind_group_binds": 16547,
+        "gpu.bind_group_creations": 533,
         "gpu.buffer_alloc_bytes": 48128,
-        "gpu.draw_calls": 17304,
-        "gpu.pipeline_binds": 17304,
-        "gpu.render_passes": 1272,
-        "gpu.upload_bytes": 4700736,
-        "gpu.uploads": 1272
-      }
+        "gpu.draw_calls": 14304,
+        "gpu.pipeline_binds": 14304,
+        "gpu.render_passes": 972,
+        "gpu.upload_bytes": 3855936,
+        "gpu.uploads": 972
+      },
+      "thread": {
+        "cpu.heap_alloc_bytes": 93785615,
+        "cpu.heap_allocs": 894176,
+        "engine.comp_passes": 1800,
+        "engine.file_stats": 240,
+        "engine.layers_planned": 2040,
+        "gpu.bind_group_binds": 16547,
+        "gpu.bind_group_creations": 533,
+        "gpu.buffer_alloc_bytes": 48128,
+        "gpu.draw_calls": 14304,
+        "gpu.pipeline_binds": 14304,
+        "gpu.render_passes": 972,
+        "gpu.upload_bytes": 3855936,
+        "gpu.uploads": 972
+      },
+      "unit": "moves",
+      "units": 60
     },
     "edit_playback_500": {
-      "units": 60,
-      "unit": "frames",
-      "thread": {
-        "cpu.heap_alloc_bytes": 171964200,
-        "cpu.heap_allocs": 2442241,
-        "engine.comp_passes": 1800,
-        "engine.file_stats": 240,
-        "engine.layers_planned": 33000,
-        "gpu.bind_group_binds": 36840,
-        "gpu.bind_group_creations": 240,
-        "gpu.buffer_alloc_bytes": 15360,
-        "gpu.draw_calls": 32880,
-        "gpu.pipeline_binds": 32880,
-        "gpu.render_passes": 1920,
-        "gpu.upload_bytes": 8854080,
-        "gpu.uploads": 1920
-      },
       "all_threads": {
-        "cpu.heap_alloc_bytes": 171973440,
-        "cpu.heap_allocs": 2442241,
+        "cpu.heap_alloc_bytes": 167766360,
+        "cpu.heap_allocs": 2430241,
         "engine.comp_passes": 1800,
         "engine.file_stats": 240,
         "engine.layers_planned": 33000,
-        "gpu.bind_group_binds": 36840,
+        "gpu.bind_group_binds": 33480,
         "gpu.bind_group_creations": 240,
         "gpu.buffer_alloc_bytes": 15360,
-        "gpu.draw_calls": 32880,
-        "gpu.pipeline_binds": 32880,
-        "gpu.render_passes": 1920,
-        "gpu.upload_bytes": 8854080,
-        "gpu.uploads": 1920
-      }
+        "gpu.draw_calls": 29880,
+        "gpu.pipeline_binds": 29880,
+        "gpu.render_passes": 1620,
+        "gpu.upload_bytes": 8009280,
+        "gpu.uploads": 1620
+      },
+      "thread": {
+        "cpu.heap_alloc_bytes": 167766360,
+        "cpu.heap_allocs": 2430241,
+        "engine.comp_passes": 1800,
+        "engine.file_stats": 240,
+        "engine.layers_planned": 33000,
+        "gpu.bind_group_binds": 33480,
+        "gpu.bind_group_creations": 240,
+        "gpu.buffer_alloc_bytes": 15360,
+        "gpu.draw_calls": 29880,
+        "gpu.pipeline_binds": 29880,
+        "gpu.render_passes": 1620,
+        "gpu.upload_bytes": 8009280,
+        "gpu.uploads": 1620
+      },
+      "unit": "frames",
+      "units": 60
     },
     "export_120": {
-      "units": 120,
-      "unit": "frames",
-      "thread": {
-        "cpu.heap_alloc_bytes": 440775168,
-        "cpu.heap_allocs": 4618168,
-        "engine.comp_passes": 3600,
-        "engine.file_stats": 242,
-        "engine.layers_planned": 66000,
-        "gpu.bind_group_binds": 73560,
-        "gpu.bind_group_creations": 420,
-        "gpu.buffer_alloc_bytes": 16850960,
-        "gpu.draw_calls": 65640,
-        "gpu.pipeline_binds": 65640,
-        "gpu.render_passes": 3720,
-        "gpu.texture_alloc_bytes": 359257088,
-        "gpu.texture_allocs": 33,
-        "gpu.upload_bytes": 18230528,
-        "gpu.uploads": 3722
-      },
       "all_threads": {
-        "cpu.heap_alloc_bytes": 823966673,
-        "cpu.heap_allocs": 4624977,
+        "cpu.heap_alloc_bytes": 767798722,
+        "cpu.heap_allocs": 3476027,
         "engine.comp_passes": 3600,
         "engine.file_stats": 242,
         "engine.layers_planned": 66000,
-        "gpu.bind_group_binds": 73560,
-        "gpu.bind_group_creations": 420,
-        "gpu.buffer_alloc_bytes": 16850960,
-        "gpu.draw_calls": 65640,
-        "gpu.pipeline_binds": 65640,
-        "gpu.render_passes": 3720,
-        "gpu.texture_alloc_bytes": 359257088,
-        "gpu.texture_allocs": 33,
-        "gpu.upload_bytes": 18230528,
-        "gpu.uploads": 3722
-      }
+        "gpu.bind_group_binds": 66840,
+        "gpu.bind_group_creations": 410,
+        "gpu.buffer_alloc_bytes": 16830480,
+        "gpu.draw_calls": 59640,
+        "gpu.pipeline_binds": 59640,
+        "gpu.render_passes": 3120,
+        "gpu.texture_alloc_bytes": 354073088,
+        "gpu.texture_allocs": 28,
+        "gpu.upload_bytes": 16540928,
+        "gpu.uploads": 3122
+      },
+      "thread": {
+        "cpu.heap_alloc_bytes": 384607217,
+        "cpu.heap_allocs": 3469218,
+        "engine.comp_passes": 3600,
+        "engine.file_stats": 242,
+        "engine.layers_planned": 66000,
+        "gpu.bind_group_binds": 66840,
+        "gpu.bind_group_creations": 410,
+        "gpu.buffer_alloc_bytes": 16830480,
+        "gpu.draw_calls": 59640,
+        "gpu.pipeline_binds": 59640,
+        "gpu.render_passes": 3120,
+        "gpu.texture_alloc_bytes": 354073088,
+        "gpu.texture_allocs": 28,
+        "gpu.upload_bytes": 16540928,
+        "gpu.uploads": 3122
+      },
+      "unit": "frames",
+      "units": 120
     },
     "import_3d_600k": {
-      "units": 11,
-      "unit": "frames",
-      "thread": {
-        "cpu.heap_alloc_bytes": 50870987,
-        "cpu.heap_allocs": 109866,
-        "engine.comp_passes": 11,
-        "engine.layers_planned": 33,
-        "gpu.bind_group_binds": 88,
-        "gpu.bind_group_creations": 68,
-        "gpu.buffer_alloc_bytes": 9625952,
-        "gpu.draw_calls": 66,
-        "gpu.pipeline_binds": 66,
-        "gpu.render_passes": 66,
-        "gpu.texture_alloc_bytes": 73889472,
-        "gpu.texture_allocs": 7,
-        "gpu.upload_bytes": 9623840,
-        "gpu.uploads": 69
-      },
       "all_threads": {
         "cpu.heap_alloc_bytes": 50871009,
-        "cpu.heap_allocs": 109866,
+        "cpu.heap_allocs": 109754,
         "engine.comp_passes": 11,
         "engine.layers_planned": 33,
         "gpu.bind_group_binds": 88,
@@ -141,13 +159,29 @@
         "gpu.texture_allocs": 7,
         "gpu.upload_bytes": 9623840,
         "gpu.uploads": 69
-      }
+      },
+      "thread": {
+        "cpu.heap_alloc_bytes": 50870987,
+        "cpu.heap_allocs": 109754,
+        "engine.comp_passes": 11,
+        "engine.layers_planned": 33,
+        "gpu.bind_group_binds": 88,
+        "gpu.bind_group_creations": 68,
+        "gpu.buffer_alloc_bytes": 9625952,
+        "gpu.draw_calls": 66,
+        "gpu.pipeline_binds": 66,
+        "gpu.render_passes": 66,
+        "gpu.texture_alloc_bytes": 73889472,
+        "gpu.texture_allocs": 7,
+        "gpu.upload_bytes": 9623840,
+        "gpu.uploads": 69
+      },
+      "unit": "frames",
+      "units": 11
     },
     "inspector_edit_500": {
-      "units": 60,
-      "unit": "edits",
-      "thread": {
-        "cpu.heap_alloc_bytes": 71631848,
+      "all_threads": {
+        "cpu.heap_alloc_bytes": 71620448,
         "cpu.heap_allocs": 845166,
         "engine.comp_passes": 1800,
         "engine.file_stats": 240,
@@ -161,8 +195,8 @@
         "gpu.upload_bytes": 22080,
         "gpu.uploads": 180
       },
-      "all_threads": {
-        "cpu.heap_alloc_bytes": 71645768,
+      "thread": {
+        "cpu.heap_alloc_bytes": 71620448,
         "cpu.heap_allocs": 845166,
         "engine.comp_passes": 1800,
         "engine.file_stats": 240,
@@ -175,86 +209,86 @@
         "gpu.render_passes": 180,
         "gpu.upload_bytes": 22080,
         "gpu.uploads": 180
-      }
+      },
+      "unit": "edits",
+      "units": 60
     },
     "open_large_2000": {
-      "units": 1,
-      "unit": "opens",
-      "thread": {
-        "cpu.heap_alloc_bytes": 149728274,
-        "cpu.heap_allocs": 880286,
-        "engine.comp_passes": 117,
-        "engine.file_stats": 4,
-        "engine.layers_planned": 2196,
-        "gpu.bind_group_binds": 2418,
-        "gpu.bind_group_creations": 238,
-        "gpu.buffer_alloc_bytes": 919824,
-        "gpu.draw_calls": 2182,
-        "gpu.pipeline_binds": 2182,
-        "gpu.render_passes": 119,
-        "gpu.texture_alloc_bytes": 811787136,
-        "gpu.texture_allocs": 120,
-        "gpu.upload_bytes": 1112432,
-        "gpu.uploads": 121
-      },
       "all_threads": {
-        "cpu.heap_alloc_bytes": 149728796,
-        "cpu.heap_allocs": 880286,
+        "cpu.heap_alloc_bytes": 149180860,
+        "cpu.heap_allocs": 878480,
         "engine.comp_passes": 117,
         "engine.file_stats": 4,
         "engine.layers_planned": 2196,
-        "gpu.bind_group_binds": 2418,
-        "gpu.bind_group_creations": 238,
-        "gpu.buffer_alloc_bytes": 919824,
-        "gpu.draw_calls": 2182,
-        "gpu.pipeline_binds": 2182,
-        "gpu.render_passes": 119,
-        "gpu.texture_alloc_bytes": 811787136,
-        "gpu.texture_allocs": 120,
-        "gpu.upload_bytes": 1112432,
-        "gpu.uploads": 121
-      }
+        "gpu.bind_group_binds": 2202,
+        "gpu.bind_group_creations": 198,
+        "gpu.buffer_alloc_bytes": 837904,
+        "gpu.draw_calls": 1982,
+        "gpu.pipeline_binds": 1982,
+        "gpu.render_passes": 99,
+        "gpu.texture_alloc_bytes": 799160896,
+        "gpu.texture_allocs": 100,
+        "gpu.upload_bytes": 1056112,
+        "gpu.uploads": 101
+      },
+      "thread": {
+        "cpu.heap_alloc_bytes": 149180860,
+        "cpu.heap_allocs": 878480,
+        "engine.comp_passes": 117,
+        "engine.file_stats": 4,
+        "engine.layers_planned": 2196,
+        "gpu.bind_group_binds": 2202,
+        "gpu.bind_group_creations": 198,
+        "gpu.buffer_alloc_bytes": 837904,
+        "gpu.draw_calls": 1982,
+        "gpu.pipeline_binds": 1982,
+        "gpu.render_passes": 99,
+        "gpu.texture_alloc_bytes": 799160896,
+        "gpu.texture_allocs": 100,
+        "gpu.upload_bytes": 1056112,
+        "gpu.uploads": 101
+      },
+      "unit": "opens",
+      "units": 1
     },
     "playback_500": {
-      "units": 120,
-      "unit": "frames",
-      "thread": {
-        "cpu.heap_alloc_bytes": 341465520,
-        "cpu.heap_allocs": 4584241,
-        "engine.comp_passes": 3600,
-        "engine.file_stats": 240,
-        "engine.layers_planned": 66000,
-        "gpu.bind_group_binds": 73680,
-        "gpu.bind_group_creations": 480,
-        "gpu.buffer_alloc_bytes": 30720,
-        "gpu.draw_calls": 65760,
-        "gpu.pipeline_binds": 65760,
-        "gpu.render_passes": 3840,
-        "gpu.upload_bytes": 17708160,
-        "gpu.uploads": 3840
-      },
       "all_threads": {
-        "cpu.heap_alloc_bytes": 341476800,
-        "cpu.heap_allocs": 4584241,
+        "cpu.heap_alloc_bytes": 283436640,
+        "cpu.heap_allocs": 3419161,
         "engine.comp_passes": 3600,
         "engine.file_stats": 240,
         "engine.layers_planned": 66000,
-        "gpu.bind_group_binds": 73680,
+        "gpu.bind_group_binds": 66960,
         "gpu.bind_group_creations": 480,
         "gpu.buffer_alloc_bytes": 30720,
-        "gpu.draw_calls": 65760,
-        "gpu.pipeline_binds": 65760,
-        "gpu.render_passes": 3840,
-        "gpu.upload_bytes": 17708160,
-        "gpu.uploads": 3840
-      }
+        "gpu.draw_calls": 59760,
+        "gpu.pipeline_binds": 59760,
+        "gpu.render_passes": 3240,
+        "gpu.upload_bytes": 16018560,
+        "gpu.uploads": 3240
+      },
+      "thread": {
+        "cpu.heap_alloc_bytes": 283436640,
+        "cpu.heap_allocs": 3419161,
+        "engine.comp_passes": 3600,
+        "engine.file_stats": 240,
+        "engine.layers_planned": 66000,
+        "gpu.bind_group_binds": 66960,
+        "gpu.bind_group_creations": 480,
+        "gpu.buffer_alloc_bytes": 30720,
+        "gpu.draw_calls": 59760,
+        "gpu.pipeline_binds": 59760,
+        "gpu.render_passes": 3240,
+        "gpu.upload_bytes": 16018560,
+        "gpu.uploads": 3240
+      },
+      "unit": "frames",
+      "units": 120
     },
     "scrub_24": {
-      "units": 24,
-      "unit": "seeks",
-      "thread": {
-        "cpu.heap_alloc_bytes": 1489762,
-        "cpu.heap_allocs": 14208,
+      "all_threads": {
+        "cpu.heap_alloc_bytes": 1590488,
+        "cpu.heap_allocs": 14763,
         "engine.comp_passes": 24,
         "engine.file_stats": 24,
         "engine.layers_planned": 48,
@@ -269,9 +303,9 @@
         "gpu.upload_bytes": 26640,
         "gpu.uploads": 118
       },
-      "all_threads": {
-        "cpu.heap_alloc_bytes": 1618582,
-        "cpu.heap_allocs": 15056,
+      "thread": {
+        "cpu.heap_alloc_bytes": 1462820,
+        "cpu.heap_allocs": 13921,
         "engine.comp_passes": 24,
         "engine.file_stats": 24,
         "engine.layers_planned": 48,
@@ -285,14 +319,50 @@
         "gpu.texture_allocs": 1,
         "gpu.upload_bytes": 26640,
         "gpu.uploads": 118
-      }
+      },
+      "unit": "seeks",
+      "units": 24
+    },
+    "text_cold": {
+      "all_threads": {
+        "cpu.heap_alloc_bytes": 762099,
+        "cpu.heap_allocs": 6344,
+        "engine.comp_passes": 1,
+        "engine.layers_planned": 2,
+        "gpu.bind_group_binds": 24,
+        "gpu.bind_group_creations": 15,
+        "gpu.buffer_alloc_bytes": 8720,
+        "gpu.draw_calls": 13,
+        "gpu.pipeline_binds": 5,
+        "gpu.render_passes": 4,
+        "gpu.texture_alloc_bytes": 24645304,
+        "gpu.texture_allocs": 12,
+        "gpu.upload_bytes": 133032,
+        "gpu.uploads": 12
+      },
+      "thread": {
+        "cpu.heap_alloc_bytes": 762099,
+        "cpu.heap_allocs": 6344,
+        "engine.comp_passes": 1,
+        "engine.layers_planned": 2,
+        "gpu.bind_group_binds": 24,
+        "gpu.bind_group_creations": 15,
+        "gpu.buffer_alloc_bytes": 8720,
+        "gpu.draw_calls": 13,
+        "gpu.pipeline_binds": 5,
+        "gpu.render_passes": 4,
+        "gpu.texture_alloc_bytes": 24645304,
+        "gpu.texture_allocs": 12,
+        "gpu.upload_bytes": 133032,
+        "gpu.uploads": 12
+      },
+      "unit": "frames",
+      "units": 1
     },
     "typing_60": {
-      "units": 60,
-      "unit": "keys",
-      "thread": {
-        "cpu.heap_alloc_bytes": 52973641,
-        "cpu.heap_allocs": 199330,
+      "all_threads": {
+        "cpu.heap_alloc_bytes": 52963621,
+        "cpu.heap_allocs": 199307,
         "engine.comp_passes": 60,
         "engine.layers_planned": 60,
         "gpu.bind_group_binds": 3638,
@@ -306,9 +376,9 @@
         "gpu.upload_bytes": 1811020,
         "gpu.uploads": 328
       },
-      "all_threads": {
-        "cpu.heap_alloc_bytes": 52973641,
-        "cpu.heap_allocs": 199330,
+      "thread": {
+        "cpu.heap_alloc_bytes": 52963621,
+        "cpu.heap_allocs": 199307,
         "engine.comp_passes": 60,
         "engine.layers_planned": 60,
         "gpu.bind_group_binds": 3638,
@@ -321,170 +391,172 @@
         "gpu.texture_allocs": 148,
         "gpu.upload_bytes": 1811020,
         "gpu.uploads": 328
-      }
+      },
+      "unit": "keys",
+      "units": 60
     }
   },
   "tolerance": {
-    "export_120": {
-      "all_threads/cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
-      },
-      "all_threads/cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
-      },
-      "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
-      },
-      "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166). The export thread also parks on the encoder thread a different number of times per run."
-      }
-    },
     "drag_500": {
       "all_threads/cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "all_threads/cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
       },
       "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "edit_playback_500": {
       "all_threads/cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "all_threads/cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
       },
       "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
+      }
+    },
+    "export_120": {
+      "all_threads/cpu.heap_alloc_bytes": {
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
+      },
+      "all_threads/cpu.heap_allocs": {
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
+      },
+      "cpu.heap_alloc_bytes": {
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166). The export thread also parks on the encoder thread a different number of times per run.",
+        "relative": 0.001
       }
     },
     "import_3d_600k": {
       "all_threads/cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "all_threads/cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
       },
       "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "inspector_edit_500": {
       "all_threads/cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "all_threads/cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
       },
       "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "open_large_2000": {
       "all_threads/cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "all_threads/cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
       },
       "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "playback_500": {
       "all_threads/cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "all_threads/cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
       },
       "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "scrub_24": {
       "all_threads/cpu.heap_alloc_bytes": {
-        "relative": 0.03,
-        "reason": "Every thread: the video decode thread's demuxer and decoder allocate according to how far decoding ahead got when each seek arrived. Measured spread: 3 full runs 15,046 to 15,056 allocations and 1,616,662 to 1,618,582 bytes; a 4th full run 15,198 allocations; 12 runs of scrub_24 alone 15,046 to 15,339 allocations (1.9%) and 1,521,120 to 1,538,422 bytes (1.1%), at load 29. The bench thread's own counts stay within 0.1%."
+        "reason": "Every thread: the video decode thread's demuxer and decoder allocate according to how far decoding ahead got when each seek arrived. Measured spread: 3 full runs 15,046 to 15,056 allocations and 1,616,662 to 1,618,582 bytes; a 4th full run 15,198 allocations; 12 runs of scrub_24 alone 15,046 to 15,339 allocations (1.9%) and 1,521,120 to 1,538,422 bytes (1.1%), at load 29. The bench thread's own counts stay within 0.1%.",
+        "relative": 0.03
       },
       "all_threads/cpu.heap_allocs": {
-        "relative": 0.03,
-        "reason": "Every thread: the video decode thread's demuxer and decoder allocate according to how far decoding ahead got when each seek arrived. Measured spread: 3 full runs 15,046 to 15,056 allocations and 1,616,662 to 1,618,582 bytes; a 4th full run 15,198 allocations; 12 runs of scrub_24 alone 15,046 to 15,339 allocations (1.9%) and 1,521,120 to 1,538,422 bytes (1.1%), at load 29. The bench thread's own counts stay within 0.1%."
+        "reason": "Every thread: the video decode thread's demuxer and decoder allocate according to how far decoding ahead got when each seek arrived. Measured spread: 3 full runs 15,046 to 15,056 allocations and 1,616,662 to 1,618,582 bytes; a 4th full run 15,198 allocations; 12 runs of scrub_24 alone 15,046 to 15,339 allocations (1.9%) and 1,521,120 to 1,538,422 bytes (1.1%), at load 29. The bench thread's own counts stay within 0.1%.",
+        "relative": 0.03
       },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
       },
       "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "typing_60": {
       "all_threads/cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "all_threads/cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's."
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
       },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
       },
       "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     }
   },
