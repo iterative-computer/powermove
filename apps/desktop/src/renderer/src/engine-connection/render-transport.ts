@@ -381,7 +381,7 @@ export class EngineRenderTransport {
    *  ticks), with its revision and kind, most recent last; at most
    *  {@link ANSWER_LOG_LIMIT}. Counts answers by the frame they are for,
    *  wherever they were made (a need, the lookahead, the paused warm-up). */
-  private readonly answerLog = new Map<string, { revision: number; kind: 'raster' | 'reuse' | 'native' }>();
+  private readonly answerLog = new Map<string, { revision: number; kind: 'raster' | 'reuse' | 'native'; key?: string }>();
   private answering = 0;
   /** Clock-driven, bounded playback lookahead. Answers are keyed by the
    * layer's exact need (including scale/crop) and document revision. */
@@ -736,10 +736,14 @@ export class EngineRenderTransport {
       if (entry.session.closed || !this.answerers.has(entry.need.source)) continue;
       const time = entry.need.composition === this.options.composition() ? pts : entry.cursor;
       const need = { ...entry.need, time };
-      const before = this.answeredAt(String(need.layer), time);
+      const before = this.answerLog.get(`${need.layer}\u0000${time}`);
       if (!this.answerNeed(need, entry.session, false, true)) continue;
-      const after = this.answeredAt(String(need.layer), time);
-      if (after?.kind === 'raster' || after?.kind !== before?.kind) changed = true;
+      const after = this.answerLog.get(`${need.layer}\u0000${time}`);
+      // The same pixels (a reuse, or a raster under the key already posted)
+      // or a pass-through again: unchanged.
+      const was = before ? (before.kind === 'native' ? 'native' : `raster:${before.key ?? ''}`) : null;
+      const now = after ? (after.kind === 'native' ? 'native' : `raster:${after.key ?? ''}`) : null;
+      if (now !== was) changed = true;
     }
     return changed;
   }
@@ -799,21 +803,22 @@ export class EngineRenderTransport {
       this.compatStats.rasters++;
       posted = this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer, need.crop ?? undefined);
     }
-    if (posted) this.logAnswer(need, revision, answer.kind);
+    if (posted) this.logAnswer(need, revision, answer.kind, answer.kind === 'native' ? undefined : answer.key);
     return posted;
   }
 
-  private logAnswer(need: CompatNeed, revision: number, kind: 'raster' | 'reuse' | 'native'): void {
+  private logAnswer(need: CompatNeed, revision: number, kind: 'raster' | 'reuse' | 'native', rasterKey?: string): void {
     const key = `${need.layer}\u0000${need.time}`;
     this.answerLog.delete(key);
-    this.answerLog.set(key, { revision, kind });
+    this.answerLog.set(key, { revision, kind, ...(rasterKey !== undefined ? { key: rasterKey } : {}) });
     if (this.answerLog.size > ANSWER_LOG_LIMIT) this.answerLog.delete(this.answerLog.keys().next().value!);
   }
 
   /** The latest answer this window posted for `layer` at `time` (ticks):
    *  its revision and kind, or null (diagnostics and the cadence gates). */
   answeredAt(layer: string, time: number): { revision: number; kind: 'raster' | 'reuse' | 'native' } | null {
-    return this.answerLog.get(`${layer}\u0000${time}`) ?? null;
+    const entry = this.answerLog.get(`${layer}\u0000${time}`);
+    return entry ? { revision: entry.revision, kind: entry.kind } : null;
   }
 
   private postRaster(session: TransportSession, id: { composition: string; layer: string; time: number; source: CompatSource; key: string }, revision: number, scale: number,

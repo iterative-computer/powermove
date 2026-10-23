@@ -786,25 +786,22 @@ describe('compatibility answers during playback', () => {
 
   it('answers the frame on screen again on a paused redraw and says whether the output changed', () => {
     const { t, session, posted } = rig(false);
-    let key = 'k1';
-    t.answerCompat('rasterOverride', () => ({ kind: 'raster', key, width: 1, height: 1, format: 'rgba8Premultiplied', origin: [0, 0], scale: 1, data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] } as any));
+    let key = 'k1', reuse = false;
+    const raster = () => ({ kind: 'raster', key, width: 1, height: 1, format: 'rgba8Premultiplied', origin: [0, 0], scale: 1, data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] } as any);
+    t.answerCompat('rasterOverride', () => reuse ? { kind: 'reuse', key } : raster());
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(3 * frame)] }, session);
       const before = posted.length;
-      // The wrapper's output is unchanged: still a raster under the same key
-      // here (a real producer answers reuse), so it counts as changed only
-      // when the answer's kind or pixels are new.
-      expect(t.refreshShown(3 * frame)).toBe(true);
-      expect(posted.length).toBeGreaterThan(before);
-      // A producer answering reuse: unchanged.
-      t.answerCompat('rasterOverride', () => ({ kind: 'reuse', key }));
-      t.receiveCompat({ compat: 'needs', needs: [need(3 * frame)] }, session);
+      // Unchanged: pixels again under the key already posted, or a reuse.
       expect(t.refreshShown(3 * frame)).toBe(false);
-      // Its output changed (new pixels under a new key).
-      key = 'k2';
-      t.answerCompat('rasterOverride', () => ({ kind: 'raster', key, width: 1, height: 1, format: 'rgba8Premultiplied', origin: [0, 0], scale: 1, data: new Uint8Array(4), anchor: [0, 0], size: [1, 1] } as any));
-      t.receiveCompat({ compat: 'needs', needs: [need(3 * frame)] }, session);
+      expect(posted.length).toBeGreaterThan(before);
+      reuse = true;
+      expect(t.refreshShown(3 * frame)).toBe(false);
+      // Its output changed: new pixels under a new key.
+      reuse = false; key = 'k2';
       expect(t.refreshShown(3 * frame)).toBe(true);
+      // The new output again: unchanged.
+      expect(t.refreshShown(3 * frame)).toBe(false);
     } finally { t.dispose(); }
   });
 
