@@ -379,24 +379,29 @@ today hears); the decoded length is today's buffer length, which also sets the c
 audible end (packet durations less skip side data do not reproduce it: measured off by
 152 to 696 frames on the test files).
 
-**Random access is today's: one whole decode per file** (review round 9). Today decodes
-the whole file once (`decodeAudioData`) and plays the buffer. A packet seek with
-pre-roll cannot reproduce that sequential decode bit for bit (HE-AAC's SBR noise index
-and Opus's CELT energy prediction carry state across the whole stream), so each file
-has one shared decode (`chromium::Whole`, keyed by path, size and modification time)
-that starts on its own thread at the first open and appends decoded blocks; every open
-of the file reads it. A seek anywhere, forward or back, copies samples once the decode
-has passed them (a read ahead of it waits, as today's first Play waits for its buffer).
-At most two whole decodes run at once unless a read is waiting on one. The decode's end
-is also today's length (`known_length`, `count_length`): no second decode. Memory is
-the decoded samples in whole 65,536-frame blocks (frames × channels × 4 bytes, rounded
-up), never the file's bytes, freed with the file's last open; `resident_bytes()` reports
-it. `tests/chromium.rs` checks a five-minute 192 kbps AAC: random block reads (last
-block first, 240 s then back to 200 s, the start, …) equal the sequential decode bit for
-bit, a cold block read after the decode takes 0.14–0.15 ms (the old sequential decoder:
-364–384 ms at 480 s and 293 ms back to 420 s on a 10-minute file, past A3's 120 ms
-bound), resident bytes equal the decoded samples exactly, and they are freed with the
-last open. The whole decode of that file took 263 ms from open at machine load ~30.
+**Random access uses one sequential Chromium decode per file.** AAC's SBR
+noise index and Opus's CELT prediction carry state across the stream, so a
+packet seek with pre-roll cannot reproduce today's samples exactly. The shared
+`chromium::Whole` now spools those samples to an anonymous temporary PCM file.
+It keeps no whole-file sample allocation in RAM. Each block read seeks in that
+spool; the source block cache retains decoded samples under today's **128 MiB**
+`audio` budget, evicting least-recently-used blocks which no render has pinned.
+In-flight blocks may briefly exceed the budget, as today's active voices can.
+The host lease's memory-pressure hook releases every unpinned sample block.
+
+Opening a restored source only probes metadata. Its sequential decode begins
+on the first sample read, with at most two background decodes unless a reader
+is waiting. The source registry holds weak references: dropping the last mix
+or pending read closes its decoder and removes its anonymous spool. A waiting
+read holds the source until it completes. Temporary-file failures are named
+decode errors. Disk space and file I/O replace the former unbounded resident
+whole buffers; a five-minute stereo file uses about 115 MB of temporary disk.
+
+`tests/chromium.rs` checks bit-identical random reads, lazy opens, and the total
+memory across ten independent 45-second AAC files (more than 128 MiB decoded),
+including LRU eviction, memory pressure with a pinned block, and last-reader
+cleanup. `SourceCache::stats().bytes` accounts for resident sample blocks;
+`chromium::resident_bytes()` is zero because the shared PCM is on disk.
 
 Files today cannot play keep Powermove's random-access decoder: today refuses a decoded
 buffer past its `audio` budget (`PM.Memory`, 128 MiB: "too long to decode safely"), so
@@ -405,8 +410,7 @@ estimates today's buffer (container frames at the lower of the file's rate and
 44.1 kHz, × channels × 4) so a file today plays is never sent to the fallback; those
 over it decode through `pm_media::audio` with block-cache memory (the plan's "no length
 limit"; samples about −93 dBFS from what Chromium's FFmpeg would give; LONG-1 on the
-beta list above, pending the orchestrator). A whole decode of a stream without a container length stops at the budget × its
-rate / 44.1 kHz.
+beta list above, pending the orchestrator). A stream without a container length can also spool without a resident-memory length limit.
 
 Playback opens a source with the container's length until the whole decode ends; the
 next mix build takes today's length (up to about 700 frames at a clip's end in

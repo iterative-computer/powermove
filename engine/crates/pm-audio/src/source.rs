@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 
 use pm_media::audio::{AudioDecoder, AudioStreamInfo};
@@ -250,7 +250,7 @@ pub struct CacheStats {
 
 /// Shared by every mixer and render in one process.
 pub struct SourceCache {
-    sources: Mutex<HashMap<SourceKey, Arc<Source>>>,
+    sources: Mutex<HashMap<SourceKey, Weak<Source>>>,
     blocks: Mutex<Blocks>,
     ready: Condvar,
     work: Condvar,
@@ -309,7 +309,9 @@ impl SourceCache {
             blocks: Mutex::default(),
             ready: Condvar::new(),
             work: Condvar::new(),
-            budget: budget_bytes.max(BLOCK * 8 * 4),
+            budget: budget_bytes
+                .min(crate::chromium::TODAYS_BUDGET as usize)
+                .max(BLOCK * 8 * 4),
             next_id: AtomicU64::new(1),
             decoded: AtomicU64::new(0),
             hits: AtomicU64::new(0),
@@ -436,7 +438,7 @@ impl SourceCache {
     /// FFmpeg stream index, the best audio stream when `None`.
     pub fn open(&self, path: &Path, stream: Option<usize>) -> Result<Arc<Source>> {
         let key = (path.to_owned(), stream);
-        if let Some(s) = lock(&self.sources).get(&key) {
+        if let Some(s) = lock(&self.sources).get(&key).and_then(Weak::upgrade) {
             // A length counted since this source opened replaces it (the
             // next mix build takes the exact length).
             let stale = matches!(&*lock(&s.decoder), Decoder::Chromium(..))
@@ -459,13 +461,13 @@ impl SourceCache {
             // engine processes); our FFmpeg elsewhere (the CLI, tests) and
             // for files longer than today plays at all.
             match crate::chromium::ChromiumDecoder::open(path, info.channels()) {
-                Ok(Some(d)) => {
+                Ok(Some(mut d)) => {
                     // Today's buffer length (its own priming and padding):
                     // counted once per file, off this thread unless the
                     // cache is an export's. Until then the container's.
                     let blocking = self.blocking_lengths.load(Ordering::Relaxed);
-                    if let Some(frames) =
-                        crate::chromium::count_length(path, info.channels(), blocking)
+                    if let Some(frames) = crate::chromium::known_length(path)
+                        .or_else(|| blocking.then(|| d.count_frames().ok()).flatten())
                     {
                         info.length = Some(frames);
                         info.priming = 0;
@@ -484,12 +486,13 @@ impl SourceCache {
             decoder: Mutex::new(decoder),
         });
         let mut sources = lock(&self.sources);
-        if let Some(existing) = sources.get(&key)
+        sources.retain(|_, source| source.strong_count() > 0);
+        if let Some(existing) = sources.get(&key).and_then(Weak::upgrade)
             && existing.info.length == source.info.length
         {
             return Ok(existing.clone());
         }
-        sources.insert(key, source.clone());
+        sources.insert(key, Arc::downgrade(&source));
         Ok(source)
     }
 
@@ -499,7 +502,7 @@ impl SourceCache {
         let gone: Vec<u64> = sources
             .iter()
             .filter(|((p, _), _)| p == path)
-            .map(|(_, s)| s.id)
+            .filter_map(|(_, s)| s.upgrade().map(|s| s.id))
             .collect();
         sources.retain(|(p, _), _| p != path);
         drop(sources);
@@ -515,6 +518,18 @@ impl SourceCache {
                 blocks.bytes -= e.block.bytes();
             }
         }
+    }
+
+    /// Release inactive decoded samples on host memory pressure. Blocks in
+    /// an in-flight render remain pinned until that render releases them.
+    /// Sources are weakly indexed: the last mix/read also closes its PCM spool.
+    pub fn memory_pressure(&self) {
+        lock(&self.sources).retain(|_, source| source.strong_count() > 0);
+        let mut blocks = lock(&self.blocks);
+        blocks
+            .map
+            .retain(|_, entry| Arc::strong_count(&entry.block) > 1);
+        blocks.bytes = blocks.map.values().map(|entry| entry.block.bytes()).sum();
     }
 
     fn decode(&self, source: &Source, index: u64, trace: &mut DecodeTrace) -> Result<Block> {
@@ -570,7 +585,7 @@ impl SourceCache {
             let Some((&oldest, _)) = blocks
                 .map
                 .iter()
-                .filter(|(k, _)| **k != key)
+                .filter(|(k, e)| **k != key && Arc::strong_count(&e.block) == 1)
                 .min_by_key(|(_, e)| e.used)
             else {
                 break;

@@ -330,6 +330,7 @@ pub enum Command {
     },
     /// The viewer's frame-cache share of the lease (bytes): the composer's
     /// decode service evicts down to it at once.
+    AudioMemoryPressure,
     FrameCache {
         bytes: usize,
     },
@@ -1216,6 +1217,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Definitions { .. } => "definitions",
         Command::Media { .. } => "media",
         Command::ShaderFallback { .. } => "shader fallback",
+        Command::AudioMemoryPressure => "audio memory pressure",
         Command::FrameCache { .. } => "frame cache",
         Command::Snapshot(_) => "snapshot",
         Command::SnapshotMapReady => "snapshot map ready",
@@ -2043,7 +2045,17 @@ impl Thread {
                 }
             }
             Command::ShaderFallback { key, message } => self.shader_fallback(key, message),
+            Command::AudioMemoryPressure => {
+                for audio in self.audio.values() {
+                    audio.send(AudioCtl::MemoryPressure);
+                }
+            }
             Command::FrameCache { bytes } => {
+                if bytes < self.frame_cache {
+                    for audio in self.audio.values() {
+                        audio.send(AudioCtl::MemoryPressure);
+                    }
+                }
                 self.frame_cache = bytes;
                 self.stats().frame_cache = bytes as u64;
                 if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {

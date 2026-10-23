@@ -1041,6 +1041,11 @@ impl Playback {
 
     /// Plays `comp_id` of `doc` from now on (a new revision, or another
     /// composition). Returns the media that could not be opened.
+    /// Release unused decoded audio without interrupting the current render.
+    pub fn memory_pressure(&self) {
+        self.cache.memory_pressure();
+    }
+
     pub fn set_project(
         &self,
         doc: Arc<Document>,

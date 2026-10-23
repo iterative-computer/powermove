@@ -73,7 +73,7 @@ fn aac_and_opus_decode_as_today() {
 /// container's length and counts today's on a background thread; a later
 /// open of the same file takes today's.
 #[test]
-fn todays_length_is_counted_off_the_opening_thread() {
+fn restored_sources_decode_lazily_and_count_length_on_first_read() {
     let Some(lib) = chromium_ffmpeg() else {
         eprintln!("no Electron libffmpeg in this checkout; skipping");
         return;
@@ -88,6 +88,12 @@ fn todays_length_is_counted_off_the_opening_thread() {
     std::fs::copy(fixtures.join("tone.opus"), &file).unwrap();
     let cache = pm_audio::SourceCache::new(16 << 20, 0);
     let first = cache.open(&file, None).unwrap();
+    assert_eq!(
+        pm_audio::chromium::resident_bytes_of(&file),
+        None,
+        "metadata open must not decode"
+    );
+    read_block(&cache, &first, 0, first.length().unwrap() as usize);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while pm_audio::chromium::known_length(&file).is_none() && std::time::Instant::now() < deadline
     {
@@ -176,7 +182,10 @@ fn seeks_read_the_shared_whole_decode() {
 
     // Memory: the decoded samples in whole blocks, not the file.
     let resident = pm_audio::chromium::resident_bytes_of(&file).unwrap();
-    assert_eq!(resident, n.div_ceil(b) * b * 2 * 4, "decoded samples only");
+    assert_eq!(
+        resident, 0,
+        "shared PCM is on disk; blocks alone consume the RAM budget"
+    );
     let file_bytes = std::fs::metadata(&file).unwrap().len() as usize;
     eprintln!("resident {resident} B for a {file_bytes} B file of {n} frames");
 
@@ -250,4 +259,81 @@ fn files_today_refuses_keep_random_access() {
     assert!(got[0].iter().any(|v| *v != 0.0));
     assert_eq!(pm_audio::chromium::resident_bytes_of(&file), None);
     cache.shutdown();
+}
+
+/// The presenter uses one cache for every file in its mix. Opening a restored
+/// project must be lazy, and ten decodes together must obey the RAM budget.
+#[test]
+fn total_decode_memory_across_files_obeys_the_presenter_budget() {
+    let Some(lib) = chromium_ffmpeg() else { return };
+    // SAFETY: all tests set the same library path before its OnceLock is read.
+    unsafe { std::env::set_var("POWERMOVE_CHROMIUM_FFMPEG", &lib) };
+    let dir = tempfile::tempdir().unwrap();
+    let encoded = long_aac(dir.path(), 45, "seed.m4a");
+    let budget = 128 << 20;
+    let cache = pm_audio::SourceCache::new(budget, 0);
+    let files: Vec<_> = (0..10)
+        .map(|i| {
+            let file = dir.path().join(format!("source-{i}.m4a"));
+            std::fs::copy(&encoded, &file).unwrap();
+            file
+        })
+        .collect();
+    let sources: Vec<_> = files.iter().map(|p| cache.open(p, None).unwrap()).collect();
+    for file in &files {
+        assert_eq!(
+            pm_audio::chromium::resident_bytes_of(file),
+            None,
+            "restored metadata is lazy"
+        );
+    }
+    let mut total_decoded = 0;
+    for source in &sources {
+        let n = source.length().unwrap() as usize;
+        for block in 0..n.div_ceil(pm_audio::source::BLOCK) {
+            let _ = read_block(&cache, source, block, n);
+        }
+        total_decoded += n * source.channels() * 4;
+        assert!(
+            cache.stats().bytes <= budget,
+            "aggregate block LRU: {:?}",
+            cache.stats()
+        );
+    }
+    assert!(
+        total_decoded > budget,
+        "the test must exceed the budget across files"
+    );
+    assert_eq!(
+        pm_audio::chromium::resident_bytes(),
+        0,
+        "no hidden whole-file sample allocation"
+    );
+    assert!(cache.stats().evicted_blocks > 0);
+    // An inactive old block was evicted; the newest remains warm.
+    let before = cache.stats();
+    cache.block(&sources[0], 0, true).unwrap();
+    assert!(cache.stats().misses > before.misses);
+    let pinned = cache
+        .block(sources.last().unwrap(), 0, true)
+        .unwrap()
+        .unwrap();
+    cache.memory_pressure();
+    assert!(cache.stats().bytes > 0, "an in-use block stays pinned");
+    drop(pinned);
+    cache.memory_pressure();
+    assert_eq!(cache.stats().bytes, 0);
+    drop(sources);
+    cache.shutdown();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while files
+        .iter()
+        .any(|p| pm_audio::chromium::resident_bytes_of(p).is_some())
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the last mix releases every spool"
+        );
+        std::thread::yield_now();
+    }
 }

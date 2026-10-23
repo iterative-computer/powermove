@@ -779,6 +779,7 @@ impl FramePresenter for BridgePresenter {
     }
 
     fn lease_changed(&mut self, ctx: &mut PresentContext<'_>) {
+        self.send(Command::AudioMemoryPressure);
         self.sync_frame_cache(ctx);
     }
 

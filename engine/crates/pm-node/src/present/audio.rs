@@ -54,7 +54,7 @@ pub type LevelsSink = Box<dyn Fn(AudioLevels) + Send>;
 pub const WARM_IDLE: Duration = Duration::from_millis(100);
 
 /// Decoded audio kept per viewer.
-const SOURCE_BUDGET: usize = 256 * 1024 * 1024;
+const SOURCE_BUDGET: usize = 128 * 1024 * 1024;
 const DECODE_WORKERS: usize = 2;
 
 // The audio control thread is ordinary-priority. Keep these clock reads and
@@ -79,6 +79,7 @@ struct ProjectTiming {
 
 pub enum AudioCtl {
     Document(DocumentUpdate),
+    MemoryPressure,
     Media(MediaMap),
     Composition(String),
     /// Seek to `from` (ticks) and play at `rate`.
@@ -410,6 +411,11 @@ impl Control {
     fn apply(&mut self, ctl: AudioCtl, received_us: Option<u64>) -> bool {
         match ctl {
             AudioCtl::Shutdown => return false,
+            AudioCtl::MemoryPressure => {
+                if let Some(playback) = &self.playback {
+                    playback.memory_pressure();
+                }
+            }
             AudioCtl::Document(update) => {
                 let replace = matches!(update, DocumentUpdate::Replace { .. });
                 if self.broken && !replace {

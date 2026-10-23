@@ -26,8 +26,9 @@
 //! back, copies samples once the decode has passed them. The samples equal
 //! the sequential decode by construction (AAC's SBR noise index and Opus's
 //! energy prediction carry state across the whole stream, so a packet seek
-//! with pre-roll would not). Memory is today's: the decoded samples
-//! (frames × channels × 4 bytes, rounded up to a block), not the file.
+//! with pre-roll would not). Samples are spooled to an anonymous temporary
+//! file, not retained in RAM. SourceCache owns the budgeted sample-block LRU.
+//! Opening metadata is lazy; the spool disappears with the last reader.
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -289,13 +290,6 @@ pub fn plays_today(info: &pm_media::audio::AudioStreamInfo) -> bool {
     let rate = f64::from(info.sample_rate.max(1));
     let context_frames = frames as f64 * (44_100f64.min(rate) / rate);
     context_frames * info.channels().max(1) as f64 * 4.0 <= TODAYS_BUDGET as f64
-}
-
-/// A whole decode stops past this many bytes (a stream without a container
-/// length that turns out longer than any file today plays).
-fn hard_cap(rate: c_int) -> usize {
-    let scale = (f64::from(rate.max(1)) / 44_100.0).max(1.0);
-    (TODAYS_BUDGET as f64 * scale) as usize + BLOCK * 4 * 8
 }
 
 /// Whether today decodes `codec` (FFmpeg's name) with FFmpeg: everything
@@ -574,8 +568,8 @@ fn slots() -> &'static (std::sync::Mutex<usize>, std::sync::Condvar) {
 
 /// The decoded samples of a file so far.
 struct Decoded {
-    /// Chunks of [`BLOCK`] frames, planar; the last one is filling.
-    chunks: Vec<Vec<Vec<f32>>>,
+    /// Sparse planar blocks on disk; the handle removes the anonymous file.
+    file: std::fs::File,
     frames: u64,
     done: bool,
     error: Option<String>,
@@ -586,8 +580,6 @@ struct Decoded {
 struct Whole {
     key: FileKey,
     channels: usize,
-    /// [`hard_cap`] for the stream's rate.
-    cap: usize,
     decoded: std::sync::Mutex<Decoded>,
     grew: std::sync::Condvar,
     /// A reader waits on it: it decodes without waiting for a slot.
@@ -601,8 +593,7 @@ fn wholes() -> &'static Wholes {
     WHOLES.get_or_init(Default::default)
 }
 
-/// Bytes the shared whole decodes hold (diagnostics and the memory bound:
-/// decoded samples only, never the file).
+/// Resident sample bytes outside SourceCache (zero: shared PCM is on disk).
 pub fn resident_bytes() -> usize {
     let live: Vec<std::sync::Arc<Whole>> = wholes()
         .lock()
@@ -613,7 +604,7 @@ pub fn resident_bytes() -> usize {
     live.iter().map(|w| w.bytes()).sum()
 }
 
-/// Bytes the whole decode of `path` holds, while one is open.
+/// Resident sample bytes of an open spool (zero); None after its last reader.
 pub fn resident_bytes_of(path: &Path) -> Option<usize> {
     let key = file_key(path)?;
     let live: Vec<std::sync::Arc<Whole>> = wholes()
@@ -641,14 +632,11 @@ impl Whole {
             return Ok(w);
         }
         let session = Session::open(lib, path)?;
-        // SAFETY: the session's codec context is open.
-        let rate = unsafe { (*session.codec).sample_rate };
         let whole = std::sync::Arc::new(Whole {
             key: key.clone(),
             channels,
-            cap: hard_cap(rate),
             decoded: std::sync::Mutex::new(Decoded {
-                chunks: Vec::new(),
+                file: tempfile::tempfile().map_err(|e| err(&format!("PCM spool: {e}")))?,
                 frames: 0,
                 done: false,
                 error: None,
@@ -675,12 +663,8 @@ impl Whole {
     }
 
     fn bytes(&self) -> usize {
-        let d = self.lock();
-        d.chunks
-            .iter()
-            .flat_map(|c| c.iter())
-            .map(|c| c.capacity() * 4)
-            .sum()
+        // PCM lives in the temporary file. Only SourceCache's blocks are resident.
+        0
     }
 
     /// The decode: waits for a slot unless a reader wants it, then appends
@@ -712,7 +696,7 @@ impl Whole {
             }
         }
         let _slot = Slot;
-        let Some((channels, cap)) = weak.upgrade().map(|w| (w.channels, w.cap)) else {
+        let Some(channels) = weak.upgrade().map(|w| w.channels) else {
             return;
         };
         let mut frame: Vec<Vec<f32>> = (0..channels).map(|_| Vec::with_capacity(4096)).collect();
@@ -723,14 +707,16 @@ impl Whole {
             let step = session.next(&mut frame);
             let Some(w) = weak.upgrade() else { return };
             let mut d = w.lock();
-            let step = match step {
-                Ok(true) if (d.frames as usize).saturating_mul(channels * 4) > cap => {
-                    Err(err("the stream is longer than any file today decodes"))
-                }
-                step => step,
-            };
             match step {
-                Ok(true) => d.append(&frame),
+                Ok(true) => {
+                    if let Err(e) = d.append(&frame) {
+                        d.done = true;
+                        d.error = Some(e.to_string());
+                        drop(d);
+                        w.grew.notify_all();
+                        return;
+                    }
+                }
                 Ok(false) => {
                     d.done = true;
                     let frames = d.frames;
@@ -771,53 +757,67 @@ impl Whole {
 }
 
 impl Decoded {
-    fn append(&mut self, frame: &[Vec<f32>]) {
+    fn append(&mut self, frame: &[Vec<f32>]) -> Result<()> {
+        use std::os::unix::fs::FileExt;
         let n = frame.first().map_or(0, Vec::len);
         let mut at = 0;
         while at < n {
-            if self
-                .chunks
-                .last()
-                .is_none_or(|c| c.first().map_or(0, Vec::len) == BLOCK)
-            {
-                self.chunks.push(
-                    (0..frame.len())
-                        .map(|_| Vec::with_capacity(BLOCK))
-                        .collect(),
-                );
-            }
-            let chunk = self.chunks.last_mut().expect("a chunk");
-            let take = (BLOCK - chunk[0].len()).min(n - at);
-            for (dst, src) in chunk.iter_mut().zip(frame) {
-                dst.extend_from_slice(&src[at..at + take]);
+            let block = self.frames / BLOCK as u64;
+            let off = self.frames as usize % BLOCK;
+            let take = (BLOCK - off).min(n - at);
+            for (channel, samples) in frame.iter().enumerate() {
+                let offset =
+                    ((block * frame.len() as u64 + channel as u64) * BLOCK as u64 + off as u64) * 4;
+                // SAFETY: f32 samples are initialized, and the byte view has
+                // exactly their size. This private spool is read on this host.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(samples[at..at + take].as_ptr().cast(), take * 4)
+                };
+                self.file
+                    .write_all_at(bytes, offset)
+                    .map_err(|e| err(&format!("PCM spool: {e}")))?;
             }
             at += take;
             self.frames += take as u64;
         }
+        Ok(())
     }
 
-    /// Frames `[from, from + frames)` (clamped to what is decoded) appended
-    /// to `out`.
-    fn copy(&self, from: u64, frames: usize, out: &mut [Vec<f32>]) -> usize {
+    fn copy(&self, from: u64, frames: usize, out: &mut [Vec<f32>]) -> Result<usize> {
+        use std::os::unix::fs::FileExt;
         let end = (from + frames as u64).min(self.frames);
         let mut at = from;
         while at < end {
-            let chunk = &self.chunks[(at / BLOCK as u64) as usize];
-            let off = (at % BLOCK as u64) as usize;
+            let block = at / BLOCK as u64;
+            let off = at as usize % BLOCK;
             let take = ((end - at) as usize).min(BLOCK - off);
-            for (dst, src) in out.iter_mut().zip(chunk) {
-                dst.extend_from_slice(&src[off..off + take]);
+            let channels = out.len();
+            for (channel, dst) in out.iter_mut().enumerate() {
+                let first = dst.len();
+                dst.resize(first + take, 0.0);
+                let offset =
+                    ((block * channels as u64 + channel as u64) * BLOCK as u64 + off as u64) * 4;
+                // SAFETY: the initialized destination has take f32 elements;
+                // every f32 bit pattern is valid, and the view does not escape.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts_mut(dst[first..].as_mut_ptr().cast(), take * 4)
+                };
+                self.file
+                    .read_exact_at(bytes, offset)
+                    .map_err(|e| err(&format!("PCM spool: {e}")))?;
             }
             at += take as u64;
         }
-        end.saturating_sub(from) as usize
+        Ok(end.saturating_sub(from) as usize)
     }
 }
 
 /// A source decoded by today's library: a reader of the file's shared
 /// whole decode.
 pub struct ChromiumDecoder {
-    whole: std::sync::Arc<Whole>,
+    whole: Option<std::sync::Arc<Whole>>,
+    path: PathBuf,
+    channels: usize,
     /// Program sample of the next read.
     position: u64,
 }
@@ -825,18 +825,31 @@ pub struct ChromiumDecoder {
 impl ChromiumDecoder {
     /// `None` when today's library is not loaded in this process.
     pub fn open(path: &Path, channels: usize) -> Result<Option<ChromiumDecoder>> {
-        let Some(lib) = lib() else {
+        let Some(_) = lib() else {
             return Ok(None);
         };
         Ok(Some(ChromiumDecoder {
-            whole: Whole::get(lib, path, channels)?,
+            whole: None,
+            path: path.to_owned(),
+            channels,
             position: 0,
         }))
     }
 
+    fn whole(&mut self) -> Result<&std::sync::Arc<Whole>> {
+        if self.whole.is_none() {
+            self.whole = Some(Whole::get(
+                lib().ok_or_else(|| err("library unavailable"))?,
+                &self.path,
+                self.channels,
+            )?);
+        }
+        Ok(self.whole.as_ref().expect("opened"))
+    }
+
     /// The decoded length in frames: waits for the whole decode.
     pub fn count_frames(&mut self) -> Result<u64> {
-        let d = self.whole.wait_for(u64::MAX);
+        let d = self.whole()?.wait_for(u64::MAX);
         match &d.error {
             Some(e) => Err(err(e)),
             None => Ok(d.frames),
@@ -853,13 +866,15 @@ impl ChromiumDecoder {
     /// Up to `frames` samples per channel appended to `out` (fewer only at
     /// the end of the stream); waits for the decode to pass them.
     pub fn read(&mut self, out: &mut [Vec<f32>], frames: usize) -> Result<usize> {
-        let d = self.whole.wait_for(self.position + frames as u64);
-        if d.frames < self.position + frames as u64
+        let position = self.position;
+        let d = self.whole()?.wait_for(position + frames as u64);
+        if d.frames < position + frames as u64
             && let Some(e) = &d.error
         {
             return Err(err(e));
         }
-        let got = d.copy(self.position, frames, out);
+        let got = d.copy(position, frames, out)?;
+        drop(d);
         self.position += got as u64;
         Ok(got)
     }
