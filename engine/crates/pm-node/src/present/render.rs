@@ -627,6 +627,9 @@ pub struct Stats {
     pub compat_bytes: u64,
     /// Rasters the store evicted for room (least recently used first).
     pub compat_evicted: u64,
+    /// Answers that replaced a different one at the same revision (a
+    /// producer's output changed without an edit), each redrawing the view.
+    pub compat_replaced: u64,
     /// Producer answers held and asks outstanding (the `raster`
     /// override's pass-throughs, reuses, and rasters).
     pub compat_answers: u64,
@@ -2195,8 +2198,15 @@ impl Thread {
                 };
                 {
                     let mut stats = self.stats();
-                    if applied == super::compat::Applied::Complete {
+                    if matches!(
+                        applied,
+                        super::compat::Applied::Complete
+                            | super::compat::Applied::Replaced { pixels: true }
+                    ) {
                         stats.compat_rasters_received += 1;
+                    }
+                    if matches!(applied, super::compat::Applied::Replaced { .. }) {
+                        stats.compat_replaced += 1;
                     }
                     stats.compat_rasters = rasters;
                     stats.compat_bytes = bytes;

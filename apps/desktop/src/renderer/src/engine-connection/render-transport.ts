@@ -718,7 +718,33 @@ export class EngineRenderTransport {
   }
 
   /** Draws one need with its producer and posts the answer; false when there was none. */
-  private answerNeed(need: CompatNeed, session: TransportSession, prepared = false): boolean {
+  /**
+   * A paused redraw: today's frame loop calls every raster wrapper again on
+   * `draw`, so a wrapper whose output follows its own state (a panel
+   * setting, then `transport.invalidate()`) is drawn anew without an edit.
+   * The producers answer the frame on screen again (`pts`: its media time;
+   * nested compositions' layers at their last asked time). A wrapper that
+   * returns its posted key answers `reuse`. Returns whether an answer
+   * changed: the engine then draws and presents the frame (an answer that
+   * replaces another at the same revision redraws it); otherwise the
+   * caller announces the frame on screen again.
+   */
+  refreshShown(pts: number): boolean {
+    if (this.options.playing?.()) return false;
+    let changed = false;
+    for (const entry of [...this.ahead.values()]) {
+      if (entry.session.closed || !this.answerers.has(entry.need.source)) continue;
+      const time = entry.need.composition === this.options.composition() ? pts : entry.cursor;
+      const need = { ...entry.need, time };
+      const before = this.answeredAt(String(need.layer), time);
+      if (!this.answerNeed(need, entry.session, false, true)) continue;
+      const after = this.answeredAt(String(need.layer), time);
+      if (after?.kind === 'raster' || after?.kind !== before?.kind) changed = true;
+    }
+    return changed;
+  }
+
+  private answerNeed(need: CompatNeed, session: TransportSession, prepared = false, refresh = false): boolean {
     const answerer = this.answerers.get(need.source);
     // A producer that asks for a frame from inside its own answer (an
     // override calling `render.snapshot`) gets none: that frame would need
@@ -731,7 +757,8 @@ export class EngineRenderTransport {
     const tag = `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.source}\u0000${need.scale}\u0000${need.crop ? `${need.crop.x},${need.crop.y},${need.crop.width},${need.crop.height}` : ''}`;
     // Asked again after a `reuse` at this revision: the engine no longer
     // holds that raster (evicted), so this answer carries the pixels.
-    const fresh = this.reused.has(`${tag}\u0000${revision}`);
+    // A refresh asks the producer whether its output changed: never fresh.
+    const fresh = !refresh && this.reused.has(`${tag}\u0000${revision}`);
     let answer: CompatAnswerResult;
     this.answering++;
     try {

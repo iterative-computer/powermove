@@ -85,7 +85,11 @@ export function emitPresented(
 export class PresentedEvents {
   private pending: { frame: PresentedFrameLike; quality: number } | null = null;
   private scheduled = false;
+  /** The frame last emitted (the one on screen). */
+  private last: { frame: PresentedFrameLike; quality: number } | null = null;
   emitted = 0;
+  /** Redraw requests answered with the frame on screen (`redraw`). */
+  redraws = 0;
   /** Main-thread time the emissions' listeners took (ms), and the slowest. */
   listenersMs = 0;
   slowestMs = 0;
@@ -104,6 +108,7 @@ export class PresentedEvents {
       const next = this.pending;
       this.pending = null;
       if (!next) return;
+      this.last = next;
       this.emitted++;
       const started = performance.now();
       this.emit(next.frame, next.quality);
@@ -111,6 +116,26 @@ export class PresentedEvents {
       this.listenersMs += ms;
       this.slowestMs = Math.max(this.slowestMs, ms);
     });
+  }
+
+  /**
+   * A paused redraw request (today's frame loop drawing on `draw`, which
+   * renders and announces the frame again even when nothing changed). The
+   * engine presents a new frame only for a new revision, view or time; when
+   * none is coming (`current` still matches the frame on screen) the frame
+   * on screen is announced again, now, as today's redraw announces it.
+   * Returns whether it was.
+   */
+  redraw(current: { revision: number | null; viewSeq: number | null; pts: number | null; frameTicks: number }, announce: (frame: PresentedFrameLike, quality: number) => boolean): boolean {
+    const last = this.last;
+    if (!last || this.pending || current.revision === null || current.revision !== last.frame.revision) return false;
+    if (current.viewSeq !== null && current.viewSeq !== last.frame.viewSeq) return false;
+    if (current.pts !== null && Math.abs(current.pts - last.frame.pts) >= Math.max(1, current.frameTicks) / 2) return false;
+    // `announce` declines when the redraw changed what the engine draws (it
+    // presents the new frame itself).
+    if (!announce(last.frame, last.quality)) return false;
+    this.redraws++;
+    return true;
   }
 }
 

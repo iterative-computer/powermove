@@ -120,6 +120,10 @@ pub enum Applied {
     Producers,
     /// A pass-through or a reused raster answered a need.
     Answered,
+    /// An answer replaced a different one for the same need at the same
+    /// revision: the producer's output changed without a document change
+    /// (a paused redraw after its own state changed). `pixels`: a raster.
+    Replaced { pixels: bool },
     /// A reuse named a raster the store evicted meanwhile: the need is
     /// asked again at once (not after [`ASK_AGAIN`]), for new pixels.
     Evicted,
@@ -138,7 +142,7 @@ impl Applied {
     /// what is shown may change.
     pub fn redraws(self, waiting: bool) -> bool {
         match self {
-            Applied::Producers => true,
+            Applied::Producers | Applied::Replaced { .. } => true,
             Applied::Forgot(n) => n > 0,
             Applied::Complete | Applied::Answered | Applied::Evicted => waiting,
             Applied::Band | Applied::Restarted | Applied::Ignored => false,
@@ -333,6 +337,7 @@ impl CompatStore {
                     n.crop,
                 );
                 self.asked.remove(&id);
+                let replaced = self.replaces(&id, n.revision, None);
                 self.answers.insert(
                     id,
                     Answer {
@@ -340,7 +345,11 @@ impl CompatStore {
                         raster: None,
                     },
                 );
-                Applied::Answered
+                if replaced {
+                    Applied::Replaced { pixels: false }
+                } else {
+                    Applied::Answered
+                }
             }
             CompatMessage::Reuse {
                 id,
@@ -365,6 +374,7 @@ impl CompatStore {
                     return Applied::Evicted;
                 }
                 self.asked.remove(&answer);
+                let replaced = self.replaces(&answer, revision, Some(&id));
                 self.answers.insert(
                     answer,
                     Answer {
@@ -372,7 +382,11 @@ impl CompatStore {
                         raster: Some(id),
                     },
                 );
-                Applied::Answered
+                if replaced {
+                    Applied::Replaced { pixels: false }
+                } else {
+                    Applied::Answered
+                }
             }
             // Needs travel the other way.
             CompatMessage::Needs { .. } => Applied::Ignored,
@@ -461,6 +475,7 @@ impl CompatStore {
                     band.crop,
                 );
                 self.asked.remove(&answer);
+                let replaced = self.replaces(&answer, raster.revision, Some(&band.id));
                 self.answers.insert(
                     answer,
                     Answer {
@@ -472,7 +487,11 @@ impl CompatStore {
                 if let Some((old, _)) = self.complete.insert(id, (raster, self.clock)) {
                     self.bytes -= size(old.width, old.height, old.format);
                 }
-                Applied::Complete
+                if replaced {
+                    Applied::Replaced { pixels: true }
+                } else {
+                    Applied::Complete
+                }
             }
         }
     }
@@ -484,6 +503,15 @@ impl CompatStore {
         let entry = self.complete.get_mut(&(key, id.clone()))?;
         entry.1 = clock;
         Some(&entry.0)
+    }
+
+    /// Whether an answer at `revision` drawing `raster` (`None`: a
+    /// pass-through) replaces a different answer for the same need at the
+    /// same revision.
+    fn replaces(&self, id: &AnswerId, revision: Revision, raster: Option<&CompatKey>) -> bool {
+        self.answers
+            .get(id)
+            .is_some_and(|a| a.revision == revision && a.raster.as_ref() != raster)
     }
 
     /// Evicts least recently used complete rasters until `incoming` fits.
@@ -868,6 +896,39 @@ mod tests {
             store.apply(session(1), CompatMessage::Producers { sources: vec![] }),
             Applied::Producers
         );
+    }
+
+    #[test]
+    fn a_different_answer_at_the_same_revision_replaces_the_shown_one() {
+        let mut store = CompatStore::default();
+        let s = session(1);
+        let k = id("L7", "a");
+        assert_eq!(
+            store.apply(s, band(k.clone(), 1, 1, 0, 1, 1)),
+            Applied::Complete
+        );
+        // The same raster again (fresh after a reuse): no change.
+        assert_eq!(
+            store.apply(s, band(k.clone(), 1, 1, 0, 1, 1)),
+            Applied::Complete
+        );
+        // Another key for the same need and revision: the output changed.
+        let other = id("L7", "b");
+        assert_eq!(
+            store.apply(s, band(other.clone(), 1, 1, 0, 1, 1)),
+            Applied::Replaced { pixels: true }
+        );
+        assert!(Applied::Replaced { pixels: true }.redraws(false));
+        // A reuse of the first raster replaces it back.
+        let reuse = CompatMessage::Reuse {
+            id: k.clone(),
+            scale: 1.0,
+            revision: Revision::new(3).unwrap(),
+            crop: None,
+        };
+        let replaced = store.apply(s, reuse.clone());
+        assert_eq!(replaced, Applied::Replaced { pixels: false });
+        assert_eq!(store.apply(s, reuse), Applied::Answered);
     }
 
     #[test]

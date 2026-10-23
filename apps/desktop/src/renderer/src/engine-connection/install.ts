@@ -205,6 +205,25 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const stats = new EngineStatsView();
   (PM as any).EngineStats = stats;
   (PM as any).EnginePresentedEvents = presentedEvents;
+  /** A paused redraw request with nothing new for the engine to present:
+   *  today's frame loop announces the frame it draws again
+   *  (`PresentedEvents.redraw`). Called by the frame loop on `draw`. */
+  (PM as any).EngineRedraw = (): boolean => {
+    const doc = PM.EngineDoc;
+    doc?.barrier?.flush();
+    const fps = Number((PM.curComp?.() ?? PM.proj)?.fps) || 30;
+    return presentedEvents.redraw(
+      { revision: doc?.barrier?.revision ?? current?.applied ?? null, viewSeq: current?.viewSeq ?? null, pts: Number.isFinite(PM.time) ? ticks(PM.time) : null, frameTicks: ticks(1) / fps },
+      (frame, quality) => {
+        // Today's redraw calls the raster wrappers again: an output that
+        // changed is the engine's to draw and present (once, as today).
+        if (renderTransport.refreshShown(frame.pts)) return false;
+        PM.CompatContext?.selectFrame?.(frame);
+        PM.bus?.emit?.('preview:presented', { viewport: PM.GL?.previewViewport ?? null, time: frame.pts / TICKS_PER_SECOND, version: versions.at(frame.revision), project: PM.proj, quality });
+        return true;
+      }
+    );
+  };
   PM.setTransportDriver?.(transport);
 
   // The engine's levels, monitor solo, and waveform peaks for today's audio
@@ -626,6 +645,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
+      delete (PM as any).EngineRedraw;
       registration.dispose();
       target.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
       for (const s of [...sessions]) s.close();
