@@ -281,16 +281,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         noteVersion();
         renderTransport.trace.record('edit flushed', PM.EngineDoc?.barrier?.revision ?? 0, ticks(PM.time ?? 0), began);
         // An edit while paused: the producers prepare the frame on screen at
-        // the new revision now (today draws an edit in the frame it
-        // happens). The batch waits for their answers while they are made
-        // in this task, at most until the next one: one that needs a base
-        // the engine draws must not wait for it.
-        const preparing = before !== null && (PM.EngineDoc?.barrier?.revision ?? null) !== before ? renderTransport.prepareShown() : null;
-        const release = preparing ? connection?.holdPatches() : undefined;
-        if (release) {
-          void preparing!.finally(release);
-          setTimeout(release, 0);
-        }
+        // the new revision now, beside the engine's render that will ask
+        // for it (today draws an edit in the frame it happens).
+        if (before !== null && (PM.EngineDoc?.barrier?.revision ?? null) !== before) renderTransport.prepareShown();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {

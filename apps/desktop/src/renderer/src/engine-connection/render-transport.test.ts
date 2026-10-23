@@ -574,7 +574,7 @@ describe('compatibility answers during playback', () => {
 
   it('prepares an edited paused frame urgently without warming obsolete future revisions', async () => {
     vi.useFakeTimers();
-    const { t, session, state, posted } = rig(false);
+    const { t, session, state } = rig(false);
     const prepare = vi.fn(async () => {});
     t.answerCompat('rasterOverride', () => ({ kind: 'native' }), prepare);
     try {
@@ -582,13 +582,8 @@ describe('compatibility answers during playback', () => {
       await vi.advanceTimersByTimeAsync(0);
       prepare.mockClear();
       state.revision++;
-      // It settles once the answer it prepared is posted (the edit's patch
-      // batch is held until then: install.ts).
-      const before = posted.length;
-      let postedWhenSettled = -1;
-      void t.prepareShown()!.then(() => { postedWhenSettled = posted.length - before; });
+      t.prepareShown();
       await vi.advanceTimersByTimeAsync(0);
-      expect(postedWhenSettled).toBe(1);
       expect(prepare).toHaveBeenCalledExactlyOnceWith(need(0), state.revision, { urgent: true });
       expect(vi.getTimerCount()).toBe(0);
       state.playing = true;
