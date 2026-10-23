@@ -24,7 +24,7 @@ starts no engine process and behaves as before.
 |---|---|---|
 | Main | `apps/desktop/src/main/engine/` | Host services, supervision, port wiring |
 | Interactive engine | `utilityProcess` running `out/main/engine-process.js`, addon `pm-node` | Viewer sessions, playback (later lanes) |
-| Job engine | same entry, `POWERMOVE_ENGINE_PROCESS=job` | Exports, agent snapshots, job snapshot sessions; utility QoS |
+| Job engine | same entry, `POWERMOVE_ENGINE_PROCESS=job` | Exports, agent snapshots, job snapshot sessions; utility infrastructure QoS, dynamic user-export QoS |
 
 Main creates every `MessageChannelMain`:
 
@@ -161,12 +161,19 @@ fixtures).
   re-sends `playbackStarted` to a job engine that restarts mid-playback.
   When the interactive engine dies, main sends `playbackStopped` itself
   (RFC 13 invariant 9).
-- The job engine runs at utility QoS (`pthread_set_qos_class_self_np`),
-  never in the Darwin background state. macOS threads do not inherit
-  their creator's QoS, so every engine thread starts through
-  `pm_engine::qos::spawn_engine_thread`, which applies the class first.
-  Threads Chromium starts in the utility process (IO, IPC) keep their own
-  classes; they only move messages.
+- Job infrastructure, agent exports and snapshots, and background and
+  generation work run at utility QoS (`pthread_set_qos_class_self_np`). A
+  user-started export from the sheet or render queue runs at default QoS
+  while playback is idle, switches to utility during playback, and restores
+  default when playback stops. Its render and encoder threads refresh at
+  frame and GPU band boundaries; parallel CPU conversion workers refresh
+  during rows. The render lane returns to utility after each user job.
+  macOS threads do not inherit their creator's QoS, so engine threads start
+  through `pm_engine::qos::spawn_engine_thread` and scoped export workers set
+  their own class. Chromium's IO and IPC threads in the job process keep
+  their own classes. The host WebCodecs encoder window, bundled FFmpeg encoder
+  process, and external Blender process are outside this thread-level QoS
+  control.
 - The shared host clock: engines read `CLOCK_UPTIME_RAW`, main reads
   libuv's `hrtime`; both are `mach_absolute_time`. Each engine stamps its
   start notice and main checks the delivery delay (77 to 387 µs measured).

@@ -14,7 +14,8 @@ principle 7). Metal exposes no public way to give one process's GPU work priorit
 over another's, so the job engine yields cooperatively: during playback main signals it, it splits its
 work into command buffers of at most 2 ms of GPU time (predicted to 1 ms),
 keeps one in flight, submits only into the gap after the interactive
-engine's frame (frame alignment), runs at utility QoS, and yields when the
+engine's frame (frame alignment), runs at utility QoS during playback (user
+exports use default QoS while idle), and yields when the
 interactive engine reports a deadline miss. Blender jobs pause during
 playback. Spike S8 measured the policy (`docs/engine/spikes/S8.md`); plan
 section 26 amendment 12 adopted it.
@@ -90,10 +91,16 @@ restarts.
    the interactive engine exits, main sends the job engine
    `playbackStopped` and restores its lease, so the job engine never waits
    on a dead peer (the stale fallback in invariant 3 covers the gap).
-10. **The job engine runs at utility QoS**, never in the Darwin background
-    state (S8: no GPU effect, and the background state slows its reaction
-    to signals). The private `setGPUPriority:` is not used (Jude's decision,
-    S8 recommendation 11).
+10. **EXPORTQOS-1: User-started exports use Darwin default QoS while playback is idle**
+    (export sheet and render queue), and utility QoS while it is active.
+    Their render, encoder, and CPU conversion threads refresh their own class
+    at frame, GPU band, and row boundaries, then the render lane returns to
+    utility at job exit. Agent exports, snapshots, background and generation
+    work, and job infrastructure remain at utility QoS. No engine-owned job
+    thread enters Darwin's background state (S8: no GPU effect, and slower
+    reaction to signals). The private `setGPUPriority:` is not used (Jude's decision,
+    S8 recommendation 11). External encoder processes are outside this
+    thread-level QoS control.
 
 ## Versioning
 
@@ -111,8 +118,9 @@ playback, re-sends `playbackStarted` to a job engine that restarts during
 playback, and sends `playbackStopped` itself when the interactive engine
 dies (`apps/desktop/src/main/engine/native-engine.ts`). The interactive
 engine sends `frameDone` on the direct port (`Engine::signal_deadline`);
-the job engine feeds every signal to `JobSlicer`. The job engine's thread
-runs at utility QoS (`pm-node`). Notes: `docs/engine/host-processes.md`.
+the job engine feeds every signal to `JobSlicer`. Job infrastructure starts
+at utility QoS (`pm-node`); only user-started export workers change class
+under invariant 10. Notes: `docs/engine/host-processes.md`.
 
 ## Phase 0 results
 

@@ -48,8 +48,9 @@ JobDocument (frozen Arc<Document> at the session's revision)
 - **Encoder input** (amendment 6): ProRes 422 profiles take `v216`, ProRes
   4444 and XQ `y416`, H.264 `420v`. Conversion is the f64 reference in
   `convert.rs`, split across rows on scoped threads that first take the
-  calling thread's QoS (utility in the job engine, so it never competes with
-  the interactive engine for CPU).
+  calling thread's QoS and refresh it as rows complete. User exports use
+  default QoS while playback is idle and utility while it plays; agent and
+  background work stays at utility (RFC 13 invariant 10).
 - **Dither**: on for H.264 (8-bit), off for ProRes unless asked, never on
   alpha (delivery.md has the tile and its tests).
 - **Precision**: exports render at 32-bit (amendment 8 asks for 32-bit
@@ -684,7 +685,7 @@ GCD of its input streams' time bases, at least 1000: 1000 for an encode at
 audio mux (24 fps: 1,536,000). `verify::Expected::movie_timescale` follows it
 for FFmpeg-written files.
 
-### Measured (`e2e/export-encoding-parity.spec.ts`, 2026-10-22)
+### Initial exportaudio measurements (`e2e/export-encoding-parity.spec.ts`, 2026-10-22)
 
 Each fixture exports ProRes 4444, ProRes 4444 with alpha, H.264 MP4 and WebM
 twice with the setting off and once (1080p: twice) with it on; inputs are
@@ -710,17 +711,18 @@ captured at both encoder boundaries in hidden test launches.
 
 ### Gaps
 
-- **WebM export time** is about 3× today's at 1080p. Today's frames never leave
-  the GPU (WebGL canvas → GPU readback → encoder, ~8 ms a frame); the engine's
-  go GPU → f32 readback → RGBA8 → shared memory → main → window → texture
-  upload. Matching it needs GPU-resident frames into the encoder window (the
-  viewer's IOSurface frame bridge and `sharedTexture`) or an 8-bit readback.
+- **WebM export time** was about 3× today's at 1080p in the initial
+  exportaudio run. The GPU transport below removes full-frame shared-memory
+  delivery; the remaining throughput gate is measured separately below.
 - **Nested-composition audio in exports is silent** (all samples): a project
   whose root holds an audio layer plus a precomposition of an audio layer
-  exports silence with the setting on (today: the mix). Each audio feature
-  alone matches today to the sample level; pm-audio's offline mixer renders
-  the same document shape correctly in a unit test, so the fault is in the
-  app's job path (document or media binding of the nested composition).
+  exports silence with the setting on (today: the mix). A graph probe now
+  reproduces two channel-value bugs in `pm-audio::graph`: the linear
+  precomposition path converts a `d.trim` property object directly to a
+  number, giving NaN local time; the nested composition's `audioGain`
+  property falls back to 1 instead of its channel value. Numeric-valued
+  fixtures do not exercise these paths. These audio fixes remain outside
+  the encoder lane.
 - **Mix parity** beyond integer decode and length: pm-audio's documented
   "allowed differences" (speed and remaps followed where today ignores them,
   automation at 3 kHz instead of frame ramps, the resampler) are visible
@@ -730,3 +732,109 @@ captured at both encoder boundaries in hidden test launches.
 - A project frame rate held as a decimal that is not the rational's double
   (for example 29.97 rather than 30000/1001) gives today's encoders a
   different `-framerate`/`framerate`; the engine passes `num / den`.
+
+## GPU WebM transport and user-export scheduling (EXPORT-1 / EXPORTQOS-1)
+
+The desktop's opaque WebM path now keeps encoder frames on the GPU. The
+job renderer retains its owned working target (or assembles sliced bands on
+the GPU) and pipelines it to the encoder thread. That thread byte-quantizes
+into five BGRA8 IOSurfaces with the compositor's round-to-even UNORM boundary,
+no display transform and no dither. An authenticated, separate job bridge
+imports each surface once through the viewer's `importSharedTexture` path.
+The hidden encoder window uploads its `VideoFrame` into the existing WebGL
+canvas with color conversion disabled and calls the same `VideoEncoder`
+configuration, keyframe schedule and muxer. Full CPU frames no longer travel
+through shared memory in this path. Sampled output verification and periodic
+progress previews still read working pixels; test captures read Chromium's
+actual encoder canvas after the GPU copy.
+
+Main bounds the outstanding commands at four. A fifth waits for the first
+completed Chromium GPU copy before the engine can reuse its slot. The GPU
+conversion also goes through the playback admission gate with 16-row units
+and a separate measured pass key. Pools retire on every exit; the encoder
+window's current frame is resolved after navigation, and crashes/navigation
+reclaim its imports. Its sandbox preload is self-contained, so the viewer
+and encoder cannot introduce a shared preload chunk that Electron refuses.
+
+EXPORTQOS-1 changes only user-started exports (sheet or a started render
+queue): the render lane and encoder/conversion workers use Darwin default
+QoS while playback is idle, utility during playback, then default again
+when it stops. Per-frame/band/row refresh and host-reply wait refresh carry
+transitions into active work. The lane returns to utility on exit. Agent,
+snapshot, generation and background work stay utility. Chromium and external
+encoder processes retain their own thread classes. Contract 13 invariant 10
+and `host-processes.md` describe the scope.
+
+Straight-alpha WebM is a new delivery format with no transparent counterpart
+in today's exporter. Its libvpx input now divides premultiplied RGB by alpha
+before REC709 conversion; zero alpha clears hidden color. Bare `pm-cli` has
+no Chromium runtime, so its WebM remains libvpx/libopus and does not claim
+Chromium byte parity; see `export-opus.md` for the exact boundary.
+
+Focused regressions cover the actual GPU UNORM bytes (including clipping,
+halfway codes, row/channel orientation and three scissored submissions), the
+five-slot command backpressure without CPU pixel reads, descriptor validation
+and codec boundaries, alpha 0/half/full, and real Darwin QoS transitions on
+render, encoder and parallel conversion threads. Export readback also reuses
+one staging buffer and decodes mapped float rows directly into the frame; a
+65,536-entry half-float table preserves every decoded bit pattern. The
+RGBA8, alpha and linear-color conversions stay unchanged. App parity and
+paired timing use the hidden EXPORT-1 harness.
+
+GPU WebM verification converts only the same aligned blocks it checks,
+instead of converting every pixel of each sampled frame. Crops preserve
+the 2×2 chroma boundaries and produce exactly the same block means. Decoded
+samples within one two-second keyframe interval share their decoder cursor;
+distant samples still seek. Every packet timestamp, frame count, metadata,
+audio sample count and first/middle/last pixel check remains in place.
+Tests compare both the expected block vectors and decoded sample planes
+exactly against the previous full-frame/seek-per-sample work.
+
+GPU timestamp calibration keeps its completed-submission resolve barrier.
+An attempted early resolve in a separate command buffer returned the prior
+span's end timestamp on Metal, despite successful buffer mapping; that
+optimization was rejected.
+
+
+### Last app replay and remaining gates (2026-10-22)
+
+After GPU transport, dynamic QoS and direct float readback, before the final
+verification optimizations above, the complete EXPORT-1 run measured:
+
+- **basic:** all four formats identical at encoder RGBA/PCM, decoded video
+  and audio, encoded audio payloads and stream properties.
+- **automation / advanced:** encoder RGBA and decoded video match in all
+  formats; audio still fails, including NaN WebM input samples.
+- **large, 1080p / 60 frames:** decoded video, audio and stream properties
+  match in all formats. The two WebM exports use 120 GPU descriptors in total
+  and zero CPU pixel messages.
+- Today against itself remains identical in every format and fixture.
+
+Paired times, best of two at one-minute machine load approximately 29–32:
+
+| Format | Engine | Today | ≤ today |
+|---|---:|---:|---|
+| ProRes 4444 | 1,555 ms | 2,297 ms | yes |
+| ProRes 4444 alpha | 2,050 ms | 5,484 ms | yes |
+| H.264 MP4 | 1,332 ms | 2,341 ms | yes |
+| WebM | 554 ms | 470 ms | **no** |
+
+These are warmed best-of-two measurements: the first engine ProRes export
+was 3,252 ms, so they do not establish a cold-start speed pass. An earlier
+run at load 46–57, before the readback and verification optimizations, also
+failed the speed gate for opaque ProRes, MP4 and WebM.
+
+The playback/cancellation test at load 26.8 presented 179 frames over three
+seconds during export, with p99 spacing 25.5 ms and no gap beyond the
+33.3 ms two-frame deadline (control p99 24.6 ms, also no late gap). After
+playback stopped the export advanced, then cancellation reported cancelled.
+An earlier cadence sample at load 78.2 presented 180 frames with p99 31.5 ms
+and no late gap; it exposed the encoder cancellation classification fixed
+in this lane.
+
+The final verification optimizations pass exact block/decoded-plane equality
+and format tests and build successfully. Their app throughput has not been
+measured; export ≤ today at both moderate and high load remains unproven.
+The complete EXPORT-1 gate is **not green**, due to the audio failures and
+the last measured WebM speed failure. No fixture or assertion was skipped,
+and no tolerance or GPU admission budget was relaxed.
