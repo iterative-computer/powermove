@@ -1,6 +1,6 @@
 const ROW = '.settings-row, .settings-extension-row';
 const SECTION = '.sg-section, .settings-section';
-const EXCLUDED = 'script, style, svg, input, textarea, select, [hidden], [aria-hidden="true"], [role="listbox"], [data-slot="smooth-corners-effects"]';
+const EXCLUDED = 'script, style, svg, dialog, input, textarea, select, [hidden], [aria-hidden="true"], [role="listbox"], [data-slot="smooth-corners-effects"]';
 
 /** Search rendered copy without rewriting text owned by Svelte or live controls. */
 function textNodes(root: HTMLElement): Text[] {
@@ -29,7 +29,18 @@ export function searchSettings(root: HTMLElement, query: string): { pages: strin
 
   for (const page of root.querySelectorAll<HTMLElement>('.sg-page')) {
     if (!query) {
+      page.querySelector('.settings-extension-root')?.dispatchEvent(new CustomEvent('settings-search', { detail: '' }));
       pages.push(page.dataset.settingsPage!);
+      continue;
+    }
+    const collection = page.querySelector<HTMLElement>('.settings-extension-root');
+    if (collection) {
+      const headingMatches = !!page.querySelector('.sg-heading h2')?.textContent?.toLowerCase().includes(query);
+      collection.dispatchEvent(new CustomEvent('settings-search', { detail: headingMatches ? '' : query }));
+      const matches = Number(collection.dataset.settingsMatchCount ?? 0);
+      const visible = matches > 0 || headingMatches;
+      hide(page, visible);
+      if (visible) { pages.push(page.dataset.settingsPage!); count += matches || 1; }
       continue;
     }
     const pageMatch = Array.from(page.querySelectorAll<HTMLElement>('.sg-heading h2, .settings-extension-head')).some(matches);

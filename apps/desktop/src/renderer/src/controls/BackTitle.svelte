@@ -1,8 +1,5 @@
 <script lang="ts">
-  /* A page title that doubles as the way back, first built for the Store:
-     when there is somewhere to return to, the word rolls (Scritto) into that
-     place's name while a chevron grows its own width beside it, on the roll's
-     clock, and the pair becomes one button. */
+  /* A stable page title that doubles as Back; text changes are immediate by default. */
   import Scritto from '@scritto/svelte';
   import Icon from '../panels/Icon.svelte';
 
@@ -10,7 +7,7 @@
     PM,
     text,
     back = false,
-    animateText = true,
+    animateText = false,
     label,
     onback,
     class: className = ''
@@ -53,7 +50,7 @@
 <style>
   .pm-back-title { margin: 0; font-size: 22px; line-height: 28px; font-weight: var(--fw-medium); letter-spacing: -.015em; color: var(--tx); }
   .pm-back-title-inner { display: inline-flex; align-items: center; vertical-align: top; border-radius: var(--r-sm); transition: color var(--dur-1) var(--ease); }
-  .pm-back-title-chev { display: inline-flex; align-items: center; width: 0; height: 28px; overflow: hidden; opacity: 0; color: var(--tx-3); transition: width 550ms cubic-bezier(.32,.72,0,1), opacity 300ms var(--ease), color var(--dur-1) var(--ease); }
+  .pm-back-title-chev { display: inline-flex; align-items: center; width: 0; height: 28px; overflow: hidden; opacity: 0; color: var(--tx-3); transition: width 100ms var(--ease), opacity 100ms var(--ease), color var(--dur-1) var(--ease); }
   .pm-back-title-chev :global(svg) { flex: none; width: 17px; height: 17px; transform: rotate(180deg); }
   .is-back .pm-back-title-chev { width: 22px; opacity: 1; }
   .is-back .pm-back-title-inner { cursor: default; user-select: none; -webkit-user-select: none; }

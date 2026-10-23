@@ -6448,7 +6448,7 @@ impl Thread {
         // The session's compatibility producers (the `raster` override).
         renderer.set_compat_rasters(compat_view(&self.compat, job.key, revision, None));
         let size = request.target_size();
-        let format = pm_render::Renderer::target_format(doc.document(), &request);
+        let format = renderer.device_target_format(doc.document(), &request);
         let target = snapshot_output_target(
             snapshot_target,
             renderer.device(),

@@ -7,6 +7,8 @@ import { doc } from '../state/document.svelte';
 import { sel } from '../state/selection.svelte';
 import { perf, transport } from '../state/transport.svelte';
 import { fakePM } from './__fixtures__/fake-pm';
+import { installBridgeForTests, resetBridgeForTests } from './bridge';
+import type { PowermoveBridge } from '../../../shared/ipc';
 
 type LegacyPM = Record<string, any>;
 
@@ -892,6 +894,68 @@ it('reads durable text assets larger than 64 MB', async () => {
   PM.MediaStore = { get: vi.fn(async () => new Blob([text])) };
   installed = installKernel(PM);
   expect(await installed.api('models').assets.readText('large')).toBe(text);
+});
+
+describe('URL import project ownership', () => {
+  afterEach(() => { resetBridgeForTests(); vi.unstubAllGlobals(); });
+
+  function downloadHarness(stage: 'fetch'|'read'|'decode') {
+    const PM = fakePM();
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const pending = new Promise<void>(resolve => { entered = resolve; });
+    const bytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const info = { token: 'url-media', size: bytes.length, name: 'photo.png', type: 'image/png', kind: 'image' as const };
+    const pause = async (current: string) => { if (stage === current) { entered(); await gate; } };
+    const media = {
+      fetch: vi.fn(async () => { await pause('fetch'); return info; }),
+      read: vi.fn(async () => { await pause('read'); return bytes; }),
+      release: vi.fn(async () => {})
+    };
+    const close = vi.fn();
+    vi.stubGlobal('createImageBitmap', vi.fn(async () => { await pause('decode'); return { close }; }));
+    installBridgeForTests({ remoteMedia: media } as unknown as PowermoveBridge);
+    installed = installKernel(PM);
+    const api = installed.api('download');
+    return { PM, api, pending, release, media, bytes, close };
+  }
+
+  it.each([
+    { stage: 'fetch', sameId: false }, { stage: 'read', sameId: false },
+    { stage: 'decode', sameId: false }, { stage: 'fetch', sameId: true }
+  ] as const)('refuses a URL download after a $stage project switch (same id: $sameId)', async ({ stage, sameId }) => {
+    const { PM, api, pending, release, media } = downloadHarness(stage);
+    const original = PM.proj;
+    const downloading = api.assets.importUrl('https://cdn.example/photo.png');
+    const settled = downloading.then(value => ({ value }), error => ({ error }));
+    await pending;
+    const next = { id: sameId ? original.id : 'next-project', revision: 0, assets: {} };
+    PM.proj = next;
+    release();
+    const result = await settled;
+    expect(original.assets).toEqual({});
+    expect(next.assets).toEqual({});
+    expect(PM.assets.add).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ error: { code: 'STALE_MEDIA_IMPORT' } });
+    expect(media.release).toHaveBeenCalledExactlyOnceWith('url-media');
+  });
+
+  it('imports the exact downloaded file when its project remains active', async () => {
+    const { PM, api, pending, release, media, bytes, close } = downloadHarness('decode');
+    const original = PM.proj;
+    const downloading = api.assets.importUrl('https://cdn.example/photo.png');
+    await pending;
+    release();
+    expect(await downloading).toBe('asset-1');
+    expect(PM.proj).toBe(original);
+    expect(PM.assets.add).toHaveBeenCalledOnce();
+    const file = PM.assets.add.mock.calls[0][0] as File;
+    expect([file.name, file.type, file.size]).toEqual(['photo.png', 'image/png', bytes.length]);
+    expect([...new Uint8Array(await file.arrayBuffer())]).toEqual([...bytes]);
+    expect(PM.proj.assets['asset-1'].name).toBe('photo.png');
+    expect(close).toHaveBeenCalledOnce();
+    expect(media.release).toHaveBeenCalledExactlyOnceWith('url-media');
+  });
 });
 
 describe('the raster override base cache key (today\'s raster cache identity)', () => {

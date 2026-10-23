@@ -49,6 +49,7 @@ pub mod js_sem;
 pub mod keyframes;
 pub mod math;
 pub mod matte;
+pub mod motion_path;
 pub mod node;
 pub mod parenting;
 pub mod query3d;

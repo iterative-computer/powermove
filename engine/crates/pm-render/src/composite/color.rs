@@ -68,6 +68,15 @@ pub fn project_color(root: &Node) -> Result<ProjectColor, String> {
     Ok(out)
 }
 
+/// Whether the project asks for 32-bit float intermediates through the
+/// current app's Settings › Project › Color depth (`colorDepth`: 8, 16, or
+/// 32 bits per channel; absent or anything else is 16, `normalizeColorDepth`).
+/// The current compositor falls back to 16 where the GPU lacks float
+/// rendering (`availableColorDepth`); the renderer does the same.
+pub fn color_depth_float32(root: &Node) -> bool {
+    matches!(node::member(Some(root), "colorDepth").map(Node::kind), Some(NodeKind::Number(n)) if *n == 32.0)
+}
+
 /// A premultiplied E-encoded color (hex solids, backgrounds) in the
 /// working encoding.
 pub fn premultiplied_to_working(rgba: [f64; 4], working: WorkingEncoding) -> [f64; 4] {
@@ -101,6 +110,19 @@ mod tests {
         .unwrap();
         assert_eq!(all.precision, Precision::Float32);
         assert_eq!(all.blend_domain, BlendDomain::DisplayEncoded);
+    }
+
+    #[test]
+    fn color_depth_32_asks_for_float32() {
+        assert!(color_depth_float32(&root(r#"{"colorDepth":32}"#)));
+        for other in [
+            r#"{}"#,
+            r#"{"colorDepth":16}"#,
+            r#"{"colorDepth":8}"#,
+            r#"{"colorDepth":"32"}"#,
+        ] {
+            assert!(!color_depth_float32(&root(other)), "{other}");
+        }
     }
 
     #[test]

@@ -1302,6 +1302,27 @@ impl Renderer {
         self.vector.last_backend
     }
 
+    /// The precision a render of this project uses: [`effective_precision`],
+    /// raised to 32-bit float when the current app's Color depth asks for it
+    /// and the device has it (otherwise 16, as the current compositor falls
+    /// back). An 8-bit Color depth still renders 16-bit float intermediates.
+    fn project_precision(
+        &self,
+        root: &pm_model::Node,
+        request: Precision,
+        project: Precision,
+    ) -> Precision {
+        let precision = effective_precision(request, project);
+        if precision == Precision::Float16
+            && crate::composite::color_depth_float32(root)
+            && self.supports_precision(Precision::Float32)
+        {
+            Precision::Float32
+        } else {
+            precision
+        }
+    }
+
     fn supports_precision(&self, precision: Precision) -> bool {
         precision == Precision::Float16
             || self
@@ -1310,12 +1331,43 @@ impl Renderer {
                 .contains(wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE)
     }
 
-    /// The output format a fresh [`Self::render`] frame would use. Callers
-    /// rendering into their own target must make the same precision choice.
+    /// The output format the project asks for, before the device fallback:
+    /// main's Color depth 32 selects float32 over the 16-bit default.
+    /// Callers rendering into their own target use [`Self::device_target_format`]
+    /// to include the shipped compositor's hardware fallback.
     pub fn target_format(document: &Document, request: &RenderRequest) -> wgpu::TextureFormat {
-        let precision = match document.root().map(project_settings) {
-            Some(Ok(c)) => effective_precision(request.precision, c.precision),
-            _ => request.precision,
+        let precision = match document.root() {
+            Some(root) => match project_settings(root) {
+                Ok(c) => {
+                    let precision = effective_precision(request.precision, c.precision);
+                    if precision == Precision::Float16 && crate::composite::color_depth_float32(root) {
+                        Precision::Float32
+                    } else {
+                        precision
+                    }
+                }
+                Err(_) => request.precision,
+            },
+            None => request.precision,
+        };
+        working_format(precision)
+    }
+
+    /// The actual output format on this device ([`Self::project_precision`]):
+    /// main's compositor falls back from 32 to 16 when float32 filtering or
+    /// blending is unavailable. Viewers, snapshots and caller-owned targets
+    /// must use this choice so the frame matches [`Self::render_into`].
+    pub fn device_target_format(
+        &self,
+        document: &Document,
+        request: &RenderRequest,
+    ) -> wgpu::TextureFormat {
+        let precision = match document.root() {
+            Some(root) => match project_settings(root) {
+                Ok(c) => self.project_precision(root, request.precision, c.precision),
+                Err(_) => request.precision,
+            },
+            None => request.precision,
         };
         working_format(precision)
     }
@@ -1330,7 +1382,7 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let format = Self::target_format(document, request);
+        let format = self.device_target_format(document, request);
         // A target a finished frame gave back (`recycle`), when it fits.
         let target = match self.frame_reuse.target.take() {
             Some(t)
@@ -1640,7 +1692,7 @@ impl Renderer {
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
         debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
-        let precision = effective_precision(request.precision, color.precision);
+        let precision = self.project_precision(root, request.precision, color.precision);
         if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
                 "32-bit precision on a device without rgba32float filtering and blending",

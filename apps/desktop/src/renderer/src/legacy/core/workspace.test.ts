@@ -28,6 +28,15 @@ function workspaceModel(saved: Record<string, any> = {}): PMRegistry {
 }
 
 describe('legacy workspace install', () => {
+  it.each(['1', '0.5', '0.25', 'auto'])('preserves the explicit %s preview choice when restoring a workspace', (resolution) => {
+    const PM = workspaceModel();
+    PM.previewResolution = resolution; PM.perf.auto = resolution === 'auto';
+    PM.quality = resolution === 'auto' ? .5 : Number(resolution);
+    PM.WS.init();
+    PM.WS.restoreSnapshot({ id: 'test', name: 'Test', features: { adaptiveQuality: resolution !== 'auto' }, layout: { docks: [] } });
+    expect(PM.perf.auto).toBe(resolution === 'auto');
+    expect(PM.quality).toBe(resolution === 'auto' ? .5 : Number(resolution));
+  });
   it('persists accessible headless panels and preserves ordinary collapsed panels before mounting', () => {
     const saved: Record<string, any> = {};
     const PM = workspaceModel(saved);

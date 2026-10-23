@@ -228,6 +228,8 @@ fn png_pixels(bytes: &[u8]) -> Option<PngPixels> {
 
 #[test]
 fn snapshots_equal_todays_render_snapshot() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let captures: Vec<std::path::PathBuf> = match std::env::var("PM_ENGINE_CORPUS") {
         Ok(p) => p.split(',').map(std::path::PathBuf::from).collect(),
         Err(_) => [newest_capture("v1-"), newest_capture("threed-2")]

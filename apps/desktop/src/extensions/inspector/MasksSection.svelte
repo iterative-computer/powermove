@@ -4,7 +4,7 @@
   import ChannelRow from './ChannelRow.svelte';
   import PropertyStopwatch from './PropertyStopwatch.svelte';
   import { isProperty } from 'powermove';
-  import { evaluatedValue } from './multi-edit';
+  import { evaluatedValue, isInspectorLayerEditable } from './multi-edit';
   import Icon from './Icon.svelte';
   import SectionHeading from './SectionHeading.svelte';
   import { inspectorRefresh } from './refresh.svelte.js';
@@ -20,8 +20,10 @@
     ['rotation', 'Rotation', 1, '°'], ['feather', 'Feather', 0.5, 'px']
   ] as const;
   const masks = $derived((inspectorRefresh.version, doc.tick.structure, doc.tick.values, doc.proj, [...(layer.masks ?? [])]));
+  const editable = $derived((inspectorRefresh.version, doc.tick.history, doc.tick.structure, doc.tick.values, doc.proj, isInspectorLayerEditable(api, layer)));
 
   function mutate(label: string, operation: () => void): void {
+    if (!isInspectorLayerEditable(api, layer)) return;
     api.history.do(label, () => {
       operation();
       api.anim.touch();
@@ -68,7 +70,7 @@
 </script>
 
 <SectionHeading title="Masks" empty={!masks.length}>
-  <button type="button" class="section-action" aria-label="Add mask" title="Add mask" onclick={addMask}><Icon name="plus" /></button>
+  <button type="button" class="section-action" aria-label="Add mask" title="Add mask" disabled={!editable} onclick={addMask}><Icon name="plus" /></button>
 </SectionHeading>
 {#if masks.length}
   {#each masks as mask, index (mask.id ?? index)}
@@ -89,6 +91,7 @@
         class="stopwatch"
         title="Delete mask"
         aria-label={`Delete mask ${index + 1}`}
+        disabled={!editable}
         onclick={() => mutate('Remove mask', () => { layer.masks.splice(index, 1); })}
       ><Icon name="x" /></button>
     </div>

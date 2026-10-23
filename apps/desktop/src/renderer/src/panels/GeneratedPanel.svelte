@@ -146,7 +146,7 @@
   {/snippet}
   {#snippet point(pair: typeof pointPairs[number])}
     {@const x=pair.x.control as any}{@const y=pair.y.control as any}
-    <Row {api} label={pair.label}><PointField {api} label={pair.label} get={()=>[Number(pair.x.get!()),Number(pair.y.get!())]} edit={pointEdit(pair.x,pair.y)} xEdit={pair.x.edit!} yEdit={pair.y.edit!} xLabel={pair.x.control.label} yLabel={pair.y.control.label} minX={x.min} maxX={x.max} minY={y.min} maxY={y.max} step={x.step} unit={x.unit} /></Row>
+    <Row {api} label={pair.label}><PointField {api} label={pair.label} get={()=>[Number(pair.x.get!()),Number(pair.y.get!())]} edit={pointEdit(pair.x,pair.y)} xEdit={pair.x.edit!} yEdit={pair.y.edit!} xLabel={pair.x.control.label} yLabel={pair.y.control.label} minX={x.min} maxX={x.max} minY={y.min} maxY={y.max} stepX={x.step} stepY={y.step} unit={x.unit} /></Row>
   {/snippet}
   {#if startColor?.get && endColor?.get && !secondary.has(startColor.key) && !secondary.has(endColor.key)}
     <RampField {api} label="Gradient" get={()=>[{id:'start',color:String(startColor.get!()),position:0},{id:'end',color:String(endColor.get!()),position:100}]} onSelect={(id)=>document.querySelector<HTMLElement>(`[data-svelte-panel="${CSS.escape(panelId)}"] [data-generated-key="${CSS.escape(id==='start'?startColor.key:endColor.key)}"] .color-field`)?.click()} />

@@ -4,7 +4,7 @@ import type { TransformInput } from './transform';
 export const COMMAND_TYPES = [
   'set_property',
   'replace_keyframes',
-  'offset_property',
+  'simplify_keyframes',
   'set_easing',
   'set_expression',
   'set_content',
@@ -22,6 +22,7 @@ export const COMMAND_TYPES = [
   'set_transition',
   'set_scene_parameter',
   'add_marker',
+  'remove_marker',
   'create_section',
   'update_section',
   'transform_layers',
@@ -46,9 +47,12 @@ export interface CommandKeyframe {
   value: JsonValue;
   ease?: string;
   hold?: boolean;
-  eo?: [number,number];
-  ei?: [number,number];
-  spring?: JsonObject;
+  /** Native editor round trips preserve identity and independent temporal sides. */
+  id?: string;
+  temporal?: import('../anim/temporal-ease').TemporalEaseFields;
+  spring?: JsonObject | null;
+  /** Unit handles for color channels, whose values are strings. */
+  handles?: EasingCurve;
 }
 
 interface LayerTargetedCommand {
@@ -74,14 +78,21 @@ export interface SetPropertyCommand extends LayerTargetedCommand, LockableComman
   markIntent?: boolean | string;
 }
 
-export interface OffsetPropertyCommand extends LayerTargetedCommand, LockableCommand, IntentAwareCommand {type:'offset_property';path:string;delta:number;}
-
 export interface ReplaceKeyframesCommand extends LayerTargetedCommand, LockableCommand, IntentAwareCommand {
   type: 'replace_keyframes';
   path: string;
   keyframes: CommandKeyframe[];
   replace?: boolean;
   expression?: string | null;
+}
+
+export interface SimplifyKeyframesCommand {
+  type: 'simplify_keyframes';
+  scope?: 'project' | 'layers' | 'properties';
+  /** Explicit IDs; omitted layers use the current layer selection. */
+  targets?: string[];
+  /** Explicit property paths from get_project_state. */
+  properties?: { layerId: string; path: string }[];
 }
 
 export interface SetEasingCommand {
@@ -125,7 +136,8 @@ export interface SetLayerCommand extends LayerTargetedCommand {
 }
 
 export interface CompositionPatch {
-  render3d?:import('../../../../shared/blender').Render3DSettings;
+  /** Project-wide working precision, in bits per color channel. */
+  colorDepth?: import('../color-depth').ColorDepth;
   name?: string;
   width?: number;
   height?: number;
@@ -229,6 +241,12 @@ export interface AddMarkerCommand {
   id?: string;
   time?: number;
   name?: string;
+}
+
+export interface RemoveMarkerCommand {
+  type: 'remove_marker';
+  /** Position in the current composition's marker list, including legacy markers without IDs. */
+  index: number;
 }
 
 export interface SectionVersion {
@@ -335,10 +353,11 @@ export interface EditCaptionsCommand extends LayerTargetedCommand, LockableComma
 
 export interface GroupLayersCommand { type: 'group_layers' | 'ungroup_layers' | 'move_to_group'; targets: string[]; name?: string; group?: string | null; }
 
-export type EditCommand = OffsetPropertyCommand
+export type EditCommand =
   | GroupLayersCommand
   | SetPropertyCommand
   | ReplaceKeyframesCommand
+  | SimplifyKeyframesCommand
   | SetEasingCommand
   | SetExpressionCommand
   | SetContentCommand
@@ -353,6 +372,7 @@ export type EditCommand = OffsetPropertyCommand
   | SetTransitionCommand
   | SetSceneParameterCommand
   | AddMarkerCommand
+  | RemoveMarkerCommand
   | CreateSectionCommand
   | UpdateSectionCommand
   | TransformLayersCommand

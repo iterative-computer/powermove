@@ -1,113 +1,348 @@
+import {viewportCamera} from './viewport';
 import * as THREE from 'three';
-import {TransformControls} from 'three/addons/controls/TransformControls.js';
-import {deltaCommands,upgradeGroupCommands,allowedModes,type TransformTarget,type TransformMode} from './targets';
-import type {ViewportOrientation,ViewportPivot} from './editor-state';
-
-/*
- * The Move, Rotate and Scale tools' gizmo. The overlay canvas never takes
- * pointer events: the viewport asks `hover`/`pointerDown` first and only a
- * press on a handle becomes a gesture. Every gesture edits the real layers'
- * own channels inside one Edit transaction (one Undo).
- */
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { layer3DRole, isModelGroup, type Layer3DRole } from './layers';
+import { parent3D,world3D } from '../../legacy/core/space-3d';
+import { themeColor } from './theme';
+import type { SceneRuntime } from './runtime';
 
 const gizmoNotice='scene3d-gizmo';
-const LABEL:Record<TransformMode,[string,string]>={translate:['Move 3D layer','Move 3D layers'],rotate:['Rotate 3D layer','Rotate 3D layers'],scale:['Scale 3D layer','Scale 3D layers']};
-const SNAP={translate:1,rotate:5,scale:.1};
 
-export interface GizmoSync {
-  targets:TransformTarget[];
-  mode:TransformMode|null;
-  orientation:ViewportOrientation;
-  pivot:ViewportPivot;
-  activeId:string|null;
-  cursor:THREE.Vector3;
-  snap:boolean;
-  /** View camera with a stage-wide view offset (pointer NDC spans the stage). */
-  camera:THREE.PerspectiveCamera|THREE.OrthographicCamera;
-}
-export interface TransformGizmo {
-  readonly helper:THREE.Object3D;
-  attached():boolean;
-  sync(state:GizmoSync):void;
+/*
+ * Blender-style transform gizmo drawn over the composition viewer. The canvas
+ * never takes pointer events: the viewer asks `hover`/`pointerDown` first and
+ * only a press on a handle becomes a gizmo gesture. Every gesture edits the
+ * real layers' own channels inside one Edit transaction (one Undo).
+ */
+
+export type GizmoMode = 'translate'|'rotate'|'scale';
+export type GizmoSpace = 'world'|'local';
+export interface GizmoRect { x:number;y:number;width:number;height:number }
+export interface SceneGizmo {
+  /** Follow the composition frame (stage-relative CSS px) and the layer selection. */
+  update(rect:GizmoRect,selection?:string[]):void;
+  /** True when the client point is over a handle; highlights it. */
   hover(clientX:number,clientY:number):boolean;
+  /** Take a press that lands on a handle. Returns false to let the viewer handle it. */
   pointerDown(event:PointerEvent):boolean;
+  /** True while a gizmo gesture is in progress. */
   active():boolean;
+  /** True when every id is a 3D layer, so the viewer replaces its 2D handles. */
+  covers(ids:readonly string[]):boolean;
   cancel():void;
   dispose():void;
 }
 
-export function createTransformGizmo(PM:any,stage:HTMLElement,canvas:HTMLCanvasElement,refresh:()=>void,resolve:()=>TransformTarget[]):TransformGizmo {
-  // TransformControls reads the attached object's parent, so the pivot lives under an identity root.
-  const pivot=new THREE.Object3D(),root=new THREE.Object3D();root.add(pivot);
-  const controls=new TransformControls(new THREE.PerspectiveCamera(),canvas);
-  // The canvas ignores pointers, so TransformControls' own listeners never fire;
-  // the viewport drives pointerHover/pointerDown/pointerMove/pointerUp directly.
-  controls.disconnect();
-  const helper=controls.getHelper();
-  let state:GizmoSync|null=null,targets:TransformTarget[]=[];
-  let gesture:{label:string;start:TransformTarget[];frames:THREE.Matrix4[];pivotStart:THREE.Matrix4;pivotInverse:THREE.Matrix4;mode:TransformMode}|null=null;
-  let fine=false,alt=false,snapping=false,suppressContextUntil=0,disposed=false;
-  const cleanup:(()=>void)[]=[];let dragOffs:(()=>void)[]=[];
-  const listen=(target:any,event:string,callback:any,options?:any)=>{target.addEventListener(event,callback,options);cleanup.push(()=>target.removeEventListener(event,callback,options));};
-  const warn=(error:unknown)=>PM.toast?.(error instanceof Error?error.message:String(error),2200,{key:gizmoNotice,error:true});
+/* ── shared mode / space (viewer chrome and any 3D view read the same state) ── */
+type GizmoState = {mode:GizmoMode;space:GizmoSpace};
+let state:GizmoState={mode:'translate',space:'world'};
+const stateListeners=new Set<(state:GizmoState)=>void>();
+const publish=()=>{for(const listener of stateListeners)listener({...state});};
+export const getGizmoMode=():GizmoMode=>state.mode;
+export const getGizmoSpace=():GizmoSpace=>state.space;
+export function setGizmoMode(mode:GizmoMode):void {
+  if(!['translate','rotate','scale'].includes(mode))throw new Error(`Unknown gizmo mode "${String(mode)}"`);
+  if(state.mode!==mode){state={...state,mode};publish();}
+}
+export function setGizmoSpace(space:GizmoSpace):void {
+  if(space!=='world'&&space!=='local')throw new Error(`Unknown gizmo space "${String(space)}"`);
+  if(state.space!==space){state={...state,space};publish();}
+}
+export function onGizmoState(listener:(state:GizmoState)=>void):()=>void {stateListeners.add(listener);return()=>stateListeners.delete(listener);}
 
-  function frameFor(t:TransformTarget|null,s:GizmoSync):THREE.Quaternion {
-    if(s.orientation==='local'&&t)return t.rotation.clone();
-    if(s.orientation==='view'){const q=new THREE.Quaternion();s.camera.matrixWorld.decompose(new THREE.Vector3(),q,new THREE.Vector3());return q;}
-    return new THREE.Quaternion();
-  }
-  function place(list:TransformTarget[],s:GizmoSync){
-    const active=list.find(t=>t.id===s.activeId)??list.at(-1)!;
-    if(s.pivot==='cursor')pivot.position.copy(s.cursor);
-    else if(s.pivot==='active')pivot.position.copy(active.position);
-    else if(s.pivot==='bounds'){const box=new THREE.Box3();for(const t of list)box.expandByPoint(t.position);box.getCenter(pivot.position);}
-    else {pivot.position.set(0,0,0);for(const t of list)pivot.position.add(t.position);pivot.position.divideScalar(list.length);}
-    pivot.quaternion.copy(frameFor(active,s));pivot.scale.set(1,1,1);pivot.updateMatrixWorld(true);
-  }
-  function setSnap(on:boolean){
-    if(on===snapping)return;snapping=on;
-    controls.setTranslationSnap(on?SNAP.translate:null);controls.setRotationSnap(on?THREE.MathUtils.degToRad(SNAP.rotate):null);controls.setScaleSnap(on?SNAP.scale:null);
-  }
-  const modifiers=(event:{ctrlKey:boolean;metaKey?:boolean;shiftKey:boolean;altKey:boolean})=>{setSnap(!!state?.snap!==(event.ctrlKey||!!event.metaKey));fine=event.shiftKey;alt=event.altKey;};
-  const pointer=(clientX:number,clientY:number,button=0)=>{
-    const bounds=stage.getBoundingClientRect();
-    return {x:(clientX-bounds.left)/Math.max(1,bounds.width)*2-1,y:-(clientY-bounds.top)/Math.max(1,bounds.height)*2+1,button};
+/** Which handles apply: a sun only aims, a point light only moves, a camera never scales. */
+export function gizmoModes(role:Layer3DRole,lightType?:string):GizmoMode[] {
+  if(role==='object')return ['translate','rotate','scale'];
+  if(role==='camera')return ['translate','rotate'];
+  return lightType==='sun'?['rotate']:lightType==='point'?['translate']:['translate','rotate'];
+}
+
+const LABEL:Record<GizmoMode,[string,string]>={translate:['Move 3D layer','Move 3D layers'],rotate:['Rotate 3D layer','Rotate 3D layers'],scale:['Scale 3D layer','Scale 3D layers']};
+const SNAP={translate:1,rotate:15,scale:.1};
+const tidy=(value:number)=>Math.round(value*1e9)/1e9;
+const vec=(values:number[])=>new THREE.Vector3(values[0],values[1],values[2]);
+
+type Target = {
+  id:string;layer:any;role:Layer3DRole|'group';modes:GizmoMode[];
+  /** Objects: the runtime node. Lights and cameras are placed from their layer values. */
+  object:THREE.Object3D|null;
+  world:THREE.Matrix4;parentInverse:THREE.Matrix4;position:THREE.Vector3;target:THREE.Vector3|null;
+  orientation:THREE.Vector3;order:THREE.EulerOrder;
+};
+
+function createGizmoRenderer(canvas:HTMLCanvasElement):THREE.WebGLRenderer {
+  // Three registers context listeners before its constructor can fail. Keep
+  // those failed instances from remaining attached to our reusable canvas.
+  const descriptor=Object.getOwnPropertyDescriptor(canvas,'addEventListener');
+  const add=canvas.addEventListener,registrations:Parameters<HTMLCanvasElement['addEventListener']>[]=[];
+  canvas.addEventListener=function(...args:Parameters<HTMLCanvasElement['addEventListener']>) {
+    registrations.push(args);add.apply(this,args);
   };
-  function apply(){
+  try {return new THREE.WebGLRenderer({canvas,alpha:true,antialias:true});}
+  catch(error){for(const args of registrations)canvas.removeEventListener(...args);throw error;}
+  finally {if(descriptor)Object.defineProperty(canvas,'addEventListener',descriptor);else delete (canvas as any).addEventListener;}
+}
+
+export function createSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:number)=>SceneRuntime|null):SceneGizmo {
+  // A 2D viewer still owns the same hidden canvas/controller, but needs no
+  // second GPU context or TransformControls geometry. The first 3D selection
+  // initializes synchronously, before that update returns.
+  const canvas=document.createElement('canvas');
+  canvas.setAttribute('aria-hidden','true');canvas.dataset.sceneGizmo='';
+  canvas.style.cssText='position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:4';
+  canvas.hidden=true;stage.append(canvas);
+  let live:SceneGizmo|null=null,renderer:THREE.WebGLRenderer|null=null,disposed=false;
+  let selection:string[]=[];
+  const roleOf=(id:string)=>{const layer=PM.L?.(id);return layer3DRole(layer) || isModelGroup(PM,layer);};
+  return {
+    update(rect,ids) {
+      if(disposed)return;
+      if(live){live.update(rect,ids);return;}
+      if(ids)selection=ids.length && ids.every(roleOf)?[...ids]:[];
+      if(!selection.length)return;
+      renderer ??= createGizmoRenderer(canvas);
+      try { live=createInitializedSceneGizmo(PM,stage,runtime,renderer); }
+      // A lost WebGL context cannot be synchronously recreated on this same
+      // canvas. Retain it for retry; disposing the facade still releases it.
+      catch(error){canvas.hidden=true;throw error;}
+      live.update(rect,selection);
+    },
+    hover:(x,y)=>live?.hover(x,y) ?? false,
+    pointerDown:event=>live?.pointerDown(event) ?? false,
+    active:()=>live?.active() ?? false,
+    covers:ids=>ids.length>0 && ids.every(roleOf),
+    cancel:()=>live?.cancel(),
+    dispose() {
+      if(disposed)return;disposed=true;
+      if(live)live.dispose();else {renderer?.dispose();renderer?.forceContextLoss();canvas.remove();}
+      live=null;renderer=null;selection=[];
+    }
+  };
+}
+
+function createInitializedSceneGizmo(PM:any,stage:HTMLElement,runtime:(time:number)=>SceneRuntime|null,renderer:THREE.WebGLRenderer):SceneGizmo {
+  renderer.setPixelRatio(Math.min(2,window.devicePixelRatio || 1));
+  const canvas=renderer.domElement;
+  canvas.setAttribute('aria-hidden','true');canvas.dataset.sceneGizmo='';
+  canvas.style.cssText='position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:4';
+  canvas.hidden=true;
+  const scene=new THREE.Scene();
+  const pivot=new THREE.Object3D();scene.add(pivot);
+  let camera:THREE.Camera=new THREE.PerspectiveCamera();
+  // The viewer drives pointer methods itself. Construct without DOM listeners
+  // so even a failed control constructor leaves no callbacks on the canvas.
+  const controls=new TransformControls(camera as THREE.PerspectiveCamera);
+  controls.domElement=canvas;
+  const outlines=new Map<string,THREE.BoxHelper>();
+  const cleanup:(()=>void)[]=[];
+  let offState=()=>{},frame=0;
+  try {
+  // The canvas ignores pointers, so TransformControls' own listeners never fire;
+  // the viewer drives pointerHover/pointerDown/pointerMove/pointerUp directly.
+  controls.disconnect();
+  scene.add(controls.getHelper());
+  let accent=themeColor(stage,'--accent',0xff7a33);
+  let rect:GizmoRect={x:0,y:0,width:1,height:1},ids:string[]=[],targets:Target[]=[];
+  let disposed=false,gesture:{label:string;start:Target[];pivotInverse:THREE.Matrix4;pivotStart:THREE.Matrix4;mode:GizmoMode}|null=null;
+  let fine=false,alt=false,snapping=false;
+  let suppressContextUntil=0;
+  const listen=(target:any,event:string,callback:any,options?:any)=>{target.addEventListener(event,callback,options);cleanup.push(()=>target.removeEventListener(event,callback,options));};
+
+  const layer=(id:string)=>PM.L?.(id);
+  const roleOf=(l:any)=>layer3DRole(l) || (isModelGroup(PM,l)?'group':null);
+  const editable=(l:any)=>!!l&&!l.lock&&!(PM.groupAncestors?.(l)||[]).some((g:any)=>g.lock);
+  const ev=(l:any,prop:any,path:string,fallback=0)=>prop?Number(PM.evP(l,prop,PM.time,path)):fallback;
+  const channel=(l:any,path:string,fallback=0)=>ev(l,l.p?.[path],path,fallback);
+  const activeCamera=()=>(PM.curComp?.()||PM.proj)?.layers?.find((l:any)=>layer3DRole(l)==='camera'&&(PM.active?PM.active(l,PM.time):true))?.id ?? null;
+  function warn(error:unknown){PM.toast?.(error instanceof Error?error.message:String(error),{key:gizmoNotice,error:true});}
+
+  /* ── targets ─────────────────────────────────────────── */
+  function resolveTargets(runtimeWorld:SceneRuntime|null):Target[] {
+    const out:Target[]=[],active=activeCamera();
+    for(const id of ids) {
+      const l=layer(id),role=roleOf(l);
+      // The active camera is the view itself; it is edited from the inspector.
+      if(!role||!editable(l)||(role==='camera'&&id===active))continue;
+      if(PM.active&&!PM.active(l,PM.time))continue;
+      const lightType=role==='light'?l.d?.data?.light?.type:undefined;
+      const object=role==='object'?runtimeWorld?.objects.get(id) ?? null:null;
+      if(role==='object'&&!object)continue;
+      const position=role==='object'?object!.getWorldPosition(new THREE.Vector3())
+        :new THREE.Vector3().setFromMatrixPosition(new THREE.Matrix4().fromArray(world3D(PM,l,PM.time)));
+      const content=role==='light'?l.d?.data?.light?.p:role==='camera'?l.d?.data?.camera?.p:null,prefix=role==='light'?'light':'camera';
+      const target=content?vec(['X','Y','Z'].map(axis=>ev(l,content[`target${axis}`],`${prefix}.target${axis}`))).applyMatrix4(new THREE.Matrix4().fromArray(parent3D(PM,l,PM.time))):null;
+      let world=new THREE.Matrix4();
+      if(object){object.updateWorldMatrix(true,false);world=object.matrixWorld.clone();}
+      else if(role==='group')world.fromArray(world3D(PM,l,PM.time));
+      else {
+        // A light or camera's frame looks from its position toward its target.
+        const look=new THREE.Matrix4().lookAt(position,target&&target.distanceToSquared(position)>1e-12?target:position.clone().add(new THREE.Vector3(0,0,-1)),new THREE.Vector3(0,1,0));
+        world.copy(look).setPosition(position);
+      }
+      if(role==='object'||role==='group')position.copy(vec(['x','y','z'].map(axis=>channel(l,`anchor.${axis}`))).applyMatrix4(world));
+      if(role==='group'&&!l.threeD){
+        const box=new THREE.Box3();
+        for(const child of (PM.curComp?.()||PM.proj).layers)if((PM.groupAncestors?.(child)||[]).some((g:any)=>g.id===id)){
+          const node=runtimeWorld?.objects.get(child.id);if(node)box.expandByObject(node);
+        }
+        if(!box.isEmpty())box.getCenter(position);
+      }
+      out.push({id,layer:l,role,modes:role==='group'?['translate','rotate','scale']:gizmoModes(role,lightType),object,world,
+        parentInverse:new THREE.Matrix4().fromArray(parent3D(PM,l,PM.time)).invert(),position,target,
+        orientation:vec(['x','y','z'].map(axis=>channel(l,`orientation.${axis}`))),order:(object?.rotation.order ?? 'ZYX') as THREE.EulerOrder});
+    }
+    const roots=new Set((PM.transformRoots?.(out.map(t=>t.id)) || out.map(t=>t.layer)).map((l:any)=>l.id));
+    return out.filter(t=>roots.has(t.id));
+  }
+  const allowed=(list:Target[])=>list.length?(['translate','rotate','scale'] as GizmoMode[]).filter(mode=>list.every(t=>t.modes.includes(mode))):[];
+
+  function placePivot(list:Target[]) {
+    const center=new THREE.Vector3();for(const t of list)center.add(t.position);center.divideScalar(list.length);
+    pivot.position.copy(center);pivot.quaternion.identity();pivot.scale.set(1,1,1);
+    if(state.space==='local'&&list.length===1)list[0]!.world.decompose(new THREE.Vector3(),pivot.quaternion,new THREE.Vector3());
+    pivot.updateMatrixWorld(true);
+  }
+
+  /* ── drawing ─────────────────────────────────────────── */
+  function syncCamera(world:SceneRuntime|null) {
+    const width=Math.max(2,stage.clientWidth),height=Math.max(2,stage.clientHeight);
+    renderer.setSize(width,height,false);
+    if(!world)return false;
+    // A private copy: the view offset extends the camera frustum to the whole
+    // stage so handles stay visible past the composition edge.
+    const view=viewportCamera(PM,world.camera).clone() as THREE.PerspectiveCamera|THREE.OrthographicCamera;
+    if(view instanceof THREE.PerspectiveCamera)view.aspect=rect.width/rect.height;
+    view.setViewOffset(rect.width,rect.height,-rect.x,-rect.y,width,height);
+    view.updateProjectionMatrix();view.updateMatrixWorld(true);
+    camera=view;controls.camera=view;
+    return true;
+  }
+  function syncOutlines(world:SceneRuntime|null) {
+    const wanted=new Set<string>();
+    const outlined=new Set(ids.flatMap(id=>isModelGroup(PM,layer(id))?(PM.curComp?.()||PM.proj).layers.filter((l:any)=>layer3DRole(l)==='object'&&(PM.groupAncestors?.(l)||[]).some((g:any)=>g.id===id)).map((l:any)=>l.id):[id]));
+    for(const id of outlined) {
+      const object=world?.objects.get(id);if(!object||layer3DRole(layer(id))!=='object')continue;
+      wanted.add(id);
+      let outline=outlines.get(id);
+      if(!outline){outline=new THREE.BoxHelper(object,accent);(outline.material as THREE.LineBasicMaterial).depthTest=false;outlines.set(id,outline);scene.add(outline);}
+      else{outline.setFromObject(object);(outline.material as THREE.LineBasicMaterial).color.copy(accent);}
+    }
+    for(const [id,outline] of outlines)if(!wanted.has(id)){outline.removeFromParent();outline.dispose();outlines.delete(id);}
+  }
+  function draw() {
+    frame=0;if(disposed)return;
+    try{renderer.setClearColor(0,0);renderer.clear();renderer.render(scene,camera);}catch(error){warn(error);}
+  }
+  const request=()=>{if(!frame&&!disposed)frame=requestAnimationFrame(draw);};
+
+  /* ── gesture ─────────────────────────────────────────── */
+  const command=(id:string,path:string,value:number)=>({type:'set_property',target:id,path,value:tidy(value),
+    time:PM.time,mode:PM.autokey?'keyframe':'auto',preserveHandEdits:false,markIntent:'human'});
+  function apply() {
     if(!gesture)return;
     pivot.updateMatrixWorld(true);
     let current=pivot.matrixWorld.clone();
-    if(fine){
+    if(fine) {
       // Shift: a tenth of the pointer's motion, measured from the start.
       const [p0,q0,s0]=[new THREE.Vector3(),new THREE.Quaternion(),new THREE.Vector3()],[p1,q1,s1]=[new THREE.Vector3(),new THREE.Quaternion(),new THREE.Vector3()];
       gesture.pivotStart.decompose(p0,q0,s0);current.decompose(p1,q1,s1);
       current=new THREE.Matrix4().compose(p0.lerp(p1,.1),q0.slerp(q1,.1),s0.lerp(s1,.1));
     }
-    // The change in the pivot's own frame, re-applied around each target's frame.
-    const local=gesture.pivotInverse.clone().multiply(current);
-    const commands=gesture.start.flatMap((t,i)=>{
-      const frame=gesture!.frames[i]!,delta=frame.clone().multiply(local).multiply(frame.clone().invert());
-      return deltaCommands(PM,t,delta,gesture!.mode,{moveAim:alt});
-    });
+    const delta=current.multiply(gesture.pivotInverse),commands:any[]=[];
+    const rotation=new THREE.Quaternion();delta.decompose(new THREE.Vector3(),rotation,new THREE.Vector3());
+    for(const t of gesture.start) {
+      if(t.role==='object' || t.role==='group') {
+        const local=t.parentInverse.clone().multiply(delta.clone().multiply(t.world));
+        const position=new THREE.Vector3(),quaternion=new THREE.Quaternion(),scale=new THREE.Vector3();local.decompose(position,quaternion,scale);
+        const anchor=vec(['x','y','z'].map(axis=>channel(t.layer,`anchor.${axis}`)));
+        position.add(anchor.applyMatrix3(new THREE.Matrix3().setFromMatrix4(local)));
+        const orientation=new THREE.Quaternion().setFromEuler(new THREE.Euler(...t.orientation.toArray().map(THREE.MathUtils.degToRad) as [number,number,number],'ZYX'));
+        quaternion.multiply(orientation.invert());
+        const euler=new THREE.Euler().setFromQuaternion(quaternion,'ZYX'),deg=THREE.MathUtils.radToDeg;
+        // The runtime adds native orientation to rotation; write back rotation alone.
+        const values:[string,number][]=[['position.x',position.x],['position.y',position.y],['position.z',position.z],
+          ['rotation.x',deg(euler.x)],['rotation.y',deg(euler.y)],['rotation',deg(euler.z)],
+          ['scale.x',scale.x*100],['scale.y',scale.y*100],['scale.z',scale.z*100]];
+        for(const [path,value] of values)if(gesture.mode==='translate'?path.startsWith('position.'):gesture.mode==='rotate'?path.startsWith('rotation') || path.startsWith('position.'):path.startsWith('scale.') || path.startsWith('position.'))commands.push(command(t.id,path,value));
+        continue;
+      }
+      const prefix=t.role==='light'?'light':'camera';
+      const position=t.position.clone().applyMatrix4(delta);
+      if(gesture.mode==='translate'){
+        const motion=position.clone().sub(t.position).applyMatrix3(new THREE.Matrix3().setFromMatrix4(t.parentInverse));
+        const localPosition=vec(['x','y','z'].map(axis=>channel(t.layer,`position.${axis}`))).add(motion);
+        for(const [axis,value] of [['x',localPosition.x],['y',localPosition.y],['z',localPosition.z]] as const)commands.push(command(t.id,`position.${axis}`,value));
+      }
+      if(t.target) {
+        // Moving keeps the aim point (Alt moves it along); rotating swings it around the position.
+        const target=gesture.mode==='rotate'?position.clone().add(t.target.clone().sub(t.position).applyQuaternion(rotation))
+          :alt?t.target.clone().add(position.clone().sub(t.position)):null;
+        if(target){target.applyMatrix4(t.parentInverse);for(const [axis,value] of [['X',target.x],['Y',target.y],['Z',target.z]] as const)commands.push(command(t.id,`${prefix}.target${axis}`,value));}
+      }
+    }
     if(!commands.length)return;
     const result=PM.Edit.apply(commands,{origin:'canvas',label:gesture.label});
     if(!result.ok){warn(result.message);cancel();}
   }
-  controls.addEventListener('objectChange',()=>apply());
+  function setSnap(on:boolean) {
+    if(on===snapping)return;snapping=on;
+    controls.setTranslationSnap(on?SNAP.translate:null);controls.setRotationSnap(on?THREE.MathUtils.degToRad(SNAP.rotate):null);controls.setScaleSnap(on?SNAP.scale:null);
+  }
+  function modifiers(event:{ctrlKey:boolean;shiftKey:boolean;altKey:boolean}){setSnap(event.ctrlKey);fine=event.shiftKey;alt=event.altKey;}
+  const pointer=(clientX:number,clientY:number,button=0)=>{
+    const bounds=stage.getBoundingClientRect();
+    return {x:(clientX-bounds.left)/Math.max(1,bounds.width)*2-1,y:-(clientY-bounds.top)/Math.max(1,bounds.height)*2+1,button};
+  };
+  let dragOffs:(()=>void)[]=[];
   function endDrag(){for(const off of dragOffs.splice(0))off();}
-  function stop(){controls.dragging=false;controls.axis=null;}
-  function finish(){
-    if(!gesture)return;const label=gesture.label;suppressContextUntil=performance.now()+500;
-    gesture=null;endDrag();stop();
+  function stopControls(){if(controls.dragging){controls.dragging=false;}controls.axis=null;}
+  function finish() {
+    if(!gesture)return;const label=gesture.label;
+    suppressContextUntil=performance.now()+500;
+    gesture=null;endDrag();stopControls();
     try{PM.Edit.commit(label);}catch(error){warn(error);}
     refresh();
   }
-  function cancel(){
-    if(!gesture)return;suppressContextUntil=performance.now()+500;
-    gesture=null;endDrag();stop();
+  function cancel() {
+    if(!gesture)return;
+    suppressContextUntil=performance.now()+500;
+    gesture=null;endDrag();stopControls();
     try{PM.Edit.cancel();}catch(error){warn(error);}
     refresh();
   }
+  controls.addEventListener('objectChange',()=>apply());
+
+  /* ── public controller ───────────────────────────────── */
+  function refresh() {
+    if(disposed)return;
+    // Playback refreshes the viewer overlay on every display tick. Without a
+    // 3D selection there is nothing to draw: avoid rebuilding a scene/camera,
+    // forcing theme layout, or clearing a second full-size WebGL canvas.
+    if(!gesture&&!ids.length){
+      targets=[];
+      if(!canvas.hidden){
+        canvas.hidden=true;controls.detach();syncOutlines(null);
+        cancelAnimationFrame(frame);frame=0;
+      }
+      return;
+    }
+    if(canvas.hidden)canvas.hidden=false;
+    const world=runtime(PM.time);
+    if(!syncCamera(world)){controls.detach();syncOutlines(null);request();return;}
+    accent=themeColor(stage,'--accent',0xff7a33);
+    syncOutlines(world);
+    if(!gesture) {
+      targets=resolveTargets(world);
+      const modes=allowed(targets);
+      if(targets.length&&modes.includes(state.mode)){placePivot(targets);controls.setMode(state.mode);controls.setSpace(state.space);controls.attach(pivot);}
+      else controls.detach();
+    }
+    // Hit tests can run before the scheduled paint. Three refreshes picker
+    // geometry and the drag plane during this helper's matrix traversal.
+    controls.getHelper().updateMatrixWorld(true);
+    request();
+  }
+  offState=onGizmoState(()=>refresh());
   listen(window,'keydown',(event:KeyboardEvent)=>{
     if(!gesture)return;
     if(event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();cancel();return;}
@@ -115,54 +350,51 @@ export function createTransformGizmo(PM:any,stage:HTMLElement,canvas:HTMLCanvasE
   },true);
   listen(window,'keyup',(event:KeyboardEvent)=>{if(gesture)modifiers(event);},true);
   listen(window,'blur',()=>cancel());
-  // macOS turns Control-click into a context menu, including snap drags; right-click cancels like Blender.
+  // macOS turns Control-click into a context menu, including snap drags.
+  // The menu event can arrive after pointerup, when the gesture has committed.
   listen(stage,'contextmenu',(event:MouseEvent)=>{
-    if(!gesture&&performance.now()>suppressContextUntil)return;
+    if(!gesture && performance.now()>suppressContextUntil)return;
     event.preventDefault();event.stopImmediatePropagation();
-    if(gesture&&!event.ctrlKey)cancel();
+    if(gesture && !event.ctrlKey)cancel();
   },true);
 
   return {
-    helper,
-    attached:()=>!!controls.object,
-    sync(next){
-      state=next;if(gesture||disposed)return;
-      controls.camera=next.camera;
-      targets=next.targets;
-      const modes=allowedModes(targets);
-      if(next.mode&&targets.length&&modes.includes(next.mode)){
-        place(targets,next);controls.setMode(next.mode);controls.setSpace(next.orientation==='global'?'world':'local');controls.attach(pivot);
-      }else controls.detach();
+    update(next,selection) {
+      rect={x:next.x,y:next.y,width:Math.max(1,next.width),height:Math.max(1,next.height)};
+      if(selection)ids=selection.length && selection.every(id=>!!roleOf(layer(id)))?[...selection]:[];
+      refresh();
     },
-    hover(clientX,clientY){
+    hover(clientX,clientY) {
       if(gesture)return true;
       if(!controls.object)return false;
-      controls.pointerHover(pointer(clientX,clientY) as any);canvas.dataset.gizmoAxis=controls.axis||'';refresh();
+      controls.pointerHover(pointer(clientX,clientY) as any);canvas.dataset.gizmoAxis=controls.axis || '';request();
       return controls.axis!==null;
     },
-    pointerDown(event){
-      if(gesture||event.button!==0||!controls.object||!state)return false;
+    pointerDown(event) {
+      if(gesture||event.button!==0||!controls.object)return false;
       const start=pointer(event.clientX,event.clientY,event.button);
       controls.pointerHover(start as any);
       if(controls.axis===null)return false;
-      const mode=state.mode!,count=targets.length;
-      if(!count)return false;
-      const label=LABEL[mode][count===1?0:1];
-      try{PM.Edit.begin(label,{origin:'canvas'});}catch(error){warn(error);return false;}
-      const upgrades=upgradeGroupCommands(PM,targets);
-      if(upgrades.length){
-        const result=PM.Edit.apply(upgrades,{origin:'canvas'});
-        if(!result.ok){PM.Edit.cancel();warn(result.message);return false;}
-        targets=resolve();place(targets,state);
+      const mode=state.mode,count=targets.length;
+      if(!count || ids.some(id=>!editable(layer(id))))return false;
+      try{PM.Edit.begin(LABEL[mode][count===1?0:1],{origin:'canvas'});}catch(error){warn(error);return false;}
+      const upgrades:any[]=[];
+      for(const t of targets.filter(t=>t.role==='group'&&!t.layer.threeD)){
+        const anchor=t.position.clone().applyMatrix4(t.world.clone().invert());
+        const old=vec(['x','y','z'].map(axis=>channel(t.layer,`anchor.${axis}`)));
+        const local=t.parentInverse.clone().multiply(t.world),motion=anchor.clone().sub(old).applyMatrix3(new THREE.Matrix3().setFromMatrix4(local));
+        const position=vec(['x','y','z'].map(axis=>channel(t.layer,`position.${axis}`))).add(motion);
+        upgrades.push({type:'set_layer',target:t.id,patch:{threeD:true}});
+        for(const [axis,value] of [['x',anchor.x],['y',anchor.y],['z',anchor.z]] as const)upgrades.push(command(t.id,`anchor.${axis}`,value));
+        for(const [axis,value] of [['x',position.x],['y',position.y],['z',position.z]] as const)upgrades.push(command(t.id,`position.${axis}`,value));
       }
+      if(upgrades.length){const result=PM.Edit.apply(upgrades,{origin:'canvas'});if(!result.ok){PM.Edit.cancel();warn(result.message);return false;}targets=resolveTargets(runtime(PM.time));}
       pivot.updateMatrixWorld(true);
-      const pivotStart=pivot.matrixWorld.clone();
-      const frames=targets.map(t=>state!.pivot==='individual'?new THREE.Matrix4().compose(t.position,pivot.quaternion,new THREE.Vector3(1,1,1)):pivotStart.clone());
-      gesture={label,start:targets,frames,mode,pivotStart,pivotInverse:pivotStart.clone().invert()};
+      gesture={label:LABEL[mode][count===1?0:1],start:targets,mode,pivotStart:pivot.matrixWorld.clone(),pivotInverse:pivot.matrixWorld.clone().invert()};
       modifiers(event);
       controls.pointerDown(start as any);
       if(!controls.dragging){cancel();return false;}
-      const move=(e:PointerEvent)=>{if(!gesture)return;e.preventDefault();e.stopImmediatePropagation();modifiers(e);controls.pointerMove(pointer(e.clientX,e.clientY,-1) as any);refresh();};
+      const move=(e:PointerEvent)=>{if(!gesture)return;e.preventDefault();e.stopImmediatePropagation();modifiers(e);controls.pointerMove(pointer(e.clientX,e.clientY,-1) as any);request();};
       const up=(e:PointerEvent)=>{if(!gesture)return;e.preventDefault();e.stopImmediatePropagation();controls.pointerUp(pointer(e.clientX,e.clientY,0) as any);finish();};
       const lost=()=>cancel();
       window.addEventListener('pointermove',move,true);window.addEventListener('pointerup',up,true);window.addEventListener('pointercancel',lost,true);
@@ -171,11 +403,21 @@ export function createTransformGizmo(PM:any,stage:HTMLElement,canvas:HTMLCanvasE
       return true;
     },
     active:()=>!!gesture,
+    covers(list) {
+      return list.length>0&&list.every(id=>!!roleOf(layer(id)));
+    },
     cancel,
-    dispose(){
-      if(disposed)return;cancel();disposed=true;
+    dispose() {
+      if(disposed)return;cancel();disposed=true;cancelAnimationFrame(frame);offState();
       for(const off of cleanup.splice(0))off();
-      controls.detach();controls.dispose();helper.removeFromParent();
+      for(const outline of outlines.values())outline.dispose();
+      controls.detach();controls.dispose();renderer.dispose();renderer.forceContextLoss();canvas.remove();
     }
   };
+  } catch(error) {
+    cancelAnimationFrame(frame);offState();
+    for(const off of cleanup.splice(0))off();
+    for(const outline of outlines.values())outline.dispose();
+    controls.dispose();throw error;
+  }
 }

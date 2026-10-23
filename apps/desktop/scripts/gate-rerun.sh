@@ -46,7 +46,7 @@ FLAG_ON_SPECS=(
 )
 ENGINE_SPECS=(native-engine native-engine-tracer media-store engine-export)
 # Engine specs added after the Phase 2 gate (reported apart).
-ENGINE_SPECS_NEW=(engine-present-recovery native-engine-transport engine-blender engine-delivery native-edit-kernels)
+ENGINE_SPECS_NEW=(engine-present-recovery native-engine-transport engine-delivery native-edit-kernels)
 
 PERF_RUNS="tracer-drag-today-500-idle,tracer-drag-engine-500-idle,tracer-drag-today-500-load,tracer-drag-engine-500-load,tracer-edit-playback-engine-1000,tracer-edit-playback-today-1000,tracer-playback-engine-1000,tracer-playback-engine-25,tracer-playback-engine-23976,tracer-playback-engine-30-load,tracer-playback-engine-30,tracer-playback-engine-25-load,tracer-playback-engine-23976-load,playback-engine-idle,playback-engine-agent-snapshots,playback-engine-agent-snapshots-busy"
 S1_RUNS="app-playback-today-idle,app-playback-engine-idle,app-playback-today-load,app-playback-engine-load,app-latency-today-idle,app-latency-engine-idle,app-latency-today-load,app-latency-engine-load"

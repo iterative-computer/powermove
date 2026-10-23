@@ -5,7 +5,7 @@ import { encodeFrame, decodeFrame } from '../../../shared/wire';
 import type { EngineSnapshotRequest, EngineSnapshotReply } from '../../../shared/engine-ipc';
 import type { PMRegistry } from '../legacy/registry';
 import { EngineRenderTransport } from '../engine-connection/render-transport';
-import { installAppCaptures, usesBlender } from '../engine-connection/app-captures';
+import { installAppCaptures } from '../engine-connection/app-captures';
 import { ShaderFallbackRunner } from '../engine-connection/shader-fallback';
 import { SvgRasters } from '../engine-connection/svg-rasters';
 
@@ -33,7 +33,7 @@ export function installHiddenCpu(PM: PMRegistry): void {
   const render = new EngineRenderTransport({ native, documentOnly: true, session: () => null,
     revision: () => { PM.EngineDoc?.barrier?.flush(); return PM.EngineDoc?.barrier?.revision ?? null; },
     composition: () => String(PM.proj.compId ?? PM.proj.id), document: () => String(PM.proj.id), viewSeq: () => null,
-    fallbackRunner: () => runner, svgRasters: () => svg, usesBlender: () => usesBlender(PM.proj), log,
+    fallbackRunner: () => runner, svgRasters: () => svg, usesBlender: () => false, log,
     windowDocument: () => {
       const doc = PM.EngineDoc, barrier = doc?.barrier;
       if (!doc?.enabled || !barrier || !doc.ready) return null;

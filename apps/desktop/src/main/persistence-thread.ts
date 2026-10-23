@@ -22,9 +22,9 @@ export type PersistenceReply =
   | { from: 'store'; reply: StoreReply }
   | { from: 'project'; id: number; error?: string };
 
-/** Store requests answered by exactly one reply; `restore` is answered only by `written`. */
-const ANSWERED = new Set<StoreRequest['op']>(['init', 'load', 'set', 'setSerialized', 'delete', 'flush']);
-const FINAL = new Set<StoreReply['type']>(['ready', 'loaded', 'committed', 'rejected', 'flushed', 'failed']);
+/** Store requests answered by exactly one reply; `restore` is answered only by `written`, `evict` not at all. */
+const ANSWERED = new Set<StoreRequest['op']>(['init', 'load', 'set', 'setSerialized', 'delete', 'read', 'flush']);
+const FINAL = new Set<StoreReply['type']>(['ready', 'loaded', 'committed', 'rejected', 'read', 'flushed', 'failed']);
 const MAX_RESTARTS = 5;
 
 export interface PersistenceThreadOptions {

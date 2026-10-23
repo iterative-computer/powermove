@@ -10,10 +10,14 @@ import { unpackProjectFile } from './core/project-file';
 import { makePM } from './__tests__/make-pm';
 import { install as installAnim } from './core/anim';
 import { sceneProperties } from '../core/scene3d/schema';
+import * as fingerprints from './core/project-fingerprint';
+import * as serialization from './core/serialize-async';
+import { sha256Hex } from '../../../shared/sha256';
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   resetBridgeForTests();
   if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
@@ -162,10 +166,10 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
         transitionIn: null, transitionOut: null, d: type === 'shader' ? { uniforms: {} } : {},
       };
     },
-    normalizeKeyframes(keys: any, fallback: any) {
+    normalizeKeyframes(keys: any, fallback: any, _fps: any, minTime = 0) {
       normalizationCalls.push({ keys, fallback });
       return (Array.isArray(keys) ? keys : []).filter((key: any) =>
-        key && Number.isFinite(key.t) && key.t >= 0 && typeof key.v === typeof fallback);
+        key && Number.isFinite(key.t) && key.t >= minTime && typeof key.v === typeof fallback);
     },
     WS: { init() {}, restoreSnapshot() {}, snapshot: () => ({}), get: (id: string) => ({ id }), activate() {}, editing: false },
     selectLayers() {},
@@ -216,7 +220,150 @@ function appRegistry(withExtensionSurfaces = true, bootProject?: any, bootFile?:
   return { PM, memory, listeners, timers, clearedTimers, toasts, frames };
 }
 
+async function reopenWithPendingMedia() {
+  const { PM } = appRegistry();
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  await Promise.resolve();
+  PM.bus.emit = (name: string, ...args: any[]) => {
+    for (const handler of PM.__busHandlers.get(name) || []) handler(...args);
+  };
+  const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Test.pmv' }));
+  installBridgeForTests({ saveFile } as any);
+  expect(await PM.saveProject()).toBe(true);
+  const data = saveFile.mock.calls[0]![0].data;
+  let release!: () => void;
+  PM.assets.restoreProject = () => new Promise(resolve => { release = () => resolve({ stale: false, missing: [] }); });
+  installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Test.pmv', projectId: 'reopened', data }) } as any);
+  await PM.openProject();
+  expect(PM.app.dirty).toBe(false);
+  return { PM, release };
+}
+
 describe('legacy app install', () => {
+  it('keeps a reopened saved document clean after runtime-only media restoration notifications', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const before = JSON.stringify(PM.proj), savedHash = PM.projectFileState(PM.proj.id).savedHash;
+    release(); await PM.projectAssetsReady;
+    expect(JSON.stringify(PM.proj)).toBe(before);
+    expect(PM.app.dirty).toBe(false);
+    expect(PM.projectFileState(PM.proj.id).savedHash).toBe(savedHash);
+  });
+  it.each(['user edit', 'persisted media metadata repair'])('keeps a %s dirty when restoration finishes', async kind => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const savedHash = PM.projectFileState(PM.proj.id).savedHash;
+    if (kind === 'user edit') PM.proj.name = 'Edited during loading';
+    else PM.proj.assets.repaired = { id: 'repaired', kind: 'image', format: 'svg', poster: true };
+    if (kind === 'user edit') PM.autosave();
+    release(); await PM.projectAssetsReady;
+    expect(PM.app.dirty).toBe(true);
+    expect(PM.projectFileState(PM.proj.id).savedHash).toBe(savedHash);
+    if (kind === 'user edit') expect(PM.proj.name).toBe('Edited during loading');
+    else expect(PM.proj.assets.repaired.format).toBe('svg');
+  });
+  it('keeps a newer edit dirty when it arrives during the restoration content comparison', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const savedHash = PM.projectFileState(PM.proj.id).savedHash;
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let finishHash!: () => void;
+    const hashing = vi.spyOn(crypto.subtle, 'digest').mockImplementationOnce(async (...args) => {
+      await new Promise<void>(resolve => { finishHash = resolve; });
+      return digest(...args);
+    });
+    try {
+      release();
+      await vi.waitFor(() => expect(hashing).toHaveBeenCalled());
+      PM.proj.name = 'Newer edit during comparison'; PM.autosave();
+      finishHash(); await PM.projectAssetsReady;
+      expect(PM.app.dirty).toBe(true);
+      expect(PM.proj.name).toBe('Newer edit during comparison');
+      expect(PM.projectFileState(PM.proj.id).savedHash).toBe(savedHash);
+    } finally { hashing.mockRestore(); }
+  });
+  it('does not clear another tab’s edits when an old restoration finishes', async () => {
+    const { PM, release } = await reopenWithPendingMedia();
+    const ready = PM.projectAssetsReady;
+    PM.proj = PM.mkProject({ id: 'other', name: 'Other unsaved project' });
+    PM.projectFileState('other');
+    PM.proj.name = 'Other edits'; PM.autosave();
+    release(); await ready;
+    expect(PM.proj.name).toBe('Other edits');
+    expect(PM.app.dirty).toBe(true);
+  });
+
+  it('ignores runtime preview readiness while still autosaving asset metadata changes', () => {
+    const { PM } = appRegistry();
+    const previous = { timer: PM.app.saveTimer, dirty: PM.app.dirty };
+    const handlers = PM.__busHandlers.get('assets');
+    handlers.forEach((run: any) => run({ runtimeOnly: true }));
+    expect(PM.app.saveTimer).toBe(previous.timer);
+    expect(PM.app.dirty).toBe(previous.dirty);
+    PM.proj.assets.source = { id: 'source', name: 'Edited media' };
+    handlers.forEach((run: any) => run());
+    expect(PM.app.saveTimer).not.toBe(previous.timer);
+    expect(PM.app.dirty).toBe(true);
+  });
+
+  it('checks autosave file status once while retaining exact Close comparisons', async () => {
+    const { PM, timers } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    PM.Projects.recoverAsync = vi.fn(async () => true);
+    const stringify = vi.spyOn(serialization, 'stringifyAsync');
+    PM.autosave(); await timers.get(PM.app.saveTimer)();
+    expect(stringify).toHaveBeenCalledTimes(1);
+    stringify.mockClear();
+    expect(await PM.confirmCloseProject(PM.proj.id)).toBe(true);
+    expect(stringify).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['name', 'assets', 'composition', 'animation', 'history', 'project'])('abandons an autosave comparison when %s changes during hashing', async change => {
+    const { PM, timers } = appRegistry();
+    await vi.waitFor(() => expect(PM.projectFileState().dirty).toBe(false));
+    let editVersion = 1, editing = false;
+    PM.animVersion = () => editVersion;
+    PM.hist.busy = () => editing;
+    PM.Projects.recoverAsync = vi.fn(async () => true);
+    let finish!: (hash: string) => void;
+    const fingerprint = vi.spyOn(fingerprints, 'projectFingerprint').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const emit = vi.spyOn(PM.bus, 'emit');
+    const project = PM.proj, baseline = PM.projectFileState().baselineHash;
+    PM.autosave();
+    const saving = timers.get(PM.app.saveTimer)();
+    await vi.waitFor(() => expect(fingerprint).toHaveBeenCalledOnce());
+    if (change === 'name') { project.name = 'Newer edit'; PM.autosave(); }
+    else if (change === 'assets') {
+      project.assets.source = { id: 'source', name: 'Newer metadata' };
+      PM.__busHandlers.get('assets').forEach((run: any) => run());
+    } else if (change === 'composition') {
+      project.comps.sub = { layers: [], dur: 2 };
+      PM.__busHandlers.get('project').forEach((run: any) => run());
+    } else if (change === 'animation') { project.name = 'Newer edit'; editVersion++; }
+    else if (change === 'history') { project.name = 'Newer edit'; editing = true; }
+    else PM.proj = { ...project, name: 'Replacement project' };
+    emit.mockClear(); finish(baseline); await saving;
+    expect(PM.projectFileState().dirty).toBe(true);
+    expect(emit.mock.calls.some(([event]: any[]) => event === 'project:recovered')).toBe(false);
+  });
+
+  it('awaits recovery and abandons a superseded autosave before writing its session', async () => {
+    const { PM, timers } = appRegistry();
+    let finish!: (saved: boolean) => void;
+    let current!: () => boolean;
+    PM.Projects.recoverAsync = vi.fn((_project, _thumb, guard) => {
+      current = guard; return new Promise<boolean>(resolve => finish = resolve);
+    });
+    const putState = vi.spyOn(PM.Projects, 'putState');
+    PM.store.flush = vi.fn(async () => undefined);
+    PM.autosave();
+    const saving = timers.get(PM.app.saveTimer)();
+    expect(current()).toBe(true);
+    expect(putState).not.toHaveBeenCalled();
+    PM.proj.name = 'Newer edit'; PM.autosave();
+    expect(current()).toBe(false);
+    finish(true); await saving;
+    expect(putState).not.toHaveBeenCalled();
+    expect(PM.store.flush).not.toHaveBeenCalled();
+  });
   it('opens a project delivered by the external-open subscription', async () => {
     let externalOpen!: (result: any) => Promise<void>;
     const onProjectOpenExternal = vi.fn((callback: typeof externalOpen) => {
@@ -244,6 +391,21 @@ describe('legacy app install', () => {
     expect(PM.proj.id).toBe('from-finder');
     expect(hide).toHaveBeenCalledOnce();
     expect(toasts).toContain('Opened Finder Project.pmv');
+  });
+
+  it('reopens negative strip starts and their earlier local keys, including nested compositions', () => {
+    const { PM } = appRegistry();
+    const layer = {
+      id: 'early', type: 'solid', from: -6, dur: 8,
+      p: { opacity: { v: 100, kf: [{ i: 'before', t: -1, v: 0 }, { i: 'after', t: 1, v: 100 }] } },
+    };
+    const source = { ...PM.proj, layers: [layer], comps: {
+      nested: { ...PM.proj, layers: [{ ...layer, id: 'nested-early', p: {} }] },
+    } };
+    const restored = PM.hydrateProject(source);
+    expect(restored.layers[0].from).toBe(-6);
+    expect(restored.layers[0].p.opacity.kf.map((key: any) => key.t)).toEqual([-1, 1]);
+    expect(restored.comps.nested.layers[0].from).toBe(-6);
   });
 
   it('compacts oversized provenance when reopening without removing source', () => {
@@ -815,7 +977,7 @@ describe('legacy app install', () => {
     const shape: any = PM.proj.layers[0];
     const shader: any = PM.proj.layers[1];
 
-    expect(shape.p.opacity.kf).toEqual([{ t: 1, v: 50 }]);
+    expect(shape.p.opacity.kf.map(({ t, v }: any) => ({ t, v }))).toEqual([{ t: 1, v: 50 }, { t: -1, v: 80 }]);
     expect(shape.p.opacity.expr).toBeNull();
     expect(shape.fx[0].missing).toBe(true);
     expect(shape.fx[0].p.amount.kf).toHaveLength(1);
@@ -914,6 +1076,54 @@ it('hydrates legacy scene animation before either engine evaluates it', () => {
   expect(JSON.stringify(PM.hydrateProject(JSON.parse(before)))).toBe(before);
 });
 
+it.each([
+  { renamed: false, delayedMetadata: false }, { renamed: true, delayedMetadata: false },
+  { renamed: false, delayedMetadata: true }
+])('saves the live inactive tab after recovery failure (renamed=$renamed metadata delayed=$delayedMetadata)', async ({ renamed, delayedMetadata }) => {
+  const { PM, listeners, memory } = appRegistry();
+  const set = PM.store.set;
+  PM.store.set = (key: string, value: any) => key === 'projectJournal.P2' ? false : set(key, JSON.parse(JSON.stringify(value)));
+  PM.store.has = (key: string) => memory.has(key);
+  installProjects(PM); installHistory(PM);
+  // Run the real journal listener, with its storage write failing. The live
+  // document and Undo remain usable even though recovery is behind them.
+  PM.bus.emit = (name: string, ...args: any[]) => {
+    if (name === 'history:project-patch') PM.__busHandlers.get(name)?.forEach((run: any) => run(...args));
+  };
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.WS.activate = vi.fn(); PM.touch = vi.fn();
+  PM.assets.suspend = () => ({ map: new Map() }); PM.assets.resume = vi.fn(); PM.assets.discard = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  PM.Projects.put(PM.proj);
+  listeners.get('pm-open-project')![0]({ detail: PM.mkProject({ id: 'P2', name: 'Second' }) });
+  PM.hist.do('Edit live second', () => { PM.proj.name = 'Latest second'; PM.proj.bg = '#ff0000'; });
+  const live = PM.proj;
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  PM.store.setSnapshotAsync = vi.fn(async () => { await pending; return false; });
+  const recover = PM.Projects.recoverAsync;
+  if (delayedMetadata) PM.Projects.recoverAsync = async (...args: any[]) => { await pending; return recover(...args); };
+  const saveFile = vi.fn(async (_request: any) => ({ ok: true, path: '/tmp/Second.pmv' }));
+  installBridgeForTests({ saveFile } as any);
+  try {
+    expect(await PM.Tabs.activate('P1')).toBe(true);
+    expect(PM.proj.id).toBe('P1');
+    if (!delayedMetadata) expect(PM.store.setSnapshotAsync).toHaveBeenCalledOnce();
+    expect(PM.Projects.get('P2').name).toBe('Second');
+    if (renamed) PM.Projects.rename('P2', 'Renamed from Projects');
+    expect(await PM.saveProject({ projectId: 'P2' })).toBe(true);
+    const saved = unpackProjectFile(saveFile.mock.calls[0]![0].data);
+    expect(saved.proj.name).toBe(renamed ? 'Renamed from Projects' : 'Latest second');
+    expect(saved.proj.bg).toBe('#ff0000');
+    expect(saved.history.entries.map((entry: any) => entry.label)).toEqual(['Edit live second']);
+    expect(PM.projectFileState('P2').dirty).toBe(false);
+    expect(PM.proj.id).toBe('P1');
+    expect(await PM.Tabs.activate('P2')).toBe(true);
+    expect(PM.proj).toBe(live);
+    expect(PM.proj.name).toBe(renamed ? 'Renamed from Projects' : 'Latest second');
+    expect(PM.hist.undo()).toBe(true); expect(PM.proj.name).toBe('Second');
+  } finally { PM.Projects.recoverAsync = recover; release(); }
+});
+
 it('saves real undo and redo history in the native file and local session', async () => {
   const { PM, toasts } = appRegistry();
   installHistory(PM);
@@ -950,6 +1160,123 @@ it('saves real undo and redo history in the native file and local session', asyn
   expect(PM.proj.name).toBe('Two');
   PM.hist.undo();
   expect(PM.proj.name).toBe('One');
+});
+
+it.each(['failed', 'cancelled'])('resumes outgoing asset restoration after a %s native project open without clearing live media', async outcome => {
+  const { PM, toasts } = appRegistry();
+  const outgoing = PM.proj;
+  const runtime = { id: 'live-audio', kind: 'audio' };
+  PM.sel.layers = ['selected-outgoing-layer'];
+  PM.assets.map = new Map([[runtime.id, runtime]]);
+  PM.assets.cancelRestores = vi.fn();
+  PM.assets.clear = vi.fn();
+  PM.assets.restoreProject = vi.fn(async () => ({ stale: false, missing: [] }));
+  let readStarted!: () => void, rejectRead!: (error: Error) => void;
+  const started = new Promise<void>(resolve => { readStarted = resolve; });
+  const pending = new Promise<Uint8Array>((_resolve, reject) => { rejectRead = reject; });
+  const read = vi.fn(async () => {
+    readStarted();
+    if (outcome === 'failed') throw new Error('Native media read failed');
+    return pending;
+  });
+  const close = vi.fn(async () => undefined);
+  PM.MediaStore = { get: async () => null, put: vi.fn(async () => true) };
+  vi.stubGlobal('navigator', { storage: {} });
+  installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Incoming.pmv',
+    projectId: 'incoming', token: 'incoming-reader', size: 3,
+    document: { proj: PM.mkProject({ id: 'incoming', assets: { clip: { id: 'clip' } } }) },
+    media: [{ id: 'clip', type: 'audio/wav', offset: 0, length: 3 }] }), projectRead: { read, close } } as any);
+  const opening = PM.openProject();
+  await started;
+  if (outcome === 'cancelled') {
+    expect(await PM.openProjectHere(outgoing.id)).toBe(true);
+    rejectRead(new Error('Superseded read finished'));
+  }
+  await opening;
+  await PM.projectAssetsReady;
+  expect(PM.assets.cancelRestores).toHaveBeenCalledOnce();
+  expect(PM.assets.cancelRestores.mock.invocationCallOrder[0]).toBeLessThan(read.mock.invocationCallOrder[0]!);
+  expect(PM.assets.restoreProject).toHaveBeenCalledOnce();
+  expect(PM.assets.restoreProject).toHaveBeenCalledWith(outgoing);
+  expect(PM.assets.clear).not.toHaveBeenCalled();
+  expect(PM.proj).toBe(outgoing);
+  expect(PM.sel.layers).toEqual(['selected-outgoing-layer']);
+  expect(PM.assets.map.get(runtime.id)).toBe(runtime);
+  expect(PM.projectLoading).toBeNull();
+  expect(close).toHaveBeenCalledWith('incoming-reader');
+  expect(PM.MediaStore.put).not.toHaveBeenCalled();
+  expect(toasts.some(message => message.startsWith('Could not open'))).toBe(outcome === 'failed');
+});
+
+it('opens streamed document ranges with Unicode and working Undo and Redo', async () => {
+  const { PM, toasts } = appRegistry();
+  installHistory(PM);
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.WS.activate = vi.fn(); PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  PM.proj.note = 'x'.repeat(1024 * 1024) + '🟢 Café';
+  PM.hist.do('Rename ☃ one', () => { PM.proj.name = 'One ☃'; });
+  PM.hist.do('Rename 🟢 two', () => { PM.proj.name = 'Two 🟢'; });
+  PM.hist.undo();
+  const document = { proj: PM.proj, history: PM.hist.export({ copy: false }) };
+  const bytes = new TextEncoder().encode(JSON.stringify(document)), offset = 5;
+  const read = vi.fn(async (token: string, at: number, length: number) => {
+    expect(token).toBe('streamed-document');
+    return bytes.subarray(at - offset, at - offset + length);
+  });
+  const close = vi.fn(async () => undefined);
+  PM.MediaStore = { get: async () => null, put: async () => true };
+  (window as any).powermove = { openProjectFile: async () => ({ ok: true, path: '/tmp/Streamed.pmv',
+    projectId: 'streamed-open', token: 'streamed-document', size: offset + bytes.length, media: [],
+    documentRange: { offset, length: bytes.length, sha256: sha256Hex(bytes) } }), projectRead: { read, close } };
+  installBridgeForTests((window as any).powermove);
+  await PM.openProject();
+  expect(PM.proj.id).toBe('streamed-open');
+  expect(PM.proj.note).toBe(document.proj.note);
+  expect(PM.hist.export().entries.map((entry: any) => entry.label)).toEqual(['Rename ☃ one', 'Rename 🟢 two']);
+  expect(PM.hist.canUndo()).toBe(true); expect(PM.hist.canRedo()).toBe(true);
+  PM.hist.redo(); expect(PM.proj.name).toBe('Two 🟢');
+  PM.hist.undo(); expect(PM.proj.name).toBe('One ☃');
+  expect(read.mock.calls.length).toBeGreaterThan(1);
+  expect(read.mock.calls.every(([, , length]) => length <= 1024 * 1024)).toBe(true);
+  expect(close).toHaveBeenCalledWith('streamed-document');
+  expect(toasts.some(message => message.startsWith('Could not open'))).toBe(false);
+});
+
+it.each([false, true])('reads a streamed document range, then lets main copy its media with the same reader token (stamped native: %s)', async stamped => {
+  const { PM, toasts } = appRegistry();
+  installHistory(PM);
+  PM.pause = vi.fn(); PM.rasterClear = vi.fn(); PM.WS.activate = vi.fn(); PM.touch = vi.fn();
+  PM.replaceProject = (next: any) => { PM.proj = next; };
+  const project = PM.mkProject({ id: 'source', name: 'Ranged', assets: { clip: { id: 'clip', kind: 'video', storageKey: 'media:clip' } },
+    ...(stamped ? { requiresEngine: 'native' } : {}) });
+  const bytes = new TextEncoder().encode(JSON.stringify({ proj: project, history: { version: 1, index: -1, entries: [] } }));
+  const offset = 9, media = [{ id: 'clip', type: 'video/mp4', offset: offset + bytes.length, length: 4096, revision: 'saved', sha256: 'a'.repeat(64) }];
+  const read = vi.fn(async (_token: string, at: number, length: number) => {
+    if (at < offset || at + length > offset + bytes.length) throw new Error('The page read media bytes');
+    return bytes.subarray(at - offset, at - offset + length);
+  });
+  const close = vi.fn(async () => undefined);
+  const putProjectRange = vi.fn(async (_token: string, source: any, _asset: any, onBytes?: (bytes: number) => void) => { onBytes?.(source.length); return true; });
+  PM.MediaStore = { get: async () => null, put: vi.fn(async () => true), putProjectRange };
+  installBridgeForTests({ openProjectFile: async () => ({ ok: true, path: '/tmp/Ranged.pmv', projectId: 'ranged-open', token: 'ranged-reader',
+    size: offset + bytes.length + 4096, media, documentRange: { offset, length: bytes.length, sha256: sha256Hex(bytes) } }),
+    projectRead: { read, close } } as any);
+  await PM.openProject();
+  expect(read).toHaveBeenCalled();
+  expect(read.mock.calls.every(([token]) => token === 'ranged-reader')).toBe(true);
+  expect(close).toHaveBeenCalledWith('ranged-reader');
+  expect(PM.MediaStore.put).not.toHaveBeenCalled();
+  if (stamped) {
+    // The legacy engine refuses a native-stamped document read from its range, before any media is copied.
+    expect(putProjectRange).not.toHaveBeenCalled();
+    expect(PM.proj.id).not.toBe('ranged-open');
+    expect(toasts.some(message => message.startsWith('Could not open'))).toBe(true);
+  } else {
+    expect(putProjectRange).toHaveBeenCalledOnce();
+    expect(putProjectRange).toHaveBeenCalledWith('ranged-reader', media[0], expect.objectContaining({ id: 'clip' }), expect.any(Function));
+    expect(PM.proj.id).toBe('ranged-open');
+    expect(PM.proj.name).toBe('Ranged');
+  }
 });
 
 it('does not recapture a trashed active project while switching, but still captures an ordinary outgoing project', () => {

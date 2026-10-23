@@ -32,6 +32,7 @@ import type { IpcMain, IpcMainInvokeEvent, WebContents } from 'electron';
 
 import { parseExtensionUrl } from '../shared/extension-url';
 import { IPC, type RemoteMediaInfo } from '../shared/ipc';
+import { isRendererUnavailable, watchRendererDocument } from './renderer-recovery';
 
 export const REMOTE_MEDIA_MAX_BYTES = 512 * 1024 * 1024;
 export const REMOTE_MEDIA_MAX_REDIRECTS = 5;
@@ -341,13 +342,30 @@ export function registerRemoteMediaIpc(ipc: Pick<IpcMain, 'handle'>, ctx: { isTr
   const owner = (event: IpcMainInvokeEvent): number => {
     if (!ctx.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
     const sender = event.sender;
+    if (isRendererUnavailable(sender)) throw new RemoteMediaError('The download window is unavailable');
     if (!watched.has(sender)) {
       watched.add(sender);
-      sender.once('destroyed', () => void service.releaseOwner(sender.id));
+      watchRendererDocument(sender, () => {
+        watched.delete(sender);
+        void service.releaseOwner(sender.id).catch(() => undefined);
+      });
     }
     return sender.id;
   };
-  ipc.handle(IPC.remoteMediaFetch, async (event, url: unknown) => service.fetch(owner(event), url));
+  ipc.handle(IPC.remoteMediaFetch, async (event, url: unknown) => {
+    const id = owner(event);
+    let documentGone = false;
+    const stopWatching = watchRendererDocument(event.sender, () => { documentGone = true; });
+    try {
+      const download = await service.fetch(id, url);
+      // A pending download is not held yet when document cleanup runs.
+      if (documentGone || isRendererUnavailable(event.sender)) {
+        await service.release(id, download.token).catch(() => undefined);
+        throw new RemoteMediaError('The download window is unavailable');
+      }
+      return download;
+    } finally { stopWatching(); }
+  });
   ipc.handle(IPC.remoteMediaRead, async (event, input: unknown) => {
     const request = (input ?? {}) as { token?: unknown; offset?: unknown; length?: unknown };
     return service.read(owner(event), request.token, request.offset, request.length);

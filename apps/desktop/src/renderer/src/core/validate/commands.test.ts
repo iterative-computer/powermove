@@ -62,6 +62,7 @@ const validCommands: unknown[] = [
   },
   { type: 'set_scene_parameter', name: 'Intensity', value: 42, min: '0', max: '100' },
   { type: 'add_marker', id: 'm1', time: '2.5', name: 'Beat' },
+  { type: 'remove_marker', index: '0' },
   { type: 'create_section', section: { id: 'section-1', layers: [], versions: [] } },
   {
     type: 'update_section', sectionId: 'section-1', layers: [serializedTextLayer],
@@ -78,22 +79,22 @@ const validCommands: unknown[] = [
     state: { scale: 2 }
   },
 
-  {type:'offset_property', target:'a', path:'position.x', delta:2},
   {type: 'group_layers', targets: ['a'], name: 'Group'},
   {type: 'ungroup_layers', targets: ['g']},
   {type: 'move_to_group', targets: ['a'], group: null},
   { type: 'add_captions', name: 'English', cues: [{ start: 0, end: '1.5', text: 'Hello' }], style: { preset: 'boxed' }, language: 'en' },
   { type: 'edit_captions', target: 'cap', op: 'split', id: 'c1', at: '2' },
 
+  { type: 'simplify_keyframes', scope: 'properties', properties: [{ layerId: 'title', path: 'opacity' }] },
 ];
 
 const invalidCommands: unknown[] = [
-  {type:'offset_property',path:'position.x',delta:NaN},
   {type: 'group_layers', targets: []},
   {type: 'ungroup_layers', targets: [12]},
   {type: 'move_to_group', targets: ['a'], group: 12},
   { type: 'set_property', value: 42 },
   { type: 'replace_keyframes', path: 'opacity', keyframes: 'not-an-array' },
+  { type: 'simplify_keyframes', scope: 'properties', properties: [] },
   { type: 'set_easing', keyframes: [], curve: [0, 0, 1, 1] },
   { type: 'set_expression', expression: 'value' },
   { type: 'set_content', patch: [] },
@@ -108,6 +109,7 @@ const invalidCommands: unknown[] = [
   { type: 'set_transition', layer: 'a', edge: 'middle', transition: null },
   { type: 'set_scene_parameter', name: '', value: 1 },
   { type: 'add_marker', time: Number.POSITIVE_INFINITY },
+  { type: 'remove_marker', index: -1 },
   { type: 'create_section', section: {} },
   { type: 'update_section', sectionId: 'section-1', layers: [] },
   { type: 'transform_layers', transform: { edits: [] } },
@@ -117,7 +119,7 @@ const invalidCommands: unknown[] = [
 
 const huge = 'x'.repeat(COMMAND_JSON_LIMIT + 1);
 const oversizedCommands: unknown[] = [
-  {type:'offset_property',path:huge,delta:1},
+  { type: 'simplify_keyframes', scope: 'properties', properties: [{ layerId: 'title', path: huge }] },
   {type: 'group_layers', targets: [huge]},
   {type: 'ungroup_layers', targets: [huge]},
   {type: 'move_to_group', targets: [huge], group: null},
@@ -137,6 +139,7 @@ const oversizedCommands: unknown[] = [
   { type: 'set_transition', layer: 'a', edge: 'in', transition: { type: huge } },
   { type: 'set_scene_parameter', name: 'Value', value: huge },
   { type: 'add_marker', name: huge },
+  { type: 'remove_marker', index: huge },
   { type: 'create_section', section: { id: 'section', note: huge } },
   { type: 'update_section', sectionId: 'section', layers: [serializedTextLayer], thumb: huge },
   {
@@ -151,7 +154,7 @@ function exhaustivelyName(command: EditCommand): string {
   switch (command.type) {
     case 'set_property': return command.type;
     case 'replace_keyframes': return command.type;
-    case 'offset_property': return command.type;
+    case 'simplify_keyframes': return command.type;
     case 'set_easing': return command.type;
     case 'set_expression': return command.type;
     case 'set_content': return command.type;
@@ -165,7 +168,7 @@ function exhaustivelyName(command: EditCommand): string {
     case 'set_effect': return command.type;
     case 'set_transition': return command.type;
     case 'set_scene_parameter': return command.type;
-    case 'add_marker': return command.type;
+    case 'add_marker': case 'remove_marker': return command.type;
     case 'create_section': return command.type;
     case 'update_section': return command.type;
     case 'group_layers': case 'ungroup_layers': case 'move_to_group': return command.type;
@@ -176,6 +179,9 @@ function exhaustivelyName(command: EditCommand): string {
 }
 
 describe('EditCommand contract', () => {
+  it.each([undefined, null, -1, .5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1])('rejects invalid marker indexes: %s', index => {
+    expect(parseEditCommand({ type: 'remove_marker', index })).toBeInstanceOf(ValidationError);
+  });
   it('matches the shared operation vocabulary in contract order', () => {
     expect(COMMAND_TYPES).toEqual(legacyGoldenCommandTypes());
   });
@@ -190,6 +196,17 @@ describe('EditCommand contract', () => {
 });
 
 describe('parseEditCommand', () => {
+  it('accepts only supported color depth values through the shared edit contract', () => {
+    for (const colorDepth of [8, 16, 32]) {
+      const command = { type: 'set_composition', patch: { colorDepth } };
+      expect(parseEditCommand(command)).toEqual(command);
+      expect(parseAgentEditCommand(command)).toEqual(command);
+    }
+    for (const colorDepth of [24, '32', true]) {
+      expect(parseEditCommand({ type: 'set_composition', patch: { colorDepth } })).toBeInstanceOf(ValidationError);
+    }
+  });
+
   it('accepts adjustment layers as canonical add-layer commands', () => {
     expect(parseEditCommand({
       type: 'add_layer', id: 'grade', layerType: 'adjustment', name: 'Global Grade',
@@ -347,13 +364,6 @@ describe('parseEditCommand', () => {
     expect(deleted).not.toBeInstanceOf(ValidationError);
     if (!(deleted instanceof ValidationError) && deleted.type === 'delete_layers') {
       expect(deleted.targets).toHaveLength(25);
-    }
-  });
-
-  it('retains negative local times only for reused material channels', () => {
-    for (const path of ['shader.roughness', 'm.roughness', 'slots.paint.shader.roughness', 'slots.paint.color', 'opacity']) {
-      const command = parseEditCommand({ type: 'replace_keyframes', path, keyframes: [{ time: -2, value: 0.5 }] });
-      expect(command).toMatchObject({ keyframes: [{ time: path === 'opacity' ? 0 : -2, value: 0.5 }] });
     }
   });
 

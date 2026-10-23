@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { makePM } from './make-pm';
 
 describe('animation frame cache', () => {
@@ -82,6 +82,54 @@ describe('animation frame cache', () => {
     PM.animate(parent, 'position.x', [{ t: 0, v: 0 }, { t: 2, v: 200 }]);
     for (const time of [0, 1, 2, .5]) {
       PM.beginEval(time); expect(PM.worldMatrix(child, time)[4]).toBeCloseTo(10 + time * 100);
+    }
+  });
+
+  it('assembles a shared nested group space once per frame, preserving edits and backwards seeks', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/anim');
+    PM.proj = PM.mkProject({ dur: 5 });
+    const outer = PM.mkLayer('group', { p: { 'position.x': 0, 'position.y': 0, rotation: 17 } });
+    const inner = PM.mkLayer('group', { p: { 'position.x': 25, 'position.y': 40, 'scale.x': -80 } });
+    inner.group = outer.id;
+    const children = Array.from({ length: 200 }, (_, index) => {
+      const child = PM.mkLayer('solid', { p: { 'position.x': index, 'position.y': 15 } });
+      child.group = inner.id;
+      return child;
+    });
+    PM.proj.layers = [outer, inner, ...children];
+    PM.animate(outer, 'position.x', [{ t: 0, v: 0 }, { t: 2, v: 200 }]);
+    const localMatrix = vi.spyOn(PM, 'localMatrix');
+    for (const time of [0, 1, 2, .5]) {
+      PM.beginEval(time);
+      const expected = children.map(child => PM.mul(PM.transformParentMatrix(child, time), PM.localMatrix(child, time)));
+      localMatrix.mockClear();
+      children.forEach((child, index) => expect(PM.worldMatrix(child, time)).toEqual(expected[index]));
+      expect(localMatrix.mock.calls.filter(([layer]) => (layer as { type: string }).type === 'group')).toHaveLength(2);
+    }
+    outer.p['position.x'].kf[1].v = 400;
+    PM.touch(); PM.beginEval(.5);
+    const expected = PM.mul(PM.transformParentMatrix(children[0], .5), PM.localMatrix(children[0], .5));
+    expect(PM.worldMatrix(children[0], .5)).toEqual(expected);
+  });
+
+  it('preserves parent rigs and invalid group links on the general group-space path', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/anim');
+    PM.proj = PM.mkProject({ dur: 5 });
+    const rig = PM.mkLayer('null', { p: { 'position.x': 25, rotation: 29 } });
+    const outer = PM.mkLayer('group', { p: { 'scale.y': 70, skew: 13 } });
+    const inner = PM.mkLayer('group', { p: { 'position.y': 30 } });
+    const child = PM.mkLayer('solid');
+    inner.group = outer.id; child.group = inner.id;
+    PM.proj.layers = [rig, outer, inner, child];
+    for (const setup of [
+      () => { outer.parent = rig.id; },
+      () => { outer.parent = null; child.parent = rig.id; },
+      () => { child.parent = null; outer.group = inner.id; },
+      () => { outer.group = 'missing'; },
+    ]) {
+      setup(); PM.touch(); PM.beginEval(1);
+      const expected = PM.mul(PM.transformParentMatrix(child, 1), PM.localMatrix(child, 1));
+      expect(PM.worldMatrix(child, 1)).toEqual(expected);
     }
   });
 });
