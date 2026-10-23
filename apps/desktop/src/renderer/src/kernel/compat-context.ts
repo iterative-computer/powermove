@@ -162,11 +162,20 @@ export class CompatContextHost {
     if (!bound) return null;
     let state = this.state;
     if (!state || state.bound !== bound || state.lost) {
+      const previous = state;
       this.drop();
       this.env.beforeContext?.(bound);
       state = this.make(bound);
       if (!state) return null;
       this.state = state;
+      // A viewer can replace its bound canvas while paused, after the last
+      // native frame. Keep the selected completed surface: the WebGPU
+      // swapchain may already be clear and there may be no next frame.
+      if (previous?.pendingFrame) {
+        state.copies = previous.copies;
+        state.pendingFrame = previous.pendingFrame;
+        this.presented();
+      }
     }
     this.fit(state);
     return state.gl;

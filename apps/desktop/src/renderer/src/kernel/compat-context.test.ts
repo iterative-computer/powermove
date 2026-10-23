@@ -129,6 +129,24 @@ describe('render.gl.context, the compatibility context', () => {
     expect(r.drawn).toContainEqual(['drawImage', captured, 0, 0]);
   });
 
+  it('keeps the completed paused surface when a viewer replaces its bound canvas', () => {
+    const r = rig(); r.env.bound.mockReturnValue(r.bound); r.host.context();
+    const tag = { seq: 1, revision: 7, viewSeq: 3 };
+    r.host.captureFrame(tag, { displayWidth: 400, displayHeight: 200 } as VideoFrame);
+    const saved = r.made.at(-1);
+    r.host.selectFrame(tag); r.host.presented();
+    const replacement = r.bound.cloneNode() as HTMLCanvasElement;
+    replacement.getBoundingClientRect = r.bound.getBoundingClientRect;
+    r.stage.append(replacement);
+    r.env.bound.mockReturnValue(replacement);
+    r.env.presentation = () => r.presentation;
+    r.drawn.length = 0;
+    r.host.context();
+    expect(r.host.stats.made).toBe(2);
+    expect(r.drawn).toContainEqual(['drawImage', saved, 0, 0, 400, 200, 0, 0, 200, 100]);
+    r.host.dispose();
+  });
+
   it('is null until a viewer binds a canvas, then one context on an offscreen canvas with today\'s attributes', () => {
     const r = rig();
     expect(r.host.context()).toBeNull();
