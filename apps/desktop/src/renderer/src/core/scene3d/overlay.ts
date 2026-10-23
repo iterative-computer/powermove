@@ -2,12 +2,13 @@ import * as THREE from 'three';
 import type {SceneRuntime} from './runtime';
 import type {ViewAxis} from './viewport';
 import {AXIS_COLORS,type Axis,type Rect} from './modal';
+import {retainViewportOverlayBitmap,releaseViewportOverlayBitmap} from './overlay-capture';
 
 /*
  * Blender's viewport overlays drawn over the composition: the floor grid and
  * its axes (user views only), selection outlines, light and camera wires, and
  * transform constraint guides. Overlays never draw into the composition, so
- * exports and captures are unaffected.
+ * composition exports and agent captures are unaffected.
  */
 
 export const SELECTED_COLOR='#f15800',ACTIVE_COLOR='#ffaa40',WIRE_COLOR='#c8c8c8';
@@ -192,6 +193,10 @@ export class ViewportOverlay {
     }
     renderer.setScissorTest(false);
     if(frame.gizmo){renderer.clearDepth();renderer.render(this.gizmoScene,camera);}
+    // The native outline mask can still contain pixels while the editor's
+    // selection state catches up, so retain every completed overlay pass.
+    if((frame.overlays&&(runtime||native))||frame.guides.length||frame.gizmo)retainViewportOverlayBitmap(this.canvas);
+    else releaseViewportOverlayBitmap(this.canvas);
   }
 
   /** Completion for reads of shared native planes in this WebGL context. */
@@ -370,6 +375,7 @@ export class ViewportOverlay {
 
   dispose():void {
     if(this.disposed)return;this.disposed=true;
+    releaseViewportOverlayBitmap(this.canvas);
     this.clearLines();this.grid.geometry.dispose();this.grid.material.dispose();this.depthMaterial.dispose();this.maskMaterial.dispose();
     this.outline.dispose();this.mask?.dispose();this.pointMaterial?.dispose();for(const material of this.materials.values())material.dispose();
     this.nativeDepth?.dispose();this.nativeCoverage?.dispose();this.depthQuad?.geometry.dispose();this.depthQuad?.material.dispose();

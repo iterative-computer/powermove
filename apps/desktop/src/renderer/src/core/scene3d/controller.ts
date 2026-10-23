@@ -176,6 +176,15 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
       // Engine geometry keeps hit testing current while the matching chrome
       // planes are still in flight. Drawing waits for their frame tag.
       gizmo.helper.updateMatrixWorld(true);
+      // Screen-space chrome depends only on the view and editor state. Update
+      // it even while native depth/coverage planes are pending: a Library
+      // clone can be taken as soon as the matching presented frame arrives.
+      const cursor=toScreen(camera,rect,cursorLocation(PM)),rotation=new THREE.Quaternion();camera.matrixWorld.decompose(new THREE.Vector3(),rotation,new THREE.Vector3());
+      const fps=PM.proj?.fps||30,activeLayer=active?PM.L?.(active):null;
+      chrome.update({visible:true,rotation,axis:view.axis,camera:view.mode==='camera',orthographic:view.projection==='orthographic',
+        label:viewLabel(PM),detail:`(${Math.round((PM.time||0)*fps)})${activeLayer?` ${activeLayer.name}`:''}`,leftInset:prefs.toolbar?46:0,rightInset:prefs.sidebar?236:0,
+        cursor:prefs.overlays&&cursor.z<1&&cursor.z>-1?{x:cursor.x,y:cursor.y}:null,box:border,
+        modal:modal?{header:modal.header(),hints:modal.hints(),link:modal.link}:walk?{header:walk.header(),hints:walk.hints(),link:null}:zoomArmed?{header:'Zoom Border',hints:[['LMB drag','Zoom to region'],['Esc','Cancel']],link:null}:boxArmed?{header:'Box Select',hints:[['LMB drag','Select'],['⇧','Extend'],['Ctrl','Subtract'],['Esc','Cancel']],link:null}:null});
       if(!nativeReady)return;
       const selected=new Set(ids),pose=viewportPose(PM);
       let frameGlyphs:Glyph[]=[];
@@ -194,12 +203,6 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
       try { overlay.draw({camera,rect,runtime,native:depth&&coverage?{depth,coverage}:null,userView:view.mode==='editor',axis:view.axis,distance:pose.distance,fov:view.fov,overlays:prefs.overlays,
         edit,xray:prefs.xray,selected:editing?new Set():expand(ids),active:editing?new Set():expand(active?[active]:[]),glyphs:frameGlyphs,guides:modal?.guides??[],gizmo:gizmo.attached()?gizmo.helper:null});
       } finally { if(depth&&coverage)chromeDone=overlay.workDone(); }
-      const cursor=toScreen(camera,rect,cursorLocation(PM)),rotation=new THREE.Quaternion();camera.matrixWorld.decompose(new THREE.Vector3(),rotation,new THREE.Vector3());
-      const fps=PM.proj?.fps||30,activeLayer=active?PM.L?.(active):null;
-      chrome.update({visible:true,rotation,axis:view.axis,camera:view.mode==='camera',orthographic:view.projection==='orthographic',
-        label:viewLabel(PM),detail:`(${Math.round((PM.time||0)*fps)})${activeLayer?` ${activeLayer.name}`:''}`,leftInset:prefs.toolbar?46:0,rightInset:prefs.sidebar?236:0,
-        cursor:prefs.overlays&&cursor.z<1&&cursor.z>-1?{x:cursor.x,y:cursor.y}:null,box:border,
-        modal:modal?{header:modal.header(),hints:modal.hints(),link:modal.link}:walk?{header:walk.header(),hints:walk.hints(),link:null}:zoomArmed?{header:'Zoom Border',hints:[['LMB drag','Zoom to region'],['Esc','Cancel']],link:null}:boxArmed?{header:'Box Select',hints:[['LMB drag','Select'],['⇧','Extend'],['Ctrl','Subtract'],['Esc','Cancel']],link:null}:null});
     }catch(error){console.error('[scene3d] viewport overlay failed',error);}finally{for(const image of readFrames)image.close();releaseChrome?.(chromeDone);}
   }
 
