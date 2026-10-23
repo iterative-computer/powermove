@@ -698,3 +698,23 @@ the reduced scale before.
 
 Remaining: a level 1 SVG inside a level 2 precomp keeps the engine's
 continuous density (today has no level 2).
+
+### CPU canvas content cache (round 4)
+
+`pm-render/vector/rasters.rs` keeps exact N32 shape and path bytes by the
+same evaluated source key as the vector texture cache, independent of output
+precision. Frame prefetch, speculative workers and the layer-raster API use
+it, so a wrapper base read or seek after texture eviction does not repeat
+canvas emulation. The cache holds at most 128 MiB and 4,096 entries; a lease
+trim drops bytes and stops speculative work from refilling it while idle.
+It is separate from the 192 MiB GPU texture budget and is included in vector
+cache memory accounting. Unconsumed ahead results have their own 128 MiB
+bound and share the pixel allocations where possible.
+
+The analytic rasterizer retains the exact interpolated solid-interior branch
+while avoiding nine unused varying components there. Opaque, fully covered
+samples use the same unorm8 source color directly. The per-pixel analytic
+reference test still compares every coverage sample's bits; frame reuse and
+wrapper-base tests compare pixels exactly. `canvas_cold_24` and
+`canvas_seek_revisit_24` in perfbench ratchet the work, including zero CPU
+canvas misses when warm positions are revisited after GPU texture eviction.

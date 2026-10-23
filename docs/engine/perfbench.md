@@ -39,7 +39,8 @@ The counters are always on, in release builds too. A `Scope` diffs a thread's
 | `engine.glsl_compiles` | GLSL programs through glslang (`pm-gpu` `glsl.rs`) |
 | `engine.raster_requests` / `engine.raster_answers` | level 1 SVG rasters asked of the window and put back; fallback runner jobs and their pixels |
 | `engine.layers_planned`, `engine.comp_passes` | layers planned from scratch; composition passes built (`pm-render` `plan.rs`) |
-| `cache.{pipeline,program,media,vector,text,svg,draw_reuse,frame_prefix,bind_group,target_pool}.{hits,misses}` | effect pipelines per format, effect programs, media textures (stills and decoded frames), vector rasters, text rasters, SVG rasters, layer draw reuse, the kept frame bottom, kept bind groups, pooled targets |
+| `engine.canvas_interpolations` | analytic CPU canvas varying components actually interpolated (one aggregate add per raster) |
+| `cache.{pipeline,program,media,vector,canvas,text,svg,draw_reuse,frame_prefix,bind_group,target_pool}.{hits,misses}` | effect pipelines per format, effect programs, media textures (stills and decoded frames), vector rasters, text rasters, SVG rasters, layer draw reuse, the kept frame bottom, kept bind groups, pooled targets |
 
 **GPU calls without call-site edits.** `engine/third_party/wgpu` is wgpu
 30.0.1's front crate, vendored unchanged except one marked counter line in each
@@ -110,6 +111,8 @@ the cold work is the point.
 | `inspector_edit_500` | edit | 60 paused moves as `PM.Edit.apply` writes them: the channel, the project's `revision`, an `edits` entry |
 | `edit_playback_500` | frame | an opacity edit every frame while 60 frames play |
 | `scrub_24` | seek | 24 exact paused seeks across the video, every length forward and back |
+| `canvas_cold_24` | frame | four animated level 1 shapes at 24 cold times; GPU textures evicted, native CPU raster work counted |
+| `canvas_seek_revisit_24` | seek | the same 24 positions revisited out of order with GPU textures evicted; exact CPU canvas bytes stay cached |
 | `export_120` | frame | 120 frames of the 500-layer project to H.264 1920 × 1080 (VideoToolbox; the file is written and removed) |
 | `typing_60` | key | 60 keystrokes into a 96 px SF Pro title, each a revision drawn paused |
 | `open_large_2000` | open | the 2,000-layer project's text parsed, given to a new view, routed, and drawn by a new composer |

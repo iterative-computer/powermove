@@ -599,6 +599,70 @@ What remains:
 - **Memory** above today on PMV4 (bigopen: the in-window document mirror,
   the engine's document tree).
 
+### Round 4 (2026-10-23)
+
+The acceptance criterion is presented frames at least today's, with no
+cross-origin isolation of the editor. The former one-main-thread-task target
+is retired. The 500-layer rig's per-frame planning and compose work belongs
+to frame120; this round changes raster preparation and transport, not that
+work.
+
+- The idle 48-frame warm-up now asks the window for the raster-override
+  answers its plans find, as well as drawing native rasters ahead. Those
+  needs cover only text, captions and shapes; the warm-up never decodes
+  video. Answers for future frames no longer dirty an already complete
+  paused frame and restart its idle deadline. The child-process gate
+  receives all 48 frames' needs before Play.
+- Exact CPU canvas bytes are kept by content across GPU texture eviction,
+  seeks, wrapper base reads and discarded speculative frames
+  (`pm-render/vector/rasters.rs`). The cache is bounded at 128 MiB and 4,096
+  entries; its key includes the evaluated content, colors, density and crop.
+  Output precision and document identity do not change these N32 bytes.
+  Ahead workers share the same bytes. Completed speculative work is also
+  bounded, and a trim cancels queued work and prevents stale completions
+  from repopulating the ahead set.
+- The scrub profile's analytic coverage and blending loops now skip work
+  whose result is already known: a solid interior's interpolated control
+  decides coverage before nine unused varying components are evaluated;
+  an opaque source-over sample uses the same prequantized unorm8 color.
+  The per-sample reference comparison remains bit-exact.
+- Export answer horizons are per layer: a newly appearing layer no longer
+  moves every older layer's horizon backwards. An already-prefetched gap
+  does not change the learned frame step. Near frames precede far ones.
+  The window still executes a wrapper at every requested time, then caches
+  fresh readback bytes under its explicit texture key and unchanged quad
+  (4,096 entries, 192 MiB; cleared on revision, reset and chain changes).
+  Export callers receive independent copies, never a preview-only reuse.
+- Private baseline runs exposed the shared-texture HandleScope abort again.
+  Direct pool release can return a slot before the page knows the worker
+  closed its clone. The page now retains each frame by sequence until an
+  explicit worker acknowledgment; these ride on presentations, or flush
+  in a batch after 50 ms idle. Direct engine release is retained.
+- Engine-on project-slot writes no longer make a redundant window clone
+  immediately before Electron's context bridge makes its own snapshot.
+  The slot is evicted after writing; the saved value remains detached.
+  The old autosave attribution included two stages: historical profiles
+  spent time in `beforeSave` (chiefly `canonicalHash`) as well as
+  `persistCurrent` (including `cloneValue`). Those profiles predate the
+  current 30 s consistency-check throttle. Whole-document
+  consistency hashing remains bigopen's work (`engine-doc/barrier.ts`
+  `check`, `shared/canonical-json.ts`); these historical profiles do not
+  attribute a present playback gap to autosave.
+
+The main-thread budget now lives in perfbench's shared ratchet as exact
+integer totals over 48 presented frames. Two new native rows hold cold
+canvas work and repeated seeks with GPU textures evicted: four shapes at
+24 positions give 96 cold CPU misses, then 96 hits and zero misses when
+revisited. The cold row gates 2,797,340 varying-component interpolations.
+All 11 native ratchet rows pass after lowering; the CPU coverage references,
+vector reuse comparisons and render corpus gate pass.
+
+The public large-project playback gate matched today's cadence in both
+loaded runs (112 versus 113, then 109 versus 114 frames). Its scrub gate
+failed twice: engine p95 82.8 and 83.3 ms, above the unchanged bounds near
+49 ms. The shader-parity cases passed four of four. These remain performance
+failures; no bound was widened.
+
 ## Resync
 
 `resync` with `canonicalJsonV1` installs a `pm-model` mirror after checking
