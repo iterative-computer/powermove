@@ -74,7 +74,9 @@ impl Default for State {
             stroke_paint: None,
             clips: Vec::new(),
             ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
-            m44: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            m44: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
         }
     }
 }
@@ -90,6 +92,7 @@ enum Op {
     /// renderer (which does not). The pass's viewport maps them to window
     /// coordinates when they are rasterized.
     Polygons {
+        native: Option<pm_text::render::graphite::Geometry>,
         polys: Vec<Vec<P>>,
         color: Paint,
         msaa: bool,
@@ -98,6 +101,7 @@ enum Op {
     /// The union of triangles in device coordinates (the tessellated fill
     /// and stroke renderers, MSAA).
     Triangles {
+        native: Option<pm_text::render::graphite::Geometry>,
         tris: Vec<[P; 3]>,
         color: Paint,
     },
@@ -123,6 +127,10 @@ enum Op {
 
 /// A Canvas2D context on a `width` × `height` canvas.
 pub struct Context {
+    native_paths: bool,
+    /// The render pass is multisampled for a draw recorded outside this
+    /// context (see [`Context::multisample_pass`]).
+    pass_msaa: bool,
     width: u32,
     height: u32,
     ops: Vec<Op>,
@@ -158,6 +166,8 @@ fn m44_concat(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
 impl Context {
     pub fn new(width: u32, height: u32) -> Self {
         Self {
+            native_paths: false,
+            pass_msaa: false,
             width,
             height,
             ops: Vec::new(),
@@ -170,6 +180,22 @@ impl Context {
 
     pub fn save(&mut self) {
         self.stack.push(self.state.clone());
+    }
+
+    pub fn retain_native_paths(&mut self) {
+        self.native_paths = true;
+    }
+
+    /// Graphite multisamples a whole render pass once any draw in it needs
+    /// MSAA. A caller that records only part of a pass whose other draws
+    /// tessellate marks the pass multisampled here, so analytic draws are
+    /// rasterized per sample like the rest.
+    pub fn multisample_pass(&mut self) {
+        self.pass_msaa = true;
+    }
+
+    fn multisampled(&self) -> bool {
+        self.pass_msaa || self.ops.iter().any(needs_msaa)
     }
 
     pub fn restore(&mut self) {
@@ -245,7 +271,9 @@ impl Context {
             return;
         }
         // The rotation as a 4x4 (column-major): [cs sn 0 0], [-sn cs 0 0], ...
-        let r = [cs, sn, 0.0, 0.0, -sn, cs, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let r = [
+            cs, sn, 0.0, 0.0, -sn, cs, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
         self.state.m44 = m44_concat(&self.state.m44, &r);
     }
 
@@ -260,8 +288,12 @@ impl Context {
             return;
         }
         self.state.ctm = m;
-        let r = [f[0], f[1], 0.0, 0.0, f[2], f[3], 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, f[4], f[5], 0.0, 1.0];
-        if r != [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0] {
+        let r = [
+            f[0], f[1], 0.0, 0.0, f[2], f[3], 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, f[4], f[5], 0.0, 1.0,
+        ];
+        if r != [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ] {
             self.state.m44 = m44_concat(&self.state.m44, &r);
         }
     }
@@ -326,19 +358,22 @@ impl Context {
 
     /// The premultiplied paint color.
     fn paint(&self, c: CanvasColor) -> Paint {
-        Paint::Solid(c.with_alpha_scale(self.state.global_alpha as f32).premultiplied())
+        Paint::Solid(
+            c.with_alpha_scale(self.state.global_alpha as f32)
+                .premultiplied(),
+        )
     }
     fn fill_paint(&self) -> Paint {
-        self.state
-            .fill_paint
-            .clone()
-            .map_or_else(|| self.paint(self.state.fill.0), |p| p.alpha(self.state.global_alpha as f32))
+        self.state.fill_paint.clone().map_or_else(
+            || self.paint(self.state.fill.0),
+            |p| p.alpha(self.state.global_alpha as f32),
+        )
     }
     fn stroke_paint(&self) -> Paint {
-        self.state
-            .stroke_paint
-            .clone()
-            .map_or_else(|| self.paint(self.state.stroke.0), |p| p.alpha(self.state.global_alpha as f32))
+        self.state.stroke_paint.clone().map_or_else(
+            || self.paint(self.state.stroke.0),
+            |p| p.alpha(self.state.global_alpha as f32),
+        )
     }
     pub fn set_fill_paint(&mut self, p: Paint) {
         self.state.fill_paint = Some(p)
@@ -375,7 +410,12 @@ impl Context {
     pub fn end_layer(&mut self, alpha: f32, blur: [f64; 2], linear: bool) {
         if let Some(start) = self.layers.pop() {
             let ops = self.ops.drain(start..).collect();
-            self.ops.push(Op::Layer { ops, alpha, blur, linear });
+            self.ops.push(Op::Layer {
+                ops,
+                alpha,
+                blur,
+                linear,
+            });
         }
     }
     fn record(&mut self, op: Op) {
@@ -413,12 +453,22 @@ impl Context {
         }
         if p.is_convex() {
             let tris = tess::convex_wedge_triangles(p, &m);
-            self.record(Op::Triangles { tris, color });
+            let native = self
+                .native_paths
+                .then(|| super::native::fill(p, &m, false, rule == Rule::EvenOdd));
+            self.record(Op::Triangles {
+                tris,
+                color,
+                native,
+            });
             return Ok(());
         }
         let local = tess::fill_polygons_local(p, &m);
         let polys = tess::to_device(&local, &m);
         self.record(Op::Polygons {
+            native: self
+                .native_paths
+                .then(|| super::native::fill(p, &m, true, rule == Rule::EvenOdd)),
             polys,
             color,
             msaa: true,
@@ -459,13 +509,20 @@ impl Context {
         }
         let rect_stays_rect = (m.kx == 0.0 && m.ky == 0.0) || (m.sx == 0.0 && m.sy == 0.0);
         if rect_stays_rect {
-            let a = [m.sx * r[0] + m.kx * r[1] + m.tx, m.ky * r[0] + m.sy * r[1] + m.ty];
-            let b = [m.sx * r[2] + m.kx * r[3] + m.tx, m.ky * r[2] + m.sy * r[3] + m.ty];
+            let a = [
+                m.sx * r[0] + m.kx * r[1] + m.tx,
+                m.ky * r[0] + m.sy * r[1] + m.ty,
+            ];
+            let b = [
+                m.sx * r[2] + m.kx * r[3] + m.tx,
+                m.ky * r[2] + m.sy * r[3] + m.ty,
+            ];
             let near = |v: f32| (v - libm::roundf(v)).abs() <= 0.0039;
             if near(a[0]) && near(a[1]) && near(b[0]) && near(b[1]) {
                 let corners = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
                 let polys = tess::to_device(&[corners.to_vec()], m);
                 self.record(Op::Polygons {
+                    native: None,
                     polys,
                     color,
                     msaa: false,
@@ -529,7 +586,14 @@ impl Context {
         }
         let color = self.stroke_paint();
         let tris = stroke::stroke_triangles(p, &m, params, cap);
-        self.record(Op::Triangles { tris, color });
+        let native = self
+            .native_paths
+            .then(|| super::native::stroke(p, &m, params, cap));
+        self.record(Op::Triangles {
+            tris,
+            color,
+            native,
+        });
         Ok(())
     }
 
@@ -546,26 +610,111 @@ impl Context {
     /// (the tessellating renderers); otherwise every draw is rasterized once
     /// per pixel at its center.
     pub fn finish(&self) -> Vec<u8> {
-        render_ops(self.width, self.height, &self.ops)
+        render_ops(self.width, self.height, &self.ops, self.pass_msaa)
     }
 
     /// Resolve a device-space crop of primitive path draws, retaining the
     /// original canvas viewport. This bounds a glyph allocation without
     /// changing the NDC round trip or any sample decisions.
     pub fn finish_region(&self, rect: [i32; 4]) -> Option<Vec<u8>> {
-        if rect[2] <= rect[0] || rect[3] <= rect[1] { return None; }
-        if self.ops.iter().any(|o| !matches!(o,
-            Op::Polygons { .. } | Op::Triangles { .. } | Op::Analytic { .. })) {
+        if rect[2] <= rect[0] || rect[3] <= rect[1] {
             return None;
         }
-        let pattern = if self.ops.iter().any(needs_msaa) { &SAMPLES_4X[..] } else { &SAMPLES_1X[..] };
-        let mut target = MsaaTarget::new((rect[2] - rect[0]) as u32,
-                                        (rect[3] - rect[1]) as u32, pattern);
+        if self.ops.iter().any(|o| {
+            !matches!(
+                o,
+                Op::Polygons { .. } | Op::Triangles { .. } | Op::Analytic { .. }
+            )
+        }) {
+            return None;
+        }
+        let pattern = if self.multisampled() {
+            &SAMPLES_4X[..]
+        } else {
+            &SAMPLES_1X[..]
+        };
+        let mut target = MsaaTarget::new(
+            (rect[2] - rect[0]) as u32,
+            (rect[3] - rect[1]) as u32,
+            pattern,
+        );
         let viewport = tess::Viewport::of(self.width, self.height);
         for op in &self.ops {
             render_op_region(&mut target, op, None, viewport, [rect[0], rect[1]]);
         }
         Some(target.resolve())
+    }
+
+    /// Native render-step input for the same device crop. Keep the full
+    /// backing canvas: a smaller viewport changes subpixel edge decisions.
+    pub fn graphite_region(&self, rect: [i32; 4]) -> Option<pm_text::render::graphite::Raster> {
+        use pm_text::render::graphite::{Draw, Geometry, Raster};
+        let mut draws = Vec::new();
+        for op in &self.ops {
+            let (geometry, color) = match op {
+                Op::Analytic { inst, color } => {
+                    let m = inst.m.map(|v| [v[0], v[1], v[2], 0.0]);
+                    (
+                        Geometry::Analytic([
+                            inst.x_radii_or_flags,
+                            inst.radii_or_quad_xs,
+                            inst.ltrb_or_quad_ys,
+                            inst.center,
+                            m[0],
+                            m[1],
+                            m[2],
+                        ]),
+                        color,
+                    )
+                }
+                Op::Triangles {
+                    native: Some(geometry),
+                    color,
+                    ..
+                }
+                | Op::Polygons {
+                    native: Some(geometry),
+                    color,
+                    ..
+                } => (geometry.clone(), color),
+                Op::Triangles { tris, color, .. } => (
+                    Geometry::Triangles(tris.iter().flatten().copied().collect()),
+                    color,
+                ),
+                Op::Polygons {
+                    polys, color, rule, ..
+                } => {
+                    let mut vertices = Vec::new();
+                    for p in polys {
+                        for i in 2..p.len() {
+                            vertices.extend([p[0], p[i - 1], p[i]]);
+                        }
+                    }
+                    (
+                        Geometry::Winding {
+                            vertices,
+                            even_odd: *rule == Rule::EvenOdd,
+                        },
+                        color,
+                    )
+                }
+                _ => return None,
+            };
+            let Paint::Solid(color) = color else {
+                return None;
+            };
+            draws.push(Draw {
+                geometry,
+                color: *color,
+            });
+        }
+        Some(Raster {
+            width: self.width,
+            height: self.height,
+            crop: rect.map(|v| v as u32),
+            multisampled: self.multisampled(),
+            draws,
+        })
     }
 
     /// A single white fill's alpha, with CPU work bounded to its device mesh.
@@ -656,8 +805,8 @@ fn needs_msaa(o: &Op) -> bool {
         Op::Analytic { .. } | Op::Layer { .. } | Op::Bitmap { .. } => false,
     }
 }
-fn render_ops(width: u32, height: u32, ops: &[Op]) -> Vec<u8> {
-    let pattern = if ops.iter().any(needs_msaa) {
+fn render_ops(width: u32, height: u32, ops: &[Op], pass_msaa: bool) -> Vec<u8> {
+    let pattern = if pass_msaa || ops.iter().any(needs_msaa) {
         &SAMPLES_4X[..]
     } else {
         &SAMPLES_1X[..]
@@ -672,8 +821,13 @@ fn render_op(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>) {
     let viewport = tess::Viewport::of(target.width, target.height);
     render_op_region(target, op, clip, viewport, [0, 0]);
 }
-fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
-                    viewport: tess::Viewport, origin: [i32; 2]) {
+fn render_op_region(
+    target: &mut MsaaTarget,
+    op: &Op,
+    clip: Option<&[f32]>,
+    viewport: tess::Viewport,
+    origin: [i32; 2],
+) {
     use super::msaa::{fill_triangles, unorm8};
     let mut mask = target.mask();
     let mut coverage = None;
@@ -686,7 +840,7 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
             fill_polygons(&mut mask, &mapped, *rule);
             color
         }
-        Op::Triangles { tris, color } => {
+        Op::Triangles { tris, color, .. } => {
             let mut mapped = viewport.map_triangles(tris);
             for p in mapped.iter_mut().flatten() {
                 p[0] -= origin[0] as f32; p[1] -= origin[1] as f32;
@@ -695,7 +849,13 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
             color
         }
         Op::Analytic { inst, color } => {
-            coverage = Some(analytic::rasterize_region(inst, target.width, target.height, target.pattern, origin));
+            coverage = Some(analytic::rasterize_region(
+                inst,
+                target.width,
+                target.height,
+                target.pattern,
+                origin,
+            ));
             color
         }
         Op::Clip { op, clips } => {
@@ -706,7 +866,12 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
                     let local = tess::fill_polygons_local(p, m);
                     let polys = viewport.map_polygons(&tess::to_device(&local, m));
                     if let Some(g) = geometry {
-                        let c = analytic::rasterize(&analytic::instance(g, m), target.width, target.height, target.pattern);
+                        let c = analytic::rasterize(
+                            &analytic::instance(g, m),
+                            target.width,
+                            target.height,
+                            target.pattern,
+                        );
                         for (a, b) in union.iter_mut().zip(c.coverage) {
                             let b = b.unwrap_or(0.0);
                             *a += b * (1.0 - *a);
@@ -715,7 +880,11 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
                         let mut c = target.mask();
                         fill_polygons(&mut c, &polys, *rule);
                         for (i, a) in union.iter_mut().enumerate() {
-                            let b = f32::from(u8::from(c.bits[i / target.pattern.len()] & (1 << (i % target.pattern.len())) != 0));
+                            let b = f32::from(u8::from(
+                                c.bits[i / target.pattern.len()]
+                                    & (1 << (i % target.pattern.len()))
+                                    != 0,
+                            ));
                             *a += b * (1.0 - *a);
                         }
                     }
@@ -744,8 +913,13 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
             }
             return;
         }
-        Op::Layer { ops, alpha, blur, linear } => {
-            let mut pixels = render_ops(target.width, target.height, ops);
+        Op::Layer {
+            ops,
+            alpha,
+            blur,
+            linear,
+        } => {
+            let mut pixels = render_ops(target.width, target.height, ops, false);
             if blur[0] > 0.0 || blur[1] > 0.0 {
                 if *linear {
                     linear_rgb(&mut pixels, false);
@@ -782,8 +956,10 @@ fn render_op_region(target: &mut MsaaTarget, op: &Op, clip: Option<&[f32]>,
             continue;
         }
         let color = paint
-            .at((p % target.width as usize) as f32 + origin[0] as f32 + 0.5,
-                (p / target.width as usize) as f32 + origin[1] as f32 + 0.5)
+            .at(
+                (p % target.width as usize) as f32 + origin[0] as f32 + 0.5,
+                (p / target.width as usize) as f32 + origin[1] as f32 + 0.5,
+            )
             .map(|v| v * cov);
         let inv = 1.0 - color[3];
         for c in 0..4 {
@@ -859,7 +1035,11 @@ mod window_tests {
         // tessellation paths. Also a genuine UHD viewport (never recentered).
         for (w, h) in [(317, 233), (1920, 1080), (3840, 2160)] {
             for kind in 0..4 {
-                for (x, y) in [(13.375, 17.625), (-45.125, 6.875), (w as f64-5.25, h as f64-7.125)] {
+                for (x, y) in [
+                    (13.375, 17.625),
+                    (-45.125, 6.875),
+                    (w as f64 - 5.25, h as f64 - 7.125),
+                ] {
                     let mut c = Context::new(w, h);
                     c.set_fill_style("white");
                     c.translate(x, y);

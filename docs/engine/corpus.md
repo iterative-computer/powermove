@@ -94,6 +94,38 @@ module state with the app.
 
 ## Layout
 
+### Explicit COMPCLOSE-1 reference correction
+
+The owner decision of 2026-10-19 keeps correct center-time video frames rather
+than reproducing the legacy stale-upload bug. Produce corrected references
+with today's built app under the Electron lock:
+
+```sh
+~/Library/Caches/powermove-engine/bin/pm-electron-lock \
+  bun engine/corpus/src/compclose1.ts "<motion capture directory>"
+```
+
+This command is restricted to `motion/blur-video` at t=0.5 and t=1.2, 480×270.
+It prepares the center frame, drops cached source textures through the legacy
+compositor's own invalidation API, primes source uploads with a sharp center
+render, then captures its unchanged 16-sample blur.
+The recorded upload timestamps must match the correct fixture frame, and
+each corrected capture must repeat exactly. No native renderer output is used.
+
+The original `sample.png` record and file stay intact. Both the project record
+and manifest receive `sample.referenceSubstitution` with `id: "COMPCLOSE-1"`,
+`ownerDecision: "2026-10-19"`, a reason, `original` and `corrected` file records,
+and absolute `evidence` paths outside Git. The added PNG and provenance JSON
+live under `references/COMPCLOSE-1/` in that project; any further evidence
+(comparison images and measurements) goes in `references/COMPCLOSE-1/evidence/`.
+Evidence must be inside the capture: `verify` and the Rust corpus reject a
+path elsewhere (a `/tmp` file would vanish and break the gate later). `verify` checks these
+annotations alongside the original outputs; original capture byte totals stay
+unchanged. The general Rust corpus validates both PNGs' sizes, hashes, and
+dimensions before selecting corrected pixels, logs every application, and
+rejects other samples or malformed annotations. Original-only diagnostics
+can still read `sample.png`. Bounds and project selection are unchanged.
+
 ```text
 <capture-id>/
   manifest.json

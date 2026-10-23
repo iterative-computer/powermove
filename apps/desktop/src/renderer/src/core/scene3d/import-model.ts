@@ -1,6 +1,11 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
+/** The bytes each loaded model was parsed from, for the engine's geometry (picks and bounds). */
+const modelSources=new WeakMap<THREE.Object3D,ArrayBuffer>();
+export const modelSourceBytes=(root:THREE.Object3D):ArrayBuffer|null=>modelSources.get(root)??null;
+export const registerModelSource=(root:THREE.Object3D,bytes:ArrayBuffer):void=>{modelSources.set(root,bytes);};
+
 /** Self-contained glTF only: imports must never fetch untrusted remote dependencies. */
 export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animations:THREE.AnimationClip[];vertices:number;triangles:number}> {
   if(blob.size>128*1024*1024)throw new Error('GLB models must be smaller than 128 MB');
@@ -56,6 +61,7 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
   const normalization=new THREE.Group(),root=new THREE.Group();
   normalization.add(scene);normalization.scale.setScalar(1/radius);scene.position.sub(center);
   root.add(normalization);
+  modelSources.set(root,data);
   return {object3d:root,animations:result.animations,vertices,triangles:Math.ceil(triangles)};
 }
 export function disposeModel(root:THREE.Object3D):void {

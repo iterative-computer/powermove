@@ -69,6 +69,7 @@ export type PageLifecycle = { addEventListener(type: 'pagehide', listener: () =>
 export function installFrameBridgeReceiver(module: ReceiverModule, page: PageLifecycle | null = typeof window === 'undefined' ? null : window, notify: NotifyRelease | null = null): FrameBridgeApi {
   let launch = 0;
   const imports = new Map<string, ImportedLike>();
+  const retired = new Set<number>();
   const listeners = new Set<(generation: number, poolIndex: number) => void>();
   const stats: FrameBridgeStats = { launch: 0, held: 0, received: 0, released: 0, videoFrames: 0, misses: 0, duplicates: 0, lateReleases: 0, errors: [] };
   const key = (generation: number, poolIndex: number): string => `${generation}:${poolIndex}`;
@@ -128,6 +129,11 @@ export function installFrameBridgeReceiver(module: ReceiverModule, page: PageLif
       for (const k of [...imports.keys()]) release(k);
       launch = info.launch;
       stats.launch = launch;
+      retired.clear();
+    }
+    if (retired.has(info.generation)) {
+      letGo(importedSharedTexture, true);
+      return;
     }
     const k = key(info.generation, info.poolIndex);
     const held = imports.get(k);
@@ -171,6 +177,7 @@ export function installFrameBridgeReceiver(module: ReceiverModule, page: PageLif
       return () => listeners.delete(listener);
     },
     retire(generation) {
+      retired.add(generation);
       let n = 0;
       for (const k of [...imports.keys()]) {
         if (k.startsWith(`${generation}:`)) {

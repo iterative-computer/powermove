@@ -198,10 +198,9 @@ impl super::scene::MaskSource for CgMasks {
             glyphs: Vec::new(),
             color: [0.0, 0.0, 0.0, 1.0],
         };
-        let mask = self
-            .fonts
-            .font_of(face.id, &run)
-            .and_then(|font| draw_transformed(&font, glyph, &strike, sub, false).map(Arc::new));
+        let mask = self.fonts.font_of(face.id, &run).and_then(|font| {
+            draw_transformed(&font, glyph, &strike, sub, false, true).map(Arc::new)
+        });
         if self.bytes > CACHE_BYTES {
             self.clear();
         }
@@ -265,7 +264,7 @@ impl super::scene::MaskSource for CgMasks {
                     &a8, w as usize, h as usize, left, top,
                 )));
             }
-            let a8 = draw_transformed(&font, glyph, &m, (0, 0), true)?;
+            let a8 = draw_transformed(&font, glyph, &m, (0, 0), true, false)?;
             Some(Arc::new(super::sdf::SdfGlyph::from_a8(
                 &a8.coverage,
                 a8.width as usize,
@@ -555,7 +554,9 @@ fn glyph_path_with(
     let back = (1.0 / x_scale) as f32;
     let pts: Vec<(pm_skia_path::PathSegment, ())> = built.segments().map(|s| (s, ())).collect();
     let mut b = pm_skia_path::PathBuilder::new();
-    let m = |q: pm_skia_path::Point| (q.x * back + dx, q.y);
+    // SkMatrix::Scale still maps y as 1*y + 0. In particular, this
+    // canonicalizes the negative zero introduced by the CG y-axis flip.
+    let m = |q: pm_skia_path::Point| (q.x * back + dx, q.y + 0.0);
     for (seg, _) in pts {
         match seg {
             pm_skia_path::PathSegment::MoveTo(a) => {
@@ -730,12 +731,17 @@ impl StrikeMatrix {
 /// bottom, rounded out, outset by 1), and the glyph drawn by CoreGraphics
 /// with the transform as the text matrix at the point mapped back through
 /// its inverse.
+/// The glyph's mask under `strike` at quarter offsets `sub`. With
+/// `direct`, a mask beyond Skia's atlas (`fitsInAtlasDirect`) is returned
+/// with its bounds only (no coverage): Skia never rasterizes it, and the
+/// scene draws that glyph as its path.
 fn draw_transformed(
     font: &CFRetained<CTFont>,
     glyph: u16,
     strike: &StrikeMatrix,
     sub: (u8, u8),
     linear: bool,
+    direct: bool,
 ) -> Option<GlyphMask> {
     use objc2_core_foundation::{CGAffineTransform, CGRect};
     let t = strike.cg();
@@ -765,7 +771,19 @@ fn draw_transformed(
     let right = rt.ceil() as i32 + 1;
     let bottom = bt.ceil() as i32 + 1;
     let (w, h) = ((right - left) as usize, (bottom - top) as usize);
-    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    if direct && w.max(h) > 256 {
+        return Some(GlyphMask {
+            width: u32::try_from(w).ok()?,
+            height: u32::try_from(h).ok()?,
+            left,
+            top,
+            coverage: Vec::new(),
+        });
+    }
+    if w > 4096 || h > 4096 {
         return None;
     }
     let mut pixels = vec![0xffff_ffffu32; w * h];

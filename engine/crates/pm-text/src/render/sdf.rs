@@ -5,11 +5,12 @@
 //! preblend (the SDF mask filter ignores it), turned into an 8-bit signed
 //! distance field (`SkGenerateDistanceFieldFromA8Image`, padded by 4), and
 //! drawn as a quad inset by 2 texels whose fragments sample the field
-//! bilinearly and shade it with Graphite's `sdf_text_coverage_fn` in half
-//! precision.
+//! bilinearly. The production GPU path executes Chromium 152's f32 Dawn
+//! shader (pm-render/text/graphite); the CPU reference below retains the
+//! earlier half-precision emulation.
 //!
 //! [`distance_field`] is a port of `src/core/SkDistanceFieldGen.cpp` from
-//! Skia m149 (the A8 path), in the same `f32` arithmetic and the same
+//! Skia m152 (the A8 path), in the same `f32` arithmetic and the same
 //! pointer walk; [`draw`] emulates the draw: the vertex positions in `f32`,
 //! the rasterizer's subpixel snapping, attribute interpolation, bilinear
 //! filtering, and the fragment function with every `half` operation rounded

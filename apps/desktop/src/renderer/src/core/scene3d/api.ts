@@ -43,7 +43,7 @@ export function makeScene3DAPI(PM:any,emit:(event:'scene3d:selection',selection:
     },
     getRendering:()=>renderSettings(PM.curComp?.()||PM.proj),setRendering:(patch,meta)=>setRenderSettings(PM,patch,meta),blenderStatus,chooseBlender:()=>bridge()?.blender?.choose()||Promise.resolve(null),
     previewState:()=>renderState(PM),setPreviewMode:mode=>setPreviewMode(PM,mode),onPreviewChange:listener=>({dispose:onRenderState(PM,listener)}),renderFrame:()=>renderBlenderPreview(PM),cancelRender:()=>cancelBlender(PM),
-    getAutoKey:()=>!!PM.autokey,setAutoKey:value=>{PM.autokey=!!value;notifyViewport(PM);},createScene,createObject,createLight,prepareImport:prepareModelImport,convert:layerId=>convertLegacyScene(PM,layerId),edit:(args,meta)=>editScene(PM,args,{origin:'interface',...meta}),
+    getAutoKey:()=>!!PM.autokey,setAutoKey:value=>{PM.autokey=!!value;notifyViewport(PM);},createScene,createObject,createLight,prepareImport:files=>prepareModelImport(files,PM),convert:layerId=>convertLegacyScene(PM,layerId),edit:(args,meta)=>editScene(PM,args,{origin:'interface',...meta}),
     isGroup:layerId=>isModelGroup(PM,PM.L?.(layerId)),
     getView:()=>getViewportMode(PM),setView:mode=>setViewportMode(PM,mode),onViewChange:listener=>({dispose:onViewportChange(PM,listener)}),
     frame:selected=>{try{frameComposition(PM,selected);}catch(error){warn(PM,error);}},

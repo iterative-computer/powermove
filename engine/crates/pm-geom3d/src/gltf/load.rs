@@ -1,5 +1,6 @@
 //! `loadGltf` and three.js r180's `GLTFLoader.parse`, as data.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -52,7 +53,7 @@ const CHUNK_JSON: u32 = 0x4e4f_534a;
 
 /// The JSON document and the GLB `BIN` chunk, with `loadGltf`'s container
 /// checks.
-fn container(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>)> {
+pub(crate) fn container(bytes: &[u8]) -> Result<(Value, Option<Cow<'_, [u8]>>)> {
     if bytes.len() >= 20 && u32_at(bytes, 0) == GLB_MAGIC {
         if u32_at(bytes, 4) != 2 || u32_at(bytes, 8) as usize != bytes.len() {
             return err("Invalid GLB container");
@@ -68,7 +69,7 @@ fn container(bytes: &[u8]) -> Result<(Value, Option<Vec<u8>>)> {
         let glb = gltf::Glb::from_slice(bytes).map_err(|e| Error(format!("GLB: {e}")))?;
         let json: Value =
             serde_json::from_slice(&glb.json).map_err(|e| Error(format!("GLB JSON: {e}")))?;
-        let body = glb.bin.map(|b| b.into_owned());
+        let body = glb.bin;
         Ok((json, body))
     } else {
         let text = std::str::from_utf8(bytes).map_err(|e| Error(format!("glTF JSON: {e}")))?;
@@ -143,6 +144,30 @@ fn index(v: &Value) -> Option<usize> {
     v.as_u64().map(|i| i as usize)
 }
 
+/// The prefix of the error for an accessor type GLTFLoader has no size for.
+const UNKNOWN_TYPE: &str = "accessor type";
+
+/// JavaScript's `ToNumber` of a JSON value, as typed-array and matrix
+/// stores apply it.
+pub(crate) fn js_number(v: &Value) -> f64 {
+    match v {
+        Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
+        Value::Null => 0.0,
+        Value::Bool(b) => f64::from(u8::from(*b)),
+        Value::String(t) => {
+            let t = t.trim();
+            if t.is_empty() {
+                0.0
+            } else {
+                t.parse().unwrap_or(f64::NAN)
+            }
+        }
+        Value::Array(a) if a.is_empty() => 0.0,
+        Value::Array(a) if a.len() == 1 => js_number(&a[0]),
+        _ => f64::NAN,
+    }
+}
+
 /// `PropertyBinding.sanitizeNodeName`.
 fn sanitize(name: &str) -> String {
     name.chars()
@@ -173,7 +198,7 @@ impl Names {
 
 struct Doc<'a> {
     json: &'a Value,
-    buffers: Vec<Vec<u8>>,
+    buffers: Vec<Cow<'a, [u8]>>,
 }
 
 const TYPES: [(&str, usize); 7] = [
@@ -186,19 +211,81 @@ const TYPES: [(&str, usize); 7] = [
     ("MAT4", 16),
 ];
 
-/// An accessor as three.js holds it: values as numbers (normalized
-/// integers kept raw), component type, item size.
+/// An accessor with exact source components (normalized integers kept raw),
+/// component type, and item size. `raw`/`get` expose three.js numbers.
+enum Components {
+    Float(Arc<Vec<f32>>),
+    Integer(Vec<u32>),
+}
+
+impl Components {
+    fn len(&self) -> usize {
+        match self {
+            Self::Float(values) => values.len(),
+            Self::Integer(values) => values.len(),
+        }
+    }
+
+    fn resize(&mut self, len: usize) {
+        match self {
+            Self::Float(values) => Arc::make_mut(values).resize(len, 0.0),
+            Self::Integer(values) => values.resize(len, 0),
+        }
+    }
+}
+
+/// Accessor assembly is exclusively owned; wrap float storage in an Arc
+/// only after base and sparse writes are complete.
+enum DecodeBuffer {
+    Float(Vec<f32>),
+    Integer(Vec<u32>),
+}
+
+impl DecodeBuffer {
+    fn set_bits(&mut self, index: usize, bits: u32) {
+        match self {
+            Self::Float(values) => {
+                // The old path decoded to f64, then stored in a Float32Array.
+                // Keep that round trip (including signaling-NaN quieting).
+                values[index] = f64::from(f32::from_bits(bits)) as f32;
+            }
+            Self::Integer(values) => values[index] = bits,
+        }
+    }
+
+    fn share(self) -> Components {
+        match self {
+            Self::Float(values) => Components::Float(Arc::new(values)),
+            Self::Integer(values) => Components::Integer(values),
+        }
+    }
+}
+
 struct Raw {
-    values: Vec<f64>,
+    // A glTF component occupies at most four bytes. Keep its exact source
+    // bits until a consumer asks for a JS number: f64 staging doubled the
+    // peak size of large POSITION accessors, while f32 staging would lose
+    // exact u32 indices above 2^24.
+    values: Components,
     size: usize,
     component: u64,
     normalized: bool,
 }
 
 impl Raw {
+    fn raw(&self, i: usize) -> f64 {
+        match &self.values {
+            Components::Float(values) => f64::from(values[i]),
+            Components::Integer(values) => match self.component {
+                5120 | 5122 => f64::from(values[i] as i32),
+                _ => f64::from(values[i]),
+            },
+        }
+    }
+
     /// The value `BufferAttribute.getX` returns (denormalized).
     fn get(&self, i: usize) -> f64 {
-        let v = self.values[i];
+        let v = self.raw(i);
         if !self.normalized {
             return v;
         }
@@ -214,7 +301,12 @@ impl Raw {
     /// The f32 value WebGL's vertex fetch produces.
     fn attribute(&self) -> Attribute {
         Attribute {
-            data: (0..self.values.len()).map(|i| self.get(i) as f32).collect(),
+            data: match &self.values {
+                Components::Float(values) => values.clone(),
+                Components::Integer(_) => {
+                    Arc::new((0..self.values.len()).map(|i| self.get(i) as f32).collect())
+                }
+            },
             size: self.size,
         }
     }
@@ -240,11 +332,14 @@ impl Doc<'_> {
             .buffers
             .get(b)
             .ok_or_else(|| Error(format!("buffer {b} missing")))?;
-        let start = v["byteOffset"].as_u64().unwrap_or(0) as usize;
+        // `loadBufferView`: `buffer.slice(byteOffset, byteOffset +
+        // byteLength)`, which clamps both ends to the buffer; an accessor
+        // reading past the shorter view fails below, as its typed array
+        // constructor does.
+        let start = (v["byteOffset"].as_u64().unwrap_or(0) as usize).min(buffer.len());
         let len = v["byteLength"].as_u64().unwrap_or(0) as usize;
-        buffer
-            .get(start..start + len)
-            .ok_or_else(|| Error(format!("buffer view {i} is out of range")))
+        let end = start.saturating_add(len).min(buffer.len());
+        Ok(&buffer[start..end])
     }
 
     /// `loadAccessor`.
@@ -262,7 +357,7 @@ impl Doc<'_> {
             .iter()
             .find(|(n, _)| *n == ty)
             .map(|(_, s)| *s)
-            .ok_or_else(|| Error(format!("accessor type {ty}")))?;
+            .ok_or_else(|| Error(format!("{UNKNOWN_TYPE} {ty}")))?;
         let component = a["componentType"].as_u64().unwrap_or(0);
         let normalized = a["normalized"].as_bool() == Some(true);
         let csize = match component {
@@ -271,17 +366,20 @@ impl Doc<'_> {
             5125 | 5126 => 4,
             c => return err(format!("accessor component type {c}")),
         };
-        let decode = |b: &[u8]| -> f64 {
+        let decode = |b: &[u8]| -> u32 {
             match component {
-                5120 => f64::from(b[0] as i8),
-                5121 => f64::from(b[0]),
-                5122 => f64::from(i16::from_le_bytes([b[0], b[1]])),
-                5123 => f64::from(u16::from_le_bytes([b[0], b[1]])),
-                5125 => f64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]])),
-                _ => f64::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+                5120 => i32::from(b[0] as i8) as u32,
+                5121 => u32::from(b[0]),
+                5122 => i32::from(i16::from_le_bytes([b[0], b[1]])) as u32,
+                5123 => u32::from(u16::from_le_bytes([b[0], b[1]])),
+                _ => u32_at(b, 0),
             }
         };
-        let mut values = vec![0.0; count * size];
+        let mut values = if component == 5126 {
+            DecodeBuffer::Float(vec![0.0; count * size])
+        } else {
+            DecodeBuffer::Integer(vec![0; count * size])
+        };
         if let Some(view_index) = index(&a["bufferView"]) {
             let view = self.view(view_index)?;
             let offset = a["byteOffset"].as_u64().unwrap_or(0) as usize;
@@ -317,7 +415,7 @@ impl Doc<'_> {
                     } else {
                         c * csize
                     };
-                    values[e * size + c] = decode(&view[base + at..]);
+                    values.set_bits(e * size + c, decode(&view[base + at..]));
                 }
             }
         }
@@ -346,16 +444,17 @@ impl Doc<'_> {
                     2 => u16::from_le_bytes([ib[2 * k], ib[2 * k + 1]]) as usize,
                     _ => u32_at(ib, 4 * k) as usize,
                 };
+                // `setX` past the end of the typed array writes nothing.
                 if target >= count {
-                    return err("sparse index out of range");
+                    continue;
                 }
                 for c in 0..size.min(4) {
-                    values[target * size + c] = decode(&vb[(k * size + c) * csize..]);
+                    values.set_bits(target * size + c, decode(&vb[(k * size + c) * csize..]));
                 }
             }
         }
         Ok(Raw {
-            values,
+            values: values.share(),
             size,
             component,
             normalized,
@@ -407,6 +506,8 @@ struct Loader<'a> {
     light_defs: Vec<Option<usize>>,
     /// glTF node → its object.
     node_objects: HashMap<usize, usize>,
+    selected_parents: Vec<Option<usize>>,
+    selected_roots: Vec<usize>,
     /// Per mesh: how many nodes reference it, and uses so far.
     mesh_refs: HashMap<usize, (u32, u32)>,
     light_refs: HashMap<usize, (u32, u32)>,
@@ -851,9 +952,18 @@ impl Loader<'_> {
         {
             return err("Draco-compressed glTF is not supported");
         }
+        // An accessor of a type GLTFLoader has no size for
+        // (`WEBGL_TYPE_SIZES[type]` undefined) becomes an attribute with no
+        // elements, which no vertex reads: the attribute is absent here. A
+        // POSITION without elements leaves the model with no vertices,
+        // which `loadGltf` refuses.
         let read = |name: &str| -> Result<Option<Raw>> {
             match index(&attrs[name]) {
-                Some(i) => Ok(Some(self.doc.accessor(i)?)),
+                Some(i) => match self.doc.accessor(i) {
+                    Ok(a) => Ok(Some(a)),
+                    Err(e) if e.0.starts_with(UNKNOWN_TYPE) && name != "POSITION" => Ok(None),
+                    Err(e) => Err(e),
+                },
                 None => Ok(None),
             }
         };
@@ -864,36 +974,58 @@ impl Loader<'_> {
         }
         let count = position.count();
         let check = |a: &Option<Raw>, name: &str, sizes: &[usize]| -> Result<()> {
-            if let Some(a) = a {
-                if !sizes.contains(&a.size) {
-                    return err(format!("{name} has {} components", a.size));
-                }
-                if a.count() < count {
-                    return err(format!("{name} has fewer elements than POSITION"));
-                }
+            if let Some(a) = a
+                && !sizes.contains(&a.size)
+            {
+                return err(format!("{name} has {} components", a.size));
             }
             Ok(())
         };
-        let normal = read("NORMAL")?;
+        // Keep the source lengths for the final shader's active-attribute
+        // decision. CPU poses use padded values; an inactive short attribute
+        // does not make WebGL refuse the draw. Short skin attributes throw
+        // in `setFromObject` (below).
+        let mut short: Vec<(&'static str, usize)> = Vec::new();
+        let mut pad = |a: Option<Raw>, name: &'static str| -> Option<Raw> {
+            a.map(|mut a| {
+                if a.count() < count {
+                    short.push((name, a.count()));
+                    a.values.resize(count * a.size);
+                }
+                a
+            })
+        };
+        let normal = pad(read("NORMAL")?, "NORMAL");
         check(&normal, "NORMAL", &[3])?;
-        let tangent = read("TANGENT")?;
+        let tangent = pad(read("TANGENT")?, "TANGENT");
         check(&tangent, "TANGENT", &[4])?;
         let mut uv: [Option<Attribute>; 4] = Default::default();
         for (k, slot) in uv.iter_mut().enumerate() {
-            let a = read(&format!("TEXCOORD_{k}"))?;
+            let name = ["TEXCOORD_0", "TEXCOORD_1", "TEXCOORD_2", "TEXCOORD_3"][k];
+            let a = pad(read(name)?, name);
             check(&a, "TEXCOORD", &[2])?;
             *slot = a.map(|a| a.attribute());
         }
-        let color = read("COLOR_0")?;
+        let color = pad(read("COLOR_0")?, "COLOR_0");
         check(&color, "COLOR_0", &[3, 4])?;
         let joints = read("JOINTS_0")?;
         check(&joints, "JOINTS_0", &[4])?;
+        if joints.as_ref().is_some_and(|a| a.count() < count) {
+            return err("JOINTS_0 has fewer elements than POSITION");
+        }
         let weights = read("WEIGHTS_0")?;
         check(&weights, "WEIGHTS_0", &[4])?;
+        if weights.as_ref().is_some_and(|a| a.count() < count) {
+            return err("WEIGHTS_0 has fewer elements than POSITION");
+        }
         let mut indices = match index(&p["indices"]) {
             Some(i) => {
                 let a = self.doc.accessor(i)?;
-                Some(a.values.iter().map(|v| *v as u32).collect::<Vec<u32>>())
+                Some(
+                    (0..a.values.len())
+                        .map(|k| a.raw(k) as u32)
+                        .collect::<Vec<u32>>(),
+                )
             }
             None => None,
         };
@@ -928,10 +1060,12 @@ impl Loader<'_> {
             }
             Some(m) => return err(format!("Primitive mode unsupported: {m}")),
         };
+        // An index past the last vertex loads today (the import facts and
+        // bounds read positions only); WebGL refuses to draw the primitive.
         if let Some(ix) = &indices
             && ix.iter().any(|&i| i as usize >= count)
         {
-            return err("a primitive index is out of range");
+            short.insert(0, ("an index past the last vertex", 0));
         }
         // `computeBounds`.
         let bounding_box = {
@@ -1008,7 +1142,7 @@ impl Loader<'_> {
                         // A missing target attribute is the base attribute
                         // itself (relative: added as is).
                         None => out.push(base.map(Raw::attribute).unwrap_or(Attribute {
-                            data: vec![0.0; count * 3],
+                            data: Arc::new(vec![0.0; count * 3]),
                             size: 3,
                         })),
                     }
@@ -1017,12 +1151,42 @@ impl Loader<'_> {
             };
             if hp {
                 morph.position = Some(list("POSITION", Some(&position))?);
+                morph.source_counts[0] = morph
+                    .position
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(Attribute::count)
+                    .collect();
             }
             if hn {
                 morph.normal = Some(list("NORMAL", normal.as_ref())?);
+                morph.source_counts[1] = morph
+                    .normal
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(Attribute::count)
+                    .collect();
             }
             if hc {
                 morph.color = Some(list("COLOR_0", color.as_ref())?);
+                morph.source_counts[2] = morph
+                    .color
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(Attribute::count)
+                    .collect();
+            }
+        }
+        // WebGLMorphtargets packs morph attributes into a texture in JS.
+        // Short targets therefore do not bind a short vertex buffer.
+        for targets in [&mut morph.position, &mut morph.normal, &mut morph.color] {
+            for t in targets.iter_mut().flatten() {
+                if t.data.len() < count * t.size {
+                    Arc::make_mut(&mut t.data).resize(count * t.size, 0.0);
+                }
             }
         }
         let g = Geometry {
@@ -1032,15 +1196,23 @@ impl Loader<'_> {
             uv,
             color: color.map(|a| a.attribute()),
             skin_index: joints.map(|a| Attribute {
-                data: a.values.iter().map(|v| *v as f32).collect(),
+                data: Arc::new((0..a.values.len()).map(|k| a.raw(k) as f32).collect()),
                 size: 4,
             }),
             skin_weight_bits: weights.as_ref().and_then(Raw::bits),
             skin_weight: weights.map(|a| a.attribute()),
-            index: indices,
+            index: indices.map(Arc::new),
             morph,
             bounding_box,
             mode,
+            undrawable: short
+                .iter()
+                .find(|(name, _)| name.starts_with("an index"))
+                .map(|(name, _)| (*name).to_owned()),
+            short_attributes: short
+                .into_iter()
+                .filter(|(name, _)| !name.starts_with("an index"))
+                .collect(),
         };
         self.geometries.push(g);
         let i = self.geometries.len() - 1;
@@ -1056,7 +1228,7 @@ impl Loader<'_> {
         let Some(w) = &mut g.skin_weight else {
             return;
         };
-        for v in w.data.chunks_exact_mut(4) {
+        for v in Arc::make_mut(&mut w.data).chunks_exact_mut(4) {
             let x = [
                 f64::from(v[0]),
                 f64::from(v[1]),
@@ -1305,6 +1477,11 @@ impl Loader<'_> {
             }
         }
         if let Some(ci) = index(&def["camera"]) {
+            // `loadCamera` reads `json.cameras[index]`'s type: a missing
+            // camera throws.
+            if self.doc.json["cameras"].get(ci).is_none() {
+                return err(format!("node {ni}: camera {ci} missing"));
+            }
             let cname = self.doc.json["cameras"][ci]["name"]
                 .as_str()
                 .filter(|n| !n.is_empty())
@@ -1365,12 +1542,11 @@ impl Loader<'_> {
             self.objects[o].name = name;
         }
         if let Some(m) = def["matrix"].as_array() {
-            if m.len() != 16 {
-                return err(format!("node {ni}: matrix must have 16 values"));
-            }
-            let mut mat: Mat4 = [0.0; 16];
-            for (k, v) in m.iter().enumerate() {
-                mat[k] = v.as_f64().unwrap_or(0.0);
+            // `Matrix4.fromArray`: the first 16 entries; a missing one is
+            // `undefined`, NaN in the arithmetic below.
+            let mut mat: Mat4 = [f64::NAN; 16];
+            for (k, v) in m.iter().take(16).enumerate() {
+                mat[k] = js_number(v);
             }
             // `applyMatrix4` on an identity transform: decompose.
             let (t, r, s) = math::decompose(&mat);
@@ -1399,6 +1575,9 @@ impl Loader<'_> {
             if c == ni {
                 return err(format!("node {ni} is its own child"));
             }
+            if self.selected_parents.get(c) != Some(&Some(ni)) {
+                continue;
+            }
             children.push(self.node(c, depth + 1)?);
         }
         if let Some(si) = index(&def["skin"]) {
@@ -1414,9 +1593,6 @@ impl Loader<'_> {
             }
         }
         for c in children {
-            if self.objects[c].parent.is_some() {
-                return err(format!("a node of node {ni} has two parents"));
-            }
             self.attach(o, c);
         }
         Ok(o)
@@ -1495,11 +1671,18 @@ impl Loader<'_> {
         for (k, &j) in joints.iter().enumerate() {
             let o = self.node(j, 0)?;
             bones.push(o);
+            // `mat.fromArray(inverseBindMatrices.array, i * 16)`: entries
+            // past the array are `undefined` (NaN).
             let m: Mat4 = match &inverses {
-                Some(a) if (k + 1) * 16 <= a.values.len() => {
-                    std::array::from_fn(|e| math::f32_of(a.get(k * 16 + e)))
-                }
-                _ => math::IDENTITY,
+                Some(a) => std::array::from_fn(|e| {
+                    let at = k * 16 + e;
+                    if at < a.values.len() {
+                        math::f32_of(a.get(at))
+                    } else {
+                        f64::NAN
+                    }
+                }),
+                None => math::IDENTITY,
             };
             inv.push(m);
         }
@@ -1516,7 +1699,7 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
     if bytes.len() > limits.bytes {
         return err("GLB models must be smaller than 128 MB");
     }
-    let (json, body) = container(bytes)?;
+    let (json, mut body) = container(bytes)?;
     for dep in json["buffers"]
         .as_array()
         .into_iter()
@@ -1588,10 +1771,10 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
         }
         match b["uri"].as_str() {
             None if i == 0 => buffers.push(
-                body.clone()
+                body.take()
                     .ok_or_else(|| Error("GLB has no BIN chunk".into()))?,
             ),
-            Some(uri) => buffers.push(decode_data_uri(uri)?.1),
+            Some(uri) => buffers.push(Cow::Owned(decode_data_uri(uri)?.1)),
             None => return err("a buffer without data"),
         }
     }
@@ -1677,6 +1860,8 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
             light_refs.entry(l).or_insert((0, 0)).0 += 1;
         }
     }
+    let selection = super::promise_order::selected_parents(&json)
+        .ok_or_else(|| Error("glTF node hierarchy is cyclic or invalid".into()))?;
     let mut loader = Loader {
         doc,
         ext,
@@ -1693,6 +1878,8 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
         lights: Vec::new(),
         light_defs: Vec::new(),
         node_objects: HashMap::new(),
+        selected_parents: selection.parents,
+        selected_roots: selection.default_roots,
         mesh_refs,
         light_refs,
         camera_refs,
@@ -1718,12 +1905,15 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
     let mut roots = Vec::new();
     for n in scene["nodes"].as_array().into_iter().flatten() {
         let n = index(n).ok_or_else(|| Error("a scene node is not an index".into()))?;
+        if !loader.selected_roots.contains(&n) {
+            continue;
+        }
         roots.push(loader.node(n, 0)?);
     }
+    // `loadScene`: `scene.add(node)` for each scene node once every one
+    // has loaded, so a scene node another node also lists moves to the
+    // scene (and one listed twice moves to the end).
     for r in roots {
-        if loader.objects[r].parent.is_some() {
-            return err("a scene node has a parent");
-        }
         loader.attach(root, r);
     }
     let clips = clips(&mut loader)?;
@@ -1781,7 +1971,7 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
             }
             let n = g.vertex_count();
             vertices += n;
-            triangles += g.index.as_ref().map_or(n, Vec::len) as f64 / 3.0;
+            triangles += g.index.as_ref().map_or(n, |index| index.len()) as f64 / 3.0;
         }
     }
     for i in model.traversal() {
@@ -1795,6 +1985,29 @@ pub fn load_with(bytes: &[u8], limits: Limits) -> Result<Model> {
     }
     if vertices == 0 || triangles > limits.triangles as f64 {
         return err("GLB has no supported geometry or exceeds 500,000 triangles");
+    }
+    // `Box3.setFromObject` poses every skinned vertex
+    // (`applyBoneTransform`): a weight other than 0 on a joint the skin
+    // does not have reads `bones[index].matrixWorld` of `undefined`.
+    for i in model.traversal() {
+        if let ObjectKind::Drawable(d) = &model.objects[i].kind
+            && d.skinned
+            && let Some(s) = d.skin
+        {
+            let g = &model.geometries[d.geometry];
+            let bones = model.skins[s].bones.len();
+            if let (Some(si), Some(sw)) = (&g.skin_index, &g.skin_weight) {
+                for v in 0..g.vertex_count() {
+                    for k in 0..4 {
+                        let w = sw.data.get(v * 4 + k).copied().unwrap_or(f32::NAN);
+                        let j = si.data.get(v * 4 + k).copied().unwrap_or(f32::NAN);
+                        if w != 0.0 && !(j >= 0.0 && (j as usize) < bones && j.fract() == 0.0) {
+                            return err("a skinned vertex weights a joint its skin does not have");
+                        }
+                    }
+                }
+            }
+        }
     }
     let rest = super::pose::Pose::rest(&model);
     // A directional or spot light's `target` on the runtime's clone is a
@@ -1911,7 +2124,7 @@ fn clips(loader: &mut Loader<'_>) -> Result<Vec<Clip>> {
                 .map(|i| output.get(i) as f32)
                 .collect();
             let times: Vec<f32> = (0..input.values.len())
-                .map(|i| input.values[i] as f32)
+                .map(|i| input.raw(i) as f32)
                 .collect();
             let value_size = if times.is_empty() {
                 0
@@ -1973,4 +2186,104 @@ fn clips(loader: &mut Loader<'_>) -> Result<Vec<Clip>> {
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+    use crate::model_import::glb::GlbWriter;
+    use serde_json::{Map, json};
+
+    #[test]
+    fn glb_container_borrows_its_bin_chunk() {
+        let mut writer = GlbWriter::default();
+        writer.view(&[1, 2, 3, 4], None);
+        let mut document = Map::new();
+        document.insert("asset".into(), json!({"version":"2.0"}));
+        let bytes = writer.finish(document);
+        let (_, bin) = container(&bytes).unwrap();
+        let Cow::Borrowed(bin) = bin.unwrap() else {
+            panic!("GLB BIN was copied")
+        };
+        assert_eq!(bin, [1, 2, 3, 4]);
+        assert!(bin.as_ptr() >= bytes.as_ptr());
+        assert!((bin.as_ptr() as usize) + bin.len() <= (bytes.as_ptr() as usize) + bytes.len());
+    }
+
+    #[test]
+    fn sparse_float_accessor_shares_exact_attribute_bits() {
+        let original = [f32::from_bits(0x7f80_0001), -0.0, 1.0, 0.0];
+        let mut bytes: Vec<u8> = original.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let sparse_index = bytes.len();
+        bytes.push(2);
+        let sparse_value = bytes.len();
+        bytes.extend_from_slice(&2.0f32.to_le_bytes());
+        let json = json!({
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":16},
+                {"buffer":0,"byteOffset":sparse_index,"byteLength":1},
+                {"buffer":0,"byteOffset":sparse_value,"byteLength":4}
+            ],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"SCALAR",
+                "sparse":{"count":1,"indices":{"bufferView":1,"componentType":5121},
+                    "values":{"bufferView":2}}}]
+        });
+        let doc = Doc {
+            json: &json,
+            buffers: vec![Cow::Borrowed(&bytes)],
+        };
+        let raw = doc.accessor(0).unwrap();
+        let attribute = raw.attribute();
+        let Components::Float(values) = &raw.values else {
+            panic!("float accessor made integer staging")
+        };
+        assert!(Arc::ptr_eq(values, &attribute.data));
+        // A signaling NaN's payload survives or is quieted depending on whether the
+        // optimizer keeps the f32 -> f64 -> f32 round trip, so only its NaN-ness is fixed.
+        assert!(original[0].is_nan() && attribute.data[0].is_nan());
+        assert_eq!(attribute.data[1].to_bits(), (-0.0f32).to_bits());
+        assert_eq!(attribute.data[2].to_bits(), 2.0f32.to_bits());
+        assert_eq!(raw.raw(2), 2.0);
+    }
+
+    #[test]
+    fn wide_integer_accessor_keeps_exact_index() {
+        let bytes = u32::MAX.to_le_bytes();
+        let json = json!({
+            "bufferViews":[{"buffer":0,"byteLength":4}],
+            "accessors":[{"bufferView":0,"componentType":5125,"count":1,"type":"SCALAR"}]
+        });
+        let doc = Doc {
+            json: &json,
+            buffers: vec![Cow::Borrowed(&bytes)],
+        };
+        let raw = doc.accessor(0).unwrap();
+        assert_eq!(raw.raw(0), u32::MAX as f64);
+    }
+
+    #[test]
+    fn integer_normalization_and_padded_matrix_keep_getter_values() {
+        let bytes = [128u8, 127, 0, 1, 2, 3, 99, 4, 5, 6, 99, 7, 8, 9, 99];
+        let json = json!({
+            "bufferViews":[
+                {"buffer":0,"byteOffset":0,"byteLength":3},
+                {"buffer":0,"byteOffset":3,"byteLength":12}
+            ],
+            "accessors":[
+                {"bufferView":0,"componentType":5120,"normalized":true,"count":1,"type":"VEC3"},
+                {"bufferView":1,"componentType":5121,"count":1,"type":"MAT3"}
+            ]
+        });
+        let doc = Doc {
+            json: &json,
+            buffers: vec![Cow::Borrowed(&bytes)],
+        };
+        let normalized = doc.accessor(0).unwrap().attribute();
+        assert_eq!(normalized.data.as_slice(), &[-1.0, 1.0, 0.0]);
+        let matrix = doc.accessor(1).unwrap().attribute();
+        assert_eq!(
+            matrix.data.as_slice(),
+            &[1., 2., 3., 4., 5., 6., 7., 8., 9.]
+        );
+    }
 }

@@ -17,6 +17,7 @@ use pm_protocol::common::{RequestId, Revision, SessionId};
 use pm_protocol::error::EngineError;
 use pm_protocol::frame::{FrameRelease, FrameRequest, ViewerState};
 use pm_protocol::host::PortId;
+use pm_protocol::preview::PreviewControl;
 
 use crate::document::DocumentUpdate;
 use crate::engine::LogLevel;
@@ -151,6 +152,17 @@ pub trait FramePresenter: Send {
         _port: PortId,
         _session: SessionId,
         _message: pm_protocol::snapshot::CompatMessage,
+    ) {
+    }
+
+    /// Explicit paused Blender preview request or cancellation. The
+    /// presenter reports progress and the presented frame asynchronously.
+    fn preview_control(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _control: PreviewControl,
     ) {
     }
 

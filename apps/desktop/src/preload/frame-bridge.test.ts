@@ -36,6 +36,28 @@ function harness() {
 }
 
 describe('frame bridge receiver', () => {
+  it('releases transfers arriving after retirement and accepts a new launch', async () => {
+    const { api, imported, send, args } = harness();
+    await send(imported(), args(1, 1, 0));
+    api.retire(1);
+    const late = imported();
+    await send(late, args(1, 1, 1));
+    expect(late.released).toBe(1);
+    expect(api.has(1, 1)).toBe(false);
+    await send(imported(), args(2, 1, 1));
+    expect(api.has(1, 1)).toBe(true);
+  });
+
+  it('imports the final slot of the paired chrome surface pool', async () => {
+    const { api, imported, send, args } = harness();
+    const texture = imported();
+    await send(texture, { ...args(1, 2, 63), poolSize: 64, format: 'rgbaf16' });
+    expect(api.has(2, 63)).toBe(true);
+    expect(api.videoFrame(2, 63)).not.toBeNull();
+    expect(api.retire(2)).toBe(1);
+    expect(texture.released).toBe(1);
+  });
+
   it('keeps each import and makes a VideoFrame per request', async () => {
     const { api, imported, send, args } = harness();
     const listener = vi.fn();

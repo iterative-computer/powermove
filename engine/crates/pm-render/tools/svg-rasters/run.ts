@@ -33,7 +33,7 @@ const args = process.argv.slice(2);
 const flag = (name: string) => { const i = args.indexOf(name); return i < 0 ? undefined : args[i + 1]; };
 const sha = (b: Uint8Array) => createHash('sha256').update(b).digest('hex');
 
-type Job = { id: string; width: number; height: number; svg: Uint8Array; expect?: string; out?: string };
+type Job = { texture?: boolean; id: string; width: number; height: number; svg: Uint8Array; expect?: string; out?: string };
 const jobs: Job[] = [];
 let mode: 'cases' | 'needs';
 let reference = '';
@@ -51,11 +51,12 @@ if (args.includes('--cases')) {
   mode = 'needs';
   const dir = path.resolve(flag('--needs')!);
   if (dir.startsWith(path.resolve(repo) + path.sep)) throw new Error('rasters never go inside the repository');
-  const needs: { content: string; width: number; height: number; svg: string }[] = JSON.parse(readFileSync(path.join(dir, 'needs.json'), 'utf8'));
+  const needs: { texture?: boolean; content: string; width: number; height: number; svg: string }[] = JSON.parse(readFileSync(path.join(dir, 'needs.json'), 'utf8'));
   for (const n of needs) {
     const svg = new Uint8Array(readFileSync(n.svg));
     if (sha(svg) !== n.content) throw new Error(`${n.svg} no longer hashes to ${n.content}`);
-    jobs.push({ id: `${n.content}-${n.width}x${n.height}`, width: n.width, height: n.height, svg, out: path.join(dir, `${n.content}-${n.width}x${n.height}.rgba`) });
+    const id = `${n.content}-${n.width}x${n.height}${n.texture ? '-texture' : ''}`;
+    jobs.push({ id, texture: n.texture, width: n.width, height: n.height, svg, out: path.join(dir, `${id}.rgba`) });
   }
 } else {
   console.error('usage: run.ts --cases [--reference DIR] | --needs DIR');
@@ -78,7 +79,7 @@ const server = Bun.serve({
     const q = url.searchParams;
     if (url.pathname === '/') return new Response('<!doctype html><meta charset=utf-8><body><script src="/bundle.js"></script>', { headers: { 'content-type': 'text/html' } });
     if (url.pathname === '/bundle.js') return new Response(bundle, { headers: { 'content-type': 'text/javascript' } });
-    if (url.pathname === '/jobs') return Response.json(jobs.map(({ id, width, height }) => ({ id, width, height })));
+    if (url.pathname === '/jobs') return Response.json(jobs.map(({ id, width, height, texture }) => ({ id, width, height, texture })));
     if (url.pathname === '/svg') return new Response(byId.get(q.get('id')!)?.svg ?? null, { status: byId.has(q.get('id')!) ? 200 : 404 });
     const body = new Uint8Array(await req.arrayBuffer());
     if (url.pathname === '/gpu') { gpu = JSON.parse(new TextDecoder().decode(body)); return new Response('ok'); }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { DeviceLostError, type FramePainter } from './gpu';
+import { DeviceLostError, FrameUnusableError, type FramePainter } from './gpu';
 import { EnginePresenter, RESIZE_HOLD_MS, type FrameLink, type FrameSource, type PresentedFrame } from './presenter';
 import { TICKS_PER_SECOND, type ClockSample, type FrameDescriptor, type FrameRelease, type ViewerState, type VsyncHint } from './protocol';
 
@@ -43,6 +43,8 @@ class Painter implements FramePainter {
   draws: FakeFrame[] = [];
   configured: string[] = [];
   lostReason: string | null = null;
+  /** Frames whose upload fails as a stale shared image's does. */
+  unusable = new Set<string>();
   private pending: (() => void)[] = [];
   configure(format: string, colorSpace: string, width: number, height: number): void {
     this.configured.push(`${format}:${colorSpace}:${width}x${height}`);
@@ -50,6 +52,7 @@ class Painter implements FramePainter {
   draw(frame: VideoFrame): void {
     if (this.lostReason !== null) throw new DeviceLostError(this.lostReason);
     const fake = frame as unknown as FakeFrame;
+    if (this.unusable.has(fake.id)) throw new FrameUnusableError('GL 0x501');
     expect(fake.closed).toBe(false);
     this.draws.push(fake);
   }
@@ -114,15 +117,31 @@ describe('EnginePresenter', () => {
     presenter.refresh(16.7);
     expect(painter.draws).toHaveLength(1);
     expect(painter.configured).toEqual(['bgra8Unorm:srgb:640x360']);
-    expect(painter.draws[0]!.closed).toBe(true);
+    expect(painter.draws[0]!.closed).toBe(false);
     await flush();
     expect(link.releases).toEqual([]);
     painter.finishGpu();
     await flush();
+    expect(painter.draws[0]!.closed).toBe(true);
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(presented).toEqual([
       { seq: 1, revision: 4, viewSeq: 1, pts: 0, overlay: desc(1).overlay, rafMs: 16.7, timed: false, standIn: false, displayUs: null, depthId: null, width: 640, height: 360 }
     ]);
+  });
+
+  it('publishes only metadata of the frame it actually paints', () => {
+    const { source, presenter } = setup();
+    const shown: PresentedFrame[] = [];
+    presenter.onPresented(frame => shown.push(frame));
+    const old = [{ composition: 'main', layers: ['model'], warnings: ['Missing model: old'], error: null }];
+    const current = [{ composition: 'main', layers: ['model'], warnings: ['Missing texture: current'], error: null }];
+    source.arrive(1, 1); source.arrive(1, 2);
+    presenter.receive({ type: 'frame', frame: desc(1, { scene3dMeta: old }) });
+    presenter.receive({ type: 'frame', frame: desc(2, { scene3dMeta: current }) });
+    expect(shown).toHaveLength(0);
+    presenter.refresh(16.7);
+    expect(shown).toHaveLength(1);
+    expect(shown[0]?.scene3dMeta).toEqual(current);
   });
 
   it('parks a frame until its import arrives and releases it if the import never comes', () => {
@@ -235,13 +254,27 @@ describe('EnginePresenter', () => {
     source.arrive(1, 1);
     presenter.receive({ type: 'frame', frame: desc(1) });
     presenter.receive({ type: 'surfacePool', pool: { generation: 2, surfaces: [] } });
-    expect(link.releases).toEqual([]);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(source.retired).toEqual([1]);
     expect(source.frames[0]!.closed).toBe(true);
     // A descriptor of the retired generation still in flight is ignored.
     presenter.receive({ type: 'frame', frame: desc(2) });
     expect(presenter.stats.staleGeneration).toBe(1);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+  });
+
+  it('reports a color GPU completion after its pool was retired', async () => {
+    const { source, painter, link, presenter } = setup();
+    source.arrive(1, 1);
+    presenter.receive({ type: 'frame', frame: desc(1) });
+    presenter.refresh(16.7);
+    presenter.receive({ type: 'surfacePool', pool: { generation: 3, surfaces: [] } });
     expect(link.releases).toEqual([]);
+    expect(source.frames[0]!.closed).toBe(false);
+    painter.finishGpu();
+    await flush();
+    expect(source.frames[0]!.closed).toBe(true);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
   });
 
   it('a depth and object-id pool never replaces the frames, and tags the frames that name it', () => {
@@ -349,6 +382,26 @@ describe('EnginePresenter', () => {
     expect(source.frames[0]!.closed).toBe(true);
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
     expect(presenter.stats.dropped['device-lost']).toBe(1);
+  });
+
+  it('releases a frame that cannot be read and keeps drawing the next ones on the same painter', async () => {
+    const { source, painter, link, presenter } = setup();
+    source.arrive(1, 1); source.arrive(1, 2);
+    painter.unusable.add('1:1');
+    presenter.receive({ type: 'frame', frame: desc(1) });
+    expect(() => presenter.refresh(16)).not.toThrow();
+    expect(painter.draws).toHaveLength(0);
+    expect(source.frames[0]!.closed).toBe(true);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+    expect(presenter.stats.dropped.unusable).toBe(1);
+    presenter.receive({ type: 'frame', frame: desc(2) });
+    presenter.refresh(32);
+    expect(painter.draws.map((f) => f.id)).toEqual(['1:2']);
+    painter.finishGpu();
+    await flush();
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }, { poolIndex: 2, seq: 2 }]);
+    expect(presenter.stats.dropped['device-lost']).toBeUndefined();
+    presenter.dispose();
   });
 
   it('picks the frame nearest the calibrated display instant (nearestRefresh, presentOffsetMs)', () => {

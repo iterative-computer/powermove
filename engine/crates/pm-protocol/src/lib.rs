@@ -45,6 +45,7 @@ pub mod interop;
 pub mod lease;
 pub mod media;
 pub mod patch;
+pub mod preview;
 pub mod priority;
 pub mod scene;
 pub mod shader_fallback;

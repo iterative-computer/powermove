@@ -7,7 +7,7 @@ use pm_eval::bounds::{HOST_ONLY, LayerHost, NoHost, PickOptions};
 use pm_eval::retime::{RetimeCache, Retiming};
 use pm_eval::text_geom::{MeasuredLine, TextMeasure};
 use pm_eval::{Comp, Evaluator, JsValue, Scope};
-use pm_model::json::parse;
+use pm_model::json::{Value, parse};
 use pm_model::{Document, JsString, Node};
 use pm_text::compat::{GlyphLayout, TextContent};
 
@@ -137,44 +137,67 @@ fn pick_skips_layers_in_locked_groups_and_follows_3d_depth() {
     assert_eq!(hit.map(id_of).as_deref(), Some("near"));
 }
 
+/// A geometry host without model assets or an editor camera.
+#[derive(Default)]
 struct ObjectHost {
-    hits: bool,
+    scenes: pm_eval::query3d::SceneCache,
+}
+
+impl pm_eval::query3d::Geometry3d for ObjectHost {
+    fn model(&mut self, _: &str) -> pm_eval::query3d::ModelAsset {
+        pm_eval::query3d::ModelAsset::Missing
+    }
+    fn view_camera(&self) -> Option<pm_geom3d::query::Camera> {
+        None
+    }
+    fn scenes(&mut self) -> &mut pm_eval::query3d::SceneCache {
+        &mut self.scenes
+    }
 }
 
 impl LayerHost for ObjectHost {
-    fn pick_object(&mut self, _: &Node, _: f64, _: f64, _: f64) -> pm_eval::JsResult<bool> {
-        Ok(self.hits)
+    fn geometry(&mut self) -> Option<&mut dyn pm_eval::query3d::Geometry3d> {
+        Some(self)
     }
 }
 
 #[test]
-fn object_picks_go_to_the_host() {
-    let object = r#"{"id":"model","type":"extension","from":0,"dur":10,"on":true,"threeD":true,"p":{},"d":{"definition":"powermove.3d.object","data":{"object":{}}}}"#.to_string();
+fn object_picks_raycast_the_scene() {
+    // A unit box at the origin seen by the studio camera covers the canvas
+    // center, not its corner.
+    let p = format!(
+        r#"{{"position.x":{0},"position.y":{0},"position.z":{0},"rotation.x":{0},"rotation.y":{0},"rotation":{0},"scale.x":{1},"scale.y":{1},"scale.z":{1},"opacity":{1}}}"#,
+        ch(0.0),
+        ch(100.0)
+    );
+    let object = format!(
+        r#"{{"id":"model","type":"extension","from":0,"dur":10,"on":true,"threeD":true,"p":{p},"d":{{"definition":"powermove.3d.object","data":{{"object":{{"source":{{"primitive":"box"}},"material":{{"p":{{"opacity":{}}}}}}}}}}}}}"#,
+        ch(1.0)
+    );
     let d = doc(&project(&[object, layer("below", "solid", 0.0, 0.0, "")]));
     let comp = Comp::resolve(&d, "C").unwrap();
     let mut ev = Evaluator::new();
     let mut scope = Scope::open(&mut ev, &comp);
+    // The synthetic layer has no name. JS `parseScene` fills the default.
+    let evaluated = scope.composition_scene(0.0).unwrap();
+    let Value::Object(scene) = &evaluated.scene else {
+        panic!("scene")
+    };
+    let Some(Value::Array(objects)) = scene.get("objects") else {
+        panic!("objects")
+    };
+    let Value::Object(first) = &objects[0] else {
+        panic!("object")
+    };
+    assert_eq!(first.get("name"), Some(&Value::String("Object".into())));
     let opts = PickOptions::default();
+    let mut host = ObjectHost::default();
     let hit = scope
-        .pick(
-            10.0,
-            10.0,
-            0.0,
-            &opts,
-            &mut NoText,
-            &mut ObjectHost { hits: true },
-        )
+        .pick(320.0, 180.0, 0.0, &opts, &mut NoText, &mut host)
         .unwrap();
     assert_eq!(hit.map(id_of).as_deref(), Some("model"));
     let hit = scope
-        .pick(
-            10.0,
-            10.0,
-            0.0,
-            &opts,
-            &mut NoText,
-            &mut ObjectHost { hits: false },
-        )
+        .pick(10.0, 10.0, 0.0, &opts, &mut NoText, &mut host)
         .unwrap();
     assert_eq!(hit.map(id_of).as_deref(), Some("below"));
     let err = scope
@@ -182,7 +205,7 @@ fn object_picks_go_to_the_host() {
         .unwrap_err();
     assert_eq!(
         err.kind, HOST_ONLY,
-        "an unanswered 3D pick is never silently a miss"
+        "a 3D pick without geometry is never silently a miss"
     );
     // Local View hides objects outside the set from picking.
     let local = [JsValue::from("other")];
@@ -190,6 +213,10 @@ fn object_picks_go_to_the_host() {
         local_view: Some(&local),
         ..PickOptions::default()
     };
+    let hit = scope
+        .pick(320.0, 180.0, 0.0, &opts, &mut NoText, &mut host)
+        .unwrap();
+    assert_eq!(hit.map(id_of).as_deref(), None);
     let hit = scope
         .pick(10.0, 10.0, 0.0, &opts, &mut NoText, &mut NoHost)
         .unwrap();
@@ -460,23 +487,27 @@ fn engine_retiming_matches_today_at_the_root() {
                 legacy.to_bits(),
                 "{fps} fps at t = {t}: engine {engine} legacy {legacy}"
             );
-            assert_eq!(engine.to_bits(), cached.to_bits(), "the cache changes nothing");
+            assert_eq!(
+                engine.to_bits(),
+                cached.to_bits(),
+                "the cache changes nothing"
+            );
             checked += 1;
         }
         assert_eq!(checked, 400);
     }
     // The expression takes part: without it the answers differ.
     let with = doc(&eased_expression_speed(30.0));
-    let without = doc(&eased_expression_speed(30.0).replace(
-        r#""value * (1 + 0.1 * Math.sin(time * 7))""#,
-        "null",
-    ));
+    let without = doc(&eased_expression_speed(30.0)
+        .replace(r#""value * (1 + 0.1 * Math.sin(time * 7))""#, "null"));
     let answer = |d: &Document| {
         let comp = Comp::resolve(d, "C").unwrap();
         let mut ev = with_expressions();
         let mut scope = Scope::open(&mut ev, &comp);
         let l = &comp.layers()[0];
-        scope.source_time_with(l, 3.3, Retiming::Engine, None).unwrap()
+        scope
+            .source_time_with(l, 3.3, Retiming::Engine, None)
+            .unwrap()
     };
     assert_ne!(answer(&with), answer(&without));
 }
@@ -516,7 +547,10 @@ fn engine_retiming_of_a_nested_composition_is_its_own_rate() {
             differs += 1;
         }
     }
-    assert!(differs > 150, "60 Hz and 120 Hz steps differ: {differs} of 200");
+    assert!(
+        differs > 150,
+        "60 Hz and 120 Hz steps differ: {differs} of 200"
+    );
 }
 
 fn bounds_of<'d>(scope: &mut Scope<'_, 'd>, layer: &'d Node) -> Option<pm_eval::bounds::Bounds> {
