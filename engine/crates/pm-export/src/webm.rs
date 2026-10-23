@@ -1262,7 +1262,7 @@ pub fn verify_webm(
         }
     };
     let scan_ms = scan_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e3);
-    // Sampled pixels, decoded by libvpx (which also decodes the alpha stream).
+    // Sampled pixels: native VP9 for opaque I420; libvpx retains alpha decoding.
     let mut sampled_pixels = SampledPixelTimes::default();
     let decode_started = profiling.then(Instant::now);
     let decoded = decode_sampled(
@@ -1324,7 +1324,14 @@ fn decode_sampled(
     mut times: Option<&mut SampledPixelTimes>,
 ) -> Result<Vec<BlockSample>, Error> {
     let key_interval = (2.0 * spec.rate.to_f64()).round().max(1.0) as u64;
-    let sampled = decode_sampled_with_gap_map(fmt, vst, spec, key_interval, |f, n| {
+    // The opaque native VP9 decoder reproduces libvpx's complete planes and
+    // sampled frame IDs and is faster in the sampled-verifier benchmark.
+    // Alpha and VP8 retain their existing libvpx decoders.
+    let decoder = match spec.codec {
+        Codec::Vp9 { .. } if !alpha => Some("vp9"),
+        _ => None,
+    };
+    let sampled = decode_sampled_with_gap_map(fmt, vst, spec, key_interval, decoder, |f, n| {
         frame_blocks(f, alpha, n, (spec.width, spec.height), times.as_deref_mut())
     })?;
     Ok(sampled.into_iter().flat_map(|(_, blocks)| blocks).collect())
@@ -1335,12 +1342,21 @@ fn decode_sampled_with_gap_map<T>(
     vst: *mut ff::AVStream,
     spec: &ExportSpec,
     max_sequential_gap: u64,
+    decoder_name: Option<&str>,
     mut map: impl FnMut(&ff::AVFrame, u64) -> Result<T, Error>,
 ) -> Result<Vec<(u64, T)>, Error> {
-    let name = match spec.codec {
-        Codec::Vp9 { .. } => "libvpx-vp9",
-        _ => "libvpx",
+    let (libvpx, native) = match spec.codec {
+        Codec::Vp9 { .. } => ("libvpx-vp9", "vp9"),
+        _ => ("libvpx", "vp8"),
     };
+    // None selects the libvpx reference. Native vp8/vp9 are allowed only
+    // for opaque video: libvpx is needed for WebM's alpha stream.
+    let name = decoder_name.unwrap_or(libvpx);
+    if name != libvpx && (spec.alpha != AlphaOutput::None || name != native) {
+        return Err(Error::Verify(
+            "native verifier trial requires matching opaque VP8/VP9 I420".into(),
+        ));
+    }
     let dec = open_decoder(vst, Some(name))?;
     let codec_tb = rational(spec.rate.den(), spec.rate.num());
     let (vtb, vindex) = unsafe { ((*vst).time_base, (*vst).index) };
@@ -1523,12 +1539,10 @@ mod sampled_decode_tests {
         }
     }
 
-    fn decoded_samples_with<T>(
+    fn with_video_stream<T>(
         path: &Path,
-        spec: &ExportSpec,
-        max_sequential_gap: u64,
-        map: impl FnMut(&ff::AVFrame, u64) -> Result<T, Error>,
-    ) -> Vec<(u64, T)> {
+        run: impl FnOnce(*mut ff::AVFormatContext, *mut ff::AVStream) -> T,
+    ) -> T {
         let p = cstr(&path.to_string_lossy());
         let input = unsafe {
             let mut fmt = ptr::null_mut();
@@ -1551,7 +1565,31 @@ mod sampled_decode_tests {
                 .find(|&st| (*(*st).codecpar).codec_type == ff::AVMEDIA_TYPE_VIDEO)
                 .unwrap()
         };
-        decode_sampled_with_gap_map(input.0, vst, spec, max_sequential_gap, map).unwrap()
+        run(input.0, vst)
+    }
+
+    fn decoded_samples_with<T>(
+        path: &Path,
+        spec: &ExportSpec,
+        max_sequential_gap: u64,
+        decoder_name: Option<&str>,
+        map: impl FnMut(&ff::AVFrame, u64) -> Result<T, Error>,
+    ) -> Vec<(u64, T)> {
+        with_video_stream(path, |fmt, vst| {
+            decode_sampled_with_gap_map(fmt, vst, spec, max_sequential_gap, decoder_name, map)
+                .unwrap()
+        })
+    }
+
+    fn decoded_samples_named(
+        path: &Path,
+        spec: &ExportSpec,
+        max_sequential_gap: u64,
+        decoder_name: Option<&str>,
+    ) -> Vec<(u64, EncoderInput)> {
+        decoded_samples_with(path, spec, max_sequential_gap, decoder_name, |f, _| {
+            frame_input(f, spec.alpha != AlphaOutput::None)
+        })
     }
 
     fn decoded_samples(
@@ -1559,9 +1597,7 @@ mod sampled_decode_tests {
         spec: &ExportSpec,
         max_sequential_gap: u64,
     ) -> Vec<(u64, EncoderInput)> {
-        decoded_samples_with(path, spec, max_sequential_gap, |f, _| {
-            frame_input(f, spec.alpha != AlphaOutput::None)
-        })
+        decoded_samples_named(path, spec, max_sequential_gap, None)
     }
 
     #[test]
@@ -1661,6 +1697,39 @@ mod sampled_decode_tests {
             let reused = decoded_samples(&delivered.path, &spec, gap);
             let sought = decoded_samples(&delivered.path, &spec, 0);
             assert_eq!(reused, sought, "{name}");
+            if alpha {
+                assert!(
+                    reused.iter().all(|(_, input)| {
+                        input.format == InputFormat::I420a && input.planes.len() == 4
+                    }),
+                    "alpha remains on libvpx's four-plane decoder: {name}"
+                );
+            } else {
+                // Both explicit native decoders must reproduce every byte of
+                // libvpx's Y, U and V planes, not merely pass block tolerances.
+                let native_name = match codec {
+                    Codec::Vp9 { .. } => "vp9",
+                    Codec::Vp8 { .. } => "vp8",
+                    _ => unreachable!(),
+                };
+                for decode_gap in [gap, 0] {
+                    let native = decoded_samples_named(
+                        &delivered.path,
+                        &spec,
+                        decode_gap,
+                        Some(native_name),
+                    );
+                    assert_eq!(
+                        native.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+                        verify::sampled_frames(frames),
+                        "{name} native frame IDs with gap {decode_gap}"
+                    );
+                    assert_eq!(
+                        native, reused,
+                        "{name} native full YUV planes with gap {decode_gap}"
+                    );
+                }
+            }
             let expected: Vec<_> = reused
                 .iter()
                 .flat_map(|(n, input)| verify::block_means(input, *n))
@@ -1668,7 +1737,7 @@ mod sampled_decode_tests {
             assert_eq!(expected.len(), verify::sampled_frames(frames).len() * 9);
             for decode_gap in [gap, 0] {
                 let cropped: Vec<_> =
-                    decoded_samples_with(&delivered.path, &spec, decode_gap, |f, n| {
+                    decoded_samples_with(&delivered.path, &spec, decode_gap, None, |f, n| {
                         frame_blocks(f, alpha, n, (spec.width, spec.height), None)
                     })
                     .into_iter()
@@ -1681,6 +1750,87 @@ mod sampled_decode_tests {
                 verify::sampled_frames(frames),
                 "{name}"
             );
+        }
+    }
+
+    /// Manual comparison of the exact verifier decode path on a saved opaque
+    /// 1920×1080, 60-frame, 30000/1001 VP9 export. The file is read only.
+    #[test]
+    #[ignore = "set PM_WEBM_VERIFY_BENCH_INPUT to the saved large VP9 WebM"]
+    fn opaque_vp9_decoder_timing_on_saved_large_export() {
+        let path = PathBuf::from(
+            std::env::var_os("PM_WEBM_VERIFY_BENCH_INPUT")
+                .expect("PM_WEBM_VERIFY_BENCH_INPUT must name a saved opaque VP9 WebM"),
+        );
+        let spec = ExportSpec {
+            width: 1920,
+            height: 1080,
+            rate: Rate::FPS_29_97,
+            frames: 60,
+            codec: Codec::Vp9 {
+                bitrate_bps: 16_000_000,
+            },
+            container: Container::Webm,
+            tags: ColorTags::Rec709QuickTime,
+            alpha: AlphaOutput::None,
+            working: WorkingEncoding::Standard,
+            dither: Dither::Default,
+            audio: None,
+            timecode: None,
+            destination: path.clone(),
+            overwrite: Overwrite::Fail,
+            mode: None,
+        };
+        let gap = (2.0 * spec.rate.to_f64()).round().max(1.0) as u64;
+        let libvpx = decoded_samples_named(&path, &spec, gap, Some("libvpx-vp9"));
+        let native = decoded_samples_named(&path, &spec, gap, Some("vp9"));
+        assert_eq!(
+            libvpx.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            verify::sampled_frames(spec.frames)
+        );
+        assert_eq!(native, libvpx, "native and libvpx full YUV planes");
+        let expected: Vec<_> = libvpx
+            .iter()
+            .flat_map(|(n, input)| verify::block_means(input, *n))
+            .collect();
+        for round in 0..6 {
+            let names = if round % 2 == 0 {
+                ["libvpx-vp9", "vp9"]
+            } else {
+                ["vp9", "libvpx-vp9"]
+            };
+            for name in names {
+                let (elapsed, pixels, blocks) = with_video_stream(&path, |fmt, vst| {
+                    let mut pixels = SampledPixelTimes::default();
+                    let started = Instant::now();
+                    let sampled = decode_sampled_with_gap_map(
+                        fmt,
+                        vst,
+                        &spec,
+                        gap,
+                        Some(name),
+                        |frame, n| {
+                            frame_blocks(
+                                frame,
+                                false,
+                                n,
+                                (spec.width, spec.height),
+                                Some(&mut pixels),
+                            )
+                        },
+                    )
+                    .unwrap();
+                    (started.elapsed(), pixels, sampled)
+                });
+                let got: Vec<_> = blocks.into_iter().flat_map(|(_, v)| v).collect();
+                assert_eq!(got, expected, "{name} verifier blocks on pass {round}");
+                let decode = elapsed.saturating_sub(pixels.crop + pixels.means);
+                eprintln!(
+                    "webm verifier decoder={name} pass={round} decode_ms={:.3} total_ms={:.3}",
+                    decode.as_secs_f64() * 1e3,
+                    elapsed.as_secs_f64() * 1e3,
+                );
+            }
         }
     }
 }
