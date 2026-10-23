@@ -641,31 +641,57 @@ The writes are also coalesced (`core/projects.ts`):
   only after that project's pending or in-flight slot write reaches disk.
   Before, a crash between the two could recover the older slot without its
   journal. The new crash-point test fails on the old order.
-- A failed checkpoint is repaired by the next save, as before. When a slot
-  write is refused or fails to reach disk (ENOSPC, EIO, a storage worker
-  restart), main keeps that project's journal on disk as it is until a slot
-  write succeeds: deleting it, or replacing it with entries meant for the
-  slot that never landed, lost the edits since the older slot. The window
-  drops the slot's digest and the registry's record and marks the project
-  unsaved, so its next checkpoint writes rather than checks, and its next
-  autosave checkpoints even when the journal has entries. That write clears
-  the save error, so `PM.store.flush()` (flushProject, autosave) succeeds
-  again once the disk does.
-- Each slot write carries a checkpoint id (`cp`, before `proj` in the
-  envelope), and each journal entry the id of the checkpoint it follows.
-  Projects.get replays an entry tagged for another checkpoint no longer:
-  with the journal written after the slot, a crash in the one unlink between
-  them left the new slot with the old journal, and replaying it reverted any
-  path an old entry set that a raw (unannounced) write had changed since,
-  next to raw writes it kept. Untagged entries (older builds, or a
-  checkpoint the window does not know) and slots without an id replay as
-  before.
+- A failed checkpoint loses no edit. Main tells the window that wrote a key
+  when an accepted write of it did not reach disk (ENOSPC, EIO, a storage
+  worker that stopped); before, only a refused value was reported, so a
+  persist failure left the window treating its checkpoint as written. Per
+  slot, main records the newest write's request id and outcome; an older
+  write finishing never clears a newer failure (a checkpoint refused while
+  the one before it is still renaming, as when a project crosses the 256 MB
+  slot limit). A journal deletion goes ahead only if the newest slot write
+  posted before it reached disk, and a journal is written only if every
+  entry's checkpoint id names the slot on disk.
+- While a slot write is failing every edit stays on disk (D1). Each
+  checkpoint keeps the journal as it stands against the slot before it. On
+  a slot error the window goes back to it: everything journaled since is
+  appended, tagged with the older slot's id, and written, and later edits
+  keep being appended. Past the 4 MiB journal bound the project is
+  checkpointed as before, except while its slot write is failing: the
+  journal then keeps growing up to the store's own value limit, and the save
+  error stays reported (`PM.store.flush()` throws, so autosave and
+  flushProject show it) until a checkpoint lands. The project is marked
+  unsaved, so its next checkpoint writes rather than checks and its next
+  autosave checkpoints even when the journal has entries; that write clears
+  the save error.
+- Each slot write carries a checkpoint id (`cp`), and each journal entry the
+  id of the checkpoint it follows. Projects.get no longer replays an entry
+  tagged for another checkpoint: with the journal written after the slot, a
+  crash in the one unlink between them left the new slot with the old
+  journal, and replaying it reverted any path an old entry set that a raw
+  (unannounced) write had changed since, next to raw writes it kept. A
+  window that reads a slot (Projects.get) before it checkpoints the project
+  tags its entries with that slot's id.
+- Untagged entries remain, and replay over whatever slot is on disk as
+  before (the same-path hazard in the unlink window): entries written by
+  older builds, entries against a slot without an id (written by an older
+  build) while the window has not checkpointed it, and entries after
+  another window wrote the slot (the read id is forgotten). Two slot writes
+  in flight with the older failing send the window back to that older
+  base; main then declines its entries (their id is not on disk) until the
+  next checkpoint, which the unsaved mark makes the next autosave: the disk
+  stays at the newer slot and its journal, an older state but a real one.
 - Known limit: a write of `project.<id>` by another writer (another window's
   Projects screen rename, a future main-side writer) marks the key stale in
   the owning window but does not drop its digest, so that window's next
   checkpoint of the same, unchanged object is checked against its own last
   write and skipped where the old code overwrote. Windows own their
   projects, so no such writer exists today.
+
+**On-disk format (D3).** A project slot is `{"v":…,"cp":"<id>","proj":{…}}`
+(`cp` before `proj`; main reads it from the envelope's head). A journal
+entry is `{"revision":n,"patches":[…],"cp":"<id>"}`. Both members are
+optional and backward compatible: older builds read `proj` and replay every
+entry, and data without them is read as before.
 
 The dirty check's fingerprints (twice per autosave and per open) are now
 serialized in slices and hashed on a worker (`project-fingerprint.ts`, the
@@ -686,8 +712,10 @@ what the previous code did. Two tests prove it:
   (was 5), and 3 more only where the document really changed. It recovers
   through a fresh window's Projects.get. It also covers a failing slot rename
   and an ENOSPC slot write (the edits survive every crash point, and the next
-  autosave writes the slot and lets flush succeed), and a raw write after a
-  journaled edit to the same path (never reverted by the old journal).
+  autosave writes the slot and lets flush succeed), edits made while every
+  slot write fails (each on disk once settled), a checkpoint refused while
+  the one before it is still renaming, and a raw write after a journaled
+  edit to the same path (never reverted by the old journal).
 - `e2e/project-open-crash-recovery.spec.ts` SIGKILLs the whole app at 15
   seeded moments, from 0.2 s into a large open to after it settles, with
   either setting. Every relaunch recovered nothing (killed before the first
@@ -707,7 +735,10 @@ what the previous code did. Two tests prove it:
   (`POWERMOVE_CRASH_SEED` 1 to 11) gave 165 kills: 110 with the setting off
   and 55 with it on, from 40 ms to 5.9 s into the open plus 22 after it
   settled. 86 recovered the document (62 off, 24 on), 79 recovered nothing,
-  and none recovered another document or quarantined a file.
+  and none recovered another document or quarantined a file. Opening now
+  replaces a repeated or missing keyframe id deterministically (`kA.2`,
+  `k<index>`), so a document with real duplicates also opens to the same
+  document every time.
 
 Preparation (engine on) also lost two of its three whole-document passes:
 
