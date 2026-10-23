@@ -337,15 +337,13 @@ mod tests {
     }
 
     fn priming_of(bytes: &[u8]) -> Option<Priming> {
-        let p = std::env::temp_dir().join(format!(
-            "pm-media-priming-{}-{}.m4a",
-            std::process::id(),
-            bytes.len()
-        ));
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-priming-")
+            .tempdir()
+            .unwrap();
+        let p = dir.path().join("priming.m4a");
         std::fs::write(&p, bytes).unwrap();
-        let r = mp4_priming(&p, 1, "aac", 48000);
-        std::fs::remove_file(&p).ok();
-        r
+        mp4_priming(&p, 1, "aac", 48000)
     }
 
     #[test]

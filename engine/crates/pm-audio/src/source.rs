@@ -23,7 +23,48 @@ pub const BLOCK: usize = 1 << 16;
 pub struct Source {
     id: u64,
     pub info: AudioStreamInfo,
-    decoder: Mutex<AudioDecoder>,
+    decoder: Mutex<Decoder>,
+}
+
+/// FFmpeg, or Symphonia for MP3 as today decodes it ([`crate::mp3`]).
+enum Decoder {
+    Ffmpeg(Box<AudioDecoder>),
+    Mp3(Box<crate::mp3::Mp3Decoder>, u64),
+    /// Electron's own FFmpeg ([`crate::chromium`]).
+    Chromium(Box<crate::chromium::ChromiumDecoder>, u64),
+}
+
+impl Decoder {
+    fn packets_decoded(&self) -> u64 {
+        match self {
+            Decoder::Ffmpeg(d) => d.packets_decoded(),
+            Decoder::Mp3(_, n) | Decoder::Chromium(_, n) => *n,
+        }
+    }
+
+    fn seek_anchored(&mut self, index: u64) -> Result<()> {
+        match self {
+            Decoder::Ffmpeg(d) => Ok(d.seek_anchored(index)?),
+            Decoder::Mp3(d, _) => d.seek_anchored(index),
+            Decoder::Chromium(d, _) => d.seek_anchored(index),
+        }
+    }
+
+    fn read(&mut self, out: &mut [Vec<f32>], frames: usize) -> Result<usize> {
+        match self {
+            Decoder::Ffmpeg(d) => Ok(d.read(out, frames)?),
+            Decoder::Mp3(d, n) => {
+                let got = d.read(out, frames)?;
+                *n += got.div_ceil(1152) as u64;
+                Ok(got)
+            }
+            Decoder::Chromium(d, n) => {
+                let got = d.read(out, frames)?;
+                *n += got.div_ceil(1024) as u64;
+                Ok(got)
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for Source {
@@ -96,6 +137,105 @@ struct Blocks {
     queue: VecDeque<(Arc<Source>, u64)>,
     queued: HashSet<BlockKey>,
     errors: HashMap<BlockKey, String>,
+    /// Allocated only for opt-in diagnostics; follows a block through an
+    /// ordinary worker or an offline synchronous decode.
+    traces: HashMap<BlockKey, BlockTrace>,
+}
+
+#[derive(Default)]
+struct BlockTrace {
+    enqueued_us: u64,
+    enqueue_thread: Option<String>,
+    urgent: bool,
+    queued_duplicates: u64,
+    in_flight_duplicates: u64,
+    last_duplicate_us: u64,
+}
+
+impl BlockTrace {
+    fn enqueued(&mut self, urgent: bool) {
+        self.enqueued_us = crate::clock::host_now_us();
+        let thread = std::thread::current();
+        self.enqueue_thread = thread
+            .name()
+            .filter(|name| name.starts_with("pm-audio-"))
+            .map(str::to_owned);
+        self.urgent = urgent;
+    }
+
+    fn queued_duplicate(&mut self) {
+        self.queued_duplicates += 1;
+        self.last_duplicate_us = crate::clock::host_now_us();
+    }
+
+    fn in_flight_duplicate(&mut self) {
+        self.in_flight_duplicates += 1;
+        self.last_duplicate_us = crate::clock::host_now_us();
+    }
+}
+
+#[derive(Default)]
+struct DecodeTrace {
+    claim_us: u64,
+    decoder_lock_us: u64,
+    seek_done_us: u64,
+    read_done_us: u64,
+    cpu_start_ns: u64,
+}
+
+impl DecodeTrace {
+    fn claimed(profile: bool, claim_us: u64) -> Self {
+        if profile {
+            Self {
+                claim_us,
+                cpu_start_ns: crate::realtime::thread_cpu_ns(),
+                ..Self::default()
+            }
+        } else {
+            Self::default()
+        }
+    }
+}
+
+fn log_decode(
+    source: &Source,
+    index: u64,
+    origin: &'static str,
+    queued: BlockTrace,
+    trace: DecodeTrace,
+    success: bool,
+) {
+    if trace.claim_us == 0 {
+        return;
+    }
+    // Called after the cache mutex is released. This is an upper bound on
+    // publication, including a worker descheduled after insertion.
+    let published_us = crate::clock::host_now_us();
+    let cpu_ns = crate::realtime::thread_cpu_ns().saturating_sub(trace.cpu_start_ns);
+    let thread = std::thread::current();
+    crate::profile::worker_event(format!(
+        "pm-audio-source-block source={} block={} origin={} success={} enqueued_us={} enqueue_thread={} urgent={} claim_us={} decode_thread={} decoder_lock_us={} seek_done_us={} read_done_us={} published_us={} cpu_ns={} queued_duplicates={} in_flight_duplicates={} last_duplicate_us={}",
+        source.id,
+        index,
+        origin,
+        success,
+        queued.enqueued_us,
+        queued.enqueue_thread.as_deref().unwrap_or("external"),
+        queued.urgent,
+        trace.claim_us,
+        thread
+            .name()
+            .filter(|name| name.starts_with("pm-audio-"))
+            .unwrap_or("external"),
+        trace.decoder_lock_us,
+        trace.seek_done_us,
+        trace.read_done_us,
+        published_us,
+        cpu_ns,
+        queued.queued_duplicates,
+        queued.in_flight_duplicates,
+        queued.last_duplicate_us,
+    ));
 }
 
 /// Counters for diagnostics and tests.
@@ -120,8 +260,12 @@ pub struct SourceCache {
     hits: AtomicU64,
     misses: AtomicU64,
     evicted: AtomicU64,
+    /// Advances when a decoded block or a memoized decode error becomes
+    /// visible. Missing-input preparation waits for progress, not a timer.
+    publication_epoch: AtomicU64,
     stop: AtomicBool,
     workers: Mutex<Vec<JoinHandle<()>>>,
+    profile: bool,
     #[cfg(feature = "test-hooks")]
     decode_delay_us: AtomicU64,
     #[cfg(feature = "test-hooks")]
@@ -130,6 +274,9 @@ pub struct SourceCache {
     decode_gate_changed: Condvar,
     #[cfg(feature = "test-hooks")]
     gated_decoders: AtomicU64,
+    /// Count today's decoded lengths before a source opens (an export's
+    /// cache; [`SourceCache::set_blocking_lengths`]).
+    blocking_lengths: AtomicBool,
     #[cfg(feature = "test-hooks")]
     decode_failing: Mutex<HashSet<u64>>,
 }
@@ -153,6 +300,10 @@ impl SourceCache {
     /// `workers` background decode threads for prefetch (0 for none: every
     /// block then decodes on the thread that asks for it).
     pub fn new(budget_bytes: usize, workers: usize) -> Arc<SourceCache> {
+        let profile = crate::profile::enabled();
+        if profile {
+            crate::profile::init_worker_events();
+        }
         let cache = Arc::new(SourceCache {
             sources: Mutex::default(),
             blocks: Mutex::default(),
@@ -164,8 +315,10 @@ impl SourceCache {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             evicted: AtomicU64::new(0),
+            publication_epoch: AtomicU64::new(0),
             stop: AtomicBool::new(false),
             workers: Mutex::default(),
+            profile,
             #[cfg(feature = "test-hooks")]
             decode_delay_us: AtomicU64::new(0),
             #[cfg(feature = "test-hooks")]
@@ -174,6 +327,7 @@ impl SourceCache {
             decode_gate_changed: Condvar::new(),
             #[cfg(feature = "test-hooks")]
             gated_decoders: AtomicU64::new(0),
+            blocking_lengths: AtomicBool::new(false),
             #[cfg(feature = "test-hooks")]
             decode_failing: Mutex::default(),
         });
@@ -267,20 +421,75 @@ impl SourceCache {
         }
     }
 
+    pub(crate) fn publication_epoch(&self) -> u64 {
+        self.publication_epoch.load(Ordering::Acquire)
+    }
+
+    /// Exports wait for today's decoded length of an AAC or Opus file when
+    /// they open it (a job, off any interactive path); playback counts it in
+    /// the background ([`crate::chromium::count_length`]).
+    pub fn set_blocking_lengths(&self, blocking: bool) {
+        self.blocking_lengths.store(blocking, Ordering::Relaxed);
+    }
+
     /// Opens (or returns the open) audio stream of a file; `stream` is the
     /// FFmpeg stream index, the best audio stream when `None`.
     pub fn open(&self, path: &Path, stream: Option<usize>) -> Result<Arc<Source>> {
         let key = (path.to_owned(), stream);
         if let Some(s) = lock(&self.sources).get(&key) {
-            return Ok(s.clone());
+            // A length counted since this source opened replaces it (the
+            // next mix build takes the exact length).
+            let stale = matches!(&*lock(&s.decoder), Decoder::Chromium(..))
+                && crate::chromium::known_length(path).is_some_and(|n| s.info.length != Some(n));
+            if !stale {
+                return Ok(s.clone());
+            }
         }
         let decoder = AudioDecoder::open(path, stream)?;
+        let mut info = decoder.info().clone();
+        // The FFmpeg probe gives the stream's facts (layout, length, priming);
+        // MP3 samples come from today's decoder.
+        let decoder = if info.codec == "mp3" {
+            match crate::mp3::Mp3Decoder::open(path, info.channels()) {
+                Ok(mp3) => Decoder::Mp3(Box::new(mp3), 0),
+                Err(_) => Decoder::Ffmpeg(Box::new(decoder)),
+            }
+        } else if crate::chromium::decodes(&info.codec) {
+            // Today's own FFmpeg where this process has it (the app's
+            // engine processes); our FFmpeg elsewhere (the CLI, tests).
+            match crate::chromium::ChromiumDecoder::open(path, info.channels()) {
+                Ok(Some(d)) => {
+                    // Today's buffer length (its own priming and padding):
+                    // counted once per file, off this thread unless the
+                    // cache is an export's. Until then the container's.
+                    let blocking = self.blocking_lengths.load(Ordering::Relaxed);
+                    if let Some(frames) =
+                        crate::chromium::count_length(path, info.channels(), blocking)
+                    {
+                        info.length = Some(frames);
+                        info.priming = 0;
+                        info.extra_priming = 0;
+                    }
+                    Decoder::Chromium(Box::new(d), 0)
+                }
+                _ => Decoder::Ffmpeg(Box::new(decoder)),
+            }
+        } else {
+            Decoder::Ffmpeg(Box::new(decoder))
+        };
         let source = Arc::new(Source {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
-            info: decoder.info().clone(),
+            info,
             decoder: Mutex::new(decoder),
         });
-        Ok(lock(&self.sources).entry(key).or_insert(source).clone())
+        let mut sources = lock(&self.sources);
+        if let Some(existing) = sources.get(&key)
+            && existing.info.length == source.info.length
+        {
+            return Ok(existing.clone());
+        }
+        sources.insert(key, source.clone());
+        Ok(source)
     }
 
     /// Forgets open sources whose files changed or that no mix uses.
@@ -307,7 +516,7 @@ impl SourceCache {
         }
     }
 
-    fn decode(&self, source: &Source, index: u64) -> Result<Block> {
+    fn decode(&self, source: &Source, index: u64, trace: &mut DecodeTrace) -> Result<Block> {
         #[cfg(feature = "test-hooks")]
         {
             let mut gate = lock(&self.decode_gate);
@@ -333,10 +542,19 @@ impl SourceCache {
             }
         }
         let mut decoder = lock(&source.decoder);
+        if self.profile {
+            trace.decoder_lock_us = crate::clock::host_now_us();
+        }
         let start = index * BLOCK as u64;
         decoder.seek_anchored(start)?;
+        if self.profile {
+            trace.seek_done_us = crate::clock::host_now_us();
+        }
         let mut channels = vec![Vec::with_capacity(BLOCK); source.channels()];
         decoder.read(&mut channels, BLOCK)?;
+        if self.profile {
+            trace.read_done_us = crate::clock::host_now_us();
+        }
         Ok(Block { channels })
     }
 
@@ -374,6 +592,9 @@ impl SourceCache {
     ) -> Result<Option<Arc<Block>>> {
         let key = (source.id, index);
         let mut blocks = lock(&self.blocks);
+        // A waiting caller can wake for unrelated blocks. Count its request
+        // once, while still rechecking readiness after every notification.
+        let mut counted_in_flight = false;
         loop {
             blocks.clock += 1;
             let now = blocks.clock;
@@ -387,22 +608,41 @@ impl SourceCache {
             }
             if !wait {
                 self.misses.fetch_add(1, Ordering::Relaxed);
-                if !blocks.in_flight.contains(&key) && blocks.queued.insert(key) {
+                if blocks.in_flight.contains(&key) {
+                    if self.profile {
+                        blocks.traces.entry(key).or_default().in_flight_duplicate();
+                    }
+                } else if blocks.queued.insert(key) {
                     blocks.queue.push_front((source.clone(), index));
+                    if self.profile {
+                        blocks.traces.entry(key).or_default().enqueued(true);
+                    }
                     self.work.notify_one();
+                } else if self.profile {
+                    blocks.traces.entry(key).or_default().queued_duplicate();
                 }
                 return Ok(None);
             }
             if blocks.in_flight.contains(&key) {
+                if self.profile && !counted_in_flight {
+                    blocks.traces.entry(key).or_default().in_flight_duplicate();
+                    counted_in_flight = true;
+                }
                 blocks = self.ready.wait(blocks).unwrap_or_else(|e| e.into_inner());
                 continue;
             }
             self.misses.fetch_add(1, Ordering::Relaxed);
             blocks.in_flight.insert(key);
             drop(blocks);
-            let decoded = self.decode(source, index);
+            let mut trace = DecodeTrace::claimed(
+                self.profile,
+                self.profile.then(crate::clock::host_now_us).unwrap_or(0),
+            );
+            let decoded = self.decode(source, index, &mut trace);
             let mut b = lock(&self.blocks);
             b.in_flight.remove(&key);
+            let queued = b.traces.remove(&key).unwrap_or_default();
+            let success = decoded.is_ok();
             let out = match decoded {
                 Ok(block) => {
                     self.decoded.fetch_add(1, Ordering::Relaxed);
@@ -415,7 +655,17 @@ impl SourceCache {
                     Err(e)
                 }
             };
+            self.publication_epoch.fetch_add(1, Ordering::Release);
             self.ready.notify_all();
+            drop(b);
+            if self.profile {
+                let origin = if queued.enqueued_us != 0 {
+                    "inline-stole-queued"
+                } else {
+                    "inline"
+                };
+                log_decode(source, index, origin, queued, trace, success);
+            }
             return out;
         }
     }
@@ -426,14 +676,28 @@ impl SourceCache {
         let mut added = false;
         for index in indexes {
             let key = (source.id, index);
-            if blocks.map.contains_key(&key)
-                || blocks.in_flight.contains(&key)
-                || blocks.errors.contains_key(&key)
-                || !blocks.queued.insert(key)
-            {
+            if blocks.map.contains_key(&key) {
+                continue;
+            }
+            if blocks.in_flight.contains(&key) {
+                if self.profile {
+                    blocks.traces.entry(key).or_default().in_flight_duplicate();
+                }
+                continue;
+            }
+            if blocks.errors.contains_key(&key) {
+                continue;
+            }
+            if !blocks.queued.insert(key) {
+                if self.profile {
+                    blocks.traces.entry(key).or_default().queued_duplicate();
+                }
                 continue;
             }
             blocks.queue.push_back((source.clone(), index));
+            if self.profile {
+                blocks.traces.entry(key).or_default().enqueued(false);
+            }
             added = true;
         }
         if added {
@@ -559,7 +823,12 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
                         continue;
                     }
                     blocks.in_flight.insert(key);
-                    break Some((source, index));
+                    let claim_us = if c.profile {
+                        crate::clock::host_now_us()
+                    } else {
+                        0
+                    };
+                    break Some((source, index, claim_us));
                 }
                 let (b, timeout) = c
                     .work
@@ -571,15 +840,18 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
                 }
             }
         };
-        let Some((source, index)) = job else {
+        let Some((source, index, claim_us)) = job else {
             // Re-check the weak reference so a dropped cache ends the thread.
             drop(c);
             continue;
         };
         let key = (source.id, index);
-        let decoded = c.decode(&source, index);
+        let mut trace = DecodeTrace::claimed(c.profile, claim_us);
+        let decoded = c.decode(&source, index, &mut trace);
         let mut blocks = lock(&c.blocks);
         blocks.in_flight.remove(&key);
+        let queued = blocks.traces.remove(&key).unwrap_or_default();
+        let success = decoded.is_ok();
         match decoded {
             Ok(block) => {
                 c.decoded.fetch_add(1, Ordering::Relaxed);
@@ -589,7 +861,12 @@ fn worker(cache: std::sync::Weak<SourceCache>) {
                 blocks.errors.insert(key, memo(&e));
             }
         }
+        c.publication_epoch.fetch_add(1, Ordering::Release);
         c.ready.notify_all();
+        drop(blocks);
+        if c.profile {
+            log_decode(&source, index, "worker", queued, trace, success);
+        }
     }
 }
 

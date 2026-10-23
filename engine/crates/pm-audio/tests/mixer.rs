@@ -177,7 +177,10 @@ fn renders_are_identical_from_any_start() {
 }
 
 /// Gain, fades, composition levels, and the master on a constant source:
-/// every output sample equals the legacy `gainAt` product.
+/// today's envelope (`envelopePoints`): `gainAt` one composition frame apart
+/// from the clip's start (the gain is a channel), on its keyframes and fade
+/// corners, ramped linearly between them from the frame each point's time
+/// rounds up to.
 #[test]
 fn levels_follow_gain_at() {
     let dir = temp_dir("levels");
@@ -202,37 +205,53 @@ fn levels_follow_gain_at() {
     let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
     let out = rig.render(&mut m, 0, SR as i64 * 3, 4096);
     let audible = 2.5f64.min(3.0 - 0.1);
+    let gain_at = |local: f64| {
+        let g = if local <= 1.0 {
+            0.2 + 1.3 * local
+        } else if local <= 2.0 {
+            1.5 - (local - 1.0)
+        } else {
+            0.5
+        };
+        let l = local.clamp(0.0, audible);
+        let fade = (l / 0.3)
+            .clamp(0.0, 1.0)
+            .min(((audible - l) / 0.5).clamp(0.0, 1.0));
+        g.clamp(0.0, 4.0) * fade
+    };
+    // The points: the start, the end, every 1/30 s, keys 1 and 2, the fade
+    // in's end (0.3) and the fade out's start (2.0).
+    let mut points = vec![0.0, 2.5];
+    let mut l = 1.0 / 30.0;
+    while l < 2.5 {
+        points.push(l);
+        l += 1.0 / 30.0;
+    }
+    points.extend([1.0, 2.0, 0.3]);
+    points.sort_by(f64::total_cmp);
+    points.dedup();
+    let frame = |local: f64| ((0.25 + local) * SR as f64).ceil() as usize;
     let mut worst = 0f64;
     for (n, &v) in out[0].iter().enumerate() {
-        let t = n as f64 / SR as f64;
-        let local = t - 0.25;
-        let expected = if !(0.0..2.5).contains(&local) {
+        let expected = if n < frame(0.0) || n >= frame(2.5) {
             0.0
         } else {
-            let g = if local <= 1.0 {
-                0.2 + 1.3 * local
-            } else if local <= 2.0 {
-                1.5 - (local - 1.0)
-            } else {
-                0.5
-            };
-            let l = local.clamp(0.0, audible);
-            let fade = (l / 0.3)
-                .clamp(0.0, 1.0)
-                .min(((audible - l) / 0.5).clamp(0.0, 1.0));
-            0.5 * 0.8 * g.clamp(0.0, 4.0) * fade
+            let i = points.partition_point(|&p| frame(p) <= n) - 1;
+            let (a, b) = (points[i], points[(i + 1).min(points.len() - 1)]);
+            let t = n as f64 / SR as f64 - 0.25;
+            let x = if b > a { (t - a) / (b - a) } else { 0.0 };
+            0.5 * 0.8 * (gain_at(a) + (gain_at(b) - gain_at(a)) * x)
         };
         let e = (v as f64 - expected).abs();
         if e > worst {
             worst = e;
-            if e > 1e-3 {
-                eprintln!("sample {n} (t {t:.6}): got {v}, expected {expected}");
+            if e > 1e-5 {
+                eprintln!("sample {n}: got {v}, expected {expected}");
             }
         }
     }
-    // Control points every 16 samples, linear between: exact for linear keys
-    // except within one control interval of a key.
-    assert!(worst < 2e-4, "worst level error {worst}");
+    // f32 values and ramps: rounding only.
+    assert!(worst < 2e-6, "worst level error {worst}");
     assert_eq!(out[0][(0.2 * SR as f64) as usize], 0.0);
 }
 
@@ -291,6 +310,104 @@ fn precompositions_nest() {
     // Levels: 0.8 × inner comp 0.5 × precomp 0.5 (A) or 1 (B).
     assert!((out[0][sec(0.3)] - 0.8 * 0.25).abs() < 1e-6);
     assert!((out[0][sec(0.6)] - 0.8 * 0.5).abs() < 1e-6);
+}
+
+/// The shape of today's app projects: every content field a channel object
+/// (`PM.P(v)`), as the export-encoding `automation` fixture builds them. A
+/// precomposition's static `trim` channel once reached the linear source-time
+/// map as an object (`Number({…})` is NaN), so the nested voice and the whole
+/// export mix became NaN, written as silence.
+#[test]
+fn channel_valued_precomposition_fields_mix_like_numbers() {
+    let dir = temp_dir("nest-channels");
+    let dc = dir.join("dc.wav");
+    write_wav(&dc, SR, &[vec![0.5; SR as usize * 3]]);
+    let render = |channels: bool| {
+        let v = |x: f64| {
+            if channels {
+                ch(&x.to_string())
+            } else {
+                x.to_string()
+            }
+        };
+        let inner = comp(
+            30.0,
+            1.0,
+            &[audio(
+                "I",
+                "dc",
+                0.0,
+                1.0,
+                &format!(
+                    r#","gain":{},"trim":{},"speed":{},"fadeIn":{},"fadeOut":{}"#,
+                    v(0.35),
+                    v(0.1),
+                    v(1.0),
+                    v(0.08),
+                    v(0.1)
+                ),
+                "",
+            )],
+            // Today reads a composition's own level with `Number(…)`: a
+            // channel object there is unity, in both forms.
+            &format!(
+                r#","audioGain":{}"#,
+                if channels { ch("0.7") } else { "1".into() }
+            ),
+        );
+        let gain = keys(&[(0.0, 0.25), (0.4, 0.9), (0.85, 0.4)]);
+        let layers = [
+            audio(
+                "A",
+                "dc",
+                0.1,
+                0.85,
+                &format!(
+                    r#","gain":{gain},"trim":{},"fadeIn":{},"fadeOut":{}"#,
+                    v(0.05),
+                    v(0.14),
+                    v(0.2)
+                ),
+                "",
+            ),
+            layer(
+                "P",
+                "precomp",
+                0.0,
+                1.0,
+                &format!(
+                    r#"{{"comp":"X","audioGain":{},"trim":{}}}"#,
+                    v(0.75),
+                    v(0.0)
+                ),
+                "",
+            ),
+        ];
+        let doc = project(30.0, 1.0, &layers, &[("X".into(), inner)], "");
+        let rig = Rig::new(&[("dc", &dc)]);
+        let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
+        rig.render(&mut m, 0, SR as i64, 4096)
+    };
+    let numbers = render(false);
+    let channels = render(true);
+    for out in [&numbers, &channels] {
+        assert!(out[0].iter().all(|v| v.is_finite()), "the mix has NaN");
+        // The nested clip alone at 0.05 s: 0.5 × 0.35 × 0.75 × fade 0.625.
+        let at = (0.05 * SR as f64) as usize;
+        assert!(
+            (out[0][at] - 0.5 * 0.35 * 0.75 * 0.625).abs() < 1e-4,
+            "{}",
+            out[0][at]
+        );
+    }
+    // A channel makes today's envelope step one frame apart, along the
+    // same straight lines: the forms differ by `f32` rounding only.
+    let worst = numbers[0]
+        .iter()
+        .zip(&channels[0])
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    assert!(worst < 1e-6, "{worst}");
 }
 
 #[test]
@@ -592,14 +709,21 @@ fn clips_on_frame_starts_keep_their_first_sample() {
         let rig = Rig::new(&[("click", &file)]);
         let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
         let out = rig.render(&mut m, 0, SR as i64 * 2, 1024);
-        let at = (from * SR as f64).round() as usize;
+        // Today's source node starts on the frame the start rounds up to
+        // (at 1024× first) and plays a start between frames from that
+        // fraction of the source, interpolated.
+        let at =
+            pm_audio::today::time_to_sample_frame(from, SR as f64, pm_audio::today::Rounding::Up);
+        let skipped = (from * SR as f64 - at).min(0.0).abs();
+        let at = at as usize;
         assert_eq!(
             out[0][at - 1],
             0.0,
             "{fps} fps frame {frame}: nothing before the clip"
         );
+        let first = ((1.0 - skipped) * 0.9 + skipped * 0.45) as f32;
         assert!(
-            (out[0][at] - 0.9).abs() < 1e-6 && (out[0][at + 1] - 0.45).abs() < 1e-6,
+            (out[0][at] - first).abs() < 1e-6,
             "{fps} fps frame {frame}: first source samples at {at}: {:?}",
             &out[0][at - 1..at + 3]
         );

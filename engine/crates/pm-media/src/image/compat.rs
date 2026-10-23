@@ -694,10 +694,12 @@ mod tests {
     /// a Display P3 `cICP` selects P3.
     #[test]
     fn png_color_selects_gamma_like_blink() {
-        let dir = std::env::temp_dir().join(format!("pm-compat-png-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("pm-compat-png-")
+            .tempdir()
+            .unwrap();
         let check = |name: &str, chunks: &[(&[u8; 4], Vec<u8>)]| {
-            let path = dir.join(format!("{name}.png"));
+            let path = dir.path().join(format!("{name}.png"));
             std::fs::write(&path, ramp_png(chunks)).unwrap();
             png_color(&path).unwrap()
         };
@@ -739,7 +741,6 @@ mod tests {
             check("p3", &[(b"cICP", vec![12, 13, 0, 1]), gama(70_000)]),
             Some(PngColor::Cicp(12, 13))
         ));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The level 1 bitmap of a gamma-only PNG decodes the stored samples
@@ -748,11 +749,13 @@ mod tests {
     /// gamma leaves the bytes unchanged.
     #[test]
     fn gamma_png_bitmap_applies_the_inverse_power() {
-        let dir = std::env::temp_dir().join(format!("pm-compat-gamma-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("pm-compat-gamma-")
+            .tempdir()
+            .unwrap();
         let pool = FramePool::new(0);
         let bytes = |name: &str, chunks: &[(&[u8; 4], Vec<u8>)]| -> Vec<u8> {
-            let path = dir.join(format!("{name}.png"));
+            let path = dir.path().join(format!("{name}.png"));
             std::fs::write(&path, ramp_png(chunks)).unwrap();
             let still = super::super::read(&path, &pool).unwrap();
             let bitmap = bitmap_at(&path, &still, &pool).unwrap();
@@ -785,6 +788,5 @@ mod tests {
             }
             assert!(changed, "{gamma}");
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

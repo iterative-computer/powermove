@@ -20,6 +20,11 @@ serde_json.workspace = true
 rubato = "5.0.1"
 cpal = "0.18.2"
 libc = "0.2"
+libm.workspace = true
+# Today's MP3 decoder (Chromium 152 pins 0.6.0): see src/mp3.rs.
+symphonia = { version = "=0.6.0", default-features = false, features = ["mp3"] }
+symphonia-core = "=0.6.0"
+symphonia-bundle-mp3 = "=0.6.0"
 
 [features]
 # Test hooks on production types (an artificial decode delay); off in the
@@ -29,3 +34,5 @@ test-hooks = []
 [dev-dependencies]
 proptest.workspace = true
 pm-audio = { path = ".", features = ["test-hooks"] }
+tempfile = "3.27"
+sha2 = { workspace = true, features = ["std"] }

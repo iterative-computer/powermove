@@ -12,11 +12,10 @@ use pm_media::pool::FramePool;
 use pm_protocol::color::{AlphaMode, Transfer};
 use std::path::PathBuf;
 use std::process::Command;
+use tempfile::TempDir;
 
-fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("pm-media-images-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d.join(name)
+fn tmp(dir: &TempDir, name: &str) -> PathBuf {
+    dir.path().join(name)
 }
 
 /// Packed pixels of the single RGBA plane as bytes, row by row.
@@ -104,10 +103,14 @@ fn e2e_animation_fixtures() {
 
 #[test]
 fn png16_and_float_tiff_are_exact() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-images-")
+        .tempdir()
+        .unwrap();
     let pool = FramePool::new(0);
     let (w, h) = (64u32, 8u32);
     let px: Vec<u16> = (0..w * h * 4).map(|i| (i * 977 % 65536) as u16).collect();
-    let p = tmp("ramp16.png");
+    let p = tmp(&dir, "ramp16.png");
     ::image::ImageBuffer::<::image::Rgba<u16>, _>::from_raw(w, h, px.clone())
         .unwrap()
         .save(&p)
@@ -124,7 +127,7 @@ fn png16_and_float_tiff_are_exact() {
     assert_eq!(got, px, "16-bit PNG samples pass through exactly");
 
     let fpx: Vec<f32> = (0..w * h * 4).map(|i| i as f32 * 0.37 - 20.0).collect();
-    let t = tmp("float.tiff");
+    let t = tmp(&dir, "float.tiff");
     ::image::ImageBuffer::<::image::Rgba<f32>, _>::from_raw(w, h, fpx.clone())
         .unwrap()
         .save(&t)
@@ -150,9 +153,13 @@ fn ffmpeg(args: &[&str]) {
 
 #[test]
 fn openexr_half_float_and_alpha() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-images-")
+        .tempdir()
+        .unwrap();
     let pool = FramePool::new(0);
     let src = "testsrc2=size=96x54:rate=1";
-    let half = tmp("half.exr");
+    let half = tmp(&dir, "half.exr");
     ffmpeg(&[
         "-f",
         "lavfi",
@@ -170,7 +177,7 @@ fn openexr_half_float_and_alpha() {
         "zip1",
         half.to_str().unwrap(),
     ]);
-    let float = tmp("float.exr");
+    let float = tmp(&dir, "float.exr");
     ffmpeg(&[
         "-f",
         "lavfi",
@@ -226,7 +233,7 @@ fn openexr_half_float_and_alpha() {
         "half and float decodes differ by {max}"
     );
     // FFmpeg's own decode of the float file agrees with OpenEXRCore.
-    let raw = tmp("float.raw");
+    let raw = tmp(&dir, "float.raw");
     ffmpeg(&[
         "-i",
         float.to_str().unwrap(),
@@ -250,8 +257,12 @@ fn openexr_half_float_and_alpha() {
 
 #[test]
 fn dpx_through_ffmpeg() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-images-")
+        .tempdir()
+        .unwrap();
     let pool = FramePool::new(0);
-    let p = tmp("frame.dpx");
+    let p = tmp(&dir, "frame.dpx");
     ffmpeg(&[
         "-f",
         "lavfi",
@@ -273,9 +284,13 @@ fn dpx_through_ffmpeg() {
 
 #[test]
 fn exif_orientation_is_applied() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-images-")
+        .tempdir()
+        .unwrap();
     let pool = FramePool::new(0);
     // 4×2 JPEG, left half red, right half blue; then an EXIF orientation 6 (rotate 90° clockwise).
-    let p = tmp("orient.jpg");
+    let p = tmp(&dir, "orient.jpg");
     let img = ::image::RgbImage::from_fn(16, 8, |x, _| {
         if x < 8 {
             ::image::Rgb([255, 0, 0])
@@ -413,13 +428,17 @@ fn write_tiled_exr(
 
 #[test]
 fn openexr_tiled_zip_and_dwaa() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-images-")
+        .tempdir()
+        .unwrap();
     use pm_media::sys::openexr::{EXR_COMPRESSION_DWAA, EXR_COMPRESSION_ZIP};
     let pool = FramePool::new(0);
     let (w, h) = (40, 24);
     let px: Vec<f32> = (0..w * h * 4)
         .map(|i| ((i * 37) % 1000) as f32 / 250.0 - 0.5)
         .collect();
-    let zip = tmp("tiled-zip.exr");
+    let zip = tmp(&dir, "tiled-zip.exr");
     write_tiled_exr(&zip, w as i32, h as i32, false, EXR_COMPRESSION_ZIP, &px);
     let s = image::read(&zip, &pool).unwrap();
     assert!(s.frame.format.label.contains("tiled"));
@@ -453,7 +472,7 @@ fn openexr_tiled_zip_and_dwaa() {
         "outside the data window is transparent black"
     );
     // DWAA (lossy, half): decodes through OpenEXRCore and stays close.
-    let dwaa = tmp("tiled-dwaa.exr");
+    let dwaa = tmp(&dir, "tiled-dwaa.exr");
     write_tiled_exr(&dwaa, w as i32, h as i32, true, EXR_COMPRESSION_DWAA, &px);
     let d = image::read(&dwaa, &pool).unwrap();
     assert_eq!(d.frame.format.planes[0].format, PlaneFormat::Rgba16Float);

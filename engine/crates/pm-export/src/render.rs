@@ -746,6 +746,9 @@ pub struct AudioPlan {
     /// The export's samples: today's `OfflineAudioContext` length
     /// ([`legacy_audio_samples`]), not the frames' span.
     pub samples: i64,
+    /// The range in seconds as today's `renderOffline(t0, t1)` receives it:
+    /// its clips and envelopes start from `t0` (`pm_audio::today`).
+    pub range: (f64, f64),
 }
 
 /// Today's export mix length (`audio.ts` `renderOffline`):
@@ -956,6 +959,8 @@ fn plan_export_checked(
     let audio_codec = audio_codec_of(s, container);
     let audio = if s.audio && !s.format.is_image() {
         let cache = pm_audio::SourceCache::new(AUDIO_CACHE_BYTES, 2);
+        // An export takes today's exact lengths before it mixes.
+        cache.set_blocking_lengths(true);
         let graph =
             pm_audio::MixGraph::build(doc, &job.composition, &mut evaluator(), &cache, &*job.media)
                 .map_err(|e| JobError::Audio(e.to_string()))?;
@@ -970,6 +975,10 @@ fn plan_export_checked(
                 // independently of the project's playback device/rate.
                 sample_rate: 48_000,
                 samples: legacy_audio_samples(s.range.start, s.range.end, 48_000),
+                range: (
+                    s.range.start.get() as f64 / TICKS_PER_SECOND as f64,
+                    s.range.end.get() as f64 / TICKS_PER_SECOND as f64,
+                ),
                 graph: Arc::new(graph),
                 cache,
             })
@@ -1175,14 +1184,17 @@ where
     pipeline.set_legacy_png(crate::png_compat::has_level1_content(&document));
     let mut mixer = audio.map(|a| {
         let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
+        let mut mixer = pm_audio::Mixer::new(
+            pm_audio::MixFormat::stereo(a.sample_rate),
+            document.clone(),
+            a.graph,
+            evaluator(),
+            a.cache,
+        );
+        // Today's OfflineAudioContext starts at the range's start.
+        mixer.set_today_range(a.range.0.max(0.0), a.range.1, first);
         (
-            pm_audio::Mixer::new(
-                pm_audio::MixFormat::stereo(a.sample_rate),
-                document.clone(),
-                a.graph,
-                evaluator(),
-                a.cache,
-            ),
+            mixer,
             a.sample_rate,
             // Today's mix ends here, before or after the last frame's end.
             first + a.samples,

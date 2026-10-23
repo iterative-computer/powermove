@@ -1557,6 +1557,12 @@ fn chromium_to_float(offset: f32, below: f32, above: f32) -> f32 {
     }
 }
 
+/// `FloatSampleTypeTraits<float>::FromFloat`: NaN is silence, everything
+/// else is clamped to the unit range.
+fn chromium_clip(v: f32) -> f32 {
+    if v.is_nan() { 0.0 } else { v.clamp(-1.0, 1.0) }
+}
+
 const U8_BELOW: f32 = 1.0 / 128.0;
 const U8_ABOVE: f32 = 1.0 / 127.0;
 const S16_BELOW: f32 = 1.0 / 32768.0;
@@ -1590,12 +1596,15 @@ unsafe fn convert(
             ff::AV_SAMPLE_FMT_S64 | ff::AV_SAMPLE_FMT_S64P => out.extend((skip..n).map(|i| {
                 ((at(i) as *const i64).read_unaligned() as f64 / 9_223_372_036_854_775_808.0) as f32
             })),
+            // Chromium clips decoded floats to [−1, 1] (NaN to 0) when it
+            // copies them into the decode's bus (`FloatSampleTypeTraits`):
+            // a loud MP3 or AAC frame plays clipped today.
             ff::AV_SAMPLE_FMT_FLT | ff::AV_SAMPLE_FMT_FLTP => {
-                out.extend((skip..n).map(|i| (at(i) as *const f32).read_unaligned()))
+                out.extend((skip..n).map(|i| chromium_clip((at(i) as *const f32).read_unaligned())))
             }
-            ff::AV_SAMPLE_FMT_DBL | ff::AV_SAMPLE_FMT_DBLP => {
-                out.extend((skip..n).map(|i| (at(i) as *const f64).read_unaligned() as f32))
-            }
+            ff::AV_SAMPLE_FMT_DBL | ff::AV_SAMPLE_FMT_DBLP => out.extend(
+                (skip..n).map(|i| chromium_clip((at(i) as *const f64).read_unaligned() as f32)),
+            ),
             _ => out.extend(std::iter::repeat_n(0.0, n - skip)),
         }
     }
@@ -1604,6 +1613,15 @@ unsafe fn convert(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn float_samples_clip_as_chromium_does() {
+        // A loud MP3 decodes past full scale; decodeAudioData holds it there.
+        assert_eq!(chromium_clip(-1.1439409), -1.0);
+        assert_eq!(chromium_clip(1.0966294), 1.0);
+        assert_eq!(chromium_clip(f32::NAN), 0.0);
+        assert_eq!(chromium_clip(0.4744522), 0.4744522);
+    }
 
     #[test]
     fn integer_samples_convert_as_chromium_does() {
@@ -1637,10 +1655,8 @@ mod tests {
     }
 
     /// A WebM/Opus file from Powermove's FFmpeg build (`PM_FFMPEG_DIR`).
-    fn webm_opus(name: &str, seconds: u32) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pm-media-audio-unit-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let out = dir.join(name);
+    fn webm_opus(dir: &tempfile::TempDir, name: &str, seconds: u32) -> PathBuf {
+        let out = dir.path().join(name);
         let ffmpeg = std::env::var_os("PM_FFMPEG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -1678,7 +1694,11 @@ mod tests {
     /// block.
     #[test]
     fn failed_anchors_fall_back_after_a_few() {
-        let file = webm_opus("failed-anchors.webm", 30);
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-audio-unit-")
+            .tempdir()
+            .unwrap();
+        let file = webm_opus(&dir, "failed-anchors.webm", 30);
         let mut d = AudioDecoder::open(&file, None).unwrap();
         let mut pcm = vec![Vec::new()];
         while d.read(&mut pcm, 4096).unwrap() > 0 {}
@@ -1719,7 +1739,11 @@ mod tests {
     /// start; the seeks after it use their anchors again.
     #[test]
     fn a_stray_failed_anchor_does_not_stick() {
-        let file = webm_opus("stray-anchor.webm", 30);
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-audio-unit-")
+            .tempdir()
+            .unwrap();
+        let file = webm_opus(&dir, "stray-anchor.webm", 30);
         let mut d = AudioDecoder::open(&file, None).unwrap();
         let mut pcm = vec![Vec::new()];
         while d.read(&mut pcm, 4096).unwrap() > 0 {}
@@ -1755,7 +1779,11 @@ mod tests {
     /// first frame.
     #[test]
     fn a_seek_that_lands_after_its_target_starts_an_anchor_earlier() {
-        let file = webm_opus("landed-after.webm", 30);
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-audio-unit-")
+            .tempdir()
+            .unwrap();
+        let file = webm_opus(&dir, "landed-after.webm", 30);
         let mut s = AudioDecoder::open(&file, None).unwrap();
         assert!(s.codec_delay > 100);
         let a = s.anchor_for(20 * 48_000).unwrap();

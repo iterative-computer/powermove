@@ -293,8 +293,10 @@ fn project_with_assets(layers: &[String], assets: &str, dur: f64) -> Document {
 }
 
 /// A clip of 23.976 fps footage conformed to 24 or 25 (Interpret Footage)
-/// plays its soundtrack with its frames: a sound at native time t is heard
-/// at clip time t × 23.976 / conformed.
+/// plays its soundtrack as today does: at the soundtrack's own rate and
+/// pitch, whatever the conformed picture rate (today's `audioLayers`
+/// ignores the interpretation; the engine matches it, decision of
+/// 2026-10-22). A sound at native time t is heard at clip time t.
 #[test]
 fn conformed_footage_keeps_its_soundtrack_on_its_frames() {
     let dir = temp_dir("stretch-conform");
@@ -344,7 +346,7 @@ fn conformed_footage_keeps_its_soundtrack_on_its_frames() {
         let out = rig.render(&mut m, 0, (dur * SR as f64) as i64, 4096);
         let mut errors = vec![];
         for native in [1.0, 2.0, 3.0, 4.0] {
-            let c = (native / factor * SR as f64) as usize;
+            let c = (native * SR as f64) as usize;
             let (lo, hi) = (c - SR as usize / 20, c + SR as usize / 20);
             // Energy centroid of the burst above the 1 kHz bed (high-passed
             // by a first difference).
@@ -357,12 +359,8 @@ fn conformed_footage_keeps_its_soundtrack_on_its_frames() {
             errors.push((num / den - c as f64) / SR as f64 * 1000.0);
         }
         // The bed's pitch: preserved, or moved by the factor.
-        let bed = &out[0][(0.55 / factor * SR as f64) as usize..][..SR as usize / 3];
-        let expect = if pitch == "follow" {
-            1000.0 * factor
-        } else {
-            1000.0
-        };
+        let bed = &out[0][(0.55 * SR as f64) as usize..][..SR as usize / 3];
+        let expect = 1000.0;
         let f = best_freq(bed, expect, SR);
         println!(
             "23.976 conformed to {conform} ({pitch}): factor {factor:.6}, burst errors {errors:.3?} ms, bed {f:.2} Hz"
