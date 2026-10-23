@@ -243,6 +243,9 @@ pub struct SnapshotQueue {
     cost_us: Option<f64>,
     /// Names and bytes of results main has not taken (or the reaper unlinked).
     published: VecDeque<(String, u64)>,
+    /// Result bytes of the layer rasters handed to the raster worker and not
+    /// finished (`super::rasters`): they left the queue but not memory.
+    in_worker: u64,
 }
 
 impl SnapshotQueue {
@@ -270,6 +273,13 @@ impl SnapshotQueue {
     fn pending_bytes(&self) -> u64 {
         self.jobs.iter().map(SnapshotJob::bytes).sum::<u64>()
             + self.published.iter().map(|(_, b)| b).sum::<u64>()
+            + self.in_worker
+    }
+
+    /// The raster worker's jobs' result bytes, counted against
+    /// [`MAX_PENDING_BYTES`] while they are drawn.
+    pub fn set_in_worker(&mut self, bytes: u64) {
+        self.in_worker = bytes;
     }
 
     /// Records a result until main takes it or orphan cleanup unlinks it.
@@ -883,6 +893,17 @@ mod tests {
         );
         assert_eq!(pm_bridge::shm::take(&name, 16).unwrap(), vec![7; 16]);
         assert!(m.push(job(SnapshotClass::Sync, key(3, 1), None, 0)).is_ok());
+        // Layer rasters the worker is drawing left the queue, not memory.
+        let mut w = SnapshotQueue::default();
+        w.set_in_worker(MAX_PENDING_BYTES);
+        assert_eq!(
+            w.push(job(SnapshotClass::Sync, key(3, 1), None, 0))
+                .unwrap_err()
+                .1,
+            Refused::Full
+        );
+        w.set_in_worker(0);
+        assert!(w.push(job(SnapshotClass::Sync, key(3, 1), None, 0)).is_ok());
     }
 
     #[test]

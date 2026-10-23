@@ -5818,7 +5818,8 @@ impl Thread {
     /// ([`Command::RasterReseed`]).
     fn raster_reseed(&mut self, job: super::rasters::RasterJob) {
         if let Some(rasters) = self.rasters.as_mut() {
-            rasters.finished();
+            rasters.finished(job.job.bytes());
+            self.snapshots.set_in_worker(rasters.in_flight_bytes());
         }
         self.raster_mirrors.remove(&job.job.key);
         self.stats().layer_raster_reseeds += 1;
@@ -5828,7 +5829,8 @@ impl Thread {
     /// The layer raster worker answered a job ([`Command::RasterDone`]).
     fn raster_done(&mut self, done: super::rasters::RasterDone) {
         if let Some(rasters) = self.rasters.as_mut() {
-            rasters.finished();
+            rasters.finished(done.bytes);
+            self.snapshots.set_in_worker(rasters.in_flight_bytes());
         }
         if let Some((name, length)) = done.published {
             self.segments.add(name.clone());
@@ -6405,6 +6407,7 @@ impl Thread {
         let raster_job = match self.rasters.as_mut() {
             Some(worker) => match worker.submit(raster_job) {
                 Ok(()) => {
+                    self.snapshots.set_in_worker(worker.in_flight_bytes());
                     if !mirrored {
                         self.raster_mirrors.insert(key);
                         self.stats().layer_raster_seeds += 1;

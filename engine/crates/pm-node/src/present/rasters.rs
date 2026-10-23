@@ -80,6 +80,8 @@ pub struct RasterJob {
 #[derive(Debug, Clone)]
 pub struct RasterDone {
     pub key: Key,
+    /// The job's result bytes (what the worker held for it).
+    pub bytes: u64,
     /// A shared-memory segment it published for main, and its length.
     pub published: Option<(String, u64)>,
     /// Host µs from the job's start on the worker to its answer; `None`
@@ -110,6 +112,8 @@ pub struct RasterWorker {
     tx: Option<Sender<Work>>,
     thread: Option<JoinHandle<()>>,
     in_flight: usize,
+    /// Result bytes of the jobs in flight ([`super::snapshot::SnapshotJob::bytes`]).
+    in_flight_bytes: u64,
 }
 
 impl RasterWorker {
@@ -136,6 +140,7 @@ impl RasterWorker {
             tx: Some(tx),
             thread: Some(thread),
             in_flight: 0,
+            in_flight_bytes: 0,
         })
     }
 
@@ -147,6 +152,11 @@ impl RasterWorker {
     /// Jobs handed over and not finished.
     pub fn in_flight(&self) -> usize {
         self.in_flight
+    }
+
+    /// Their result bytes, which the snapshot queue's memory bound counts.
+    pub fn in_flight_bytes(&self) -> u64 {
+        self.in_flight_bytes
     }
 
     /// Builds the worker's renderer on `device` ahead of its first job.
@@ -165,9 +175,11 @@ impl RasterWorker {
         let Some(tx) = &self.tx else {
             return Err(Box::new(job));
         };
+        let bytes = job.job.bytes();
         match tx.send(Work::Job(Box::new(job), now_us())) {
             Ok(()) => {
                 self.in_flight += 1;
+                self.in_flight_bytes += bytes;
                 Ok(())
             }
             Err(error) => match error.0 {
@@ -192,9 +204,10 @@ impl RasterWorker {
         }
     }
 
-    /// The worker finished a job.
-    pub fn finished(&mut self) {
+    /// The worker finished (or sent back) a job of `bytes`.
+    pub fn finished(&mut self, bytes: u64) {
         self.in_flight = self.in_flight.saturating_sub(1);
+        self.in_flight_bytes = self.in_flight_bytes.saturating_sub(bytes);
     }
 }
 
@@ -247,6 +260,7 @@ fn run(
             Work::Forget(key) => mirrors.forget(key),
             Work::Job(mut job, dispatched) => {
                 let key = job.job.key;
+                let bytes = job.job.bytes();
                 let source = std::mem::replace(&mut job.document, RasterDocument::Mirror);
                 let Some(document) = mirrors.for_job(key, source, job.revision) else {
                     if back.send(Command::RasterReseed(job)).is_err() {
@@ -285,6 +299,7 @@ fn run(
                         }
                         RasterDone {
                             key,
+                            bytes,
                             published,
                             render_us: Some(render_us),
                             queued_us: (started - dispatched).max(0),
@@ -311,6 +326,7 @@ fn run(
                         );
                         RasterDone {
                             key,
+                            bytes,
                             published: None,
                             render_us: None,
                             queued_us: (started - dispatched).max(0),
