@@ -28,7 +28,8 @@ const env = {
   ...process.env,
   CODEX_BINARY: path.join(appDir, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'),
   POWERMOVE_FAKE_CHATGPT_STATUS: 'connected',
-  POWERMOVE_USER_DATA: userData, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1'
+  POWERMOVE_USER_DATA: userData, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1',
+  POWERMOVE_DISABLE_RUNTIME_UPDATES: '1'
 };
 delete env.ELECTRON_RUN_AS_NODE;
 const app = await _electron.launch({ args: ['.'], cwd: appDir, env });

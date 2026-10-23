@@ -973,6 +973,8 @@ try {
       Object.assign(env, {
         PM_MEASURE_APP: JSON.stringify({ ...run, project, startS: run.startS ?? 1, pageScript: path.join(work, 'app-page.js'), out, trace }),
         POWERMOVE_BACKGROUND_TEST: '1',
+        // Long hidden launches are killed: never start a runtime download.
+        POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
         POWERMOVE_USER_DATA: profile,
         POWERMOVE_DEVTOOLS: '0',
         POWERMOVE_NEW_ENGINE: run.mode === 'engine' || run.mode === 'tracer' ? '1' : '0',

@@ -113,7 +113,7 @@ try {
     await writeFile(path.join(extension, 'manifest.json'), JSON.stringify({ id: 'import-contract-defaults', name: 'Import contract defaults', version: '1.0.0', apiVersion: 1, contributes: ['media'] }));
     await writeFile(path.join(extension, 'index.ts'), 'export default function activate(api) { api.media.registerImportDefaults({ anchor: { x: 0.25, y: 0.75 } }); }');
     const env = { ...process.env, POWERMOVE_USER_DATA: profile, POWERMOVE_AGENT_EXPORTS: exportsDir,
-      PM_FFMPEG_DIR: ffmpegDirectory, POWERMOVE_NEW_ENGINE: mode === 'legacy' ? '0' : '1', POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DEVTOOLS: '0', POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' };
+      PM_FFMPEG_DIR: ffmpegDirectory, POWERMOVE_NEW_ENGINE: mode === 'legacy' ? '0' : '1', POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DISABLE_RUNTIME_UPDATES: '1', POWERMOVE_DEVTOOLS: '0', POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' };
     delete env.ELECTRON_RUN_AS_NODE;
     let app, page;
     if (mode === 'desktop') {
