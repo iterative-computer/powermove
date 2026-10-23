@@ -797,9 +797,14 @@ describe('compatibility answers during playback', () => {
       expect(posted.length).toBeGreaterThan(before);
       reuse = true;
       expect(t.refreshShown(3 * frame)).toBe(false);
-      // Its output changed: new pixels under a new key.
+      // Its output changed: new pixels under a new key, after the layer's
+      // stale answers are forgotten.
       reuse = false; key = 'k2';
+      const at = posted.length;
       expect(t.refreshShown(3 * frame)).toBe(true);
+      const sent = posted.slice(at).map((m: any) => m.compat);
+      expect(sent[0]).toBe('forget');
+      expect(sent.slice(1).every((c: string) => c === 'pixels')).toBe(true);
       // The new output again: unchanged.
       expect(t.refreshShown(3 * frame)).toBe(false);
     } finally { t.dispose(); }

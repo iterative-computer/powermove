@@ -749,15 +749,19 @@ export class EngineRenderTransport {
       const time = entry.need.composition !== this.options.composition() || Math.abs(entry.cursor - pts) < Math.max(1, frame) / 2
         ? entry.cursor : pts;
       const need = { ...entry.need, time };
-      const tag = this.needTag(need);
-      const was = this.postedFor.get(tag) ?? null;
-      if (!this.answerNeed(need, entry.session, false, true)) continue;
+      const was = this.postedFor.get(this.needTag(need)) ?? null;
       // The same pixels (a reuse, or a raster under the key already posted)
-      // or a pass-through again: unchanged.
-      const now = this.postedFor.get(tag) ?? null;
-      // Without an earlier answer logged here the engine decides alone (an
-      // answer that replaces its own redraws the frame).
-      if (was !== null && now !== was) changed = true;
+      // or a pass-through again: unchanged. A changed output makes every
+      // answer for that layer stale (other frames, densities, windows: a
+      // capture asks for them again): the layer is forgotten first, so the
+      // engine draws the frame once, with the new answer. Without an earlier
+      // answer posted here the engine decides alone (an answer that replaces
+      // its own redraws the frame).
+      this.answerNeed(need, entry.session, false, true, (now) => {
+        if (was === null || now === was) return;
+        changed = true;
+        this.forgetCompat(String(need.layer), String(need.composition));
+      });
     }
     return changed;
   }
@@ -769,7 +773,7 @@ export class EngineRenderTransport {
     this.presentedWhilePlaying(true);
   }
 
-  private answerNeed(need: CompatNeed, session: TransportSession, prepared = false, refresh = false): boolean {
+  private answerNeed(need: CompatNeed, session: TransportSession, prepared = false, refresh = false, beforePost?: (answer: string) => void): boolean {
     const answerer = this.answerers.get(need.source);
     // A producer that asks for a frame from inside its own answer (an
     // override calling `render.snapshot`) gets none: that frame would need
@@ -811,6 +815,7 @@ export class EngineRenderTransport {
       return false;
     }
     const id = { composition: need.composition, layer: need.layer, time: need.time, source: need.source };
+    beforePost?.(answer.kind === 'native' ? 'native' : `raster:${answer.key}`);
     let posted: boolean;
     if (answer.kind === 'native') {
       this.compatStats.natives++;
