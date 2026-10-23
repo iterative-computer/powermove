@@ -1191,8 +1191,12 @@ p.is-streaming::after,.agent-md-li.is-streaming p::after,.agent-md-quote.is-stre
 #projects-screen.on{display:flex}
 /* The editor panels under the home screen start at the titlebar's edge, and their hairline ring peeks above it. Don't paint them. */
 /* The screen's canvas is the window material, so it can't cover what sits
-   beneath it. Hide the editor and its status line instead of painting over them. */
-body:has(#projects-screen.on) #body,body:has(#projects-screen.on) #status{visibility:hidden}
+   beneath it. Hide the editor and its status line instead of painting over them.
+   The screen is a child of body (legacy/ui/projects.ts). `> ` keeps Chromium's
+   :has() recheck to body's own children: with a descendant :has() on body,
+   every node inserted or removed anywhere in the page (a timecode, a label)
+   invalidated the style of the whole document. */
+body:has(> #projects-screen.on) #body,body:has(> #projects-screen.on) #status{visibility:hidden}
 .ps-sidebar{width:236px;flex:none;padding:6px 12px 8px;display:flex;flex-direction:column;gap:14px}
 .ps-search{height:32px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;border:0;border-radius:var(--r-md);background:var(--bg-float);color:var(--tx-3)}
 .ps-search input::placeholder{color:var(--tx-3)}
