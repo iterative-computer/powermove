@@ -2467,6 +2467,10 @@ fn child_warm() {
     let mut doc = shape_project(60.0);
     doc["layers"][0]["d"] = json!({ "shape": "star", "w": 40, "h": 40, "points": 5, "radius": 6,
         "stroke": 2, "strokeColor": "#FFD60A", "color": "#E8E2CF" });
+    // With motion blur: a playing frame samples fewer sub-frames than a
+    // paused one, so the warm-up must plan as the play will.
+    doc["layers"][0]["mblur"] = json!(true);
+    doc["shutter"] = json!(0.5);
     for key in ["scale.x", "scale.y"] {
         doc["layers"][0]["p"][key] = json!({ "v": 100, "expr": null, "kf": [
             { "t": 0, "v": 50, "ease": "linear" }, { "t": 2, "v": 650, "ease": "linear" }

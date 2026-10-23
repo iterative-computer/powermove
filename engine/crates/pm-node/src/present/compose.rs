@@ -835,7 +835,9 @@ impl Composer {
 
     /// [`Self::compat_needs_at`] for a frame a playing view will draw soon,
     /// with its level 1 shape and path rasters drawn ahead
-    /// (`Renderer::plan_ahead`).
+    /// (`Renderer::plan_ahead`). Planned as a playing frame (its motion
+    /// blur and sampling), whether or not the view plays now: a paused
+    /// view warms the frames its next play draws.
     pub fn plan_ahead_at(
         &mut self,
         doc: &pm_model::Document,
@@ -855,7 +857,10 @@ impl Composer {
         let Some(region) = place.region else {
             return Vec::new();
         };
-        let request = self.viewer_request(&place, region, state, false);
+        let mut request = self.viewer_request(&place, region, state, false);
+        request.motion_blur =
+            pm_render::motion::MotionBlur::Kind(pm_protocol::frame::MotionBlurKind::PreviewPlaying);
+        request.sampling = pm_render::sampling::Sampling::Playback;
         self.renderer
             .plan_ahead(doc, composition, time, &request, media, true)
     }
