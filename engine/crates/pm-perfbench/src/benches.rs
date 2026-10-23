@@ -84,6 +84,7 @@ pub fn all() -> Vec<Bench> {
         ("playback_500", playback_500),
         ("drag_500", drag_500),
         ("edit_playback_500", edit_playback_500),
+        ("inspector_edit_500", inspector_edit_500),
         ("scrub_24", scrub_24),
         ("export_120", export_120),
         ("typing_60", typing_60),
@@ -340,6 +341,56 @@ pub fn drag(ctx: &Ctx, name: &str, layers: usize, moves: u32, reuse: bool) -> Be
         m,
         wall,
         json!({ "fixture": f.summary, "layer": layer, "reuse": reuse }),
+    )
+}
+
+/// Inspector edits while paused: 60 edits of one layer's position, each
+/// as the editor applies it (`PM.Edit.apply`): the layer's channel, the
+/// project's `revision`, and an entry appended to its `edits` provenance log
+/// (`legacy/core/editing.ts`), one batch per edit.
+pub fn inspector_edit_500(ctx: &Ctx) -> BenchReport {
+    use pm_model::patch::PathPart;
+    let f = fixtures::synthetic(Synthetic::new(500));
+    let layer = nth_solid(&f.doc, 150);
+    let mut v = Viewer::new(ctx, &f.doc, &f.media);
+    let at = ticks(1.0);
+    v.frame(at);
+    v.frame(at);
+    let entry = |k: u32| {
+        pm_model::json::parse(&format!(
+            r#"{{"id":"e{k}","label":"Position","origin":"inspector","revision":{},"at":{k}}}"#,
+            k + 1
+        ))
+        .unwrap()
+    };
+    let scope = Scope::begin();
+    let wall = (0..60)
+        .map(|k| {
+            v.patch(vec![
+                leaf_set(
+                    layer,
+                    &["p", "position.x", "v"],
+                    pm_model::Value::Number(100.0 + f64::from(k)),
+                ),
+                pm_model::Patch::set(
+                    vec![PathPart::Key("revision".into())],
+                    pm_model::Value::Number(f64::from(k + 1)),
+                ),
+                pm_model::Patch::set(
+                    vec![PathPart::Key("edits".into()), PathPart::Index(f64::from(k))],
+                    entry(k),
+                ),
+            ]);
+            v.frame(at)
+        })
+        .collect();
+    let m = measured(scope);
+    report(
+        "inspector_edit_500",
+        "edits",
+        m,
+        wall,
+        json!({ "fixture": f.summary, "layer": layer }),
     )
 }
 
