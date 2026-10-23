@@ -31,23 +31,37 @@ test('user export protects playback cadence across playback start and stop', asy
       PM.bus.emit('project'); PM.bus.emit('layers');
     });
     await expect.poll(() => session!.page.evaluate(() => !!(window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.latest), { timeout: 45_000 }).toBe(true);
-    const sample = () => session!.page.evaluate(async () => {
-      const PM = (window as any).PM;
-      const presentation = PM.Kernel.services.get('viewer').enginePresentation;
-      PM.loop = false; PM.setTime(0); PM.play();
-      await new Promise(resolve => setTimeout(resolve, 400));
-      const stamps: number[] = [];
-      let seq = -1;
-      const off = presentation.onPresented((frame: any) => {
-        if (frame.seq !== seq) { seq = frame.seq; stamps.push(performance.now()); }
+    const runtimeQos = () => session!.app.evaluate(async () =>
+      (await (globalThis as any).__powermoveNativeEngine?.engine?.report('job'))?.qos ?? null);
+    const sample = async (exporting = false) => {
+      const sampled = session!.page.evaluate(async () => {
+        const PM = (window as any).PM;
+        const presentation = PM.Kernel.services.get('viewer').enginePresentation;
+        PM.loop = false; PM.setTime(0); PM.play();
+        await new Promise(resolve => setTimeout(resolve, 400));
+        const stamps: number[] = [];
+        let seq = -1;
+        const off = presentation.onPresented((frame: any) => {
+          if (frame.seq !== seq) { seq = frame.seq; stamps.push(performance.now()); }
+        });
+        try { await new Promise(resolve => setTimeout(resolve, 3000)); }
+        finally { off(); PM.pause(); }
+        const intervals = stamps.slice(1).map((t, i) => t - stamps[i]!).sort((a, b) => a - b);
+        return { frames: stamps.length, p50: intervals[Math.floor(intervals.length * 0.5)] ?? null,
+          p99: intervals[Math.floor(intervals.length * 0.99)] ?? null, max: intervals.at(-1) ?? null,
+          late: intervals.filter(ms => ms > 2 * 1000 / 60).length };
       });
-      try { await new Promise(resolve => setTimeout(resolve, 3000)); }
-      finally { off(); PM.pause(); }
-      const intervals = stamps.slice(1).map((t, i) => t - stamps[i]!).sort((a, b) => a - b);
-      return { frames: stamps.length, p50: intervals[Math.floor(intervals.length * 0.5)] ?? null,
-        p99: intervals[Math.floor(intervals.length * 0.99)] ?? null, max: intervals.at(-1) ?? null,
-        late: intervals.filter(ms => ms > 2 * 1000 / 60).length };
-    });
+      const qos = (async () => {
+        if (exporting) {
+          await expect.poll(runtimeQos, { timeout: 10_000 }).toBe('utility');
+          metrics.qosPlaying = await runtimeQos();
+        }
+      })();
+      const [frames, checked] = await Promise.allSettled([sampled, qos]);
+      if (frames.status === 'rejected') throw frames.reason;
+      if (checked.status === 'rejected') throw checked.reason;
+      return frames.value;
+    };
     metrics.control = await sample();
     await session.app.evaluate(({ dialog }, file) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: file }); }, path.join(root, 'export.webm'));
     const start = await session.page.evaluate(async () => {
@@ -62,13 +76,19 @@ test('user export protects playback cadence across playback start and stop', asy
     });
     expect(start.status).toBe('accepted');
     await expect.poll(() => session!.page.evaluate(() => (window as any).__exportQosStatuses.some((s: any) => s.progress > 0)), { timeout: 45_000 }).toBe(true);
-    metrics.during = await sample();
+    await expect.poll(runtimeQos).toBe('default');
+    metrics.qosIdle = await runtimeQos();
+    metrics.during = await sample(true);
+    await expect.poll(runtimeQos).toBe('default');
+    metrics.qosStopped = await runtimeQos();
     const before = await session.page.evaluate(() => (window as any).__exportQosStatuses.at(-1));
     expect(before.state).toBe('running');
     await expect.poll(() => session!.page.evaluate(() => (window as any).__exportQosStatuses.at(-1)?.progress), { timeout: 30_000 }).toBeGreaterThan(before.progress);
     await session.page.evaluate(async (id) => { await (window as any).__powermoveTestBridge.nativeEngine.cancelExport(id); }, start.jobId);
     try { await expect.poll(() => session!.page.evaluate(() => (window as any).__exportQosStatuses.at(-1)?.state)).toBe('cancelled'); }
     finally { metrics.statuses = await session.page.evaluate(() => (window as any).__exportQosStatuses.map(({ state, progress, routed, error }: any) => ({ state, progress, routed, error }))); }
+    await expect.poll(runtimeQos).toBe('utility');
+    metrics.qosCancelled = await runtimeQos();
     expect((metrics.during as any).frames).toBeGreaterThan(100);
     expect((metrics.during as any).late, 'zero presentation gaps beyond the two-frame deadline').toBe(0);
     expect(session.diagnostics.pageErrors).toEqual([]);
