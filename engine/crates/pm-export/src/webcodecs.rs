@@ -296,9 +296,9 @@ impl Sink for WebCodecsSink {
     }
 
     fn finish(mut self) -> Result<Delivered, Error> {
-        self.closed = true;
         let started = std::time::Instant::now();
         self.host.finish()?;
+        self.closed = true;
         let host_ms = started.elapsed().as_secs_f64() * 1e3;
         let started = std::time::Instant::now();
         let path = self.spec.destination.clone();
@@ -327,7 +327,7 @@ mod tests {
     #[derive(Default)]
     struct Log(Vec<String>);
 
-    struct Recorder(Arc<Mutex<Log>>);
+    struct Recorder(Arc<Mutex<Log>>, bool);
 
     impl EncodeHost for Recorder {
         fn open(&mut self, open: &EncodeOpen) -> Result<(), Error> {
@@ -358,7 +358,11 @@ mod tests {
         }
         fn finish(&mut self) -> Result<(), Error> {
             self.0.lock().unwrap().0.push("finish".into());
-            Ok(())
+            if self.1 {
+                Err(Error::Cancelled)
+            } else {
+                Ok(())
+            }
         }
         fn abort(&mut self) {
             self.0.lock().unwrap().0.push("abort".into());
@@ -392,7 +396,7 @@ mod tests {
         let log = Arc::new(Mutex::new(Log::default()));
         let s = spec(AlphaOutput::None);
         assert!(uses_host(&s));
-        let mut sink = WebCodecsSink::new(&s, Box::new(Recorder(log.clone()))).unwrap();
+        let mut sink = WebCodecsSink::new(&s, Box::new(Recorder(log.clone(), false))).unwrap();
         let rgba = [0.5f32, 0.25, 1.0, 1.0].repeat(16);
         let frame = WorkingFrame {
             rgba: &rgba,
@@ -414,6 +418,18 @@ mod tests {
                 "abort",
             ]
         );
+    }
+
+    #[test]
+    fn cancelling_host_finish_aborts_the_open_encode_once() {
+        let log = Arc::new(Mutex::new(Log::default()));
+        let sink = WebCodecsSink::new(
+            &spec(AlphaOutput::None),
+            Box::new(Recorder(log.clone(), true)),
+        )
+        .unwrap();
+        assert!(matches!(sink.finish(), Err(Error::Cancelled)));
+        assert_eq!(log.lock().unwrap().0, ["open 4x4 2", "finish", "abort"]);
     }
 
     #[test]
@@ -483,7 +499,7 @@ mod tests {
         s.overwrite = Overwrite::Replace;
         assert!(!uses_host(&s));
         let log = Arc::new(Mutex::new(Log::default()));
-        assert!(WebCodecsSink::new(&s, Box::new(Recorder(log.clone()))).is_err());
+        assert!(WebCodecsSink::new(&s, Box::new(Recorder(log.clone(), false))).is_err());
         assert!(log.lock().unwrap().0.is_empty());
     }
 }
