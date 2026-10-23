@@ -2238,10 +2238,9 @@ mod storage_tests {
             panic!("float accessor made integer staging")
         };
         assert!(Arc::ptr_eq(values, &attribute.data));
-        assert_eq!(
-            attribute.data[0].to_bits(),
-            (f64::from(original[0]) as f32).to_bits()
-        );
+        // A signaling NaN's payload survives or is quieted depending on whether the
+        // optimizer keeps the f32 -> f64 -> f32 round trip, so only its NaN-ness is fixed.
+        assert!(original[0].is_nan() && attribute.data[0].is_nan());
         assert_eq!(attribute.data[1].to_bits(), (-0.0f32).to_bits());
         assert_eq!(attribute.data[2].to_bits(), 2.0f32.to_bits());
         assert_eq!(raw.raw(2), 2.0);
