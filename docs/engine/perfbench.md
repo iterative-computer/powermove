@@ -217,9 +217,13 @@ which allocates according to how far the GPU has got when a frame polls
 (measured spread over identical runs: up to 0.011% of allocations and 0.03% of
 bytes), and the export thread parks on the encoder thread a different number
 of times per run. Every heap counter has a 0.1% relative tolerance for that
-reason, on both scopes; `scrub_24`'s every-thread heap counts have 0.5% (its
-video decode thread allocates according to how far decoding ahead got: 0.067%
-and 0.12% spread over three runs). Each is listed with its evidence in
+reason, on both scopes; `scrub_24`'s every-thread heap counts have 3% (its
+video decode thread allocates according to how far decoding ahead got: up to
+1.9% of allocations and 1.1% of bytes over 12 runs at load 29; a full run once
+measured 0.94% above its baseline). A run of some benches (`PM_PERF_ONLY`) can
+count less than the whole set (state warmed by earlier benches: `scrub_24` alone
+allocates 1.39 MB on its thread against 1.49 MB in the whole run), so lower
+baselines from whole runs only. Each is listed with its evidence in
 `baselines.json`; every other count is exact.
 
 `PM_PERF_RATCHET=update` rewrites the file: every count that went down is

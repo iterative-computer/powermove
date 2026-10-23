@@ -5,8 +5,9 @@
 //!
 //! `PM_PERF_RATCHET=update` lowers the baselines that went down and records
 //! new benches (never raises one, never changes units, refuses while a bench
-//! of the file did not run); `PM_PERF_ONLY=<name,...>` runs some benches
-//! (the comparison then covers only those).
+//! of the file did not run, and runs only with the whole set);
+//! `PM_PERF_ONLY=<name,...>` runs some benches (the comparison then covers
+//! only those).
 //!
 //! Runs on the main thread (harness = false): the typing bench's CoreText
 //! registry uses AppKit's font manager.
@@ -66,6 +67,14 @@ fn main() {
         );
     }
     if std::env::var("PM_PERF_RATCHET").is_ok_and(|v| v == "update") {
+        // A bench alone can count less than in the whole set (state warmed by
+        // the benches before it), so only whole runs lower baselines.
+        if !whole_set {
+            eprintln!(
+                "perf ratchet: PM_PERF_RATCHET=update runs the whole set (unset PM_PERF_ONLY)"
+            );
+            std::process::exit(1);
+        }
         let next = match lowered(&baselines, &reports, whole_set) {
             Ok(next) => next,
             Err(e) => {

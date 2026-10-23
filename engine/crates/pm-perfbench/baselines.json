@@ -453,12 +453,12 @@
     },
     "scrub_24": {
       "all_threads/cpu.heap_alloc_bytes": {
-        "relative": 0.005,
-        "reason": "Every thread: the video decode thread's demuxer and decoder allocate according to how far decoding ahead got when each seek arrived. Measured spread over 3 identical runs: 0.067% of allocations (15,046 to 15,056) and 0.12% of bytes (1,616,662 to 1,618,582)."
+        "relative": 0.03,
+        "reason": "Every thread: the video decode thread's demuxer and decoder allocate according to how far decoding ahead got when each seek arrived. Measured spread: 3 full runs 15,046 to 15,056 allocations and 1,616,662 to 1,618,582 bytes; a 4th full run 15,198 allocations; 12 runs of scrub_24 alone 15,046 to 15,339 allocations (1.9%) and 1,521,120 to 1,538,422 bytes (1.1%), at load 29. The bench thread's own counts stay within 0.1%."
       },
       "all_threads/cpu.heap_allocs": {
-        "relative": 0.005,
-        "reason": "Every thread: the video decode thread's demuxer and decoder allocate according to how far decoding ahead got when each seek arrived. Measured spread over 3 identical runs: 0.067% of allocations (15,046 to 15,056) and 0.12% of bytes (1,616,662 to 1,618,582)."
+        "relative": 0.03,
+        "reason": "Every thread: the video decode thread's demuxer and decoder allocate according to how far decoding ahead got when each seek arrived. Measured spread: 3 full runs 15,046 to 15,056 allocations and 1,616,662 to 1,618,582 bytes; a 4th full run 15,198 allocations; 12 runs of scrub_24 alone 15,046 to 15,339 allocations (1.9%) and 1,521,120 to 1,538,422 bytes (1.1%), at load 29. The bench thread's own counts stay within 0.1%."
       },
       "cpu.heap_alloc_bytes": {
         "relative": 0.001,
