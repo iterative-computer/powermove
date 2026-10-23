@@ -145,9 +145,16 @@ the others as app-writer violations and groups violations by writer.
   interned id (the fast path), revalidated on every call by walking the path; a
   `FinalizationRegistry` releases ids when the objects go (S5 finding 2). A channel
   object outside its layer is evaluated from its JSON with the layer as context.
+  An id names the document's layer with that id, so once the revision moves it
+  answers only for a layer object that is still in its composition's `layers`
+  (and that list still the composition's). Undo, Redo, and a scoped rollback
+  replace a restored layer by a clone without changing the shape; the replaced
+  object is evaluated from its own JSON, as the legacy code reads it, never half
+  from the document and half from itself.
 - **Answers are live objects**: `findProp` and `allProps` return the layer's own
   channel objects, `pick` the live layer, `hasKeyAt` the live key,
-  `groups.ancestors`/`transformRoots` live layers. `expressionErrors` (the kernel's
+  `groups.ancestors`/`transformRoots` live layers (a memoized answer is served
+  only while its layers are still the composition's). `expressionErrors` (the kernel's
   view) holds pm-wasm's errors on the live channel objects it evaluated, and the
   renderer's for the rest.
 - **Routed** (kernel/install.ts, kernel/editor-helpers.ts): `anim.ev`, `evP`,

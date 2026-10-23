@@ -14,6 +14,8 @@ pm-time = { path = "../pm-time" }
 # platform registry, so the same code runs in pm-wasm.
 pm-text = { path = "../pm-text", default-features = false, features = ["level2"] }
 pm-vector = { path = "../pm-vector" }
+# 3D picks and bounds (`query3d`): geometry, glTF models, three.js raycasts.
+pm-geom3d = { path = "../pm-geom3d" }
 # Glyph outline boxes for text ink bounds (already in the tree through parley).
 skrifa = "0.44"
 serde_json.workspace = true

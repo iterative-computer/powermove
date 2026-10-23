@@ -122,8 +122,9 @@ per frame: plan without drawing → snapshots (per nested composition)
   invariant 7). Cancelling the export stops Blender.
 - Routing: `plan_export_with(job, true)` drops `Feature::Blender` from the
   static check when the lane has a Blender stage; everything else the
-  static check lists still routes (imported models, recipe parts, and the
-  native pass's own limits such as texture maps with transparency).
+  static check lists still routes (imported glTF models, which are not
+  built into snapshots yet, and SVG texture maps). Recipe parts are built
+  since Phase 3c, and texture maps of every level 1 still class draw.
 
 ## Host services (contract 11 over the host port)
 
@@ -154,8 +155,12 @@ per frame: plan without drawing → snapshots (per nested composition)
   anything plays, main stops the worker's process group (`SIGSTOP`) and
   continues it (`SIGCONT`) when playback ends; a job that starts during
   playback starts stopped; the 10-minute timeout does not count paused
-  time. The job engine therefore waits for an answer (bounded at 6 hours,
-  for a host that never answers) rather than timing Blender itself.
+  time. The explicit interactive `renderFrame` cache capture is a narrow
+  exception: its typed `foregroundCapture` request resumes the worker while
+  that capture is queued or running, then restores the playback pause. The
+  single worker drains any already queued work ahead of it in order. The job
+  engine therefore waits for an answer (bounded at 6 hours, for a host that
+  never answers) rather than timing Blender itself.
 - Discovery: the Blender chosen in Settings (`blender-path.json`, as the
   current engine reads it), else the first Blender 4.5 or newer found
   (`discoverBlender`).
@@ -205,9 +210,10 @@ playback draw natively. The interactive engine does the same:
   job: `cancelJobs` for its Blender job, which kills the worker's process
   group. Main accepts `cancelJobs` from the interactive engine for its own
   launch's Blender jobs only (`EngineBlender.owns`).
-- **Playback.** Host services stop Blender (`SIGSTOP`) while anything plays
-  (contract 13); a job running when playback starts finishes after it
-  stops, and no job starts during playback.
+- **Playback.** Host services stop automatic previews during playback
+  (contract 13); a running job resumes when playback stops. An explicit
+  `renderFrame` cache capture temporarily resumes the serialized worker,
+  without changing the transport, and restores the pause afterward.
 - **Failures** (Blender missing, a failed job) go to the viewer as a
   session failure (`blenderMissing`, `blenderFailed`; the viewer logs it)
   and stop that view's previews until its shading changes, as today's
@@ -230,7 +236,7 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 
 | Test | What | Result |
 |---|---|---|
-| `pm-render` `tests/blender_snapshots.rs` | Every Blender snapshot of the corpus (final, preview, export, exportAlpha; every shutter sample; nested compositions) against today's `renderSnapshot`; every frame list against `blenderFrameRequests` | 158 snapshots: 135 equal (geometry: 11,274,896 values, max abs difference 3.5e-16; 9,622 other values exact; asset ids, names, and SHA-256 equal), 23 not built (`3d/gltf`, `3d/gltf-materials`: imported models, the glTF lane); 74 of 74 frame lists equal (times bit for bit) |
+| `pm-render` `tests/blender_snapshots.rs` | Every Blender snapshot of the corpus (final, preview, export, exportAlpha; every shutter sample; nested compositions) against today's `renderSnapshot`; every frame list against `blenderFrameRequests` | 158 snapshots: 135 equal (geometry: 11,274,896 values, max abs difference 3.5e-16; 9,622 other values exact; asset ids, names, and SHA-256 equal), 23 not built (`3d/gltf`, `3d/gltf-materials`: imported models, the glTF lane); 74 of 74 frame lists equal (times bit for bit). Round 3 (2026-10-19, `v1` plus `threed-20261019-roles-maps`, not-built now a failure): 182 compared, 153 equal, **29 failures** (23 not built, 6 converted-texture differences); 90 frame lists equal; geometry max 3.5e-16 |
 | `pm-render` `tests/blender_composite.rs` | Two layers of 16-bit surfaces with gamma and sRGB chunks, off-center crops, 50% opacity, in plan order, against an f64 source-over reference | 32-bit: max 6.8e-8; 16-bit: max 1.06e-3 (half-float storage and accumulation); missing surfaces fail each layer with today's sentence; preview draws what it has and asks for the rest; nested compositions are their own frames |
 | `pm-export` `tests/blender_export.rs` | A 2-frame 16-bit PNG export of two models on the installed Blender | One Blender request per frame (layers batched), 4 surfaces, device `Metal {Apple M4 Max (GPU - 40 cores)}`; every exported sample equals the f64 composite of the stored surfaces (max 0 of 65,535); re-export: 0 Blender jobs, 4 cache hits (0.85 s against 0.03 s) |
 | same | Batched against one invocation per layer (EEVEE), and two batched runs | Decoded surfaces equal; files byte-identical; no text chunks |
@@ -298,29 +304,194 @@ wgpu 30.0.1 (Metal), corpus `v1-20261012-230504-ae47a3b3`, 2026-10-17.
 - `pm-render/tests/motion.rs`: the request is cloned (as on the integration
   branch).
 
-## Gaps
+## Current status and remaining gaps
 
-- **Imported glTF models and recipe parts** are not built into snapshots;
-  their compositions route (the static check lists them). The comparison
-  harness lists the glTF corpus snapshots as not built.
-- **The viewport's busy and error state** (`previewState()`: the
-  spinner and the error line in the 3D viewport UI) still comes from
-  today's renderer-side preview; the engine's preview jobs and failures
-  are in the presenter's status (`blenderPreview`) and the viewer's log,
-  not in that UI.
-- **The editor camera** is not sent by the viewer yet (`view-params.ts`:
-  `camera: null` until the 3D lane exposes it), so previews in the editor
-  view use the composition camera, as the engine's native frames do.
-- **Agent frames** (`render_frames`) of Blender compositions route to
-  today's capture (contract 12's `cachedOrPending` and `render` policies are
-  not implemented in the job engine's still path).
-- **Motion blur** is routed by pm-render; the stage handles shutter samples
-  once the plan visits them, and the frame-list port covers them.
+- **Imported glTF snapshots and converted maps.** Round 4 built all 23
+  formerly missing glTF snapshots. In round 5, five independent Chromium
+  conversions of the original AVIF sources supplied the exact PNG inputs;
+  the complete corpus then passed **182/182 snapshots**, including 29
+  converted-texture comparisons by decoded pixels, and 90/90 frame lists.
+  The live app then passed both an imported AVIF map and an SVG map through
+  the renderer's `compatFrame` Canvas2D PNG producer to the interactive
+  engine's Blender worker: one PNG answer, one native job and one surface
+  for each, with zero legacy `blender:run` jobs. A cold synchronous capture
+  returned today's prepare-frame error immediately, before any PNG ask.
+- **The viewport's busy and error state** now follows the interactive
+  engine's per-session, generation-tagged preview status. `renderFrame`
+  requests the engine's Blender preview. With a paused Material or Rendered
+  viewer, it completes after the matching fully backed frame is shown by
+  the engine viewer's presentation. During playback, in Solid or Wireframe,
+  with no direct 3D viewport (including a nested composition), or with no
+  mounted viewer, it prepares the same Blender cache through the
+  engine document session and completes without a viewer frame. Neither path
+  pauses, seeks, or changes the viewport shading. `cancelRender` cancels the
+  engine job (and resolves after the window worker cancel even if the engine
+  connection is unavailable), while `previewState()` and `onPreviewChange`
+  receive automatic and explicit job changes. The round-5 native API pilot
+  passed 1/1 in Electron, including render, status, cancellation, and zero
+  calls to today's `blender:run` preview path. All three Blender motion app
+  tests passed with native preview/capture pixels and host-worker engine proof.
+- **The editor camera** is sent by the viewer since Phase 3c
+  (`scene3d.viewport.state().engineCamera`, docs/engine/scene3d.md); the
+  round-5 preview API test now cancels, orbits into the editor camera and
+  restarts successfully. Its actual presented frame matches the transmitted
+  editor camera, current view sequence, revision and time; native Blender
+  jobs increase, capture pixels are nonempty, and no legacy preview job runs.
+- **Agent frames** (`render_frames`) first ask the job engine's `render_still`
+  path. It checks `unsupported_with_media` without a Blender stage, so a
+  Blender composition routes back to renderer orchestration. With Use New
+  Engine on, that renderer calls `PM.Export.snapshotAsync`, which uses
+  `PM.EngineCaptures` and prepares the Blender frame through the native
+  snapshot path; it does not draw through the legacy WebGL compositor.
+  The request's `cachedOrPending` policy is not yet applied in `run_frames`.
+- **Motion-blurred exports** of supported layer types are drawn natively:
+  the plan visits shutter samples, prepares their Blender surfaces, and the
+  Blender motion app test passed transparent, opaque, and nested stills.
+  Capability routing remains for unsupported layer types, not for motion
+  blur itself.
 - **Leases**: the job lane's decoded surfaces use a fixed 512 MiB budget,
   not the `blenderSurfaces` lease category; the disk area's bound is 8 GiB.
-- **Native-pass limits on Blender compositions**: the static check still
-  routes Blender compositions for limits only the native pass has (texture
-  maps with transparency, image formats the native pass cannot draw).
+- **Converted textures:** round 4's TIFF rendition comparisons stay exact.
+  Round 5's Chromium PNG producer closes the five AVIF inputs that made six
+  captured snapshots differ; the independent converter plus full corpus
+  comparison passed 182/182. The live AVIF app round trip passed through
+  `compatFrame` with a content-hash-matched 192 × 128 PNG answer.
+- **SVG maps in Blender:** the same exact-PNG request path accepts SVG
+  sources. The live app rendered a freshly imported SVG as a Blender map
+  from a content-hash-matched 32 × 32 PNG answer; the retained Blender
+  corpus has no SVG map for a separate snapshot comparison.
+- **Fixed in Phase 3c round 2: media-store assets.** Media-store files are
+  content-addressed and may have no extension; main's Blender stage refused
+  them ("Unsupported Blender asset format"), so a texture imported into the
+  store failed every engine Blender job (`blender-motion.spec.ts`'s agent
+  spec with the engine on). Their extension now comes from the file's
+  first bytes (`assetExtension`, `main/engine/blender.ts`).
+  Round 3 completes it: today names a model file by the asset's name
+  (`chair.obj`, `scene.gltf`), so text models are recognised by content too
+  (glTF JSON with an `asset` member; OBJ by its first statement after
+  blank and `#` lines, UTF-8 with or without a byte order mark). EXR and
+  HDR files without an extension are no longer passed through: the engine
+  passes only PNG, JPEG and WebP images as they are (today's `blob.type`
+  rule) and converts every other image to PNG first, as today draws them
+  through a canvas (Chromium decodes neither EXR nor HDR, so today's
+  conversion fails, and the engine's fails the same way). A linked file
+  keeps its own extension. `blender.test.ts` covers each case.
+- **A missing Blender is a named error** (verified round 3): the viewer's
+  preview reports `blenderMissing` once until the shading changes
+  (`present::blender` `a_missing_blender_is_reported_once_until_the_shading_changes`),
+  a capture fails with `blenderMissing` (`pm-node` `tests/snapshot.rs`
+  `blender_compositions_are_captured_as_today`), and main's stage rejects
+  with `blenderMissing` and today's message (`blender.test.ts`).
 - **Level 2 surfaces stay 16-bit PNG** (decision 15); level 1 retains
   PNG8/dither 1 for existing-project parity. RFC 11 open question 1 (raw
   or EXR for level 2) is unchanged.
+
+## Phase 3c round 4: imported-model snapshots
+
+Imported glTF snapshots now use the CPU pose kernel for positions, including
+relative morph targets and skinning. Normals follow today's snapshot exactly:
+normalize the attribute, or apply the bone transform to `normal + position`
+and subtract the posed point before normalizing. Instance transforms are not
+expanded, matching today's `renderSnapshot` traversal. The renderer's material
+state supplies the source colors, factors, and maps. The material snapshots
+resume empty-map awaits before new PNG conversions, preserving the captured
+texture ids and mesh completion order. Embedded images follow today's
+straight bitmap → premultiplied canvas → straight PNG conversion.
+
+Measured on the retained v1 and threed map captures: 182 built, 176 equal,
+23 with converted embedded textures equal by decoded pixels; all 90 frame
+lists equal. Across 14,118,112 geometry values the maximum absolute difference
+was 3.47e-16. All 23 previously unbuilt glTF snapshots now compare equal.
+The six snapshots with external converted TIFF/AVIF maps still fail; this
+change does not close that separate blocker. The same focused comparison with
+`PM_BLENDER_ONLY=3d/gltf` passes. The full comparison continues to fail honestly.
+
+### TIFF conversion and the remaining AVIF differences
+
+Round 4 also preserves the full TIFF rendition samples, including 16-bit
+precision and straight alpha; all six captured TIFF maps now match exactly.
+The comparison decodes RGBA, RGB, gray, and gray-alpha PNGs at both 8 and
+16 bits, compares dimensions, and compares samples at 16-bit precision.
+Two unhandled layouts or failed decodes can no longer compare equal.
+`PM_BLENDER_DIFFS` optionally writes differing texture pairs outside Git.
+
+The full comparison remains 176/182 equal: each of the six map snapshots
+still contains AVIF differences. The five distinct AVIF maps are PQ HDR
+(max 174 CV), HLG HDR (117 CV), HDR alpha (210 CV), P3 SDR (1 CV on 66
+pixels), and BT.2020 SDR (1 CV on 29 pixels). The previous round's prose
+misattributed the PQ failure to a 16-bit TIFF: asset `a1xwvwot` is
+`hdr-pq.avif`. The full-depth TIFF comparisons now pass independently.
+
+
+## Round 5 synchronized app verification
+
+The final engine-on app run passes 25/25 tests, including all 19 required
+3D checks, the explicit preview API, live AVIF/SVG PNG conversion, paired
+chrome pixels, exact OBJ bundle imports and textured Object3D compatibility.
+No legacy preview jobs run in the native preview or map-transport checks.
+The converted-PNG caches in the renderer and native process each retain at
+most 256 MiB of successful bytes by SHA-256; failures retry and concurrent
+requests share one conversion. Snapshot-construction failures are reported
+to explicit and automatic preview listeners instead of becoming an empty
+Ready frame. Permanent GPU, descriptor, SVG and pool failures also end the
+matching generation; temporary pending resources still retry.
+
+The follow-up editor-camera restart check passes after the synchronized
+25-test run. The flag-off Blender motion suite also passes 3/3 with the
+original WebGL capture and legacy worker-manifest assertions retained.
+
+## Phase 3c round 6: reproducible Blender corpus inputs
+
+AVIF and SVG maps reach Blender as the PNG the editor window's Chromium draws
+(decision THREED-2), so `tests/blender_snapshots.rs` needs those PNGs as
+inputs. They are corpus data, kept outside Git beside the captures:
+
+- **Where:** `~/Library/Application Support/Powermove Engine Corpus/blender-chromium-pngs/`,
+  one `<sha256 of the original file>.png` per source, with the
+  `<sha256>.json` need (content hash and source path) that produced it.
+  `PM_BLENDER_CHROMIUM_PNGS` overrides the directory. The directory sits at
+  the corpus root, not inside a capture, so each capture's own file list
+  still verifies with no unlisted files.
+- **Generate:** run the comparison once. A missing PNG fails the test, which
+  writes a need for every AVIF and SVG still of the failing project and
+  names the command. Then, under the Electron lock:
+
+  ```sh
+  ~/Library/Caches/powermove-engine/bin/pm-electron-lock \
+    bun engine/crates/pm-render/tools/blender-png/run.ts \
+    --needs "$HOME/Library/Application Support/Powermove Engine Corpus/blender-chromium-pngs"
+  ```
+
+  `run.ts` checks each source's hash, converts it in a hidden Electron
+  window through the app's own `BlenderPngs` producer
+  (`engine-connection/blender-png.ts`), and writes `<sha256>.png`. It
+  refuses a directory inside the repository and never reads the capture's
+  expected PNGs.
+- **Test:** `cargo test -p pm-render --test blender_snapshots` runs both
+  tests with no environment variables. The TIFF full-depth test
+  (`tiff_renditions_equal_todays_blender_textures_at_full_depth`) now builds
+  `maps-level1` with the same Chromium PNG resolver as the full comparison;
+  round 5 left it on the plain resolver, so it failed on `hdr-pq.avif`.
+
+Measured 2026-10-19: both tests pass with no environment set: 182 compared,
+182 equal (29 converted textures equal by decoded pixels), 90 frame lists
+equal, geometry max |Δ| 3.5e-16, 15,070 exact values. Regenerating the five
+AVIF inputs from scratch into an empty directory with the command above
+produced five PNGs byte-identical to the stored ones (`cmp`), so the stored
+inputs are reproducible from the original media.
+
+## Phase 3c round 7: preview API captures
+
+`scene3d.renderFrame` leaves transport time, playback and shading unchanged.
+A paused Material/Rendered view waits for its matching native presented
+frame. Solid, Wireframe, playback, viewerless and precomp-only roots prepare
+the engine's Blender cache instead, using the engine document, headless GPU
+setup and the same Chromium PNG resolver. No legacy preview supplies it.
+
+Only an explicit Interactive cache capture sets `foregroundCapture` on the
+typed Blender job. Main resumes its serialized worker while that capture is
+queued or running, then restores the playback pause on completion or cancel.
+Automatic previews, snapshots and export jobs retain their ordinary pause
+policy. Session startup refusal, cancellation and disposal settle pending
+captures even if the renderer wake never resolves. The final preview API
+tests, nested Blender motion test, and 182-snapshot/TIFF comparison all pass.

@@ -1,7 +1,5 @@
 //! Compiled pipelines and the uniform layouts they read.
 
-use pm_protocol::color::Precision;
-
 /// Dynamic uniform offsets are aligned to this (Metal's 256-byte rule).
 pub const UNIFORM_STRIDE: u64 = 256;
 
@@ -76,7 +74,7 @@ pub struct Pipelines {
     solid_add: [wgpu::RenderPipeline; 3],
     background: [wgpu::RenderPipeline; 3],
     flip: [wgpu::RenderPipeline; 3],
-    source: [wgpu::ComputePipeline; 2],
+    source: [wgpu::ComputePipeline; 3],
     /// Level 2 sampling (`crate::sampling`).
     pub(crate) resample: crate::sampling::gpu::Resampler,
 }
@@ -321,6 +319,11 @@ impl Pipelines {
             label: Some("pm source f32"),
             entries: &source_entries(wgpu::TextureFormat::Rgba32Float),
         });
+        let source_layout_rgba8 =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("pm source rgba8"),
+                entries: &source_entries(wgpu::TextureFormat::Rgba8Unorm),
+            });
         let source = [
             (
                 wgpu::TextureFormat::Rgba16Float,
@@ -331,6 +334,11 @@ impl Pipelines {
                 wgpu::TextureFormat::Rgba32Float,
                 "rgba32float",
                 &source_layout_f32,
+            ),
+            (
+                wgpu::TextureFormat::Rgba8Unorm,
+                "rgba8unorm",
+                &source_layout_rgba8,
             ),
         ]
         .map(|(_, name, layout)| {
@@ -472,16 +480,12 @@ impl Pipelines {
         &self.flip[format_index(format)]
     }
 
-    pub fn source(&self, precision: Precision) -> &wgpu::ComputePipeline {
-        match precision {
-            Precision::Float16 => &self.source[0],
-            Precision::Float32 => &self.source[1],
-        }
+    pub fn source(&self, format: wgpu::TextureFormat) -> &wgpu::ComputePipeline {
+        &self.source[format_index(format)]
     }
 
-    /// The source pass bind group layout for a precision (each storage
-    /// format has its own).
-    pub fn source_layout(&self, precision: Precision) -> wgpu::BindGroupLayout {
-        self.source(precision).get_bind_group_layout(0)
+    /// The source pass bind group layout for its output storage format.
+    pub fn source_layout(&self, format: wgpu::TextureFormat) -> wgpu::BindGroupLayout {
+        self.source(format).get_bind_group_layout(0)
     }
 }

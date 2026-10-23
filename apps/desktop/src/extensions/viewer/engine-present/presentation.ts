@@ -1,3 +1,4 @@
+import { ChromeLeases } from './chrome-leases';
 /*
  * The viewer's engine presentation, behind "Use New Engine" (plan section
  * 18; amendments 4 and 5).
@@ -30,7 +31,8 @@
  * session; until then (and whenever the engine restarts) the current
  * engine's canvas underneath is what the viewer shows.
  */
-import { createWebGpuPainter, type FramePainter } from './gpu';
+import type { FramePainter } from './gpu';
+import { createFramePainter } from './painter';
 import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type Presenter, type PresenterStats, type TraceRecord } from './presenter';
 import { PresentWorker, type WorkerLike } from './worker-presenter';
 import type { PresentationWarmup } from './prewarm';
@@ -133,6 +135,7 @@ export const PRESENTATION_STATUS = {
   starting: 'Starting the engine…',
   reconnecting: 'Reconnecting to the engine…',
   gpuFailed: 'The viewer cannot draw: the GPU keeps failing. Restart Powermove.',
+  unreadable: 'The viewer cannot read the engine’s frames. Restart Powermove.',
   unavailable: 'The viewer cannot draw engine frames:',
   unsupported: 'The new engine cannot draw this composition yet.'
 } as const;
@@ -198,6 +201,15 @@ export const SIZE_SETTLE_MS = 150;
 export const MAX_DEVICE_LOSSES = 3;
 export const DEVICE_LOSS_WINDOW_MS = 30_000;
 
+/**
+ * Surface renewals (`renewSurfaces`) allowed within `DEVICE_LOSS_WINDOW_MS`:
+ * up to two per tolerated device loss (one when the drawing is replaced,
+ * one more if the first pool was imported while the GPU process was still
+ * coming back). Beyond it the stage says the frames cannot be read, until
+ * the window passes or a frame draws.
+ */
+export const MAX_SURFACE_RENEWALS = 2 * MAX_DEVICE_LOSSES;
+
 export class ViewerPresentation {
   private canvasElement: HTMLCanvasElement;
   /** Draws on this thread (`painter`) or in a presentation worker (`worker`). */
@@ -209,6 +221,7 @@ export class ViewerPresentation {
   private workerUnavailable = false;
   private presenter: Presenter | null = null;
   private channel: EngineViewerChannel | null = null;
+  private chromeLeases: ChromeLeases | null = null;
   private readonly sequencer = new ViewSequencer();
   private readonly states: ViewerState[] = [];
   private params: ViewParams | null = null;
@@ -254,6 +267,11 @@ export class ViewerPresentation {
   private vsync: VsyncHint | null = null;
   /** When the drawing's device was lost recently (performance.now ms). */
   private losses: number[] = [];
+  /** When the surfaces were renewed recently (performance.now ms). */
+  private renewals: number[] = [];
+  /** The newest pool generation a renewal replaces: frames of it and older
+   *  pools that cannot be read are the failure already being handled. */
+  private renewedFrom = 0;
 
   /** The visible state while an exclusive presentation has no frame. */
   private statusElement: HTMLElement | null = null;
@@ -326,8 +344,8 @@ export class ViewerPresentation {
 
   /**
    * The depth and object-id surface of a frame on screen (plan section 8:
-   * r depth, g/b object id − 1, a coverage; `rgba16float`, the frame's size
-   * and placement), for the 3D viewport chrome's occlusion and outlines.
+   * `chromePlanesV1`: losslessly packed f32 depth in RGB; paired coverage
+   * and visible IDs from coverageFrame). Both surfaces use the frame size.
    * Ask for it with `ViewParams.depthId`. Null when the frame has none or
    * its import has not arrived. Close it after reading; it stays valid
    * while its frame is the one on screen.
@@ -336,6 +354,23 @@ export class ViewerPresentation {
     const depth = frame?.depthId;
     if (!depth) return null;
     return this.options.service.source.videoFrame(depth.poolGeneration, depth.poolIndex);
+  }
+
+  /** Retain this frame's native slot through the overlay's GPU read fence. */
+  retainChromeFrame(frame: PresentedFrame): ((done?: Promise<unknown>) => void) | null {
+    return this.chromeLeases?.acquire(frame.seq) ?? null;
+  }
+
+  /** Unoccluded selection coverage and visible IDs, aligned to `frame`. */
+  coverageFrame(frame: PresentedFrame | null = this.latestFrame): VideoFrame | null {
+    const depth = frame?.depthId;
+    if (depth?.encoding !== 'chromePlanesV1' || depth.coveragePoolIndex == null) return null;
+    return this.options.service.source.videoFrame(depth.poolGeneration, depth.coveragePoolIndex);
+  }
+  onChromeSurface(listener: () => void): () => void {
+    return this.options.service.source.onSurface((generation) => {
+      if (this.latestFrame?.depthId?.poolGeneration === generation) listener();
+    });
   }
 
   get state(): ViewerState | null {
@@ -415,6 +450,7 @@ export class ViewerPresentation {
   private show(frame: PresentedFrame): void {
     const fresh = this.latestFrame?.seq !== frame.seq || this.latestFrame.revision !== frame.revision || this.latestFrame.viewSeq !== frame.viewSeq;
     this.latestFrame = frame;
+    this.chromeLeases?.showing(frame.seq);
     for (const listener of this.listeners) listener(frame);
     if (fresh) this.options.service.presented?.(frame, this.qualityOf(frame));
   }
@@ -658,7 +694,7 @@ export class ViewerPresentation {
     if (this.painterFailed) return false;
     let painter: FramePainter;
     try {
-      painter = await (this.options.createPainter ?? createWebGpuPainter)(this.canvasElement);
+      painter = await (this.options.createPainter ?? createFramePainter)(this.canvasElement);
     } catch (error) {
       this.painterFailed = true;
       const message = error instanceof Error ? error.message : String(error);
@@ -679,8 +715,8 @@ export class ViewerPresentation {
   }
 
   /**
-   * The drawing's WebGPU device was lost (the GPU process restarted): a
-   * new canvas and device (a new worker when presenting from one), and the
+   * The drawing's graphics context was lost (the GPU process restarted): a
+   * new canvas and context (a new worker when presenting from one), and the
    * session carries on. Losses that keep coming back off the drawing are
    * given up after `MAX_DEVICE_LOSSES` within `DEVICE_LOSS_WINDOW_MS`, so a
    * broken GPU cannot spin the viewer; the current engine's canvas shows.
@@ -691,7 +727,7 @@ export class ViewerPresentation {
     this.losses = this.losses.filter((t) => now - t < DEVICE_LOSS_WINDOW_MS);
     this.losses.push(now);
     if (this.losses.length > MAX_DEVICE_LOSSES) {
-      this.options.log?.('error', `engine presentation stopped: the WebGPU device was lost ${this.losses.length} times in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${message})`);
+      this.options.log?.('error', `engine presentation stopped: the graphics context was lost ${this.losses.length} times in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${message})`);
       this.painterFailed = true;
       this.workerUnavailable = true;
       // A visible failure, never another engine's frames.
@@ -700,8 +736,40 @@ export class ViewerPresentation {
       return;
     }
     if (this.exclusive) this.setStatus(PRESENTATION_STATUS.reconnecting);
-    this.options.log?.('warn', `engine presentation lost its WebGPU device (${message}); drawing again on a new one`);
-    void this.replaceDrawing();
+    this.options.log?.('warn', `engine presentation lost its graphics context (${message}); drawing again on a new one`);
+    // The GPU process that held this window's surface imports may be gone
+    // with the context: frames of those imports no longer upload, so the
+    // new drawing starts on new surfaces.
+    void this.replaceDrawing(`the graphics context was lost (${message})`);
+  }
+
+  /**
+   * The imports of the current pool cannot be read (after a GPU process
+   * restart a `VideoFrame` of an earlier import names a shared image the
+   * new process does not have): asks the engine for new surfaces with the
+   * next surface epoch, which is a new view, so a paused view draws again
+   * too. One renewal per pool generation; at most `MAX_SURFACE_RENEWALS`
+   * within `DEVICE_LOSS_WINDOW_MS`, after which the stage says so.
+   */
+  private renewSurfaces(generation: number, why: string): void {
+    if (this.disposed || !this.presenter || generation <= this.renewedFrom) return;
+    const now = performance.now();
+    this.renewals = this.renewals.filter((t) => now - t < DEVICE_LOSS_WINDOW_MS);
+    if (this.renewals.length >= MAX_SURFACE_RENEWALS) {
+      // Frames of this pool keep failing: once per pool, a visible failure.
+      this.renewedFrom = Math.max(this.renewedFrom, generation);
+      this.options.log?.('error', `engine presentation cannot read its surfaces: ${this.renewals.length} renewals in ${DEVICE_LOSS_WINDOW_MS / 1000} s (${why})`);
+      if (this.exclusive) this.setStatus(PRESENTATION_STATUS.unreadable);
+      return;
+    }
+    const state = this.sequencer.renewSurfaces();
+    if (!state) return;
+    this.renewals.push(now);
+    this.renewedFrom = Math.max(this.renewedFrom, generation, this.presenter.stats.generation);
+    this.options.log?.('warn', `engine presentation asks for new surfaces: ${why}`);
+    this.states.push(state);
+    if (this.states.length > STATE_HISTORY) this.states.shift();
+    this.presenter.setViewerState(this.withHint(state));
   }
 
   private workerFailed(token: number, message: string): void {
@@ -723,11 +791,13 @@ export class ViewerPresentation {
 
   /**
    * Replaces the canvas and its drawing (worker moved windows, or failed)
-   * and carries the open session over to a new presenter.
+   * and carries the open session over to a new presenter. `renew` (why):
+   * the new presenter starts on new surfaces (`renewSurfaces`).
    */
-  private async replaceDrawing(): Promise<void> {
+  private async replaceDrawing(renew: string | null = null): Promise<void> {
     const token = ++this.backendToken;
     const generation = this.presenter?.stats.generation ?? 0;
+    this.chromeLeases?.clear();
     this.presenter?.dispose();
     this.presenter = null;
     this.latestFrame = null;
@@ -738,19 +808,32 @@ export class ViewerPresentation {
     this.replaceCanvas();
     if (!(await this.makeDrawing()) || token !== this.backendToken || this.disposed) return;
     const channel = this.channel;
-    if (channel) this.startPresenter(channel, generation);
+    if (!channel) return;
+    this.startPresenter(channel, generation);
+    if (renew !== null) this.renewSurfaces(Math.max(generation, 1), renew);
   }
 
   /** A presenter for `channel` on the current drawing, sent the current state. */
   private startPresenter(channel: EngineViewerChannel, generation = 0): void {
     const view = this.options.stage.ownerDocument.defaultView;
+    const leases = this.chromeLeases;
     const common = {
-      link: channel,
-      source: this.options.service.source,
+      link: {
+        sendViewerState: (state: ViewerState) => channel.sendViewerState(state),
+        release: (release: import('./protocol').FrameRelease) => leases ? leases.colorDone(release) : channel.release(release),
+      },
+      source: {
+        videoFrame: (generation: number, index: number) => this.options.service.source.videoFrame(generation, index),
+        onSurface: (listener: (generation: number, index: number) => void) => this.options.service.source.onSurface(listener),
+        retire: (generation: number) => leases ? leases.retire(generation, () => this.options.service.source.retire(generation)) : this.options.service.source.retire(generation),
+      },
       trace: this.options.trace,
       generation,
       hostOffsetUs: this.options.service.hostOffsetUs ? () => this.options.service.hostOffsetUs!() : undefined,
-      onVsync: (hint: VsyncHint) => this.onVsync(hint)
+      onVsync: (hint: VsyncHint) => this.onVsync(hint),
+      onUnusable: (generation: number, message: string) => {
+        if (this.presenter === presenter) this.renewSurfaces(generation, message);
+      }
     };
     const presenter: Presenter = this.worker
       ? this.worker.open({ ...common, displayHz: view ? (this.options.service.displayHz?.(view) ?? null) : null })
@@ -763,6 +846,7 @@ export class ViewerPresentation {
       // engine's canvas.
       if (this.routedSeq !== null && frame.seq <= this.routedSeq) return;
       this.routedSeq = null;
+      leases?.drawing(frame.seq);
       // A canvas that was hidden shows a frame only once the GPU finished
       // it and the display took it (the drawing's canvas and this page
       // commit separately; at a cold start the drawing's pipelines compile
@@ -808,6 +892,7 @@ export class ViewerPresentation {
           // frames (older ones still in flight too) leave the stage.
           this.routedSeq = Math.max(this.deliveredSeq, Number(message.seq) || 0);
           this.latestFrame = null;
+          this.chromeLeases?.clear();
           if (this.exclusive) {
             // "Use New Engine" on (amendment 21): nothing else draws it, so
             // the stage says why, and stays the engine's (no hand-back; the
@@ -821,7 +906,10 @@ export class ViewerPresentation {
           this.hide(this.canvasElement);
           return;
         }
-        if (message.type === 'frame') this.deliveredSeq = Math.max(this.deliveredSeq, Number(message.frame.seq) || 0);
+        if (message.type === 'frame') {
+          this.deliveredSeq = Math.max(this.deliveredSeq, Number(message.frame.seq) || 0);
+          this.chromeLeases?.track(message.frame);
+        }
         if (this.presenter) this.presenter.receive(message, arrivedMs);
         else this.hold(opened!, message, arrivedMs);
       },
@@ -830,8 +918,11 @@ export class ViewerPresentation {
     if (!channel) return;
     opened = channel;
     this.channel = channel;
-    // A new session numbers its frames from 1.
+    this.chromeLeases = new ChromeLeases(release => channel.release(release));
+    // A new session numbers its frames from 1, and a restarted engine its
+    // pool generations.
     this.deliveredSeq = 0;
+    this.renewedFrom = 0;
     this.routedSeq = null;
     this.sessions++;
     this.startPresenter(channel);
@@ -843,7 +934,11 @@ export class ViewerPresentation {
    * for the next presenter.
    */
   private hold(channel: EngineViewerChannel, message: EngineFrameMessage, arrivedMs: number): void {
-    if (message.type === 'frame') channel.release({ poolIndex: message.frame.poolIndex, seq: message.frame.seq });
+    if (message.type === 'frame') {
+      const release = { poolIndex: message.frame.poolIndex, seq: message.frame.seq };
+      if (this.chromeLeases) this.chromeLeases.colorDone(release);
+      else channel.release(release);
+    }
     else this.held.push({ message, arrivedMs });
   }
 
@@ -851,6 +946,8 @@ export class ViewerPresentation {
     if (!channel || channel !== this.channel) return;
     this.options.log?.('info', `engine viewer session ended: ${reason}`);
     this.channel = null;
+    this.chromeLeases?.clear();
+    this.chromeLeases = null;
     this.held = [];
     this.presenter?.dispose();
     this.presenter = null;
@@ -877,6 +974,7 @@ export class ViewerPresentation {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.chromeLeases?.clear();
     this.backendToken++;
     if (this.settleTimer && this.host) this.clearTimer(this.host, this.settleTimer);
     this.settleTimer = 0;

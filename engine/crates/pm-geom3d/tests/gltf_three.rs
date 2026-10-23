@@ -85,15 +85,24 @@ fn imports_like_three() {
         };
         let mut fail = |what: String| failures.push(format!("{file}: {what}"));
         if THREE_DEFECTS.contains(&file.as_str()) {
-            assert_eq!(facts.vertices, 4, "{file}: the engine reads the sparse accessor");
+            assert_eq!(
+                facts.vertices, 4,
+                "{file}: the engine reads the sparse accessor"
+            );
             assert!(want["vertices"].as_f64().unwrap().fract() != 0.0);
             continue;
         }
         if facts.vertices as f64 != want["vertices"].as_f64().unwrap() {
-            fail(format!("vertices {} vs {}", facts.vertices, want["vertices"]));
+            fail(format!(
+                "vertices {} vs {}",
+                facts.vertices, want["vertices"]
+            ));
         }
         if facts.triangles as f64 != want["triangles"].as_f64().unwrap() {
-            fail(format!("triangles {} vs {}", facts.triangles, want["triangles"]));
+            fail(format!(
+                "triangles {} vs {}",
+                facts.triangles, want["triangles"]
+            ));
         }
         if !close(facts.radius, want["radius"].as_f64().unwrap(), 1e-9) {
             fail(format!("radius {} vs {}", facts.radius, want["radius"]));
@@ -121,18 +130,31 @@ fn imports_like_three() {
         for (i, (ours, theirs)) in scene.objects.iter().zip(objects).enumerate() {
             let label = format!("object {i} {}", theirs["name"]);
             if ours.kind.type_name() != theirs["type"].as_str().unwrap() {
-                fail(format!("{label}: {} vs {}", ours.kind.type_name(), theirs["type"]));
+                fail(format!(
+                    "{label}: {} vs {}",
+                    ours.kind.type_name(),
+                    theirs["type"]
+                ));
                 continue;
             }
             if ours.name != theirs["name"].as_str().unwrap() {
                 fail(format!("{label}: named {:?}", ours.name));
             }
             let m = nums(&theirs["matrix"]);
-            if ours.matrix.iter().zip(&m).any(|(a, b)| !close(*a, *b, 1e-6)) {
+            if ours
+                .matrix
+                .iter()
+                .zip(&m)
+                .any(|(a, b)| !close(*a, *b, 1e-6))
+            {
                 fail(format!("{label}: matrix {:?} vs {m:?}", ours.matrix));
             }
             if ours.kind == ObjectKind::InstancedMesh {
-                let n = model.nodes[ours.node.unwrap()].instances.as_ref().unwrap().len();
+                let n = model.nodes[ours.node.unwrap()]
+                    .instances
+                    .as_ref()
+                    .unwrap()
+                    .len();
                 if Some(n as u64) != theirs["count"].as_u64() {
                     fail(format!("{label}: {n} instances"));
                 }
@@ -165,12 +187,10 @@ fn imports_like_three() {
                     }
                     // Attribute sums catch decoding errors (normalized and
                     // quantized components, strides).
-                    let sum3 = |v: &[[f32; 3]]| -> f64 {
-                        v.iter().flatten().map(|x| f64::from(*x)).sum()
-                    };
-                    let sum2 = |v: &[[f32; 2]]| -> f64 {
-                        v.iter().flatten().map(|x| f64::from(*x)).sum()
-                    };
+                    let sum3 =
+                        |v: &[[f32; 3]]| -> f64 { v.iter().flatten().map(|x| f64::from(*x)).sum() };
+                    let sum2 =
+                        |v: &[[f32; 2]]| -> f64 { v.iter().flatten().map(|x| f64::from(*x)).sum() };
                     let mut sums = vec![("position", Some(sum3(&p.positions)))];
                     sums.push(("normal", p.normals.as_deref().map(sum3)));
                     sums.push(("uv", p.uv.as_deref().map(sum2)));
@@ -185,7 +205,10 @@ fn imports_like_three() {
                     }
                     let index = geometry["index"]["count"].as_u64().map(|c| c as usize);
                     if p.indices.as_ref().map(Vec::len) != index {
-                        fail(format!("{label}: index {:?} vs {index:?}", p.indices.as_ref().map(Vec::len)));
+                        fail(format!(
+                            "{label}: index {:?} vs {index:?}",
+                            p.indices.as_ref().map(Vec::len)
+                        ));
                     }
                     if let Some(isum) = geometry["index"]["sum"].as_f64() {
                         let s: f64 = p.indices.iter().flatten().map(|&i| f64::from(i)).sum();
@@ -208,7 +231,8 @@ fn imports_like_three() {
                     {
                         fail(format!("{label}: bounds {ours_b:?} vs {wb:?}"));
                     }
-                    let targets = geometry["morphTargets"]["position"].as_u64().unwrap_or(0) as usize;
+                    let targets =
+                        geometry["morphTargets"]["position"].as_u64().unwrap_or(0) as usize;
                     if p.targets.iter().filter(|t| t.position.is_some()).count() != targets {
                         fail(format!("{label}: morph targets"));
                     }
@@ -221,7 +245,11 @@ fn imports_like_three() {
                     for (k, ours, theirs) in [
                         ("side", mf.side as f64, wm["side"].as_f64()),
                         ("opacity", f64::from(mf.opacity), wm["opacity"].as_f64()),
-                        ("alphaTest", f64::from(mf.alpha_test), wm["alphaTest"].as_f64()),
+                        (
+                            "alphaTest",
+                            f64::from(mf.alpha_test),
+                            wm["alphaTest"].as_f64(),
+                        ),
                     ] {
                         if !theirs.is_some_and(|t| same(ours, t)) {
                             mfail(format!("{k} {ours} vs {theirs:?}"));
@@ -237,7 +265,12 @@ fn imports_like_three() {
                         }
                     }
                     let c = nums(&wm["color"]);
-                    if mf.color.iter().zip(&c).any(|(a, b)| !same(f64::from(*a), *b)) {
+                    if mf
+                        .color
+                        .iter()
+                        .zip(&c)
+                        .any(|(a, b)| !same(f64::from(*a), *b))
+                    {
                         mfail(format!("color {:?} vs {c:?}", mf.color));
                     }
                     for (k, ours) in [
@@ -255,7 +288,9 @@ fn imports_like_three() {
                         }
                     }
                     if let Some(e) = mf.emissive
-                        && e.iter().zip(nums(&wm["emissive"])).any(|(a, b)| !same(f64::from(*a), b))
+                        && e.iter()
+                            .zip(nums(&wm["emissive"]))
+                            .any(|(a, b)| !same(f64::from(*a), b))
                     {
                         mfail(format!("emissive {e:?} vs {}", wm["emissive"]));
                     }
@@ -289,12 +324,22 @@ fn imports_like_three() {
             fail(format!("{} clips vs {}", model.clips.len(), clips.len()));
         }
         for (c, w) in model.clips.iter().zip(clips) {
-            if c.name != w["name"].as_str().unwrap() || !same(f64::from(c.duration), w["duration"].as_f64().unwrap()) {
-                fail(format!("clip {:?} {} vs {} {}", c.name, c.duration, w["name"], w["duration"]));
+            if c.name != w["name"].as_str().unwrap()
+                || !same(f64::from(c.duration), w["duration"].as_f64().unwrap())
+            {
+                fail(format!(
+                    "clip {:?} {} vs {} {}",
+                    c.name, c.duration, w["name"], w["duration"]
+                ));
             }
             let tracks = w["tracks"].as_array().unwrap();
             if tracks.len() != c.channels.len() {
-                fail(format!("clip {:?}: {} channels vs {} tracks", c.name, c.channels.len(), tracks.len()));
+                fail(format!(
+                    "clip {:?}: {} channels vs {} tracks",
+                    c.name,
+                    c.channels.len(),
+                    tracks.len()
+                ));
             }
             for (ch, t) in c.channels.iter().zip(tracks) {
                 if ch.times.len() as u64 != t["times"].as_u64().unwrap() {

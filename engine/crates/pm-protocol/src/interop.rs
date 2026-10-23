@@ -350,8 +350,9 @@ pub struct SurfacePool {
 /// Fewest surfaces in a pool: ring + jitter buffer + 2 (section 18), with a
 /// ring and jitter buffer of at least one frame each.
 pub const MIN_POOL_SURFACES: usize = 4;
-/// Most surfaces in a pool.
-pub const MAX_POOL_SURFACES: usize = 32;
+/// Most transported surfaces in a pool: 32 color slots, or their paired
+/// depth and selection planes. Color presentation still uses at most 32.
+pub const MAX_POOL_SURFACES: usize = 64;
 
 impl Validate for SurfacePool {
     fn validate(&self) -> Result<(), Violation> {

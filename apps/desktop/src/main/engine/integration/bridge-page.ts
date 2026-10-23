@@ -14,7 +14,7 @@
  * persistent import see the surface's current contents.
  */
 import type { TransportCommand } from '../../../shared/engine-protocol';
-import { createWebGpuPainter } from '../../../extensions/viewer/engine-present/gpu';
+import { createFramePainter } from '../../../extensions/viewer/engine-present/painter';
 import { ViewerPresentation, type ViewParams } from '../../../extensions/viewer/engine-present/presentation';
 import { CodeReader, frameBridge, log, PageEngine, verifying } from './page-engine';
 
@@ -89,7 +89,7 @@ async function start(): Promise<void> {
       service: engine,
       stage,
       before: overlay,
-      createPainter: async (canvas) => verifying(await createWebGpuPainter(canvas), reader!),
+      createPainter: async (canvas) => verifying(await createFramePainter(canvas), reader!),
       log: (level, message) => log(`${level}: ${message}`)
     });
     presentation.onPresented((frame) => {
