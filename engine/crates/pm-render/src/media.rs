@@ -1103,6 +1103,7 @@ pub struct MediaCache {
     interpretations: BTreeMap<PathBuf, ColorDescription>,
     /// bwdif on normalized planes (interlaced sources), made on first use.
     deinterlacer: Option<Deinterlacer>,
+    video_upload: Option<video_compat::Upload>,
     /// The display geometry pass (clean aperture, rotation), made on first use.
     orient: Option<Orient>,
     /// Bytes of converted textures held (stills and frames).
@@ -1141,6 +1142,7 @@ impl MediaCache {
             frames: BTreeMap::new(),
             interpretations: BTreeMap::new(),
             deinterlacer: None,
+            video_upload: None,
             orient: None,
             bytes: 0,
         }
@@ -1393,6 +1395,21 @@ impl MediaCache {
         // neighbors: random access includes neighboring fields), decode on
         // this thread; other display frames come from the scrub workers.
         let deinterlaced = timing.deinterlaced();
+        let decode_reading = if compat
+            && !sequence
+            && !deinterlaced
+            && working == WorkingEncoding::Standard
+            && v.codec.codec == "hevc"
+            && v.codec.bit_depth == 10
+            && v.color.tagged.full_range == Some(true)
+            && !interprets_video_color(interp)
+            && !self.interpretations.contains_key(path)
+            && !matches!(reading.color.transfer, Transfer::Pq | Transfer::Hlg)
+        {
+            pm_media::decode::DecodeReading::Chromium
+        } else {
+            pm_media::decode::DecodeReading::Native
+        };
         let (n, frame, fields) = if export || deinterlaced {
             let purpose = if export {
                 DecodePurpose::Export
@@ -1401,7 +1418,7 @@ impl MediaCache {
             };
             let mut session = self
                 .service
-                .session(&src, instance, purpose)
+                .session_with_reading(&src, instance, purpose, decode_reading)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?;
             if deinterlaced {
                 let f = session
@@ -1418,7 +1435,7 @@ impl MediaCache {
             let want = if self.scrub { Want::Scrub } else { Want::Exact };
             let fetched = self
                 .viewer
-                .fetch(&src, instance, n, want)
+                .fetch_with_reading(&src, instance, n, want, decode_reading)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?;
             if !fetched.exact {
                 self.stand_ins.push(fetched.shown);
@@ -1446,11 +1463,26 @@ impl MediaCache {
             && !interprets_video_color(interp)
             && fields.is_none()
             && !self.interpretations.contains_key(path);
+        let alpha_bitmap = compat
+            && !sequence
+            && working == WorkingEncoding::Standard
+            && frame.format.has_alpha()
+            && !interprets_video_reading(interp)
+            && !self.interpretations.contains_key(path)
+            && fields.is_none()
+            && !matches!(reading.color.transfer, Transfer::Pq | Transfer::Hlg);
         let bitmap = if full_range_bitmap {
             Some(
                 pm_media::compat_video::full_range_709_bitmap(&frame, &self.pool)
                     .map_err(|e| MediaFailure::Failed(e.to_string()))?,
             )
+        } else if alpha_bitmap {
+            pm_media::compat_video::alpha_bitmap(
+                &frame,
+                &self.pool,
+                video_compat::color(v, reading.color).matrix,
+            )
+            .map_err(|e| MediaFailure::Failed(e.to_string()))?
         } else if sequence
             && compat
             && !interprets_video_reading(interp)
@@ -1468,54 +1500,13 @@ impl MediaCache {
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));
         }
-        let importer = self.importer()?;
-        let import = |f: &pm_media::frame::DecodedFrame| {
-            importer
-                .import(f)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))
-        };
-        let imported = import(&frame)?;
+        let imported = self
+            .importer()?
+            .import(&frame)
+            .map_err(|e| MediaFailure::Failed(e.to_string()))?;
         let mut held = vec![];
         // The importer's normalizations to hand back once recorded.
         let mut recycled = vec![];
-        let normalized = match &fields {
-            Some(f) => {
-                let prev = import(&f.prev)?;
-                let next = import(&f.next)?;
-                let norm = |i: &pm_gpu::decode_in::ImportedFrame, e: &mut wgpu::CommandEncoder| {
-                    importer
-                        .normalize(queue, e, i)
-                        .map_err(|e| MediaFailure::Failed(e.to_string()))
-                };
-                let (np, nc, nn) = (
-                    norm(&prev, encoder)?,
-                    norm(&imported, encoder)?,
-                    norm(&next, encoder)?,
-                );
-                held.push(prev);
-                held.push(next);
-                let pass = FieldPass::new(timing.fields.top_field_first(), second, f.first, f.last);
-                let out = self
-                    .deinterlacer
-                    .as_ref()
-                    .expect("made above")
-                    .run(
-                        queue,
-                        encoder,
-                        &np,
-                        &nc,
-                        &nn,
-                        pass,
-                        &CodeSpace::of(&frame.format),
-                    )
-                    .map_err(|e| MediaFailure::Failed(e.to_string()))?;
-                recycled.extend([np, nc, nn]);
-                out
-            }
-            None => importer
-                .normalize(queue, encoder, &imported)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?,
-        };
         let mut desc: ColorDescription = match self.interpretations.get(path) {
             Some(d) => *d,
             None if interprets_video_reading(interp) => reading.color,
@@ -1600,7 +1591,8 @@ impl MediaCache {
             && !matches!(color.transfer, Transfer::Pq | Transfer::Hlg)
             && (matches!(color.primaries, Primaries::Bt709 | Primaries::Unspecified)
                 || video_compat::bt2020_upload(v));
-        let format = if compatibility_bitmap || full_range_bitmap {
+        let format = if compatibility_bitmap || full_range_bitmap || (alpha_bitmap && source_bitmap)
+        {
             wgpu::TextureFormat::Rgba8Unorm
         } else {
             working_format(precision)
@@ -1613,27 +1605,90 @@ impl MediaCache {
             .iter()
             .position(|t| t.width() == w && t.height() == h && t.format() == format)
             .map(|i| self.free_frames.swap_remove(i));
-        let converted = convert_format(
-            device,
-            queue,
-            pipelines,
-            encoder,
-            &normalized,
-            &color,
-            working,
-            precision,
-            factors,
-            reuse,
-            format,
-            compatibility_bitmap && v.codec.codec == "hevc" && frame.format.label == "x420",
-        );
-        let importer = self.importer()?;
-        if fields.is_none() {
-            importer.recycle(normalized);
-        }
-        for n in recycled {
-            importer.recycle(n);
-        }
+        let converted = if compatibility_bitmap
+            && video_compat::Upload::supports(&imported, color.matrix)
+        {
+            let upload = self
+                .video_upload
+                .get_or_insert_with(|| video_compat::Upload::new(device));
+            upload.run(
+                device,
+                encoder,
+                &imported,
+                color.matrix,
+                color.primaries == Primaries::Bt2020,
+                reuse,
+            )
+        } else {
+            let importer = self.importer()?;
+            let import = |f: &pm_media::frame::DecodedFrame| {
+                importer
+                    .import(f)
+                    .map_err(|e| MediaFailure::Failed(e.to_string()))
+            };
+            let normalized = match &fields {
+                Some(f) => {
+                    let prev = import(&f.prev)?;
+                    let next = import(&f.next)?;
+                    let norm = |i: &pm_gpu::decode_in::ImportedFrame,
+                                e: &mut wgpu::CommandEncoder| {
+                        importer
+                            .normalize(queue, e, i)
+                            .map_err(|e| MediaFailure::Failed(e.to_string()))
+                    };
+                    let (np, nc, nn) = (
+                        norm(&prev, encoder)?,
+                        norm(&imported, encoder)?,
+                        norm(&next, encoder)?,
+                    );
+                    held.push(prev);
+                    held.push(next);
+                    let pass =
+                        FieldPass::new(timing.fields.top_field_first(), second, f.first, f.last);
+                    let out = self
+                        .deinterlacer
+                        .as_ref()
+                        .expect("made above")
+                        .run(
+                            queue,
+                            encoder,
+                            &np,
+                            &nc,
+                            &nn,
+                            pass,
+                            &CodeSpace::of(&frame.format),
+                        )
+                        .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+                    recycled.extend([np, nc, nn]);
+                    out
+                }
+                None => importer
+                    .normalize(queue, encoder, &imported)
+                    .map_err(|e| MediaFailure::Failed(e.to_string()))?,
+            };
+            let converted = convert_format(
+                device,
+                queue,
+                pipelines,
+                encoder,
+                &normalized,
+                &color,
+                working,
+                precision,
+                factors,
+                reuse,
+                format,
+                compatibility_bitmap && v.codec.codec == "hevc" && frame.format.label == "x420",
+            );
+            let importer = self.importer()?;
+            if fields.is_none() {
+                importer.recycle(normalized);
+            }
+            for n in recycled {
+                importer.recycle(n);
+            }
+            converted
+        };
         let geometry = Geometry::of(&reading, (converted.width(), converted.height()));
         let target = if geometry.is_identity() {
             converted

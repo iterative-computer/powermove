@@ -132,3 +132,110 @@ pub fn full_range_709_bitmap(frame: &DecodedFrame, pool: &FramePool) -> Result<D
     bitmap.pts = frame.pts;
     Ok(bitmap)
 }
+
+/// Chromium's software alpha video bitmap, including playback renditions.
+/// Matrix conversion and alpha attenuation happen together in libyuv before
+/// Canvas or the layer's filter samples the premultiplied RGBA8 pixels.
+pub fn alpha_bitmap(
+    frame: &DecodedFrame,
+    pool: &FramePool,
+    matrix: pm_protocol::color::MatrixCoefficients,
+) -> Result<Option<DecodedFrame>> {
+    use pm_protocol::color::MatrixCoefficients;
+    let f = &frame.format;
+    if f.layout != Layout::Planar
+        || f.bits != 8
+        || f.alpha_bits != 8
+        || f.range != Range::Limited
+        || f.log2_chroma_w != 1
+        || f.log2_chroma_h != 1
+        || f.planes.len() != 4
+        || !f.planes.iter().all(|p| p.format == PlaneFormat::R8)
+    {
+        return Ok(None);
+    }
+    unsafe extern "C" {
+        static kYuvI601Constants: YuvConstants;
+        static kYuvH709Constants: YuvConstants;
+        static kYuv2020Constants: YuvConstants;
+        fn I420AlphaToARGBMatrix(
+            y: *const u8,
+            ys: i32,
+            u: *const u8,
+            us: i32,
+            v: *const u8,
+            vs: i32,
+            a: *const u8,
+            as_: i32,
+            dst: *mut u8,
+            ds: i32,
+            constants: *const YuvConstants,
+            w: i32,
+            h: i32,
+            attenuate: i32,
+        ) -> i32;
+    }
+    let constants = match matrix {
+        MatrixCoefficients::Bt601 => &raw const kYuvI601Constants,
+        MatrixCoefficients::Bt709 => &raw const kYuvH709Constants,
+        MatrixCoefficients::Bt2020Ncl => &raw const kYuv2020Constants,
+        _ => return Ok(None),
+    };
+    let w = i32::try_from(f.width).map_err(|_| MediaError::invalid("alpha video width"))?;
+    let h = i32::try_from(f.height).map_err(|_| MediaError::invalid("alpha video height"))?;
+    let stride = w
+        .checked_mul(4)
+        .ok_or_else(|| MediaError::invalid("alpha video stride"))?;
+    let length = (stride as usize)
+        .checked_mul(h as usize)
+        .filter(|&n| n <= 1 << 30)
+        .ok_or_else(|| MediaError::invalid("alpha video size"))?;
+    let mut rgba = vec![0; length];
+    frame.with_planes(|p| -> Result<()> {
+        let s = p
+            .iter()
+            .map(|p| {
+                i32::try_from(p.stride).map_err(|_| MediaError::invalid("alpha video plane stride"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let status = unsafe {
+            I420AlphaToARGBMatrix(
+                p[0].ptr,
+                s[0],
+                p[1].ptr,
+                s[1],
+                p[2].ptr,
+                s[2],
+                p[3].ptr,
+                s[3],
+                rgba.as_mut_ptr(),
+                stride,
+                constants,
+                w,
+                h,
+                1,
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(MediaError::decode(format!(
+                "libyuv alpha video bitmap: {status}"
+            )))
+        }
+    })??;
+    for p in rgba.chunks_exact_mut(4) {
+        p.swap(0, 2);
+    }
+    let mut bitmap = pool_rgba(
+        pool,
+        f.width,
+        f.height,
+        Rgba::U8(&rgba),
+        true,
+        8,
+        "Chromium alpha video rgba8".into(),
+    )?;
+    bitmap.pts = frame.pts;
+    Ok(Some(bitmap))
+}

@@ -47,14 +47,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut resolver = MapResolver::default();
             for (id, asset) in project["assets"].as_object().unwrap() {
                 if asset["kind"] == "video" {
-                    resolver
-                        .paths
-                        .insert(id.clone(), dir.join(row["file"].as_str().unwrap()));
+                    resolver.paths.insert(
+                        id.clone(),
+                        dir.join(
+                            row["playback"]["file"]
+                                .as_str()
+                                .unwrap_or_else(|| row["file"].as_str().unwrap()),
+                        ),
+                    );
                 }
             }
+            let live = row["reading"].as_str() == Some("live");
             let request = RenderRequest {
-                export: true,
+                export: !live,
                 video_end: VideoEnd::Final,
+                sampling: if live {
+                    pm_render::sampling::Sampling::Playback
+                } else {
+                    pm_render::sampling::Sampling::Final
+                },
                 ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
             };
             let scope = pm_perf::Scope::begin();
@@ -90,8 +101,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(dir.join(format!("{id}-{i}.render.rgba")), &rgba)?;
             let reference = std::fs::read(
                 dir.join(
-                    sample["reference"]
+                    sample["nativeReference"]
                         .as_str()
+                        .or_else(|| sample["reference"].as_str())
                         .map(str::to_owned)
                         .unwrap_or_else(|| format!("{id}-{i}.canvas")),
                 ),
@@ -124,9 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if results.iter().any(|r| {
         r.get("chromiumError").is_some()
             || r.get("nativeError").is_some()
-            || r["max"].as_u64().is_some_and(|v| v > 2)
+            || r["max"].as_u64().is_some_and(|v| v > 0)
     }) {
-        Err("video parity has unresolved formats or pixels beyond the corpus video bound; see native-parity.json".into())
+        Err("video parity has unresolved formats or pixels differing from Chromium; see native-parity.json".into())
     } else {
         Ok(())
     }

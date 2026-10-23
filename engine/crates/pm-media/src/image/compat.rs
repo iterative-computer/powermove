@@ -522,6 +522,11 @@ unsafe fn canonicalize_trc(profile: &mut crate::sys::skcms::skcms_ICCProfile) {
     }
 }
 
+/// The same Skia transfer table used by compatibility stills and Canvas video.
+pub fn srgb_decode_table() -> [f32; 256] {
+    super::compat_color::srgb_decode_table()
+}
+
 /// Chromium's software I420 video upload uses libyuv's nearest-chroma,
 /// clipped RGBA8 bitmap before the canvas filters it. Existing sequence
 /// renditions are 8-bit limited-range I420, optionally with straight alpha.

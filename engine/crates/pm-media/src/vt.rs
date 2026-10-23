@@ -10,11 +10,14 @@
 //! | 8-bit | `420v` / `420f` |
 //! | HEVC with an alpha layer | `v0a8` |
 //!
-//! The range of the requested format follows the bitstream and every output
-//! buffer is checked against the request. Sessions are reused across seeks;
+//! Native output range follows the bitstream. Chromium-compatible reading
+//! requests a video-range biplanar surface for ordinary H.264 and HEVC,
+//! matching Chromium's VideoToolbox session attributes. Every output buffer
+//! is checked against the request. Sessions are reused across seeks;
 //! each seek first submits an end-of-sequence sample (S6 finding 1).
 
 use crate::apple::cf::*;
+use crate::decode::DecodeReading;
 use crate::error::{MediaError, Result};
 use crate::ff::{CodecInfo, Packet};
 use crate::frame::{CvBuffer, DecodedFrame, Pixels, corevideo_format, fourcc::*};
@@ -84,6 +87,19 @@ impl VtConfig {
         idx: &FrameIndex,
         extradata: &[u8],
         purpose: DecodePurpose,
+    ) -> Result<VtConfig> {
+        Self::new_with_reading(info, idx, extradata, purpose, DecodeReading::Native)
+    }
+
+    /// The Chromium reading requests a video-range biplanar surface, including
+    /// for full-range streams. The bitstream range remains in `full_range`;
+    /// the actual decoded buffer's format reports its requested surface range.
+    pub fn new_with_reading(
+        info: &CodecInfo,
+        idx: &FrameIndex,
+        extradata: &[u8],
+        purpose: DecodePurpose,
+        reading: DecodeReading,
     ) -> Result<VtConfig> {
         init();
         let cfg = &idx.config;
@@ -184,6 +200,15 @@ impl VtConfig {
             ))
         };
         let full = ext_full.unwrap_or(info.full_range);
+        let output_full = if reading == DecodeReading::Chromium
+            && !prores
+            && !alpha_layer
+            && matches!(&codec.to_be_bytes(), b"avc1" | b"hvc1")
+        {
+            false
+        } else {
+            full
+        };
         let (cw, ch) = (info.log2_chroma_w, info.log2_chroma_h);
         let fmt = match &codec.to_be_bytes() {
             b"ap4h" | b"ap4x" => F_Y416,
@@ -192,7 +217,7 @@ impl VtConfig {
                 DecodePurpose::Export => F_V216,
             },
             _ if alpha_layer => F_V0A8,
-            _ => match (info.bit_depth > 8, cw, ch, full) {
+            _ => match (info.bit_depth > 8, cw, ch, output_full) {
                 (false, 1, 1, false) => F_420V,
                 (false, 1, 1, true) => F_420F,
                 (true, 1, 1, false) => F_X420,
@@ -825,6 +850,32 @@ impl Drop for VtDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decode::service::MediaSource;
+
+    #[test]
+    fn chromium_requests_video_range_for_full_hevc10_without_changing_bitstream_range() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pm-render/tests/fixtures/video-parity-round2/hevc10-709-full.mp4");
+        let source = MediaSource::open(&path).unwrap();
+        let native = VtConfig::new(
+            &source.info,
+            &source.index,
+            &source.extradata,
+            DecodePurpose::Display,
+        )
+        .unwrap();
+        let chromium = VtConfig::new_with_reading(
+            &source.info,
+            &source.index,
+            &source.extradata,
+            DecodePurpose::Display,
+            DecodeReading::Chromium,
+        )
+        .unwrap();
+        assert!(native.full_range && chromium.full_range);
+        assert_eq!(native.pixel_format, "xf20");
+        assert_eq!(chromium.pixel_format, "x420");
+    }
 
     #[test]
     fn annexb_rewrites_to_length_prefixes_without_parameter_sets() {

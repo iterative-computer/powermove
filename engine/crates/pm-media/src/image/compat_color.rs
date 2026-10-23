@@ -65,6 +65,13 @@ fn transfer(v: f32, t: s::skcms_TransferFunction) -> f32 {
     r.copysign(v)
 }
 
+/// Skia's byte-to-linear transfer, evaluated on the CPU so a GPU upload
+/// can use the same rounding at the 256 possible input codes.
+pub(super) fn srgb_decode_table() -> [f32; 256] {
+    let t = unsafe { *s::skcms_sRGB_TransferFunction() };
+    std::array::from_fn(|i| transfer(i as f32 * (1.0 / 255.0), t))
+}
+
 /// Returns false for profiles SkColorSpace cannot express as matrix/TRC;
 /// those retain the skcms ICC transform (CLUTs and distinct table curves).
 pub(super) unsafe fn transform(

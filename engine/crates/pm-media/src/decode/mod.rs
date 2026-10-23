@@ -32,6 +32,17 @@ use crate::vt::{DecodePurpose, VtConfig, VtDecoder};
 use arbiter::{HardwareArbiter, HwCodec, HwPermit};
 use serde::Serialize;
 
+/// Which decoder output the caller needs. Chromium's VideoToolbox session
+/// requests video-range biplanar surfaces even for full-range bitstreams;
+/// native decoding follows the stream's range.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DecodeReading {
+    #[default]
+    Native,
+    Chromium,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Backend {
@@ -248,6 +259,29 @@ pub fn open(
     threads: i32,
     prefer: Option<Backend>,
 ) -> Result<(Decoder, Vec<String>)> {
+    open_with_reading(
+        spec,
+        purpose,
+        pool,
+        arbiter,
+        threads,
+        prefer,
+        DecodeReading::Native,
+    )
+}
+
+/// Opens a decoder for the requested compatibility reading. The usual
+/// [`open`] remains native by default.
+#[allow(clippy::too_many_arguments)]
+pub fn open_with_reading(
+    spec: &StreamSpec<'_>,
+    purpose: DecodePurpose,
+    pool: &FramePool,
+    arbiter: &dyn HardwareArbiter,
+    threads: i32,
+    prefer: Option<Backend>,
+    reading: DecodeReading,
+) -> Result<(Decoder, Vec<String>)> {
     let mut order = backends(spec.info, spec.index);
     if let Some(p) = prefer {
         if !order.contains(&p) {
@@ -262,7 +296,7 @@ pub fn open(
     let mut skipped = Vec::new();
     for b in order {
         let r = match b {
-            Backend::VideoToolbox => open_vt(spec, purpose, arbiter, pool),
+            Backend::VideoToolbox => open_vt(spec, purpose, reading, arbiter, pool),
             Backend::Ffmpeg => FfDecoder::new(spec.input, spec.stream, None, pool.clone(), threads)
                 .map(Decoder::Ff),
             Backend::Dav1d => Dav1dDecoder::new(pool.clone(), threads).map(Decoder::Dav1d),
@@ -286,10 +320,11 @@ pub fn open(
 fn open_vt(
     spec: &StreamSpec<'_>,
     purpose: DecodePurpose,
+    reading: DecodeReading,
     arbiter: &dyn HardwareArbiter,
     pool: &FramePool,
 ) -> Result<Decoder> {
-    let cfg = VtConfig::new(spec.info, spec.index, spec.extradata, purpose)?;
+    let cfg = VtConfig::new_with_reading(spec.info, spec.index, spec.extradata, purpose, reading)?;
     let codec = HwCodec::from_fourcc(cfg.codec_fcc);
     let permit = if cfg.hardware_supported {
         arbiter.try_acquire(codec)
