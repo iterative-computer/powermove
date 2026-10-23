@@ -380,8 +380,8 @@ command buffer, and a readback that waits for that submission only
 (`pm_gpu::readback` now waits for its own submission index, not the
 queue's latest). It answers main itself; the render thread hears what it
 published (`Command::RasterDone`) for the shared-memory accounting. The
-document is shared as an `Arc` once per revision; a document update drops
-it. A rebuilt device gets a new renderer. Sync and async layer jobs leave
+document was shared as an `Arc` of a deep copy made per revision on the
+render thread; round eight replaced that with a mirror (below). A rebuilt device gets a new renderer. Sync and async layer jobs leave
 the snapshot queue for the worker without waiting for a playing view's next
 frame (`SnapshotQueue::next_layer`); idle ones still wait; at most eight are
 in flight. The pixels come from the same `Renderer::layer_raster` over the
@@ -407,8 +407,10 @@ as `stopped`: one 83 ms gap in ten runs before that fix. After a cold seek
 the window's answers arrive two at a time about every 50 ms. Its
 round-trip, not the 1 to 10 ms native text base, is the bound, so the preroll usually
 starts the line at its bound with two to three frames answered. The waiting
-frames above cover the rest. The engine's first frame lands 37 to 70 ms
-after Play, against today's 106 to 216 ms.
+frames above cover the rest. (Round seven reported the engine's first
+frame at 37 to 70 ms after Play, against today's 106 to 216 ms. Those times
+were re-presentations of the paused frame, not the run's first frame:
+round eight below.)
 
 **The lookahead stops at the end.** Both horizons are bounded by the open
 composition's span (its loop range, else the composition), as in round
@@ -438,6 +440,12 @@ today in the same run:
 | Animated path vertices | 20/20 | 90 vs 90 | 42–51 vs 35–42 ms | 1–48 vs 104–281 ms | 3001–3018 vs 3072–3249 ms |
 | Typewriter, Play right after a seek | 20/20 | 60 vs 60 | 42–64 vs 39–48 ms | 37–93 vs 106–360 ms | 2083–2097 vs 2075–2329 ms |
 
+The "First frame" column times the first `frame:rendered` after Play. With
+the engine that was a repeated presentation of the paused frame (the Play's
+own seek, and answers arriving during the preroll; round eight), so it
+overstates the engine's lead. Round eight gates the run's first advancing
+frame instead.
+
 No run skipped a frame, dropped one in the presenter, or loaded a base
 synchronously during playback. Every presented time had the window's
 answer. An earlier campaign, on the build before the preroll's
@@ -450,6 +458,143 @@ private corpus variable unset.
 generator to end before it starts and records the load average before and
 after. Each run prints `os.loadavg()`. Only the harness's own two workers
 are stopped afterwards.
+
+### Round eight: copies, repeated frames, loops, redraws (2026-10-22)
+
+Merged `feat/native-engine` (164 commits) first. Integration's readback
+rewrite (an asynchronous ring with a completion thread) kept this lane's
+per-submission wait for serial readbacks (`Readback::with_mapped_rows`
+waits for its own submission index). `CompatFrameRequest` carries both
+`frame` (this lane) and `blender` (Blender PNG maps). The job engine refuses
+a PNG answer for a layer. `CompatPending` is a non-transient render error.
+The viewer is 1.3.9. PROTOCOL_BUILD `protocol-ed91b6f951dbf4be`.
+
+**No document copy per revision.** Round seven gave the raster worker an
+`Arc` of a deep copy of the session document, made on the render thread at
+every new revision a raster was drawn at. Review measured the copy at
+13.8 ms for 1.7 MB of JSON and 154.6 ms for 17.2 MB. The session document
+(`ViewDocument::doc`) is now an `Arc` that updates apply in place
+(`Arc::make_mut`; a resync replaces it without copying). The worker keeps
+its own mirror of each session it draws for, fed by the same updates the
+render thread applies (`Work::Update`), as the audio thread's mirror is.
+The first raster of a session seeds the mirror with the render thread's
+`Arc`, and the worker makes the copy (`Arc::unwrap_or_clone`). A job names
+its revision. A mirror at another revision, or none, sends the job back
+(`Command::RasterReseed`) to be seeded again. An update the mirror cannot
+take drops it. The render thread copies only when an update arrives while
+a seed is still held (`documentCopies`). The render-thread fallback borrows
+the document again and loads the session's definitions, as before round
+seven. The worker's in-flight results count against the snapshot queue's
+1 GiB bound (`SnapshotQueue::set_in_worker`).
+
+**No repeated `frame:rendered`.** Three causes, all fixed:
+
+- An answer for another frame (the lookahead, a preroll) set the view
+  dirty and re-presented the complete paused frame. Answers now redraw
+  only a frame waiting for them: a timed frame kept in its slot, or a
+  paused frame that lacked answers (`View::compat_paused_wait`, which also
+  ends the paused frame's per-turn retry; it asks again after
+  `ASK_AGAIN`). A changed producer list, an invalidation (`Forget`), and an
+  answer that replaces the shown one at the same revision
+  (`Applied::Replaced`) still redraw. The same producer list sent again is
+  no change.
+- Play sent an exact seek to the time already shown, and the engine
+  presented that paused frame again just before the run did. Play from a
+  stopped line no longer seeks it to where the latest clock sample (newer
+  than any play or pause sent) says it rests (`EngineTransport.shuttle`).
+- A seek and a Play in one task drew the paused frame while the Play
+  waited in its preroll. Paused redraws now wait while a Play is in its
+  preroll or waits for the audio's first sample, without polling.
+
+The preroll checks the frames a reverse or faster run shows. The cadence
+gates assert that no time is presented more often than today
+(`repeatCount`), and compare the run's first advancing frame
+(`firstAdvanceMs`) with today's.
+
+**Loops.** Looping playback is today's default (`PM.loop`). Both
+lookahead horizons stopped at the loop's end. A need for the first frame
+after the wrap, asked while the clock still showed the last ones, counted
+as stale. Lookahead distances now run along the loop (`runAhead`,
+`intoLoop`): the frames after the wrap follow the last ones, the wrap does
+not restart the windows, and a nested composition's entries wrap with the
+clock's shift. `span()` says when the clock loops (`loop: true` from the
+clock's `loopRange`). The engine reports store evictions
+(`compatEvicted`). A new gate plays a 10 s loop of 300 viewer-sized
+rasters, more than the 256 MiB store keeps, and 45 frames past the wrap.
+
+That gate first found a worse failure than the wrap. Each 1100×600
+ellipse base took 26 ms on the CPU (91 ms at twice the density), so
+preparations fell behind the clock. The lookahead kept preparing the frame
+at the clock, each result came back after the clock had passed it, and
+playback presented nothing for 7.7 s (232 frames skipped) until the wrap.
+Two fixes:
+
+- Canvas2D rasters (`pm-vector`, outside this lane): triangle fills write
+  only each sample row's covered span, using the same exact rational
+  thresholds as `fill_polygons`. A solid unclipped paint blends through a
+  256-entry table. The box resolve is specialized for one and four samples.
+  Pixels are unchanged: tests compare spans with the per-pixel point test
+  on 400 random and fan cases, the table with per-sample blending, and the
+  resolve with the mean, and every pm-vector parity test passes. The
+  ellipse now takes 4.5 ms (16 ms at twice the density).
+- The lookahead keeps a running average of a preparation's time. While the
+  line moves, it starts the horizon at the first frame a preparation can
+  still reach in time. A Play held in the preroll still prepares the frames
+  at the clock.
+
+**Paused redraws.** Today's frame loop renders on every draw request while
+paused (a selection change, `transport.invalidate()`). It calls every
+raster wrapper again and announces the frame with `frame:rendered`. With
+the engine, nothing was asked or announced without an edit. Now, on a
+paused draw with no new revision, view or time, the window answers the
+frame on screen again (`EngineRenderTransport.refreshShown`, compared per
+exact need, layer, time, source, density and window). A wrapper whose
+output changed has its layer forgotten first, so stale answers at other
+densities, for example a capture's, are asked again, and the engine draws
+and presents the frame once. Otherwise the frame on screen is announced
+again (`PresentedEvents.redraw`: `preview:presented`, then `overlay`), once
+per draw. The legacy frame loop calls it (`PM.EngineRedraw`). A paused edit
+also starts preparing the shown frame's answers at once
+(`prepareShown`), beside the engine's render that will ask for them.
+
+**Measured on the final tree** (`1ec57f9e3` and the fixes after it; the
+release thin-LTO addon; the Electron lock; one Playwright worker; load
+average 12 to 36 from other lanes). One run of the five spec files had
+25 passed and 2 failed. Both failures are listed under "What remains".
+Engine against today in the same run:
+
+| Gate | Distinct frames | Longest gap | First advancing frame | Times presented twice |
+| --- | --- | --- | --- | --- |
+| Rotation | 90 vs 90 | 43 vs 36 ms | 81 vs 166 ms | 0 vs 0 |
+| Typewriter keyed 0→100% | 90 vs 90 | 42 vs 43 ms | 86 vs 179 ms | 0 vs 0 |
+| Ellipse size | 90 vs 90 | 44 vs 35 ms | 72 vs 189 ms | 0 vs 0 |
+| Path vertices | 90 vs 90 | 44 vs 42 ms | 77 vs 221 ms | 0 vs 0 |
+| Play right after a seek (frame 30 first shown at 99 vs 147 ms) | 60 vs 60 | 47 vs 43 ms | 124 vs 181 ms | 0 vs 0 |
+| 10 s loop, then 45 frames past the wrap | 300 + 45 vs 300 + 45 | 48 vs 38 ms | 69 vs 197 ms | 0 vs 0 |
+
+At the loop's wrap the gap was 34 ms (today 35 ms), and the longest gap
+after it 46 ms (today 35 ms). The engine evicted 275 rasters before the
+wrap, and the window had answered every frame after it. Earlier runs of
+the same gate measured wrap gaps of 20 and 27 ms. No gate skipped a frame
+or loaded a base synchronously during playback. In the paused redraw gate,
+the engine and today each sent one `frame:rendered` for a no-op draw and
+one for a changed wrapper, and showed the new tint at the ellipse's centre.
+
+**Edit drag on a large document** (5.46 MB of JSON: the overridden ellipse
+and 2,500 switched-off shapes with keyframes; 60 moves, each waiting for
+its frame). The worker drew about 119 bases off the render thread. The
+render thread copied the document 0 times. There were no reseeds and no
+render-thread turn of 50 ms or more during the drag. Every move was
+presented. Latency from the edit to its `frame:rendered`, p50/p95/max:
+
+| Run | Engine with the override | Engine without it | Today |
+| --- | --- | --- | --- |
+| Before `prepareShown` | 42 / 51 / 60 ms | n/a | 18 / 21 / 29 ms |
+| With it | 51 / 67 / 75 ms | 42 / 44 / 50 ms | 15 / 18 / 25 ms |
+| Final run | 50 / 57 / 59 ms | 25 / 34 / 35 ms | 14 / 16 / 22 ms |
+
+The engine is slower than today with and without the override. These are
+gaps (below).
 
 ### Earlier measurements (2026-10-19, before round-three integration)
 
@@ -669,6 +814,35 @@ new ids through a typed accessor; none is added in this lane.
   override's layers: such an export fails by name there (plan: the hidden
   host's on-demand Chromium, L6).
 - The lookahead answers at the open composition's frame rate only.
+- **Paused edit latency on a large document** (round eight's drag): with
+  the override, the engine shows an edit 42 to 51 ms after it (p50); today
+  shows it in 14 to 18 ms. Without the override the engine took 25 to
+  42 ms in two runs, so part of the difference is the engine's own edit
+  path (patch, render, presentation: the presenter and document lanes).
+  The override adds 9 to 25 ms at p50: the window's base preparation and
+  the answer's round trip, now started at the edit (`prepareShown`).
+- **A synchronous capture timed out right after the zoom gate.** Running
+  the typewriter preview/disposal gate after the moat's zoom 8/16 gate made
+  its first synchronous `renderFrameTo` time out at 5 s, 3 times in 3
+  runs. Run alone, it passed. At the timeout the window had answered one
+  need, with two asynchronous base preparations still in flight, and the
+  raster worker had finished one job (`layerRastersOffThread` 1, no
+  reseeds). The worker may be waiting on something the blocked window
+  must answer (suspected: the font service), but this is not confirmed.
+  Logs are outside the repository (/tmp/ne-w5/extcompat-r8-*.log).
+- **The zoom 8 and 16 crop gate** (`engine-compat-moat.spec.ts`) fails
+  after the merge. At zoom 8 the viewer keeps the whole 480×270 canvas
+  under a 3840×2160 CSS box (integration's canvas hold) and sends no
+  refined view, so the override is never asked at a density over 16. The
+  gate needs the viewer lane's refine-after-navigation behavior with a
+  programmatic zoom; it is not loosened here.
+- A paused redraw re-asks only the needs the engine asked for most
+  recently (the frame on screen). A wrapper whose output follows its own
+  state is asked again for other frames and densities only after a
+  change it shows at the frame on screen (its layer is then forgotten).
+- `main/codex/instructions.test.ts` fails on integration too: its golden
+  and its 10 KB budget (11,576 bytes; 343 of them this lane's deprecation
+  guidance). The update needs the agents lane.
 
 ## Round-four verification and the private setup gate
 
