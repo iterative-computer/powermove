@@ -28,7 +28,7 @@ pub struct Source {
 
 /// FFmpeg, or Symphonia for MP3 as today decodes it ([`crate::mp3`]).
 enum Decoder {
-    Ffmpeg(AudioDecoder),
+    Ffmpeg(Box<AudioDecoder>),
     Mp3(Box<crate::mp3::Mp3Decoder>, u64),
 }
 
@@ -427,10 +427,10 @@ impl SourceCache {
         let decoder = if info.codec == "mp3" {
             match crate::mp3::Mp3Decoder::open(path, info.channels()) {
                 Ok(mp3) => Decoder::Mp3(Box::new(mp3), 0),
-                Err(_) => Decoder::Ffmpeg(decoder),
+                Err(_) => Decoder::Ffmpeg(Box::new(decoder)),
             }
         } else {
-            Decoder::Ffmpeg(decoder)
+            Decoder::Ffmpeg(Box::new(decoder))
         };
         let source = Arc::new(Source {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
