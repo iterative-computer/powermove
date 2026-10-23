@@ -1,8 +1,0 @@
-{
-  "name": "powermove-s1-bridge-spike",
-  "private": true,
-  "version": "0.0.0",
-  "description": "Spike S1 (frame bridge): minimal Electron 44 app hosting the Rust engine in a utilityProcess.",
-  "license": "AGPL-3.0-or-later",
-  "main": "main.cjs"
-}

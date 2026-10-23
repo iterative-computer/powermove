@@ -54,7 +54,7 @@ if (OUT.startsWith(resolve(REPO) + sep)) throw new Error('the shader corpus is n
 const withStore = !args.includes('--no-store');
 const storeDir = flag('--store') ?? (existsSync(CORPUS_ROOT) ? (await readdir(CORPUS_ROOT)).filter((d) => d.startsWith('store-')).sort().map((d) => join(CORPUS_ROOT, d)).at(-1) : undefined);
 const localPaths = args.flatMap((arg, i, all) => (arg === '--local' && all[i + 1] ? [all[i + 1]!] : []));
-const { GENERATED } = await import(join(REPO, 'engine', 'spikes', 's3-shaders', 'corpus', 'generated', 'index.ts'));
+const { GENERATED } = await import(join(REPO, 'engine', 'crates', 'pm-render', 'tools', 'agent-shaders', 'index.ts'));
 const { decodeProjectContainer } = await import(join(APP, 'src/shared/project-container.ts'));
 
 /* legacy/core/util.ts PM.hex2rgb, verbatim (its install needs a DOM). */
@@ -451,7 +451,7 @@ if (withStore) {
 
 /* ── 9. generated corpora ──────────────────────────────────────────── */
 for (const g of GENERATED as any[]) {
-  const source = `engine/spikes/s3-shaders/corpus/generated (${g.name})`;
+  const source = `engine/crates/pm-render/tools/agent-shaders (${g.name})`;
   const extra = { covers: g.covers };
   if (g.kind === 'effect') safely(g.name, () => effectCase('generated-s3', g.name, g.def, source, extra));
   else if (g.kind === 'transition') safely(g.name, () => transitionCase('generated-s3', g.name, g.def, source, extra));

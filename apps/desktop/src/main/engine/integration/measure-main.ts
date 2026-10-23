@@ -11,7 +11,7 @@
  * (measure-page.ts). "Today's viewer" runs on the same harness: the
  * renderer draws each frame itself at the animation frame.
  *
- * Load (S1's gate load, engine/spikes/s1-bridge/app/load.cjs): autosave of
+ * Load (S1's gate load, measure-load.cjs): autosave of
  * a 7.1 MB document every 2 s, a 50 ms long task every second, a 1 s live
  * resize every 5 s, and agent tool traffic 20 times a second (a 64 KB
  * request into the page and a 600-layer reply serialized in main).
@@ -113,9 +113,9 @@ type HarnessAddon = {
   InputGenerator: new (hz: number, durationMs: number, kind: number, callback: (input: { seq: number; tsUs: number; x: number; y: number }) => void) => { stop(): void };
 };
 
-// The S1 load generator (CommonJS, shared with the spike).
+// The S1 load generator (CommonJS).
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { MainLoad } = require('../../../../../../engine/spikes/s1-bridge/app/load.cjs') as {
+const { MainLoad } = require('./measure-load.cjs') as {
   MainLoad: new (options: { win: BrowserWindow; ipcMain: Electron.IpcMain; log: (m: string) => void; nowUs: () => number }) => {
     start(options: Record<string, unknown>): void;
     stop(): Record<string, unknown>;
