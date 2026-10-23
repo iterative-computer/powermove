@@ -322,6 +322,7 @@ fn linear_blending_decodes_the_3d_canvas_once() {
             ],
         );
         doc["color"] = json!({ "mode": "standard", "linearBlending": on });
+        doc["colorDepth"] = json!(32);
         let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
         let frame = r
             .render(
@@ -333,6 +334,7 @@ fn linear_blending_decodes_the_3d_canvas_once() {
             )
             .unwrap();
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba32Float);
         r.read_rgba(&frame).unwrap()
     };
     let mut r = Renderer::headless().unwrap();

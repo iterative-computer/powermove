@@ -1148,7 +1148,10 @@ fn a_read_only_first_probe_leaves_no_marker_for_the_desktop() {
     let mut hidden = make(true);
     let frame = probe(&mut hidden);
     assert_eq!(
-        hidden.effects_mut().parity.verdict(&code),
+        hidden
+            .effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::NativeVerified
     );
     assert_eq!(render(&mut hidden, &doc).unwrap(), frame);
@@ -1159,7 +1162,10 @@ fn a_read_only_first_probe_leaves_no_marker_for_the_desktop() {
     );
     let mut desktop = make(false);
     assert_eq!(
-        desktop.effects_mut().parity.verdict(&code),
+        desktop
+            .effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::Unknown,
         "the desktop must still compare the program with its own runner"
     );
@@ -1171,7 +1177,10 @@ fn a_read_only_first_probe_leaves_no_marker_for_the_desktop() {
     // A fresh read-only host honours the desktop's verification at once.
     let mut later = make(true);
     assert_eq!(
-        later.effects_mut().parity.verdict(&code),
+        later
+            .effects_mut()
+            .parity
+            .verdict_at_precision(&code, Precision::Float16),
         Verdict::NativeVerified
     );
     assert_eq!(render(&mut later, &doc).unwrap(), frame);

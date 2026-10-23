@@ -524,20 +524,19 @@ mod child {
             &painted.pixels,
             SnapshotPixels::Premultiplied,
         );
-        let [left, top, right, bottom] = painted.plan.crop;
-        assert!(left > 0 && top > 0, "exercise a padded text crop");
-        let mut placed = vec![0; raster.width as usize * raster.height as usize * 4];
-        let row_bytes = (right - left) as usize * 4;
-        for y in top..bottom {
-            let src = (y - top) as usize * row_bytes;
-            let dst = (y as usize * raster.width as usize + left as usize) * 4;
-            placed[dst..dst + row_bytes].copy_from_slice(&rgba[src..src + row_bytes]);
-        }
-        assert_eq!(
-            pixels(&raster),
-            placed,
-            "the raster is the registry's raster"
+        // Level 1 keeps the full Canvas2D quad: its transparent border is
+        // part of the source geometry even when the ink has a smaller crop.
+        assert_eq!(painted.plan.crop, [0, 0, raster.width, raster.height]);
+        let [ink_left, ink_top, _, _] = painted.plan.scene.ink().expect("the layer has ink");
+        assert!(
+            ink_left > 0 && ink_top > 0,
+            "exercise transparent canvas padding"
         );
+        assert_eq!(
+            rgba.len(),
+            raster.width as usize * raster.height as usize * 4
+        );
+        assert_eq!(pixels(&raster), rgba, "the raster is the registry's raster");
         println!("layer raster: {}x{}", raster.width, raster.height);
         // Today's placement: the selection of the text geometry; with
         // typography anchoring, the shift as `fontOffset` and in the anchor.

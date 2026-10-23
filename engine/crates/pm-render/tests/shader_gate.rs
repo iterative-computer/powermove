@@ -1202,7 +1202,10 @@ fn a_user_program_the_probe_never_judged_fails_the_gate() {
         height: 1,
         rgba16f: vec![0; 4],
     };
-    via_runner.effects_mut().parity.judge("judged", &px, &px);
+    via_runner
+        .effects_mut()
+        .parity
+        .judge("working-depth-v1:float16\0judged", &px, &px);
     let judged = json!({"id": "user/ok", "kind": "transition", "frag": "judged"});
     let mut tally = Tally {
         variants: 1,

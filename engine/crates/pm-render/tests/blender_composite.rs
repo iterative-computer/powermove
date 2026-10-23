@@ -189,6 +189,7 @@ fn level1_matches_the_straight_imagebitmap_upload_including_zero_alpha_rgb() {
 
 fn check_surfaces(compat: u8) {
     let mut exact = scene(true);
+    exact["colorDepth"] = json!(32);
     for layer in exact["layers"].as_array_mut().unwrap() {
         if compat >= 2 {
             layer["compat"] = json!(compat);
@@ -236,18 +237,33 @@ fn check_surfaces(compat: u8) {
     surfaces.insert(snap.frame.lookup(), decoded.clone());
     let opacity: HashMap<&str, f64> = [("a", 1.0), ("b", 0.5)].into();
     for precision in [Precision::Float32, Precision::Float16] {
+        let mut at_depth = exact.clone();
+        at_depth["colorDepth"] = json!(if precision == Precision::Float32 {
+            32
+        } else {
+            16
+        });
+        let at_depth = load(&at_depth);
         let mut req = request(precision);
         req.blender = BlenderRender::Final(Arc::new(surfaces.clone()));
         let (plan, failures) = r
-            .plan(&doc, "Ptest-root", ticks(0.0), &req, &assets)
+            .plan(&at_depth, "Ptest-root", ticks(0.0), &req, &assets)
             .unwrap();
         assert!(failures.is_empty(), "{failures:?}");
         let order = draw_order(&plan);
         assert_eq!(order.len(), 2, "both layers draw their surfaces");
         let frame = r
-            .render(&doc, "Ptest-root", ticks(0.0), &req, &assets)
+            .render(&at_depth, "Ptest-root", ticks(0.0), &req, &assets)
             .unwrap();
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        assert_eq!(
+            frame.color.format(),
+            if precision == Precision::Float32 {
+                wgpu::TextureFormat::Rgba32Float
+            } else {
+                wgpu::TextureFormat::Rgba16Float
+            }
+        );
         let got = r.read_rgba(&frame).unwrap();
         let want = reference(&order, &decoded, &opacity, compat < 2, precision);
         let d = max_diff(&got, &want);
