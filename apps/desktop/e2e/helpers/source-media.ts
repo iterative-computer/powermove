@@ -46,6 +46,33 @@ export async function decodedRenditionIdentity(directory: string, name: string, 
   return { byteEqual: Buffer.from(reference).equals(Buffer.from(actual)), picture, audio };
 }
 
+/** Compare captured app surfaces after PNG decoding, without compression differences. */
+export async function capturedPixelDelta(referenceFile: string, actualFile: string) {
+  const decode = async (file: string) => {
+    const png = await readFile(file);
+    const size = [png.readUInt32BE(16), png.readUInt32BE(20)];
+    const result = await exec(sourceFfmpeg(), ['-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '2', '-i', file,
+      '-frames:v', '1', '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1'],
+    { timeout: 60_000, encoding: 'buffer', maxBuffer: 128 * 1024 * 1024 });
+    return { size, pixels: result.stdout };
+  };
+  const expected = await decode(referenceFile), actual = await decode(actualFile);
+  const sameSize = expected.size.every((v, i) => v === actual.size[i]) && expected.pixels.length === actual.pixels.length;
+  let max = 0, changed = 0;
+  let left = Infinity, top = Infinity, right = -1, bottom = -1;
+  for (let i = 0; i < Math.max(expected.pixels.length, actual.pixels.length); i++) {
+    const d = Math.abs((expected.pixels[i] ?? 0) - (actual.pixels[i] ?? 0));
+    max = Math.max(max, d);
+    if (d) {
+      changed++;
+      const pixel = Math.floor(i / 4), x = pixel % expected.size[0]!, y = Math.floor(pixel / expected.size[0]!);
+      left = Math.min(left, x); top = Math.min(top, y); right = Math.max(right, x); bottom = Math.max(bottom, y);
+    }
+  }
+  return { sameSize, expectedSize: expected.size, actualSize: actual.size, max, changed,
+    changedBounds: changed ? [left, top, right, bottom] : null };
+}
+
 /** Same −85 dBFS whole-mix ceiling as pm-audio/tests/legacy_parity.rs; no masks or alignment. */
 export async function sourcePcmComparison(directory: string, name: string, input: number[], expected: number[]) {
   const source = path.join(directory, name), output = path.join(directory, `${name}.native.f32le`);

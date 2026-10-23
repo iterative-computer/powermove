@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { expect, test } from './helpers/app';
 import { importFixture } from './helpers/media';
-import { decodedRenditionIdentity, renditionAudioFixture, sourcePcmComparison } from './helpers/source-media';
+import { capturedPixelDelta, decodedRenditionIdentity, renditionAudioFixture, sourcePcmComparison } from './helpers/source-media';
 
 for (const enabled of [false, true]) test.describe(`source media, engine ${enabled ? 'on' : 'off'}`, () => {
   test.use({ desktopLaunchOptions: { env: { POWERMOVE_NEW_ENGINE: enabled ? '1' : '0' } } });
@@ -133,14 +133,26 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
               context.drawImage(asset.el, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
               const expected = context.getImageData(0, 0, canvas.width, canvas.height).data;
               const reference = canvas.toDataURL('image/png');
-              let max = 0, changed = 0, native = null;
+              const fresh = document.createElement('canvas'); fresh.width = canvas.width; fresh.height = canvas.height;
+              const freshContext = fresh.getContext('2d')!;
+              freshContext.drawImage(asset.el, (fresh.width - w) / 2, (fresh.height - h) / 2, w, h);
+              const freshExpected = freshContext.getImageData(0, 0, fresh.width, fresh.height).data;
+              const freshReference = fresh.toDataURL('image/png');
+              let max = 0, changed = 0, freshMax = 0, freshChanged = 0, native = null;
               if (enabled) {
                 const received = (await source.frame(ids[name], 0, canvas.width, canvas.height, { fit })).data;
-                for (let i = 0; i < expected.length; i++) { const d = Math.abs(expected[i]! - received[i]!); max = Math.max(max, d); if (d) changed++; }
+                for (let i = 0; i < expected.length; i++) {
+                  const d = Math.abs(expected[i]! - received[i]!); max = Math.max(max, d); if (d) changed++;
+                  const freshDelta = Math.abs(freshExpected[i]! - received[i]!); freshMax = Math.max(freshMax, freshDelta); if (freshDelta) freshChanged++;
+                }
                 context.putImageData(new ImageData(new Uint8ClampedArray(received), canvas.width, canvas.height), 0, 0);
                 native = canvas.toDataURL('image/png');
               }
-              frames[name].fits.push({ fit, max, changed, reference, native });
+              // Keep reference rendering independent of the native PNG written
+              // into the reused canvas above. Its readback/backend history is
+              // diagnostic only; each source request draws into a fresh canvas.
+              frames[name].fits.push({ fit, max: freshMax, changed: freshChanged,
+                reusedMax: max, reusedChanged: changed, reference: freshReference, reusedReference: reference, native });
             }
           }
         }
@@ -149,8 +161,33 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
       await writeFile(path.join(directory, 'measurements.json'), JSON.stringify(measured, null, 2));
       for (const [name, result] of Object.entries<any>(measured)) {
         for (const kind of ['reference', 'native', 'posterReference', 'posterNative']) if (result[kind]) await writeFile(path.join(directory, `${name}-${kind}.png`), Buffer.from(result[kind].split(',')[1], 'base64'));
-        for (const fit of result.fits ?? []) for (const kind of ['reference', 'native']) if (fit[kind]) await writeFile(path.join(directory, `${name}-${fit.fit}-${kind}.png`), Buffer.from(fit[kind].split(',')[1], 'base64'));
+        for (const fit of result.fits ?? []) for (const kind of ['reference', 'reusedReference', 'native']) if (fit[kind]) await writeFile(path.join(directory, `${name}-${fit.fit}-${kind}.png`), Buffer.from(fit[kind].split(',')[1], 'base64'));
       }
+      const inline = [];
+      for (const [name, result] of Object.entries<any>(measured)) {
+        const poster = page.locator(`.asset-card[data-asset-id="${ids[name]}"] .asset-poster`);
+        await expect(poster).toBeVisible();
+        const decoded = await poster.evaluate(async (element: HTMLImageElement, referenceUrl: string) => {
+          await element.decode();
+          const referenceBytes = Uint8Array.from(atob(referenceUrl.split(',')[1]!), c => c.charCodeAt(0));
+          const bitmap = await createImageBitmap(new Blob([referenceBytes], { type: 'image/png' }));
+          try {
+            const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+            const context = canvas.getContext('2d')!;
+            context.drawImage(bitmap, 0, 0);
+            const expected = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            context.clearRect(0, 0, canvas.width, canvas.height); context.drawImage(element, 0, 0);
+            const actual = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            let max = 0, changed = 0;
+            for (let i = 0; i < expected.length; i++) { const d = Math.abs(expected[i]! - actual[i]!); max = Math.max(max, d); if (d) changed++; }
+            return { max, changed, width: element.naturalWidth, height: element.naturalHeight, png: canvas.toDataURL('image/png') };
+          } finally { bitmap.close(); }
+        }, result.posterReference);
+        const { png, ...metric } = decoded;
+        inline.push({ name, ...metric });
+        await writeFile(path.join(directory, `${name}-inline.png`), Buffer.from(png.split(',')[1]!, 'base64'));
+      }
+      await writeFile(path.join(directory, 'inline-thumbnails.json'), JSON.stringify(inline, null, 2));
 
       // The offline probe uses the production SourceAudio document and mixer.
       // Chromium's decoded PCM is padded to the media element's duration, just
@@ -192,6 +229,7 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         const play = HTMLMediaElement.prototype.play;
         HTMLMediaElement.prototype.play = function () { (window as any).__sourceBrowserPlays++; return play.call(this); };
       });
+      await expect(page.locator('.toast')).toHaveCount(0, { timeout: 15_000 });
       for (const theme of ['light', 'dark']) {
         await page.evaluate(({ theme, id }) => {
           const PM = (window as any).PM; PM.theme.apply(theme);
@@ -202,6 +240,19 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         await page.locator('#source-preview').screenshot({ path: path.join(directory, `source-${theme}.png`), animations: 'disabled' });
         await page.keyboard.press('Escape');
         await page.locator('.asset-list').screenshot({ path: path.join(directory, `assets-${theme}.png`), animations: 'disabled' });
+        for (const name of Object.keys(measured)) await page.locator(`.asset-card[data-asset-id="${ids[name]}"] .asset-preview`).screenshot({ path: path.join(directory, `${name}-inline-${theme}.png`), animations: 'disabled' });
+      }
+      if (enabled && evidence) {
+        const captures = [];
+        for (const theme of ['light', 'dark']) for (const surface of ['source', ...Object.keys(measured).map(name => `${name}-inline`)]) {
+          const file = `${surface}-${theme}.png`;
+          captures.push({ file, ...await capturedPixelDelta(path.join(evidence, 'legacy', file), path.join(directory, file)) });
+        }
+        await writeFile(path.join(evidence, 'theme-capture-comparison.json'), JSON.stringify(captures, null, 2));
+        for (const result of captures) {
+          expect.soft(result.sameSize, JSON.stringify(result)).toBe(true);
+          expect.soft(result.max, JSON.stringify(result)).toBe(0);
+        }
       }
       const monitor = await page.evaluate(async ({ enabled, id }) => {
         const PM = (window as any).PM; PM.Kernel.services.get('viewer').preview.show(id);
@@ -321,6 +372,7 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
       if (enabled) expect(code.videoDraws).toBe(0);
       expect(session.diagnostics.pageErrors).toEqual([]);
       if (enabled) {
+        for (const result of inline) expect.soft(result.max, `inline ${result.name}: ${JSON.stringify(result)}; ${directory}`).toBe(0);
         for (const frame of monitor.pixels) expect(frame.max, `source monitor at ${frame.time}: ${JSON.stringify({ max: frame.max, changed: frame.changed })}; ${directory}`).toBe(0);
         for (const [name, result] of Object.entries<any>(measured)) {
           for (const fit of result.fits ?? []) expect.soft(fit.max, `${name} ${fit.fit}: ${JSON.stringify({ max: fit.max, changed: fit.changed })}; ${directory}`).toBe(0);

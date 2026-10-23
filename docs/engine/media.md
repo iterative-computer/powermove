@@ -78,6 +78,9 @@ pairs alternating app sessions with native `pm-perfbench` counters on one
 examples before running these specs under `pm-electron-lock`; no build runs
 inside the lock. Targeted Rust and unit passes do not certify app parity,
 relative performance or direct device/DAC output.
+Exact source-viewer transport-shadow screenshot parity and filmstrip/scrub
+latency at or below the current app remain cutover blockers; passing source
+frame pixels and decoded/mixed PCM does not waive either gate.
 
 Production media I/O for plan section 13, built from the S6 spike
 (`docs/engine/spikes/S6.md`, `engine/spikes/s6-decode`). Crates:
