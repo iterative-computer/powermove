@@ -1380,7 +1380,7 @@ scheduled presentation, ms. Raw JSON is outside the repository
   The distinct-trim row also carries round 8's DECISION item (sixteen independent
   canonical pre-rolls under the workers' Mach duty cycle). None of these misses is an
   audible difference; they are start latency.
-- Device note: Jude switched the default output to AirPods Pro (160 ms latency) and back
+- Device note: the default output was switched to AirPods Pro (160 ms latency) and back
   during smoke runs before the campaign; every campaign row ran on the speakers.
 
 ### Playback suite on `c035ad187` (43 tests, `--test-threads=1`)
