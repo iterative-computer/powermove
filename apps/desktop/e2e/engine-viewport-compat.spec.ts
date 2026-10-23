@@ -31,13 +31,28 @@ for (const [version, store] of [[1, false], [2, false], [3, false], [3, true]] a
     await session.page.waitForFunction(() => !!(window as any).PM.EngineRender);
     const results = [];
     for (const probe of probes) {
-      await session.page.evaluate(() => {
+      await session.page.evaluate((member) => {
         const PM = (window as any).PM, api = PM.Kernel.api('corpus');
         PM.replaceProject(PM.mkProject({ name: 'Viewport corpus', w: 480, h: 270, fps: 30, dur: 3 }));
         api.scene3d.edit({ operation: 'add_object', object: { id: 'probe-cube', source: { primitive: 'box' } } });
         api.scene3d.edit({ operation: 'add_light', light: { id: 'probe-light', type: 'point', p: { x: -2, y: 3, z: 2 } } });
+        if (member === 'glyphsIn') {
+          api.project.apply({ type: 'set_layer', target: 'probe-light', patch: { duration: .5 } });
+          api.transport.setTime(0);
+          api.scene3d.select(null, ['probe-cube']);
+        }
         api.scene3d.setView('editor');
-      });
+      }, probe.member);
+      if (probe.member === 'glyphsIn') {
+        // Exercise picking with usable native chrome already present, then
+        // seek and query in one task before a replacement frame can arrive.
+        await session.page.waitForFunction(() => {
+          const PM = (window as any).PM;
+          const presentation = PM.Kernel.services.get('viewer')?.enginePresentation;
+          const frame = presentation?.latest;
+          return frame?.pts === 0 && frame?.viewSeq === presentation.state?.viewSeq && frame?.revision >= PM.EngineDoc.barrier.revision && frame?.depthId?.glyphs?.some((g: any) => g.id === 'probe-light');
+        }, undefined, { timeout: 20_000 });
+      }
       const result = await session.page.evaluate(async ({ id, member }) => {
         const PM = (window as any).PM, api = PM.Kernel.api('corpus');
         const result = await api.commands.run(`${id}.run`, member);

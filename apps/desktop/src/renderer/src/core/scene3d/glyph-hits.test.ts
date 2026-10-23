@@ -14,7 +14,7 @@ function scene() {
   let x = 1;
   const native = {
     active: vi.fn((layer: any) => layer.id !== 'other'),
-    world3D: vi.fn(() => new THREE.Matrix4().makeTranslation(x, 2, 0).elements)
+    world3D: vi.fn((_layer: any, _time: number) => new THREE.Matrix4().makeTranslation(x, 2, 0).elements)
   };
   const reference = vi.fn(() => { throw new Error('reference geometry must not run'); });
   const PM = { proj: { layers: [light, other, view, object] }, time: 0.25,
@@ -41,6 +41,17 @@ describe('synchronous viewport glyph hit geometry', () => {
       .toEqual([{ id: 'camera', x: 288, y: 81 }]);
     expect(viewportGlyphHits(PM, camera, rect, 'camera', new Set(['camera'])))
       .toEqual([]);
+  });
+
+  it('evaluates the requested playhead time even while the same revision has an older presented frame', () => {
+    const { PM, camera, native } = scene();
+    native.world3D.mockImplementation((_layer: any, time: number) => new THREE.Matrix4().makeTranslation(time * 4, 2, 0).elements);
+    (PM as any).Kernel = { services: { get: () => ({ enginePresentation: { latest: { pts: 176_400_000, revision: 1 } } }) } };
+    const hits = () => viewportGlyphHits(PM, camera, rect, 'camera', null);
+    expect(hits()).toEqual([{ id: 'light', x: 288, y: 81 }]);
+    PM.time = 0.75;
+    expect(hits()).toEqual([{ id: 'light', x: 384, y: 81 }]);
+    expect(native.world3D).toHaveBeenLastCalledWith(PM.proj.layers[0], 0.75);
   });
 
   it('fails visibly when the native geometry API is unavailable instead of using the reference', () => {

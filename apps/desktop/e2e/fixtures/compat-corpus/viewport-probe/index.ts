@@ -66,7 +66,18 @@ export default function activate(api: PowermoveAPI): void {
         case 'modalActive': assert(!c.modalActive(), 'idle'); c.startTransform('rotate'); assert(c.modalActive(), 'modal'); c.cancel(); assert(!c.modalActive(), 'idle again'); break;
         case 'pointer': assert(JSON.stringify(c.pointer()) === JSON.stringify({ clientX: -9760, clientY: -9865 }), c.pointer()); stage.dispatchEvent(new PointerEvent('pointerleave')); assert(c.pointer() === null, 'outside stage'); break;
         case 'covers': assert(c.covers(['probe-cube', 'probe-light']) && !c.covers([]) && !c.covers(['missing']), 'covers only real 3D items'); break;
-        case 'glyphsIn': { c.hover(-20000, -20000); const ids = c.glyphsIn({ x0: -100000, y0: -100000, x1: 100000, y1: 100000 }); assert(ids.includes('probe-light') && !ids.includes('probe-cube') && c.glyphsIn({ x0: -100, y0: -100, x1: -90, y1: -90 }).length === 0, ids); break; }
+        case 'glyphsIn': {
+          c.hover(-20000, -20000);
+          const box = { x0: -100000, y0: -100000, x1: 100000, y1: 100000 };
+          const ids = c.glyphsIn(box);
+          assert(ids.includes('probe-light') && !ids.includes('probe-cube') && c.glyphsIn({ x0: -100, y0: -100, x1: -90, y1: -90 }).length === 0, ids);
+          api.transport.setTime(1);
+          const afterSeek = c.glyphsIn(box);
+          assert(!afterSeek.includes('probe-light'), { afterSeek, time: api.transport.time() });
+          api.transport.setTime(0);
+          assert(c.glyphsIn(box).includes('probe-light'), 'the light is pickable again at its active time');
+          break;
+        }
         case 'active': assert(!c.active(), 'idle'); c.startTransform('scale'); assert(c.active(), 'transform active'); c.cancel(); assert(!c.active(), 'idle after cancel'); break;
         case 'cancel': { const before = JSON.stringify(api.model.layer('probe-cube')); c.startTransform('translate'); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'x' })); window.dispatchEvent(new KeyboardEvent('keydown', { key: '2' })); c.cancel(); assert(!c.active() && JSON.stringify(api.model.layer('probe-cube')) === before, 'cancel restores transform'); break; }
         case 'dispose': c.startTransform('translate'); c.dispose(); c.dispose(); assert(!c.active() && !c.modalActive() && stage.querySelectorAll('canvas').length === 0 && !v.inContext(), 'idempotent disposal removes overlays and controller'); break;
