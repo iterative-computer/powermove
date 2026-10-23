@@ -41,7 +41,16 @@ The headless native host (`src/server/native/host.ts`) renders on the job
 engine as its main work, so it keeps the job engine resident (`eagerJobs`).
 Harnesses that measure agent snapshots during playback start their run the
 way an agent does (`AgentJobs.prepareRun`) rather than waiting for a job
-utility that no longer starts with the app.
+utility that no longer starts with the app. The harness also renders those
+frames for the measured window: its synthetic owner `-2` was not a valid
+font-service window id, so every batch failed to take font cache seeds. A
+functional rerun in round 4 rendered every batch with no failures. The display
+was asleep and the session locked, so its frame timings do not count as gate
+measurements. Two alternating pairs with eager versus on-demand job utility,
+at load average 19–34, gave 4-frame busy batch medians of 30.8/59.1 ms
+(on-demand) and 31.3/41.4 ms (eager). Every-2-s turn medians were
+221.4/264.8 ms (on-demand) and 246.6/397.4 ms (eager). Those spreads are
+dominated by machine load, and the run shows no consistent lifecycle cost.
 
 Agent frames retain their separate job host, frozen document revisions,
 JPEG behavior and job-slicer playback progress. They do not borrow the
