@@ -28,7 +28,7 @@ const fallbackBundle = readFileSync(bundlePath, 'utf8');
 const gradient = { type: 'linear', angle: 27, stops: [
   { id: 'a', color: '#101420', position: 0 }, { id: 'b', color: '#484262', position: 100 },
 ] };
-const projects = (process.argv.includes('--fallback-only') ? [] : ['gradient', 'blend-stack', 'masked-matte', 'blur', 'glow', 'vector', 'text']).map(kind => {
+const projects = (process.argv.includes('--fallback-only') ? [] : process.argv.includes('--text-only') ? ['text'] : ['gradient', 'blend-stack', 'masked-matte', 'blur', 'glow', 'vector', 'text']).map(kind => {
   const b = newProject(`depth/${kind}`, { name: `Color depth ${kind}`, w: 320, h: 180, dur: 2, backgroundFill: gradient });
   if (kind !== 'gradient') {
     const l = b.add(b.layer(kind === 'vector' ? 'shape' : kind === 'text' ? 'text' : 'solid', {
@@ -77,7 +77,7 @@ try {
   writeFileSync(path.join(out, 'fallback.json'), JSON.stringify(fallback, null, 2));
   console.log(`Fallback exact codes: ${fallback.compared}, differences: ${fallback.differing}`);
   for (const { kind, doc } of projects) for (const depth of [8, 16, 32]) {
-    const sample = await app.evaluate(async ({ doc, depth }) => {
+    const sample = await app.evaluate(async ({ doc, depth, kind }) => {
       const PM = (window as any).PM;
       PM.replaceProject({ ...doc, colorDepth: depth }); PM.pause();
       await PM.projectAssetsReady; await PM.prepareFrame(.5);
@@ -96,14 +96,33 @@ try {
         const from = (179 - y) * 320 * 4 + x;
         pixels[y * 320 * 4 + x] = raw ? raw[from]! : bytes![from]! / 255;
       }
-      return { doc: JSON.parse(JSON.stringify(PM.proj)), pixels: Array.from(pixels), dither: gl.isEnabled(gl.DITHER), supported: PM.GL.supportedColorDepths };
-    }, { doc, depth });
+      let source: { width: number; height: number; pixels: number[]; layer: string } | undefined;
+      if (kind === 'text') {
+        const layer = PM.proj.layers.find((l: any) => l.type === 'text');
+        const raster = PM.raster(layer, 1, .5);
+        const uploaded = PM.GL.texes.get('r:' + raster.key);
+        if (!uploaded || !raster.cv) throw new Error('Missing uploaded text source');
+        const fb = gl.createFramebuffer(), previous = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+        try {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+          gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, uploaded.tex, 0);
+          if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) throw new Error('Incomplete text source framebuffer');
+          const data = new Uint8Array(raster.cv.width * raster.cv.height * 4);
+          gl.readPixels(0, 0, raster.cv.width, raster.cv.height, gl.RGBA, gl.UNSIGNED_BYTE, data);
+          // Canvas uploads are top-down; attachment reads preserve that row order.
+          source = { width: raster.cv.width, height: raster.cv.height, pixels: Array.from(data), layer: layer.id };
+        } finally { gl.bindFramebuffer(gl.FRAMEBUFFER, previous); gl.deleteFramebuffer(fb); }
+      }
+      return { doc: JSON.parse(JSON.stringify(PM.proj)), pixels: Array.from(pixels), source, dither: gl.isEnabled(gl.DITHER), supported: PM.GL.supportedColorDepths };
+    }, { doc, depth, kind });
     const id = `${kind}-${depth}`;
     const pixels = new Float32Array(sample.pixels);
     writeFileSync(path.join(out, `${id}.json`), JSON.stringify(sample.doc));
     writeFileSync(path.join(out, `${id}.rgba32f`), new Uint8Array(pixels.buffer));
     writeFileSync(path.join(out, `${id}.png`), encodePng({ width: 320, height: 180, channels: 4, data: new Uint8Array(sample.pixels.map((v: number) => Math.round(Math.min(1, Math.max(0, v)) * 255))) }));
-    samples.push({ id, depth, width: 320, height: 180, time: .5, dither: sample.dither, supported: sample.supported });
+    if (sample.source) writeFileSync(path.join(out, `${id}.source.rgba`), new Uint8Array(sample.source.pixels));
+    const source = sample.source ? { width: sample.source.width, height: sample.source.height, layer: sample.source.layer, scale: 1 } : undefined;
+    samples.push({ id, depth, width: 320, height: 180, time: .5, source, dither: sample.dither, supported: sample.supported });
     console.log(`Captured ${id}`);
   }
   if (samples.length) writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({ samples }, null, 2));

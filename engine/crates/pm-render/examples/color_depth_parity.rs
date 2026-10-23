@@ -80,6 +80,60 @@ fn main() {
         // Pixel-exact is the DEPTH-1 bar, with no corpus exceptions.
         let pass = different == 0;
         failures += usize::from(!pass);
+        let mut source_result = serde_json::Value::Null;
+        if let Some(source) = s.get("source") {
+            let source_w = source["width"].as_u64().unwrap() as usize;
+            let source_h = source["height"].as_u64().unwrap() as usize;
+            let raster = r
+                .text_raster(
+                    &doc,
+                    &comp,
+                    source["layer"].as_str().unwrap(),
+                    s["time"].as_f64().unwrap(),
+                    source["scale"].as_f64().unwrap(),
+                    Precision::Float32,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(raster.canvas, (source_w as u32, source_h as u32));
+            let mut native_source = vec![0; source_w * source_h * 4];
+            let [x0, y0, x1, y1] = raster.plan.crop.map(|v| v as usize);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    for c in 0..4 {
+                        native_source[(y * source_w + x) * 4 + c] =
+                            to_byte(raster.pixels[((y - y0) * (x1 - x0) + x - x0) * 4 + c]);
+                    }
+                }
+            }
+            let reference_source = std::fs::read(dir.join(format!("{id}.source.rgba"))).unwrap();
+            assert_eq!(native_source.len(), reference_source.len());
+            let source_different = native_source
+                .chunks_exact(4)
+                .zip(reference_source.chunks_exact(4))
+                .filter(|(a, b)| a != b)
+                .count();
+            let source_max = native_source
+                .iter()
+                .zip(&reference_source)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            support::write_png(
+                &dir.join(format!("{id}.source.native.png")),
+                source_w as u32,
+                source_h as u32,
+                &native_source,
+            );
+            support::write_png(
+                &dir.join(format!("{id}.source.reference.png")),
+                source_w as u32,
+                source_h as u32,
+                &reference_source,
+            );
+            println!("{id} source: different={source_different}, max={source_max} CV");
+            source_result = json!({"differentPixels":source_different,"maxCv":source_max});
+        }
         support::write_png(&dir.join(format!("{id}.native.png")), w, h, &native);
         let mut diff: Vec<u8> = native
             .iter()
@@ -114,7 +168,7 @@ fn main() {
             timings[6],
             r.target_pool_bytes()
         );
-        results.push(json!({"id":id,"depth":s["depth"],"pass":pass,"differentPixels":different,"maxCv":max_cv,"p50Ms":timings[6],"targetPoolBytes":r.target_pool_bytes(),"outputBytes":frame.color.bytes()}));
+        results.push(json!({"id":id,"depth":s["depth"],"pass":pass,"differentPixels":different,"maxCv":max_cv,"source":source_result,"p50Ms":timings[6],"targetPoolBytes":r.target_pool_bytes(),"outputBytes":frame.color.bytes()}));
     }
     std::fs::write(
         dir.join("parity.json"),

@@ -70,11 +70,18 @@ fails if even one output byte differs. It has no residual allowlist.
 
 The initial slice has seven synthetic projects at all three depths: gradient,
 blend stack, feathered mask plus matte, blur, glow, vector and rotated text.
-Eighteen of 21 output images match byte for byte. The rotated text still fails:
-293 pixels at depth 8 (maximum 1 CV), 294 at depth 16 (maximum 0.748 CV), and
-303 at depth 32 (maximum 0.729 CV). Merging the latest native text implementation
-did not clear these three cases. They remain a DEPTH-1 blocker, not an accepted
-difference or a relaxed test.
+All 21 output images now match byte for byte. The first run's rotated text
+differed at 293 / 294 / 303 pixels at depths 8 / 16 / 32. The text lane through
+`ec1a0c5fd` (including `7ca866a3c`) was already merged; fetching and merging
+the remote text branch reported it up to date. Its Canvas raster is exact at
+all depths. The difference came from replacing the full Canvas quad with an
+ink-cropped quad: f32 vertex and UV interpolation produced different bilinear
+weights after rotation. Level 1 now keeps the original Canvas backing size
+and quad, matching today's app. This removes every differing output byte
+without changing glyph pixels, tolerances or intermediate quantization.
+Level 2 retains its ink crop. The capture's `--text-only` mode also records
+the actual uploaded Canvas texture, and the native example compares it
+separately from composition sampling.
 
 The real WebGL fallback runner preserves 24,576 checked codes exactly across
 synchronous/asynchronous readback, three passes, and depth switches. Targeted
@@ -90,4 +97,4 @@ same 1:2:4 ratio. Concurrent debug-build microbenchmarks are diagnostic only:
 vector and text in this run. No general throughput win is claimed. The
 `pm-perfbench` counters are not yet on the merged integration base; a quiet
 paired performance gate remains required, together with broader video/3D,
-export-format and native-app qualification after the text blocker is fixed.
+export-format and native-app qualification.
