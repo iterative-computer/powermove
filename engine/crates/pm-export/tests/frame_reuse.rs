@@ -8,7 +8,6 @@
 
 mod support;
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -222,7 +221,12 @@ fn whole_gpu_targets_return_only_after_sink_reads_and_are_reused() {
     )
     .unwrap();
     assert_eq!(captured.pixels.len(), frames as usize);
-    let distinct: HashSet<_> = captured.textures.iter().cloned().collect();
+    let mut distinct = Vec::new();
+    for texture in &captured.textures {
+        if !distinct.contains(texture) {
+            distinct.push(texture.clone());
+        }
+    }
     assert!(
         distinct.len() <= 3,
         "{} whole-frame targets allocated",
