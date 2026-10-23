@@ -136,7 +136,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // returns their pool slots. An import can arrive after its descriptor.
   const pendingCompatFrames = new Map<string, FrameDescriptor>();
   const captureCompatFrame = (desc: FrameDescriptor): boolean => {
-    if (!PM.CompatContext?.active) return true;
+    if (!PM.CompatContext?.capturesFrames) return true;
     const frame = source.videoFrame(desc.poolGeneration, desc.poolIndex);
     if (!frame) return false;
     try { PM.CompatContext.captureFrame(desc, frame); } finally { frame.close(); }

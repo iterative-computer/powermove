@@ -147,6 +147,24 @@ describe('render.gl.context, the compatibility context', () => {
     r.host.dispose();
   });
 
+  it('preserves the current engine frame during compatibility WebGL loss for paused recovery', () => {
+    const r = rig(); r.env.bound.mockReturnValue(r.bound); r.host.context();
+    const lost = r.made[0].addEventListener.mock.calls.find(([name]: [string]) => name === 'webglcontextlost')[1];
+    lost({ preventDefault() {} });
+    expect(r.host.active).toBe(false);
+    expect(r.host.capturesFrames).toBe(true);
+    const tag = { seq: 2, revision: 8, viewSeq: 3 };
+    r.host.captureFrame(tag, { displayWidth: 400, displayHeight: 200 } as VideoFrame);
+    const saved = r.made.at(-1);
+    r.host.selectFrame(tag); r.host.presented();
+    r.drawn.length = 0;
+    r.host.context();
+    expect(r.host.stats).toMatchObject({ made: 2, recreated: 'lost', selectedAtRecreate: true });
+    expect(r.drawn).toContainEqual(['drawImage', saved, 0, 0, 400, 200, 0, 0, 200, 100]);
+    r.host.dispose();
+    expect(r.host.capturesFrames).toBe(false);
+  });
+
   it('is null until a viewer binds a canvas, then one context on an offscreen canvas with today\'s attributes', () => {
     const r = rig();
     expect(r.host.context()).toBeNull();
