@@ -70,8 +70,8 @@ closes. Each stacked sheet has a separate id. Export and queue preflight
 retain their own holds while media bindings and definitions settle, covering
 the handoff after the settings sheet closes. Offline prompts and save panels
 acquire independent holds through job acceptance, cancellation or error,
-including callers that skip the settings sheet. Main releases all of a page’s holds on navigation, renderer
-loss, window closure and host disposal. Once the last hold closes, the normal
+including callers that skip the settings sheet. Main releases all of a
+page’s holds on navigation, renderer loss, window closure and host disposal. Once the last hold closes, the normal
 quiet countdown resumes; accepted jobs remain protected by their sessions.
 Background queue resumption after relaunch may still pay a cold start, as
 accepted by the owner. These lifecycle changes were functionally tested after
@@ -376,10 +376,9 @@ The standard Node typecheck still reports two existing TS6307 inclusion
 errors in the canonical JSON test/compositions/registry imports; no changed
 file reports a type error. A hidden Electron regression spec now exercises
 sheet, slow-preflight and save-panel holds past a diagnostic one-second idle
-deadline, then checks retirement after dismissal. That follow-up spec and
-the export rerun were queued but not executed because another lane acquired
-a long exclusive reservation; the queue was cancelled without launching an
-app. The existing round-3 export result above remains historical evidence.
+deadline, then checks retirement after dismissal. That spec and the export
+rerun were not executed in this follow-up; no new Electron result is claimed.
+The existing round-3 export result above remains historical evidence.
 
 ## Reproduction and next work
 
@@ -399,6 +398,5 @@ list as MEM-1. Future attribution work needs symbolized PartitionAlloc
 call-site attribution, coordinated font registry generation release, and
 page/compositor allocation attribution with matching engine-off trace
 controls. Actual Metal heap residency remains unavailable through these
-public counters. Document and frame-cache cuts
-belong with their owning lanes. Existing shaders, formats, compatibility
+public counters. Document and frame-cache cuts belong with their owning lanes. Existing shaders, formats, compatibility
 contracts, crash isolation and initial viewer latency remain requirements.
