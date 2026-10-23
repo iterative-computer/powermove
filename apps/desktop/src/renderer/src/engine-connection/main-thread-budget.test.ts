@@ -68,7 +68,7 @@ async function playback(layers: number, frames: number): Promise<Record<string, 
   const transport = new EngineRenderTransport({
     native: {}, session: () => session, revision: () => 3, composition: () => 'root', document: () => 'doc', viewSeq: () => 1, fallbackRunner: () => null, log: () => {},
     playing: () => true, frameTicks: () => FRAME, playhead: () => ({ time: state.time, rate: 1 }),
-    nextFrame: (fn) => rafs.push(fn), counters
+    nextFrame: (fn: () => void) => rafs.push(fn), counters
   } as never);
   // A wrapper that passes every layer through (today's documented pattern).
   transport.answerCompat('rasterOverride', () => ({ kind: 'native' }));
