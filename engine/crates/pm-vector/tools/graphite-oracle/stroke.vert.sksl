@@ -1,0 +1,17 @@
+// m152 TessellateStrokesRenderStep, explicit curve type as on Dawn.
+layout(set=0,binding=0) uniform Params { float4 u[12]; };
+layout(location=0) in float4 p01;
+layout(location=1) in float4 p23;
+layout(location=2) in float2 prevPoint;
+layout(location=3) in float2 stroke;
+layout(location=4) in float depth;
+layout(location=5) in uint ssboIndex;
+layout(location=6) in float curveType;
+void main() {
+    float edgeID=float(sk_VertexID >> 1);
+    if ((sk_VertexID & 1) != 0) { edgeID=-edgeID; }
+    float4 coords=tessellate_stroked_curve(edgeID,16383,float2x2(u[1].xy,u[1].zw),
+        u[2].xy,u[2].z,p01,p23,prevPoint,stroke,curveType);
+    float4 devPosition=float4(coords.xy,depth,1);
+    sk_Position=float4(u[0].zw*devPosition.xy-sign(u[0].zw)*devPosition.ww,devPosition.zw);
+}

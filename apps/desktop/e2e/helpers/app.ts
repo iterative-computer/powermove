@@ -70,6 +70,8 @@ export type LaunchedApp = {
    * folds it away, so call again to read the conversation after a send. */
   openAgent(): Promise<void>;
   close(): Promise<void>;
+  /** Wall time of the last close: app shutdown, then profile cleanup. */
+  readonly teardown: { appCloseMs: number; cleanupMs: number } | null;
 };
 
 /** The Playwright session builds exactly once in global setup. Direct helper users
@@ -188,6 +190,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     page: active.page,
     userData,
     diagnostics,
+    teardown: null,
     async relaunch() {
       await active.app.close();
       active = await startElectron(userData, env, diagnostics, options.normalWindow, switches);
@@ -225,8 +228,14 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       // A failed close-decision assertion must not leave its Cancel mock
       // preventing cleanup of this disposable test process.
       await active.app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
+      const started = performance.now();
       await active.app.close().catch(() => undefined);
+      const closedAt = performance.now();
       if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      (session as { teardown: LaunchedApp['teardown'] }).teardown = {
+        appCloseMs: Math.round(closedAt - started),
+        cleanupMs: Math.round(performance.now() - closedAt)
+      };
     }
   };
   return session;
@@ -248,15 +257,22 @@ async function attachDiagnostics(testInfo: TestInfo, diagnostics: RendererDiagno
 
 export const test = base.extend<{ session: LaunchedApp; desktopLaunchOptions: LaunchOptions }>({
   desktopLaunchOptions: [{}, { option: true }],
-  session: async ({ desktopLaunchOptions }, use, testInfo) => {
+  // Native process shutdown and disposable-profile cleanup have their own
+  // lifecycle budget; they must not consume a text interaction's deadline.
+  session: [async ({ desktopLaunchOptions }, use, testInfo) => {
     const session = await launchApp(desktopLaunchOptions);
     try {
       await use(session);
     } finally {
       await session.close();
       await attachDiagnostics(testInfo, session.diagnostics);
+      // Recorded so a slow native shutdown is visible, not only a timeout.
+      await testInfo.attach('session-teardown', {
+        body: Buffer.from(JSON.stringify(session.teardown)),
+        contentType: 'application/json'
+      });
     }
-  }
+  }, { timeout: 60_000 }]
 });
 
 export { expect };

@@ -163,25 +163,20 @@ fn the_real_fixture_loads_within_the_approved_ceilings() {
 
 #[test]
 fn raising_any_budget_fails_without_a_change_to_the_approved_table() {
-    let n = real()["cases"].as_array().unwrap().len();
-    for i in 0..n {
-        for field in ["pixelsOverBound", "maxCv"] {
-            let mut f = real();
-            let v = f["cases"][i][field].as_u64().unwrap();
-            f["cases"][i][field] = json!(v + 1);
-            assert!(
-                Ratchet::from_json(&f.to_string()).is_err(),
-                "{} {field} raised",
-                f["cases"][i]["id"]
-            );
-        }
+    // Keep exercising the ceiling validator after the real table reaches
+    // zero entries; iterating that table would make this check vacuous.
+    for field in ["pixelsOverBound", "maxCv"] {
+        let mut f = fixture();
+        let v = f["cases"][0][field].as_u64().unwrap();
+        f["cases"][0][field] = json!(v + 1);
+        assert!(load(&f).is_err(), "{field} raised");
     }
 }
 
 #[test]
 fn adding_a_case_fails_without_a_change_to_the_approved_table() {
     let mut f = real();
-    let mut extra = f["cases"][0].clone();
+    let mut extra = fixture()["cases"][0].clone();
     extra["id"] = json!("caption-paper-0463");
     extra["sideBySide"] = json!("caption-paper-0463.png");
     f["cases"].as_array_mut().unwrap().push(extra);
@@ -189,51 +184,55 @@ fn adding_a_case_fails_without_a_change_to_the_approved_table() {
 }
 
 #[test]
-fn an_approved_budget_cannot_be_moved_to_another_measurement() {
-    let corpus = real()["cases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .position(|c| c["gate"] == "corpus")
-        .unwrap();
-    let isolated = real()["cases"][corpus]["corpus"]["isolated"]
-        .as_bool()
-        .unwrap();
-    for (field, value) in [
-        ("time", json!(20)),
-        ("isolated", json!(!isolated)),
-        ("project", json!("real/other")),
-    ] {
-        let mut f = real();
-        f["cases"][corpus]["corpus"][field] = value;
-        assert!(Ratchet::from_json(&f.to_string()).is_err(), "{field}");
+fn all_original_corpus_residuals_are_retired_and_cannot_move() {
+    assert!(real()["cases"].as_array().unwrap().is_empty());
+    assert!(APPROVED.is_empty());
+    for isolated in [false, true] {
+        for time in [16, 18] {
+            for project in ["real/powermove-ad", "real/other"] {
+                let mut f = real();
+                f["cases"].as_array_mut().unwrap().push(json!({
+                    "gate":"corpus", "id":format!("real_powermove-ad-{isolated}-{time}"),
+                    "pixelsOverBound":1, "maxCv":3,
+                    "cause":"Retired cases keep the strict bound.", "sideBySide":"retired.png",
+                    "corpus":{"project":project,"isolated":isolated,"time":time}
+                }));
+                assert!(Ratchet::from_json(&f.to_string()).is_err());
+                assert!(
+                    Ratchet::load()
+                        .check(Key::corpus(project, isolated, time as f64), 1, 3)
+                        .is_err()
+                );
+            }
+        }
     }
-    let mut f = real();
-    f["cases"][0]["gate"] = json!("corpus");
-    f["cases"][0]["corpus"] =
-        json!({"project": "real/powermove-ad", "isolated": false, "time": 16});
-    assert!(Ratchet::from_json(&f.to_string()).is_err());
 }
 
 #[test]
 fn lowering_or_removing_budgets_stays_possible_by_editing_the_fixture() {
-    let n = real()["cases"].as_array().unwrap().len();
-    for i in 0..n {
-        let mut f = real();
-        let pixels = f["cases"][i]["pixelsOverBound"].as_u64().unwrap();
-        if pixels > 1 {
-            f["cases"][i]["pixelsOverBound"] = json!(pixels - 1);
-            assert!(Ratchet::from_json(&f.to_string()).is_ok());
-        }
-        let mut f = real();
-        f["cases"].as_array_mut().unwrap().remove(i);
-        assert!(Ratchet::from_json(&f.to_string()).is_ok());
+    for field in ["pixelsOverBound", "maxCv"] {
+        let mut f = fixture();
+        let v = f["cases"][0][field].as_u64().unwrap();
+        f["cases"][0][field] = json!(v - 1);
+        assert!(load(&f).is_ok());
     }
+    let mut f = fixture();
+    f["cases"] = json!([]);
+    assert!(load(&f).is_ok());
 }
 
 #[test]
 fn retired_exact_cases_cannot_be_revived_by_editing_the_fixture() {
     for id in [
+        "caption-paper-0460",
+        "caption-paper-0461",
+        "caption-paper-0462",
+        "sdf-sizes-0004",
+        "path-stroke-0000",
+        "path-stroke-0001",
+        "real-16-Lkkauewe",
+        "real-18-Lkkauewe",
+        "real-24-L3app4ie",
         "colr-0033",
         "colr-0034",
         "caption-pop-0455",
@@ -255,5 +254,8 @@ fn retired_exact_cases_cannot_be_revived_by_editing_the_fixture() {
             Ratchet::from_json(&f.to_string()).is_err(),
             "retired case {id} revived"
         );
+        let mut r = Ratchet::load();
+        assert_eq!(r.check(Key::raster(id), 0, 1), Ok(Outcome::Strict));
+        assert!(r.check(Key::raster(id), 1, 2).is_err());
     }
 }

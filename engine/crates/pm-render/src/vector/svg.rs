@@ -209,12 +209,25 @@ pub fn plan_svg(
 mod tests {
     use super::*;
 
-    fn write(name: &str, svg: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pm-render-svg-{}", std::process::id()));
+    struct TestSvg(PathBuf);
+
+    impl std::ops::Deref for TestSvg {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TestSvg {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(self.0.parent().unwrap()).unwrap();
+        }
+    }
+    fn write(name: &str, svg: &str) -> TestSvg {
+        let dir = std::env::temp_dir().join(format!("pm-render-svg-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join(name);
         std::fs::write(&p, svg).unwrap();
-        p
+        TestSvg(p)
     }
 
     const SOLID: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect x="10" y="10" width="80" height="30" fill="#4C8DFF"/></svg>"##;
