@@ -100,6 +100,21 @@ const unsaved = new Set<string>();
    save error stays reported. It ends when a flush finds the journal no
    longer failing (storage:saved), not when a checkpoint is merely posted. */
 const journalFull = new Set<string>();
+/* A closed journal reopens only when a slot posted after the last refused
+   edit has landed. Waiting for autosave (its debounce grows to a large
+   project's last write time, up to 60 s) kept "not saved" up for minutes; the
+   project is checkpointed shortly after the last refused edit instead. */
+const CLOSED_CHECKPOINT_MS = 250;
+const closedCheckpoints = new Map<string, ReturnType<typeof setTimeout>>();
+function checkpointSoon(id: string) {
+  const pending = closedCheckpoints.get(id);
+  if (pending !== undefined) clearTimeout(pending);
+  closedCheckpoints.set(id, setTimeout(() => {
+    closedCheckpoints.delete(id);
+    if (PM.proj?.id !== id || !journalFull.has(id)) return;
+    try { R.put(PM.proj); } catch (error) { console.warn('Project checkpoint failed', error); }
+  }, CLOSED_CHECKPOINT_MS));
+}
 PM.bus?.on?.('storage:saved', (key: any) => {
   if (typeof key === 'string' && key.startsWith(R.JOURNAL)) journalFull.delete(key.slice(R.JOURNAL.length));
 });
@@ -265,30 +280,57 @@ R.upsertMeta = (meta: any) => {
     into a different project's storage slot. Blank names keep the old name. */
 R.rename = (id: any, name: any) => {
   if (!id) return null;
-  const raw = R.get(id);
   const active = PM.proj && PM.proj.id === id ? PM.proj : null;
+  // A background tab of this window: its live document, not the stored copy.
+  const parked = active ? null : PM.liveProject?.(id) ?? null;
+  const live = active || parked;
   const meta = R.list().find((x: any) => x.id === id);
-  const previous = (active && active.name) || (raw && raw.name) || (meta && meta.name) || 'Untitled';
-  const next = String(name == null ? '' : name).trim() || previous;
-  if (active || raw) {
-    // Persist the live document when active; the stored snapshot may predate
-    // recent edits. Do not mutate the live name until the write succeeds.
-    R.put({ ...(active || raw), name: next });
-  } else if (meta) {
-    R.upsertMeta({ ...meta, name: next, at: Date.now() });
-  } else return null;
-  /* Inactive projects do not emit the active-document autosave events. Mark
-     their file association dirty here so the Projects screen and close guard
-     never imply that a rename already reached the external .pmv file. */
-  if (!active && next !== previous) {
-    const file = PM.projectFileState?.(id);
-    if (file) file.dirty = true;
+  /* SAVE-1c: a project is written only by the window that has it. Without a
+     live copy here, the stored one lacks the newest edits of whichever window
+     has it open (main refuses that write); so that window renames it. Only if
+     none has it is the stored copy renamed here, as before. */
+  if (!live && PM.windows?.supported && typeof PM.windows.renameProject === 'function') {
+    const next = String(name == null ? '' : name).trim() || (meta && meta.name) || 'Untitled';
+    void PM.windows.renameProject(id, next).then((routed: boolean) => {
+      if (!routed) renameStored(id, next);
+      PM.bus?.emit?.('projects:open');
+    });
+    return next;
   }
+  if (!live) return renameStored(id, name);
+  const previous = live.name || (meta && meta.name) || 'Untitled';
+  const next = String(name == null ? '' : name).trim() || previous;
+  // Persist the live document; do not change its name until the write succeeds.
+  R.put({ ...live, name: next });
+  if (parked) { markFileDirty(id, next !== previous); parked.name = next; }
   if (active) writeDocument(PM, [['name']], () => { active.name = next; });
   PM.bus?.emit?.('projects:open');
   if (active) { PM.touch?.(); PM.bus?.emit?.('project'); }
   return next;
 };
+
+/** Renames a project no window holds a live copy of, from its stored copy. */
+function renameStored(id: any, name: any) {
+  const raw = R.get(id);
+  const meta = R.list().find((x: any) => x.id === id);
+  const previous = (raw && raw.name) || (meta && meta.name) || 'Untitled';
+  const next = String(name == null ? '' : name).trim() || previous;
+  if (raw) R.put({ ...raw, name: next });
+  else if (meta) R.upsertMeta({ ...meta, name: next, at: Date.now() });
+  else return null;
+  markFileDirty(id, next !== previous);
+  PM.bus?.emit?.('projects:open');
+  return next;
+}
+
+/* An inactive project emits no active-document autosave events: its file
+   association is marked dirty here, so the Projects screen and close guard
+   never imply that a rename already reached the external .pmv file. */
+function markFileDirty(id: any, changed: boolean) {
+  if (!changed) return;
+  const file = PM.projectFileState?.(id);
+  if (file) file.dirty = true;
+}
 
 R.get = (id: any) => {
   if (!id) return null;
@@ -441,7 +483,7 @@ function append(entry: { projectId: string; revision: number; patches: any[] }) 
      brackets, the entries, and a comma between each two). */
   const measure = () => 2 + state.sizes.reduce((sum, size) => sum + size, 0) + Math.max(0, state.sizes.length - 1);
   if (mainKeepsJournal()) {
-    PM.store.appendJournal(R.JOURNAL + id, item).catch(() => { journalFull.add(id); unsaved.add(id); });
+    PM.store.appendJournal(R.JOURNAL + id, item).catch(() => { journalFull.add(id); unsaved.add(id); checkpointSoon(id); });
     // Refused (main's journal is closed): sent, so main knows, but not kept here.
     if (journalFull.has(id)) return;
     supersede(state.entries, entry.patches, index => { state.sizes[index] = journalBytes(state.entries[index]); });

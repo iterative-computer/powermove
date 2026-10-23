@@ -669,6 +669,21 @@ function registerWindowIpc(): void {
     return { claimed: true, focused: false };
   });
 
+  /* SAVE-1c: a project open in a window is written only by that window. A
+     rename asked for elsewhere (the Projects screen) goes to it; it renames
+     its live document and checkpoints. False: no other window has it, and the
+     asker writes it as before. */
+  ipcMain.handle(IPC.windowRenameProject, (event, payload: unknown): boolean => {
+    if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    const projectId = readProjectId(payload, IPC.windowRenameProject);
+    const name = payload && typeof payload === 'object' ? (payload as { name?: unknown }).name : null;
+    if (!projectId || typeof name !== 'string' || name.length > 1000) return false;
+    const holder = editors.windowForProject(projectId);
+    if (!holder || holder === senderWindow(event) || holder.webContents.isDestroyed()) return false;
+    holder.webContents.send(IPC.windowRenameRequest, { projectId, name });
+    return true;
+  });
+
   // Closing a tab frees its project for any window.
   ipcMain.handle(IPC.windowReleaseProject, (event, payload: unknown): boolean => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -913,6 +928,11 @@ if (!hasSingleInstanceLock) {
     await store.load();
     registerStoreIpc(ipcMain, store, {
       isTrustedSender,
+      // SAVE-1c: the window that has a project is its only writer.
+      ownerOf: (projectId) => {
+        const holder = editors.windowForProject(projectId);
+        return holder && !holder.webContents.isDestroyed() ? holder.webContents.id : null;
+      },
       // One window's write is another window's stale cache. Tell the others
       // which keys moved so their next read goes back to the store.
       broadcastChange: (keys, sender) => {

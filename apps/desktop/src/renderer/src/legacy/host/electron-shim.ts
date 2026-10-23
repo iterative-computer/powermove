@@ -542,7 +542,12 @@ export function install(PM: PMRegistry): void {
       cached.delete(legacyKey(service)); stale.add(service);
       let text: string;
       try { text = JSON.stringify(entry); } catch (error) {
-        saveErrors.set(service, errorText(error, 'Save failed'));
+        /* The edit cannot be journaled: main must still learn of it, or a later
+           entry would be accepted over the gap. A malformed entry is refused
+           there, which closes the journal (SAVE-1b). */
+        void Promise.resolve(bridge.store.appendJournal(service, '{"unserializable"')).catch(() => undefined);
+        persistErrors.add(service);
+        reportStoreError({ key: service, error: errorText(error, 'Save failed') });
         return Promise.reject(error);
       }
       const sent = (async () => { await bridge.store.appendJournal(service, text); })();
@@ -600,6 +605,18 @@ export function install(PM: PMRegistry): void {
     },
     onAdoptTab(cb: (tab: { projectId: string; x: number }) => void) {
       return bridge.windows?.onAdoptTab?.(cb) ?? (() => undefined);
+    },
+    /** SAVE-1c: asks the window that has a project open to rename it; false when none other has it. */
+    async renameProject(projectId: string, name: string): Promise<boolean> {
+      if (!bridge.windows?.renameProject) return false;
+      try { return await bridge.windows.renameProject(projectId, name); }
+      catch (error) {
+        bridge.log('warn', `rename through the owning window failed: ${errorText(error, 'unknown error')}`);
+        return false;
+      }
+    },
+    onRenameRequest(cb: (request: { projectId: string; name: string }) => void) {
+      return bridge.windows?.onRenameRequest?.(cb) ?? (() => undefined);
     },
     async openProject(projectId: string) {
       if (!bridge.windows) return { opened: false, focused: false, error: 'Windows are not available' };

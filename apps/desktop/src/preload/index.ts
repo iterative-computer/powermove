@@ -420,6 +420,13 @@ const bridge: PowermoveBridge = {
     },
     openProject: (projectId) =>
       ipcRenderer.invoke(IPC.windowOpenProject, { projectId }) as Promise<WindowOpenResult>,
+    renameProject: (projectId, name) =>
+      ipcRenderer.invoke(IPC.windowRenameProject, { projectId, name }) as Promise<boolean>,
+    onRenameRequest: (cb) => {
+      const listener = (_event: IpcRendererEvent, request: { projectId: string; name: string }): void => cb(request);
+      ipcRenderer.on(IPC.windowRenameRequest, listener);
+      return () => ipcRenderer.removeListener(IPC.windowRenameRequest, listener);
+    },
     create: () => ipcRenderer.invoke(IPC.windowNew) as Promise<void>,
     close: () => {
       ipcRenderer.send(IPC.windowClose);

@@ -141,6 +141,9 @@ export const IPC = {
   windowPlaceTab: 'window:place-tab',
   windowAdoptTab: 'window:adopt-tab', // main → renderer, a tab dropped on this window's strip
   windowOpenProject: 'window:open-project',
+  /** Renames a project through the window that has it open (SAVE-1c); main → owner: windowRenameRequest. */
+  windowRenameProject: 'window:rename-project',
+  windowRenameRequest: 'window:rename-request', // main → renderer
   windowNew: 'window:new',
   windowClose: 'window:close',
 
@@ -913,6 +916,9 @@ export interface PowermoveBridge {
     placeTab?(projectId: string, point: { x: number; y: number }): Promise<WindowPlaceTabResult>;
     onAdoptTab?(cb: (tab: WindowAdoptTab) => void): () => void;
     openProject(projectId: string): Promise<WindowOpenResult>;
+    /** Asks the window that has a project open to rename it; false when no other window has it. */
+    renameProject?(projectId: string, name: string): Promise<boolean>;
+    onRenameRequest?(cb: (request: { projectId: string; name: string }) => void): () => void;
     create(): Promise<void>;
     close(): void;
   };

@@ -279,3 +279,50 @@ it('keeps appending past the bound while the slot write is failing, and keeps se
   }
   assert.equal(slotWrites, 3, 'checkpointed at the bound again');
 });
+
+it('renames a project another window has through that window, writing nothing here (SAVE-1c)', async () => {
+  const { PM, mem } = projectsModel();
+  mem.set('project.O1', { v: '1.0.0', proj: { id: 'O1', name: 'Theirs', layers: [] } });
+  PM.Projects.saveList([{ id: 'O1', name: 'Theirs', at: 1 }]);
+  const writes = [];
+  const set = PM.store.set;
+  PM.store.set = (key, value) => { if (key.startsWith('project.')) writes.push(key); return set(key, value); };
+  const asked = [];
+  PM.windows = { supported: true, renameProject: async (id, name) => { asked.push([id, name]); return true; } };
+  assert.equal(PM.Projects.rename('O1', 'Renamed'), 'Renamed');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(asked, [['O1', 'Renamed']]);
+  assert.deepEqual(writes, [], 'the stored copy is not written');
+  // No window has it: the stored copy is renamed here, as before.
+  PM.windows.renameProject = async () => false;
+  PM.Projects.rename('O1', 'Mine now');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(writes, ['project.O1']);
+  assert.equal(mem.get('project.O1').proj.name, 'Mine now');
+});
+
+it('renames a background tab through its live document, not the stored copy (SAVE-1c)', () => {
+  const { PM, mem } = projectsModel();
+  mem.set('project.T2', { v: '1.0.0', proj: { id: 'T2', name: 'Stored', layers: [] } });
+  const live = { id: 'T2', name: 'Stored', layers: [{ id: 'unsaved edit' }] };
+  PM.liveProject = (id) => id === 'T2' ? live : null;
+  PM.windows = { supported: true, renameProject: async () => { throw new Error('must not be asked'); } };
+  PM.Projects.rename('T2', 'Renamed');
+  assert.equal(live.name, 'Renamed');
+  assert.deepEqual(mem.get('project.T2').proj, { id: 'T2', name: 'Renamed', layers: [{ id: 'unsaved edit' }] });
+});
+
+it('checkpoints shortly after main refuses an entry, without waiting for autosave', async () => {
+  const { PM, refuse } = mainJournalModel();
+  let slotWrites = 0;
+  const set = PM.store.set;
+  PM.store.set = (key, value) => { if (key === 'project.K1') slotWrites++; return set(key, value); };
+  PM.proj = { id: 'K1', name: 'Closed', revision: 0, layers: [] };
+  PM.Projects.put(PM.proj);
+  refuse(true);
+  PM.bus.emit('history:project-patch', { projectId: 'K1', revision: 1, patches: [{ path: ['name'], exists: true, value: 'One' }] });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(slotWrites, 1);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(slotWrites, 2, 'a slot holding the refused edit is posted');
+});

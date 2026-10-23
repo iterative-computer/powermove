@@ -1158,6 +1158,13 @@ function claimForThisWindow(id: string | null): void {
 const LIVE_TABS = 4;
 type ParkedTab = { project: any; history: any; media: any };
 const parkedTabs = new Map<string, ParkedTab>();
+/** A background tab's live document, for edits that must reach it (a rename; SAVE-1c). */
+PM.liveProject = (id: string) => parkedTabs.get(id)?.project ?? null;
+/* Another window's Projects screen renames a project this window has open:
+   the live document is renamed here and checkpointed (SAVE-1c). */
+PM.windows?.onRenameRequest?.(({ projectId, name }: { projectId: string; name: string }) => {
+  if (typeof projectId === 'string' && typeof name === 'string') PM.Projects.rename(projectId, name);
+});
 function discardParked(id: string) {
   const tab = parkedTabs.get(id);
   if (!tab) return;
