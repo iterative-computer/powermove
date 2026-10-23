@@ -118,6 +118,25 @@ MCP stdio mode excluded), adds the launchers the pattern cannot see (listed in
   look-alike.
 - `scripts/runtime-update-launchers.test.ts`: the launcher audit.
 
+## Measured end to end (2026-10-23)
+
+These were run once in the real app, with a private `TMPDIR` and the developer's
+connected Claude account, through a temporary Playwright script that is not
+committed:
+
+1. With the switch, the app ran for 30 s, past the 20 s refresh delay. No
+   runtime scratch directory appeared.
+2. Without the switch, `powermove-runtime-claude-*` appeared holding
+   `owner.pid` (the Electron main pid) and `package.tgz`. A SIGKILL during the
+   download left it behind.
+3. On the next launch, the startup sweep removed it within the 10 s poll.
+
+On the same day, a dry-run classification of the development Mac's real
+`$TMPDIR` used the same rules. Of the 46 legacy directories, 24 (7.6 GB)
+qualify for reclamation. The other 22 (5.9 GB) were kept: 19 had been written
+within the last hour by other lanes' launches still running without the switch,
+and 3 were account-test directories without `package.tgz`.
+
 ## What remains
 
 - Legacy directories younger than an hour are not reclaimed at startup. They
