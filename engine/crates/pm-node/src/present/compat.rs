@@ -508,21 +508,10 @@ impl CompatStore {
     /// Whether an answer at `revision` drawing `raster` (`None`: a
     /// pass-through) replaces a different answer for the same need at the
     /// same revision.
-    fn replaces(&mut self, id: &AnswerId, revision: Revision, raster: Option<&CompatKey>) -> bool {
-        let replaced = self
-            .answers
+    fn replaces(&self, id: &AnswerId, revision: Revision, raster: Option<&CompatKey>) -> bool {
+        self.answers
             .get(id)
-            .is_some_and(|a| a.revision == revision && a.raster.as_ref() != raster);
-        if replaced {
-            // The producer's output for this layer changed without an edit:
-            // its answers for other frames, densities and windows are stale
-            // too (asked again when drawn: a capture, the next frames).
-            self.answers
-                .retain(|a, _| a == id || !(a.0 == id.0 && a.1 == id.1 && a.2 == id.2));
-            self.asked
-                .retain(|a, _| a == id || !(a.0 == id.0 && a.1 == id.1 && a.2 == id.2));
-        }
-        replaced
+            .is_some_and(|a| a.revision == revision && a.raster.as_ref() != raster)
     }
 
     /// Evicts least recently used complete rasters until `incoming` fits.
@@ -946,45 +935,6 @@ mod tests {
         let replaced = store.apply(s, reuse.clone());
         assert_eq!(replaced, Applied::Replaced { pixels: false });
         assert_eq!(store.apply(s, reuse), Applied::Answered);
-        // The layer's other answers (another density) are stale after a
-        // replacement; another layer's are kept.
-        let at = |layer: &str, scale: f64| {
-            CompatMessage::Native(pm_protocol::snapshot::CompatNative {
-                composition: "c".into(),
-                layer: layer.into(),
-                time: Ticks::ZERO,
-                source: CompatSource::RasterOverride,
-                scale,
-                revision: Revision::new(3).unwrap(),
-                crop: None,
-            })
-        };
-        store.apply(s, at("L7", 2.0));
-        store.apply(s, at("L8", 1.0));
-        let r = Revision::new(3).unwrap();
-        let has = |store: &mut CompatStore, layer: &str, scale: f64| {
-            !matches!(
-                store.answer(
-                    s,
-                    "c",
-                    layer,
-                    0.0,
-                    scale,
-                    CompatSource::RasterOverride,
-                    None,
-                    r
-                ),
-                pm_render::compat::CompatAnswer::Missing
-            )
-        };
-        assert!(has(&mut store, "L7", 2.0));
-        assert_eq!(
-            store.apply(s, band(id("L7", "c"), 1, 1, 0, 1, 1)),
-            Applied::Replaced { pixels: true }
-        );
-        assert!(!has(&mut store, "L7", 2.0));
-        assert!(has(&mut store, "L7", 1.0));
-        assert!(has(&mut store, "L8", 1.0));
     }
 
     #[test]

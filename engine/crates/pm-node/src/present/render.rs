@@ -3827,7 +3827,11 @@ impl Thread {
                     wake = wake.min(at);
                 }
             }
-            if (view.dirty && !external_waiting && view.state.headless != Some(true))
+            if (view.dirty
+                && !external_waiting
+                && view.state.headless != Some(true)
+                && view.preroll.is_none()
+                && view.awaiting.is_none())
                 || !view.requests.is_empty()
                 || (view.sample_due
                     && (view.state.headless != Some(true)
@@ -4415,11 +4419,17 @@ impl Thread {
             retry.at = None;
             view.dirty = true;
         }
-        // A paused frame after a view or transport change.
-        let paused_dirty = self
-            .views
-            .get(&key)
-            .is_some_and(|v| v.dirty && v.pool.is_some() && !v.clock.is_playing());
+        // A paused frame after a view or transport change. Not while a Play
+        // waits to start (its preroll, or the audio's first sample): the run
+        // presents that frame itself in a moment, and drawing it now would
+        // present it twice (a seek and a Play in one task: today draws once).
+        let paused_dirty = self.views.get(&key).is_some_and(|v| {
+            v.dirty
+                && v.pool.is_some()
+                && !v.clock.is_playing()
+                && v.preroll.is_none()
+                && v.awaiting.is_none()
+        });
         if paused_dirty {
             let media = self
                 .preview_controls
