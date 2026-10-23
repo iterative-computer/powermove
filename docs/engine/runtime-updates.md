@@ -81,7 +81,7 @@ gated on `app.isPackaged`, matching the other test switches
 Dock launch does not inherit a shell environment, so production cannot set it
 by accident, and setting it only skips a background check.
 
-Every launcher of the real app sets the switch:
+The following test and measurement launchers set the switch:
 
 - `apps/desktop/e2e/helpers/app.ts` (`launchApp`, all e2e specs that use it).
   A spec that tests runtime updates can opt back in by passing
@@ -93,14 +93,27 @@ Every launcher of the real app sets the switch:
   `electron-bridge.mts`), `scripts/gate-engine-switch-corpus.mjs`,
   `scripts/frame-bridge-measure.mjs` (app rows), `pm-wasm-bench.mjs`,
   `profile-autosave-main-thread.mjs`, `profile-desktop-memory.mjs`,
-  `test-mcp.mjs` and `test-native-import-contract.mjs`.
+  `test-mcp.mjs`, `test-native-import-contract.mjs` and
+  `test-native-hidden-parity.mjs`. The hidden-parity harness sets the switch
+  and the fake `CODEX_BINARY` explicitly in `appEnv`, which its `start` wrapper
+  passes to the desktop launch.
 
-`apps/desktop/scripts/runtime-update-launchers.test.ts` (vitest) guards this.
-It finds every file under `apps/desktop/e2e`, `apps/desktop/scripts` and
-`engine/corpus/src` that launches the app's main entry
-(`_electron.launch({ args: [..., '.'] })` or `spawn(electron, ['.'])`, with
-MCP stdio mode excluded), adds the launchers the pattern cannot see (listed in
-`INDIRECT`), and fails if any of them omits the switch.
+`apps/desktop/scripts/runtime-update-launchers.test.ts` (vitest) scans
+`apps/desktop/e2e`, `apps/desktop/scripts` and `engine/corpus/src` for recognized
+app-entry argument arrays. It matches `_electron.launch` and calls receiving
+`electron` plus an argument array regardless of the function name, including
+wrappers such as `start(electron, ['.'])`. Entries can be `'.'` (either quote
+style) or the path identifiers `desktop`, `desktopRoot`, `desktopDir`,
+`repoRoot` or `appDir`. MCP stdio and agent-tool entry modes are excluded
+because they do not start the editor. Launchers the pattern cannot see are
+listed in `INDIRECT`.
+
+The audit checks for a literal switch setting in each detected source file,
+or its listed environment source in `DELEGATED`; it does not trace environment
+objects through calls. Negative fixtures prove an unswitched wrapper launch
+fails the audit. The initial direct-`spawn` pattern missed the hidden-parity
+wrapper, so this guard is coverage for these source patterns rather than a
+guarantee that all possible launchers are protected.
 
 ## Tests
 
@@ -116,7 +129,8 @@ MCP stdio mode excluded), adds the launchers the pattern cannot see (listed in
   `TMPDIR` holding four seeded directories. It reclaims the dead-owner and
   legacy downloads, and keeps the live-owner install and the editor-run
   look-alike.
-- `scripts/runtime-update-launchers.test.ts`: the launcher audit.
+- `scripts/runtime-update-launchers.test.ts`: the launcher audit, including
+  wrapper and path-entry negative fixtures and tool-only exclusions.
 
 ## Measured end to end (2026-10-23)
 
@@ -146,7 +160,8 @@ and 3 were account-test directories without `package.tgz`.
   not reclaim directories that other processes leak while it is running.
 - A new launcher outside the three audited roots, or one that starts the app
   in a way the audit pattern does not recognise (like `frame-bridge-measure`'s
-  `-r` preload), has to be added to the audit by hand.
+  `-r` preload), has to be added to the audit by hand. A detected file still
+  needs review to confirm that each app launch receives the switched env.
 - Directories in a different `TMPDIR` than the one the app starts with (a
   harness that overrode `TMPDIR`) are only reclaimed by a launch that uses
   that `TMPDIR`.
