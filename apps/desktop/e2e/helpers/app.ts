@@ -107,6 +107,9 @@ async function startElectron(
   await ensureBuilt();
   const launchEnv = {
     ...process.env,
+    // Fresh test profiles must not download runtimes from a connected account.
+    // Runtime-update specs can opt in with an explicit env override below.
+    POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
     // Offline UI regressions must not depend on the developer's subscription
     // state (or race a real account check that replaces the composer).
     ...(process.env.POWERMOVE_E2E_LIVE ? {} : {
