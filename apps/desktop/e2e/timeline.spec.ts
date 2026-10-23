@@ -29,7 +29,13 @@ async function scaleFixture(page: Page) {
 
 async function scaleKeyPoint(page: Page, time: number) {
   await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return timeline.rows.filter((row: any) => row.key === 'scale').length; })).toBe(1);
-  return page.evaluate((time) => {
+  /* Aim at the key the timeline has drawn. A draw can still widen the gutter
+     to fit the new property labels and clamp the scroll; a point read before
+     that draw lands beside the key the user sees (the press then selects no
+     key). Read after a painted frame, and only once two frames agree. */
+  const read = () => page.evaluate(async (time) => {
+    const frame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    await frame(); await frame();
     const PM = (window as any).PM;
     const timeline = PM.Kernel.services.get('timeline');
     const box = timeline.cv.getBoundingClientRect();
@@ -37,6 +43,14 @@ async function scaleKeyPoint(page: Page, time: number) {
     return { x: box.x + timeline.gut + (time - timeline.scrollT) * timeline.pps,
       y: box.y + timeline.ruler + index * timeline.row - timeline.scrollY + timeline.row / 2, pps: timeline.pps };
   }, time);
+  let point = await read();
+  await expect.poll(async () => {
+    const next = await read();
+    const same = next.x === point.x && next.y === point.y && next.pps === point.pps;
+    point = next;
+    return same;
+  }).toBe(true);
+  return point;
 }
 
 async function openGraph(page: Page) {
