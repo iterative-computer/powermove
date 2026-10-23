@@ -44,6 +44,24 @@ comparison implied). Job tests compare decoded WebM video and audio, and
 decoded TIFF-to-PNG pixels, against the existing converter flags. The app
 parity and relative-performance gates are tracked by the integration lane.
 
+The renderer registers `engine.source` only with Use New Engine enabled.
+Assets live posters and inline thumbnails use its source pixels; import,
+replacement, and restore backfill persist the same WebP/JPEG poster format.
+The source viewer keeps its existing controls and keyboard interactions,
+using a canvas and engine audio voice. Code export sends frozen originals
+to browser-rendition jobs. Setting-off branches retain their current browser
+capture and conversion behavior. Source jobs pin old storage-key references
+before waiting for a cold engine and remove their scratch output and media
+session after success, failure, or cancellation.
+
+`e2e/engine-source-media.spec.ts` is the app gate for both settings: exact
+source and encoded-poster pixel comparisons, ordered video/SVG filmstrips,
+light/dark Assets and source-viewer captures, source audio levels and natural
+end, silent video, keyboard controls, browser-play invocation guards, code
+rendition jobs, and source-scrub/filmstrip wall clocks. Targeted Rust and unit
+passes do not certify this app parity or its relative performance. Those
+gates and direct heard-PCM parity remain required before cutover.
+
 Production media I/O for plan section 13, built from the S6 spike
 (`docs/engine/spikes/S6.md`, `engine/spikes/s6-decode`). Crates:
 `engine/crates/pm-media` (probe, index, decode, images, cache, hashing) and the

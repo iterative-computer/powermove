@@ -32,7 +32,7 @@ async function fixture(mode: 'done' | 'failed' | 'wait' = 'done') {
       return { type: 'ack' } as Response;
     })
   };
-  const bind = vi.fn(async () => {});
+  const bind = vi.fn(async (_session: number, _project: Record<string, any> | null) => {});
   const jobs = new SourceJobs({ engine, directory: root, bindMediaSession: bind });
   const spec = (session: number): JobSpec => ({ kind: 'browserRendition', session, asset: 'clip', format: 'webm' });
   return { root, engine, jobs, spec, bind, sent, status };
