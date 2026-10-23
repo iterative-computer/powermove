@@ -302,6 +302,29 @@ describe('WorkerPresenter and the presentation worker', () => {
     expect(releasedOnPort.map((bytes) => decodeEnvelope(bytes).message)).toContainEqual({ kind: 'event', body: { type: 'releaseFrame', poolIndex: 1, seq: 7 } });
   });
 
+  it('hands a frame paired with chrome planes back through the page, whose leases release color and planes together', async () => {
+    const pair = new Pair();
+    const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0 });
+    const source = new Source();
+    const releasedOnPort: Uint8Array[] = [];
+    const port = { postMessage: (bytes: Uint8Array) => releasedOnPort.push(bytes), close: () => {} };
+    class DirectLink extends Link {
+      releasePort() {
+        return { port: port as unknown as MessagePort, session: 3 };
+      }
+    }
+    const link = new DirectLink();
+    const presenter = host.open({ link, source, displayHz: 120 });
+    source.imports.add('1:1');
+    presenter.receive({ type: 'surfacePool', pool: { generation: 1, size: { width: 640, height: 360 }, format: 'bgra8Unorm', colorSpace: 'srgb', count: 8 } } as never, 0);
+    presenter.receive({ type: 'frame', frame: desc(1, { depthId: { encoding: 'chromePlanesV1', poolGeneration: 2, poolIndex: 1 } } as never) }, 5);
+    await settle();
+    pair.painter.finishGpu();
+    await settle();
+    expect(releasedOnPort).toEqual([]);
+    expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
+  });
+
   it('offers the release port once the session can make one (a session the engine had not numbered when it opened)', async () => {
     const pair = new Pair();
     const host = new PresentWorker({ worker: pair.worker, canvas: {} as OffscreenCanvas, timeOrigin: 0 });

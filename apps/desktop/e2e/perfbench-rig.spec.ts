@@ -472,8 +472,13 @@ async function enginePathCounts(page: Page): Promise<Record<string, any> | null>
     const PM = (window as any).PM;
     const counters = PM.EngineCounters?.snapshot?.() ?? null;
     let worker: Record<string, number> | null = null;
-    try { worker = PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.()?.workerMessages ?? null; } catch { worker = null; }
-    return counters ? { ...counters, worker } : null;
+    let direct: boolean | null = null;
+    try {
+      const stats = PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.();
+      worker = stats?.workerMessages ?? null;
+      direct = stats?.directRelease ?? null;
+    } catch { worker = null; }
+    return counters ? { ...counters, worker, directRelease: direct } : null;
   }).catch(() => null);
 }
 
@@ -571,7 +576,8 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[], opt
     counts = r.counts;
     report = next;
   }
-  const enginePath = mode === 'engine' ? perStep(pathBefore, await enginePathCounts(page), measured.length) : null;
+  const pathAfter = mode === 'engine' ? await enginePathCounts(page) : null;
+  const enginePath = mode === 'engine' ? { ...(perStep(pathBefore, pathAfter, measured.length) ?? {}), directRelease: pathAfter?.directRelease ?? null } : null;
   const tasks = await endTrace().catch(() => new Map<number, number>());
   measured.forEach((spec, i) => { steps[i]!.tasks = tasks.get(spec.k) ?? null; });
   if (gpuTime) {

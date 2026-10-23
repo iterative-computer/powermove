@@ -139,8 +139,10 @@ type Session = {
   statsSentMs: number;
   /** Hands a frame straight back to the engine (`releasePort`), when set. */
   direct: ((release: FrameRelease) => void) | null;
-  /** Frames received and not handed back yet (by `poolIndex:seq`). */
-  outstanding: Map<string, FrameRelease>;
+  /** Frames received and not handed back, and whether each pairs with
+   *  chrome planes (those go back through the page, whose leases release
+   *  color and planes together). */
+  outstanding: Map<string, { release: FrameRelease; paired: boolean }>;
   /** The page waits on `done` (`watchDone`), and the newest frame done. */
   watchDone: boolean;
   lastDone: number;
@@ -165,8 +167,9 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
     message.frame.close();
     const release = { poolIndex: message.desc.poolIndex, seq: message.desc.seq };
     const s = session && session.id === message.session ? session : null;
+    const paired = message.desc.depthId?.encoding === 'chromePlanesV1';
     s?.outstanding.delete(`${release.poolIndex}:${release.seq}`);
-    if (s?.direct) s.direct(release);
+    if (s?.direct && !paired) s.direct(release);
     else post({ type: 'release', session: message.session, release });
   };
 
@@ -192,7 +195,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
       // the engine from here (the page hands those back itself otherwise,
       // once it hears the session closed).
       const direct = ended.direct;
-      if (direct) for (const release of ended.outstanding.values()) direct(release);
+      if (direct) for (const { release, paired } of ended.outstanding.values()) if (!paired) direct(release);
       ended.outstanding.clear();
       sendStats(ended, true);
       post({ type: 'closed', session: ended.id });
@@ -218,8 +221,10 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
           // straight to the engine once it has the session's release port.
           sendViewerState: () => {},
           release: (release) => {
-            s.outstanding.delete(`${release.poolIndex}:${release.seq}`);
-            if (s.direct) s.direct(release);
+            const k = `${release.poolIndex}:${release.seq}`;
+            const paired = s.outstanding.get(k)?.paired ?? false;
+            s.outstanding.delete(k);
+            if (s.direct && !paired) s.direct(release);
             else post({ type: 'release', session: id, release });
           }
         },
@@ -325,7 +330,10 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
           giveBack(message);
           return;
         }
-        s.outstanding.set(`${message.desc.poolIndex}:${message.desc.seq}`, { poolIndex: message.desc.poolIndex, seq: message.desc.seq });
+        s.outstanding.set(`${message.desc.poolIndex}:${message.desc.seq}`, {
+          release: { poolIndex: message.desc.poolIndex, seq: message.desc.seq },
+          paired: message.desc.depthId?.encoding === 'chromePlanesV1'
+        });
         // Stats go to the page with the frame's `presented` message.
         s.presenter.present(message.desc, message.frame, message.arrivedMs);
         return;

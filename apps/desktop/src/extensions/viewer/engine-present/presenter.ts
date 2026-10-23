@@ -185,6 +185,8 @@ export type PresenterStats = {
   workerMessagesOut?: number;
   /** The same by message type (`in:presented`, `out:frame`, …). */
   workerMessages?: Record<string, number>;
+  /** The worker hands frames back to the engine on its own port. */
+  directRelease?: boolean;
 };
 
 export type TraceRecord = {

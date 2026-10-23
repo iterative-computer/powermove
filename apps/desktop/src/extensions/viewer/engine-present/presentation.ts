@@ -821,6 +821,10 @@ export class ViewerPresentation {
       link: {
         sendViewerState: (state: ViewerState) => channel.sendViewerState(state),
         release: (release: import('./protocol').FrameRelease) => leases ? leases.colorDone(release) : channel.release(release),
+        // A worker hands frames back to the engine itself, except frames
+        // paired with chrome planes, whose leases release color and planes
+        // together on this side (present-worker.ts).
+        releasePort: () => channel.releasePort?.() ?? null,
       },
       source: {
         videoFrame: (generation: number, index: number) => this.options.service.source.videoFrame(generation, index),

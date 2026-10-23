@@ -575,9 +575,14 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         // The presentation worker hands frames back on its own port.
         releasePort: () => {
           const c = connection;
-          if (lease !== viewerLease || !c || c.closed || opened.closed || opened.id === null) return null;
-          const port = c.releasePort();
-          return port ? { port, session: opened.id } : null;
+          const why = lease !== viewerLease ? 'lease' : !c ? 'connection' : c.closed ? 'closed' : opened.closed ? 'session-closed' : opened.id === null ? 'unnumbered' : null;
+          if (why) {
+            mainThreadCounters.receivedType(`releasePort:${why}`);
+            return null;
+          }
+          const port = c!.releasePort();
+          if (!port) mainThreadCounters.receivedType('releasePort:refused');
+          return port ? { port, session: opened.id! } : null;
         },
         close: () => {
           if (lease !== viewerLease || opened.closed) return;

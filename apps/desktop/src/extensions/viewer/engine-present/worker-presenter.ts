@@ -224,7 +224,7 @@ export class WorkerPresenter implements Presenter {
    * before this). Keeping the last reference here keeps it on the page's
    * thread.
    */
-  private readonly inWorker = new Map<string, { release: FrameRelease; frame: VideoFrame }>();
+  private readonly inWorker = new Map<string, { release: FrameRelease; frame: VideoFrame; paired?: boolean }>();
   private remote: PresenterStats | null = null;
   /**
    * The worker hands frames back to the engine itself (`releasePort`): this
@@ -282,7 +282,8 @@ export class WorkerPresenter implements Presenter {
       shownLate: r?.shownLate ?? 0,
       workerMessagesIn: this.options.host.messagesIn,
       workerMessagesOut: this.options.host.messagesOut,
-      workerMessages: { ...this.options.host.byType }
+      workerMessages: { ...this.options.host.byType },
+      directRelease: this.direct
     };
   }
 
@@ -406,7 +407,7 @@ export class WorkerPresenter implements Presenter {
       this.releaseUndrawn(desc);
       return;
     }
-    this.inWorker.set(k, { release: { poolIndex: desc.poolIndex, seq: desc.seq }, frame });
+    this.inWorker.set(k, { release: { poolIndex: desc.poolIndex, seq: desc.seq }, frame, paired: desc.depthId?.encoding === 'chromePlanesV1' });
     this.options.host.post({ type: 'frame', session: this.options.session, desc, frame: clone, arrivedMs }, [clone as unknown as Transferable]);
   }
 
@@ -530,9 +531,11 @@ export class WorkerPresenter implements Presenter {
    *  the engine (with a release port it handed every one back itself; the
    *  page's references close). */
   releaseHeld(): void {
-    for (const { release, frame } of this.inWorker.values()) {
+    for (const { release, frame, paired } of this.inWorker.values()) {
       frame.close();
-      if (this.direct) continue;
+      // With a release port the worker handed back every frame but those
+      // paired with chrome planes.
+      if (this.direct && !paired) continue;
       this.local.released++;
       this.options.link.release(release);
     }
