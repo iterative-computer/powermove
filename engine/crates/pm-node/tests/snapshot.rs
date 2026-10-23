@@ -928,10 +928,29 @@ fn child_viewer_snapshot() {
 
     // Project Float32 raises render intermediates, while the live viewer
     // still writes its composition into an F16 display working texture.
+    // At this opacity, ordinary Float32 rounds white on black to code 95;
+    // the viewer's F16 display texture rounds the same pixel to code 94.
     let mut high_precision = project(100.0);
     high_precision["color"] =
-        json!({ "mode": "standard", "linearBlending": true, "precision": "float32" });
+        json!({ "mode": "standard", "linearBlending": false, "precision": "float32" });
+    high_precision["backgroundFill"]["stops"][0]["color"] = json!("#000000");
+    high_precision["layers"][0]["d"]["color"] = json!("#FFFFFF");
+    high_precision["layers"][0]["p"]["opacity"] = ch(json!(37.060));
     c.resync(53, 2, &high_precision);
+    c.snapshot(
+        54,
+        frame_request(
+            SnapshotClass::Sync,
+            Size::new(320, 180),
+            SnapshotPixels::Opaque,
+            5_000,
+        ),
+        Some(2),
+        WINDOW,
+        c.session,
+    );
+    let ordinary_float32 = rendered(c.inbox.wait(Duration::from_secs(20), answer(54)));
+    assert_eq!(ordinary_float32.view_seq, Some(Seq::new(4).unwrap()));
     let mut high_precision_pin = frame_request(
         SnapshotClass::Sync,
         Size::new(320, 180),
@@ -959,10 +978,17 @@ fn child_viewer_snapshot() {
         view_seq: Seq::new(7).unwrap(),
     });
     high_precision_pin.view_seq = None;
-    c.snapshot(54, high_precision_pin, Some(2), WINDOW, c.session);
-    let high_precision = rendered(c.inbox.wait(Duration::from_secs(20), answer(54)));
-    assert_eq!(high_precision.view_seq, Some(Seq::new(7).unwrap()));
-    assert_eq!(at(&pixels_of(&high_precision), 320, 120, 70), BOX);
+    c.snapshot(55, high_precision_pin, Some(2), WINDOW, c.session);
+    let high_precision_viewer = rendered(c.inbox.wait(Duration::from_secs(20), answer(55)));
+    assert_eq!(high_precision_viewer.view_seq, Some(Seq::new(7).unwrap()));
+    assert_eq!(
+        at(&pixels_of(&ordinary_float32), 320, 120, 70),
+        [95, 95, 95, 255]
+    );
+    assert_eq!(
+        at(&pixels_of(&high_precision_viewer), 320, 120, 70),
+        [94, 94, 94, 255]
+    );
     println!("CHILD-OK");
 }
 
