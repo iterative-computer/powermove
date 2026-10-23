@@ -843,6 +843,8 @@ fn plan_export_checked(
     let audio_codec = audio_codec_of(s, container);
     let audio = if s.audio && !s.format.is_image() {
         let cache = pm_audio::SourceCache::new(AUDIO_CACHE_BYTES, 2);
+        // An export takes today's exact lengths before it mixes.
+        cache.set_blocking_lengths(true);
         let graph =
             pm_audio::MixGraph::build(doc, &job.composition, &mut evaluator(), &cache, &*job.media)
                 .map_err(|e| JobError::Audio(e.to_string()))?;

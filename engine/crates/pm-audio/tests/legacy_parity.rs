@@ -423,6 +423,7 @@ fn render(
 ) -> ([Vec<f32>; 2], Problems) {
     let doc = Document::new(Some(loaded), 1);
     let cache = SourceCache::new(128 << 20, 0);
+    cache.set_blocking_lengths(true);
     let media = media.clone();
     let resolver = move |id: &str| media.get(id).cloned();
     let graph = MixGraph::build(&doc, comp, &mut Evaluator::new(), &cache, &resolver).unwrap();

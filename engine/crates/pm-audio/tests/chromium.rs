@@ -42,6 +42,7 @@ fn aac_and_opus_decode_as_today() {
         ),
     ] {
         let cache = pm_audio::SourceCache::new(64 << 20, 0);
+        cache.set_blocking_lengths(true);
         let source = cache.open(&fixtures.join(file), None).unwrap();
         assert!(
             pm_audio::chromium::library().is_some(),
@@ -66,4 +67,35 @@ fn aac_and_opus_decode_as_today() {
         assert_eq!(got, want, "{file}");
         cache.shutdown();
     }
+}
+
+/// Playback never waits for today's length: the first open takes the
+/// container's length and counts today's on a background thread; a later
+/// open of the same file takes today's.
+#[test]
+fn todays_length_is_counted_off_the_opening_thread() {
+    let Some(lib) = chromium_ffmpeg() else {
+        eprintln!("no Electron libffmpeg in this checkout; skipping");
+        return;
+    };
+    // SAFETY: set before any thread opens a source in this process.
+    unsafe { std::env::set_var("POWERMOVE_CHROMIUM_FFMPEG", &lib) };
+    let dir = tempfile::tempdir().unwrap();
+    // A copy: the per-file memo must not already know it.
+    let file = dir.path().join("tone-copy.opus");
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures");
+    std::fs::copy(fixtures.join("tone.opus"), &file).unwrap();
+    let cache = pm_audio::SourceCache::new(16 << 20, 0);
+    let first = cache.open(&file, None).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while pm_audio::chromium::known_length(&file).is_none() && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(pm_audio::chromium::known_length(&file), Some(96_000));
+    let again = cache.open(&file, None).unwrap();
+    assert_eq!(again.length(), Some(96_000), "today's length once counted");
+    let _ = first;
+    cache.shutdown();
 }

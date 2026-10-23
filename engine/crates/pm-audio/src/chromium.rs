@@ -198,6 +198,73 @@ pub fn library() -> Option<&'static Path> {
     lib().map(|l| l.path.as_path())
 }
 
+type FileKey = (PathBuf, u64, Option<std::time::SystemTime>);
+
+fn file_key(path: &Path) -> Option<FileKey> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((path.to_owned(), meta.len(), meta.modified().ok()))
+}
+
+/// Counted lengths, and the files being counted.
+type Lengths = std::sync::Mutex<(BTreeMap<FileKey, u64>, std::collections::BTreeSet<FileKey>)>;
+
+fn lengths() -> &'static Lengths {
+    static LENGTHS: OnceLock<Lengths> = OnceLock::new();
+    LENGTHS.get_or_init(Default::default)
+}
+
+/// Today's decoded length of a file, when it has been counted (per file:
+/// path, size, modification time).
+pub fn known_length(path: &Path) -> Option<u64> {
+    let key = file_key(path)?;
+    lengths()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .0
+        .get(&key)
+        .copied()
+}
+
+/// Counts today's decoded length: a whole decode, as `decodeAudioData`
+/// does. `blocking` waits for it (an export's plan); otherwise it runs on
+/// a background thread once per file and a later open finds it
+/// ([`known_length`]), so no mix build or playback control waits on it.
+pub fn count_length(path: &Path, channels: usize, blocking: bool) -> Option<u64> {
+    let key = file_key(path)?;
+    if let Some(n) = known_length(path) {
+        return Some(n);
+    }
+    let count = {
+        let path = path.to_owned();
+        let key = key.clone();
+        move || {
+            let n = ChromiumDecoder::open(&path, channels)
+                .ok()
+                .flatten()
+                .and_then(|mut d| d.count_frames().ok());
+            let mut l = lengths().lock().unwrap_or_else(|e| e.into_inner());
+            l.1.remove(&key);
+            if let Some(n) = n {
+                l.0.insert(key, n);
+            }
+            n
+        }
+    };
+    if blocking {
+        return count();
+    }
+    let mut l = lengths().lock().unwrap_or_else(|e| e.into_inner());
+    if l.1.insert(key) {
+        drop(l);
+        let _ = std::thread::Builder::new()
+            .name("pm-audio-length".into())
+            .spawn(move || {
+                count();
+            });
+    }
+    None
+}
+
 /// A notice for a mix whose voices use these codecs when today's decoder is
 /// not in this process (the CLI, a test outside Electron): they decode with
 /// our FFmpeg, about −93 dBFS from the app's samples.
@@ -496,9 +563,8 @@ impl ChromiumDecoder {
         Ok(Some(d))
     }
 
-    /// The decoded length in frames: today's buffer length, which sets the
-    /// clip's audible end (`asset.audioBuffer.duration`). A whole decode,
-    /// once per open source; the blocks it passes are kept.
+    /// The decoded length in frames by a whole decode (the blocks it passes
+    /// are kept).
     pub fn count_frames(&mut self) -> Result<u64> {
         self.restart()?;
         let mut total = 0u64;

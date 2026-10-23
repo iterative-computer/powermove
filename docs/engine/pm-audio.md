@@ -358,8 +358,13 @@ and Opus), and says so: `pm-cli render` prints a warning naming the codecs and r
 Chromium's rules: the first audio stream; other streams' packets skipped; a custom
 memory I/O; float output requested; FFmpeg's skip side data dropping priming and end
 padding (the fork's own handling, what today hears); the decoded length is today's
-buffer length (counted by one whole decode when the source opens, which also sets
-the clip's audible end). Blocks equal the sequential decode: the decoder moves forward
+buffer length, which also sets the clip's audible end. It takes a whole decode, as
+`decodeAudioData` does (packet durations less skip side data do not reproduce it:
+measured off by 152 to 696 frames on the test files), so it is counted once per file
+(path, size, modification time) and never on a mix build's thread: playback opens the
+source with the container's length and counts in the background, and the next mix
+build takes today's length (`chromium::count_length`); an export's cache waits for
+it (`SourceCache::set_blocking_lengths`), on the job's thread. Blocks equal the sequential decode: the decoder moves forward
 and restarts from the file's start only to go back, keeping the last 8 blocks it
 passed. Verified: `tests/chromium.rs` (fixtures, last block first), outside the
 repository odd lengths (ADTS mono 2.71 s, M4A 44.1 kHz 3.317 s, MOV 6.1 s, Ogg and

@@ -274,6 +274,9 @@ pub struct SourceCache {
     decode_gate_changed: Condvar,
     #[cfg(feature = "test-hooks")]
     gated_decoders: AtomicU64,
+    /// Count today's decoded lengths before a source opens (an export's
+    /// cache; [`SourceCache::set_blocking_lengths`]).
+    blocking_lengths: AtomicBool,
     #[cfg(feature = "test-hooks")]
     decode_failing: Mutex<HashSet<u64>>,
 }
@@ -324,6 +327,7 @@ impl SourceCache {
             decode_gate_changed: Condvar::new(),
             #[cfg(feature = "test-hooks")]
             gated_decoders: AtomicU64::new(0),
+            blocking_lengths: AtomicBool::new(false),
             #[cfg(feature = "test-hooks")]
             decode_failing: Mutex::default(),
         });
@@ -421,12 +425,25 @@ impl SourceCache {
         self.publication_epoch.load(Ordering::Acquire)
     }
 
+    /// Exports wait for today's decoded length of an AAC or Opus file when
+    /// they open it (a job, off any interactive path); playback counts it in
+    /// the background ([`crate::chromium::count_length`]).
+    pub fn set_blocking_lengths(&self, blocking: bool) {
+        self.blocking_lengths.store(blocking, Ordering::Relaxed);
+    }
+
     /// Opens (or returns the open) audio stream of a file; `stream` is the
     /// FFmpeg stream index, the best audio stream when `None`.
     pub fn open(&self, path: &Path, stream: Option<usize>) -> Result<Arc<Source>> {
         let key = (path.to_owned(), stream);
         if let Some(s) = lock(&self.sources).get(&key) {
-            return Ok(s.clone());
+            // A length counted since this source opened replaces it (the
+            // next mix build takes the exact length).
+            let stale = matches!(&*lock(&s.decoder), Decoder::Chromium(..))
+                && crate::chromium::known_length(path).is_some_and(|n| s.info.length != Some(n));
+            if !stale {
+                return Ok(s.clone());
+            }
         }
         let decoder = AudioDecoder::open(path, stream)?;
         let mut info = decoder.info().clone();
@@ -441,16 +458,20 @@ impl SourceCache {
             // Today's own FFmpeg where this process has it (the app's
             // engine processes); our FFmpeg elsewhere (the CLI, tests).
             match crate::chromium::ChromiumDecoder::open(path, info.channels()) {
-                Ok(Some(mut d)) => match d.count_frames() {
-                    Ok(frames) => {
-                        // Today's buffer: its own priming and padding rules.
+                Ok(Some(d)) => {
+                    // Today's buffer length (its own priming and padding):
+                    // counted once per file, off this thread unless the
+                    // cache is an export's. Until then the container's.
+                    let blocking = self.blocking_lengths.load(Ordering::Relaxed);
+                    if let Some(frames) =
+                        crate::chromium::count_length(path, info.channels(), blocking)
+                    {
                         info.length = Some(frames);
                         info.priming = 0;
                         info.extra_priming = 0;
-                        Decoder::Chromium(Box::new(d), 0)
                     }
-                    Err(_) => Decoder::Ffmpeg(Box::new(decoder)),
-                },
+                    Decoder::Chromium(Box::new(d), 0)
+                }
                 _ => Decoder::Ffmpeg(Box::new(decoder)),
             }
         } else {
@@ -461,7 +482,14 @@ impl SourceCache {
             info,
             decoder: Mutex::new(decoder),
         });
-        Ok(lock(&self.sources).entry(key).or_insert(source).clone())
+        let mut sources = lock(&self.sources);
+        if let Some(existing) = sources.get(&key)
+            && existing.info.length == source.info.length
+        {
+            return Ok(existing.clone());
+        }
+        sources.insert(key, source.clone());
+        Ok(source)
     }
 
     /// Forgets open sources whose files changed or that no mix uses.
