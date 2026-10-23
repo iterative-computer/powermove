@@ -11,7 +11,8 @@
  * stepped rows step a virtual clock instead: step k asks for the frame of
  * refresh k (a playback step seeks, paused, to k/120 s on a 120 fps
  * composition; an edit step applies one edit) and waits until that frame is
- * presented (`preview:presented`, which both paths emit). Each step records:
+ * GPU-complete and reaches the next animation frame. The old, unequal
+ * endpoints are retained as diagnostic columns. Each step records:
  *
  * - the page's main-thread work in the step (CDP Performance.getMetrics
  *   TaskDuration, minus the rig's own calibrated round trip), its forced
@@ -188,7 +189,60 @@ function installHooks(): void {
       }
     });
   }
-  w.__pmRig = { counts: () => ({ ...c }), seeks };
+  // Test-only endpoint: a WebGL fence after the last draw, then the next
+  // page rAF. Poll without rAF so polling does not insert a second refresh.
+  const afterWebGL = (complete: (gpuDoneAt: number, shownAt: number) => void) => {
+    const gl: WebGL2RenderingContext = w.PM.GL.gl;
+    const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (!sync) throw new Error('rig: WebGL fenceSync failed');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let raf = 0;
+    const cancel = () => { clearTimeout(timer); cancelAnimationFrame(raf); gl.deleteSync(sync); };
+    const poll = () => {
+      const status = gl.clientWaitSync(sync, 0, 0);
+      if (status === gl.WAIT_FAILED) { cancel(); throw new Error('rig: WebGL fence wait failed'); }
+      if (status === gl.TIMEOUT_EXPIRED) { timer = setTimeout(poll, 1); return; }
+      const gpuDoneAt = performance.now();
+      raf = requestAnimationFrame(() => { cancel(); complete(gpuDoneAt, performance.now()); });
+    };
+    gl.flush();
+    timer = setTimeout(poll, 0);
+    return cancel;
+  };
+  // onPresented identifies the drawn frame; onDone(seq) acknowledges the
+  // page's WebGPU workDone, including when drawing lives in the worker.
+  // Observe new presenters too (open can replace the session). Cold reveal
+  // may call onPresented AFTER onDone, so remember completions by sequence.
+  const watchEngine = (draw: (frame: any) => void, complete: (frame: any, gpuDoneAt: number) => void) => {
+    const presentation = w.PM.Kernel.services.get('viewer').enginePresentation;
+    const done = new Map<number, number>();
+    const pending = new Map<number, any>();
+    let offDone = () => {};
+    const attach = () => {
+      offDone(); done.clear(); pending.clear();
+      if (!presentation.presenter?.onDone) throw new Error('rig: engine draw completion unavailable');
+      offDone = presentation.presenter.onDone((seq: number) => {
+        const at = performance.now();
+        done.set(seq, at);
+        const frame = pending.get(seq);
+        if (frame) { pending.delete(seq); complete(frame, at); }
+        // Playback is bounded, but keep only recent cold-reveal completions.
+        if (done.size > 512) done.delete(done.keys().next().value!);
+      });
+    };
+    const start = presentation.startPresenter;
+    const wrapped = function (this: any, ...args: any[]) { const result = start.apply(this, args); attach(); return result; };
+    presentation.startPresenter = wrapped;
+    if (presentation.presenter) attach();
+    const off = presentation.onPresented((frame: any) => {
+      draw(frame);
+      const at = done.get(frame.seq);
+      if (at === undefined) pending.set(frame.seq, frame);
+      else complete(frame, at);
+    });
+    return () => { off(); offDone(); presentation.startPresenter = start; };
+  };
+  w.__pmRig = { counts: () => ({ ...c }), seeks, afterWebGL, watchEngine };
 }
 
 type Metrics = Record<string, number>;
@@ -226,63 +280,102 @@ type StepSpec =
   | { k: number; kind: 'time'; t: number }
   | { k: number; kind: 'edit'; command: Record<string, unknown>; t: number }
   | { k: number; kind: 'seek'; t: number; engine: boolean };
-type StepArgs = StepSpec & { gpuTime: boolean };
-function pageStep(spec: StepArgs): Promise<{ ms: number | null; counts: Record<string, number>; gpuQuery: number | null }> {
+type StepArgs = StepSpec & { gpuTime: boolean; mode: Mode };
+type PageStepResult = {
+  ms: number | null;
+  oldEndpointMs: number | null;
+  busPresentedMs: number | null;
+  drawCallbackMs: number | null;
+  gpuCompleteMs: number | null;
+  counts: Record<string, number>;
+  gpuQuery: number | null;
+};
+function pageStep(spec: StepArgs): Promise<PageStepResult> {
   const PM = (window as any).PM;
   const rig = (window as any).__pmRig;
-  // Today's WebGL GPU time: a TIME_ELAPSED query on the viewer's context from the request to the presentation.
   const gl: WebGL2RenderingContext | null = spec.gpuTime ? PM.GL?.gl ?? null : null;
   const ext = gl?.getExtension('EXT_disjoint_timer_query_webgl2') ?? null;
   const queries: WebGLQuery[] = (rig.queries ??= []);
   let query: WebGLQuery | null = null;
   return new Promise((resolve) => {
     let done = false;
-    let wantVersion = -Infinity;
+    let claimed = false;
+    let wantVersion = Infinity;
+    let wantRevision = Infinity;
+    let ms: number | null = null;
+    let oldEndpointMs: number | null = null;
+    let busPresentedMs: number | null = null;
+    let drawCallbackMs: number | null = null;
+    let gpuCompleteMs: number | null = null;
+    let queryEnded = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const offs: Array<() => void> = [];
     const endQuery = () => {
-      if (query && gl && ext) { gl.endQuery(ext.TIME_ELAPSED_EXT); queries.push(query); }
+      if (query && gl && ext && !queryEnded) { queryEnded = true; gl.endQuery(ext.TIME_ELAPSED_EXT); queries.push(query); }
     };
-    const finish = (ms: number | null) => {
-      if (done) return;
+    const finish = (timeout = false) => {
+      // Keep the old event even if it arrives after the corrected endpoint.
+      if (done || (!timeout && (ms === null || oldEndpointMs === null || busPresentedMs === null))) return;
       done = true;
-      offs.forEach((off) => off?.());
-      if (ms === null) endQuery();
-      performance.mark(`pmrig:${spec.k}:shown`);
-      resolve({ ms, counts: rig.counts(), gpuQuery: query ? queries.length - 1 : null });
+      clearTimeout(timer);
+      offs.forEach((off) => off());
+      endQuery();
+      resolve({ ms, oldEndpointMs, busPresentedMs, drawCallbackMs, gpuCompleteMs, counts: rig.counts(), gpuQuery: query ? queries.length - 1 : null });
     };
-    const offs: Array<(() => void) | undefined> = [];
     performance.mark(`pmrig:${spec.k}:request`);
     const t0 = performance.now();
     if (gl && ext) {
       query = gl.createQuery();
       if (query) gl.beginQuery(ext.TIME_ELAPSED_EXT, query);
     }
-    if (spec.kind === 'seek' && spec.engine) {
-      // The exact frame, not a stand-in (docs/engine/scrub.md).
-      const presentation = PM.Kernel.services.get('viewer').enginePresentation;
-      const target = Math.round(spec.t * 705_600_000);
-      offs.push(presentation.onPresented((f: any) => {
-        if (Math.abs(f.pts - target) > 1 || f.standIn) return;
-        finish(performance.now() - t0);
-      }));
-    } else {
-      // Today's video: the element's seek to this time completes, then a frame at this time is presented.
-      const fromSeek = rig.seeks.length;
-      const fps = PM.proj?.fps ?? 30;
-      const seeked = () => spec.kind !== 'seek' || rig.seeks.slice(fromSeek).some((s: any) => Math.abs(s.time - spec.t) < 0.5 / fps);
-      offs.push(PM.bus.on('preview:presented', (e: any) => {
-        if (Math.abs(Number(e?.time) - spec.t) > 1e-6) return;
-        if (spec.kind === 'edit' && !(Number(e?.version ?? -1) >= wantVersion)) return;
-        if (!seeked()) return;
+    const shown = (gpuDoneAt: number, shownAt: number) => {
+      gpuCompleteMs = gpuDoneAt - t0;
+      ms = shownAt - t0;
+      performance.mark(`pmrig:${spec.k}:shown`);
+      finish();
+    };
+    const fromSeek = rig.seeks.length;
+    const fps = PM.proj?.fps ?? 30;
+    const seeked = () => spec.kind !== 'seek' || rig.seeks.slice(fromSeek).some((s: any) => Math.abs(s.time - spec.t) < 0.5 / fps);
+    offs.push(PM.bus.on('preview:presented', (e: any) => {
+      if (Math.abs(Number(e?.time) - spec.t) > 1e-6) return;
+      if (spec.kind === 'edit' && !(Number(e?.version ?? -1) >= wantVersion)) return;
+      if (spec.mode === 'today' && !seeked()) return;
+      busPresentedMs ??= performance.now() - t0;
+      if (!(spec.kind === 'seek' && spec.mode === 'engine')) oldEndpointMs ??= busPresentedMs;
+      if (spec.mode === 'today' && !claimed) {
+        claimed = true;
+        drawCallbackMs = busPresentedMs;
         endQuery();
-        finish(performance.now() - t0);
+        // This bus callback runs at GL.render's end, after its final commands.
+        offs.push(rig.afterWebGL(shown));
+      }
+      finish();
+    }));
+    if (spec.mode === 'engine') {
+      const matches = (f: any) => Math.abs(f.pts - Math.round(spec.t * 705_600_000)) <= 1 && !f.standIn
+        && (spec.kind !== 'edit' || f.revision >= wantRevision);
+      let selected: number | null = null;
+      offs.push(rig.watchEngine((f: any) => {
+        if (claimed || !matches(f)) return;
+        claimed = true; selected = f.seq;
+        drawCallbackMs = performance.now() - t0;
+        // The previous scrub endpoint bypassed PresentedEvents already.
+        if (spec.kind === 'seek') oldEndpointMs = drawCallbackMs;
+      }, (f: any, gpuDoneAt: number) => {
+        if (f.seq !== selected) return;
+        const raf = requestAnimationFrame(() => shown(gpuDoneAt, performance.now()));
+        offs.push(() => cancelAnimationFrame(raf));
       }));
     }
     if (spec.kind === 'edit') {
       PM.Edit.apply(spec.command, { label: 'Rig', origin: 'viewer' });
       wantVersion = PM.animVersion?.() ?? 0;
+      // Read the revision after the normal edit flush, without forcing one.
+      wantRevision = PM.EngineDoc?.barrier?.revision ?? 0;
       PM.invalidate?.();
     } else PM.setTime(spec.t);
-    setTimeout(() => finish(null), 5000);
+    timer = setTimeout(() => finish(true), 5000);
   });
 }
 
@@ -340,6 +433,10 @@ async function startTrace(cdp: CDPSession): Promise<() => Promise<Map<number, nu
 
 type StepRecord = {
   ms: number | null;
+  oldEndpointMs: number | null;
+  busPresentedMs: number | null;
+  drawCallbackMs: number | null;
+  gpuCompleteMs: number | null;
   mainMs: number;
   layouts: number;
   styleRecalcs: number;
@@ -366,9 +463,10 @@ function sum(records: Record<string, number>[]): Record<string, number> {
   return out;
 }
 
-type Run = { steps: StepRecord[]; calibrationMs: number; beginFrame: string; webglTimer: string };
+type Run = { steps: StepRecord[]; loadAtStart: number[]; calibrationMs: number; beginFrame: string; webglTimer: string };
 
 async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[], options: { warmup?: number; gpuTime?: boolean } = {}): Promise<Run> {
+  const loadAtStart = os.loadavg();
   const { page } = session;
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Performance.enable', { timeDomain: 'timeTicks' });
@@ -398,7 +496,7 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[], opt
   const webglTimer = mode === 'engine' ? 'n/a' : gpuTime ? 'EXT_disjoint_timer_query_webgl2' : 'not measured (no timer extension, or the project has shader or effect layers)';
   // Warm-up: the first frames build caches on both paths.
   const warm = options.warmup ?? 4;
-  for (const spec of specs.slice(0, warm)) await stage('warm-up frame', page.evaluate(pageStep, { ...spec, k: -1 - spec.k, gpuTime: false }), 60_000);
+  for (const spec of specs.slice(0, warm)) await stage('warm-up frame', page.evaluate(pageStep, { ...spec, k: -1 - spec.k, gpuTime: false, mode }), 60_000);
   const measured = specs.slice(warm);
   const steps: StepRecord[] = [];
   // $PM_PERFBENCH_RIG_PROFILE=<dir>: a V8 CPU profile of the page over the
@@ -415,13 +513,17 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[], opt
   let counts = await page.evaluate(() => (window as any).__pmRig.counts());
   for (const spec of measured) {
     const m0 = await metrics(cdp);
-    const r = await stage('frame', page.evaluate(pageStep, { ...spec, gpuTime }), 30_000);
+    const r = await stage('frame', page.evaluate(pageStep, { ...spec, gpuTime, mode }), 30_000);
     const m1 = await metrics(cdp);
     const next = mode === 'engine' ? await engineReport(session) : null;
     const e = engineTime(report, next);
     queryIndex.push(r.gpuQuery);
     steps.push({
       ms: r.ms,
+      oldEndpointMs: r.oldEndpointMs,
+      busPresentedMs: r.busPresentedMs,
+      drawCallbackMs: r.drawCallbackMs,
+      gpuCompleteMs: r.gpuCompleteMs,
       mainMs: Math.max(0, (m1.TaskDuration! - m0.TaskDuration!) * 1000 - calibrationMs),
       layouts: (m1.LayoutCount ?? 0) - (m0.LayoutCount ?? 0),
       styleRecalcs: (m1.RecalcStyleCount ?? 0) - (m0.RecalcStyleCount ?? 0),
@@ -450,7 +552,7 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[], opt
     await writeFile(path.join(profileDir, `rig-${mode}-${Date.now()}.cpuprofile`), JSON.stringify(profile));
   }
   await cdp.detach().catch(() => undefined);
-  return { steps, calibrationMs, beginFrame, webglTimer };
+  return { steps, loadAtStart, calibrationMs, beginFrame, webglTimer };
 }
 
 function summarize(row: string, mode: Mode, run: Run, extra: Record<string, unknown>) {
@@ -487,9 +589,16 @@ function summarize(row: string, mode: Mode, run: Run, extra: Record<string, unkn
     engineSpanMs: mode === 'engine' ? dist(s.map((x) => x.engineSpanMs)) : null,
     engineFramesPerStep: mode === 'engine' ? dist(s.map((x) => x.engineFrames)) : null,
     webglGpuMs: mode === 'today' ? (webgl.length ? dist(webgl) : run.webglTimer) : null,
+    latencyEndpoint: 'frame GPU-complete, then next page requestAnimationFrame (compositor opportunity; not physical scanout)',
     stepLatencyMs: dist(presented.map((x) => x.ms!)),
+    oldEndpointMs: dist(s.flatMap((x) => x.oldEndpointMs === null ? [] : [x.oldEndpointMs])),
+    oldEndpoint: mode === 'engine' && row.startsWith('scrub') ? 'direct onPresented (no bus hold)' : 'preview:presented bus event (unequal between paths)',
+    busPresentedMs: dist(s.flatMap((x) => x.busPresentedMs === null ? [] : [x.busPresentedMs])),
+    drawCallbackMs: dist(s.flatMap((x) => x.drawCallbackMs === null ? [] : [x.drawCallbackMs])),
+    gpuCompleteMs: dist(s.flatMap((x) => x.gpuCompleteMs === null ? [] : [x.gpuCompleteMs])),
     pagePerFrame: per(totals),
     enginePerFrame: per(work),
+    loadAtStart: run.loadAtStart,
     calibrationMs: run.calibrationMs,
     beginFrameControl: run.beginFrame,
     load: os.loadavg()[0],
@@ -511,7 +620,7 @@ async function stage<T>(label: string, promise: Promise<T>, ms: number): Promise
 }
 
 async function record(value: Record<string, unknown>): Promise<void> {
-  await appendFile(OUT, `${JSON.stringify({ at: new Date().toISOString(), ...value })}\n`);
+  await appendFile(OUT, `${JSON.stringify({ at: new Date().toISOString(), loadAverage: os.loadavg(), ...value })}\n`);
   console.log(`[rig] ${JSON.stringify(value)}`);
 }
 
@@ -597,6 +706,7 @@ test.describe('120 Hz rig', () => {
           const run = await runSteps(session, mode, specs);
           await record(summarize(`synthetic-500-${scenario === 'playback' ? 'paused-seeks' : 'edit'}`, mode, run, { fixture: summary }));
           expect(run.steps.length).toBe(STEPS);
+          expect(run.steps.every((s) => s.ms !== null && s.oldEndpointMs !== null && s.gpuCompleteMs !== null && s.ms >= s.gpuCompleteMs)).toBe(true);
         } finally {
           await session.close();
         }
@@ -615,13 +725,39 @@ test.describe('120 Hz rig', () => {
         await session.page.evaluate(async () => { const PM = (window as any).PM; PM.setTime(0); PM.play(); await new Promise((r) => setTimeout(r, 1000)); PM.pause(); PM.setTime(0); });
         await new Promise((r) => setTimeout(r, 500));
         const counts0 = await session.page.evaluate(() => (window as any).__pmRig.counts());
-        const m = await measureAction(session, mode, () => session.page.evaluate(async (ms) => {
+        const m = await measureAction(session, mode, () => session.page.evaluate(async ({ ms, mode }) => {
           const PM = (window as any).PM;
+          const rig = (window as any).__pmRig;
           const at: number[] = [];
+          const oldAt: number[] = [];
           const times = new Set<number>();
-          const off = PM.bus.on('preview:presented', (e: any) => { at.push(performance.now()); times.add(Number(e?.time)); });
-          let rafs = 0;
+          const offs: Array<() => void> = [];
+          let directCallbacks = 0;
+          let gpuCompletions = 0;
+          let coalesced = 0;
+          let emissionPushes = 0;
           let run = true;
+          const shown = (_gpuDoneAt: number, shownAt: number) => { if (run) at.push(shownAt); };
+          const events = PM.EnginePresentedEvents;
+          const emitted0 = events?.emitted ?? 0;
+          const pendingAtStart = Boolean(events?.pending);
+          const push = events?.push;
+          if (mode === 'engine') {
+            // Count replacements of a pending bus emission, rather than
+            // attributing every rendered-minus-emitted frame to merging.
+            events.push = function (...args: any[]) { emissionPushes++; if (this.pending) coalesced++; return push.apply(this, args); };
+            offs.push(() => { events.push = push; });
+            offs.push(rig.watchEngine(() => { directCallbacks++; }, (_f: any, gpuDoneAt: number) => {
+              gpuCompletions++;
+              const raf = requestAnimationFrame(() => shown(gpuDoneAt, performance.now()));
+              offs.push(() => cancelAnimationFrame(raf));
+            }));
+          }
+          offs.push(PM.bus.on('preview:presented', (e: any) => {
+            oldAt.push(performance.now()); times.add(Number(e?.time));
+            if (mode === 'today') offs.push(rig.afterWebGL(shown));
+          }));
+          let rafs = 0;
           const tick = () => { if (!run) return; rafs++; requestAnimationFrame(tick); };
           requestAnimationFrame(tick);
           const start = performance.now();
@@ -629,12 +765,17 @@ test.describe('120 Hz rig', () => {
           await new Promise((r) => setTimeout(r, ms));
           PM.pause();
           run = false;
-          off();
+          const emissions = (events?.emitted ?? 0) - emitted0;
+          const pendingAtEnd = Boolean(events?.pending);
+          offs.forEach((off) => off());
           const elapsed = performance.now() - start;
-          return { at, distinct: times.size, rafs, elapsed };
-        }, seconds * 1000));
+          return { at, oldAt, distinct: times.size, rafs, elapsed, directCallbacks, gpuCompletions, coalesced, emissionPushes, emissions, pendingAtStart, pendingAtEnd };
+        }, { ms: seconds * 1000, mode }));
         const counts1 = await session.page.evaluate(() => (window as any).__pmRig.counts());
         const p = m.value;
+        if (mode === 'engine') {
+          expect(p.emissionPushes + Number(p.pendingAtStart)).toBe(p.emissions + p.coalesced + Number(p.pendingAtEnd));
+        }
         const gaps = p.at.slice(1).map((t, i) => t - p.at[i]!);
         const presented = p.at.length;
         const expected = Math.floor((p.elapsed / 1000) * 120);
@@ -645,6 +786,16 @@ test.describe('120 Hz rig', () => {
           seconds: +(p.elapsed / 1000).toFixed(3),
           expectedFrames: expected,
           presented,
+          presentedEndpoint: 'GPU-complete, then next page rAF',
+          oldBusPresented: p.oldAt.length,
+          oldBusGapMs: dist(p.oldAt.slice(1).map((t, i) => t - p.oldAt[i]!)),
+          engineDirectCallbacks: mode === 'engine' ? p.directCallbacks : null,
+          engineDrawCompletions: mode === 'engine' ? p.gpuCompletions : null,
+          engineBusEmissions: mode === 'engine' ? p.emissions : null,
+          engineEmissionPushes: mode === 'engine' ? p.emissionPushes : null,
+          engineCoalescedEmissions: mode === 'engine' ? p.coalesced : null,
+          enginePendingAtStart: mode === 'engine' ? p.pendingAtStart : null,
+          enginePendingAtEnd: mode === 'engine' ? p.pendingAtEnd : null,
           distinctTimes: p.distinct,
           pageAnimationFramesPerSecond: +(p.rafs / (p.elapsed / 1000)).toFixed(1),
           presentGapMs: dist(gaps),
@@ -696,6 +847,7 @@ test.describe('120 Hz rig', () => {
         const run = await runSteps(session, mode, specs, { warmup: 1 });
         await record(summarize('scrub-24-public-clip', mode, run, { clip: 'h264-aac.mp4 (320x180, 30 fps)', exact: mode === 'engine' ? 'the exact frame (stand-ins skipped)' : "the element's completed seek, then a presented frame" }));
         expect(run.steps.length).toBe(24);
+        expect(run.steps.every((s) => s.ms !== null && s.oldEndpointMs !== null && s.gpuCompleteMs !== null && s.ms >= s.gpuCompleteMs)).toBe(true);
       } finally {
         await session.close();
       }
@@ -733,6 +885,7 @@ test.describe('120 Hz rig', () => {
         const run = await runSteps(session, mode, specs, { warmup: 3 });
         await record(summarize('typing-60-keys', mode, run, { font: 'SF Pro Display 600, 96 px', path: 'PM.Edit.apply set_content per key' }));
         expect(run.steps.length).toBe(60);
+        expect(run.steps.every((s) => s.ms !== null && s.oldEndpointMs !== null && s.gpuCompleteMs !== null && s.ms >= s.gpuCompleteMs)).toBe(true);
       } finally {
         await session.close();
       }
@@ -768,32 +921,56 @@ test.describe('120 Hz rig', () => {
             await session.openEditor();
             await session.app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, file);
             await new Promise((r) => setTimeout(r, 1500));
-            const m = await measureAction(session, mode, () => stage('open to first frame', session.page.evaluate(async (name) => {
+            const m = await measureAction(session, mode, () => stage('open to first frame', session.page.evaluate(async ({ name, mode }) => {
               const PM = (window as any).PM;
+              const rig = (window as any).__pmRig;
               const t0 = performance.now();
               let opened: number | null = null;
-              // The first frame presented of the opened document: its name, at a version no older than the open's.
               let since: number | null = null;
-              const first = new Promise<number>((resolve) => {
-                const off = PM.bus.on('preview:presented', (e: any) => {
-                  if (PM.proj?.name !== name) return;
+              let sinceRevision: number | null = null;
+              let oldFirstFrameMs: number | null = null;
+              let firstFrameMs: number | null = null;
+              let gpuCompleteMs: number | null = null;
+              let selected: number | null = null;
+              let claimed = false;
+              const offs: Array<() => void> = [];
+              const first = new Promise<void>((resolve) => {
+                const finish = () => { if (firstFrameMs !== null && oldFirstFrameMs !== null) resolve(); };
+                const shown = (gpuDoneAt: number, shownAt: number) => { gpuCompleteMs = gpuDoneAt - t0; firstFrameMs = shownAt - t0; finish(); };
+                const documentReady = () => {
+                  if (PM.proj?.name !== name) return false;
                   since ??= Number(PM.animVersion?.() ?? 0);
-                  if (e?.project?.name !== name || !(Number(e?.version ?? -1) >= since)) return;
-                  off();
-                  resolve(performance.now() - t0);
-                });
+                  sinceRevision ??= Number(PM.EngineDoc?.barrier?.revision ?? 0);
+                  return true;
+                };
+                if (mode === 'engine') offs.push(rig.watchEngine((frame: any) => {
+                  if (claimed || !documentReady() || frame.standIn || frame.revision < sinceRevision!) return;
+                  claimed = true; selected = frame.seq;
+                }, (frame: any, at: number) => {
+                  if (frame.seq !== selected) return;
+                  const raf = requestAnimationFrame(() => shown(at, performance.now()));
+                  offs.push(() => cancelAnimationFrame(raf));
+                }));
+                offs.push(PM.bus.on('preview:presented', (e: any) => {
+                  if (!documentReady() || e?.project?.name !== name || !(Number(e?.version ?? -1) >= since!)) return;
+                  oldFirstFrameMs ??= performance.now() - t0;
+                  if (mode === 'today' && !claimed) { claimed = true; offs.push(rig.afterWebGL(shown)); }
+                  finish();
+                }));
               });
-              void PM.openProject().then(() => { opened = performance.now() - t0; });
-              const firstFrameMs = await first;
-              return { firstFrameMs, openResolvedMs: opened, layers: PM.proj.layers.length };
-            }, name), 300_000));
+              try {
+                void PM.openProject().then(() => { opened = performance.now() - t0; });
+                await first;
+                return { firstFrameMs, oldFirstFrameMs, gpuCompleteMs, openResolvedMs: opened, layers: PM.proj.layers.length };
+              } finally { offs.forEach((off) => off()); }
+            }, { name, mode }), 300_000));
             const route = await waitRoute(session.page, mode);
             opens.push({ ...m.value, wallMs: m.wallMs, mainMs: +m.mainMs.toFixed(1), layouts: m.layouts, engineCpuMs: mode === 'engine' ? +m.engine.cpuMs.toFixed(2) : null, engineSpanMs: mode === 'engine' ? +m.engine.spanMs.toFixed(2) : null, route: route?.route ?? null });
           } finally {
             await session.close();
           }
         }
-        await record({ row: 'open-large-2000', mode, opens, firstFrameMs: dist(opens.map((o) => o.firstFrameMs)), mainMs: dist(opens.map((o) => o.mainMs)), load: os.loadavg()[0], fixture: summary });
+        await record({ row: 'open-large-2000', mode, opens, firstFrameMs: dist(opens.map((o) => o.firstFrameMs)), oldFirstFrameMs: dist(opens.map((o) => o.oldFirstFrameMs)), firstFrameEndpoint: 'GPU-complete, then next page rAF', mainMs: dist(opens.map((o) => o.mainMs)), load: os.loadavg()[0], fixture: summary });
         if (mode === 'engine') expect(opens.every((o) => o.route === 'engine')).toBe(true);
       }
     } finally {

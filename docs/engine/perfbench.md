@@ -252,7 +252,29 @@ per 120 Hz refresh (8.33 ms). Chromium's begin-frame control
 (`HeadlessExperimental.beginFrame`) exists only in headless Chromium: Electron's
 windowed renderer answers `'HeadlessExperimental.enable' wasn't found`, which
 every row records. So the stepped rows step a virtual clock: step k asks for the
-frame of refresh k and waits for its `preview:presented` (both paths emit it):
+frame of refresh k and waits for **that frame's pixels to be GPU-complete,
+then the next page animation frame**. This is a compositor opportunity, not a
+measurement of physical display scanout. The old `preview:presented` endpoints
+were unequal: today emits synchronously at the end of `GL.render`, after issuing
+WebGL commands but before GPU completion; the engine reports its presentation
+draw, then `PresentedEvents` merges those reports to one bus emission per rAF
+(newest wins). The direct presentation callback can precede the page's WebGPU
+completion too. The rig now uses:
+
+- today: `gl.fenceSync` after the final `GL.render` commands, `gl.flush`,
+  nonblocking `clientWaitSync` polling with timers, then one rAF after the fence
+  signals (polling itself does not consume another rAF);
+- engine: the matching frame's direct `onPresented` identity joined to the
+  presenter's `onDone(seq)` (the page/worker WebGPU draw's `workDone`), then one
+  page rAF. This bypasses `PresentedEvents`' additional hold. Cold reveal can
+  report the identity after GPU completion; the rig remembers completions and
+  observes replacement presenters during open.
+
+`stepLatencyMs` is this common endpoint. `oldEndpointMs` retains the previous
+endpoint (bus event, except engine scrub which already used direct
+`onPresented`); `busPresentedMs`, `drawCallbackMs`, and `gpuCompleteMs` expose
+the individual milestones. Old endpoint columns are diagnostic, not comparable
+latencies between paths. The stepped operations are:
 
 - paused seeks: the time k/120 s on a 120 fps composition, set while paused
   (every refresh a new frame); for the private projects, k/120 s snapped to
@@ -271,8 +293,8 @@ frame of refresh k and waits for its `preview:presented` (both paths emit it):
 Per step it records the page's main-thread work (CDP `Performance.getMetrics`
 `TaskDuration`, minus the rig's calibrated round trip), its tasks, layouts and
 style recalculations, the page's messages and clone bytes, today's WebGL calls,
-the step's latency (request to presentation), and, from the engine's stats, its
-work counters and three times:
+the step's latency (request to GPU-complete plus next rAF), and, from the
+engine's stats, its work counters and three times:
 
 - compose CPU (`composeUsTotal`: planning, encoding, submission);
 - span (`gpuUsTotal`): from the compose's start to the GPU finishing the frame
@@ -301,11 +323,15 @@ Rows that are not frame steps:
   presented against the 360 a 120 Hz display would show, the gaps between
   presentations, the page's animation-frame rate (the hidden test window's
   display link), and per presented frame the page's main thread and the
-  engine's compose CPU, GPU-only and span;
+  engine's compose CPU, GPU-only and span. It retains bus-event counts/gaps and
+  counts engine direct callbacks, GPU draw completions, bus emissions, actual
+  replacements of pending emissions, and pending state at the measurement's
+  boundaries; continuous playback counts completed draws reaching a following
+  rAF, not distinct physical scanouts;
 - **open**: the 2,000-layer project saved to a `.pmv` by today's app, then
   opened three times on each path through `PM.openProject`, each in a fresh app
-  on a small project: time to its first presented frame, and the page's main
-  thread over it;
+  on a small project: time to its first GPU-complete frame plus next rAF, the
+  old bus endpoint (`oldFirstFrameMs`), and the page's main thread over it;
 - **export**: 120 frames of the 500-layer project at 30 fps to H.264 1920 × 1080
   through the export sheet's `PM.Export.run` (`quality: 'high'`): wall time,
   frames in the file (ffprobe), the muxer tag (FFmpeg's `Lavf` is today's
@@ -356,100 +382,136 @@ and stills.
 
 ## Results
 
-The rig, release addon with the fixes above, 2026-10-22 22:00, load 12 to 15
-(run A in `perfbench-measurements/rig-20261022.jsonl`; run B is the same rows at
-load 31 to 47, run C the export rows at load 17). Stepped rows: 240 measured
-steps after 4 warm-up (scrub 24 after 1, typing 60 after 3); times are p50 / p95.
+The rerun with corrected endpoints used the release addon with the fixes
+above, 2026-10-22 22:34 (Pacific), one-minute load 44.3 to 70.5 on 16 logical CPUs
+(`perfbench-measurements/rig-endpoints-20261022.jsonl`, run A2). The original
+run A was at load 12–15. Concurrent work prevented matching that load; the
+rerun records load at each row and at the start of the stepped rows. A2 ran
+after a 180 s cooldown and had the lower mean recorded row load (51.6 versus
+62.1 for the first pass, B2, in the same file). These
+are within-run comparisons, not a controlled isolation of the endpoint change
+from load. Stepped rows: 240 measured steps after 4 warm-up (scrub 24 after 1,
+typing 60 after 3); times below are p50 / p95 in ms.
 
-| Row | Fit 8.33 ms | Page main thread | Main-thread tasks a step | Engine compose CPU | Engine GPU only | Engine span | Today WebGL GPU | Request → presented |
-|---|---|---|---|---|---|---|---|---|
-| Paused seeks, today | 227 of 240 | 6.66 / 8.37 ms | 1 | | | | 3.79 / 4.23 ms | 10.1 / 11.1 ms |
-| Paused seeks, engine | 150 of 240 (span: 98) | 7.94 / 9.89 ms | 14 | 5.77 / 7.10 ms | 2.42 / 2.99 ms | 8.41 / 9.60 ms | | 15.6 / 22.3 ms |
-| Paused edit, today | 0 of 240 | 25.0 / 29.6 ms | 1 | | | | 4.33 / 5.15 ms | 22.4 / 25.3 ms |
-| Paused edit, engine | 0 of 240 | 28.6 / 34.2 ms | 21 | 3.58 / 3.92 ms | 1.56 / 1.80 ms | 5.18 / 5.52 ms | | 34.1 / 39.5 ms |
-| Scrub 24 seeks, today | 24 of 24 | 6.98 / 7.37 ms | 18 | | | | 0.29 / 0.39 ms | 12.9 / 13.5 ms |
-| Scrub 24 seeks, engine | 22 of 24 (span: 22) | 5.52 / 7.47 ms | 4 | 0.77 / 1.32 ms | 0.79 / 1.54 ms | 1.58 / 2.78 ms | | 3.1 / 9.7 ms |
-| Typing 60 keys, today | 0 of 60 | 14.3 / 15.6 ms | 1 | | | | 0.38 / 0.53 ms | 12.5 / 13.5 ms |
-| Typing 60 keys, engine | 0 of 60 | 16.8 / 18.8 ms | 17 | 1.79 / 2.84 ms | 0.91 / 0.97 ms | 2.71 / 3.77 ms | | 18.4 / 26.0 ms |
+The old latency verdicts (“paused rows add 5 to 12 ms” and “slower everywhere
+else”) are withdrawn: their endpoints differed. The corrected comparison is:
 
-Real playback (`PM.play`, 3 s, 500 layers at 120 fps; the hidden window's page
-ran animation frames at 114 Hz today and 120 Hz with the engine on):
+| Row | Today: GPU done + next rAF | Engine: GPU done + next rAF | Today: old endpoint | Engine: old endpoint |
+|---|---|---|---|---|
+| Paused seeks | 14.40 / 18.90 | 20.10 / 25.90 | 7.30 / 11.90 | 18.80 / 24.20 |
+| Paused edit | 34.10 / 39.40 | 38.10 / 44.30 | 26.20 / 29.80 | 32.90 / 41.30 |
+| Scrub 24 seeks | 18.80 / 27.40 | 14.60 / 21.30 | 10.80 / 18.50 | 3.70 / 12.30 |
+| Typing 60 keys | 24.00 / 28.40 | 29.50 / 32.30 | 14.20 / 15.30 | 22.00 / 27.10 |
 
-| Row | Presented of 360 | Gap between presentations | Gaps over 12.5 ms | Page main thread per presented frame | Engine per rendered frame (CPU / GPU only / span) |
-|---|---|---|---|---|---|
-| Playing, today | 343 | 8.6 / 10.1 ms | 5 | 8.73 ms | |
-| Playing, engine | 189 (224 rendered) | 16.1 / 25.8 ms | 114 | 12.5 ms | 6.37 / 2.49 / 8.86 ms |
+The old endpoint is the bus event, except engine scrub's direct presentation
+callback; those two columns are retained for diagnosis only. The common
+endpoint waits for GPU completion and a compositor opportunity on both paths;
+it does not prove when a monitor scanned out the frame.
 
-Open and export:
+Stage measurements and the unchanged 8.33 ms fit criterion:
+
+| Row | Fit 8.33 ms | Page main thread | Main-thread tasks a step | Engine compose CPU | Engine GPU only | Engine span | Today WebGL GPU |
+|---|---|---|---|---|---|---|---|
+| Paused seeks, today | 0 of 240 | 10.49 / 13.37 | 8.00 / 11.00 |  |  |  | 3.42 / 4.71 |
+| Paused seeks, engine | 24 of 240 (span: 0) | 8.86 / 10.12 | 20.00 / 26.00 | 6.53 / 7.10 | 2.38 / 2.96 | 8.94 / 9.80 |  |
+| Paused edit, today | 0 of 240 | 30.80 / 37.02 | 13.00 / 19.00 |  |  |  | 4.50 / 10.07 |
+| Paused edit, engine | 0 of 240 (span: 0) | 28.04 / 35.63 | 25.00 / 30.00 | 3.57 / 4.02 | 1.52 / 2.27 | 5.08 / 6.05 |  |
+| Scrub 24 seeks, today | 0 of 24 | 9.18 / 10.28 | 34.00 / 37.00 |  |  |  | 0.28 / 0.72 |
+| Scrub 24 seeks, engine | 11 of 24 (span: 11) | 8.35 / 10.06 | 15.00 / 26.00 | 0.86 / 1.55 | 0.90 / 1.43 | 1.74 / 2.97 |  |
+| Typing 60 keys, today | 0 of 60 | 16.16 / 17.91 | 23.00 / 27.00 |  |  |  | 0.35 / 1.02 |
+| Typing 60 keys, engine | 0 of 60 (span: 0) | 18.87 / 21.00 | 23.00 / 26.00 | 2.05 / 3.02 | 0.85 / 1.25 | 2.91 / 4.16 |  |
+
+The latency is not a fit-count gate. Main-thread time/tasks now cover the
+longer common endpoint, including the rig's WebGL fence polling and the next
+rAF's work; task counts are not application-only task counts. Stage values
+from the old endpoint cannot be treated as measurements of this longer span.
+
+Real playback (`PM.play`, 3 s, 500 layers at 120 fps). “Completed + rAF” counts
+completed draws reaching a following page rAF, not distinct physical scanouts.
+The old bus event counts/gaps are retained in the JSON.
+
+| Row | Completed + rAF / expected | Old bus events | Page rAF Hz | Gap p50 / p95 | Page main thread per completed + rAF | Engine per rendered frame: CPU / GPU only / span |
+|---|---|---|---|---|---|---|
+| Playing, today | 271 / 360 | 273 | 102.5 | 10.00 / 21.90 | 11.03 |  |
+| Playing, engine | 35 / 360 | 35 | 119.9 | 27.60 / 164.90 | 80.12 | 8.02 / 3.01 / 11.03 |
+
+The engine rendered 101 frames, reported 35 direct presentation callbacks,
+and completed 35 of those page draws within the window. `PresentedEvents`
+received 35 pushes, replaced a pending emission 0 times, and emitted
+35 bus events (none pending at either boundary). No reports were merged
+in this rerun; the remainder of the rendered-versus-bus gap
+cannot all be called dropped displayed frames. Engine rendering, delivery,
+selection, and the measurement boundaries still need separate tracing.
+
+Open and export (ms unless marked s):
 
 | Row | Today | Engine |
 |---|---|---|
-| Open the 2,000-layer project, first frame (3 opens) | 433, 541, 552 ms (main thread 360 to 467 ms) | 683, 711, 859 ms (main thread 586 to 751 ms; engine compose 104 to 134 ms, span 156 to 197 ms) |
-| Export 120 frames, H.264 1080p, load 13 | 4.00 s (33.3 ms a frame; main thread 3.23 s) | 3.14 s (26.2 ms a frame; main thread 0.55 s) |
-| Export, load 17 (run C) | 8.05 s (67.1 ms a frame) | 5.28 s (44.0 ms a frame) |
-| Export, load 40 to 47 (run B) | 11.6 s (96.9 ms a frame) | 36.0 s (300 ms a frame) |
+| Open 2,000 layers, GPU done + next rAF (3 fresh opens) | 615.6, 593.9, 559.8 | 894.3, 950.9, 885.9 |
+| Open, old bus endpoint (same opens) | 595.0, 575.2, 541.4 | 894.2, 950.8, 885.8 |
+| Export 120 frames, H.264 1080p | 4.56 s (38.0 ms/frame; 120 frames verified) | 50.23 s (418.6 ms/frame; 120 frames verified) |
 
-What this says, as measured:
+What this says in this rerun:
 
-- **The engine is faster than today at scrubbing** (exact frame 3.1 ms p50 after
-  the seek against 12.9 ms, 4 main-thread tasks against 18) and **at exporting**
-  on a moderately loaded machine (26.2 against 33.3 ms a frame at load 13, 44
-  against 67 at load 17, with a sixth of today's main-thread time).
-- **It is slower everywhere else.** Real playback presents 189 of 360 frames
-  (today 343), the paused rows add 5 to 12 ms of latency, and opening the large
-  project takes 1.3 to 1.6 times as long. The engine's own render work is not
-  the main cost in the interactive rows: the page's main thread with the engine
-  on runs 14 to 21 tasks between a request and its presentation (today 1),
-  posts and receives about 5 messages a frame (56 KB of structured clones), and
-  spends 1.3 to 3.6 ms more per step than today's whole WebGL frame in the
-  paused seek, edit and typing rows. In real playback the engine rendered 224
-  frames and presented 189.
-- **The export runs at the job engine's utility QoS** (contract 13), and on a
-  heavily loaded machine that starves it: at load 40 to 47 it took 3.1 times as
-  long as today's exporter, which runs on the page's main thread. The bench at
-  the job engine's class (`perfbench --job-qos`, 3 alternating pairs at load 24
-  to 27) is 1.3 to 1.6 times slower than at the default class (18 → 28,
-  28 → 40, 26 → 34 ms a frame); the rest of the in-app gap at that load is not
-  explained.
+- **Latency to the common endpoint varies by operation.** Engine minus today at
+  p50: paused seeks +5.7 ms; paused edit +4.0 ms; scrub 24 seeks −4.2 ms;
+  typing 60 keys +5.5 ms. These replace the old endpoint comparison; there is no “slower everywhere else” conclusion.
+- **Playback remains below a 120 Hz cadence:** the engine completed
+  35 draws through the next-rAF endpoint against today's
+  271. The bus-event count is a separate, merged signal.
+- **Open's median latency to the common endpoint** was 894.3 ms with
+  the engine against 593.9 ms today; **export** took
+  50.23 s against 4.56 s. Neither is a general verdict across loads.
+- **Export still runs at the job engine's utility QoS** (contract 13). The
+  earlier load-40–47 run B took 36.0 s with the engine against 11.6 s today;
+  at load 13 the old A took 3.14 s against 4.00 s, and at load 17 run C took
+  5.28 s against 8.05 s. Export endpoints did not have the presentation mismatch.
+  The job-class bench (`perfbench --job-qos`, three alternating pairs at load
+  24–27) was 1.3–1.6 times slower than default class; the rest of the loaded
+  in-app gap is not explained.
 
-Per frame, today's WebGL viewer makes 557 draws, 607 framebuffer binds and
-2,388 uniform sets on the paused seeks; the engine 549 draws in 33 render
-passes, 32 uploads (148 KB), 5 bind group creations, 1 buffer allocation and 2
-file stats. The paused edit plans 75 layers a frame in the app (550 before the
-reuse fix).
+An earlier V8 profile of paused-seek steps (`PM_PERFBENCH_RIG_PROFILE`, load
+11) put 17% of sampled page time (about 4.3 ms/frame) in the timeline's
+`getBoundingClientRect`: a forced layout after the engine path writes the
+DOM. This is historical profile evidence, not a new profile of A2. Private
+projects were not rerun: their earlier attempts stalled before measured frames.
 
-An earlier V8 profile of the paused-seek steps (`PM_PERFBENCH_RIG_PROFILE`, load
-11) put 17% of the page's sampled time (about 4.3 ms a frame) in
-`getBoundingClientRect` from the timeline's `draw` on each presented frame: a
-forced layout, because the engine path writes the DOM (overlay, presentation)
-before the timeline reads it. The private projects did not reach measured
-frames in the last attempt (today's viewer on the first one took more than 60 s
-for a warm-up frame and the page stopped answering, twice; an earlier engine
-run never reached its first frame); they were not run again this round.
+B2 recorded 197 engine renders, 169 direct callbacks, 20 replacements of
+pending emissions, and 149 bus events. Its 169 completed draws through the
+next-rAF endpoint (against A2's 35) also show substantial playback variation
+under contention.
 
 ## What remains
 
-The next biggest gaps, from the rig against today (Results), largest first:
+The remaining gaps and uncertainties from the corrected rig (Results):
 
-- **Real playback presents half the frames today does** (189 of 360 against
-  343; the engine rendered 224). Where the 35 rendered frames went and why the
-  engine renders at 75 fps when its compose CPU (6.4 ms) and GPU (2.5 ms) fit a
-  120 Hz pipeline is the first thing to trace (presentation pacing, the
-  descriptor path to the page). The bigrender lane owns large-project playback.
-- **The page's main thread with the engine on** does more than today's whole
-  WebGL frame: 14 to 21 tasks and about 5 messages per step against today's 1
-  task, and a forced layout from the timeline's `getBoundingClientRect` after
-  the engine path writes the DOM (cache the rect on resize). bigrender owns the
-  page side.
-- **Paused edits and typing** add 6 to 12 ms of latency over today, mostly on
-  the page (the engine's own compose is 1.8 to 3.6 ms).
-- **Opening the 2,000-layer project** takes 1.3 to 1.6 times as long; the
-  engine's first frame allocates a target per group and precomp pass, all alive
-  at once (117 targets, 811 MB). bigopen owns open.
-- **Exports under load**: the job engine's utility QoS (contract 13) costs 1.3
-  to 1.6 times in the bench and, at load 40 to 47, the in-app export took 3.1
-  times as long as today's. Raising a user-started export to the default class
-  while nothing plays is a plan decision (invariant 10), not made here.
+- **Playback pacing and event accounting.** The original A's 224 rendered
+  versus 189 “presented” was a comparison to bus emissions, not a count of 35
+  known dropped pictures. Engine presented emissions are merged to one per
+  rAF (newest wins), which may explain part of that gap. A2 measures
+  101 rendered, 35 direct callbacks, 0 replacements of pending emissions,
+  and 35 bus events. That measures merging in A2; it cannot retroactively
+  partition the old 224/189 gap. The other corrected pass (B2) measured
+  20 replacements (169 direct callbacks to 149 bus events), so
+  merging's contribution varies with pacing. Trace rendering, descriptor delivery,
+  selection, GPU completion, and commit/scanout separately. bigrender owns
+  large-project playback.
+- **The page's main thread** still includes forced layout from the timeline's
+  `getBoundingClientRect` after the engine path writes the DOM; cache the rect
+  on resize (bigrender). The corrected task span includes rig fence polling
+  and next-rAF work, so the old “today 1 task versus engine 14–21” is not a
+  comparison of application-only work through the common endpoint.
+- **Interactive latency** needs quieter paired runs: engine minus today
+  at p50 in A2 is +5.7 ms for paused seeks, +4.0 ms for paused edits,
+  −4.2 ms for scrub, and +5.5 ms for typing. The old blanket “6–12 ms slower” paused-edit/typing claim is
+  withdrawn; use the corrected table and its recorded load.
+- **Opening 2,000 layers:** continue profiling the first frame's 117 targets
+  (811 MB) alive at once; release group/precomp targets as passes finish.
+  bigopen owns open. Use the corrected first-frame endpoint above.
+- **Exports under load:** utility QoS costs 1.3–1.6 times in the job-class
+  bench and the earlier loaded app run took 3.1 times today's export duration.
+  Raising a user-started export to default class while nothing plays is a plan
+  decision (invariant 10), not made here.
 - **Playback planning allocates about 38,000 times a frame** at 500 layers
   (`alloc_sites playback_500`): JavaScript-string clones in `pm-eval`
   (`node.rs` `js_value`, `scope.rs` channel keys, `comp.rs` id keys: about
