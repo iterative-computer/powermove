@@ -313,6 +313,11 @@ impl GpuProgram {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
     ) -> Result<&wgpu::RenderPipeline, Failure> {
+        pm_perf::cache(
+            pm_perf::Counter::PipelineCacheHits,
+            pm_perf::Counter::PipelineCacheMisses,
+            self.pipelines.contains_key(&format),
+        );
         if !self.pipelines.contains_key(&format) {
             let scopes = push_scopes(device);
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

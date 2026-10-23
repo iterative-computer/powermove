@@ -402,9 +402,11 @@ pub(crate) fn draw<'d>(
     {
         entry.used = build;
         reuse.stats.reused += 1;
+        pm_perf::bump(pm_perf::Counter::DrawReuseHits);
         return Ok(entry.draws.clone());
     }
     reuse.stats.planned += 1;
+    pm_perf::bump(pm_perf::Counter::DrawReuseMisses);
     // Plan the layer and keep it when it qualifies.
     let failures = b.failures.len();
     let unsupported = b.unsupported.len();

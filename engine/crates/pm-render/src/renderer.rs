@@ -835,8 +835,10 @@ impl Renderer {
             let mut attempt = 0;
             let mut waits = 0;
             let failure = loop {
+                pm_perf::bump(pm_perf::Counter::RasterRequests);
                 let failure = match host.run(&job) {
                     Ok(pixels) if pixels.fits(&job.request) => {
+                        pm_perf::bump(pm_perf::Counter::RasterAnswers);
                         self.put_fallback_pixels(key.clone(), pixels);
                         break None;
                     }

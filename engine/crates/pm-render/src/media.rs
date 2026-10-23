@@ -1092,8 +1092,10 @@ impl MediaCache {
             compat,
         };
         if let Some(t) = self.images.get(&key) {
+            pm_perf::bump(pm_perf::Counter::MediaCacheHits);
             return Ok(t.clone());
         }
+        pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
         let issue = |i: ProbeIssue| match i {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
             ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
@@ -1285,6 +1287,7 @@ impl MediaCache {
         };
         // The newest converted frame of the source (a paused redraw).
         if let Some(t) = self.frames.get(&key_of(n)) {
+            pm_perf::bump(pm_perf::Counter::MediaCacheHits);
             return Ok(Some(t.clone()));
         }
         // Export frames, and deinterlaced frames (the current frame and its
@@ -1326,8 +1329,10 @@ impl MediaCache {
         // A stand-in may be the frame converted last.
         let key = key_of(n);
         if let Some(t) = self.frames.get(&key) {
+            pm_perf::bump(pm_perf::Counter::MediaCacheHits);
             return Ok(Some(t.clone()));
         }
+        pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
         let bitmap = if sequence
             && compat
             && !interprets_video_reading(interp)
