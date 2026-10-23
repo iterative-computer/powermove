@@ -212,6 +212,8 @@ export class WorkerPresenter implements Presenter {
    */
   private readonly inWorker = new Map<string, { release: FrameRelease; frame: VideoFrame }>();
   private remote: PresenterStats | null = null;
+  private resolveDrain: () => void = () => {};
+  private readonly drain = new Promise<void>((resolve) => { this.resolveDrain = resolve; });
 
   constructor(private readonly options: WorkerPresenterOptions) {
     this.generation = options.generation ?? 0;
@@ -436,12 +438,7 @@ export class WorkerPresenter implements Presenter {
    * will never release them), and the session ends.
    */
   abandon(): void {
-    for (const { release, frame } of this.inWorker.values()) {
-      frame.close();
-      this.local.released++;
-      this.options.link.release(release);
-    }
-    this.inWorker.clear();
+    this.releaseHeld();
     this.dispose();
   }
 
@@ -453,6 +450,13 @@ export class WorkerPresenter implements Presenter {
       this.options.link.release(release);
     }
     this.inWorker.clear();
+    // A worker sends `closed` only after its GPU fence. On a crash, the
+    // worker is terminated before this release instead.
+    this.resolveDrain();
+  }
+
+  drained(): Promise<void> {
+    return this.drain;
   }
 
   dispose(): void {

@@ -544,7 +544,7 @@ export function install(PM: PMRegistry): void {
 
     window.setTimeout(() => {
       try {
-        const ok = !!(PM.GL && PM.GL.gl);
+        const ok = !!(PM.GL && (PM.EngineConnection ? PM.GL.peekContext?.() : PM.GL.gl));
         const layers = PM.proj ? PM.proj.layers.length : -1;
         const milliseconds = PM.perf ? (PM.perf.ms || 0).toFixed(1) : '?';
         bridge.log('info', `boot gl=${ok} layers=${layers} ms=${milliseconds}`);

@@ -462,6 +462,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const opened = openSession();
       if (!opened) return null;
       const lease = ++viewerLease;
+      let retirementLaunch: number | null = null;
+      let authorizedRetirement = false;
       const previous = viewerHandlers;
       viewerHandlers = handlers;
       previous?.closed('another viewer attached to the engine session');
@@ -483,12 +485,27 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         },
         release: (release) => opened.release(release),
         close: () => {
-          if (lease !== viewerLease || opened.closed) return;
+          if (lease !== viewerLease || viewerHandlers !== handlers || opened.closed) return;
+          // `sendViewerState` can merely queue headless while the document
+          // has no session id or its first resync is pending. A new viewer
+          // could overwrite that queued state and keep using this pool, so
+          // only a posted headless state grants import-retirement ownership.
+          const postedHeadless = opened.id !== null && !(opened.resyncPending && opened.applied === 0) && c.ready && !c.closed;
+          const launch = postedHeadless ? source.stats().launch : null;
           viewerHandlers = null;
           opened.sendHeadless(openComposition());
+          retirementLaunch = launch;
+          authorizedRetirement = launch !== null && source.stats().launch === launch && c.ready && !c.closed;
           transport.refresh();
-          drawingWarmup.warm();
-        }
+        },
+        retireClosedPool: (generation) => {
+          // A replacement viewer may claim the same pool before an old GPU
+          // fence drains. A new launch also reuses generation numbers after
+          // preload has cleared its old imports. Both revoke this channel's
+          // right to retire the generation.
+          if (!authorizedRetirement || lease !== viewerLease || viewerHandlers !== null || source.stats().launch !== retirementLaunch) return 0;
+          return source.retire(generation);
+        },
       };
     }
   });

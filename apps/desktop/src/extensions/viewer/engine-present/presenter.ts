@@ -192,6 +192,8 @@ export interface Presenter {
   /** The viewer's window is being resized now (a live resize step). */
   noteResize?(): void;
   dispose(): void;
+  /** Settles after every frame submitted before disposal has finished GPU use. */
+  drained?(): Promise<void>;
 }
 
 export class EnginePresenter implements Presenter {

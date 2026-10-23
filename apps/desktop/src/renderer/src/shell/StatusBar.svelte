@@ -55,14 +55,15 @@
       return total + props.reduce((count: number, entry: any) => count + (entry?.prop?.kf ?? entry?.kf ?? []).length, 0);
     }, 0);
   });
-  const webglLive = $derived.by(() => {
+  const nativeEngine = $derived(!!PM.EngineConnection);
+  const rendererLive = $derived.by(() => {
     refreshToken;
-    return !!PM.GL?.gl;
+    return nativeEngine ? PM.EngineConnection.status().connected : !!PM.GL?.gl;
   });
   const playbackStatus = $derived.by(() => {
     refreshToken;
-    if (PM.GL?.contextLost) return 'Restoring GPU preview…';
-    if (PM.GL?.compiling) return `Preparing ${PM.GL.compiling} shader${PM.GL.compiling === 1 ? '' : 's'}…`;
+    if (!nativeEngine && PM.GL?.contextLost) return 'Restoring GPU preview…';
+    if (!nativeEngine && PM.GL?.compiling) return `Preparing ${PM.GL.compiling} shader${PM.GL.compiling === 1 ? '' : 's'}…`;
     if (PM.Preview?.preparing) return 'Preparing preview';
     if (PM.Preview?.active) return 'Cached preview';
     if (!transport.playing) return 'Playback paused';
@@ -117,7 +118,9 @@
 {/each}
 <span class="sp" aria-hidden="true"></span>
 <span class="status-field">
-  {#if webglLive}<b class="live" aria-hidden="true">●</b> WebGL2{:else}WebGL unavailable{/if}
+  {#if nativeEngine}
+    {#if rendererLive}<b class="live" aria-hidden="true">●</b> Native engine{:else}Native engine starting{/if}
+  {:else if rendererLive}<b class="live" aria-hidden="true">●</b> WebGL2{:else}WebGL unavailable{/if}
 </span>
 <span class="status-field" title="Measured preview redraws per second during playback">{playbackStatus}</span>
 <span class="status-field" title="Preview render time">{frameMs} ms</span>

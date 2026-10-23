@@ -8,7 +8,7 @@ import { ChromeLeases } from './chrome-leases';
  * finds it, it attaches a `ViewerPresentation` to its stage:
  *
  * - a canvas over the stage (below the DOM and Canvas2D overlay), drawn
- *   with WebGPU from the engine's shared surfaces (`EnginePresenter`);
+ *   with WebGL2 from the engine's shared surfaces (`EnginePresenter`);
  * - a viewer session on the interactive engine (`open`): the viewer state
  *   (size in device pixels, DPR, zoom, pan, resolution, media preference,
  *   canvas color space, EDR, the view override, Play Every Frame), numbered
@@ -56,8 +56,11 @@ export const ENGINE_VIEWER_CHANGED = 'powermove:engine-viewer-changed';
 
 /** One viewer session on the interactive engine. */
 export interface EngineViewerChannel extends FrameLink {
-  /** Ends the session (the engine retires its pool). */
+  /** Detaches this viewer. */
   close(): void;
+  /** The built-in channel may retire this viewer's imports after GPU and
+   * chrome readers drain. Custom channels can omit this capability. */
+  retireClosedPool?(generation: number): number;
 }
 
 export type EngineViewerHandlers = {
@@ -217,11 +220,16 @@ export class ViewerPresentation {
   private painterFailed = false;
   private drawingPending: { token: number; promise: Promise<boolean> } | null = null;
   private worker: PresentWorker | null = null;
-  /** The worker could not present (no WebGPU in workers): stay on this thread. */
+  /** The worker could not present: stay on this thread. */
   private workerUnavailable = false;
   private presenter: Presenter | null = null;
   private channel: EngineViewerChannel | null = null;
   private chromeLeases: ChromeLeases | null = null;
+  /** Imports survive presenter replacement, but no longer than this viewer.
+   * Keep each generation's lease through a reconnect: chrome reads of the
+   * retained last frame can outlive its old channel. */
+  private readonly poolLeases = new Map<number, Set<ChromeLeases | null>>();
+  private readonly draining = new Set<Promise<void>>();
   private readonly sequencer = new ViewSequencer();
   private readonly states: ViewerState[] = [];
   private params: ViewParams | null = null;
@@ -632,7 +640,7 @@ export class ViewerPresentation {
 
   /**
    * Makes the canvas's drawing: a presentation worker when the viewer can
-   * start one and the canvas can hand its drawing over, otherwise a WebGPU
+   * start one and the canvas can hand its drawing over, otherwise a WebGL2
    * painter on this thread. False when neither works.
    */
   private makeDrawing(): Promise<boolean> {
@@ -798,7 +806,7 @@ export class ViewerPresentation {
     const token = ++this.backendToken;
     const generation = this.presenter?.stats.generation ?? 0;
     this.chromeLeases?.clear();
-    this.presenter?.dispose();
+    this.stopPresenter(this.presenter);
     this.presenter = null;
     this.latestFrame = null;
     this.worker?.dispose();
@@ -887,6 +895,11 @@ export class ViewerPresentation {
     const channel = this.options.service.open({
       message: (message, arrivedMs) => {
         if (this.channel !== opened) return;
+        if (message.type === 'surfacePool') {
+          let leases = this.poolLeases.get(message.pool.generation);
+          if (!leases) { leases = new Set(); this.poolLeases.set(message.pool.generation, leases); }
+          leases.add(this.chromeLeases);
+        }
         if (message.type === 'routed') {
           // The engine cannot draw this composition at this revision: its
           // frames (older ones still in flight too) leave the stage.
@@ -949,7 +962,7 @@ export class ViewerPresentation {
     this.chromeLeases?.clear();
     this.chromeLeases = null;
     this.held = [];
-    this.presenter?.dispose();
+    this.stopPresenter(this.presenter);
     this.presenter = null;
     if (this.exclusive) {
       // The engine restarts (section 19): the last frame stays on screen,
@@ -974,25 +987,56 @@ export class ViewerPresentation {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.chromeLeases?.clear();
+    const leases = this.chromeLeases;
+    leases?.clear();
+    this.chromeLeases = null;
     this.backendToken++;
     if (this.settleTimer && this.host) this.clearTimer(this.host, this.settleTimer);
     this.settleTimer = 0;
     this.offReady();
     for (const off of this.mediaOffs.splice(0)) off();
-    this.presenter?.dispose();
+    this.stopPresenter(this.presenter);
     this.presenter = null;
-    this.channel?.close();
+    const channel = this.channel;
+    channel?.close();
     this.channel = null;
     this.worker?.dispose();
     this.worker = null;
     this.painter?.dispose();
     this.painter = null;
+    const pools = [...this.poolLeases];
+    this.poolLeases.clear();
+    // The preload's imports are otherwise retained until a replacement
+    // pool or pagehide. A worker acknowledges `closed` only after its GPU
+    // work and page-side VideoFrame references have drained; chrome reads
+    // can defer retirement further through their leases.
+    if (channel?.retireClosedPool) void Promise.all(this.draining).then(() => {
+      for (const [generation, holders] of pools) {
+        let remaining = holders.size;
+        const oneDrained = (): number => {
+          if (--remaining === 0) return channel.retireClosedPool?.(generation) ?? 0;
+          return 0;
+        };
+        for (const poolLeases of holders) {
+          if (poolLeases) poolLeases.retire(generation, oneDrained);
+          else oneDrained();
+        }
+      }
+    });
     this.listeners.clear();
     this.hiddenListeners.clear();
     this.canvasElement.remove();
     this.setStatus(null);
     if (this.options.stage.dataset['engineStage'] === (this.options.role ?? 'viewer')) delete this.options.stage.dataset['engineStage'];
+  }
+
+  private stopPresenter(presenter: Presenter | null): void {
+    if (!presenter) return;
+    presenter.dispose();
+    const drained = presenter.drained?.();
+    if (!drained) return;
+    this.draining.add(drained);
+    void drained.then(() => this.draining.delete(drained), () => this.draining.delete(drained));
   }
 }
 

@@ -23,6 +23,11 @@ class FakeFrame {
 
 class Source implements FrameSource {
   private listeners = new Set<(g: number, i: number) => void>();
+  readonly retired: number[] = [];
+  launch = 1;
+  // Custom sources may have unrelated stats. Retirement policy belongs to
+  // the built-in channel, not the generic FrameSource contract.
+  stats(): { customImportCount: number } { return { customImportCount: 0 }; }
   videoFrame(): VideoFrame | null {
     return new FakeFrame() as unknown as VideoFrame;
   }
@@ -30,7 +35,8 @@ class Source implements FrameSource {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
-  retire(): number {
+  retire(generation: number): number {
+    this.retired.push(generation);
     return 0;
   }
 }
@@ -68,7 +74,11 @@ class Channel implements EngineViewerChannel {
   states: ViewerState[] = [];
   releases: FrameRelease[] = [];
   closed = false;
-  constructor(readonly handlers: EngineViewerHandlers) {}
+  private closedLaunch: number | null = null;
+  retireClosedPool?: (generation: number) => number;
+  constructor(readonly handlers: EngineViewerHandlers, private readonly source: Source) {
+    this.retireClosedPool = (generation) => this.closed && this.closedLaunch === this.source.launch ? this.source.retire(generation) : 0;
+  }
   sendViewerState(state: ViewerState): void {
     this.states.push(state);
   }
@@ -77,6 +87,7 @@ class Channel implements EngineViewerChannel {
   }
   close(): void {
     this.closed = true;
+    this.closedLaunch = this.source.launch;
   }
 }
 
@@ -92,7 +103,7 @@ class Service implements EngineViewerService {
   }
   open(handlers: EngineViewerHandlers): EngineViewerChannel | null {
     if (!this.connected) return null;
-    const channel = new Channel(handlers);
+    const channel = new Channel(handlers, this.source);
     this.channels.push(channel);
     return channel;
   }
@@ -229,6 +240,162 @@ const settleLong = async (): Promise<void> => {
 };
 
 describe('ViewerPresentation', () => {
+  it('retires both active imports only when the final viewer is disposed', async () => {
+    const service = new Service();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 11, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 12, surfaces: [], role: 'depthId' } }, performance.now());
+    expect(service.source.retired).toEqual([]);
+    presentation.dispose();
+    await settle();
+    expect(channel.closed).toBe(true);
+    expect(service.source.retired).toEqual([11, 12]);
+  });
+
+  it('keeps the last frame through a restart and retires a reused generation only after its new channel closes', async () => {
+    const service = new Service();
+    Object.assign(service, { exclusive: true });
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 21, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1, 21) }, performance.now());
+    runFrames(rafs, performance.now());
+    await settle();
+    expect(presentation.latest?.seq).toBe(1);
+    channel.handlers.closed('engine restart');
+    await settle();
+    expect(presentation.latest?.seq).toBe(1);
+    expect(service.source.retired).toEqual([]);
+    service.fireReady();
+    await settle();
+    const next = service.channels[1]!;
+    next.handlers.message({ type: 'surfacePool', pool: { generation: 21, surfaces: [] } }, performance.now());
+    presentation.dispose();
+    await settle();
+    expect(service.source.retired).toEqual([21]);
+  });
+
+  it('defers final color and depth retirement until a chrome read releases', async () => {
+    const service = new Service();
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 31, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 32, surfaces: [], role: 'depthId' } }, performance.now());
+    channel.handlers.message({ type: 'frame', frame: { ...desc(1, 1, 31), depthId: { poolIndex: 1, poolGeneration: 32, seq: 1, encoding: 'chromePlanesV1' } } }, performance.now());
+    runFrames(rafs, performance.now());
+    await settle();
+    const release = presentation.retainChromeFrame(presentation.latest!);
+    expect(release).not.toBeNull();
+    presentation.dispose();
+    await settle();
+    expect(service.source.retired).toEqual([]);
+    release?.();
+    await settle();
+    expect(service.source.retired).toEqual([31, 32]);
+  });
+
+  it('does not retire a reused pool generation after the engine relaunches while chrome still reads it', async () => {
+    const service = new Service();
+    const { stage, overlay, rafs } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 31, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'frame', frame: { ...desc(1, 1, 31), depthId: { poolIndex: 1, poolGeneration: 31, seq: 1, encoding: 'chromePlanesV1' } } }, performance.now());
+    runFrames(rafs, performance.now());
+    await settle();
+    const release = presentation.retainChromeFrame(presentation.latest!);
+    expect(release).not.toBeNull();
+    presentation.dispose();
+    await settle();
+    expect(service.source.retired).toEqual([]);
+    service.source.launch = 2; // Preload's new launch cleared old imports and accepted generation 31 again.
+    release?.();
+    await settle();
+    expect(service.source.retired).toEqual([]);
+  });
+
+  it('does not retire a pool handed to a replacement viewer before old disposal', async () => {
+    class HandoffService extends Service {
+      private lease = 0;
+      override open(handlers: EngineViewerHandlers): EngineViewerChannel | null {
+        const channel = super.open(handlers) as Channel;
+        const mine = ++this.lease;
+        const close = channel.close.bind(channel);
+        channel.close = () => {
+          if (mine === this.lease) close();
+        };
+        return channel;
+      }
+    }
+    const service = new HandoffService();
+    const firstStage = stageIn(window as unknown as Window);
+    const first = new ViewerPresentation({ service, stage: firstStage.stage, before: firstStage.overlay, createPainter: async () => new Painter() });
+    await settle();
+    service.channels[0]!.handlers.message({ type: 'surfacePool', pool: { generation: 41, surfaces: [] } }, performance.now());
+    const nextStage = stageIn(window as unknown as Window);
+    const next = new ViewerPresentation({ service, stage: nextStage.stage, before: nextStage.overlay, createPainter: async () => new Painter() });
+    await settle();
+    service.channels[1]!.handlers.message({ type: 'surfacePool', pool: { generation: 41, surfaces: [] } }, performance.now());
+    first.dispose();
+    await settle();
+    expect(service.source.retired).toEqual([]);
+    next.dispose();
+    await settle();
+    expect(service.source.retired).toEqual([41]);
+  });
+
+  it('leaves import ownership to a custom viewer channel that does not authorize retirement', async () => {
+    const service = new Service();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createPainter: async () => new Painter() });
+    await settle();
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 51, surfaces: [] } }, performance.now());
+    channel.retireClosedPool = undefined;
+    (channel as EngineViewerChannel).close = () => { channel.closed = true; return 'custom closed'; };
+    presentation.dispose();
+    await settle();
+    expect(channel.closed).toBe(true);
+    expect(service.source.retired).toEqual([]);
+  });
+
+  it('waits for a worker GPU fence before retiring its final imported pool', async () => {
+    const service = new Service();
+    const { stage, overlay } = stageIn(window as unknown as Window);
+    offscreenCanvases(window as unknown as Window);
+    const painter = new Painter();
+    let finish: () => void = () => {};
+    painter.workDone = () => new Promise<void>(resolve => { finish = resolve; });
+    const worker = inProcessWorker(painter);
+    const presentation = new ViewerPresentation({ service, stage, before: overlay, createWorker: () => worker, createPainter: async () => new Painter() });
+    await settleLong();
+    presentation.update(PARAMS);
+    const channel = service.channels[0]!;
+    channel.handlers.message({ type: 'surfacePool', pool: { generation: 13, surfaces: [] } }, performance.now());
+    channel.handlers.message({ type: 'frame', frame: desc(1, 1, 13) }, performance.now());
+    await settleLong();
+    expect(painter.draws).toBe(1);
+    presentation.dispose();
+    await settleLong();
+    expect(service.source.retired).toEqual([]);
+    finish();
+    await settleLong();
+    expect(service.source.retired).toEqual([13]);
+    expect(worker.terminated).toBe(true);
+    delete (HTMLCanvasElement.prototype as { transferControlToOffscreen?: unknown }).transferControlToOffscreen;
+  });
+
   it('opens a session, sends numbered viewer states, and reveals the canvas at the first frame', async () => {
     const service = new Service();
     const painter = new Painter();
