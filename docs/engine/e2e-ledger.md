@@ -613,3 +613,160 @@ pass on the merged build. `timeline.spec.ts:55` (consumers) failed once: the
 Scale key press selected no keys and the keys stayed at 1 s. It passed in the
 full engine-on run and in four repeats on the merged build (one failure in
 six runs); the cause is not yet identified and it stays a consumer item.
+(Resolved in round 5 below: the spec read the key's position before the
+timeline's first draw widened its gutter.)
+
+### Round 5 serial runs (2026-10-22, after the review fixes)
+
+`feat/ne-consumers` after merging `feat/native-engine` again (`49cc9e41d`) and
+the round 5 fixes (app build of `b73c23879`; later commits change specs and
+docs only). Same command as above, one worker, no retries, no exclusions,
+nothing quarantined. The suite grew to 775 cases: the appendix C matrix
+(`consumer-matrix.spec.ts`), the mixer retune matrix, the Library card
+on/off parity spec and the shipped-viewer fork variants. Raw JSON, logs,
+traces and images stay outside Git under `/tmp/ne-w5/consumers-r5/`.
+
+Other lanes ran heavy work on the machine during the engine-on run (load
+average 40 to 116); seven results failed only in session teardown (the test
+body passed, the app close outlived its 30 s budget). They are listed, owned
+by the bridge lifecycle, and rerun below.
+
+| Run | Cases | Passed | Failed | Skipped | Flaky | Wall time |
+|---|---:|---:|---:|---:|---:|---:|
+| Use New Engine on | 775 | 638 | 88 | 49 | 0 | 3,786.9 s |
+| Use New Engine off | 775 | 682 | 43 | 50 | 0 | 3,306.9 s |
+
+Engine on, against the previous complete run: 4 results that failed now pass
+(`engine-blender-png-transport.spec.ts:15`, `engine-present-recovery.spec.ts:132`,
+`scene3d-budget-parity.spec.ts:107`, `viewer-resize.spec.ts:206`); 6 that
+passed now fail, all teardown-only. Of the 88 failures: 17 are the fork of
+shipped viewer 1.0.18, which cannot activate until `feat/ne-mainmerge` brings
+the v1.2.0 kernel API; 8 are Library card on/off differences escalated with
+side-by-sides (consumers.md, C3); 7 are teardown-only; the other 56 are the
+previous run's rows with the same owners and symptoms (re-checked against
+this run's errors). No consumer-owned failure remains without a fix or an
+escalation: the C18 rows belong to phase4a, and the Library card
+differences need the presentation frame contract (bridge / 3D) or the
+`render.gl.init` binding's 3D view (extension compatibility / bridge).
+
+The first engine-off attempt is void and not counted: during it another
+process removed this worktree's `engine/target` (disk cleanup), taking the
+development copy of `pm_bridge.node`, and from case 151 every spec that
+forces the engine on reported "The new engine cannot render yet". The
+recorded engine-off run pins `POWERMOVE_PM_BRIDGE` to the identical
+`apps/desktop/native/pm_bridge.node`; the engine-on run had no such error.
+
+Engine off, against the previous complete run: 3 results that failed now
+pass and 4 that passed now fail, all teardown-only (load average about 30 to
+35). Of the 43 failures: 17 are the 1.0.18 fork and 8 are the Library card
+on/off parity cases (that spec launches both modes itself, so its results
+are the same in both runs); 4 are teardown-only; the other 14 are previous
+rows with unchanged owners.
+
+Teardown-only results rerun serially after both runs, at lower load: engine
+on, six cases passed and the seventh (`composited-video-sync.spec.ts:74`, the
+private cutout fixture's case) skipped without its fixture, closing cleanly; engine off, the four cases (seven with every
+`split-text.spec.ts:11` variant) passed.
+
+Engine on, every failed result:
+
+| Spec and line | Results | Owner | Observed |
+|---|---:|---|---|
+| `ae-audit-implementation.spec.ts:9` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
+| `ae-audit-implementation.spec.ts:51` | 1 | phase4a (C18) | Preview cache never becomes active: no composed native RAM-preview cache |
+| `agent-media-management.spec.ts:57` | 1 | agents / media store | Import aborted: "Media operation stopped because the project or agent run changed" |
+| `agent-media-tools.spec.ts:42` | 1 | agents | Request carries 8 images, spec expects 4 (Phase 0 row) |
+| `automatic-preview-memory.spec.ts:153` | 1 | phase4a (C18) | Zero remembered-frame hits during playback/back-scrub: composed cache absent |
+| `canvas-text.spec.ts:48` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
+| `canvas-text.spec.ts:85` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
+| `canvas-text.spec.ts:116` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
+| `canvas-text.spec.ts:177` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
+| `chatgpt-connection.spec.ts:5` | 1 | agents | Two Disconnect buttons match the exact locator |
+| `composited-video-sync.spec.ts:9` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `composited-video-sync.spec.ts:74` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
+| `consumer-matrix.spec.ts:78` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `consumer-matrix.spec.ts:93` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `consumer-matrix.spec.ts:130` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `consumer-matrix.spec.ts:211` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `consumer-surfaces.spec.ts:24` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `continuous-rasterization.spec.ts:4` | 1 | extcompat / renderer | Legacy raster source metadata absent (`undefined` density) |
+| `dropdown-toggle.spec.ts:6` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average 40 to 116 from other lanes during the run) |
+| `editor-responsiveness.spec.ts:65` | 1 | dochost | Save tick gap over 100 ms (Phase 0 row) |
+| `engine-delivery.spec.ts:199` | 1 | derouter / export | Queue job completes where the routed-failure contract expects Failed |
+| `engine-export.spec.ts:21` | 1 | derouter / export | Routed MP4 encoder tag empty |
+| `engine-svg.spec.ts:380` | 1 | derouter / vectors | Body timeout in the bucket request walk |
+| `export-destination.spec.ts:38` | 1 | derouter / export | Export fixture/output collision |
+| `extension-layers.spec.ts:4` | 1 | threed | compileError "renderer did not run" for the bundled 3D layer |
+| `extension-layers.spec.ts:60` | 1 | threed | missingAsset flag differs after OBJ asset removal |
+| `extension-sandbox-clipboard.spec.ts:9` | 1 | extcompat | Sandboxed panel never arms the gesture (Phase 0 row) |
+| `extension-sandbox-perf.spec.ts:91` | 1 | extcompat | Body timeout |
+| `extension-sandbox.spec.ts:52` | 1 | extcompat | Sandboxed view never takes focus (Phase 0 row) |
+| `gpu-recovery.spec.ts:3` | 1 | bridge | No presented frame after the GPU context restore |
+| `import-mp4.spec.ts:17` | 1 | mediaclose | "Restored video did not seek" after the source was removed |
+| `import-mp4.spec.ts:113` | 1 | mediaclose | Legacy audio-voice instrumentation; timeout |
+| `import-mp4.spec.ts:166` | 1 | mediaclose | Legacy audio-voice instrumentation; timeout |
+| `import-prores-alpha.spec.ts:10` | 1 | mediaclose | Imported ProRes 4444 has no playback proxy (`proxy` false) |
+| `import-prores.spec.ts:7` | 1 | mediaclose | No live or durable proxy, 0 frames presented |
+| `legacy-blurred-video-export.spec.ts:27` | 1 | derouter / mediaclose | Sharp ProRes end frame 200 vs source 210 (limit < 7) |
+| `library-card-parity.spec.ts:119` | 5 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `library-card-parity.spec.ts:119` | 2 | bridge / 3D (presentation frame for the Library) | Card scales the presented stage bitmap back to today's canvas: edge rows differ, at most 5 levels |
+| `library-card-parity.spec.ts:119` | 5 | bridge / 3D (presentation frame for the Library) | Cube edges differ in the scaled card (double scaling); see consumers.md C3 |
+| `library-card-parity.spec.ts:119` | 1 | extcompat / bridge (render.gl.init binding) | Bound presentation ignores the 3D editor view: 7,880 px up to 227 levels |
+| `local-media-recovery.spec.ts:38` | 1 | mediaclose | A changed source file is reported ready (no "source file has changed" error) |
+| `media-store.spec.ts:296` | 1 | agents / media store | Import aborted: project or agent run changed |
+| `media-store.spec.ts:324` | 1 | agents / media store | Import aborted: project or agent run changed |
+| `mixer.spec.ts:484` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `native-edit-kernels.spec.ts:32` | 1 | dochost | Build has the native evaluator on; spec expects VITE_POWERMOVE_NATIVE_EVALUATOR off |
+| `native-edit-kernels.spec.ts:200` | 1 | dochost | Build has the native evaluator on; spec expects VITE_POWERMOVE_NATIVE_EVALUATOR off |
+| `native-export-performance.spec.ts:6` | 2 | derouter / export | Native export canceled instead of completing |
+| `native-export-performance.spec.ts:111` | 2 | derouter / export | GPU-loss export error contract mismatch |
+| `native-linked-rendition.spec.ts:11` | 1 | mediaclose | PM_FFMPEG_DIR undefined in the spec environment |
+| `native-still-orientation-parity.spec.ts:264` | 1 | derouter | Route expected legacy, got engine; pixel metrics exact |
+| `pan-presentation.spec.ts:60` | 1 | bridge | Legacy GL presentation probe: refined=false |
+| `pan-presentation.spec.ts:104` | 1 | bridge | Legacy GL presentation probe: redraw flags false |
+| `playback-audio.spec.ts:15` | 1 | phase4a (C18) / bridge | Adaptive-quality pressure still measured through legacy GL/voice instrumentation; body timeout |
+| `playback-audio.spec.ts:72` | 1 | phase4a (C18) | Cached playback has frames but no cached-preview audio voice (`cached.audio.running` false) |
+| `playback-source-warmup.spec.ts:5` | 4 | mediaclose | Legacy raster/cache warm-up instrumentation |
+| `playback-source-warmup.spec.ts:60` | 1 | mediaclose | Legacy raster/cache warm-up instrumentation |
+| `project-file-media.spec.ts:9` | 1 | mediaclose | Phase 0 flaky row: metadata-only re-save returns false |
+| `project-file-media.spec.ts:65` | 1 | mediaclose | Legacy audio-voice instrumentation; timeout |
+| `prompt-attachments.spec.ts:5` | 1 | agents | Request carries 4 images, spec expects 1 (Phase 0 row) |
+| `video-frame-integrity.spec.ts:33` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `video-frame-integrity.spec.ts:63` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `video-frame-integrity.spec.ts:99` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `video-playback-regression.spec.ts:6` | 1 | mediaclose | An inactive copy pauses playback (`paused` true) |
+| `video-playback-regression.spec.ts:79` | 1 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `video-playback-regression.spec.ts:128` | 2 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+| `video-scrubbing.spec.ts:7` | 2 | mediaclose | Legacy GL frame probe; presented pixels unverified |
+
+Engine off, every failed result:
+
+| Spec and line | Results | Owner | Observed |
+|---|---:|---|---|
+| `agent-media-management.spec.ts:57` | 1 | agents / media store | Import aborted: "Media operation stopped because the project or agent run changed" |
+| `agent-media-tools.spec.ts:42` | 1 | agents | Request carries 8 images, spec expects 4 (Phase 0 row) |
+| `chatgpt-connection.spec.ts:5` | 1 | agents | Two Disconnect buttons match the exact locator |
+| `consumer-matrix.spec.ts:78` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `consumer-matrix.spec.ts:93` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `consumer-matrix.spec.ts:130` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `consumer-matrix.spec.ts:211` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `consumer-surfaces.spec.ts:24` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `editor-responsiveness.spec.ts:65` | 1 | dochost | Save tick gap over 100 ms (Phase 0 row) |
+| `engine-delivery.spec.ts:199` | 1 | derouter / export | Queue job completes where the routed-failure contract expects Failed |
+| `engine-export.spec.ts:21` | 1 | derouter / export | Routed MP4 encoder tag empty |
+| `engine-svg.spec.ts:286` | 1 | derouter / vectors | Job-engine control still differs from today by max 1 over 59,892 pixels (also in the previous default-off run) |
+| `extension-sandbox-clipboard.spec.ts:9` | 1 | extcompat | Sandboxed panel never arms the gesture (Phase 0 row) |
+| `extension-sandbox.spec.ts:52` | 1 | extcompat | Sandboxed view never takes focus (Phase 0 row) |
+| `extension-sandbox.spec.ts:147` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average about 30 to 35 from other lanes during the run) |
+| `library-card-parity.spec.ts:119` | 5 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `library-card-parity.spec.ts:119` | 2 | bridge / 3D (presentation frame for the Library) | Card scales the presented stage bitmap back to today's canvas: edge rows differ, at most 5 levels |
+| `library-card-parity.spec.ts:119` | 5 | bridge / 3D (presentation frame for the Library) | Cube edges differ in the scaled card (double scaling); see consumers.md C3 |
+| `library-card-parity.spec.ts:119` | 1 | extcompat / bridge (render.gl.init binding) | Bound presentation ignores the 3D editor view: 7,880 px up to 227 levels |
+| `media-store.spec.ts:296` | 1 | agents / media store | Import aborted: project or agent run changed |
+| `media-store.spec.ts:324` | 1 | agents / media store | Import aborted: project or agent run changed |
+| `mixer.spec.ts:484` | 2 | mainmerge (v1.2.0 kernel API) | Fork of shipped viewer 1.0.18 fails to activate: `api.scene3d.getMode is not a function` |
+| `native-linked-rendition.spec.ts:11` | 1 | mediaclose | PM_FFMPEG_DIR undefined in the spec environment |
+| `native-still-orientation-parity.spec.ts:264` | 1 | derouter | Route expected legacy, got engine; pixel metrics exact |
+| `native-text-selection-menu.spec.ts:15` | 1 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average about 30 to 35 from other lanes during the run) |
+| `prompt-attachments.spec.ts:5` | 1 | agents | Request carries 4 images, spec expects 1 (Phase 0 row) |
+| `split-text.spec.ts:11` | 2 | bridge lifecycle (test body passed) | Teardown only: app close exceeded the 30 s budget (load average about 30 to 35 from other lanes during the run) |

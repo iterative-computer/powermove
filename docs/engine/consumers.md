@@ -298,6 +298,22 @@ draws edits there), in both themes with each viewer variant.
 
 ## Validation
 
+Round 5 serial runs (2026-10-22/23, 775 cases each, one worker, no
+quarantine; details in the [e2e ledger](e2e-ledger.md)): engine on 638
+passed, 88 failed, 49 skipped; engine off 682 passed, 43 failed, 50 skipped.
+Every failure is owned: the 1.0.18 fork (17 in each, pending
+`feat/ne-mainmerge`), the Library card on/off differences escalated above
+(8 in each), teardown-only results that pass when rerun (7 on, 4 off), and
+the previous rows of other lanes. Targeted engine-on and engine-off reruns of
+the Library, matrix, mixer, timeline and graph specs are listed with the
+round 5 notes. Lane-area unit tests: 134 files, 1,159 passed, 1 skipped.
+`cargo check --workspace --all-targets` and `cargo clippy --workspace
+--all-targets -- -D warnings` pass at the merge; `cargo test -p pm-node --lib`
+140 passed; `pm-protocol` 98 passed; desktop typecheck 0 errors;
+`check:builtins` passes.
+
+Earlier rounds:
+
 Final-HEAD serial runs (2026-10-22, 698 cases each, one worker, no
 quarantine): engine on 588 passed, 60 failed, 50 skipped; engine off 631
 passed, 17 failed, 50 skipped. No consumer-owned failure remains with the
