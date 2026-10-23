@@ -290,6 +290,8 @@ pub struct Renderer {
 struct FrameReuse {
     readback: pm_gpu::readback::Readback,
     target: Option<Target>,
+    /// A pixel buffer given back for the next read ([`Renderer::give_rgba`]).
+    rgba: Option<Vec<f32>>,
 }
 
 impl Renderer {
@@ -1893,10 +1895,19 @@ impl Renderer {
     /// the next read (an export reads every frame): the same values, without
     /// a new GPU buffer and a packed byte copy per frame.
     pub fn read_rgba_reusing(&mut self, frame: &Frame) -> Result<Vec<f32>, RenderError> {
-        Ok(self
-            .frame_reuse
-            .readback
-            .read_f32(&self.device, &self.queue, &frame.color.texture)?)
+        let out = self.frame_reuse.rgba.take().unwrap_or_default();
+        Ok(self.frame_reuse.readback.read_f32_into(
+            &self.device,
+            &self.queue,
+            &frame.color.texture,
+            out,
+        )?)
+    }
+
+    /// Gives a finished frame's pixels back: the next
+    /// [`Self::read_rgba_reusing`] reads into their allocation.
+    pub fn give_rgba(&mut self, rgba: Vec<f32>) {
+        self.frame_reuse.rgba = Some(rgba);
     }
 
     /// Gives a finished frame's color target back: the next [`Self::render`]

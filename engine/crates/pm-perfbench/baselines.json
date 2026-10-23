@@ -32,8 +32,8 @@
       "gpu.uploads": 1920
     },
     "export_120": {
-      "cpu.heap_alloc_bytes": 4322530808,
-      "cpu.heap_allocs": 4618284,
+      "cpu.heap_alloc_bytes": 440793888,
+      "cpu.heap_allocs": 4618168,
       "engine.comp_passes": 3600,
       "engine.file_stats": 242,
       "engine.layers_planned": 66000,

@@ -95,9 +95,11 @@ fn decode_f32(
     row: usize,
     padded: usize,
     h: usize,
+    mut out: Vec<f32>,
 ) -> Vec<f32> {
     let (channels, bytes_per_channel) = layout(format).expect("checked by the caller");
-    let mut out = Vec::with_capacity(row / bytes_per_channel * h);
+    out.clear();
+    out.reserve(row / bytes_per_channel * h);
     debug_assert_eq!(row % (channels * bytes_per_channel), 0);
     for y in 0..h {
         let line = &data[y * padded..y * padded + row];
@@ -452,10 +454,22 @@ impl Readback {
         queue: &wgpu::Queue,
         texture: &wgpu::Texture,
     ) -> Result<Vec<f32>, ReadbackError> {
+        self.read_f32_into(device, queue, texture, Vec::new())
+    }
+
+    /// [`Self::read_f32`] into `out` (cleared first; its allocation is
+    /// reused when it is large enough).
+    pub fn read_f32_into(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        out: Vec<f32>,
+    ) -> Result<Vec<f32>, ReadbackError> {
         let format = texture.format();
         layout(format)?;
         self.with_mapped_rows(device, queue, texture, |data, row, padded, h| {
-            decode_f32(format, data, row, padded, h)
+            decode_f32(format, data, row, padded, h, out)
         })
     }
 

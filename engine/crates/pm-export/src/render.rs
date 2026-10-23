@@ -1087,6 +1087,9 @@ where
         )
     });
     let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
+    // The encoder gives each frame's pixels back for a later frame to read
+    // into (docs/engine/perfbench.md).
+    let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let qos = crate::par::current_qos();
     std::thread::scope(|scope| {
         let encoder = scope.spawn(move || -> Result<S::Output, JobError> {
@@ -1121,7 +1124,7 @@ where
                 } else {
                     None
                 };
-                drop(rgba);
+                let _ = back_tx.send(rgba);
                 if let Some((mixer, rate)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
                     let mut block = Vec::new();
@@ -1150,6 +1153,16 @@ where
             if cancel.load(Ordering::Relaxed) {
                 render_error = Some(JobError::Cancelled);
                 break;
+            }
+            // Three frames' pixels circulate. Before frame n the encoder has
+            // taken frame n - 2 (the channel holds one), so it has given
+            // frame n - 3's back: waiting for it never stalls the export, and
+            // which buffer a frame reads into does not depend on timing. An
+            // encoder that stopped closes the channel: a new buffer then.
+            if n >= PIXEL_BUFFERS
+                && let Ok(rgba) = back_rx.recv()
+            {
+                renderer.give_rgba(rgba);
             }
             let frame_request = match blender.as_deref_mut() {
                 None => Ok(request.clone()),
@@ -1227,6 +1240,10 @@ where
             .unwrap_or_else(|_| Err(JobError::Render("the encoder thread panicked".into())))
     })
 }
+
+/// Frames' pixel buffers an export keeps in circulation between the render
+/// and encoder threads.
+const PIXEL_BUFFERS: u64 = 3;
 
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
 /// FFmpeg (WebM), or the engine's PNG writer.
