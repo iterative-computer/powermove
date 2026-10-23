@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, EngineRenderTransport, MAX_PREPARATIONS_IN_FLIGHT, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -549,7 +549,7 @@ describe('compatibility answers during playback', () => {
       expect(prepared).toEqual([]);
       await vi.advanceTimersByTimeAsync(0);
       expect(prepared[0]).toBe('typed@0');
-      expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(2);
+      expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(MAX_PREPARATIONS_IN_FLIGHT);
       // The horizon fills over the next turns, the ready layers synchronously.
       for (let i = 0; i < 20; i++) { runFrame(); await vi.advanceTimersByTimeAsync(0); }
       for (let k = 0; k <= 6; k++) expect(asked.filter(time => time === k * frame).length).toBeGreaterThanOrEqual(24);
@@ -643,7 +643,7 @@ describe('compatibility answers during playback', () => {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => i * frame));
-      expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(2);
+      expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(MAX_PREPARATIONS_IN_FLIGHT);
       expect(vi.getTimerCount()).toBe(0);
       state.playing = true;
       t.playbackStarted();
@@ -673,12 +673,12 @@ describe('compatibility answers during playback', () => {
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
-      expect(pending).toHaveLength(2);
+      expect(pending).toHaveLength(MAX_PREPARATIONS_IN_FLIGHT);
       await vi.advanceTimersByTimeAsync(51);
       pending.forEach(resolve => resolve());
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual([0]);
-      expect(pending).toHaveLength(2);
+      expect(pending).toHaveLength(MAX_PREPARATIONS_IN_FLIGHT);
       expect(t.lookaheadStats.inFlight).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
     } finally { t.dispose(); vi.useRealTimers(); }
@@ -693,22 +693,24 @@ describe('compatibility answers during playback', () => {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       runFrame();
       await vi.advanceTimersByTimeAsync(0);
-      expect(pending.map(p => p.time)).toEqual([0, frame]);
+      const first = Array.from({ length: MAX_PREPARATIONS_IN_FLIGHT }, (_, i) => i * frame);
+      expect(pending.map(p => p.time)).toEqual(first);
       expect(asked).toEqual([]);
       // The second result lands while the first remains slow.
       pending[1]!.done();
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual([frame]);
-      expect(t.lookaheadStats.maxInFlight).toBe(2);
+      expect(t.lookaheadStats.maxInFlight).toBe(MAX_PREPARATIONS_IN_FLIGHT);
+      // The clock moves on: the others land obsolete.
       state.time = 30 * frame;
-      pending[0]!.done();
+      for (const p of pending.slice(0, MAX_PREPARATIONS_IN_FLIGHT)) if (p !== pending[1]) p.done();
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual([frame]);
-      expect(t.lookaheadStats.obsolete).toBe(1);
-      // The next turn prepares from the clock, two at a time.
+      expect(t.lookaheadStats.obsolete).toBe(MAX_PREPARATIONS_IN_FLIGHT - 1);
+      // The next turn prepares from the clock, MAX_PREPARATIONS_IN_FLIGHT at a time.
       runFrame();
       await vi.advanceTimersByTimeAsync(0);
-      expect(pending.slice(2).map(p => p.time)).toEqual([30 * frame, 31 * frame]);
+      expect(pending.slice(MAX_PREPARATIONS_IN_FLIGHT).map(p => p.time)).toEqual(first.map((t) => t + 30 * frame));
     } finally { state.playing = false; t.dispose(); vi.useRealTimers(); }
   });
 

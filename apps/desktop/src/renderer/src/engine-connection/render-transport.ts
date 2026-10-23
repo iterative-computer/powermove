@@ -237,6 +237,12 @@ export const MAX_COMPAT_ANSWERS = 4096;
  *  producer gives at once are bounded by the turn's time budget only (a
  *  large project's frame has dozens of layers each frame). */
 const LOOKAHEAD_MAX_PREPARATIONS = 16;
+/** Base-raster preparations (asynchronous snapshots) in flight at once:
+ *  half of main's eight snapshot slots (snapshot-slots.ts), the rest left
+ *  to thumbnails and extensions. Two left a project whose wrapper reads a
+ *  base every frame (a typewriter over many text layers) waiting on its
+ *  answers in most frames. */
+export const MAX_PREPARATIONS_IN_FLIGHT = 4;
 /** The turn scheduler without a window (tests, workers): a short timer. */
 const LOOKAHEAD_POLL_MS = 4;
 
@@ -645,7 +651,7 @@ export class EngineRenderTransport {
           // prepared (bounded in flight); one the producer can answer now
           // (a pass-through, pixels already here) is answered at once.
           const prepare = this.prepares({ ...entry.need, time }, revision ?? 0) ? this.preparers.get(entry.need.source) : undefined;
-          if (prepare && (this.aheadInFlight >= 2 || preparations >= LOOKAHEAD_MAX_PREPARATIONS)) continue;
+          if (prepare && (this.aheadInFlight >= MAX_PREPARATIONS_IN_FLIGHT || preparations >= LOOKAHEAD_MAX_PREPARATIONS)) continue;
           if (prepare) preparations++;
           done++;
           if (prepare) {

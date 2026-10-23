@@ -46,6 +46,11 @@ const LAZY = Symbol('powermove.lazyRaster');
 
 /** Today's raster cache entry bound (legacy/gl/raster.ts `MAX`). */
 const MAX_BASES = 4096;
+/** Base preparations at once (render-transport.ts
+ *  `MAX_PREPARATIONS_IN_FLIGHT`), and prepared bases kept for their answers
+ *  (more than in flight, so one is not dropped before it is used). */
+const MAX_PREPARING = 4;
+const MAX_READY = 8;
 
 type LazyMark = {
   layer: unknown; scale: number; time: number; crop: unknown;
@@ -530,12 +535,12 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     const cached = baseKey ? bases.get(baseKey) : undefined;
     if (cached) {
       ready.set(key, { layer, surface: cached.surface });
-      while (ready.size > 2) ready.delete(ready.keys().next().value!);
+      while (ready.size > MAX_READY) ready.delete(ready.keys().next().value!);
       return;
     }
     const existing = preparing.get(key);
     if (existing) { if (existing.layer === layer) await existing.promise; return; }
-    if (pending >= 2) return;
+    if (pending >= MAX_PREPARING) return;
     const epoch = generation;
     const crop = need.crop ? { ...need.crop } : undefined;
     pending++;
@@ -545,7 +550,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         if (generation !== epoch || findLayer(PM, String(need.composition), String(need.layer)) !== layer || !wrapped()) return;
         rememberBase(baseKey, layer, surface);
         ready.set(key, { layer, surface });
-        while (ready.size > 2) ready.delete(ready.keys().next().value!);
+        while (ready.size > MAX_READY) ready.delete(ready.keys().next().value!);
       } catch (error) {
         log(`asynchronous base raster preparation failed: ${error instanceof Error ? error.message : String(error)}`);
         throw error;
