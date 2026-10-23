@@ -72,6 +72,8 @@ export interface StoreOptions {
   fs?: StoreFileSystem;
   now?: () => number;
   randomSuffix?: () => string;
+  /** A project journal's byte limit (tests). */
+  journalLimitBytes?: number;
 }
 
 /**
@@ -129,8 +131,9 @@ class FileStore implements Store {
   private readonly unsettled = new Map<string, { id: number; present: boolean }>();
   /** Keys whose newest committed value has not reached disk yet. */
   private readonly unwritten = new Map<string, number>();
-  /** Keys whose last write failed to reach disk, until one of them reaches it. */
-  private readonly failing = new Map<string, string>();
+  /** Keys whose last write failed to reach disk, until one of them reaches it.
+   *  `after`: a refused journal entry (request id), until a slot write posted after it lands. */
+  private readonly failing = new Map<string, { error: string; after?: number }>();
   private readonly waiters = new Map<number, Waiter>();
   private readonly listeners = new Set<(event: StoreErrorEvent) => void>();
   private nextId = 1;
@@ -269,6 +272,10 @@ class FileStore implements Store {
     if (reply.type === 'error') { this.emitError(reply.key, reply.error, reply.unsaved === true); return; }
     if (reply.type === 'written') {
       if (this.unwritten.get(reply.key) === reply.id) this.unwritten.delete(reply.key);
+      if (!this.failing.get(reply.key)?.after) this.failing.delete(reply.key);
+      return;
+    }
+    if (reply.type === 'reopened') {
       this.failing.delete(reply.key);
       return;
     }
@@ -290,7 +297,7 @@ class FileStore implements Store {
       case 'rejected': {
         if (this.unsettled.get(reply.key)?.id === reply.id) this.unsettled.delete(reply.key);
         // A refused journal entry is an edit not on disk until the project's next slot write lands.
-        if (reply.key.startsWith('projectJournal.')) this.failing.set(reply.key, reply.detail);
+        if (reply.key.startsWith('projectJournal.')) this.failing.set(reply.key, { error: reply.detail, after: this.failing.get(reply.key)?.after ?? reply.id });
         const error = new IpcValidationError(reply.channel, reply.detail);
         this.emitError(reply.key, error.message);
         waiter?.reject(error);
@@ -317,10 +324,15 @@ class FileStore implements Store {
       void this.request(id => ({ op: 'init', id, directory: this.directory, writeDelayMs: this.writeDelayMs })).catch(() => undefined);
       // In the order they were first made (their ids), not the map's: a project's
       // slot and journal are replayed as they happened (project-durability.ts).
-      for (const key of [...this.unwritten].sort(([, a], [, b]) => a - b).map(([key]) => key)) {
+      // A journal that refused an entry stays closed in the new engine (project-durability.ts).
+      // Closed journals last: their closing covers every slot write replayed before.
+      const closed = new Set([...this.failing].filter(([key, value]) => key.startsWith('projectJournal.') && value.after !== undefined).map(([key]) => key));
+      const keys = [...this.unwritten].sort(([, a], [, b]) => a - b).map(([key]) => key).filter(key => !closed.has(key));
+      keys.push(...closed);
+      for (const key of keys) {
         const id = this.nextId++;
         const bytes = this.committed.get(key);
-        this.channel.post({ op: 'restore', id, key, bytes: bytes ? new Uint8Array(bytes) : null });
+        this.channel.post({ op: 'restore', id, key, bytes: bytes ? new Uint8Array(bytes) : null, ...(closed.has(key) ? { closed: true } : {}) });
         this.unwritten.set(key, id);
       }
     } catch (error) {
@@ -356,7 +368,7 @@ class FileStore implements Store {
   }
 
   private emitError(key: string, error: string, unsaved = false): void {
-    if (unsaved) this.failing.set(key, error);
+    if (unsaved) this.failing.set(key, { error, ...(this.failing.get(key)?.after ? { after: this.failing.get(key)!.after } : {}) });
     const event: StoreErrorEvent = unsaved ? { key, error, unsaved } : { key, error };
     for (const listener of this.listeners) {
       try {
@@ -369,13 +381,14 @@ class FileStore implements Store {
 }
 
 export function createStore(dir: string, options: StoreOptions = {}): Store {
-  if (options.thread && (options.fs || options.now || options.randomSuffix)) {
+  if (options.thread && (options.fs || options.now || options.randomSuffix || options.journalLimitBytes)) {
     throw new Error('Filesystem seams apply only to a store engine on this thread.');
   }
   const channel = options.thread?.storeChannel() ?? new InlineStoreChannel({
     fs: options.fs ?? nodeFs,
     now: options.now ?? Date.now,
-    randomSuffix: options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`)
+    randomSuffix: options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`),
+    ...(options.journalLimitBytes ? { journalLimitBytes: options.journalLimitBytes } : {})
   });
   return new FileStore(path.resolve(dir), channel, options.writeDelayMs ?? WRITE_DELAY_MS);
 }

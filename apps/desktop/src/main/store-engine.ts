@@ -32,8 +32,9 @@ export type StoreRequest =
   | { op: 'delete'; id: number; key: string }
   /** One entry for a project's journal (SAVE-1, project-durability.ts). */
   | { op: 'append'; id: number; key: string; serialized: string }
-  /** Re-persist bytes main already published, after a replacement engine starts. */
-  | { op: 'restore'; id: number; key: string; bytes: Uint8Array | null }
+  /** Re-persist bytes main already published, after a replacement engine starts.
+   *  `closed`: a project journal that refused an entry (project-durability.ts). */
+  | { op: 'restore'; id: number; key: string; bytes: Uint8Array | null; closed?: boolean }
   | { op: 'flush'; id: number };
 
 /** Engine to main. */
@@ -45,6 +46,8 @@ export type StoreReply =
   | { type: 'rejected'; id: number; key: string; channel: string; detail: string }
   /** The committed operation `id` reached disk. */
   | { type: 'written'; id: number; key: string }
+  /** A project journal closed by a refused entry accepts entries again (a slot holding that edit landed). */
+  | { type: 'reopened'; key: string }
   | { type: 'flushed'; id: number }
   | { type: 'failed'; id: number; error: string }
   /** `unsaved`: a write the engine committed did not reach disk. */
@@ -54,6 +57,8 @@ export interface StoreEngineOptions {
   fs: StoreFileSystem;
   now: () => number;
   randomSuffix: () => string;
+  /** A project journal's byte limit (tests; default storeByteLimit). */
+  journalLimitBytes?: number;
   /** Timers for the write debounce (a model check runs them itself). */
   later?: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
   cancel?: (timer: ReturnType<typeof setTimeout>) => void;
@@ -112,6 +117,8 @@ export class StoreEngine {
       loaded: () => this.loaded,
       randomId: () => options.randomSuffix(),
       persist: (key, data) => this.persist(key, data === null ? { id: 0, kind: 'delete' } : { id: 0, kind: 'set', data }),
+      barrier: key => this.barrier(key),
+      reopened: key => this.reply({ type: 'reopened', key }),
       // id 0: a write no request waits for (a journal shrunk after its slot landed); it still tells main the key is on disk.
       written: (id, key) => this.reply({ type: 'written', id, key }),
       failed: (key, error) => this.reply({ type: 'error', key, error: errorText(error), unsaved: true }),
@@ -138,7 +145,9 @@ export class StoreEngine {
     const reading = key === null ? undefined : this.projects.ready(key);
     if (reading && key !== null) {
       return reading.then(() => this.run(request), error => {
-        if (request.op !== 'restore') this.reply({ type: 'rejected', id: request.id, key, channel: IPC.storeSet, detail: `the project could not be read: ${errorText(error)}` });
+        // A dropped restore is a write main had accepted that is not on disk: reported like a failed write.
+        if (request.op === 'restore') this.reply({ type: 'error', key, error: `not saved: the project could not be read: ${errorText(error)}`, unsaved: true });
+        else this.reply({ type: 'rejected', id: request.id, key, channel: IPC.storeSet, detail: `the project could not be read: ${errorText(error)}` });
       });
     }
     switch (request.op) {
@@ -172,7 +181,7 @@ export class StoreEngine {
         }
         let bytes: Uint8Array;
         try {
-          bytes = this.projects.append(request.id, request.key, JSON.parse(request.serialized), storeByteLimit(request.key));
+          bytes = this.projects.append(request.id, request.key, request.serialized, this.options.journalLimitBytes ?? storeByteLimit(request.key));
         } catch (error) {
           this.reply({ type: 'rejected', id: request.id, key: request.key, channel: IPC.storeAppendJournal, detail: errorText(error) });
           return undefined;
@@ -182,7 +191,11 @@ export class StoreEngine {
       }
       case 'restore':
         if (isSlotKey(request.key)) { this.projects.restoreSlot(request.id, request.key, request.bytes); return undefined; }
-        if (isJournalKey(request.key)) { this.projects.restoreJournal(request.id, request.key, request.bytes); return undefined; }
+        if (isJournalKey(request.key)) {
+          if (request.closed) this.projects.restoreClosed(request.key);
+          this.projects.restoreJournal(request.id, request.key, request.bytes);
+          return undefined;
+        }
         if (request.key.startsWith('projectState.')) this.sessions.set(request.key, request.bytes && Buffer.from(request.bytes).toString('utf8'));
         this.schedule(request.key, request.bytes ? { id: request.id, kind: 'set', data: request.bytes } : { id: request.id, kind: 'delete' });
         return undefined;
@@ -410,6 +423,20 @@ export class StoreEngine {
       }
       throw error;
     }
+  }
+
+  /* An ordering barrier: the landed file and the directory entry the rename
+     made reach stable storage before anything that depends on them (a
+     project's journal shrinking after its slot). On macOS libuv's fsync is
+     fcntl(F_FULLFSYNC), falling back to F_BARRIERFSYNC, then fsync. Windows
+     cannot open a directory for syncing; NTFS journals the rename. */
+  private async barrier(key: string): Promise<void> {
+    const { fs } = this.options;
+    const file = await fs.open(path.join(this.directory, this.fileNameFor(key)), 'r');
+    try { await file.sync(); } finally { await file.close(); }
+    if (process.platform === 'win32') return;
+    const directory = await fs.open(this.directory, 'r');
+    try { await directory.sync(); } finally { await directory.close(); }
   }
 
   private async removeStaleTemporaryFiles(): Promise<void> {

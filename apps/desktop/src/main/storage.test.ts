@@ -625,6 +625,118 @@ describe('file store', () => {
     });
   }
 
+  it('refuses every entry after a refused one, so a smaller later entry cannot leave a gap (review probe 3)', { timeout: 120_000 }, async () => {
+    const directory = await temporaryDirectory();
+    const slotFile = path.join(directory, 'project.P.json'), journalFile = path.join(directory, 'projectJournal.P.json');
+    await fs.writeFile(slotFile, JSON.stringify({ cp: 'a', seq: 1, v: '1', proj: { id: 'P', name: 'A', f: {} } }));
+    const store = createStore(directory, { writeDelayMs: 0 });
+    await store.load();
+    const big = (n: number) => 'x'.repeat(n);
+    // E0: the journal close to its 32 MiB limit (no checkpoint lands: slot writes fail or are refused).
+    await store.appendJournal!('projectJournal.P', JSON.stringify({ revision: 2, patches: [{ path: ['f', 'big'], exists: true, value: big(31 * 1024 * 1024) }] }));
+    // E1: a 2 MiB paste, refused; E2: a rename after it.
+    await expect(store.appendJournal!('projectJournal.P', JSON.stringify({ revision: 3, patches: [{ path: ['f', 'paste'], exists: true, value: big(2 * 1024 * 1024) }] }))).rejects.toThrow();
+    await expect(store.appendJournal!('projectJournal.P', JSON.stringify({ revision: 4, patches: [{ path: ['name'], exists: true, value: 'after paste' }] }))).rejects.toThrow(/closed/);
+    await store.flushAll();
+    const project = recoverProject(JSON.parse(await fs.readFile(slotFile, 'utf8')), JSON.parse(await fs.readFile(journalFile, 'utf8')));
+    expect(project.name).toBe('A');
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+  });
+
+  it('reopens a closed journal only when a slot posted after the last refused entry lands', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const { store, recovered } = await projectStore({ rename: (_to, count) => count === 1 ? gate : undefined });
+    // Slot B posted, still renaming; then an entry is refused (malformed), closing the journal.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'B' } }));
+    await tick();
+    await expect(store.appendJournal!('projectJournal.P', '{not json')).rejects.toThrow();
+    release();
+    await store.flushAll();
+    // B was posted before the refusal: it does not hold that edit, so the journal stays closed.
+    await expect(store.appendJournal!('projectJournal.P', entry('After B'))).rejects.toThrow(/closed/);
+    expect(store.failingKeys!()).toContain('projectJournal.P');
+    // A slot posted after the last refusal lands: entries are accepted again.
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'C' } }));
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+    await store.appendJournal!('projectJournal.P', entry('After C'));
+    await store.flushAll();
+    expect(await recovered()).toBe('After C');
+  });
+
+  it('keeps a journal closed across a storage worker replacement', async () => {
+    const directory = await temporaryDirectory();
+    await fs.writeFile(path.join(directory, 'project.P.json'), numberedSlot('a', 1, 'A'));
+    let restart!: () => void;
+    const channel: StoreChannel = (() => {
+      let engine: StoreEngine, listener: (reply: StoreReply) => void = () => {}, onRestart: () => void = () => {}, generation = 0;
+      const start = () => {
+        const mine = ++generation;
+        engine = new StoreEngine({ fs, now: Date.now, randomSuffix: () => String(Math.random()).slice(2) }, reply => { if (mine === generation) queueMicrotask(() => listener(reply)); });
+      };
+      start();
+      restart = () => { start(); onRestart(); };
+      return { post: request => engine.handle(structuredClone(request)), onReply: cb => { listener = cb; }, onRestart: cb => { onRestart = cb; }, waitSync: () => { throw new Error('unused'); } };
+    })();
+    const store = createStore(directory, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+    await store.load();
+    await expect(store.appendJournal!('projectJournal.P', '{not json')).rejects.toThrow();
+    restart();
+    await tick();
+    await expect(store.appendJournal!('projectJournal.P', entry('After restart'))).rejects.toThrow(/closed/);
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'B' } }));
+    await store.flushAll();
+    await store.appendJournal!('projectJournal.P', entry('After B'));
+    await store.flushAll();
+    expect(store.failingKeys!()).toEqual([]);
+  });
+
+  it('reports a restore a replacement worker could not apply as not saved', async () => {
+    const directory = await temporaryDirectory();
+    const replies: StoreReply[] = [];
+    const engine = new StoreEngine({ fs: { ...fs, open: async () => { throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' }); } } as any, now: Date.now, randomSuffix: () => 'x' }, reply => replies.push(reply));
+    engine.handle({ op: 'init', id: 1, directory, writeDelayMs: 0 });
+    engine.handle({ op: 'restore', id: 2, key: 'project.P', bytes: new TextEncoder().encode(numberedSlot('b', 3, 'B')) });
+    await tick();
+    expect(replies).toContainEqual({ type: 'error', key: 'project.P', error: expect.stringContaining('not saved'), unsaved: true });
+  });
+
+  it('syncs a landed slot and its directory before the journal shrinks', async () => {
+    const directory = await temporaryDirectory();
+    const calls: string[] = [];
+    const store = createStore(directory, { writeDelayMs: 0, fs: {
+      ...fs,
+      open: (async (file: any, flags: any) => {
+        const handle = await fs.open(file, flags);
+        const name = path.basename(String(file));
+        return Object.assign(Object.create(handle), { sync: async () => { calls.push(`sync ${name}`); return handle.sync(); }, close: () => handle.close() });
+      }) as any,
+      rename: (async (from: any, to: any) => { await fs.rename(from, to); calls.push(`rename ${path.basename(String(to))}`); }) as any,
+      unlink: (async (file: any) => { await fs.unlink(file); calls.push(`unlink ${path.basename(String(file))}`); }) as any,
+    } });
+    await store.load();
+    await store.appendJournal!('projectJournal.P', entry('Before'));
+    await store.flushAll();
+    calls.length = 0;
+    await store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { id: 'P', name: 'Slot' } }));
+    await store.flushAll();
+    const landed = calls.indexOf('rename project.P.json');
+    expect(calls.slice(landed, landed + 3)).toEqual(['rename project.P.json', 'sync project.P.json', `sync ${path.basename(directory)}`]);
+    expect(calls.indexOf('unlink projectJournal.P.json')).toBeGreaterThan(landed + 2);
+  });
+
+  it('keeps the entries after a bare (non-envelope) slot when it lands', async () => {
+    const { store, disk } = await projectStore({ rename: (_to, count) => count === 1 ? tick().then(() => undefined) : undefined });
+    await store.set('project.P', { id: 'P', name: 'Bare' });
+    await store.appendJournal!('projectJournal.P', entry('After bare'));
+    await store.flushAll();
+    const { slot, journal } = await disk();
+    expect(slot).toEqual({ id: 'P', name: 'Bare' });
+    expect(journal!.map(item => item.patches[0].value)).toEqual(['After bare']);
+    expect(recoverProject(slot, journal).name).toBe('After bare');
+  });
+
   for (const order of ['journal first', 'slot first'] as const) {
     it(`a replacement engine replays a slot and its journal in either order without losing an entry (review restart probe, ${order})`, async () => {
       const directory = await temporaryDirectory();
