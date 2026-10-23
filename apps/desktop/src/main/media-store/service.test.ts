@@ -47,6 +47,20 @@ const service = (options: Partial<ConstructorParameters<typeof MediaStoreService
   ...options
 });
 
+it('resolves display renditions by frozen original identity without replacing original reads', async () => {
+  const svc = service(), originalFile = path.join(media, 'original.mov'), renditionFile = path.join(media, 'rendition.webm');
+  await settledFile(originalFile, bytes(1024, 1)); await settledFile(renditionFile, bytes(512, 2));
+  const original = await svc.store.putFile(originalFile, { key: 'original', type: 'video/quicktime' });
+  const rendition = await svc.store.putFile(renditionFile, { key: `rendition:${original.hash}`, type: 'video/webm', origin: 'rendition' });
+  await svc.bindJob(5, { id: 'p', assets: { clip: { id: 'clip', contentHash: original.hash, storageKey: 'original' } } });
+  expect(await svc.resolveSource('clip', { process: 'job', session: 5 })).toMatchObject({ path: svc.store.objectPath(rendition.hash) });
+  expect(await svc.resolveAsset('clip', { process: 'job', session: 5 })).toMatchObject({ path: svc.store.objectPath(original.hash) });
+  await settledFile(originalFile, bytes(1024, 3));
+  await svc.store.putFile(originalFile, { key: 'original', type: 'video/quicktime' });
+  expect(await svc.resolveSource('clip', { process: 'job', session: 5 })).toMatchObject({ path: svc.store.objectPath(rendition.hash) });
+  await svc.bindJob(5, null);
+});
+
 it('freezes a host save’s blob MIME with its content, even if its key is replaced', async () => {
   const svc = service(), file = path.join(media, 'converted.bin');
   await settledFile(file, bytes(1000, 1));

@@ -387,6 +387,18 @@ export class MediaStoreService {
     return this.resolveBindings([...this.bindings.values()].map((b) => b.assets.get(asset)));
   }
 
+  /** The copy today's browser source monitor displays, pinned to the original hash. */
+  async resolveSource(asset: string, context?: { process: EngineProcess; session: number }): Promise<{ path: string; contentHash: ContentHash | null } | null> {
+    const original = await this.resolveAsset(asset, context);
+    if (!original?.contentHash) return original;
+    const hash = Buffer.from(original.contentHash).toString('hex');
+    const rendition = await this.store.record(`rendition:${hash}`);
+    if (rendition && await this.store.hasObject(rendition.hash)) {
+      return { path: this.store.objectPath(rendition.hash), contentHash: hashBytes(rendition.hash) };
+    }
+    return original;
+  }
+
   private async resolveBindings(candidates: (MediaBinding | undefined)[]): Promise<{ path: string; contentHash: ContentHash | null } | null> {
     const bound = candidates.filter((b): b is MediaBinding => !!b);
     if (!bound.length) return null;

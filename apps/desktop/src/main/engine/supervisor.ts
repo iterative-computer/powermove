@@ -345,10 +345,10 @@ export class EngineSupervisor {
   }
 
   /** A request to the running launch. */
-  request(body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
+  request(body: Request, session: number | null = null, revision: number | null = null, signal?: AbortSignal): Promise<Response> {
     const launch = this.current;
     if (!launch) return Promise.reject(new Error(`the ${this.options.process} engine is not running`));
-    return launch.connection.request(body, session, revision);
+    return launch.connection.request(body, session, revision, signal);
   }
 
   event(body: Event, session: number | null = null): void {

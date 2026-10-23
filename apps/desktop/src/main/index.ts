@@ -962,6 +962,7 @@ if (!hasSingleInstanceLock) {
       enabled: useNewEngine,
       automaticOutputDirectory: agentExportDirectory,
       resolveAsset: (asset, context) => mediaStore.service.resolveAsset(asset, context),
+      resolveSource: (asset, context) => mediaStore.service.resolveSource(asset, context),
       snapshotMedia: (project) => mediaStore.service.snapshotProject(project),
       bindMediaSession: (session, project) => mediaStore.service.bindJob(session, project),
       ipc: ipcMain,

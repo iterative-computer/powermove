@@ -54,6 +54,29 @@ function engine(answer: (body: Request, revision: number | null) => Promise<Resp
 }
 
 describe('snapshot requests', () => {
+  it('validates source identity, fit, color and source time', () => {
+    const source = { kind: 'source' as const, asset: 'clip', fit: 'contain' as const, color: 'display' as const };
+    expect(validSnapshotRequest(request({ target: source, time: 0 }))).toBe(true);
+    expect(validSnapshotRequest(request({ target: source, time: -1 }))).toBe(false);
+    expect(validSnapshotRequest(request({ target: { ...source, asset: '' } }))).toBe(false);
+    expect(validSnapshotRequest(request({ target: { ...source, fit: 'other' as never } }))).toBe(false);
+    expect(validSnapshotRequest(request({ target: { ...source, color: 'other' as never } }))).toBe(false);
+  });
+
+  it('cancels only the originating window snapshot and forwards its signal', async () => {
+    let pending!: AbortSignal;
+    const e = engine(async () => { throw new Error('unused'); });
+    e.request = async (_process, _body, _session, _revision, signal) => {
+      pending = signal!;
+      return new Promise((_resolve, reject) => signal!.addEventListener('abort', () => reject(new RemoteError({ code: 'cancelled', message: 'Cancelled.', scope: { kind: 'session' } } as never)), { once: true }));
+    };
+    const service = new SnapshotService({ engine: e, takePixels: null, log: () => {} });
+    const result = service.snapshot(9, request({}, { requestId: 'one' }));
+    service.cancel(10, 'one'); expect(pending.aborted).toBe(false);
+    service.cancel(9, 'one');
+    expect(await result).toMatchObject({ status: 'failed', code: 'cancelled' });
+    expect(service.status().outstanding).toBe(0);
+  });
   it('accept the shapes the renderer sends and refuse the rest', () => {
     expect(validSnapshotRequest(request())).toBe(true);
     expect(validSnapshotRequest(request({ captionsHidden: true }))).toBe(true);

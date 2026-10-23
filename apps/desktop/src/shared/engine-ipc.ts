@@ -59,8 +59,12 @@ export const ENGINE_IPC = {
   /** renderer → main (invoke): the same, asynchronously (async siblings,
    *  thumbnails, library cards, posters, the project thumbnail). */
   snapshot: 'engine:snapshot',
+  cancelSnapshot: 'engine:snapshot-cancel',
   /** renderer → main: one revision-pinned agent frame batch, without stopping playback. */
   agentFrames: 'engine:agent-frames',
+  sourceFilmstrip: 'engine:source-filmstrip',
+  browserRendition: 'engine:browser-rendition',
+  cancelMediaJob: 'engine:cancel-media-job',
   /** main → renderer: the job engine needs a layer's compatibility pixels
    *  for an export frame (`EngineCompatAsk`); the window answers with
    *  `compatAnswer`. */
@@ -80,6 +84,16 @@ export type EngineAgentFramesReply = {
   status: 'rendered'; revision: number; queuedMs: number;
   images: Array<{ time: number; data: Uint8Array; mimeType: 'image/jpeg' | 'image/png'; width: number; height: number }>;
 };
+
+/** Frozen original media for a source job; request ids are scoped to the window. */
+export type EngineMediaJobRequest = { project: string; revision: number; asset: string; requestId: string };
+export type EngineSourceFilmstripRequest = EngineMediaJobRequest & {
+  times: number[]; width: number; height: number;
+  fit: 'stretch' | 'contain' | 'cover'; color: 'display' | 'interpreted';
+};
+export type EngineBrowserRenditionRequest = EngineMediaJobRequest & { format: 'png' | 'webm' };
+export type EngineSourceFilmstripReply = { frames: Uint8Array[]; width: number; height: number };
+export type EngineBrowserRenditionReply = { data: Uint8Array; type: 'image/png' | 'video/webm' };
 
 /** The `window.postMessage` types the preload uses to hand things to the page. */
 export const ENGINE_WINDOW_MESSAGE = {
@@ -244,6 +258,8 @@ export type EngineProbeResult =
  *  (main refuses another window's session and a stale launch's);
  *  `revision` is the document revision the caller has (read-your-writes). */
 export type EngineSnapshotRequest = {
+  /** Optional cancellation identity, scoped to the IPC sender. */
+  requestId?: string;
   generation: number;
   /** The window's engine session, or null with `document` (main serves the
    *  snapshot from a session of its own for the window). */
@@ -359,8 +375,12 @@ export interface EngineBridge {
   snapshotSync?(request: EngineSnapshotRequest): EngineSnapshotReply;
   /** A snapshot, asynchronously. Never rejects: failures are `status: 'failed'`. */
   snapshot?(request: EngineSnapshotRequest): Promise<EngineSnapshotReply>;
+  cancelSnapshot?(requestId: string): Promise<void>;
   /** Agent observations use the job engine at a pinned document revision. */
   agentFrames?(request: EngineAgentFramesRequest): Promise<EngineAgentFramesReply>;
+  sourceFilmstrip?(request: EngineSourceFilmstripRequest): Promise<EngineSourceFilmstripReply>;
+  browserRendition?(request: EngineBrowserRenditionRequest): Promise<EngineBrowserRenditionReply>;
+  cancelMediaJob?(requestId: string): Promise<void>;
   /** Compatibility pixels the job engine needs for an export frame; the
    *  listener answers with `answerCompat`. Returns an unsubscribe. */
   onCompatAsk?(listener: (ask: EngineCompatAsk) => void): () => void;

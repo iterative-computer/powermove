@@ -2,6 +2,8 @@ import { persistShaderEnvironment } from './shader-environment';
 import { packAgentProject } from '../agent-tools/project-packer';
 import { ProfileDefinitionsWriter, profileDefinitionsPath } from './profile-definitions';
 import { installAgentFramesIpc } from './agent-frames';
+import { SourceJobs, installSourceJobsIpc } from './source-jobs';
+import { resolveFfmpeg } from '../ffmpeg-binary';
 /*
  * Wires the native engine into the Electron app behind "Use New Engine".
  *
@@ -119,6 +121,7 @@ export type InstallNativeEngineOptions = {
   windows: () => BrowserWindow[];
   /** The media store's asset resolution for `mediaRead` handles. */
   resolveAsset?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
+  resolveSource?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: import('../../shared/engine-protocol').ContentHash | null } | null>;
   /** Keeps job snapshot media available after its window changes or closes. */
   snapshotMedia?(project: Record<string, any>): Promise<Record<string, any>>;
   bindMediaSession?(session: number, project: Record<string, any> | null): Promise<void>;
@@ -246,9 +249,15 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     });
   });
   options.ipc.handle(ENGINE_IPC.snapshot, (event, request: unknown) => snapshotReply(event, request));
+  options.ipc.handle(ENGINE_IPC.cancelSnapshot, (event, requestId: unknown) => {
+    if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
+    if (typeof requestId !== 'string' || requestId.length > 256) throw new Error('Invalid snapshot cancellation id.');
+    snapshots?.cancel(event.sender.id, requestId);
+  });
   const removeSnapshotIpc = (): void => {
     options.ipc.removeAllListeners(ENGINE_IPC.snapshotSync);
     options.ipc.removeHandler(ENGINE_IPC.snapshot);
+    options.ipc.removeHandler(ENGINE_IPC.cancelSnapshot);
   };
 
   if (!options.enabled) {
@@ -338,6 +347,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
           ...(launch?.env ?? {}),
           POWERMOVE_ENGINE_PROCESS: process,
           POWERMOVE_ENGINE_ADDON: addon,
+          POWERMOVE_ENGINE_FFMPEG: resolveFfmpeg({ packaged: options.isPackaged, resourcesPath: options.resourcesPath, appPath: options.appPath, env }).ffmpeg,
           // Invalidate first-use parity on every engine/browser/OS update.
           // GPU identity and native driver version are added by pm-render.
           POWERMOVE_ENGINE_PARITY_ENV: persistShaderEnvironment(path.join(cacheDirectory, CACHE_DIRS.shaderCache), JSON.stringify({ engine: statSync(addon).mtimeMs, bytes: statSync(addon).size, electron: globalThis.process.versions.electron, chrome: globalThis.process.versions.chrome, os: os.version() })),
@@ -362,6 +372,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     physicalMemory: os.totalmem(),
     hostNow: engineNowUs,
     ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
+    ...(options.resolveSource ? { resolveSource: options.resolveSource } : {}),
     ...(options.resolveProxy ? { resolveProxy: options.resolveProxy } : {}),
     // Blender jobs of the job engine (contract 11): the Blender the user
     // chose in Settings (`blender-path.json`, as the current engine's
@@ -523,6 +534,10 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     onAgentJob: (job) => renderQueue?.agentJob(job)
   });
   const removeAgentFramesIpc = installAgentFramesIpc(options.ipc, agentJobs, options.isTrustedSender);
+  const sourceJobs = new SourceJobs({ engine, directory: path.join(options.userData, 'Engine Cache', 'Scratch'),
+    ...(options.snapshotMedia ? { snapshotMedia: options.snapshotMedia } : {}),
+    ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}) });
+  const removeSourceJobsIpc = installSourceJobsIpc(options.ipc, sourceJobs, options.isTrustedSender);
   jobOwners = agentJobs;
   renderQueue = new RenderQueue({
     windowOpen: (owner) => { const contents = webContents.fromId(owner); return !!contents && !contents.isDestroyed(); },
@@ -660,6 +675,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     contents.on('did-finish-load', () => {
       // A new page starts its document revisions again.
       windowSessions.forget(id);
+      snapshots?.forget(id);
+      sourceJobs.forget(id);
       if (!engine) return;
       if (attached) engine.reconnectClient(id);
       else engine.addClient(id, deliver);
@@ -668,9 +685,11 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     window.once('closed', () => {
       fallbackRelay.forget(id);
       engine?.removeClient(id);
+      snapshots?.forget(id);
       windowSessions.forget(id);
       compatFrames.windowGone(id);
       void agentJobs.forgetOwner(id);
+      sourceJobs.forget(id);
     });
     // A page that goes away never reports its frame surfaces released.
     if (frameBridge) {
@@ -716,6 +735,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       options.ipc.removeAllListeners(ENGINE_IPC.playback);
       options.ipc.removeAllListeners(ENGINE_IPC.shaderFallbackResult);
       agentJobs.dispose();
+      removeSourceJobsIpc();
+      sourceJobs.dispose();
       await engine?.stop();
       frameBridge?.dispose();
     }

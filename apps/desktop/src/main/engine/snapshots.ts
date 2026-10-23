@@ -35,7 +35,7 @@ import type { WindowSnapshotSessions } from './window-sessions';
 export interface SnapshotEngine {
   isReady(process: 'interactive'): boolean;
   clientPort(id: number, process: 'interactive'): { port: number; generation: number } | null;
-  request(process: 'interactive', body: Request, session?: number | null, revision?: number | null): Promise<Response>;
+  request(process: 'interactive', body: Request, session?: number | null, revision?: number | null, signal?: AbortSignal): Promise<Response>;
   /** The textures the engine sent ahead of a `needsRenderer` answer for
    *  one of its fallback requests (fallback-inputs.ts). */
   fallbackTextures?(key: string, count: number, width: number, height: number): Uint8Array[] | null;
@@ -79,6 +79,7 @@ const id = (v: unknown): v is string => typeof v === 'string' && v.length > 0 &&
 export function validSnapshotRequest(value: unknown): value is EngineSnapshotRequest {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
+  if (v['requestId'] !== undefined && !id(v['requestId'])) return false;
   if (!safeUint(v['generation'])) return false;
   const document = v['document'];
   if (document !== undefined && !validDocument(document)) return false;
@@ -111,6 +112,11 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (target['kind'] === 'frame') {
     return safeUint(target['motionBlurSamples']) && (target['motionBlurSamples'] as number) <= 256 &&
       typeof target['background'] === 'boolean' && typeof target['draft3d'] === 'boolean';
+  }
+  if (target['kind'] === 'source') {
+    return id(target['asset']) && (s['time'] as number) >= 0
+      && ['stretch', 'contain', 'cover'].includes(target['fit'] as string)
+      && ['display', 'interpreted'].includes(target['color'] as string);
   }
   if (target['kind'] === 'layer') {
     const crop = target['crop'] as Record<string, unknown> | null;
@@ -191,11 +197,18 @@ export type SnapshotServiceOptions = {
 export type SnapshotStats = { served: number; failed: number; needsRenderer: number; shared: number; refused: number; outstanding: number; outstandingBytes: number; windowSessions: number; needsDocument: number };
 
 export class SnapshotService {
+  private readonly cancellations = new Map<number, Map<string, AbortController>>();
   private readonly perWindow = new Map<number, number>();
   private outstandingBytes = 0;
   private readonly stats: SnapshotStats = { served: 0, failed: 0, needsRenderer: 0, shared: 0, refused: 0, outstanding: 0, outstandingBytes: 0, windowSessions: 0, needsDocument: 0 };
 
   constructor(private readonly options: SnapshotServiceOptions) {}
+
+  cancel(windowId: number, requestId: string): void { this.cancellations.get(windowId)?.get(requestId)?.abort(); }
+  forget(windowId: number): void {
+    for (const controller of this.cancellations.get(windowId)?.values() ?? []) controller.abort();
+    this.cancellations.delete(windowId);
+  }
 
   status(): SnapshotStats {
     return { ...this.stats, outstanding: [...this.perWindow.values()].reduce((a, b) => a + b, 0), outstandingBytes: this.outstandingBytes };
@@ -208,25 +221,38 @@ export class SnapshotService {
       return failed('invalidMessage', 'A snapshot names its session, composition, time, size, and limits.');
     }
     const request = value;
+    const controller = new AbortController();
+    if (request.requestId) {
+      let requests = this.cancellations.get(windowId);
+      if (!requests) this.cancellations.set(windowId, requests = new Map());
+      if (requests.has(request.requestId)) return failed('invalidMessage', 'A snapshot with this request id is already running.');
+      requests.set(request.requestId, controller);
+    }
     const bytes = request.snapshot.outputSize.width * request.snapshot.outputSize.height * 4;
     const inFlight = this.perWindow.get(windowId) ?? 0;
     if (inFlight >= MAX_PER_WINDOW || this.outstandingBytes + bytes > MAX_OUTSTANDING_BYTES) {
+      if (request.requestId) this.cancellations.get(windowId)?.delete(request.requestId);
       this.stats.refused++;
       return failed('refused', 'Too many snapshots are in flight; try again when they finish.');
     }
     this.perWindow.set(windowId, inFlight + 1);
     this.outstandingBytes += bytes;
     try {
-      return await this.run(windowId, request);
+      return await this.run(windowId, request, controller.signal);
     } finally {
+      controller.abort();
       const left = (this.perWindow.get(windowId) ?? 1) - 1;
       if (left > 0) this.perWindow.set(windowId, left);
       else this.perWindow.delete(windowId);
       this.outstandingBytes -= bytes;
+      if (request.requestId) {
+        const requests = this.cancellations.get(windowId); requests?.delete(request.requestId);
+        if (!requests?.size) this.cancellations.delete(windowId);
+      }
     }
   }
 
-  private async run(windowId: number, request: EngineSnapshotRequest): Promise<EngineSnapshotReply> {
+  private async run(windowId: number, request: EngineSnapshotRequest, signal: AbortSignal): Promise<EngineSnapshotReply> {
     const now = this.options.now ?? (() => performance.now());
     const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const started = now();
@@ -236,6 +262,7 @@ export class SnapshotService {
     // A cold start or a restart: wait (within the request's own wait) for
     // the interactive engine rather than fail at once.
     while (!this.options.engine.isReady('interactive')) {
+      if (signal.aborted) return failed('cancelled', 'The source request was cancelled.');
       if (now() - started >= snapshot.waitMs) {
         this.stats.failed++;
         return failed('unavailable', 'The new engine is not running.');
@@ -286,11 +313,13 @@ export class SnapshotService {
       }
       owner = { port: client.port, session: request.session };
     }
+    if (signal.aborted) return failed('cancelled', 'The source request was cancelled.');
     const answer = this.options.engine.request(
       'interactive',
       { type: 'snapshot', renderer: owner.port, session: owner.session, snapshot } as Request,
       null,
-      request.revision
+      request.revision,
+      signal
     );
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<'timeout'>((resolve) => {

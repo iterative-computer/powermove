@@ -74,6 +74,7 @@ export type NativeEngineOptions = {
   /** Resolves an asset to the file the engine may read (the media store
    *  lane provides it); `null` when the asset is offline. */
   resolveAsset?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
+  resolveSource?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   /** A generated proxy of an offline asset, for draft renders. */
   resolveProxy?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   now?: () => number;
@@ -195,6 +196,7 @@ export class NativeEngine {
       automaticOutputDirectory: options.automaticOutputDirectory,
       physicalMemory: options.physicalMemory,
       ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
+      ...(options.resolveSource ? { resolveSource: options.resolveSource } : {}),
       ...(options.resolveProxy ? { resolveProxy: options.resolveProxy } : {}),
       ...(options.now ? { now: options.now } : {})
     });
@@ -387,8 +389,8 @@ export class NativeEngine {
   /** A request main itself sends to an engine (sessions main opens for
    *  exports and agent snapshots; tests). `revision` is the envelope
    *  revision (an agent frame request's read-your-writes revision). */
-  request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
-    return this.supervisors[process].request(body, session, revision);
+  request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null, signal?: AbortSignal): Promise<Response> {
+    return this.supervisors[process].request(body, session, revision, signal);
   }
 
   /** A destination the user chose for a job, as a write handle bound to the

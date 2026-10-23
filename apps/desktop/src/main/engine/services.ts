@@ -36,6 +36,7 @@ export type HostServicesOptions = {
   /** Overrides the global memory budget derived from physical memory (tests). */
   globalMemory?: number;
   resolveAsset?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
+  resolveSource?: (asset: string, context?: { process: EngineProcess; session: number }) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   /** A generated proxy of an asset whose original is offline (draft
    *  renders, section 14.8; Phase 4a generates proxies). */
   resolveProxy?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
@@ -142,6 +143,12 @@ export class HostServicesCore {
         const resolved = await this.options.resolveAsset?.(kind.asset, { process, session })
           ?? (this.draftSessions.has(session) ? await this.options.resolveProxy?.(kind.asset) : null);
         if (!resolved) throw new ProtocolError('mediaOffline', 'The asset\'s file is not available.');
+        return resolved;
+      }
+      case 'sourceRead': {
+        if (!isId(kind.asset)) throw new ProtocolError('invalidMessage', 'invalid source asset id');
+        const resolved = await this.options.resolveSource?.(kind.asset, { process, session });
+        if (!resolved) throw new ProtocolError('mediaOffline', 'The source display media is not available.');
         return resolved;
       }
       case 'outputWrite':
