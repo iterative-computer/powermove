@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, COMPAT_WARM_MS, COMPAT_PREFETCH, COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, intoLoop, runAhead, COMPAT_WARM_MS, COMPAT_PREFETCH, COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -751,6 +751,58 @@ describe('compatibility answers during playback', () => {
       t.receiveCompat({ compat: 'needs', needs: [{ ...need(95 * frame), composition: 'nested' }] }, session);
       for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(4);
       expect(prepared.some(time => time >= 95 * frame)).toBe(true);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('measures distances along a looping run: the frames after the wrap follow the last ones', () => {
+    const loop = { start: 10 * frame, end: 100 * frame };
+    expect(runAhead(98 * frame, 12 * frame, frame, loop)).toBe(4 * frame);
+    expect(runAhead(98 * frame, 97 * frame, frame, loop)).toBe(-frame);
+    expect(runAhead(12 * frame, 98 * frame, -frame, loop)).toBe(4 * frame);
+    // Without a loop, plain distances.
+    expect(runAhead(98 * frame, 12 * frame, frame, null)).toBe(-86 * frame);
+    expect(intoLoop(101 * frame, loop)).toBe(11 * frame);
+    expect(intoLoop(9 * frame, loop)).toBe(99 * frame);
+    expect(intoLoop(50 * frame, loop)).toBe(50 * frame);
+    expect(intoLoop(101 * frame, null)).toBe(101 * frame);
+  });
+
+  it('prepares and answers the frames after a loop\'s wrap before playback reaches them, and not again after it', async () => {
+    vi.useFakeTimers();
+    const posted: any[] = [];
+    const session: TransportSession = { id: 3, closed: false, generation: 2, resyncPending: false, applied: 5, uploadFallback: () => {}, post: (e) => { posted.push(e); return true; } };
+    const state = { time: 80 * frame };
+    const t = new EngineRenderTransport({
+      native: {}, session: () => session, revision: () => 5, composition: () => 'P-root', document: () => 'P', viewSeq: () => null, fallbackRunner: () => null, log: () => {},
+      playing: () => true, frameTicks: () => frame, playhead: () => ({ time: state.time, rate: 1 }), span: () => ({ start: 0, end: 90 * frame, loop: true })
+    } as any);
+    const prepared: number[] = [];
+    const answered: number[] = [];
+    t.answerCompat('rasterOverride', n => { answered.push(n.time); return { kind: 'native' }; }, async n => { prepared.push(n.time); });
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(80 * frame)] }, session);
+      for (let i = 0; i < 40; i++) await vi.advanceTimersByTimeAsync(4);
+      // Frames 80 to 89, then 0 onwards: the clock wraps to the loop's start.
+      const horizon = Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => ((80 + i) % 90) * frame);
+      for (const time of horizon) expect(answered, `frame ${time / frame}`).toContain(time);
+      expect(Math.max(...answered)).toBe(89 * frame);
+      expect(prepared.every(time => time >= 0 && time < 90 * frame)).toBe(true);
+      // The clock reaches the loop's last frame, then wraps: frames already
+      // answered are not answered again.
+      const before = answered.length;
+      state.time = 89 * frame;
+      for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(4);
+      state.time = 0;
+      for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(4);
+      const again = answered.slice(before);
+      expect(again.filter(time => time <= 8 * frame)).toEqual([]);
+      expect(again).toContain(COMPAT_LOOKAHEAD * frame);
+      // The engine asks for the first frame after the wrap while the clock
+      // still shows the last ones: a frame ahead, not a stale one.
+      state.time = 89 * frame;
+      const skipped = t.lookaheadStats.skipped;
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      expect(t.lookaheadStats.skipped).toBe(skipped);
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 

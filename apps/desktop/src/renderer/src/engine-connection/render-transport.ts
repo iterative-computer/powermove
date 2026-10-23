@@ -232,7 +232,36 @@ export const COMPAT_PREFETCH = 24;
 /** Speculative base preparations in flight at once (beyond the answer horizon's). */
 export const COMPAT_PREFETCH_IN_FLIGHT = 1;
 
-type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; required: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null };
+/** The playable span the clock wraps by while it loops, in ticks, `[start, end)`. */
+export type PlaybackLoop = { start: number; end: number };
+
+const modulo = (value: number, length: number) => ((value % length) + length) % length;
+
+/**
+ * How far ahead of `cursor` playback reaches `time`, running by `step`
+ * (a signed frame), in ticks. In a loop the clock wraps: `time` is ahead
+ * unless it is the frame just shown, so the result is in
+ * `[-|step|, length - |step|)` and the frames after the wrap follow the
+ * last ones before it.
+ */
+export function runAhead(cursor: number, time: number, step: number, loop: PlaybackLoop | null): number {
+  const distance = Math.sign(step) * (time - cursor);
+  const length = loop ? loop.end - loop.start : 0;
+  if (!loop || !(length > 0)) return distance;
+  const frame = Math.abs(step);
+  return modulo(distance + frame, length) - frame;
+}
+
+/** `time` brought into the loop the clock wraps by (unchanged without one). */
+export function intoLoop(time: number, loop: PlaybackLoop | null): number {
+  if (!loop || !(loop.end > loop.start) || (time >= loop.start && time < loop.end)) return time;
+  return loop.start + modulo(time - loop.start, loop.end - loop.start);
+}
+
+/** `loop`: the clock's loop in the entry's own time (a nested composition's
+ *  times are the open one's shifted), while playback loops and the shift
+ *  is known. */
+type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; required: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null; loop?: PlaybackLoop | null };
 
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
 
@@ -257,8 +286,10 @@ export type RenderTransportOptions = {
   playhead?: () => { time: number; rate: number } | null;
   /** The open composition's playable span in ticks, `[start, end)`: the
    *  loop the clock wraps by, else the composition. Playback never shows a
-   *  frame outside it, so the lookahead prepares none there. */
-  span?: () => { start: number; end: number } | null;
+   *  frame outside it, so the lookahead prepares none there. `loop`: the
+   *  clock wraps by it (today's looping playback, the default): the frames
+   *  after the wrap are prepared before it, as the frames ahead. */
+  span?: () => { start: number; end: number; loop?: boolean } | null;
   /** Every open session of the window (viewer sessions and the standby):
    *  each learns which compatibility producers the window has. */
   sessions?: () => TransportSession[];
@@ -438,8 +469,12 @@ export class EngineRenderTransport {
     for (const need of needs) {
       // A delayed request is no longer the frame the engine can present.
       // Answer the clock's frame instead of filling an obsolete FIFO.
+      // In a loop a frame after the wrap is ahead of the clock's last ones.
+      const loop = this.playbackLoop();
       const stale = !!clock && need.composition === this.options.composition() && frame > 0
-        && Math.sign(clock.rate) * (clock.time - need.time) > frame;
+        && (loop && loop.end - loop.start > (COMPAT_PREFETCH + 1) * frame
+          ? runAhead(clock.time, need.time, Math.sign(clock.rate || 1) * frame, loop) > COMPAT_PREFETCH * frame
+          : !loop && Math.sign(clock.rate) * (clock.time - need.time) > frame);
       // Compositor needs stay asynchronous across Play/Stop boundaries too.
       // The engine's stopped clock can arrive before its final frame is
       // presented; answering that need synchronously would block playback.
@@ -474,6 +509,8 @@ export class EngineRenderTransport {
       const playhead = this.options.playhead?.();
       const clock = this.options.playing?.() ? playhead : null;
       const revision = this.options.revision();
+      const span = this.options.span?.() ?? null;
+      const loop = this.playbackLoop(span);
       const entries = [...this.ahead.values()].filter(entry => {
         if (entry.session.closed || !this.answerers.has(entry.need.source)) {
           this.ahead.delete(this.aheadTag(entry.need));
@@ -484,22 +521,31 @@ export class EngineRenderTransport {
         const cursor = clockCursor === null ? entry.cursor : entry.need.composition === this.options.composition()
           ? clockCursor : entry.cursor + (entry.clockCursor === null ? 0 : clockCursor - entry.clockCursor);
         entry.clockCursor = clockCursor;
+        // The loop in this entry's time: the open composition's own, or a
+        // nested one's shifted as the clock moves it (playing only).
+        const open = entry.need.composition === this.options.composition();
+        const shift = open ? 0 : clockCursor === null ? null : cursor - clockCursor;
+        const entryLoop = loop && shift !== null ? { start: loop.start + shift, end: loop.end + shift } : null;
+        // A wrap is the run moving on, not a seek: only a move back (or
+        // further than the horizon at once) starts the windows over.
+        const moved = runAhead(entry.cursor, cursor, step, entryLoop);
         if (revision !== entry.revision || Math.sign(step) !== Math.sign(entry.step)
-          || Math.sign(step) * (cursor - entry.cursor) < 0) { entry.sent.clear(); entry.prefetched.clear(); }
-        if (Math.sign(step) * (cursor - entry.posted) > Math.abs(step)) this.lookaheadStats.recoveries++;
+          || moved < 0 || (entryLoop && moved > COMPAT_PREFETCH * Math.abs(step))) { entry.sent.clear(); entry.prefetched.clear(); }
+        if (runAhead(entry.posted, cursor, step, entryLoop) > Math.abs(step)) this.lookaheadStats.recoveries++;
         entry.revision = revision;
         entry.step = step;
         entry.cursor = cursor;
+        entry.loop = entryLoop;
         for (const time of entry.sent) {
-          const distance = Math.sign(step) * (time - cursor);
+          const distance = runAhead(cursor, time, step, entryLoop);
           if (distance < -Math.abs(step) || distance > COMPAT_LOOKAHEAD * Math.abs(step)) entry.sent.delete(time);
         }
         for (const time of entry.prefetched) {
-          const distance = Math.sign(step) * (time - cursor);
+          const distance = runAhead(cursor, time, step, entryLoop);
           if (distance < -Math.abs(step) || distance > COMPAT_PREFETCH * Math.abs(step)) entry.prefetched.delete(time);
         }
         for (const time of entry.required) {
-          const distance = Math.sign(step) * (time - cursor);
+          const distance = runAhead(cursor, time, step, entryLoop);
           if (distance < -Math.abs(step) || distance > COMPAT_LOOKAHEAD * Math.abs(step)) entry.required.delete(time);
         }
         return step !== 0;
@@ -507,12 +553,12 @@ export class EngineRenderTransport {
       // Breadth first: every layer's current frame precedes speculative
       // work. A slow producer gets at most one turn before another layer.
       let done = 0, pending = 0;
-      const span = this.options.span?.() ?? null;
       const outside = (entry: AheadEntry, time: number) => time < 0 || (!!span && entry.need.composition === this.options.composition() && (time < span.start || time >= span.end));
       for (let offset = 0; offset <= COMPAT_LOOKAHEAD; offset++) {
         for (let i = 0; i < entries.length; i++) {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
-          const time = entry.cursor + offset * entry.step;
+          // Past the loop's end, the frames after the wrap.
+          const time = intoLoop(entry.cursor + offset * entry.step, entry.loop ?? null);
           if (outside(entry, time) || entry.sent.has(time) || entry.pending.has(time)) continue;
           if (warm && performance.now() >= warmUntil && !entry.required.has(time)) continue;
           pending++;
@@ -540,7 +586,7 @@ export class EngineRenderTransport {
           for (const entry of entries) {
             if (this.prefetchInFlight >= COMPAT_PREFETCH_IN_FLIGHT) break;
             const prepare = this.preparers.get(entry.need.source);
-            const time = entry.cursor + offset * entry.step;
+            const time = intoLoop(entry.cursor + offset * entry.step, entry.loop ?? null);
             if (!prepare || outside(entry, time) || entry.prefetched.has(time)) continue;
             entry.prefetched.add(time);
             this.prefetchAhead(entry.need, time, revision ?? 0, prepare);
@@ -581,7 +627,7 @@ export class EngineRenderTransport {
       const clock = this.options.playing?.() ? this.options.playhead?.() : null;
       const cursor = clock && need.composition === this.options.composition()
         ? Math.floor(clock.time / Math.abs(entry.step)) * Math.abs(entry.step) : entry.cursor;
-      const distance = Math.sign(entry.step) * (time - cursor);
+      const distance = runAhead(cursor, time, entry.step, entry.loop ?? null);
       if ((!this.options.playing?.() && !entry.required.has(time) && (!warm || performance.now() >= warmUntil)) || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
         || this.preparers.get(need.source) !== prepare || revision !== this.options.revision() || distance < -Math.abs(entry.step) || distance > COMPAT_LOOKAHEAD * Math.abs(entry.step)) {
         this.lookaheadStats.obsolete++;
@@ -618,6 +664,11 @@ export class EngineRenderTransport {
       this.aheadTimer = null;
       this.presentedWhilePlaying();
     }, LOOKAHEAD_POLL_MS);
+  }
+
+  /** The loop the clock wraps by while playback loops (`span.loop`). */
+  private playbackLoop(span = this.options.span?.() ?? null): PlaybackLoop | null {
+    return span?.loop && span.end > span.start ? { start: span.start, end: span.end } : null;
   }
 
   private aheadTag(need: CompatNeed): string {

@@ -122,6 +122,31 @@ async function shapeSizeProject(page: Page): Promise<void> {
   });
 }
 
+/** A 10 s 1280×720 loop whose overridden ellipse nearly fills the frame
+ *  and changes size on every frame: 300 different rasters of about a
+ *  viewer's size, more than the engine's compatibility store keeps
+ *  (256 MiB), so the frames after the loop's wrap were evicted by the time
+ *  playback wraps to them. */
+async function shapeLongLoopProject(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const PM = (window as any).PM;
+    const project = PM.mkProject({ name: 'Shape long loop', w: 1280, h: 720, fps: 30, dur: 10, bg: '#203040' });
+    project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
+    const tinted = PM.mkLayer('shape', { name: 'Tinted', from: 0, dur: 10, d: { shape: 'ellipse', w: 1100, h: 600, color: '#33CC66', stroke: 0 } }, project);
+    tinted.id = 'tinted';
+    tinted.d.w = PM.P(1100, { kf: [PM.KF(0, 1100), PM.KF(10, 1260)] });
+    tinted.d.h = PM.P(600, { kf: [PM.KF(0, 600), PM.KF(10, 710)] });
+    tinted.p['position.x'].v = 640; tinted.p['position.y'].v = 360;
+    project.layers = [tinted];
+    PM.replaceProject(project);
+    PM.Projects?.put?.(PM.proj);
+    PM.loop = true;
+    const api = PM.Kernel.api('changing-base-proof');
+    const sizes = Array.from({ length: 300 }, (_, i) => { const d = api.anim.resolveContent(PM.proj.layers[0], i / 30); return JSON.stringify([d.w, d.h]); });
+    if (new Set(sizes).size !== 300) throw new Error('The long loop requires 300 different base sizes.');
+  });
+}
+
 /** A vector path whose vertex and tangent channels change on every frame. */
 async function pathProject(page: Page): Promise<void> {
   await page.evaluate(() => {
@@ -453,10 +478,12 @@ test.describe('Use New Engine: existing extensions', () => {
    * time. `from`: where playback starts (seconds). `warmAt`: when set, the
    * playhead first rests there (the paused warm-up prepares its frames),
    * then seeks to `from` and plays in the same task: Play right after a
-   * seek, before any warm-up of `from`.
+   * seek, before any warm-up of `from`. `wrapFrames`: playback loops
+   * (today's default) and goes on through the wrap for that many frames;
+   * the frames after the wrap are measured on their own (`wrap`).
    */
-  async function cadenceGate(session: { userData: string; relaunch(): Promise<void>; openEditor(): Promise<void>; close(): Promise<void>; page: Page; diagnostics: { pageErrors: unknown[] } }, extension: string, setup: (page: Page) => Promise<void>, label: string, options: { layer?: string; from?: number; warmAt?: number | null } = {}) {
-    const run = { layer: options.layer ?? 'tinted', from: options.from ?? 0, warmAt: options.warmAt ?? null };
+  async function cadenceGate(session: { userData: string; relaunch(): Promise<void>; openEditor(): Promise<void>; close(): Promise<void>; page: Page; diagnostics: { pageErrors: unknown[] } }, extension: string, setup: (page: Page) => Promise<void>, label: string, options: { layer?: string; from?: number; warmAt?: number | null; wrapFrames?: number } = {}) {
+    const run = { layer: options.layer ?? 'tinted', from: options.from ?? 0, warmAt: options.warmAt ?? null, wrapFrames: options.wrapFrames ?? 0 };
     await cp(path.join(__dirname, FIXTURE[extension]!), path.join(session.userData, 'extensions', extension), { recursive: true });
     await session.relaunch();
     await session.openEditor();
@@ -479,9 +506,12 @@ test.describe('Use New Engine: existing extensions', () => {
       // presented frame, joined with the native and viewer traces below.
       const lookaheadTrace: number[][] = [];
       let wrapped = false;
+      // The frames after the wrap, when the run goes on through it.
+      const wrapAt: number[] = [], wrapTimes: number[] = [];
       const off: any = api.events.on('frame:rendered', (event: any) => {
         if (times.length && event.time < times.at(-1)! - 1e-9) wrapped = true;
         if (!wrapped) { at.push(performance.now()); times.push(event.time); }
+        else if (wrapTimes.length < run.wrapFrames) { wrapAt.push(performance.now()); wrapTimes.push(event.time); }
         if (traced && !wrapped) {
           const la = PM.EngineRender?.lookaheadStats ?? {}, cs = PM.EngineRender?.compatStats ?? {}, bs = PM.RasterCompat?.stats ?? {};
           lookaheadTrace.push([Math.round(performance.now() * 10) / 10, Math.round(event.time * 30 * 100) / 100, la.inFlight ?? -1, la.pending ?? -1, la.answered ?? -1, la.prefetched ?? -1, la.obsolete ?? -1, (cs.rasters ?? 0) + (cs.reuses ?? 0), cs.needs ?? 0, bs.asyncLoads ?? -1, la.asked ?? -1]);
@@ -491,7 +521,8 @@ test.describe('Use New Engine: existing extensions', () => {
       const rasters = (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0);
       PM.setTime(run.warmAt ?? run.from);
       await new Promise((r) => setTimeout(r, run.warmAt === null ? 300 : 800));
-      at.length = 0; times.length = 0; wrapped = false;
+      at.length = 0; times.length = 0; wrapped = false; wrapAt.length = 0; wrapTimes.length = 0;
+      if (run.wrapFrames) PM.loop = true;
       const longTasks: { startTime: number; duration: number }[] = [];
       const observer = new PerformanceObserver(list => { for (const entry of list.getEntries()) longTasks.push({ startTime: entry.startTime, duration: entry.duration }); });
       observer.observe({ type: 'longtask' });
@@ -501,7 +532,8 @@ test.describe('Use New Engine: existing extensions', () => {
       const revision = PM.EngineDoc?.barrier?.revision ?? null;
       if (run.warmAt !== null) PM.setTime(run.from);
       PM.play();
-      while (!wrapped && !(times.length && times.at(-1)! >= last) && performance.now() - started < 6000) await new Promise((r) => setTimeout(r, 4));
+      const limit = run.wrapFrames ? (PM.proj.dur - run.from) * 1000 + run.wrapFrames * 1000 / PM.proj.fps + 4000 : 6000;
+      while (!(run.wrapFrames ? wrapTimes.length >= run.wrapFrames : wrapped || (times.length && times.at(-1)! >= last)) && performance.now() - started < limit) await new Promise((r) => setTimeout(r, 4));
       PM.pause();
       if (typeof off === 'function') off(); else off?.dispose?.();
       observer.disconnect();
@@ -516,6 +548,16 @@ test.describe('Use New Engine: existing extensions', () => {
       // Times presented more than once (each extra presentation is a
       // `frame:rendered` an extension hears again).
       const repeatCount = times.filter((t, i) => times.indexOf(t) !== i).length;
+      // The wrap: the gap from the last frame before it to the first after
+      // it, the longest gap from there over the frames after it, and the
+      // answers for those frames.
+      const wrap = run.wrapFrames ? (() => {
+        const all = [...at, ...wrapAt];
+        const gaps = wrapAt.map((v, i) => v - all[at.length + i - 1]!);
+        const answered = [...new Set(wrapTimes)].map((t) => PM.EngineRender?.answeredAt?.(run.layer, Math.round(t * 705_600_000)) ?? null)
+          .filter((a: any) => a && (revision === null || a.revision >= revision)).length;
+        return { frames: wrapTimes.length, uniqueTimes: new Set(wrapTimes).size, firstTimes: wrapTimes.slice(0, 4).map((t) => Math.round(t * 30 * 100) / 100), lastBefore: Math.round((times.at(-1) ?? 0) * 30 * 100) / 100, gap: Math.round(gaps[0] ?? 3000), maxGap: Math.round(Math.max(0, ...gaps)), answered, repeats: wrapTimes.filter((t, i) => wrapTimes.indexOf(t) !== i).length, skipped: wrapTimes.flatMap((t, i) => i > 0 && Math.round((t - wrapTimes[i - 1]!) * 30) > 1 ? [[i, Math.round(wrapTimes[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6) };
+      })() : null;
       // Answers counted by the frame they are for: the window's latest
       // answer for the overridden layer at each presented time, at this
       // revision, wherever it was made (asked by a frame, prepared by the
@@ -525,7 +567,7 @@ test.describe('Use New Engine: existing extensions', () => {
         .filter((a: any) => a && (revision === null || a.revision >= revision));
       const answeredShown = shown.length, rasterShown = shown.filter((a: any) => a.kind !== 'native').length;
       const trace = traced ? { started, hostOffsetUs: PM.EngineConnection?.status?.()?.hostOffsetUs ?? null, lookahead: lookaheadTrace, viewer: await PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.().catch(() => null) ?? null } : undefined;
-      return { answeredShown, rasterShown, trace, longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, firstAdvanceMs, repeatCount, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
+      return { answeredShown, rasterShown, trace, longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, firstAdvanceMs, repeatCount, wrap, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
     }, { traced, run });
     const { page } = session;
     await page.waitForFunction((id) => (window as any).PM?.Kernel?.loader?.activeIds?.().includes(id) && Boolean((window as any).PM?.EngineRender), extension);
@@ -549,8 +591,9 @@ test.describe('Use New Engine: existing extensions', () => {
       await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.());
       await nativeReport();
     }
-    const engine = await play(page, traced);
+    const engine: Awaited<ReturnType<typeof play>> & { nativeAfter?: Awaited<ReturnType<typeof nativeReport>> } = await play(page, traced);
     if (traced) (engine as any).trace.native = await nativeReport();
+    if (run.wrapFrames) engine.nativeAfter = await nativeReport();
     if (profiler && profileDirectory) {
       const { profile } = await profiler.send('Profiler.stop');
       await mkdir(profileDirectory, { recursive: true });
@@ -658,6 +701,26 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.rasterShown).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 1);
     expect(engine.bases.asyncLoads - engine.basesBefore.asyncLoads).toBeGreaterThanOrEqual(engine.uniqueTimes - 20);
+    expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
+  });
+
+  test('looping playback with a raster override longer than the engine keeps wraps at today\'s cadence', async ({ session }) => {
+    test.setTimeout(360_000);
+    // The whole 10 s loop, then 45 frames past the wrap (today's default
+    // looping playback). By the wrap the store evicted the first frames'
+    // rasters: the frames after it must be prepared before it.
+    const { engine, today } = await cadenceGate(session, 'shape-tint', shapeLongLoopProject, 'shape-tint long loop wrap', { wrapFrames: 45 });
+    console.log(JSON.stringify({ wrap: { engine: engine.wrap, today: today.wrap, evicted: engine.nativeAfter?.presenter?.compatEvicted ?? null, compatBytes: engine.nativeAfter?.presenter?.compatBytes ?? null } }));
+    expect(engine.nativeAfter?.presenter?.compatEvicted, 'the store evicted rasters before the wrap').toBeGreaterThan(0);
+    expect(engine.wrap!.frames).toBe(45);
+    expect(engine.wrap!.firstTimes[0]).toBe(0);
+    // The window answered for every frame after the wrap, and the wrap
+    // stalls no more than today's (one frame at 30 fps of slack).
+    expect(engine.wrap!.answered).toBe(engine.wrap!.uniqueTimes);
+    expect(engine.wrap!.gap).toBeLessThanOrEqual(today.wrap!.gap + Math.ceil(1000 / 30));
+    expect(engine.wrap!.maxGap).toBeLessThanOrEqual(today.wrap!.maxGap + Math.ceil(1000 / 30));
+    expect(engine.wrap!.repeats).toBeLessThanOrEqual(today.wrap!.repeats);
+    expect(engine.wrap!.uniqueTimes).toBeGreaterThanOrEqual(today.wrap!.uniqueTimes - 1);
     expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
   });
 

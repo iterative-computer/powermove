@@ -625,6 +625,8 @@ pub struct Stats {
     pub depth_frames: u64,
     pub compat_rasters: BTreeMap<String, usize>,
     pub compat_bytes: u64,
+    /// Rasters the store evicted for room (least recently used first).
+    pub compat_evicted: u64,
     /// Producer answers held and asks outstanding (the `raster`
     /// override's pass-throughs, reuses, and rasters).
     pub compat_answers: u64,
@@ -2179,11 +2181,17 @@ impl Thread {
                     | pm_protocol::snapshot::CompatMessage::SvgRequests { .. }),
             } => self.svg_message(key, message),
             Command::Compat { key, message } => {
-                let (applied, rasters, bytes, answers) = {
+                let (applied, rasters, bytes, answers, evicted) = {
                     let mut store = self.compat_store();
                     let applied = store.apply(key, message);
                     let (rasters, bytes) = store.usage();
-                    (applied, rasters, bytes, store.answer_counts())
+                    (
+                        applied,
+                        rasters,
+                        bytes,
+                        store.answer_counts(),
+                        store.evicted(),
+                    )
                 };
                 {
                     let mut stats = self.stats();
@@ -2192,6 +2200,7 @@ impl Thread {
                     }
                     stats.compat_rasters = rasters;
                     stats.compat_bytes = bytes;
+                    stats.compat_evicted = evicted;
                     stats.compat_answers = answers.0 as u64;
                     stats.compat_asked = answers.1 as u64;
                 }

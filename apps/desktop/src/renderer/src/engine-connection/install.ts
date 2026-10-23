@@ -408,7 +408,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     },
     span: () => {
       const loop = current?.clock?.loopRange;
-      if (loop) return { start: Number(loop.start), end: Number(loop.end) };
+      // The engine's clock wraps by the loop it was sent (today's looping
+      // playback: the work area while `PM.loop` is on).
+      if (loop) return { start: Number(loop.start), end: Number(loop.end), loop: true };
       const duration = Number((PM.curComp?.() ?? PM.proj)?.dur);
       return duration > 0 ? { start: 0, end: ticks(duration) } : null;
     },

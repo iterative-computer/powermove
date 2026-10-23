@@ -208,6 +208,8 @@ pub struct CompatStore {
     partial: HashMap<(Key, CompatKey), Partial>,
     clock: u64,
     bytes: u64,
+    /// Complete rasters evicted for room ([`Self::evicted`]).
+    evicted: u64,
     limit: u64,
     /// The producers each session has (`CompatMessage::Producers`).
     producers: HashMap<Key, Vec<CompatSource>>,
@@ -258,6 +260,7 @@ impl CompatStore {
             partial: HashMap::new(),
             clock: 0,
             bytes: 0,
+            evicted: 0,
             limit,
             producers: HashMap::new(),
             answers: HashMap::new(),
@@ -495,7 +498,13 @@ impl CompatStore {
             let (gone, _) = self.complete.remove(&oldest).expect("present");
             self.bytes -= size(gone.width, gone.height, gone.format);
             self.drawn.remove(&oldest);
+            self.evicted += 1;
         }
+    }
+
+    /// Complete rasters evicted for room so far.
+    pub fn evicted(&self) -> u64 {
+        self.evicted
     }
 
     fn forget_layer(&mut self, key: Key, composition: &CompositionId, layer: &LayerId) -> usize {
@@ -905,6 +914,7 @@ mod tests {
         store.apply(session(1), band(id("L0", "k"), 16, 16, 0, 16, 0));
         store.apply(session(1), band(id("L1", "k"), 16, 16, 0, 16, 0));
         assert!(store.get(session(1), &id("L0", "k")).is_none(), "evicted");
+        assert_eq!(store.evicted(), 1);
         // The frame at revision 4 asks; the producer says its key is unchanged.
         let r4 = Revision::new(4).unwrap();
         assert_eq!(
