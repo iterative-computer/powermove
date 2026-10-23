@@ -16,6 +16,7 @@ import {onRenderState} from './rendering';
 import {startWalk,type WalkSession} from './walk';
 import {editModeLayer,editOverlay,pointsTarget,planExtrude,selectPoints} from './editmode';
 import {world3D} from '../../legacy/core/space-3d';
+import {viewportGlyphHits} from './glyph-hits';
 
 /*
  * One Blender 3D viewport over the composition viewer. It appears only when
@@ -144,6 +145,7 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
     try{
       const prefs=viewportPreferences(PM),visible=available();
       if(!visible){
+        glyphHits=[];
         const key=JSON.stringify([rect,prefs.orientation,prefs.pivot,prefs.snap]);
         if(blank===key)return;
         blank=key;
@@ -176,7 +178,10 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
       // Engine geometry keeps hit testing current while the matching chrome
       // planes are still in flight. Drawing waits for their frame tag.
       gizmo.helper.updateMatrixWorld(true);
-      if(!nativeReady)return;
+      if(!nativeReady){
+        glyphHits=viewportGlyphHits(PM,camera,rect,excluded(),localViewIds(PM));
+        return;
+      }
       const selected=new Set(ids),pose=viewportPose(PM);
       let frameGlyphs:Glyph[]=[];
       if(prefs.overlays){
@@ -405,6 +410,7 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
     pointer:()=>over?client:null,
     covers:ids=>ids.length>0&&ids.every(id=>isViewportItem(PM,PM.L?.(id))),
     glyphsIn(box){
+      flush();
       const c=comp(PM),sx=(x:number)=>rect.x+x/Math.max(1,c.w)*rect.width,sy=(y:number)=>rect.y+y/Math.max(1,c.h)*rect.height;
       const x0=Math.min(sx(box.x0),sx(box.x1)),x1=Math.max(sx(box.x0),sx(box.x1)),y0=Math.min(sy(box.y0),sy(box.y1)),y1=Math.max(sy(box.y0),sy(box.y1));
       return viewportPreferences(PM).overlays?glyphHits.filter(g=>g.x>=x0&&g.x<=x1&&g.y>=y0&&g.y<=y1).map(g=>g.id):[];
