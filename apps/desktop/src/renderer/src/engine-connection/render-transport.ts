@@ -36,6 +36,7 @@
 import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, PixelRect, SnapshotPixels, SnapshotRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
 import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAnswer, type EngineCompatAsk, type EngineCompatEvent, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
+import { RenderPerfTrace } from './perf-trace';
 
 /** Repetitions of the same unresolved dependency set before a snapshot fails. */
 export const MAX_ROUNDS = 3;
@@ -369,6 +370,7 @@ export const VANISHING_RASTER_SCALE = 1e-9;
 export const ANSWER_LOG_LIMIT = 4096;
 
 export class EngineRenderTransport {
+  readonly trace = new RenderPerfTrace();
   private readonly producers = new Map<CompatSource, CompatProducer>();
   /** Producers of viewer frames' and snapshots' compatibility answers. */
   private readonly answerers = new Map<CompatSource, CompatAnswerer>();
@@ -643,7 +645,9 @@ export class EngineRenderTransport {
     this.lookaheadStats.inFlight = this.aheadInFlight;
     this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
     const began = performance.now();
+    this.trace.record('prepare dispatched', revision, time);
     void Promise.resolve().then(() => prepare(need, revision)).then(() => {
+      this.trace.record('prepare ready', revision, time, began);
       const ms = performance.now() - began;
       this.prepareMs = this.prepareMs === null ? ms : this.prepareMs * 0.75 + ms * 0.25;
       this.lookaheadStats.prepareMs = Math.round(this.prepareMs * 10) / 10;
@@ -832,6 +836,7 @@ export class EngineRenderTransport {
       posted = this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer, need.crop ?? undefined);
     }
     if (posted) {
+      this.trace.record(`answer posted: ${answer.kind}`, revision, need.time, began);
       this.logAnswer(need, revision, answer.kind, answer.kind === 'native' ? undefined : answer.key);
       this.postedFor.delete(tag);
       this.postedFor.set(tag, answer.kind === 'native' ? 'native' : `raster:${answer.key}`);
@@ -1187,7 +1192,13 @@ export class EngineRenderTransport {
       for (let round = 0; round < MAX_DEPENDENCY_PHASES; round++) {
         const request = this.request(options, cls, uploaded);
         request.snapshot.compatUploaded = compatUploaded;
+        const began = performance.now();
         const reply = await native.snapshot(request);
+        this.trace.record('snapshot round trip', Number(request.revision ?? 0), request.snapshot.time, began);
+        if (reply.status === 'rendered') {
+          this.trace.record('snapshot native wait', reply.revision, request.snapshot.time, began, reply.waitedUs);
+          this.trace.record('snapshot native render', reply.revision, request.snapshot.time, began, reply.renderUs);
+        }
         if (reply.status === 'rendered') {
           if (cls === 'idle') this.stats.idle++;
           else this.stats.async++;

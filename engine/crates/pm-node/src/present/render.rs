@@ -6178,11 +6178,23 @@ impl Thread {
             self.snapshots.published(name, length);
         }
         let t = now();
+        self.trace_event(
+            "layer raster queue",
+            done.started - done.queued_us,
+            done.queued_us,
+            done.time,
+        );
         if let Some(render_us) = done.render_us {
             let costs = self.snapshot_costs.entry(done.key).or_default();
             costs.0 += 1;
             costs.1 = costs.1.max(render_us);
-            self.trace_event("layer raster", t - render_us, render_us, done.time);
+            self.trace_event("layer raster", done.started, render_us, done.time);
+            self.trace_event(
+                "layer raster completion delivery",
+                done.started + render_us,
+                (t - done.started - render_us).max(0),
+                done.time,
+            );
         } else {
             self.trace_event("layer raster failed", t, 0, done.time);
         }
@@ -7085,6 +7097,37 @@ mod tests {
         assert!(cache_snapshot_target(4096, 4096, Rgba8Unorm));
         assert!(!cache_snapshot_target(4096, 4096, Rgba16Float));
         assert!(!cache_snapshot_target(4096, 2048, Rgba32Float));
+    }
+
+    #[test]
+    fn raster_trace_uses_worker_timestamps_and_separates_queue_and_delivery() {
+        let (mut thread, _) = preview_thread();
+        thread.config.trace = true;
+        thread.raster_done(super::super::rasters::RasterDone {
+            key: preview_key(),
+            bytes: 0,
+            published: None,
+            render_us: Some(300),
+            queued_us: 200,
+            started: 1_000,
+            time: 42,
+        });
+        let stats = thread.stats();
+        let events: Vec<_> = stats.turn_trace.iter().collect();
+        assert_eq!(
+            (events[0].what, events[0].at, events[0].us),
+            ("layer raster queue", 800, 200)
+        );
+        assert_eq!(
+            (events[1].what, events[1].at, events[1].us),
+            ("layer raster", 1_000, 300)
+        );
+        assert_eq!(
+            (events[2].what, events[2].at),
+            ("layer raster completion delivery", 1_300)
+        );
+        assert!(events[2].us > 0);
+        assert!(events.iter().all(|event| event.k == 42));
     }
 
     fn preview_thread() -> (Thread, Arc<Mutex<Vec<PreviewStatus>>>) {

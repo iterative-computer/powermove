@@ -89,6 +89,9 @@ pub struct RasterDone {
     pub render_us: Option<i64>,
     /// Host µs the job waited between dispatch and its start.
     pub queued_us: i64,
+    /// Actual worker start on the host clock, independent of when the
+    /// render thread receives this completion.
+    pub started: i64,
     /// The composition frame the raster is of (ticks), for the trace.
     pub time: i64,
 }
@@ -303,6 +306,7 @@ fn run(
                             published,
                             render_us: Some(render_us),
                             queued_us: (started - dispatched).max(0),
+                            started,
                             time,
                         }
                     }
@@ -330,6 +334,7 @@ fn run(
                             published: None,
                             render_us: None,
                             queued_us: (started - dispatched).max(0),
+                            started,
                             time,
                         }
                     }

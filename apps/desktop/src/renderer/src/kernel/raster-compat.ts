@@ -293,7 +293,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   const log = options.log ?? ((message: string) => console.warn(`[raster-compat] ${message}`));
   const readPixels = options.readPixels ?? compositorPixels;
   const readback = createRasterReadback(stats);
-  const readPixelsAsync = options.readPixelsAsync ?? (options.readPixels ? async (source: Parameters<typeof compositorPixels>[0]) => options.readPixels!(source) : readback.read);
+  const readPixelsAsync = (source: Parameters<typeof compositorPixels>[0], trace?: import('./raster-readback').ReadbackTrace) => options.readPixelsAsync
+    ? options.readPixelsAsync(source) : options.readPixels ? Promise.resolve(options.readPixels(source)) : readback.read(source, trace);
 
   const cropKey = (crop: RasterWindowLike | undefined) => crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : '';
   const sampleKey = (need: CompatNeed, revision: number) => `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.scale}\u0000${cropKey(need.crop ?? undefined)}\u0000${revision}`;
@@ -460,7 +461,11 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         // Keep the completed canvas. Reading it back on this thread can
         // wait hundreds of milliseconds on the GPU under load; the worker
         // uses the same premultiplied WebGL upload/readback as sync callers.
-        preparation.readback = async () => finish(await readPixelsAsync(source));
+        preparation.readback = async () => {
+          const began = performance.now();
+          try { return finish(await readPixelsAsync(source, (stage, at, computeMs) => transport?.trace?.record(stage, revision, need.time, at, computeMs))); }
+          finally { transport?.trace?.record('override readback', revision, need.time, began); }
+        };
         return null;
       }
       return finish(readPixels(source));
@@ -495,7 +500,9 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
           // dependency with the actual previous pixels, then resume on a
           // later turn. The finite bound also rejects a nonconvergent chain.
           for (let phase = 0; phase < 64 && valid(); phase++) {
+            const queued = performance.now();
             await preparationTurn();
+            transport?.trace?.record('wrapper scheduling', revision, need.time, queued, phase);
             if (!valid()) return;
             const attempt = { samples, tainted, missing: null as Dependency | null, readback: null as (() => Promise<CompatAnswerResult>) | null };
             let answer: CompatAnswerResult = null;
@@ -506,6 +513,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
             finally {
               preparation = null;
               const ms = performance.now() - beganCpu;
+              transport?.trace?.record('wrapper cpu', revision, need.time, beganCpu, phase);
               stats.prepareCpuMs += ms; stats.prepareCpuMsMax = Math.max(stats.prepareCpuMsMax, ms);
               if (ms > 8) { stats.slowPreparations.push({ time: Number(need.time) / TICKS_PER_SECOND, ms }); if (stats.slowPreparations.length > 20) stats.slowPreparations.shift(); }
             }
@@ -529,6 +537,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
             stats.asyncLoads++;
             const began = performance.now();
             const surface = await options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop);
+            transport?.trace?.record('base dependency', revision, need.time, began);
             const ms = performance.now() - began;
             stats.asyncMs += ms; stats.asyncMsMax = Math.max(stats.asyncMsMax, ms);
             if (!valid()) return;
@@ -543,6 +552,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
         }
         finally {
           const ms = performance.now() - beganPreparation;
+          transport?.trace?.record('override prepared', revision, need.time, beganPreparation);
           stats.prepareMs += ms; stats.prepareMsMax = Math.max(stats.prepareMsMax, ms);
           pending--; running.delete(promise); if (preparing.get(key)?.promise === promise) preparing.delete(key);
         }

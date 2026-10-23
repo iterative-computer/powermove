@@ -217,6 +217,9 @@ export class DocumentBarrier {
   /** Whether anything waits to be flushed. */
   get pending(): boolean { return this.resyncPending || this.structural || this.dirty.size > 0; }
 
+  /** Optional page-clock attribution for interactive performance diagnostics. */
+  trace: ((stage: string, began: number) => void) | null = null;
+
   /** Resyncs at the next flush (the live document was replaced by another). */
   markResync(): void {
     const was = this.pending;
@@ -351,7 +354,9 @@ export class DocumentBarrier {
       this.dirty.clear();
       this.structural = false;
       this.origin = 'metadata';
+      const diffStarted = this.trace ? performance.now() : 0;
       const ops = this.diff(live, paths);
+      this.trace?.('document diff', diffStarted);
       if (!ops.length) return;
       this.send(ops, origin);
     } finally {
@@ -364,9 +369,11 @@ export class DocumentBarrier {
 
   private send(ops: PatchOp[], origin: IncrementalOrigin): void {
     let body: Uint8Array;
+    const encodeStarted = this.trace ? performance.now() : 0;
     try {
       body = encodePatchOps(ops);
       this.shadow = applyOps(this.shadow, ops);
+      this.trace?.('document encode and shadow', encodeStarted);
     } catch (error) {
       // A value the format cannot carry (a lone surrogate in a key is fine;
       // a cycle is not) or a shadow that disagrees with its own ops: resync.
@@ -375,7 +382,9 @@ export class DocumentBarrier {
       return;
     }
     const base = this.revision;
+    const applyStarted = this.trace ? performance.now() : 0;
     const result = this.wasm.apply(body, base, base + 1);
+    this.trace?.('document wasm apply', applyStarted);
     this.revision = base + 1;
     if (ops.some(op => changesShape(op.path))) this.shapeRevision = this.revision;
     if (result.code !== APPLY.ok) {
@@ -388,7 +397,9 @@ export class DocumentBarrier {
     this.stats.ops += ops.length;
     this.stats.bytes += body.length;
     const assets = ops.some(op => op.path.length === 0 || op.path[0] === 'assets' || op.path[0] === 'id');
+    const postStarted = this.trace ? performance.now() : 0;
     this.emit({ baseRevision: base, revision: base + 1, origin, count: ops.length, body, assets });
+    this.trace?.('document patch dispatch', postStarted);
   }
 
   private emit(batch: PatchBatch): void {

@@ -203,6 +203,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         catch (error) { log('error', `native 3D scene synchronization: ${error instanceof Error ? error.message : String(error)}`); }
       }
       PM.CompatContext?.selectFrame?.(frame);
+      renderTransport.trace.record('frame event', frame.revision, frame.pts);
       emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj });
     },
     (fn) => target.requestAnimationFrame(fn)
@@ -273,10 +274,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       flushQueued = false;
       if (!sessions.size) return;
       flushing = true;
+      const began = performance.now();
       try {
         const before = PM.EngineDoc?.barrier?.revision ?? null;
         PM.EngineDoc?.barrier?.flush();
         noteVersion();
+        renderTransport.trace.record('edit flushed', PM.EngineDoc?.barrier?.revision ?? 0, ticks(PM.time ?? 0), began);
         // An edit while paused: the producers prepare the frame on screen at
         // the new revision now, beside the engine's render that will ask
         // for it (today draws an edit in the frame it happens).
@@ -562,6 +565,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     // per animation frame for the newest frame on screen, as today's frame
     // loop emits them once per frame it draws.
     presented: (frame, quality) => {
+      renderTransport.trace.record('viewer submitted', frame.revision, frame.pts);
       sceneMetadata.apply(frame, current);
       if (current) preview.receiveFrame(current, frame);
       presentedEvents.push(frame, quality);
@@ -663,6 +667,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       reconcileHomePresentation();
     },
     setTrace: (on) => {
+      renderTransport.trace.enabled = on;
+      const barrier = PM.EngineDoc?.barrier;
+      if (barrier) barrier.trace = on ? (stage, began) => renderTransport.trace.record(stage, barrier.revision, ticks(PM.time ?? 0), began) : null;
       if (on === trace) return;
       trace = on;
       registration.dispose();
