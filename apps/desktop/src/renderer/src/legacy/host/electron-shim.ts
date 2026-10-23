@@ -353,6 +353,14 @@ export function install(PM: PMRegistry): void {
   const posted = new Map<string, string>();
   let tracks = 0;
   const digests = new Map<string, { digest: Promise<string | null>; chars: number }>();
+  /* One toast per failure episode: a disk that stays full fails every
+     journal write (about one per edit) and every other key it writes. The
+     episode ends when a flush finds nothing failing. */
+  let toasted = false;
+  /* Save errors for writes main accepted but could not put on disk (and
+     journal entries it refused): a flush learns from main which keys are still
+     failing, and drops the others (a later write reached disk). */
+  const persistErrors = new Set<string>();
   const reportStoreError = (event: { key: string; error: string }) => {
     saveErrors.set(event.key, String(event.error));
     /* The digest describes text that may not be on disk: a project's next
@@ -363,6 +371,8 @@ export function install(PM: PMRegistry): void {
     if (String(event.error).includes('unknown store key')) {
       cached.delete(legacyKey(event.key));
     }
+    if (toasted) return;
+    toasted = true;
     PM.toast(`Could not save ${event.key}: ${event.error}`);
   };
   const setSerializedSlot = (service: string, value: any): boolean => {
@@ -506,10 +516,35 @@ export function install(PM: PMRegistry): void {
     },
     async flush() {
       while (asyncWrites.size) await Promise.all([...asyncWrites.values()]);
-      await bridge.store.flush();
+      const result: any = await bridge.store.flush();
+      if (Array.isArray(result?.failing)) {
+        const still = new Set(result.failing);
+        for (const key of [...persistErrors]) if (!still.has(key)) { persistErrors.delete(key); saveErrors.delete(key); }
+      }
+      if (!saveErrors.size) toasted = false;
       if (saveErrors.size) throw new Error([...saveErrors.values()][0]);
     }
   };
+  /* SAVE-1: one journal entry for a project; main numbers it and decides
+     what reaches disk (main/project-durability.ts). Only main's store has it. */
+  if (typeof bridge.store.appendJournal === 'function') {
+    PM.store.appendJournal = (key: string, entry: unknown): Promise<void> => {
+      const service = serviceKey(key);
+      // Reads of the journal refill from main, which holds all of it.
+      cached.delete(legacyKey(service)); stale.add(service);
+      let text: string;
+      try { text = JSON.stringify(entry); } catch (error) {
+        saveErrors.set(service, errorText(error, 'Save failed'));
+        return Promise.reject(error);
+      }
+      const sent = (async () => { await bridge.store.appendJournal(service, text); })();
+      const write = sent.catch((error: unknown) => { persistErrors.add(service); reportStoreError({ key: service, error: errorText(error, 'Save failed') }); });
+      const slot = `append:${++tracks}:${service}`;
+      asyncWrites.set(slot, write);
+      void write.finally(() => asyncWrites.delete(slot));
+      return sent;
+    };
+  }
 
   /* Each window holds its own project tabs. Everything that opens, swaps or
      closes a document goes through here so the native side stays the single
@@ -583,7 +618,10 @@ export function install(PM: PMRegistry): void {
     PM.bus?.emit('store:external', changed);
   });
 
-  bridge.store.onError((event: any) => reportStoreError(event));
+  bridge.store.onError((event: any) => {
+    if (event?.unsaved && typeof event.key === 'string') persistErrors.add(event.key);
+    reportStoreError(event);
+  });
 
   let fontRefresh: Promise<boolean> | undefined;
   let fontSignature: string | undefined;

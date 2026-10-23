@@ -137,25 +137,24 @@ it('the journal keeps one copy of what each edit rewrites whole and replays to t
   PM.Projects.put(PM.proj);
   assert.equal(mem.has('projectJournal.J1'), false);
   PM.bus.emit('history:project-patch', { projectId: 'J1', revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }] });
-  // Each entry names the checkpoint it follows (Projects.get replays only those, and untagged ones).
-  const cp = mem.get('project.J1').cp;
-  assert.equal(typeof cp, 'string');
-  assert.deepEqual(mem.get('projectJournal.J1'), [{ revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }], cp }]);
+  assert.deepEqual(mem.get('projectJournal.J1'), [{ revision: 6, patches: [{ path: ['revision'], exists: true, value: 6 }] }]);
 });
 
-it('replays the journal entries of the slot\'s checkpoint and untagged ones, not those of an older checkpoint', () => {
+it('recovers a slot with the journal entries numbered after it, whatever older entries the journal still holds', () => {
   const { PM, mem } = projectsModel();
-  const journal = [
-    { revision: 2, cp: 'older', patches: [{ path: ['name'], exists: true, value: 'Stale' }, { path: ['revision'], exists: true, value: 2 }] },
-    { revision: 3, patches: [{ path: ['layers', 0, 'name'], exists: true, value: 'Untagged' }] },
-    { revision: 4, cp: 'newer', patches: [{ path: ['revision'], exists: true, value: 4 }] },
-  ];
-  mem.set('project.C1', { v: '1.0.0', cp: 'newer', proj: { id: 'C1', name: 'Slot', revision: 3, layers: [{ id: 'L1', name: 'Layer' }] } });
-  mem.set('projectJournal.C1', structuredClone(journal));
-  assert.deepEqual(PM.Projects.get('C1'), { id: 'C1', name: 'Slot', revision: 4, layers: [{ id: 'L1', name: 'Untagged' }] });
-  // A slot from a build without checkpoint ids replays everything, as before.
-  mem.set('project.C1', { v: '1.0.0', proj: { id: 'C1', name: 'Slot', revision: 1, layers: [{ id: 'L1', name: 'Layer' }] } });
-  assert.deepEqual(PM.Projects.get('C1'), { id: 'C1', name: 'Stale', revision: 4, layers: [{ id: 'L1', name: 'Untagged' }] });
+  // Main's numbering (SAVE-1): the slot is seq 5; entries 3 and 4 are already in it.
+  mem.set('projectJournal.C1', [
+    { revision: 2, seq: 3, cp: 'older', patches: [{ path: ['name'], exists: true, value: 'Stale' }] },
+    { revision: 3, seq: 4, cp: 'older', patches: [{ path: ['layers', 0, 'name'], exists: true, value: 'Stale too' }] },
+    { revision: 4, seq: 7, cp: 'older', patches: [{ path: ['revision'], exists: true, value: 4 }] },
+    { revision: 5, seq: 6, cp: 'older', patches: [{ path: ['layers', 0, 'name'], exists: true, value: 'After the slot' }] },
+  ]);
+  mem.set('project.C1', { cp: 'slot', seq: 5, v: '1.0.0', proj: { id: 'C1', name: 'Slot', revision: 3, layers: [{ id: 'L1', name: 'Layer' }] } });
+  assert.deepEqual(PM.Projects.get('C1'), { id: 'C1', name: 'Slot', revision: 4, layers: [{ id: 'L1', name: 'After the slot' }] });
+  // A slot written before SAVE-1 (no number) replays every entry, as before.
+  mem.set('projectJournal.C1', [{ revision: 2, patches: [{ path: ['name'], exists: true, value: 'Journaled' }] }]);
+  mem.set('project.C1', { v: '1.0.0', proj: { id: 'C1', name: 'Slot', revision: 1, layers: [] } });
+  assert.equal(PM.Projects.get('C1').name, 'Journaled');
 });
 
 it('hands the journal to an asynchronous store as a snapshot of each version', () => {
@@ -181,9 +180,8 @@ it('checkpoints the project when the journal would pass its bound, to the byte',
     const first = { revision: 1, patches: [{ path: ['layers', 0], exists: true, value: { id: 'L1' } }] };
     PM.bus.emit('history:project-patch', { projectId: 'B1', ...first });
     const second = (note) => ({ revision: 2, patches: [{ path: ['layers', 1], exists: true, value: { id: 'L2', note } }] });
-    // The journal's JSON (entries tagged with their checkpoint) at exactly the bound, or one byte over it.
-    const cp = mem.get('project.B1').cp;
-    const n = MAX - bytes([{ ...first, cp }, { ...second(''), cp }]) + over;
+    // The journal's JSON at exactly the bound, or one byte over it.
+    const n = MAX - bytes([first, second('')]) + over;
     PM.bus.emit('history:project-patch', { projectId: 'B1', ...second('é'.repeat(n / 2) + 'x'.repeat(n % 2)) });
     if (over) assert.equal(mem.has('projectJournal.B1'), false, 'one byte over checkpoints the project');
     else assert.equal(bytes(mem.get('projectJournal.B1')), MAX, 'the bound itself fits');
@@ -218,35 +216,58 @@ it('keeps autosaving projects stamped for this reader', () => {
   assert.equal(PM.Projects.get('C1').name, 'Journaled');
 });
 
-it('tags the first journal entries with the checkpoint of the slot it read, before checkpointing itself', () => {
-  const { PM, mem } = projectsModel();
-  mem.set('project.T1', { v: '1.0.0', cp: 'disk', proj: { id: 'T1', name: 'Read', revision: 1, layers: [{ id: 'L1', name: 'Layer' }] } });
-  PM.proj = PM.Projects.get('T1');
-  PM.bus.emit('history:project-patch', { projectId: 'T1', revision: 2, patches: [{ path: ['layers', 0, 'name'], exists: true, value: 'Edited' }] });
-  assert.equal(mem.get('projectJournal.T1')[0].cp, 'disk');
-  // Another window writing the slot forgets it: untagged, replayed over whatever slot is there.
-  PM.bus.emit('store:external', ['project.T1']);
-  PM.bus.emit('history:project-patch', { projectId: 'T1', revision: 3, patches: [{ path: ['name'], exists: true, value: 'Renamed' }] });
-  assert.equal(mem.get('projectJournal.T1').at(-1).cp, undefined);
+/** A window whose store keeps the journal in main (SAVE-1): appends are recorded, a refusal rejects. */
+function mainJournalModel() {
+  const model = projectsModel();
+  const appended: any[] = [];
+  let refuse = false;
+  model.PM.store.appendJournal = (key: string, entry: any) => {
+    if (refuse) return Promise.reject(new Error('the project journal would be too large'));
+    appended.push([key, entry]);
+    return Promise.resolve();
+  };
+  return { ...model, appended, refuse: (value: boolean) => { refuse = value; } };
+}
+
+it('with main keeping the journal, appends each entry and never writes or deletes the journal itself', () => {
+  const { PM, mem, appended } = mainJournalModel();
+  const deleted: string[] = [];
+  const del = PM.store.del;
+  PM.store.del = (key: string) => { deleted.push(key); return del(key); };
+  PM.proj = { id: 'M1', name: 'Main', revision: 0, layers: [{ id: 'L1', name: 'Layer' }] };
+  PM.Projects.put(PM.proj);
+  PM.bus.emit('history:project-patch', { projectId: 'M1', revision: 1, patches: [{ path: ['layers', 0, 'name'], exists: true, value: 'Edited' }] });
+  PM.Projects.put(PM.proj);
+  assert.deepEqual(appended, [['projectJournal.M1', { revision: 1, patches: [{ path: ['layers', 0, 'name'], exists: true, value: 'Edited' }] }]]);
+  assert.equal(mem.has('projectJournal.M1'), false);
+  assert.deepEqual(deleted, []);
 });
 
-it('keeps journaling past the bound while the slot write is failing, instead of checkpointing again', () => {
+it('keeps appending past the bound while the slot write is failing, and stops once main refuses, until the next checkpoint', async () => {
   const MAX = 4 * 1024 * 1024;
-  const { PM, mem } = projectsModel();
+  const { PM, appended, refuse } = mainJournalModel();
   let slotWrites = 0;
   const set = PM.store.set;
   PM.store.set = (key, value) => { if (key === 'project.U1') slotWrites++; return set(key, value); };
   PM.proj = { id: 'U1', name: 'Full disk', revision: 0, layers: [] };
   PM.Projects.put(PM.proj);
-  const first = mem.get('project.U1').cp;
-  PM.Projects.put(PM.proj);
   PM.bus.emit('storage:error', { key: 'project.U1', error: 'ENOSPC' });
-  assert.equal(slotWrites, 2);
   const big = 'x'.repeat(MAX / 2);
   for (let revision = 1; revision <= 3; revision++) {
     PM.bus.emit('history:project-patch', { projectId: 'U1', revision, patches: [{ path: ['layers', revision - 1], exists: true, value: { id: `L${revision}`, note: big } }] });
   }
-  assert.equal(slotWrites, 2, 'no checkpoint while the slot write fails');
-  const journal = mem.get('projectJournal.U1');
-  assert.deepEqual(journal.map(entry => [entry.revision, entry.cp]), [[1, first], [2, first], [3, first]], 'every edit, against the slot on disk');
+  assert.equal(slotWrites, 1, 'no checkpoint while the slot write fails');
+  assert.deepEqual(appended.map(([, entry]) => entry.revision), [1, 2, 3], 'every edit is sent to main');
+  // Main refuses (its journal reached the store's limit): the window stops sending.
+  refuse(true);
+  PM.bus.emit('history:project-patch', { projectId: 'U1', revision: 4, patches: [{ path: ['name'], exists: true, value: 'Four' }] });
+  await Promise.resolve(); await Promise.resolve();
+  refuse(false);
+  PM.bus.emit('history:project-patch', { projectId: 'U1', revision: 5, patches: [{ path: ['name'], exists: true, value: 'Five' }] });
+  assert.deepEqual(appended.map(([, entry]) => entry.revision), [1, 2, 3]);
+  // The next autosave checkpoints (its slot holds every edit), and appends resume.
+  PM.Projects.recover(PM.proj);
+  assert.equal(slotWrites, 2);
+  PM.bus.emit('history:project-patch', { projectId: 'U1', revision: 6, patches: [{ path: ['name'], exists: true, value: 'Six' }] });
+  assert.deepEqual(appended.map(([, entry]) => entry.revision), [1, 2, 3, 6]);
 });

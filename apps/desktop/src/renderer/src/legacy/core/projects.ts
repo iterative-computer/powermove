@@ -4,30 +4,9 @@ import { bridge as hostBridge } from '../../kernel/bridge';
 import { needsNewerReader } from '../../../../shared/reader-version';
 import { writeDocument } from '../../engine-doc/write';
 import { digestJSON } from './json-slices';
+import { recoverProject, supersede } from '../../../../shared/project-journal';
 
-/**
- * The journal without what `patches` overwrites. A patch at a member of the
- * project itself (`['edits']`, `['revision']`) replaces everything earlier
- * patches wrote under that member, and the project is an object, so no write
- * between them can move that member elsewhere: replaying the journal gives
- * the same document without them. Every edit writes the whole provenance log
- * (`['edits']`), so without this each entry kept a copy of the log and every
- * edit rewrote all of them (docs/engine/perf.md). Entries stay, possibly with
- * no patches.
- */
-export function supersede(entries: any[], patches: any[], changed?: (index: number) => void): any[] {
-  const members = new Set<string>();
-  for (const patch of patches) {
-    if (Array.isArray(patch?.path) && patch.path.length === 1 && typeof patch.path[0] === 'string') members.add(patch.path[0]);
-  }
-  if (!members.size) return entries;
-  entries.forEach((item, index) => {
-    if (!Array.isArray(item?.patches)) return;
-    const kept = item.patches.filter((patch: any) => !(Array.isArray(patch?.path) && patch.path.length >= 1 && members.has(patch.path[0])));
-    if (kept.length !== item.patches.length) { item.patches = kept; changed?.(index); }
-  });
-  return entries;
-}
+export { supersede };
 
 export function install(PM: PMRegistry): void {
 const R: any = {
@@ -45,30 +24,17 @@ const R: any = {
 const MAX_JOURNAL_BYTES = 4 * 1024 * 1024;
 const CHECKPOINT_REVISIONS = 50;
 const journalBytes = (value: any) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
-const clone = (value: any) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+/* The store's limit for a journal value (LIMITS.storeValueBytes): past it main refuses entries. */
+const STORE_JOURNAL_BYTES = 32 * 1024 * 1024;
 
-function applyPatches(root: any, patches: any[]) {
-  let next = root;
-  for (const patch of patches || []) {
-    if (!Array.isArray(patch?.path)) continue;
-    if (!patch.path.length) { next = patch.exists ? clone(patch.value) : undefined; continue; }
-    let parent = next;
-    for (let index = 0; index < patch.path.length - 1; index++) {
-      parent = parent?.[patch.path[index]];
-      if (parent == null) break;
-    }
-    if (parent == null) continue;
-    const key = patch.path.at(-1);
-    if (patch.exists) parent[key] = clone(patch.value);
-    else if (Array.isArray(parent) && typeof key === 'number') parent.splice(key, 1);
-    else delete parent[key];
-  }
-  return next;
-}
-
-/** The journal as this window last wrote it (see the patch listener). */
+/** The journal entries this window appended since its last checkpoint, with each one's size (see `append`). */
 type JournalState = { id: string; entries: any[]; sizes: number[] };
 let written: JournalState | null = null;
+/* SAVE-1: with a store that keeps journals (main's, project-durability.ts),
+   the window only appends entries and posts slots; main decides what is on
+   disk. Without one (tests, hosts without main) the window writes the whole
+   journal and deletes it at a checkpoint, as before. */
+const mainKeepsJournal = () => typeof PM.store.appendJournal === 'function';
 
 function journal(id: any) {
   const value = id ? PM.store.get(R.JOURNAL + id, []) : [];
@@ -111,8 +77,6 @@ function slotExists(id: string): boolean {
 const VERIFY_MIN_CHARS = 4 << 20;
 type Slot = {
   project: object; chars: number; digest: Promise<string | null> | null;
-  /** The slot's checkpoint id (its envelope's `cp`). */
-  cp: string;
   /** `assets` as the slot holds it (JSON text; undefined when absent). */
   assets: string | undefined;
   /** What the journal holds since: nothing, only `checkpointAssets` entries
@@ -123,75 +87,23 @@ type Slot = {
 const slots = new Map<string, Slot>();
 const checks = new Map<string, { project: object; again: boolean }>();
 /* Projects whose slot or journal write failed (refused, or not persisted).
-   The slot on disk may be older than this window believes, and main keeps
-   that slot's journal until a slot write succeeds (store-engine.ts). So the
-   next checkpoint writes the slot rather than checking it, and the next
-   autosave checkpoints even when the journal has entries: a later write
-   repairs the failure, as it did before checkpoints were checked. */
+   Main keeps the older slot and every journal entry since (SAVE-1), so no
+   edit already on disk is lost; this window's next checkpoint writes rather
+   than checks, and its next autosave checkpoints even when it journaled
+   since, until a slot write lands. */
 const unsaved = new Set<string>();
-/* The journal as it stands against the checkpoint before the newest one
-   (its id, null for a slot without one), kept until the next checkpoint. When
-   the newest slot write fails, that older slot is the one on disk, and main
-   keeps its journal (store-engine.ts). The window then goes back to it:
-   everything journaled since is appended to it, tagged with its id, and
-   written, and later edits keep being appended to it. Every edit stays on
-   disk through the failure (D1). */
-const bases = new Map<string, { cp: string | null; entries: any[] }>();
-/* The checkpoint id of a slot this window read (Projects.get), for a project
-   it has not checkpointed: its first journal entries are tagged with it, and
-   it is the base if that first checkpoint fails. A write of the slot by
-   another window forgets it. */
-const onDisk = new Map<string, string | null>();
-PM.bus?.on?.('store:external', (keys: any) => {
-  for (const key of Array.isArray(keys) ? keys : []) if (typeof key === 'string' && key.startsWith(R.SLOT)) onDisk.delete(key.slice(R.SLOT.length));
-});
+/* Projects whose journal main refused (it reached the store's limit while
+   slot writes fail): this window stops appending until its next checkpoint.
+   The edits stay in the document, and the save error stays reported. */
+const journalFull = new Set<string>();
 PM.bus?.on?.('storage:error', (event: any) => {
   const key = typeof event?.key === 'string' ? event.key : '';
   const id = key.startsWith(R.SLOT) ? key.slice(R.SLOT.length) : key.startsWith(R.JOURNAL) ? key.slice(R.JOURNAL.length) : '';
   if (!id) return;
   slots.delete(id);
   unsaved.add(id);
-  if (key.startsWith(R.SLOT)) restoreBase(id);
 });
 
-/** The journal this window holds for `id` since its last checkpoint. */
-function journalSince(id: string): any[] {
-  const state = written;
-  return state && state.id === id ? state.entries : journal(id);
-}
-
-/** After a failed checkpoint: the journal against the slot before it, with everything since (see `bases`). */
-function restoreBase(id: string): void {
-  const base = bases.get(id);
-  bases.delete(id);
-  if (!base) { checkpoints.delete(id); return; }
-  const since = journalSince(id).map((entry: any) => {
-    const { cp: _cp, ...rest } = entry ?? {};
-    return base.cp === null ? rest : { ...rest, cp: base.cp };
-  });
-  if (base.cp === null) checkpoints.delete(id); else checkpoints.set(id, base.cp);
-  const entries = [...base.entries, ...since];
-  written = { id, entries, sizes: entries.map(item => journalBytes(item)) };
-  if (PM.store.setAsync) void PM.store.setAsync(R.JOURNAL + id, entries.slice());
-  else PM.store.set(R.JOURNAL + id, entries);
-}
-
-/*
- * Checkpoint ids. Main writes a project's journal to disk only after the slot
- * posted before it (store-engine.ts), so a crash can leave the newer slot with
- * the journal of the older one for the length of one unlink. Replaying that
- * journal over the newer slot reverted any path an entry set and an
- * unjournaled (raw) write changed since, next to raw writes it kept: a
- * document that never existed. Each slot write therefore carries an id (`cp`,
- * before `proj` in the envelope), each journal entry the id of the checkpoint
- * it follows, and Projects.get skips entries tagged for another checkpoint.
- * Untagged entries (older builds, or a checkpoint this window does not know)
- * are replayed, as before.
- */
-const checkpoints = new Map<string, string>();
-let checkpointCount = 0;
-const checkpointId = () => `${Date.now().toString(36)}.${(++checkpointCount).toString(36)}.${Math.random().toString(36).slice(2, 10)}`;
-const envelopePrefix = (cp: string) => `{"v":${JSON.stringify(PM.version || '1.0.0')},"cp":${JSON.stringify(cp)},"proj":`;
 /* Announced document changes, so a check that read through one is repeated. */
 let announced = 0;
 for (const event of ['layers', 'project', 'library', 'assets', 'comps', 'history:project-patch']) PM.bus?.on?.(event, () => { announced++; });
@@ -200,39 +112,37 @@ const changeToken = () => `${announced}:${PM.animVersion?.() ?? 0}`;
 /* The JSON this window just wrote for a project, for the rest of the writing
    task while nothing announced a change: opening and switching projects
    fingerprint the document right after checkpointing it. */
-let justWritten: { project: object; token: string; text: string; cp: string } | null = null;
+let justWritten: { project: object; token: string; text: string } | null = null;
 R.writtenJSON = (proj: any): string | null => {
   const entry = justWritten;
   if (!entry || entry.project !== proj || entry.token !== changeToken() || typeof proj?.toJSON === 'function') return null;
-  const prefix = envelopePrefix(entry.cp);
+  const prefix = `{"v":${JSON.stringify(PM.version || '1.0.0')},"proj":`;
   return entry.text.startsWith(prefix) && entry.text.endsWith('}') ? entry.text.slice(prefix.length, -1) : null;
 };
 
 function writeSlot(proj: any) {
-  // The journal against the slot this one replaces, should this one fail.
-  const previous = checkpoints.has(proj.id) ? checkpoints.get(proj.id)! : onDisk.get(proj.id);
-  const prior = previous === undefined ? null
-    : journalSince(proj.id).filter((entry: any) => typeof entry?.cp !== 'string' || entry.cp === previous);
-  const cp = checkpointId();
-  const envelope = { v: PM.version || '1.0.0', cp, proj };
+  const envelope = { v: PM.version || '1.0.0', proj };
   if (PM.store.set(R.SLOT + proj.id, envelope) === false) throw new Error('Project storage is unavailable or full');
   unsaved.delete(proj.id);
-  if (prior) bases.set(proj.id, { cp: previous ?? null, entries: prior }); else bases.delete(proj.id);
-  checkpoints.set(proj.id, cp);
-  onDisk.delete(proj.id);
+  journalFull.delete(proj.id);
   const text = typeof PM.store.writtenText === 'function' ? PM.store.writtenText(R.SLOT + proj.id) : null;
   if (text) {
-    const entry = justWritten = { project: proj, token: changeToken(), text, cp };
+    const entry = justWritten = { project: proj, token: changeToken(), text };
     queueMicrotask(() => { if (justWritten === entry) justWritten = null; });
   }
-  PM.store.del(R.JOURNAL + proj.id);
+  // Main shrinks its journal itself once this slot is on disk.
+  if (!mainKeepsJournal()) PM.store.del(R.JOURNAL + proj.id);
   if (written?.id === proj.id) written = null;
   const digest = typeof PM.store.writtenDigest === 'function' ? PM.store.writtenDigest(R.SLOT + proj.id) : null;
   slots.set(proj.id, {
-    project: proj, digest, chars: digest ? PM.store.writtenChars?.(R.SLOT + proj.id) ?? 0 : 0, cp,
+    project: proj, digest, chars: digest ? PM.store.writtenChars?.(R.SLOT + proj.id) ?? 0 : 0,
     assets: JSON.stringify(proj.assets), journal: 'none',
   });
 }
+
+/** Whether this window journaled anything for `id` since its last checkpoint. */
+const sinceCheckpoint = (id: string): any[] => { const state = written; return state && state.id === id ? state.entries : []; };
+const journaledSince = (id: string) => mainKeepsJournal() ? sinceCheckpoint(id).length > 0 : journal(id).length > 0;
 
 /** The project as its slot holds it, if the journal only replaced `assets`. */
 function asWritten(proj: any, slot: Slot): any {
@@ -259,10 +169,10 @@ function checkSlot(proj: any): void {
         const expected = slot.digest ? await slot.digest : null;
         const token = changeToken();
         const written = expected && slot.journal !== 'other' ? asWritten(proj, slot) : null;
-        const actual = written ? (await digestJSON({ v: PM.version || '1.0.0', cp: slot.cp, proj: written })).digest : null;
+        const actual = written ? (await digestJSON({ v: PM.version || '1.0.0', proj: written })).digest : null;
         if (slots.get(id) !== slot || checks.get(id) !== check) return;
         const same = actual !== null && actual === expected && slot.journal !== 'other'
-          && (slot.journal === 'none' ? !journal(id).length : JSON.stringify(proj.assets) === slot.journaledAssets);
+          && (slot.journal === 'none' ? !journaledSince(id) : JSON.stringify(proj.assets) === slot.journaledAssets);
         if (same && token === changeToken()) continue;
         // Changes announced while it was read: read again (a few times at most).
         if (same && attempt < 2) { check.again = true; continue; }
@@ -290,7 +200,7 @@ R.put = (proj: any, thumb: any) => {
      active. This matters for rename/duplicate and keeps every slot canonical. */
   const slot = unsaved.has(proj.id) ? undefined : slots.get(proj.id);
   if (slot && slot.project === proj && slot.digest && slot.chars >= VERIFY_MIN_CHARS && slot.journal !== 'other'
-    && (slot.journal === 'assets' || !journal(proj.id).length)) checkSlot(proj);
+    && (slot.journal === 'assets' || !journaledSince(proj.id))) checkSlot(proj);
   else writeSlot(proj);
   return meta;
 };
@@ -305,7 +215,7 @@ R.checkpointAssets = (proj: any) => {
   if (!proj?.id) return;
   if (needsNewerReader(proj) || !slotExists(proj.id) || PM.proj?.id !== proj.id) { R.put(proj); return; }
   const slot = slots.get(proj.id), assets = JSON.stringify(proj.assets);
-  const onlyAssets = !!slot && slot.project === proj && (slot.journal === 'assets' || slot.journal === 'none' && !journal(proj.id).length);
+  const onlyAssets = !!slot && slot.project === proj && (slot.journal === 'assets' || slot.journal === 'none' && !journaledSince(proj.id));
   append({
     projectId: proj.id, revision: Number(proj.revision) || 0,
     patches: [assets === undefined ? { path: ['assets'], exists: false } : { path: ['assets'], exists: true, value: JSON.parse(assets) }],
@@ -324,7 +234,7 @@ R.recover = (proj: any, thumb: any) => {
   if (thumb) meta.thumb = thumb;
   R.upsertMeta(meta);
   PM.store.set(R.trashKey, R.trashList().filter((item: any) => item.id !== proj.id));
-  const entries = journal(proj.id);
+  const entries = mainKeepsJournal() ? sinceCheckpoint(proj.id) : journal(proj.id);
   if (unsaved.has(proj.id) || !slotExists(proj.id) || !entries.length || journalBytes(entries) > MAX_JOURNAL_BYTES
       || Number(proj.revision || 0) % CHECKPOINT_REVISIONS === 0) {
     return R.put(proj, thumb);
@@ -385,17 +295,9 @@ R.get = (id: any) => {
     return null;
   }
   if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch (e) { return null; } }
-  let project = R.unwrap(raw);
-  if (!project) return null;
-  project = clone(project);
-  const cp = raw && typeof raw === 'object' && typeof raw.cp === 'string' ? raw.cp : null;
-  if (!checkpoints.has(id)) onDisk.set(id, cp);
-  for (const entry of journal(id)) {
-    // An entry for another checkpoint is already in this slot (see checkpointId).
-    if (cp !== null && typeof entry?.cp === 'string' && entry.cp !== cp) continue;
-    project = applyPatches(project, entry?.patches);
-  }
-  return project;
+  if (!R.unwrap(raw)) return null;
+  // The slot with the journal entries after it (shared/project-journal.ts).
+  return recoverProject(raw, journal(id));
 };
 
 R.getState = (id: any, options: { history?: boolean } = {}) => {
@@ -453,7 +355,7 @@ R.pickBoot = ({ open = R.openProjects(), metas = R.list(), get = R.get, getState
 };
 
 R.remove = (id: any) => {
-  slots.delete(id); checkpoints.delete(id); bases.delete(id); onDisk.delete(id);
+  slots.delete(id); unsaved.delete(id); journalFull.delete(id);
   R.saveList(R.list().filter((x: any) => x.id !== id));
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
@@ -483,14 +385,15 @@ R.restore = (id: any) => {
   return true;
 };
 R.destroy = (id: any) => {
-  slots.delete(id); checkpoints.delete(id); bases.delete(id); onDisk.delete(id);
+  slots.delete(id); unsaved.delete(id); journalFull.delete(id);
   PM.store.set(R.trashKey, R.trashList().filter((x: any) => x.id !== id));
   try { PM.store.del(R.SLOT + id); } catch (e) { }
   try { PM.store.del(R.STATE + id); } catch (e) { }
   for (const prefix of ['projectMeta.', 'projectHistory.', 'projectWorkspace.', 'documentHost.']) {
     try { PM.store.del(prefix + id); } catch (e) { }
   }
-  try { PM.store.del(R.JOURNAL + id); } catch (e) { }
+  // Main deletes the journal with the slot (SAVE-1).
+  if (!mainKeepsJournal()) { try { PM.store.del(R.JOURNAL + id); } catch (e) { } }
   if (written?.id === id) written = null;
   /* The agent's workspace and artifacts live exactly as long as the project.
      Imported media was copied into the project, so nothing it uses is lost. */
@@ -516,42 +419,50 @@ PM.bus?.on?.('history:project-patch', (entry: any) => {
 });
 /** Appends one entry to a project's recovery journal. */
 function append(entry: { projectId: string; revision: number; patches: any[] }) {
-  const slot = slots.get(entry.projectId);
+  const id = entry.projectId;
+  const slot = slots.get(id);
   if (slot) slot.journal = 'other';
-  /* The journal this window wrote last, with each entry's size: an append
-     neither reads the journal back from the store (a structured clone of all
-     of it) nor serializes all of it again to measure it. */
+  /* The entries this window journaled since its last checkpoint, with each
+     one's size: an append neither reads the journal back from the store nor
+     serializes all of it again to measure it. */
   const cached = written;
-  const state: JournalState = cached && cached.id === entry.projectId ? cached : (() => {
-    const entries = journal(entry.projectId);
-    return { id: entry.projectId, entries, sizes: entries.map(item => journalBytes(item)) };
+  const state: JournalState = cached && cached.id === id ? cached : (() => {
+    const entries = mainKeepsJournal() ? [] : journal(id);
+    return { id, entries, sizes: entries.map(item => journalBytes(item)) };
   })();
-  supersede(state.entries, entry.patches, index => { state.sizes[index] = journalBytes(state.entries[index]); });
-  const cp = checkpoints.get(entry.projectId) ?? onDisk.get(entry.projectId);
   const item: any = { revision: Number(entry.revision) || 0, patches: entry.patches };
-  if (cp) item.cp = cp;
+  /* Keep the journal bounded before the next debounced checkpoint (its JSON:
+     brackets, the entries, and a comma between each two). */
+  const measure = () => 2 + state.sizes.reduce((sum, size) => sum + size, 0) + Math.max(0, state.sizes.length - 1);
+  if (mainKeepsJournal()) {
+    // Refused once (main's journal is full while slot writes fail): the edit stays in the document only.
+    if (journalFull.has(id)) return;
+    PM.store.appendJournal(R.JOURNAL + id, item).catch(() => { journalFull.add(id); unsaved.add(id); });
+    supersede(state.entries, entry.patches, index => { state.sizes[index] = journalBytes(state.entries[index]); });
+    state.entries.push(item);
+    state.sizes.push(journalBytes(item));
+    written = state;
+    // Past the store's limit main refuses entries anyway: stop accumulating.
+    if (measure() > STORE_JOURNAL_BYTES) { journalFull.add(id); state.entries = []; state.sizes = []; }
+    /* Past the bound the project is checkpointed, unless its slot writes are
+       failing: then main's journal holds these edits on disk. */
+    if (measure() > MAX_JOURNAL_BYTES && !unsaved.has(id) && PM.proj?.id === id) R.put(PM.proj);
+    return;
+  }
+  supersede(state.entries, entry.patches, index => { state.sizes[index] = journalBytes(state.entries[index]); });
   state.entries.push(item);
   state.sizes.push(journalBytes(item));
-  /* Keep the journal bounded even before the next debounced checkpoint
-     (its JSON: brackets, the entries, and a comma between each two). */
-  const bytes = 2 + state.sizes.reduce((sum, size) => sum + size, 0) + Math.max(0, state.sizes.length - 1);
-  /* Past the bound the project is checkpointed instead, unless its slot
-     write is failing: then the journal is all that holds these edits on disk,
-     and it keeps growing (up to the store's own limit) while the save error
-     stays reported, until a checkpoint lands. */
-  if (bytes > MAX_JOURNAL_BYTES && !unsaved.has(entry.projectId)) {
-    // Kept as the base should that checkpoint fail (writeSlot).
-    written = state;
-    if (PM.proj?.id === entry.projectId) R.put(PM.proj);
-    if (written === state) written = null;
+  if (measure() > MAX_JOURNAL_BYTES) {
+    written = null;
+    if (PM.proj?.id === id) R.put(PM.proj);
     return;
   }
   /* Serialized off the edit's task when the store can (the journal is a
      snapshot; a newer write supersedes a pending one, and a checkpoint's
      delete supersedes both). Cloning and posting it in the edit's task cost
      6 ms per edit at 1,000 layers (docs/engine/perf.md). */
-  if (PM.store.setAsync) void PM.store.setAsync(R.JOURNAL + entry.projectId, state.entries.slice());
-  else PM.store.set(R.JOURNAL + entry.projectId, state.entries);
+  if (PM.store.setAsync) void PM.store.setAsync(R.JOURNAL + id, state.entries.slice());
+  else PM.store.set(R.JOURNAL + id, state.entries);
   written = state;
 }
 }

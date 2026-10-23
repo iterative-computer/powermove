@@ -754,6 +754,8 @@ function closeProjectTransients() {
  *  tens of seconds (C1: about 50 s for a 180 MB project) is not written
  *  again after every half-second pause. Small projects keep 550 ms. */
 let lastAutosaveMs = 0;
+/** An autosave failed and nothing has saved since: the failure is shown once, not once per edit. */
+let autosaveFailing = false;
 PM.autosave = () => {
   if (PM.proj.id === homeProjectId || discardedProjects.has(PM.proj.id)) return;
   APP.dirty = true;
@@ -777,6 +779,7 @@ PM.autosave = () => {
         PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
         lastAutosaveMs = performance.now() - began;
         await PM.store.flush?.();
+        autosaveFailing = false;
       }
       if (generation !== saveGeneration || projectId !== PM.proj.id) return;
       // Local recovery is not the user's .pmv file and must never mark it saved.
@@ -784,7 +787,8 @@ PM.autosave = () => {
       if (!readOnly) PM.bus.emit('project:recovered');
     } catch (error) {
       APP.dirty = true;
-      PM.toast('Could not save this project. Your edits are still open; try Save again.', 6000);
+      if (!autosaveFailing) PM.toast('Could not save this project. Your edits are still open; try Save again.', 6000);
+      autosaveFailing = true;
       console.warn('Project save failed', error);
     }
     PM.invalidate('status'); PM.bus.emit('projects:open');

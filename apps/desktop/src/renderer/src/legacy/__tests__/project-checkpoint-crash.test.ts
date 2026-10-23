@@ -29,7 +29,8 @@ type StoreFileSystem = any;
 type Store = {
   load(): Promise<void>; onError?(cb: (event: { key: string; error: string }) => void): () => void; get?(key: string): unknown; getEncodedSerialized?(key: string): string | null;
   bootstrapSerialized?(): Record<string, string>; set(key: string, value: unknown): void | Promise<void>;
-  setSerialized?(key: string, serialized: string): void | Promise<void>; delete(key: string): void | Promise<void>; flushAll(): Promise<void>;
+  setSerialized?(key: string, serialized: string): void | Promise<void>; appendJournal?(key: string, serialized: string): Promise<void>;
+  delete(key: string): void | Promise<void>; flushAll(): Promise<void>;
 };
 const MAIN_STORAGE = '../../../../main/storage';
 let createStore: (directory: string, options?: Record<string, unknown>) => Store;
@@ -144,11 +145,14 @@ function openWindow(store: Store, options: { refuse?: (key: string) => boolean; 
       getEncodedSync: (key: string) => store.getEncodedSerialized!(key),
       // A refusal reaches the window as the invoke's rejection (main's storage IPC).
       setSerialized: (key: string, serialized: string) => store.setSerialized!(key, options.refuse?.(key) ? '{refused' : JSON.parse(JSON.stringify(serialized))),
+      // Main's journal (SAVE-1), where the store has one.
+      ...(store.appendJournal ? { appendJournal: (key: string, serialized: string) => store.appendJournal!(key, JSON.parse(JSON.stringify(serialized))) } : {}),
       set: (key: string, value: unknown) => { void Promise.resolve(store.set(key, structuredClone(value))).catch(() => undefined); },
       delete: (key: string) => { void Promise.resolve(store.delete(key)).catch(() => undefined); },
-      flush: () => store.flushAll(),
+      // As main's storage IPC: a flush names the keys still not on disk.
+      flush: async () => { await store.flushAll(); return { failing: (store as any).failingKeys?.() ?? [] }; },
       // As main's storage IPC: a write that did not reach disk is reported to its writer (this window).
-      onError: (cb: (event: { key: string; error: string }) => void) => store.onError?.((event: any) => { if (event.unsaved) cb({ key: event.key, error: event.error }); }) ?? (() => {}),
+      onError: (cb: (event: { key: string; error: string; unsaved?: true }) => void) => store.onError?.((event: any) => { if (event.unsaved) cb({ key: event.key, error: event.error, unsaved: true }); }) ?? (() => {}),
     },
     setTheme: spy(), log: spy(), onMenuCommand: spy(),
     codex: { run: spy(), cancel: spy(), requestComputerConsent: spy() }, artifacts: { read: spy(), reveal: spy() }, captureWindow: spy(), saveFile: spy(),
@@ -530,5 +534,112 @@ describe('a raw write after a journaled edit', () => {
 
     expect(jsonDiff(states.at(-1)!, await recover(stateAfter(log, log.length), 'R'))).toEqual([]);
     await expectEveryCrashPointSafe(log, states, 'R');
+  });
+});
+
+describe('two slot writes in flight, the older one failing (review probe, recheck 2)', () => {
+  const edit = (PM: any, project: any, revision: number, layer: number, name: string) => {
+    project.revision = revision;
+    project.layers[layer].name = name;
+    PM.bus.emit('history:project-patch', { projectId: project.id, revision, patches: [{ path: ['layers', layer, 'name'], exists: true, value: name }, { path: ['revision'], exists: true, value: revision }] });
+  };
+  for (const newerFails of [false, true]) {
+    it(`loses no edit on disk when the newer one ${newerFails ? 'fails too (the disk stays full)' : 'lands later'}`, { timeout: 120_000 }, async () => {
+      const log: Op[] = [];
+      let gateA: Promise<void> | null = null, gateB: Promise<void> | null = null;
+      let releaseA = () => {}, releaseB = () => {};
+      let renames = 0, full = false;
+      const store = createStore(await temporaryDirectory(), {
+        fs: loggingFs(log, {
+          gate: to => {
+            if (path.basename(to) !== 'project.T.json') return null;
+            const n = ++renames;
+            return n === 2 ? gateA : n === 3 ? gateB : null;
+          },
+          rename: to => path.basename(to) === 'project.T.json' && full && renames >= 2 && (renames === 2 || newerFails) ? failure('ENOSPC', 'no space left on device') : null,
+        }),
+        writeDelayMs: 0,
+      });
+      await store.load();
+      const PM: any = openWindow(store);
+      const project = largeProject('T');
+      PM.proj = project;
+      const states: string[] = [];
+      const step = async (failing = false) => { await settle(PM, store, { failing }); states.push(JSON.stringify(project)); return log.length; };
+      const tick = () => new Promise(resolve => setTimeout(resolve, 20));
+
+      PM.Projects.put(project);
+      await step();
+      edit(PM, project, 8, 0, 'Journaled before A');
+      await step();
+      // Checkpoint A (its rename waits, then fails: the disk is full).
+      full = true;
+      gateA = new Promise<void>(resolve => { releaseA = resolve; });
+      gateB = new Promise<void>(resolve => { releaseB = resolve; });
+      PM.Projects.put(project);
+      await tick();
+      edit(PM, project, 9, 1, 'Against A');
+      await tick();
+      states.push(JSON.stringify(project));
+      // Checkpoint B posted while A is still being written.
+      PM.Projects.put(project);
+      await tick();
+      edit(PM, project, 10, 2, 'After B');
+      await tick();
+      states.push(JSON.stringify(project));
+      releaseA();
+      await tick(); await tick();
+      const afterAFailed = log.length;
+      releaseB();
+      const settled = await step(true);
+      if (newerFails) {
+        // Still full: another edit, an autosave, a third edit.
+        edit(PM, project, 11, 3, 'While full');
+        await step(true);
+        PM.Projects.recover(project, 'data:image/jpeg;base64,AAAA');
+        await step(true);
+        edit(PM, project, 12, 4, 'While full 2');
+        await step(true);
+      }
+      expect(jsonDiff(states[4]!, await recover(stateAfter(log, afterAFailed), 'T')), 'A failed, B not on disk').toEqual([]);
+      expect(jsonDiff(states[4]!, await recover(stateAfter(log, settled), 'T')), 'settled').toEqual([]);
+      expect(jsonDiff(states.at(-1)!, await recover(stateAfter(log, log.length), 'T')), 'last').toEqual([]);
+      await expectEveryCrashPointSafe(log, states, 'T');
+      full = false;
+    });
+  }
+});
+
+describe('a disk that stays full', () => {
+  it('shows one save error per failure episode, not one per edit', { timeout: 120_000 }, async () => {
+    let full = false;
+    const store = createStore(await temporaryDirectory(), {
+      fs: loggingFs([], { rename: () => full ? failure('ENOSPC', 'no space left on device') : null }),
+      writeDelayMs: 0,
+    });
+    await store.load();
+    const PM: any = openWindow(store);
+    const project = largeProject('Z');
+    PM.proj = project;
+    PM.Projects.put(project);
+    await settle(PM, store);
+    full = true;
+    for (let revision = 8; revision < 14; revision++) {
+      project.layers[revision - 8].name = `Edit ${revision}`;
+      PM.bus.emit('history:project-patch', { projectId: 'Z', revision, patches: [{ path: ['layers', revision - 8, 'name'], exists: true, value: `Edit ${revision}` }] });
+      await settle(PM, store, { failing: true });
+    }
+    PM.Projects.recover(project);
+    await settle(PM, store, { failing: true });
+    expect(PM.toast).toHaveBeenCalledTimes(1);
+    // The disk recovers; the next failure is a new episode.
+    full = false;
+    PM.Projects.recover(project);
+    await settle(PM, store);
+    full = true;
+    PM.bus.emit('history:project-patch', { projectId: 'Z', revision: 20, patches: [{ path: ['name'], exists: true, value: 'Again' }] });
+    await settle(PM, store, { failing: true });
+    expect(PM.toast).toHaveBeenCalledTimes(2);
+    full = false;
   });
 });

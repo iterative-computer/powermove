@@ -16,6 +16,7 @@ import { isRecord } from '../shared/guards';
 import { HistoryRecords, isHistoryDictionary, packStoredHistory } from '../shared/history-memory';
 import { IPC, LIMITS } from '../shared/ipc';
 import { parseStoreKey, storeFileName } from '../shared/store-keys';
+import { isJournalKey, isSlotKey, ProjectDurability, projectOf } from './project-durability';
 import type { StoreFileSystem } from './storage';
 
 // Takes retain up to 24 complete editable snapshots; large tracked projects
@@ -29,6 +30,8 @@ export type StoreRequest =
   | { op: 'set'; id: number; key: string; value: unknown }
   | { op: 'setSerialized'; id: number; key: string; serialized: string }
   | { op: 'delete'; id: number; key: string }
+  /** One entry for a project's journal (SAVE-1, project-durability.ts). */
+  | { op: 'append'; id: number; key: string; serialized: string }
   /** Re-persist bytes main already published, after a replacement engine starts. */
   | { op: 'restore'; id: number; key: string; bytes: Uint8Array | null }
   | { op: 'flush'; id: number };
@@ -51,16 +54,14 @@ export interface StoreEngineOptions {
   fs: StoreFileSystem;
   now: () => number;
   randomSuffix: () => string;
+  /** Timers for the write debounce (a model check runs them itself). */
+  later?: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  cancel?: (timer: ReturnType<typeof setTimeout>) => void;
 }
 
 type PendingWrite =
-  | { id: number; kind: 'set'; data: string | Uint8Array; checkpoint?: Checkpoint }
+  | { id: number; kind: 'set'; data: string | Uint8Array }
   | { id: number; kind: 'delete' };
-
-/* What a project write says about checkpoint ids (projects.ts): a slot's own
-   id (null: an envelope without one), or the ids a journal's entries are
-   tagged with. */
-type Checkpoint = { slot: string | null } | { journal: string[] };
 
 class Rejection extends Error {
   constructor(readonly channel: string, readonly detail: string) { super(detail); }
@@ -93,16 +94,31 @@ export class StoreEngine {
   private loaded = false;
   /** projectState keys whose file existed at load but could not be read. */
   private readonly unread = new Set<string>();
-  /** Per project.<id> slot, the newest write's request id and whether it reached disk (null: not yet). */
-  private readonly slotWrites = new Map<string, { id: number; ok: boolean | null }>();
-  /** Per project.<id> slot, the checkpoint id of the slot on disk (null: none; absent: unknown). */
-  private readonly diskCheckpoints = new Map<string, string | null>();
   private readonly backlog: StoreRequest[] = [];
   private busy = false;
   private directory = '';
   private writeDelayMs = 150;
+  private readonly later: (run: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  private readonly cancel: (timer: ReturnType<typeof setTimeout>) => void;
+  private readonly projects: ProjectDurability;
 
-  constructor(private readonly options: StoreEngineOptions, private readonly reply: (message: StoreReply, transfer?: ArrayBuffer[]) => void) {}
+  constructor(private readonly options: StoreEngineOptions, private readonly reply: (message: StoreReply, transfer?: ArrayBuffer[]) => void) {
+    this.later = options.later ?? ((run, ms) => setTimeout(run, ms));
+    this.cancel = options.cancel ?? (timer => clearTimeout(timer));
+    this.projects = new ProjectDurability({
+      fs: options.fs as any,
+      directory: () => this.directory,
+      writeDelayMs: () => this.writeDelayMs,
+      loaded: () => this.loaded,
+      randomId: () => options.randomSuffix(),
+      persist: (key, data) => this.persist(key, data === null ? { id: 0, kind: 'delete' } : { id: 0, kind: 'set', data }),
+      // id 0: a write no request waits for (a journal shrunk after its slot landed); it still tells main the key is on disk.
+      written: (id, key) => this.reply({ type: 'written', id, key }),
+      failed: (key, error) => this.reply({ type: 'error', key, error: errorText(error), unsaved: true }),
+      later: (run, ms) => this.later(run, ms),
+      cancel: timer => this.cancel(timer),
+    });
+  }
 
   /** Requests run in arrival order; most finish synchronously inside this call. */
   handle(request: StoreRequest): void {
@@ -117,6 +133,14 @@ export class StoreEngine {
   }
 
   private run(request: StoreRequest): Promise<void> | undefined {
+    // A replacement engine reads a project's slot head and journal before touching it.
+    const key = 'key' in request ? request.key : null;
+    const reading = key === null ? undefined : this.projects.ready(key);
+    if (reading && key !== null) {
+      return reading.then(() => this.run(request), error => {
+        if (request.op !== 'restore') this.reply({ type: 'rejected', id: request.id, key, channel: IPC.storeSet, detail: `the project could not be read: ${errorText(error)}` });
+      });
+    }
     switch (request.op) {
       case 'init':
         this.directory = request.directory;
@@ -129,24 +153,39 @@ export class StoreEngine {
           error => this.reply({ type: 'failed', id: request.id, error: errorText(error) })
         );
       case 'set':
+        if (isJournalKey(request.key)) { this.refuseJournal(request.id, request.key, IPC.storeSet); return undefined; }
         return this.encode(request.id, request.key, () => this.encodeValue(request.key, request.value));
       case 'setSerialized':
+        if (isJournalKey(request.key)) { this.refuseJournal(request.id, request.key, IPC.storeSetSerialized); return undefined; }
         return this.encode(request.id, request.key, () => this.encodeSerialized(request.key, request.serialized));
       case 'delete':
+        if (isJournalKey(request.key)) { this.refuseJournal(request.id, request.key, IPC.storeDelete); return undefined; }
         if (request.key.startsWith('projectState.')) this.sessions.set(request.key, null);
-        if (request.key.startsWith('project.')) this.noteSlotWrite(request.key, request.id, null);
         this.reply({ type: 'committed', id: request.id, key: request.key, bytes: null });
-        this.schedule(request.key, { id: request.id, kind: 'delete' });
+        if (isSlotKey(request.key)) this.projects.deleteSlot(request.id, request.key);
+        else this.schedule(request.key, { id: request.id, kind: 'delete' });
         return undefined;
-      case 'restore': {
-        if (request.key.startsWith('projectState.')) this.sessions.set(request.key, request.bytes && Buffer.from(request.bytes).toString('utf8'));
-        if (request.key.startsWith('project.')) this.noteSlotWrite(request.key, request.id, null);
-        // A slot's checkpoint id is at its head; a journal is small.
-        const text = request.bytes && (request.key.startsWith('project.') ? Buffer.from(request.bytes.subarray(0, 512)).toString('utf8')
-          : request.key.startsWith('projectJournal.') ? Buffer.from(request.bytes).toString('utf8') : null);
-        this.schedule(request.key, request.bytes ? { id: request.id, kind: 'set', data: request.bytes, ...(text ? { checkpoint: checkpointOf(request.key, text) } : {}) } : { id: request.id, kind: 'delete' });
+      case 'append': {
+        if (!isJournalKey(request.key)) {
+          this.reply({ type: 'rejected', id: request.id, key: request.key, channel: IPC.storeAppendJournal, detail: 'only a project journal is appended to' });
+          return undefined;
+        }
+        let bytes: Uint8Array;
+        try {
+          bytes = this.projects.append(request.id, request.key, JSON.parse(request.serialized), storeByteLimit(request.key));
+        } catch (error) {
+          this.reply({ type: 'rejected', id: request.id, key: request.key, channel: IPC.storeAppendJournal, detail: errorText(error) });
+          return undefined;
+        }
+        this.reply({ type: 'committed', id: request.id, key: request.key, bytes }, [bytes.buffer as ArrayBuffer]);
         return undefined;
       }
+      case 'restore':
+        if (isSlotKey(request.key)) { this.projects.restoreSlot(request.id, request.key, request.bytes); return undefined; }
+        if (isJournalKey(request.key)) { this.projects.restoreJournal(request.id, request.key, request.bytes); return undefined; }
+        if (request.key.startsWith('projectState.')) this.sessions.set(request.key, request.bytes && Buffer.from(request.bytes).toString('utf8'));
+        this.schedule(request.key, request.bytes ? { id: request.id, kind: 'set', data: request.bytes } : { id: request.id, kind: 'delete' });
+        return undefined;
       case 'flush':
         // Later requests keep encoding while earlier writes finish.
         void this.flushAll().then(() => this.reply({ type: 'flushed', id: request.id }));
@@ -158,15 +197,17 @@ export class StoreEngine {
   private encode(id: number, key: string, produce: () => string | Promise<string>): Promise<void> | undefined {
     const publish = (serialized: string) => {
       if (key.startsWith('projectState.')) this.sessions.set(key, serialized);
+      if (isSlotKey(key)) {
+        const stored = this.projects.slot(id, key, serialized);
+        this.reply({ type: 'committed', id, key, bytes: stored }, [stored.buffer as ArrayBuffer]);
+        return;
+      }
       const bytes = encoder.encode(serialized);
       this.reply({ type: 'committed', id, key, bytes }, [bytes.buffer as ArrayBuffer]);
-      if (key.startsWith('project.')) this.noteSlotWrite(key, id, null);
-      this.schedule(key, { id, kind: 'set', data: serialized, checkpoint: checkpointOf(key, serialized) });
+      this.schedule(key, { id, kind: 'set', data: serialized });
     };
     const refuse = (error: unknown) => {
       const rejection = error instanceof Rejection ? error : new Rejection(IPC.storeSet, errorText(error));
-      // The window deletes the slot's journal right after posting it.
-      if (key.startsWith('project.')) this.noteSlotWrite(key, id, false);
       this.reply({ type: 'rejected', id, key, channel: rejection.channel, detail: rejection.detail });
     };
     try {
@@ -212,6 +253,11 @@ export class StoreEngine {
     try { value = JSON.parse(serialized); }
     catch { throw new Rejection(IPC.storeSetSerialized, 'invalid JSON'); }
     if (key.startsWith('projectState.')) return this.encodeValue(key, value);
+    // Main numbers and stamps every slot (project-durability.ts); a window's own stamp is dropped.
+    if (isSlotKey(key) && isRecord(value) && (Object.hasOwn(value, 'cp') || Object.hasOwn(value, 'seq'))) {
+      const { cp: _cp, seq: _seq, ...rest } = value;
+      return JSON.stringify(rest);
+    }
     const packed = packStored(key, value);
     return packed === value ? serialized : JSON.stringify(packed);
   }
@@ -268,7 +314,8 @@ export class StoreEngine {
           this.schedule(candidateKey, { id: 0, kind: 'set', data: serialized });
         }
         if (candidateKey.startsWith('projectState.')) this.sessions.set(candidateKey, serialized);
-        if (candidateKey.startsWith('project.')) this.diskCheckpoints.set(candidateKey, isRecord(value) && typeof value.cp === 'string' ? value.cp : null);
+        if (isSlotKey(candidateKey)) this.projects.loadedSlot(projectOf(candidateKey)!, value);
+        if (isJournalKey(candidateKey)) this.projects.loadedJournal(projectOf(candidateKey)!, value);
         entries.push([candidateKey, encoder.encode(serialized)]);
         if (candidateKey === 'projects') registry = value;
         if (parsedKey.kind === 'dynamic' && parsedKey.prefix === 'project') loadedProjectIds.add(parsedKey.id);
@@ -279,6 +326,7 @@ export class StoreEngine {
 
     this.reportProjectReconciliation(registry, loadedProjectIds);
     this.loaded = true;
+    this.projects.loadFinished();
     return entries;
   }
 
@@ -288,95 +336,44 @@ export class StoreEngine {
 
     // Writes can finish while this array is assembled, but every promise here
     // represents the tail of its key's queue at the flush boundary.
-    await Promise.all([...this.queues.values()]);
+    await Promise.all([...this.queues.values(), this.projects.flush()]);
+  }
+
+  /** A project's durability state (the model check, project-durability.model.test.ts). */
+  inspectProject(id: string): unknown { return this.projects.inspect(id); }
+
+  private refuseJournal(id: number, key: string, channel: string): void {
+    // SAVE-1: only main changes a project journal, by appends and after its own slot writes.
+    this.reply({ type: 'rejected', id, key, channel, detail: 'a project journal is only appended to' });
   }
 
   private schedule(key: string, operation: PendingWrite): void {
     this.pending.set(key, operation);
     const previousTimer = this.timers.get(key);
-    if (previousTimer !== undefined) clearTimeout(previousTimer);
-    this.timers.set(key, setTimeout(() => this.enqueuePending(key), this.writeDelayMs));
+    if (previousTimer !== undefined) this.cancel(previousTimer);
+    this.timers.set(key, this.later(() => this.enqueuePending(key), this.writeDelayMs));
   }
 
   private enqueuePending(key: string): void {
     const timer = this.timers.get(key);
-    if (timer !== undefined) clearTimeout(timer);
+    if (timer !== undefined) this.cancel(timer);
     this.timers.delete(key);
 
     const operation = this.pending.get(key);
     if (operation === undefined) return;
     this.pending.delete(key);
 
-    let previous = this.queues.get(key) ?? Promise.resolve();
-    /* A project's recovery journal is relative to its slot: deleting it after
-       a checkpoint, or writing entries made after one, must reach disk only
-       once that checkpoint has. Otherwise a crash in between (the slot is a
-       large write, the journal a small one) recovered the older slot with no
-       journal, or with entries meant for the newer one. */
-    const slot = key.startsWith('projectJournal.') ? `project.${key.slice('projectJournal.'.length)}` : null;
-    if (slot) {
-      if (this.pending.has(slot)) this.enqueuePending(slot);
-      const checkpoint = this.queues.get(slot);
-      if (checkpoint) { const own = previous; previous = Promise.all([own, checkpoint]).then(() => undefined); }
-    }
-    const isSlot = key.startsWith('project.');
+    const previous = this.queues.get(key) ?? Promise.resolve();
     const current = previous
-      .then(async () => {
-        if (slot && !this.journalApplies(slot, operation)) return false;
-        await this.persist(key, operation);
-        if (isSlot) {
-          this.settleSlotWrite(key, operation.id, true);
-          this.diskCheckpoints.set(key, operation.kind === 'set' && operation.checkpoint && 'slot' in operation.checkpoint ? operation.checkpoint.slot : null);
-        }
-        return true;
-      })
-      .then(persisted => { if (persisted && operation.id) this.reply({ type: 'written', id: operation.id, key }); })
+      .then(() => this.persist(key, operation))
+      .then(() => { if (operation.id) this.reply({ type: 'written', id: operation.id, key }); })
       .catch((error: unknown) => {
-        if (isSlot) this.settleSlotWrite(key, operation.id, false);
         this.reply({ type: 'error', key, error: errorText(error), unsaved: true });
       });
     this.queues.set(key, current);
     void current.finally(() => {
       if (this.queues.get(key) === current) this.queues.delete(key);
     });
-  }
-
-  private noteSlotWrite(key: string, id: number, ok: boolean | null): void {
-    const newest = this.slotWrites.get(key);
-    if (!newest || id >= newest.id) this.slotWrites.set(key, { id, ok });
-  }
-
-  /** An earlier slot write settling never changes what is known of a newer one. */
-  private settleSlotWrite(key: string, id: number, ok: boolean): void {
-    const newest = this.slotWrites.get(key);
-    if (newest && newest.id === id) newest.ok = ok;
-  }
-
-  /*
-   * Whether a journal operation describes the slot on disk. It runs only after
-   * every slot write posted before it has settled (enqueuePending), so:
-   * - a deletion follows a checkpoint, and goes ahead only if that checkpoint,
-   *   the newest slot write posted before it, reached disk. When it was
-   *   refused or failed, the journal on disk is the only record of the edits
-   *   since the older slot and stays. A failure is cleared only by a newer
-   *   slot write reaching disk, never by an older one still in flight
-   *   finishing after it.
-   * - entries tagged with checkpoint ids (projects.ts) are written only when
-   *   every tag names the slot on disk: entries meant for a slot that never
-   *   landed would replace the journal of the one that did. The window writes
-   *   them again, against the older slot, once it hears of the failure.
-   *   Untagged entries (older builds) and an unknown slot (a replacement
-   *   engine that has not loaded) are written, as before.
-   */
-  private journalApplies(slot: string, operation: PendingWrite): boolean {
-    if (operation.kind === 'delete') {
-      const newest = this.slotWrites.get(slot);
-      return !newest || newest.id > operation.id || newest.ok !== false;
-    }
-    const tags = operation.checkpoint && 'journal' in operation.checkpoint ? operation.checkpoint.journal : [];
-    if (!tags.length || !this.diskCheckpoints.has(slot)) return true;
-    const disk = this.diskCheckpoints.get(slot);
-    return tags.every(tag => tag === disk);
   }
 
   private async persist(key: string, operation: PendingWrite): Promise<void> {
@@ -475,21 +472,6 @@ export class StoreEngine {
    own interning table, which still shares equal records within its history. */
 function packStored(key: string, value: unknown): unknown {
   return packStoredHistory(key, value, new HistoryRecords());
-}
-
-/** The checkpoint ids a project slot or journal write carries (see Checkpoint). */
-function checkpointOf(key: string, serialized: string): Checkpoint | undefined {
-  if (key.startsWith('project.')) {
-    // The envelope is {"v":…,"cp":…,"proj":…}; reading its head avoids a second parse of the slot.
-    const head = /^\{"v":(?:"(?:[^"\\]|\\.)*"|[^,{}"]*),"cp":"((?:[^"\\]|\\.)*)"/.exec(serialized.slice(0, 512));
-    return { slot: head ? JSON.parse(`"${head[1]}"`) as string : null };
-  }
-  if (!key.startsWith('projectJournal.')) return undefined;
-  try {
-    const entries: unknown = JSON.parse(serialized);
-    if (!Array.isArray(entries)) return undefined;
-    return { journal: [...new Set(entries.flatMap(entry => isRecord(entry) && typeof entry.cp === 'string' ? [entry.cp] : []))] };
-  } catch { return undefined; }
 }
 
 function withHistory(value: Record<string, unknown>, stored: string | null): unknown {

@@ -446,6 +446,7 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       snapshot: () => link.invoke(IPC.storeSnapshot),
       set: (key, value) => { serialized.set(key, JSON.stringify(value)); link.send(IPC.storeSet, { key, value }); },
       setSerialized: async (key, value) => { serialized.set(key, value); await link.invoke(IPC.storeSetSerialized, { key, serialized: value }); },
+      appendJournal: async (key, value) => { serialized.delete(key); await link.invoke(IPC.storeAppendJournal, { key, serialized: value }); },
       delete: (key) => { serialized.delete(key); link.send(IPC.storeDelete, { key }); },
       flush: () => link.invoke(IPC.storeFlush),
       onError: (cb) => link.on(IPC.storeError, (error) => cb(error as StoreErrorEvent)),

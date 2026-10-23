@@ -39,6 +39,10 @@ export interface Store {
   /** Throws for an unknown key; the promise rejects if the value is refused. */
   set(key: string, value: unknown): void | Promise<void>;
   setSerialized?(key: string, serialized: string): void | Promise<void>;
+  /** One journal entry for a project (SAVE-1, project-durability.ts). */
+  appendJournal?(key: string, serialized: string): Promise<void>;
+  /** Keys whose newest write did not reach disk (a persist failure, or a refused journal entry) and none has since. */
+  failingKeys?(): string[];
   delete(key: string): void | Promise<void>;
   flushAll(): Promise<void>;
   onError(cb: (event: StoreErrorEvent) => void): () => void;
@@ -125,6 +129,8 @@ class FileStore implements Store {
   private readonly unsettled = new Map<string, { id: number; present: boolean }>();
   /** Keys whose newest committed value has not reached disk yet. */
   private readonly unwritten = new Map<string, number>();
+  /** Keys whose last write failed to reach disk, until one of them reaches it. */
+  private readonly failing = new Map<string, string>();
   private readonly waiters = new Map<number, Waiter>();
   private readonly listeners = new Set<(event: StoreErrorEvent) => void>();
   private nextId = 1;
@@ -200,6 +206,12 @@ class FileStore implements Store {
     return this.mutate(key, true, IPC.storeSetSerialized, id => ({ op: 'setSerialized', id, key, serialized }));
   }
 
+  appendJournal(key: string, serialized: string): Promise<void> {
+    this.fileNameFor(key, IPC.storeAppendJournal);
+    if (typeof serialized !== 'string' || serialized.length > storeByteLimit(key)) throw new IpcValidationError(IPC.storeAppendJournal, 'journal entry exceeds its size limit');
+    return this.mutate(key, true, IPC.storeAppendJournal, id => ({ op: 'append', id, key, serialized }));
+  }
+
   delete(key: string): Promise<void> {
     this.fileNameFor(key, IPC.storeDelete);
     return this.mutate(key, false, IPC.storeDelete, id => ({ op: 'delete', id, key }));
@@ -208,6 +220,8 @@ class FileStore implements Store {
   async flushAll(): Promise<void> {
     await this.request(id => ({ op: 'flush', id }));
   }
+
+  failingKeys(): string[] { return [...this.failing.keys()]; }
 
   onError(cb: (event: StoreErrorEvent) => void): () => void {
     this.listeners.add(cb);
@@ -255,6 +269,7 @@ class FileStore implements Store {
     if (reply.type === 'error') { this.emitError(reply.key, reply.error, reply.unsaved === true); return; }
     if (reply.type === 'written') {
       if (this.unwritten.get(reply.key) === reply.id) this.unwritten.delete(reply.key);
+      this.failing.delete(reply.key);
       return;
     }
     const waiter = this.waiters.get(reply.id);
@@ -274,6 +289,8 @@ class FileStore implements Store {
         return;
       case 'rejected': {
         if (this.unsettled.get(reply.key)?.id === reply.id) this.unsettled.delete(reply.key);
+        // A refused journal entry is an edit not on disk until the project's next slot write lands.
+        if (reply.key.startsWith('projectJournal.')) this.failing.set(reply.key, reply.detail);
         const error = new IpcValidationError(reply.channel, reply.detail);
         this.emitError(reply.key, error.message);
         waiter?.reject(error);
@@ -298,7 +315,9 @@ class FileStore implements Store {
     this.unsettled.clear();
     try {
       void this.request(id => ({ op: 'init', id, directory: this.directory, writeDelayMs: this.writeDelayMs })).catch(() => undefined);
-      for (const key of [...this.unwritten.keys()]) {
+      // In the order they were first made (their ids), not the map's: a project's
+      // slot and journal are replayed as they happened (project-durability.ts).
+      for (const key of [...this.unwritten].sort(([, a], [, b]) => a - b).map(([key]) => key)) {
         const id = this.nextId++;
         const bytes = this.committed.get(key);
         this.channel.post({ op: 'restore', id, key, bytes: bytes ? new Uint8Array(bytes) : null });
@@ -337,6 +356,7 @@ class FileStore implements Store {
   }
 
   private emitError(key: string, error: string, unsaved = false): void {
+    if (unsaved) this.failing.set(key, error);
     const event: StoreErrorEvent = unsaved ? { key, error, unsaved } : { key, error };
     for (const listener of this.listeners) {
       try {
@@ -396,7 +416,7 @@ export function registerStoreIpc(
     if (!event.unsaved) return;
     const writer = writers.get(event.key);
     if (!writer || writer.isDestroyed?.()) return;
-    try { writer.send(IPC.storeError, { key: event.key, error: event.error } satisfies StoreErrorEvent); } catch { /* the window is closing */ }
+    try { writer.send(IPC.storeError, { key: event.key, error: event.error, unsaved: true } satisfies StoreErrorEvent); } catch { /* the window is closing */ }
   });
   /* Writes arrive in bursts (a rename touches the registry and the slot), so
      the keys are coalesced into one message per turn of the event loop. A key
@@ -520,9 +540,19 @@ export function registerStoreIpc(
     }
   });
 
+  ipcMain.handle(IPC.storeAppendJournal, async (event, payload: unknown) => {
+    requireTrusted(event, IPC.storeAppendJournal);
+    if (!isRecord(payload) || typeof payload.key !== 'string' || typeof payload.serialized !== 'string') throw new IpcValidationError(IPC.storeAppendJournal, 'expected key and serialized JSON');
+    if (!store.appendJournal) throw new IpcValidationError(IPC.storeAppendJournal, 'this store keeps no project journals');
+    wrote(event, payload.key);
+    await store.appendJournal(payload.key, payload.serialized);
+    announce(payload.key, event.sender);
+  });
+
   ipcMain.handle(IPC.storeFlush, async (event) => {
     requireTrusted(event, IPC.storeFlush);
     await store.flushAll();
+    return { failing: store.failingKeys?.() ?? [] };
   });
 }
 

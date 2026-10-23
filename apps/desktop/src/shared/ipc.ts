@@ -125,6 +125,8 @@ export const IPC = {
   storeSnapshotSync: 'store:snapshot-sync', // ipcRenderer.sendSync from preload, boot barrier only
   storeSet: 'store:set',
   storeSetSerialized: 'store:set-serialized',
+  /** One entry for a project's journal; main numbers and keeps it (SAVE-1). */
+  storeAppendJournal: 'store:append-journal',
   storeDelete: 'store:delete',
   storeFlush: 'store:flush',
   storeError: 'store:error', // main → renderer
@@ -882,8 +884,11 @@ export interface PowermoveBridge {
     snapshot(): Promise<StoreSnapshot>;
     set(key: string, value: unknown): void;
     setSerialized?(key: string, serialized: string): Promise<void>;
+    /** Appends one entry (JSON) to `projectJournal.<id>`; rejects if it is refused. */
+    appendJournal?(key: string, serialized: string): Promise<void>;
     delete(key: string): void;
-    flush(): Promise<void>;
+    /** Resolves once queued writes settle, naming the keys still not on disk (main's store). */
+    flush(): Promise<void | { failing?: string[] }>;
     onError(cb: (e: StoreErrorEvent) => void): () => void;
     /** Re-reads one key another window wrote. Null when the key is unset. */
     getSync?(key: string): string | null;

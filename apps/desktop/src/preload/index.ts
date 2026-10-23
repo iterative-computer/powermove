@@ -374,6 +374,7 @@ const bridge: PowermoveBridge = {
 
   store: {
     setSerialized: (key, serialized) => ipcRenderer.invoke(IPC.storeSetSerialized, { key, serialized }),
+    appendJournal: (key, serialized) => ipcRenderer.invoke(IPC.storeAppendJournal, { key, serialized }),
     snapshotSync: () => ipcRenderer.sendSync(IPC.storeSnapshotSync) as StoreSnapshot,
     snapshotSerializedSync: () => ipcRenderer.sendSync(IPC.storeSnapshotSerializedSync) as Record<string, string>,
     bootstrapSerializedSync: () => ipcRenderer.sendSync(IPC.storeBootstrapSync) as Record<string, string>,
@@ -385,7 +386,7 @@ const bridge: PowermoveBridge = {
     delete: (key) => {
       ipcRenderer.send(IPC.storeDelete, { key });
     },
-    flush: () => ipcRenderer.invoke(IPC.storeFlush) as Promise<void>,
+    flush: () => ipcRenderer.invoke(IPC.storeFlush) as Promise<void | { failing?: string[] }>,
     onError: (cb) => {
       const listener = (_event: IpcRendererEvent, error: StoreErrorEvent): void => cb(error);
       ipcRenderer.on(IPC.storeError, listener);
