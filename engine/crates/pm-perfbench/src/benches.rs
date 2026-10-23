@@ -48,11 +48,14 @@ impl Default for Ctx {
 /// A bench: its name and how to run it.
 pub type Bench = (&'static str, fn(&Ctx) -> BenchReport);
 
+/// A configured bench of the correlation set.
+pub type BoxedBench = Box<dyn Fn(&Ctx) -> BenchReport>;
+
 /// The correlation set (docs/engine/perfbench.md, "Correlation"): the
 /// workloads at several sizes and with the viewer's reuse on and off, so
 /// every counter moves across them.
-pub fn correlation() -> Vec<(String, Box<dyn Fn(&Ctx) -> BenchReport>)> {
-    let mut out: Vec<(String, Box<dyn Fn(&Ctx) -> BenchReport>)> = Vec::new();
+pub fn correlation() -> Vec<(String, BoxedBench)> {
+    let mut out: Vec<(String, BoxedBench)> = Vec::new();
     for layers in [125usize, 250, 500, 1000] {
         let n = format!("playback_{layers}");
         out.push((n.clone(), Box::new(move |c| playback(c, &n, layers, 60))));

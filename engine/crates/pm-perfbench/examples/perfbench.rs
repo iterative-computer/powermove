@@ -69,7 +69,9 @@ fn correlation(ctx: &pm_perfbench::benches::Ctx, repeat: usize, out: Option<&str
     use std::collections::BTreeMap;
     let set = pm_perfbench::benches::correlation();
     // name -> (counts per unit, wall p50 per round)
-    let mut runs: BTreeMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)> = BTreeMap::new();
+    // name -> (counts per unit, wall p50 per round, load per round)
+    type Runs = BTreeMap<String, (Vec<f64>, Vec<f64>, Vec<f64>)>;
+    let mut runs: Runs = BTreeMap::new();
     let mut lines = Vec::new();
     for round in 0..repeat.max(1) {
         for (name, run) in &set {

@@ -161,7 +161,7 @@ fn main() {
         ("by call chain (3 frames)", by_site),
     ] {
         let mut v: Vec<_> = map.into_iter().collect();
-        v.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        v.sort_by_key(|e| std::cmp::Reverse(e.1.0));
         println!(
             "== {title}: estimated allocations per unit ({} units)",
             r.units
