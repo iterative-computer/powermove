@@ -26,6 +26,7 @@ pub mod blender;
 pub mod capability;
 pub mod composite;
 pub mod effects;
+mod binds;
 mod error;
 mod exec;
 pub mod expr;

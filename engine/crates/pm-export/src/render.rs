@@ -296,9 +296,47 @@ fn wait_idle(renderer: &mut Renderer) {
 }
 
 /// Renders one frame through `gate`: the whole frame at once when the gate
-/// admits every unit, else bands of rows as regions of interest.
+/// admits every unit, else bands of rows as regions of interest. A one-off
+/// frame (an agent still, a parity frame): the renderer keeps no staging
+/// buffer or frame target afterwards (an export keeps them from frame to
+/// frame, [`run_export_with_blender`]).
 #[allow(clippy::too_many_arguments)]
 pub fn render_frame(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &dyn GpuGate,
+    pass: u64,
+    cancel: &AtomicBool,
+) -> Result<ReadFrame, JobError> {
+    let result = render_frame_output(
+        renderer,
+        document,
+        composition,
+        time,
+        request,
+        media,
+        gate,
+        pass,
+        cancel,
+        false,
+        true,
+        Some(&mut crate::readback::ExportReadback::default()),
+        Vec::new(),
+    );
+    renderer.release_frame_reuse();
+    result
+}
+
+/// [`render_frame`], keeping the frame's staging buffer and target for the
+/// next frame (an export's frames; the caller releases them with
+/// `Renderer::release_frame_reuse` when its frames end, as
+/// [`run_export_with_blender`] does).
+#[allow(clippy::too_many_arguments)]
+pub fn render_frame_reusing(
     renderer: &mut Renderer,
     document: &Document,
     composition: &str,
@@ -321,7 +359,8 @@ pub fn render_frame(
         cancel,
         false,
         true,
-        &mut crate::readback::ExportReadback::default(),
+        None,
+        Vec::new(),
     )
 }
 
@@ -338,7 +377,8 @@ fn render_frame_output(
     cancel: &AtomicBool,
     gpu: bool,
     readback: bool,
-    staging: &mut crate::readback::ExportReadback,
+    staging: Option<&mut crate::readback::ExportReadback>,
+    rgba: Vec<f32>,
 ) -> Result<ReadFrame, JobError> {
     let span = if gate.measures() {
         gpu_span(renderer)
@@ -363,12 +403,13 @@ fn render_frame_output(
         gpu,
         readback,
         staging,
+        rgba,
     );
     renderer.set_bracket(None);
     result
 }
 
-/// [`render_frame`]'s bands, with the renderer's bracket set to `span`.
+/// [`render_frame_reusing`]'s bands, with the renderer's bracket set to `span`.
 #[allow(clippy::too_many_arguments)]
 fn render_bands(
     renderer: &mut Renderer,
@@ -383,16 +424,17 @@ fn render_bands(
     span: Option<&crate::gpu_time::GpuSpan>,
     gpu: bool,
     readback: bool,
-    staging: &mut crate::readback::ExportReadback,
+    mut staging: Option<&mut crate::readback::ExportReadback>,
+    mut rgba: Vec<f32>,
 ) -> Result<ReadFrame, JobError> {
     let size = request.output_size;
     let (w, h) = (size.width, size.height);
     let total_units = h.div_ceil(BAND_ROWS);
-    let mut rgba = if readback {
-        vec![0f32; w as usize * h as usize * 4]
+    if readback && staging.is_some() {
+        rgba.resize(w as usize * h as usize * 4, 0.0);
     } else {
-        Vec::new()
-    };
+        rgba.clear();
+    }
     let mut gpu_frame: Option<wgpu::Texture> = None;
     let mut failures = Vec::new();
     let mut y = 0u32;
@@ -422,7 +464,7 @@ fn render_bands(
                 height: band,
             });
         }
-        let frame = match renderer.render(document, composition, time, &req, media) {
+        let mut frame = match renderer.render(document, composition, time, &req, media) {
             Ok(frame) => frame,
             Err(e) => {
                 // Whatever the failed render submitted finishes before the
@@ -492,16 +534,34 @@ fn render_bands(
         if readback {
             let row = w as usize * 4;
             let at = y as usize * row;
-            staging
-                .read_into(
-                    renderer.device(),
-                    renderer.queue(),
-                    &frame.color.texture,
-                    &mut rgba[at..at + band as usize * row],
-                )
-                .map_err(|e| JobError::Render(e.to_string()))?;
+            if let Some(staging) = staging.as_deref_mut() {
+                staging
+                    .read_into(
+                        renderer.device(),
+                        renderer.queue(),
+                        &frame.color.texture,
+                        &mut rgba[at..at + band as usize * row],
+                    )
+                    .map_err(|e| JobError::Render(e.to_string()))?;
+            } else {
+                let pixels = renderer.read_rgba_reusing(&frame)?;
+                if whole {
+                    rgba = pixels;
+                } else {
+                    if rgba.is_empty() {
+                        rgba = vec![0f32; w as usize * h as usize * 4];
+                    }
+                    rgba[at..at + pixels.len()].copy_from_slice(&pixels);
+                    renderer.give_rgba(pixels);
+                }
+            }
         }
-        failures.extend(frame.failures);
+        failures.append(&mut frame.failures);
+        // A whole GPU frame's texture is still owned by the encoder thread.
+        // Other targets can be reused after their readback or band copy.
+        if !gpu || !whole {
+            renderer.recycle(frame);
+        }
         y += band;
     }
     Ok(ReadFrame {
@@ -1162,6 +1222,27 @@ pub fn run_export_with_blender<S: Sink + Send>(
     gate: &dyn GpuGate,
     cancel: &AtomicBool,
     progress: &mut (dyn FnMut(Progress) + Send),
+    blender: Option<&mut crate::blender::ExportBlender>,
+) -> Result<S::Output, JobError>
+where
+    S::Output: Send,
+{
+    let result = export_frames(renderer, job, plan, sink, gate, cancel, progress, blender);
+    // The frames' staging buffer, target and pixels are kept only while
+    // exporting (one-off frames release them in `render_frame`).
+    renderer.release_frame_reuse();
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_frames<S: Sink + Send>(
+    renderer: &mut Renderer,
+    job: &ExportJob,
+    plan: ExportPlan,
+    sink: S,
+    gate: &dyn GpuGate,
+    cancel: &AtomicBool,
+    progress: &mut (dyn FnMut(Progress) + Send),
     mut blender: Option<&mut crate::blender::ExportBlender>,
 ) -> Result<S::Output, JobError>
 where
@@ -1201,6 +1282,9 @@ where
         )
     });
     let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
+    // The encoder gives each frame's pixels back for a later frame to read
+    // into (docs/engine/perfbench.md).
+    let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let qos = crate::par::current_qos();
     std::thread::scope(|scope| {
         let encoder_gate = gate;
@@ -1245,7 +1329,7 @@ where
                 } else {
                     None
                 };
-                drop(rgba);
+                let _ = back_tx.send(rgba);
                 if let Some((mixer, rate, last)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
                     let first = first.min(*last);
@@ -1287,11 +1371,21 @@ where
         let mut render_ns = 0u128;
         let render_started = Instant::now();
         let mut last_gpu_preview = Instant::now() - PREVIEW_EVERY;
+        let mut available_pixels: Vec<Vec<f32>> = Vec::new();
         for n in 0..frames {
             gate.sync_worker_qos();
             if cancel.load(Ordering::Relaxed) {
                 render_error = Some(JobError::Cancelled);
                 break;
+            }
+            // Three frames' pixels circulate. Keep returned buffers here so
+            // GPU frames without readback do not discard a sampled frame's
+            // allocation before the next sampled readback.
+            if n >= PIXEL_BUFFERS
+                && let Ok(rgba) = back_rx.recv()
+                && !rgba.is_empty()
+            {
+                available_pixels.push(rgba);
             }
             let frame_request = match blender.as_deref_mut() {
                 None => Ok(request.clone()),
@@ -1312,6 +1406,7 @@ where
             if preview_due {
                 last_gpu_preview = Instant::now();
             }
+            let needs_readback = !gpu_frames || sampled.contains(&n) || preview_due;
             let frame_started = Instant::now();
             let rendered = frame_request
                 .and_then(|frame_request| {
@@ -1326,8 +1421,13 @@ where
                         pass,
                         cancel,
                         gpu_frames,
-                        !gpu_frames || sampled.contains(&n) || preview_due,
-                        &mut staging,
+                        needs_readback,
+                        Some(&mut staging),
+                        if needs_readback {
+                            available_pixels.pop().unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        },
                     )
                 })
                 .and_then(|f| {
@@ -1386,6 +1486,10 @@ where
             .unwrap_or_else(|_| Err(JobError::Render("the encoder thread panicked".into())))
     })
 }
+
+/// Frames' pixel buffers an export keeps in circulation between the render
+/// and encoder threads.
+const PIXEL_BUFFERS: u64 = 3;
 
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
 /// FFmpeg (WebM), or the engine's PNG writer.

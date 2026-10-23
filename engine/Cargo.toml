@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Vendored crates patched below are not members (no workspace lints or tests).
+exclude = ["third_party/wgpu"]
 
 [workspace.package]
 version = "0.1.0"
@@ -25,3 +27,9 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 2
+
+# wgpu 30.0.1's front crate with the engine's work counters added to its
+# resource creations, pass commands, uploads, and readbacks (pm-perf;
+# engine/third_party/wgpu/POWERMOVE.md, docs/engine/perfbench.md).
+[patch.crates-io]
+wgpu = { path = "third_party/wgpu" }

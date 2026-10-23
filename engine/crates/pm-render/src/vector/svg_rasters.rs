@@ -248,6 +248,7 @@ impl SvgRasters {
     /// Stores a raster's pixels in its key's encoding (canvas bucket or
     /// straight, flipped material-map upload).
     pub fn put(&mut self, key: SvgRasterKey, data: Vec<u8>) -> Result<(), String> {
+        pm_perf::bump(pm_perf::Counter::RasterAnswers);
         key.validate().map_err(|v| v.to_string())?;
         if data.len() as u64 != key.bytes() {
             return Err(format!(
