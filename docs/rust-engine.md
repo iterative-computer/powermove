@@ -352,8 +352,8 @@ A Cargo workspace at `engine/`.
 | `pm-render` | Render graph, 2D layers, 3D scene pass, effects, compositing, motion blur | native |
 | `pm-blender` | Blender job client: snapshots from the evaluated scene, protocol, surface import, cache keys | native |
 | `pm-media` | Probe, demux, decode, index, image readers, color and chroma metadata | native |
-| `pm-cache` | Frame cache, render cache, disk caches, leases | native |
-| `pm-proxy` | Representation policy, jobs, generated-media store | native |
+| (no `pm-cache`) | Frame, render, and disk caches and leases live with their owners: `pm-engine`, `pm-media`, `pm-render`, `pm-node` | native |
+| (no `pm-proxy`) | Representation policy, jobs, and the generated-media store live in `pm-media`, `pm-export`, and `pm-node` | native |
 | `pm-audio` | Device and clock, mixer, automation, stretch, waveforms, meters | native |
 | `pm-export` | Encoders, muxers, render queue, verification | native |
 | `pm-engine` | Sessions, scheduler, priority classes, playback, crash attribution | native |
@@ -2070,7 +2070,7 @@ Drafted in Phase 0 as Rust types and RFCs; frozen when their consumer phase star
 | Platform, CI, and compliance | Toolchain, hosted CI, local gate tooling, packaging, signing, FFmpeg build, crash reporting | 0 onward |
 | Audio | `pm-audio`, mixer, clock contract | 0, 2, 3b |
 | Export and agents | `pm-export`, `pm-cli`, render queue, agent export, save, and snapshots, `pm-host` CLI implementation, the hidden MCP host, CLI prebuilds | 2, 3b, 3c |
-| Proxies and storage | `pm-proxy`, `pm-cache`, media store, media management | 2, 4a, 4b |
+| Proxies and storage | `pm-media`, `pm-node`, media store, media management | 2, 4a, 4b |
 | Viewer and settings UI | Viewer, overlays, settings, appendices C and D, API mapping, sync compatibility path, extension docs | 2, 3c, 4a, 5 |
 | Parity and QA | Ledger, corpus, parity runner, conformance, performance gates, appendix A Phase 0 fixes | 0 onward |
 

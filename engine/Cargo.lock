@@ -2161,10 +2161,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pm-cache"
-version = "0.1.0"
-
-[[package]]
 name = "pm-cli"
 version = "0.1.0"
 dependencies = [
@@ -2449,10 +2445,6 @@ dependencies = [
  "thiserror 2.0.21",
  "ts-rs",
 ]
-
-[[package]]
-name = "pm-proxy"
-version = "0.1.0"
 
 [[package]]
 name = "pm-render"
