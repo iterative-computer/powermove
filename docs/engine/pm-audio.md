@@ -642,6 +642,21 @@ bun install && bun run --cwd apps/desktop build
 cargo test --release -p pm-audio --test legacy_parity -- --nocapture   # PM_AUDIO_PARITY=<capture dir> picks one
 ```
 
+The source monitor has a separate decoded-PCM parity probe. Build
+`cargo build --manifest-path engine/Cargo.toml --release -p pm-node --example source_monitor_pcm`, then run
+`~/Library/Caches/powermove-engine/bin/pm-electron-lock engine/target/release/examples/source_monitor_pcm <source-read-path> <output.f32le> 48000`.
+The path must be the frozen browser rendition when an asset has one. The
+output is headerless interleaved stereo little-endian float32 PCM; stderr
+reports its frame count. The example uses the same isolated unity-gain
+source document builder as live `SourceAudio`, then the real `MixGraph` and
+`Mixer` offline. Compare it with Chromium `AudioContext.decodeAudioData` at
+48 kHz on the same bytes, recording frame count, alignment and the residual
+against the existing −85 dBFS plain-mix ceiling above. A WAV impulse and
+tone can reveal channel gain and one-sample alignment; a browser-rendition
+WebM checks the imported-copy path. This probe establishes decoded/mixed
+PCM behavior, not DAC output or live-device scheduling. No source-monitor
+PCM parity result is claimed until the browser comparison runs.
+
 ## Tests
 
 ```sh

@@ -115,6 +115,23 @@ the cold work is the point.
 | `open_large_2000` | open | the 2,000-layer project's text parsed, given to a new view, routed, and drawn by a new composer |
 | `import_3d_600k` | frame | the first frame of a lit, shadowed scene placing the 600k-vertex model, then 10 frames turning it |
 
+The targeted `examples/source_media.rs` bench uses the public 320×180
+H.264/AAC fixture for 24 scattered source-monitor seeks at 320×180 and 24
+ordered filmstrip frames at 160×90. It reports the same thread/global
+`pm-perf` counters and per-unit GPU-complete wall times as the main benches.
+The filmstrip span also includes straight-alpha conversion and the packed
+RGBA8 file write; its temporary output is removed on drop. The paired app
+comparison must add IPC, canvas and host-job overhead separately. This
+targeted bench is outside the baseline ratchet until its workload and paired
+app measurement are established:
+
+```sh
+source engine/env.sh
+CARGO_BUILD_JOBS=2 nice -n 15 cargo build --manifest-path engine/Cargo.toml --release -p pm-perfbench --example source_media
+~/Library/Caches/powermove-engine/bin/pm-electron-lock engine/target/release/examples/source_media
+# PM_SOURCE_BENCH_MEDIA=/path/to/clip.mp4 selects another source.
+```
+
 Each bench reports the bench thread's counters (the ratchet's numbers), every
 thread's (informational), and wall-clock per unit including the GPU
 (informational).

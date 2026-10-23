@@ -31,6 +31,7 @@ mod preview_control;
 pub mod render;
 pub mod schedule;
 pub mod snapshot;
+pub mod source_audio;
 pub mod stats;
 pub mod svg;
 pub mod view;

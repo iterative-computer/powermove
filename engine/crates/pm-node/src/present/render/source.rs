@@ -62,18 +62,7 @@ impl SourceAudio {
         let duration = decoder.info().duration().unwrap_or(86_400.0).max(0.001);
         let duration_ticks = Ticks::new((duration * TICKS_PER_SECOND as f64).round() as i64)
             .unwrap_or(Ticks::from_whole_seconds(86_400));
-        let document = serde_json::json!({
-            "id": "source-monitor", "compId": "source", "name": "Source monitor",
-            "w": 1, "h": 1, "fps": 30, "dur": duration,
-            "layers": [{
-                "id": "source-audio", "type": "audio", "name": "Source audio",
-                "from": 0, "dur": duration, "on": true, "solo": false,
-                "group": null, "parent": null, "p": {}, "fx": [], "masks": [],
-                "d": {"asset": asset.as_str(), "gain": 1, "trim": 0, "fadeIn": 0, "fadeOut": 0}
-            }], "comps": {}, "assets": {}, "params": {}
-        });
-        let parsed = pm_model::json::parse(&document.to_string()).map_err(|e| e.to_string())?;
-        let doc = pm_model::Document::new(Some(parsed), 1);
+        let doc = super::super::source_audio::source_monitor_document(asset.as_str(), duration)?;
         let mut media = BTreeMap::new();
         media.insert(asset.as_str().to_owned(), Some(path));
         let playing = Arc::new(AtomicBool::new(false));
