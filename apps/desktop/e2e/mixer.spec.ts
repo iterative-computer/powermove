@@ -2,6 +2,7 @@ import type { Page } from 'playwright';
 
 import { expect, test, type LaunchedApp } from './helpers/app';
 import { fixturePath } from './helpers/media';
+import { VIEWER_VARIANTS, useViewer } from './helpers/viewer-fork';
 
 /* The suite plays real audio through a hidden window; keep it off the speakers. */
 async function openMixerProject(session: LaunchedApp): Promise<{ tone: string; video: string }> {
@@ -423,3 +424,168 @@ test('the mixer can be placed in a new workspace and is offered as a panel', asy
   const placed = await page.evaluate(() => (window as any).PM.WS.current.layout.docks.find((d: any) => d.id === 'left').panels.map((p: any) => p.id));
   expect(placed).toContain('mixer');
 });
+
+/*
+ * The retune matrix (appendix C row C6), in both themes with the current
+ * viewer and forks of the viewers users can have: every asset kind that
+ * carries sound plays through its strip, and every audio control today's
+ * mix has (legacy/core/audio.ts: gain, video audio gain and mute, layer
+ * switch, group switch, precomp output level, relink) changes what plays,
+ * with the engine on (its levels, and no legacy voices) and off (today's
+ * voices). Today's audio model has no pan or pitch control.
+ */
+const KINDS = ['tone.wav', 'tone.mp3', 'tone.m4a', 'tone.flac', 'tone.opus', 'h264-aac.mp4', 'h264-aac.mov', 'vp9-opus.webm'];
+
+/** Waits until `strip` sounds (or is silent) in a fresh reading of what plays now. */
+async function plays(page: Page, strip: string, kind: 'sound' | 'silence', native: boolean): Promise<number> {
+  const before = native ? await page.evaluate(() => (window as any).PM.EngineConnection.audio.levelsReceived) : 0;
+  await page.evaluate(() => (window as any).PM.setTime(0));
+  const handle = await page.waitForFunction(({ strip, kind, native, before }) => {
+    const PM = (window as any).PM;
+    if (native) {
+      const audio = PM.EngineConnection.audio;
+      const latest = audio.latest();
+      if (!latest || audio.levelsReceived <= before + 1 || PM.EngineConnection.status().driving !== true) return false;
+      if (PM.Audio.inspect().voices.length !== 0 || Number(document.documentElement.dataset.audioVoices || 0) !== 0) return false;
+      const peak = Math.max(0, ...(latest.levels.strips.find((s: any) => s.id === strip)?.levels.peak ?? []));
+      return (kind === 'sound' ? peak > 0 : peak === 0) ? Math.max(peak, 1e-9) : false;
+    }
+    const voice = PM.Audio.inspect().voices.some((v: any) => v.strip === strip);
+    return (kind === 'sound') === voice ? 1 : false;
+  }, { strip, kind, native, before }, { timeout: 20_000 });
+  return handle.jsonValue() as Promise<number>;
+}
+
+/** With the engine on, waits for `strip`'s peak to be `ratio` × `baseline` in fresh readings. */
+async function playsAt(page: Page, strip: string, baseline: number, ratio: number): Promise<void> {
+  const before = await page.evaluate(() => (window as any).PM.EngineConnection.audio.levelsReceived);
+  await page.evaluate(() => (window as any).PM.setTime(0));
+  await page.waitForFunction(({ strip, baseline, ratio, before }) => {
+    const PM = (window as any).PM;
+    const audio = PM.EngineConnection.audio;
+    const latest = audio.latest();
+    if (!latest || audio.levelsReceived <= before + 1) return false;
+    if (PM.Audio.inspect().voices.length !== 0) return false;
+    const peak = Math.max(0, ...(latest.levels.strips.find((s: any) => s.id === strip)?.levels.peak ?? []));
+    return peak > 0 && Math.abs(peak / baseline - ratio) < 0.01;
+  }, { strip, baseline, ratio, before }, { timeout: 20_000 });
+}
+
+/** An undoable change to the open composition, as the panels make it. */
+function change(page: Page, label: string, edit: string, id: string) {
+  return page.evaluate(({ label, edit, id }) => {
+    const PM = (window as any).PM;
+    PM.hist.do(label, () => new Function('PM', 'id', edit)(PM, id));
+    PM.bus.emit('layers');
+  }, { label, edit, id });
+}
+
+for (const theme of ['light', 'dark'] as const) for (const variant of VIEWER_VARIANTS) {
+  test(`retune matrix: every asset kind and audio control in ${theme}, ${variant.name}`, async ({ session }) => {
+    test.setTimeout(150_000);
+    await session.openEditor();
+    const { page, app } = session;
+    await useViewer(page, session.userData, variant);
+    await page.evaluate((theme) => (window as any).PM.theme.apply(theme), theme);
+    await app.evaluate(({ BrowserWindow }) => {
+      for (const window of BrowserWindow.getAllWindows()) window.webContents.setAudioMuted(true);
+    });
+    const chooser = page.waitForEvent('filechooser');
+    await page.evaluate(() => (window as any).PM.pickFiles());
+    await (await chooser).setFiles(KINDS.map(name => fixturePath(name)));
+    await page.waitForFunction((count) => {
+      const layers = (window as any).PM.proj.layers;
+      return layers.filter((l: any) => l.type === 'audio' || (l.type === 'video' && l.d.embeddedAudio === true)).length === count;
+    }, KINDS.length, { timeout: 60_000 });
+    const ids = await page.evaluate((kinds) => {
+      const PM = (window as any).PM;
+      const out: Record<string, string> = {};
+      for (const layer of PM.proj.layers) {
+        const asset = PM.proj.assets[layer.d?.asset];
+        const names = [asset?.sourcePath, asset?.name, asset?.fileName].filter(Boolean).map((name: string) => String(name).split('/').pop());
+        const kind = kinds.find((k: string) => names.includes(k));
+        if (kind) out[kind] = layer.id;
+      }
+      return out;
+    }, KINDS);
+    expect(Object.keys(ids).sort()).toEqual([...KINDS].sort());
+    expect((await agentTool(page, 'open_panel', { panelId: 'mixer' })).ok).toBe(true);
+    const panel = page.locator('#panel-mixer');
+    await expect(panel.locator('[data-mixer-strip]')).toHaveCount(KINDS.length + 1);
+    const native = await nativeTransport(page);
+    await page.evaluate(() => { const PM = (window as any).PM; PM.setTime(0); PM.play(); });
+
+    // Every kind sounds through its own strip.
+    const baseline: Record<string, number> = {};
+    for (const kind of KINDS) {
+      await page.evaluate((id) => (window as any).PM.Audio.setMonitorSolo([id]), ids[kind]!);
+      baseline[kind] = await plays(page, ids[kind]!, 'sound', native);
+    }
+    await page.evaluate(() => (window as any).PM.Audio.setMonitorSolo([]));
+
+    // Gain on an audio layer and on a video's sound retune what plays; Undo restores it.
+    const wav = ids['tone.wav']!, mp4 = ids['h264-aac.mp4']!;
+    await change(page, 'Audio gain', 'PM.L(id).d.gain = 0.5', wav);
+    if (native) await playsAt(page, wav, baseline['tone.wav']!, 0.5); else await plays(page, wav, 'sound', native);
+    await page.evaluate(() => (window as any).PM.hist.undo());
+    if (native) await playsAt(page, wav, baseline['tone.wav']!, 1);
+    await change(page, 'Audio gain', 'PM.L(id).d.audioGain = 0.5', mp4);
+    if (native) await playsAt(page, mp4, baseline['h264-aac.mp4']!, 0.5); else await plays(page, mp4, 'sound', native);
+    await page.evaluate(() => (window as any).PM.hist.undo());
+    if (native) await playsAt(page, mp4, baseline['h264-aac.mp4']!, 1);
+
+    // A video's audio mute, the layer switch and a group switch silence the strip.
+    await change(page, 'Mute audio', 'PM.L(id).d.audioMuted = true', mp4);
+    await plays(page, mp4, 'silence', native);
+    await page.evaluate(() => (window as any).PM.hist.undo());
+    await plays(page, mp4, 'sound', native);
+    const mov = ids['h264-aac.mov']!;
+    await change(page, 'Hide layer', 'PM.L(id).on = false', mov);
+    await plays(page, mov, 'silence', native);
+    await page.evaluate(() => (window as any).PM.hist.undo());
+    await plays(page, mov, 'sound', native);
+    const flac = ids['tone.flac']!;
+    const group = await page.evaluate((id) => (window as any).PM.groupLayers([id], 'Sound group').id, flac);
+    await plays(page, flac, 'sound', native);
+    await change(page, 'Hide group', 'PM.L(id).on = false', group);
+    await plays(page, flac, 'silence', native);
+    await page.evaluate(() => (window as any).PM.hist.undo());
+    await plays(page, flac, 'sound', native);
+
+    // A precomp's output level applies to the sound inside it, on the precomp's strip.
+    const mp3 = ids['tone.mp3']!;
+    const precomp = await page.evaluate((id) => {
+      const PM = (window as any).PM;
+      PM.Comps.precompose([id], { name: 'Sound comp', adjustDuration: false });
+      return PM.proj.layers.find((layer: any) => layer.type === 'precomp' && layer.name === 'Sound comp').id;
+    }, mp3);
+    await page.evaluate((id) => (window as any).PM.Audio.setMonitorSolo([id]), precomp);
+    const nested = await plays(page, precomp, 'sound', native);
+    await change(page, 'Precomp level', 'PM.L(id).d.audioGain = 0.5', precomp);
+    if (native) await playsAt(page, precomp, nested, 0.5); else await plays(page, precomp, 'sound', native);
+    await change(page, 'Mute precomp', 'PM.L(id).d.audioMuted = true', precomp);
+    await plays(page, precomp, 'silence', native);
+    await page.evaluate(() => { const PM = (window as any).PM; PM.hist.undo(); PM.hist.undo(); PM.Audio.setMonitorSolo([]); });
+    await plays(page, precomp, 'sound', native);
+
+    // Relinking a source plays the new file through the same strip. (Relink
+    // while paused, as the Replace dialog does: with the engine off, an agent
+    // relink during playback leaves today's audio stopped while the transport
+    // runs, until playback restarts.)
+    await page.evaluate(() => (window as any).PM.pause());
+    const asset = await page.evaluate((id) => (window as any).PM.L(id).d.asset, wav);
+    const relinked = await page.evaluate(async ({ asset, path }) => {
+      const PM = (window as any).PM;
+      const reply = await PM.AgentHarness.test.handleLiveAgentTool({ runId: 'mixer-matrix', callId: 'relink', tool: 'replace_media', arguments: { assetId: asset, path }, baseRevision: PM.proj.revision || 0 });
+      await PM.AgentHarness.test.handleLiveAgentTool({ runId: 'mixer-matrix', callId: 'finish', tool: '__finish_run', arguments: { commit: true }, baseRevision: PM.proj.revision || 0 });
+      return { ok: reply.ok, source: PM.proj.assets[asset]?.sourcePath ?? PM.proj.assets[asset]?.name ?? '' };
+    }, { asset, path: fixturePath('tone.opus') });
+    expect(relinked.ok).toBe(true);
+    expect(relinked.source).toMatch(/tone\.opus$/);
+    await page.evaluate((id) => { const PM = (window as any).PM; PM.Audio.setMonitorSolo([id]); PM.setTime(0); PM.play(); }, wav);
+    await plays(page, wav, 'sound', native);
+    await page.evaluate(() => (window as any).PM.pause());
+    if (native) expect(await page.evaluate(() => (window as any).__mixerNativeEvidence.violations)).toBe(0);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+}
