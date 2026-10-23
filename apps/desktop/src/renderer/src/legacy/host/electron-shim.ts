@@ -403,7 +403,10 @@ export function install(PM: PMRegistry): void {
       stale.delete(service); lazy.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       try {
-        const copy = packStoredHistory(service, cloneValue(value), historyRecords);
+        // Project slots are evicted from this window after the write. The
+        // context bridge takes its own synchronous snapshot, so cloning the
+        // same document here only adds another full traversal and allocation.
+        const copy = packStoredHistory(service, lazyAfterWrite(service) ? value : cloneValue(value), historyRecords);
         saveErrors.delete(service);
         bridge.store.set(service, copy);
         if (lazyAfterWrite(service)) { cached.delete(legacyKey(service)); lazy.add(service); }

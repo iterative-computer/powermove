@@ -158,6 +158,24 @@ describe('legacy Electron shim install', () => {
     expect(PM.store.has('project.demo')).toBe(false);
   });
 
+  it('uses the bridge snapshot for an engine project write while keeping saved data detached', () => {
+    const { PM, bridge, window } = loadShim({ engineOn: true });
+    const clone = vi.spyOn(window, 'structuredClone');
+    let sent: any;
+    bridge.store.set.mockImplementation((key: string, value: unknown) => {
+      // The Electron context bridge copies arguments before preload receives them.
+      sent = { key, value: structuredClone(value) };
+    });
+    const project = { id: 'demo', layers: [{ id: 'first', points: [1, 2] }] };
+
+    expect(PM.store.set('project.demo', { v: '1.0.0', proj: project })).toBe(true);
+    expect(clone).not.toHaveBeenCalled();
+    project.layers[0].points.push(3);
+    expect(sent).toEqual({ key: 'project.demo', value: { v: '1.0.0', proj: {
+      id: 'demo', layers: [{ id: 'first', points: [1, 2] }],
+    } } });
+  });
+
   it('requires agreement from native storage and preload before migrating undo history', () => {
     expect(loadShim({ serializedBridge: true }).PM.store.separateHistory).toBe(false);
     expect(loadShim({ nativeAsyncStore: true }).PM.store.separateHistory).toBe(false);
