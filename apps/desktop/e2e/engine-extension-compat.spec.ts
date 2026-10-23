@@ -793,11 +793,12 @@ test.describe('Use New Engine: existing extensions', () => {
         PM.setTime(1);
         await new Promise((r) => setTimeout(r, 1200));
         const unchanged = await count(() => PM.invalidate());
+        const unchangedWhy = PM.EnginePresentedEvents?.lastRedraw ?? null;
         const before = await pixel();
         state.color = '#2050F0';
         const changed = await count(() => api.transport.invalidate());
         const after = await pixel();
-        return { unchanged, changed, before, after, redraws: PM.EnginePresentedEvents?.redraws ?? null };
+        return { unchanged, changed, before, after, redraws: PM.EnginePresentedEvents?.redraws ?? null, lastRedraw: PM.EnginePresentedEvents?.lastRedraw ?? null, unchangedWhy };
       } finally { registration.dispose(); }
     });
     await session.openEditor();

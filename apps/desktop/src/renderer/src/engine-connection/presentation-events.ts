@@ -90,6 +90,8 @@ export class PresentedEvents {
   emitted = 0;
   /** Redraw requests answered with the frame on screen (`redraw`). */
   redraws = 0;
+  /** Why the latest redraw request announced nothing (diagnostics). */
+  lastRedraw: string | null = null;
   /** Main-thread time the emissions' listeners took (ms), and the slowest. */
   listenersMs = 0;
   slowestMs = 0;
@@ -128,12 +130,16 @@ export class PresentedEvents {
    */
   redraw(current: { revision: number | null; viewSeq: number | null; pts: number | null; frameTicks: number }, announce: (frame: PresentedFrameLike, quality: number) => boolean): boolean {
     const last = this.last;
-    if (!last || this.pending || current.revision === null || current.revision !== last.frame.revision) return false;
-    if (current.viewSeq !== null && current.viewSeq !== last.frame.viewSeq) return false;
-    if (current.pts !== null && Math.abs(current.pts - last.frame.pts) >= Math.max(1, current.frameTicks) / 2) return false;
+    const skip = (why: string) => { this.lastRedraw = why; return false; };
+    if (!last) return skip('nothing on screen');
+    if (this.pending) return skip('a frame is on its way to the screen');
+    if (current.revision === null || current.revision !== last.frame.revision) return skip(`revision ${current.revision} after ${last.frame.revision}`);
+    if (current.viewSeq !== null && current.viewSeq !== last.frame.viewSeq) return skip(`view ${current.viewSeq} after ${last.frame.viewSeq}`);
+    if (current.pts !== null && Math.abs(current.pts - last.frame.pts) >= Math.max(1, current.frameTicks) / 2) return skip(`time ${current.pts} after ${last.frame.pts}`);
     // `announce` declines when the redraw changed what the engine draws (it
     // presents the new frame itself).
-    if (!announce(last.frame, last.quality)) return false;
+    if (!announce(last.frame, last.quality)) return skip('the producers\' output changed');
+    this.lastRedraw = 'announced';
     this.redraws++;
     return true;
   }

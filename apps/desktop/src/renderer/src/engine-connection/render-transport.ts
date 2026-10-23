@@ -382,6 +382,10 @@ export class EngineRenderTransport {
    *  {@link ANSWER_LOG_LIMIT}. Counts answers by the frame they are for,
    *  wherever they were made (a need, the lookahead, the paused warm-up). */
   private readonly answerLog = new Map<string, { revision: number; kind: 'raster' | 'reuse' | 'native'; key?: string }>();
+  /** What was last posted for each exact need (layer, time, source, density
+   *  and window): `native`, or `raster:` and its key. A paused redraw tells
+   *  a changed output by it. */
+  private readonly postedFor = new Map<string, string>();
   private answering = 0;
   /** Clock-driven, bounded playback lookahead. Answers are keyed by the
    * layer's exact need (including scale/crop) and document revision. */
@@ -683,6 +687,11 @@ export class EngineRenderTransport {
     }, LOOKAHEAD_POLL_MS);
   }
 
+  /** An exact need's identity (layer, time, source, density, window). */
+  private needTag(need: CompatNeed): string {
+    return `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.source}\u0000${need.scale}\u0000${need.crop ? `${need.crop.x},${need.crop.y},${need.crop.width},${need.crop.height}` : ''}`;
+  }
+
   /** The loop the clock wraps by while playback loops (`span.loop`). */
   private playbackLoop(span = this.options.span?.() ?? null): PlaybackLoop | null {
     return span?.loop && span.end > span.start ? { start: span.start, end: span.end } : null;
@@ -734,16 +743,21 @@ export class EngineRenderTransport {
     let changed = false;
     for (const entry of [...this.ahead.values()]) {
       if (entry.session.closed || !this.answerers.has(entry.need.source)) continue;
-      const time = entry.need.composition === this.options.composition() ? pts : entry.cursor;
+      // The engine's need for the frame on screen: its exact time (a layer's
+      // time can differ from the frame's by a tick of rounding), else `pts`.
+      const frame = this.options.frameTicks?.() ?? 0;
+      const time = entry.need.composition !== this.options.composition() || Math.abs(entry.cursor - pts) < Math.max(1, frame) / 2
+        ? entry.cursor : pts;
       const need = { ...entry.need, time };
-      const before = this.answerLog.get(`${need.layer}\u0000${time}`);
+      const tag = this.needTag(need);
+      const was = this.postedFor.get(tag) ?? null;
       if (!this.answerNeed(need, entry.session, false, true)) continue;
-      const after = this.answerLog.get(`${need.layer}\u0000${time}`);
       // The same pixels (a reuse, or a raster under the key already posted)
       // or a pass-through again: unchanged.
-      const was = before ? (before.kind === 'native' ? 'native' : `raster:${before.key ?? ''}`) : null;
-      const now = after ? (after.kind === 'native' ? 'native' : `raster:${after.key ?? ''}`) : null;
-      if (now !== was) changed = true;
+      const now = this.postedFor.get(tag) ?? null;
+      // Without an earlier answer logged here the engine decides alone (an
+      // answer that replaces its own redraws the frame).
+      if (was !== null && now !== was) changed = true;
     }
     return changed;
   }
@@ -758,7 +772,7 @@ export class EngineRenderTransport {
     const began = performance.now();
     const revision = this.options.revision() ?? 0;
     const crop = need.crop ? { crop: { ...need.crop } } : {};
-    const tag = `${need.composition}\u0000${need.layer}\u0000${need.time}\u0000${need.source}\u0000${need.scale}\u0000${need.crop ? `${need.crop.x},${need.crop.y},${need.crop.width},${need.crop.height}` : ''}`;
+    const tag = this.needTag(need);
     // Asked again after a `reuse` at this revision: the engine no longer
     // holds that raster (evicted), so this answer carries the pixels.
     // A refresh asks the producer whether its output changed: never fresh.
@@ -803,7 +817,12 @@ export class EngineRenderTransport {
       this.compatStats.rasters++;
       posted = this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer, need.crop ?? undefined);
     }
-    if (posted) this.logAnswer(need, revision, answer.kind, answer.kind === 'native' ? undefined : answer.key);
+    if (posted) {
+      this.logAnswer(need, revision, answer.kind, answer.kind === 'native' ? undefined : answer.key);
+      this.postedFor.delete(tag);
+      this.postedFor.set(tag, answer.kind === 'native' ? 'native' : `raster:${answer.key}`);
+      if (this.postedFor.size > 4096) this.postedFor.delete(this.postedFor.keys().next().value!);
+    }
     return posted;
   }
 
