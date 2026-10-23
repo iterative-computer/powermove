@@ -51,10 +51,10 @@ pub const MAX_THREADS: usize = 8;
 const MIN_ROWS_PER_THREAD: usize = 16;
 
 /// Worker threads for `rows` rows.
-fn threads_for(rows: usize) -> usize {
+fn threads_for(rows: usize, max_threads: usize) -> usize {
     let available = std::thread::available_parallelism().map_or(1, |n| n.get());
     available
-        .min(MAX_THREADS)
+        .min(max_threads)
         .min(rows / MIN_ROWS_PER_THREAD)
         .max(1)
 }
@@ -62,11 +62,22 @@ fn threads_for(rows: usize) -> usize {
 /// Calls `f(row_index, row)` for every row of `out` (rows of `row_len` items),
 /// splitting contiguous runs of rows across threads.
 pub fn rows<T: Send>(out: &mut [T], row_len: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    rows_limited(out, row_len, MAX_THREADS, f);
+}
+
+/// Like [`rows`], with a call-specific worker cap. Preview rows use four
+/// workers without changing the encoder and readback conversion limits.
+pub(crate) fn rows_limited<T: Send>(
+    out: &mut [T],
+    row_len: usize,
+    max_threads: usize,
+    f: impl Fn(usize, &mut [T]) + Sync,
+) {
     if row_len == 0 || out.is_empty() {
         return;
     }
     let total = out.len() / row_len;
-    let threads = threads_for(total);
+    let threads = threads_for(total, max_threads);
     let refresh = QOS_REFRESH.with(|slot| slot.borrow().clone());
     if threads <= 1 {
         for (y, row) in out.chunks_mut(row_len).enumerate() {

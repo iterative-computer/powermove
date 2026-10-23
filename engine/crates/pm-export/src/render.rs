@@ -1147,7 +1147,7 @@ pub fn preview_jpeg(
     );
     let mut out = vec![0u8; pw as usize * ph as usize * 4];
     let (w, h) = (width as usize, height as usize);
-    for py in 0..ph as usize {
+    crate::par::rows_limited(&mut out, pw as usize * 4, 4, |py, row| {
         let y0 = py * h / ph as usize;
         let y1 = ((py + 1) * h / ph as usize).max(y0 + 1);
         for px in 0..pw as usize {
@@ -1163,15 +1163,15 @@ pub fn preview_jpeg(
                 }
             }
             let n = ((y1 - y0) * (x1 - x0)) as f32;
-            let o = (py * pw as usize + px) * 4;
+            let o = px * 4;
             for k in 0..3 {
                 let v = sum[k] / n;
-                out[o + k] =
+                row[o + k] =
                     (if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) } * 255.0).round() as u8;
             }
-            out[o + 3] = 255;
+            row[o + 3] = 255;
         }
-    }
+    });
     Ok((pw, ph, encode_jpeg(&out, pw, ph, 0.8)?))
 }
 
@@ -1850,5 +1850,90 @@ mod tests {
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
         let png = encode_png(&rgba, w, h).unwrap();
         assert_eq!(&png[1..4], b"PNG");
+    }
+
+    // Retain the serial filter as the exact oracle, including its summation
+    // order, alpha byte and JPEG encoder boundary.
+    fn serial_preview_jpeg(
+        rgba: &[f32],
+        width: u32,
+        height: u32,
+        max_edge: u32,
+    ) -> Result<(u32, u32, Vec<u8>), JobError> {
+        let scale = (f64::from(max_edge) / f64::from(width.max(height))).min(1.0);
+        let (pw, ph) = (
+            ((f64::from(width) * scale).round() as u32).max(1),
+            ((f64::from(height) * scale).round() as u32).max(1),
+        );
+        let mut out = vec![0u8; pw as usize * ph as usize * 4];
+        let (w, h) = (width as usize, height as usize);
+        for py in 0..ph as usize {
+            let y0 = py * h / ph as usize;
+            let y1 = ((py + 1) * h / ph as usize).max(y0 + 1);
+            for px in 0..pw as usize {
+                let x0 = px * w / pw as usize;
+                let x1 = ((px + 1) * w / pw as usize).max(x0 + 1);
+                let mut sum = [0f32; 3];
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let i = (y * w + x) * 4;
+                        for k in 0..3 {
+                            sum[k] += rgba[i + k];
+                        }
+                    }
+                }
+                let n = ((y1 - y0) * (x1 - x0)) as f32;
+                let o = (py * pw as usize + px) * 4;
+                for k in 0..3 {
+                    let v = sum[k] / n;
+                    out[o + k] =
+                        (if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) } * 255.0).round() as u8;
+                }
+                out[o + 3] = 255;
+            }
+        }
+        Ok((pw, ph, encode_jpeg(&out, pw, ph, 0.8)?))
+    }
+
+    #[test]
+    fn preview_parallel_rows_match_serial_jpeg_bytes() {
+        for (width, height, edge) in [
+            (1920u32, 1080u32, 640u32),
+            (641, 359, 321),
+            (321, 181, 640),
+            (319, 183, 53),
+        ] {
+            for phase in [0usize, 7] {
+                let rgba: Vec<f32> = (0..width as usize * height as usize)
+                    .flat_map(|i| {
+                        let x = i % width as usize;
+                        let y = i / width as usize;
+                        let moving = ((x * 37 + y * 19 + phase * 101) % 1021) as f32 / 1020.0;
+                        let red = if (i + phase).is_multiple_of(701) {
+                            f32::NAN
+                        } else {
+                            moving
+                        };
+                        let green = if (i + phase).is_multiple_of(997) {
+                            f32::INFINITY
+                        } else {
+                            moving - 0.1
+                        };
+                        let blue = if (i + phase).is_multiple_of(1201) {
+                            f32::NEG_INFINITY
+                        } else {
+                            1.1 - moving
+                        };
+                        [red, green, blue, moving]
+                    })
+                    .collect();
+                let expected = serial_preview_jpeg(&rgba, width, height, edge).unwrap();
+                let actual = preview_jpeg(&rgba, width, height, edge).unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "{width}×{height}, edge {edge}, phase {phase}"
+                );
+            }
+        }
     }
 }
