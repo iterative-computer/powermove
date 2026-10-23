@@ -406,6 +406,32 @@ describe('the raster override producer', () => {
     expect(result).toMatchObject({ kind: 'raster', key: 'w:As queued' });
   });
 
+  it('keeps fresh export pixels by the wrapper texture key and quad while running the wrapper every frame', () => {
+    const { services, compat, readPixels, need } = setup();
+    const wrapped = vi.fn((_layer: any, _scale: number, time: number) => ({
+      cv: { width: 2, height: 2 }, w: time < 3 ? 2 : 3, h: 2,
+      key: time < 2 ? 'same-content' : 'changed-content'
+    }));
+    services.register('raster', wrapped);
+    const fresh = { fresh: true, layer: JSON.stringify(text) };
+    const first = compat.answer(need('title', 0), 1, fresh);
+    if (!first || first.kind !== 'raster') throw new Error('expected pixels');
+    first.data[0] = 99;
+    const second = compat.answer(need('title', 1), 1, fresh);
+    expect(second).toMatchObject({ kind: 'raster', key: 'same-content', data: new Uint8Array(16).fill(7) });
+    expect(wrapped).toHaveBeenCalledTimes(2);
+    expect(readPixels).toHaveBeenCalledTimes(1);
+    compat.answer(need('title', 2), 1, fresh);
+    compat.answer(need('title', 3), 1, fresh);
+    expect(readPixels).toHaveBeenCalledTimes(3);
+    compat.answer(need('title', 4), 2, fresh);
+    expect(readPixels).toHaveBeenCalledTimes(4);
+    compat.reset();
+    compat.answer(need('title', 5), 2, fresh);
+    expect(readPixels).toHaveBeenCalledTimes(5);
+    expect(wrapped).toHaveBeenCalledTimes(6);
+  });
+
   it('draws nothing for a null result, and fails (never draws the plain layer) when the wrapper throws', () => {
     const { services, compat, need } = setup();
     services.register('raster', () => null);

@@ -46,6 +46,10 @@ const LAZY = Symbol('powermove.lazyRaster');
 
 /** Today's raster cache entry bound (legacy/gl/raster.ts `MAX`). */
 const MAX_BASES = 4096;
+/** Today's raster texture budget also bounds bytes retained for fresh
+ * export answers. The wrapper still runs at every requested time. */
+const MAX_EXPORT_PIXELS = 4096;
+const MAX_EXPORT_PIXEL_BYTES = 192 * 1024 * 1024;
 /** Base preparations at once (render-transport.ts
  *  `MAX_PREPARATIONS_IN_FLIGHT`), and prepared bases kept for their answers
  *  (more than in flight, so one is not dropped before it is used). */
@@ -284,6 +288,10 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   /** The quad each key was posted with per layer and density: the same key
    *  on the same quad at another time is a `reuse`. */
   const postedQuads = new Map<string, string>();
+  /** Exact pixels of an explicitly keyed result already read for export.
+   * A key names the texture today's compositor keeps across frames. */
+  const exportPixels = new Map<string, { width: number; height: number; format: 'rgba8Premultiplied' | 'rgba8Straight'; data: Uint8Array }>();
+  let exportPixelBytes = 0;
   const ready = new Map<string, { layer: unknown; surface: any }>();
   const preparing = new Map<string, { layer: unknown; promise: Promise<void> }>();
   const bases = new Map<string, { layer: unknown; surface: any; bytes: number }>();
@@ -306,9 +314,10 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     if (readyRevision === revision) return;
     readyRevision = revision;
     ready.clear(); bases.clear(); baseBytes = 0;
+    exportPixels.clear(); exportPixelBytes = 0;
     generation++;
   };
-  const clearReady = () => { ready.clear(); preparing.clear(); bases.clear(); baseBytes = 0; readyRevision = null; generation++; };
+  const clearReady = () => { ready.clear(); preparing.clear(); bases.clear(); baseBytes = 0; exportPixels.clear(); exportPixelBytes = 0; readyRevision = null; generation++; };
   // Today's raster cache bounds (legacy/gl/raster.ts: `MAX` entries and
   // the `raster` memory budget, 192 MiB by default).
   const maxBaseBytes = Number(PM?.Memory?.budget?.('raster')) || 192 * 1024 * 1024;
@@ -512,9 +521,28 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       posted.set(tag, ownKey);
       return { kind: 'reuse', key: ownKey };
     }
+    const exportKey = answerOptions?.fresh && ownKey ? JSON.stringify([across, quad]) : '';
+    if (exportKey) {
+      const cached = exportPixels.get(exportKey);
+      if (cached) {
+        exportPixels.delete(exportKey); exportPixels.set(exportKey, cached);
+        return { kind: 'raster', key: ownKey, width: cached.width, height: cached.height, format: cached.format,
+          data: new Uint8Array(cached.data), anchor, size: [w, h], ...(uv ? { uv } : {}) };
+      }
+    }
     const pixels = readPixels(source);
     if (!pixels) return TRANSPARENT;
     const key = ownKey || `powermove:${++serial}:${revision}`;
+    if (exportKey && pixels.data.byteLength <= MAX_EXPORT_PIXEL_BYTES) {
+      const copy = new Uint8Array(pixels.data);
+      exportPixels.set(exportKey, { width: pixels.width, height: pixels.height, format: pixels.format, data: copy });
+      exportPixelBytes += copy.byteLength;
+      while (exportPixels.size > MAX_EXPORT_PIXELS || exportPixelBytes > MAX_EXPORT_PIXEL_BYTES) {
+        const oldest = exportPixels.keys().next().value!;
+        exportPixelBytes -= exportPixels.get(oldest)!.data.byteLength;
+        exportPixels.delete(oldest);
+      }
+    }
     if (!answerOptions?.fresh) posted.set(tag, key);
     if (posted.size > 8192) posted.clear();
     if (across) {

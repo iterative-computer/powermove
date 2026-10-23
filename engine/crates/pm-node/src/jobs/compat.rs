@@ -62,6 +62,7 @@ const AHEAD_LOW: i64 = 6;
 const AHEAD_BYTES: usize = 384 << 20;
 
 type AnswerKey = (String, String, i64, CompatSource, u64);
+type LayerKey = (String, String, CompatSource, u64);
 
 /// One export job's producers and the answers it got.
 ///
@@ -98,12 +99,12 @@ pub(crate) struct JobCompat {
 /// What the background fetch asks for next.
 #[derive(Default)]
 struct Ahead {
-    /// The layers of the last frame that lacked answers (composition,
-    /// layer, source, scale bits).
-    layers: Vec<(String, String, CompatSource, u64)>,
-    /// The frame step (ticks) and the last frame time asked for.
+    /// The layers seen in missing frames and the last time scheduled for
+    /// each. A new layer starts at its own frame, without moving older
+    /// layers' cursors backwards and filling the worker queue again.
+    layers: HashMap<LayerKey, i64>,
+    /// The frame step (ticks).
     step: i64,
-    scheduled: i64,
     /// Answers before each composition's floor are done (an export moves
     /// forward).
     floors: HashMap<String, i64>,
@@ -192,20 +193,25 @@ impl JobCompat {
         if prune {
             ahead.floors.insert(comp.to_owned(), floor);
         }
-        let schedule = ahead.scheduled < time + AHEAD_LOW * step;
         let mut keys = Vec::new();
-        if schedule {
-            let from = (ahead.scheduled + step).max(time + step);
-            let to = time + AHEAD_FRAMES * step;
-            let mut t = from;
-            while t <= to {
-                for (c, l, source, scale) in &ahead.layers {
-                    keys.push((c.clone(), l.clone(), t, *source, *scale));
-                }
-                t += step;
+        for ((c, l, source, scale), scheduled) in &mut ahead.layers {
+            if c != comp {
+                continue;
             }
-            ahead.scheduled = to;
+            if *scheduled < time + AHEAD_LOW * step {
+                let mut t = (*scheduled + step).max(time + step);
+                let to = time + AHEAD_FRAMES * step;
+                while t <= to {
+                    keys.push((c.clone(), l.clone(), t, *source, *scale));
+                    t += step;
+                }
+                *scheduled = to;
+            }
         }
+        // A near frame needs all its layers before a distant frame needs
+        // any. HashMap iteration otherwise sends twelve times of one layer
+        // before the next layer's first answer.
+        keys.sort_unstable_by_key(|key| key.2);
         if !keys.is_empty() {
             if ahead.worker.is_none() {
                 ahead.worker = spawn_ahead(&me);
@@ -560,20 +566,30 @@ impl CompatRasters for JobCompat {
                 n.scale.to_bits(),
             )
         };
-        // The frame step: from the last batch's earliest time to this one's.
+        // The frame step: from the first two missing frames. Later frames
+        // may have been answered ahead, so their absence from fetch must
+        // not turn a multi-frame gap into a new (slower) frame rate.
         let earliest = needs.iter().map(|n| n.time.get()).min().unwrap_or(0);
-        let step = {
+        let observed_step = {
             let mut last = self.last_batch.lock().unwrap_or_else(|e| e.into_inner());
             let step = last.map_or(0, |l| earliest - l);
             *last = Some(earliest);
             step
+        };
+        let step = {
+            let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
+            if observed_step > 0 && observed_step <= pm_protocol::common::TICKS_PER_SECOND {
+                if ahead.step == 0 || observed_step < ahead.step {
+                    ahead.step = observed_step;
+                }
+            }
+            ahead.step
         };
         let stepped = step > 0 && step <= pm_protocol::common::TICKS_PER_SECOND;
         let pipelined = self.me.upgrade().is_some();
         if pipelined && stepped {
             // The background fetch asks for these layers at the next frames.
             let mut ahead = self.ahead.lock().unwrap_or_else(|e| e.into_inner());
-            ahead.step = step;
             for n in needs {
                 let layer = (
                     n.composition.as_str().to_owned(),
@@ -581,12 +597,8 @@ impl CompatRasters for JobCompat {
                     n.source,
                     n.scale.to_bits(),
                 );
-                if !ahead.layers.contains(&layer) {
-                    ahead.layers.push(layer);
-                }
+                ahead.layers.entry(layer).or_insert(earliest);
             }
-            // A layer that appeared starts its frames ahead from here.
-            ahead.scheduled = ahead.scheduled.min(earliest);
         }
         // The frame's needs first, then (unpipelined) the same layers at
         // the next frames, in time order (the order today's export ran the
@@ -907,6 +919,11 @@ mod tests {
                 let now = self.outstanding.fetch_add(requests.len(), Ordering::SeqCst) + requests.len();
                 self.most.fetch_max(now, Ordering::SeqCst);
                 std::thread::sleep(std::time::Duration::from_millis(2));
+                let times: Vec<i64> = requests.iter().map(|request| {
+                    let Request::CompatFrame(request) = request else { panic!() };
+                    request.time.get()
+                }).collect();
+                assert!(times.windows(2).all(|pair| pair[0] <= pair[1]), "near frames are asked first");
                 for r in &requests {
                     let Request::CompatFrame(r) = r else { panic!() };
                     self.asked.lock().unwrap().push(r.time.get());
@@ -953,6 +970,28 @@ mod tests {
         assert!(furthest <= newest + (AHEAD_FRAMES + 1) * ticks_of(step).get());
         // Answers of frames already drawn are dropped.
         assert!(matches!(compat.answer("root", "L0", 0.0, 1.0, CompatSource::RasterOverride, None), CompatAnswer::Missing));
+    }
+
+    #[test]
+    fn a_new_layer_after_answered_frames_keeps_the_existing_horizon() {
+        let (_, job) = job(|_| Ok(frame(true)));
+        let compat = job.pipelined();
+        let step = ticks_of(1.0 / 30.0).get();
+        assert!(compat.fetch(&[need("old", 0.0, 1.0)]));
+        assert!(compat.fetch(&[need("old", 1.0 / 30.0, 1.0)]));
+        let old = ("root".into(), "old".into(), CompatSource::RasterOverride, 1.0f64.to_bits());
+        let new = ("root".into(), "new".into(), CompatSource::RasterOverride, 1.0f64.to_bits());
+        let first_horizon = compat.ahead.lock().unwrap().layers[&old];
+        assert_eq!(first_horizon, (1 + AHEAD_FRAMES) * step);
+
+        // The old layer's next frames were already scheduled. A new layer
+        // first seen after that run must get its own horizon; the missing
+        // batch's four-frame gap must not replace the frame step.
+        assert!(compat.fetch(&[need("new", 5.0 / 30.0, 1.0)]));
+        let ahead = compat.ahead.lock().unwrap();
+        assert_eq!(ahead.step, step);
+        assert_eq!(ahead.layers[&old], first_horizon);
+        assert_eq!(ahead.layers[&new], (5 + AHEAD_FRAMES) * step);
     }
 
     #[test]
