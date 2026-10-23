@@ -114,6 +114,51 @@ fn tolerance(precision: Precision) -> f64 {
     }
 }
 
+/// Exercises cold and warm pipeline use against the compositor reference in
+/// both precision formats. The first draw must produce the same pixels as reuse.
+#[test]
+fn lazy_fixed_pipelines_match_reference_on_first_and_repeat_frame() {
+    let mut renderer = Renderer::headless().unwrap();
+    let top = layer(
+        "top",
+        "solid",
+        json!({ "color": "#CC558880", "w": 8, "h": 8 }),
+        0.0,
+        0.0,
+        1.0,
+    );
+    let bottom = layer(
+        "bottom",
+        "solid",
+        json!({ "color": "#336699", "w": 16, "h": 8 }),
+        0.0,
+        0.0,
+        1.0,
+    );
+    for (precision, name) in [
+        (Precision::Float16, "float16"),
+        (Precision::Float32, "float32"),
+    ] {
+        let doc = with_color(
+            project(16, 8, 1.0, no_fill(), vec![top.clone(), bottom.clone()]),
+            false,
+            "hdrSafe",
+            name,
+        );
+        let start = std::time::Instant::now();
+        let first = render(&mut renderer, &doc, precision);
+        let first_use = start.elapsed();
+        let start = std::time::Instant::now();
+        let repeat = render(&mut renderer, &doc, precision);
+        let warm = start.elapsed();
+        let expected = over(hex("#CC558880"), hex("#336699"));
+        assert!(close(px(&first, 16, 4, 4), expected, tolerance(precision)));
+        assert!(close(px(&repeat, 16, 4, 4), expected, tolerance(precision)));
+        assert_eq!(first, repeat, "cold and warm pixels differ at {name}");
+        eprintln!("lazy fixed pipelines {name}: first frame={first_use:?} repeat={warm:?}");
+    }
+}
+
 const SETUPS: [(bool, &str, WorkingEncoding, BlendDomain); 3] = [
     (
         false,

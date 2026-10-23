@@ -1,3 +1,4 @@
+import { requestJobEngine } from './helpers/job-engine';
 /*
  * Level 1 SVG images with "Use New Engine" on (decision S1;
  * docs/engine/vector.md, "Level 1 SVG images"): Chromium draws today's
@@ -294,6 +295,7 @@ test('an export in the job engine gets the rasters from the window: the still eq
     try {
       await session.openEditor();
       if (env.POWERMOVE_NEW_ENGINE) {
+        await requestJobEngine(session.app);
         await expect.poll(() => session.app.evaluate(() => {
           const status = (globalThis as { __powermoveNativeEngine?: { engine: { status(): Record<string, { state: string }> } | null } }).__powermoveNativeEngine?.engine?.status();
           return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';

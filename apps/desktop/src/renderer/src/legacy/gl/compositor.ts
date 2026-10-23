@@ -166,6 +166,28 @@ const GL: any = {
   errors: new Map(),
 };
 PM.GL = GL;
+let glContext: WebGL2RenderingContext | null = null;
+let deferredCanvas: HTMLCanvasElement | null = null;
+let deferredOptions: { alpha?: boolean; quiet?: boolean } = {};
+// The native viewer has its own presenter. Keep the compatibility context
+// available to older extensions, but allocate it only when one asks for it.
+Object.defineProperty(GL, 'gl', {
+  configurable: true,
+  get() {
+    if (deferredCanvas) {
+      const canvas = deferredCanvas;
+      const options = deferredOptions;
+      deferredCanvas = null;
+      const started = performance.now();
+      initializeContext(canvas, options);
+      GL.compatFirstUseMs = performance.now() - started;
+      performance.measure?.('powermove:legacy-gl-first-use', { start: started, end: performance.now() });
+    }
+    return glContext;
+  },
+  set(value: WebGL2RenderingContext | null) { glContext = value; },
+});
+GL.peekContext = () => glContext;
 const MAX_FBO_BYTES = PM.Memory?.budget?.('framebuffers') || 384 * 1024 * 1024;
 const MAX_TEXTURE_BYTES = PM.Memory?.budget?.('textures') || 192 * 1024 * 1024;
 const MAX_TEXTURE_ENTRIES = 4096;
@@ -728,7 +750,7 @@ GL.whenReady = (timeoutMs = 10_000): Promise<boolean> => {
 };
 
 /* ── init ──────────────────────────────────────────────── */
-GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
+function initializeContext(canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}): boolean {
   previewFrames.clear();
   GL.canvas = canvas;
   const gl = canvas.getContext('webgl2', {
@@ -772,11 +794,33 @@ GL.init = (canvas: any, options: { alpha?: boolean; quiet?: boolean } = {}) => {
   readyGaveUp = false;
   for (const ready of [...readyWaiters]) ready(true);
   return true;
+}
+
+GL.init = (canvas: HTMLCanvasElement, options: { alpha?: boolean; quiet?: boolean } = {}) => {
+  // A real canvas keeps the attributes of its first WebGL context request.
+  if (deferredCanvas === canvas) return true;
+  GL.canvas = canvas;
+  if (glContext && glContext.canvas === canvas) return initializeContext(canvas, options);
+  // With the native engine on, the requested canvas belongs to an engine
+  // presenter. Older extensions still get the real WebGL2 compatibility
+  // context synchronously on their first `render.gl.context` read.
+  if (PM.EngineConnection && PM.EngineCanvas) {
+    deferredCanvas = canvas;
+    deferredOptions = { ...options };
+    glContext = null;
+    return true;
+  }
+  deferredCanvas = null;
+  return initializeContext(canvas, options);
 };
 
 GL.resize = (w: any, h: any, previewViewport: any = null) => {
   GL.previewViewport = previewViewport;
   if (GL.canvas.width === w && GL.canvas.height === h) return false;
+  if (deferredCanvas === GL.canvas) {
+    GL.canvas.width = w; GL.canvas.height = h;
+    return true;
+  }
   const previous = presentedFrame;
   /* All pooled targets except the retained presentation are invalid at the
      new output size. Dispose them before allocating another full frame. */
@@ -807,6 +851,28 @@ GL.memoryStats = () => ({
   framebuffers: { entries: GL.pool.length, bytes: poolBytes, maxBytes: MAX_FBO_BYTES },
   textures: { entries: GL.texes.size, bytes: textureBytes, maxBytes: MAX_TEXTURE_BYTES },
 });
+/** On-demand comparison with the native viewer painter. Never touch GL.gl:
+ * its compatibility getter allocates a context when native mode is on. */
+GL.allocationStats = () => {
+  const gl = glContext;
+  const attrs = gl?.getContextAttributes() ?? null;
+  const width = gl?.drawingBufferWidth ?? 0;
+  const height = gl?.drawingBufferHeight ?? 0;
+  const format = (gl as (WebGL2RenderingContext & { drawingBufferFormat?: number }) | null)?.drawingBufferFormat ?? null;
+  const bytesPerPixel = gl && format === gl.RGBA16F ? 8 : 4;
+  return {
+    initialized: gl !== null,
+    deferred: deferredCanvas !== null,
+    canvas: GL.canvas ? { width: GL.canvas.width, height: GL.canvas.height } : null,
+    drawingBuffer: gl ? { width, height, format, bytesPerPixel, nominalBytes: width * height * bytesPerPixel } : null,
+    contextAttributes: attrs ? { alpha: attrs.alpha, premultipliedAlpha: attrs.premultipliedAlpha, antialias: attrs.antialias, preserveDrawingBuffer: attrs.preserveDrawingBuffer, depth: attrs.depth, stencil: attrs.stencil } : null,
+    channelBits: gl ? { red: gl.getParameter(gl.RED_BITS), green: gl.getParameter(gl.GREEN_BITS), blue: gl.getParameter(gl.BLUE_BITS), alpha: gl.getParameter(gl.ALPHA_BITS) } : null,
+    framebuffers: { entries: GL.pool.length, bytes: poolBytes, busy: GL.pool.filter((f: any) => f.busy).length },
+    textures: { entries: GL.texes.size, bytes: textureBytes },
+    presentedFrame: presentedFrame ? { width: presentedFrame.w, height: presentedFrame.h, bytes: presentedFrame.bytes ?? null } : null,
+    compositorBuffers: 'unknown' as const
+  };
+};
 PM.Memory?.register?.('framebuffers', {
   bytes: () => poolBytes,
   entries: () => GL.pool.length,
@@ -1747,7 +1813,7 @@ const requestSourceWarmup = createPreviewWarmup(
   () => ({
     project: PM.proj, time: PM.time,
     key: JSON.stringify([sourceGeneration, PM.animVersion?.(), GL.canvas?.width, GL.canvas?.height, GL.previewViewport, PM.quality]),
-    blocked: !GL.gl || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active || PM.agentFrameCapture,
+    blocked: !glContext || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active || PM.agentFrameCapture,
   }),
   (layer, time) => {
     // Speculation must fit the existing cache and leave room for the next

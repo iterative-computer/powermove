@@ -16,7 +16,8 @@ test('agent observations batch five 720 px frames during UHD project playback wi
   const sampling = setInterval(() => { loadPeak = Math.max(loadPeak, loadavg()[0]!); }, 1000); sampling.unref();
   try {
     await session.openEditor();
-    await expect.poll(() => session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine?.engine?.status().job.state), { timeout: 30_000 }).toBe('ready');
+    // The job utility starts on demand: the warm-up capture below starts it.
+    await expect.poll(() => session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine?.engine?.status().interactive.state), { timeout: 30_000 }).toBe('ready');
     const result = await session.page.evaluate(async () => {
       const PM = (window as any).PM;
       PM.proj = PM.mkProject({ name: 'Agent observation', w: 3840, h: 2160, fps: 30, dur: 60 });

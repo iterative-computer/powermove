@@ -1,3 +1,4 @@
+import { requestJobEngine } from './helpers/job-engine';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -25,6 +26,7 @@ const rgba = (file: string) => execFileSync(ffmpegBinary, ['-v', 'error', '-i', 
 const W = 192, H = 108;
 
 async function ready(session: LaunchedApp): Promise<void> {
+  await requestJobEngine(session.app);
   await expect.poll(() => session.app.evaluate(() => {
     const status = (globalThis as { __powermoveNativeEngine?: { engine: { status(): Record<string, { state: string }> } | null } }).__powermoveNativeEngine?.engine?.status();
     return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';

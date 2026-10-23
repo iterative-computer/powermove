@@ -24,7 +24,9 @@ use pm_bridge::rendezvous::{Client, SendRight};
 use pm_bridge::wire::{PixelFormat, SurfaceInfo};
 use pm_engine::document::DocumentUpdate;
 use pm_engine::{Action, LogLevel};
-use pm_gpu::bridge_out::display::{DisplayParams, DisplayTransform, WorkingTexture};
+use pm_gpu::bridge_out::display::{
+    DisplayParams, DisplayTransform, WORKING_FORMAT, WorkingTexture,
+};
 use pm_gpu::bridge_out::pool::SurfacePool;
 #[cfg(feature = "remote-layer")]
 use pm_gpu::bridge_out::remote_layer::{
@@ -35,6 +37,7 @@ use pm_protocol::clock::{AudioMessage, SeekMode, TransportCommand, TransportStat
 use pm_protocol::codec;
 use pm_protocol::color::WorkingEncoding;
 use pm_protocol::common::{RequestId, Revision, Seq, SessionId, Size, TICKS_PER_SECOND, Ticks};
+use pm_protocol::definitions::{DefinitionKind, DefinitionSetSnapshot};
 use pm_protocol::envelope::{Envelope, Event, Message, Response};
 use pm_protocol::error::{EngineError, ErrorCode, ErrorDetail, ErrorScope, FailureReport, Retry};
 use pm_protocol::frame::{
@@ -44,6 +47,7 @@ use pm_protocol::frame::{
 use pm_protocol::host::PortId;
 use pm_protocol::interop::SurfaceFormat;
 use pm_protocol::preview::{PreviewAction, PreviewControl, PreviewPhase, PreviewStatus};
+use pm_render::effects::Effects;
 use serde::Serialize;
 
 use super::audio::{AudioCtl, AudioIngress, AudioLink, AudioStatus, ForwardedAudio};
@@ -628,6 +632,10 @@ pub struct Stats {
     /// IOSurface allocation sizes; target and cache bytes are nominal texel
     /// counts. Lease reservations are not included.
     pub allocations: AllocationInventory,
+    /// Rests at which idle GPU memory was released, and nominal bytes freed
+    /// from tracked idle targets. Full device retirement is not byte-counted.
+    pub rest_releases: u64,
+    pub rest_released_bytes: u64,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
 }
@@ -646,7 +654,54 @@ pub struct AllocationInventory {
     pub working_target_bytes: u64,
     pub snapshot_target_bytes: u64,
     pub snapshot_readback_bytes: u64,
+    /// `MTLDevice.currentAllocatedSize` of the viewer's device: every
+    /// buffer, texture and heap the driver holds for it, measured rather
+    /// than nominal (`pm_gpu::device::allocated_bytes`).
+    pub metal_allocated_bytes: Option<u64>,
+    /// Public Metal device counters; capacity and transfer rate are adapter
+    /// properties, not resident-memory measurements.
+    pub metal_device: Option<MetalDeviceInventory>,
+    /// The cached snapshot attachment's own Metal resource allocation.
+    /// This can overlap heap or IOSurface allocations and is not additive
+    /// with the device-wide counter.
+    pub metal_snapshot_texture: Option<MetalTextureInventory>,
     pub renderer: Option<RendererAllocation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetalDeviceInventory {
+    pub current_allocated_bytes: u64,
+    pub recommended_max_working_set_bytes: Option<u64>,
+    pub unified_memory: Option<bool>,
+    pub max_transfer_bytes_per_second: Option<u64>,
+}
+
+impl From<pm_gpu::device::MetalDeviceAllocation> for MetalDeviceInventory {
+    fn from(value: pm_gpu::device::MetalDeviceAllocation) -> Self {
+        Self {
+            current_allocated_bytes: value.current_allocated_bytes,
+            recommended_max_working_set_bytes: value.recommended_max_working_set_bytes,
+            unified_memory: value.unified_memory,
+            max_transfer_bytes_per_second: value.max_transfer_bytes_per_second,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetalTextureInventory {
+    pub allocated_bytes: u64,
+    pub heap_backed: bool,
+}
+
+impl From<pm_gpu::device::MetalTextureAllocation> for MetalTextureInventory {
+    fn from(value: pm_gpu::device::MetalTextureAllocation) -> Self {
+        Self {
+            allocated_bytes: value.allocated_bytes,
+            heap_backed: value.heap_backed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -657,6 +712,8 @@ pub struct ViewAllocation {
     pub color: Option<SurfaceAllocation>,
     pub depth: Option<SurfaceAllocation>,
     pub working_target_bytes: u64,
+    /// This view's live scratch attachment, if one exists.
+    pub metal_working_texture: Option<MetalTextureInventory>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -727,9 +784,16 @@ struct Gpu {
 impl Gpu {
     /// The device's composer (made on first use), its renderer holding
     /// fonts of the broker's current generation (`crate::fonts::render`).
-    fn composer_with(&mut self, config: &ThreadConfig, frame_cache: usize) -> &mut Composer {
+    fn composer_with(
+        &mut self,
+        config: &ThreadConfig,
+        frame_cache: usize,
+        prepared: &mut PreparedDefinitions,
+    ) -> &mut Composer {
         if self.composer.is_none() {
-            self.composer = Some(composer(&self.device, &self.queue, config, frame_cache));
+            let mut composer = composer(&self.device, &self.queue, config, frame_cache);
+            prepared.install(&mut composer);
+            self.composer = Some(composer);
             self.fonts_installed = None;
         }
         let composer = self.composer.as_mut().expect("made above");
@@ -743,12 +807,13 @@ impl Gpu {
         &mut self,
         config: &ThreadConfig,
         frame_cache: usize,
+        prepared: &mut PreparedDefinitions,
     ) -> (
         &mut Composer,
         &mut pm_gpu::readback::ReadbackRing,
         &mut Option<pm_gpu::Target>,
     ) {
-        self.composer_with(config, frame_cache);
+        self.composer_with(config, frame_cache, prepared);
         (
             self.composer.as_mut().expect("made above"),
             &mut self.snapshot_readback,
@@ -801,7 +866,9 @@ struct Live {
     spec: PoolSpec,
     pool: SurfacePool,
     ledger: PoolLedger,
-    working: WorkingTexture,
+    /// Scratch target; released after a quiet rest and recreated before the
+    /// next frame. The exported surfaces and their generation stay live.
+    working: Option<WorkingTexture>,
     /// The bridge test source; `None` for documents.
     source: Option<TestSource>,
     /// The C′ prototype's layer for this pool's size and format.
@@ -953,9 +1020,11 @@ impl SnapshotPoller {
                 // work for milliseconds on a loaded machine).
                 pm_bridge::set_thread_user_interactive();
                 for (device, lost) in rx {
-                    if let Err(error) = device.poll(wgpu::PollType::Wait {
-                        submission_index: None,
-                        timeout: Some(Duration::from_secs(2)),
+                    if let Err(error) = objc2::rc::autoreleasepool(|_| {
+                        device.poll(wgpu::PollType::Wait {
+                            submission_index: None,
+                            timeout: Some(Duration::from_secs(2)),
+                        })
                     }) {
                         let _ = back.send(Command::SnapshotPollFailed {
                             lost,
@@ -994,6 +1063,8 @@ struct Thread {
     stats: Arc<Mutex<Stats>>,
     bridge: Option<Client>,
     gpu: Option<Gpu>,
+    /// GLSL translation and validation completed before the first GPU frame.
+    prepared: PreparedDefinitions,
     views: BTreeMap<Key, View>,
     /// Each session's document (document source), kept from its first
     /// update, which may come before the viewer state.
@@ -1049,7 +1120,91 @@ struct Thread {
     completer: Option<super::complete::Completer>,
     /// Level 1 SVG rasters asked of the renderers (decision S1).
     svg: super::svg::SvgState,
+    /// GPU work seen last (frames and snapshots) and when; the idle
+    /// targets and staging go once the viewer has rested ([`REST_RELEASE_US`]).
+    rest: Rest,
 }
+
+/// The presenter's last GPU work, for releasing idle GPU memory at rest.
+#[derive(Debug, Default)]
+struct Rest {
+    /// (frames, snapshots) when last looked at.
+    seen: (u64, u64),
+    /// Host µs that count last changed.
+    since: i64,
+    /// Idle memory was released since then.
+    released: bool,
+}
+
+/// Definition sets prepared on the presenter thread before a GPU device exists.
+/// Each owner retains its watchdog and unchanged translated programs; the
+/// translation cache is shared across owners just as it is in `Composer`.
+#[derive(Default)]
+struct PreparedDefinitions {
+    base: Option<Effects>,
+    owners: BTreeMap<Key, (Effects, (usize, u64))>,
+}
+
+impl PreparedDefinitions {
+    fn prepare(
+        &mut self,
+        key: Key,
+        definitions: &(Arc<DefinitionSetSnapshot>, u64),
+        registered: &[(DefinitionKind, pm_protocol::common::DefinitionId)],
+        shader_cache: Option<&PathBuf>,
+    ) -> Vec<EngineError> {
+        let base = self.base.get_or_insert_with(|| {
+            let mut effects = Effects::new(format!("{}; wgpu 30", std::env::consts::OS));
+            effects.set_cache_dir(shader_cache.map(|dir| dir.join("glsl")));
+            effects
+        });
+        let (set, version) = definitions;
+        let loaded = (Arc::as_ptr(set) as usize, *version);
+        let (mut effects, previous) = self
+            .owners
+            .remove(&key)
+            .unwrap_or_else(|| (base.sibling(), (0, 0)));
+        for (kind, id) in registered {
+            effects.watchdog.forget(*kind, id);
+        }
+        let failures = if previous == loaded {
+            Vec::new()
+        } else {
+            effects.set_snapshot(set).unwrap_or_default()
+        };
+        self.owners.insert(key, (effects, loaded));
+        failures
+    }
+
+    fn install(&mut self, composer: &mut Composer) {
+        for (key, (effects, loaded)) in std::mem::take(&mut self.owners) {
+            composer.park_prepared_definitions(key, effects, loaded);
+        }
+        // The installed owners hold the shared cache. Do not keep it alive
+        // independently after the final session and its composer close.
+        self.base = None;
+    }
+
+    fn forget(&mut self, key: Key) {
+        self.owners.remove(&key);
+        if self.owners.is_empty() {
+            self.base = None;
+        }
+    }
+
+    fn stage(&mut self, key: Key, effects: Effects, loaded: (usize, u64)) {
+        if self.base.is_none() {
+            self.base = Some(effects.sibling());
+        }
+        self.owners.insert(key, (effects, loaded));
+    }
+}
+
+/// How long the presenter must have drawn nothing (no frame, snapshot, or
+/// playback) before it frees idle intermediate targets, viewer scratch
+/// textures, the cached snapshot attachment and staging buffers. They are
+/// recreated by the next frame (docs/engine/memory.md, "At rest").
+pub const REST_RELEASE_US: i64 = 2_000_000;
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -1126,6 +1281,7 @@ pub fn run(
         stats,
         bridge: None,
         gpu: None,
+        prepared: PreparedDefinitions::default(),
         views: BTreeMap::new(),
         docs: BTreeMap::new(),
         audio: BTreeMap::new(),
@@ -1155,8 +1311,9 @@ pub fn run(
         work_start: 0,
         completer,
         svg: super::svg::SvgState::default(),
+        rest: Rest::default(),
     };
-    thread.check_in();
+    objc2::rc::autoreleasepool(|_| thread.check_in());
     let mut last_inventory_us = 0;
     loop {
         let timeout = thread.next_wake();
@@ -1165,15 +1322,17 @@ pub fn run(
             Ok(command) => {
                 let started = now();
                 let what = command_name(&command);
-                if !thread.apply(command) {
+                if !objc2::rc::autoreleasepool(|_| thread.apply(command)) {
                     break;
                 }
                 thread.note_turn(what, started);
                 while let Ok(command) = rx.try_recv() {
                     let started = now();
                     let what = command_name(&command);
-                    if matches!(command, Command::Shutdown) || !thread.apply(command) {
-                        thread.shutdown();
+                    if matches!(command, Command::Shutdown)
+                        || !objc2::rc::autoreleasepool(|_| thread.apply(command))
+                    {
+                        objc2::rc::autoreleasepool(|_| thread.shutdown());
                         return;
                     }
                     thread.note_turn(what, started);
@@ -1182,17 +1341,18 @@ pub fn run(
             Err(RecvTimeoutError::Timeout) => {}
         }
         let started = now();
-        thread.work();
+        objc2::rc::autoreleasepool(|_| thread.work());
         thread.note_turn("work", started);
         let sampled_at_us = now();
+        objc2::rc::autoreleasepool(|_| thread.release_at_rest(sampled_at_us));
         if thread.config.allocation_inventory
             && sampled_at_us.saturating_sub(last_inventory_us) >= 50_000
         {
-            thread.snapshot_allocations(sampled_at_us);
+            objc2::rc::autoreleasepool(|_| thread.snapshot_allocations(sampled_at_us));
             last_inventory_us = sampled_at_us;
         }
     }
-    thread.shutdown();
+    objc2::rc::autoreleasepool(|_| thread.shutdown());
 }
 
 /// A render-thread turn longer than this is a stall (diagnostics: the
@@ -1236,10 +1396,109 @@ fn command_name(command: &Command) -> &'static str {
 }
 
 impl Thread {
+    /// Frees idle GPU memory once nothing was drawn for [`REST_RELEASE_US`]:
+    /// the renderer's idle intermediate targets, viewer scratch textures,
+    /// the cached snapshot attachment and staging buffers. Exported surface
+    /// pools remain live. With no remaining session, the device and its
+    /// composer go too. Done once per rest; any frame or snapshot starts a
+    /// new one.
+    fn release_at_rest(&mut self, now_us: i64) {
+        let seen = {
+            let stats = self.stats();
+            (stats.frames, stats.snapshots)
+        };
+        if seen != self.rest.seen || self.rest.since == 0 {
+            self.rest = Rest {
+                seen,
+                since: now_us,
+                released: false,
+            };
+            return;
+        }
+        if self.rest.released || now_us - self.rest.since < REST_RELEASE_US {
+            return;
+        }
+        let busy = !self.pending_snapshots.is_empty()
+            || self.snapshots.waiting()
+            || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
+            || self.views.values().any(|v| {
+                v.clock.is_playing()
+                    || (v.dirty && v.state.headless != Some(true))
+                    || v.awaiting.is_some()
+                    || !v.requests.is_empty()
+            });
+        let Some(gpu) = self.gpu.as_mut() else {
+            self.rest.released = true;
+            return;
+        };
+        if busy || gpu.snapshot_readback.in_flight() {
+            return;
+        }
+        let no_presenter = (self.views.is_empty() && self.docs.is_empty())
+            || (!self.views.is_empty()
+                && self.views.values().all(|view| {
+                    view.state.headless == Some(true)
+                        && view.pool.is_none()
+                        && view.depth.is_none()
+                        && !view.clock.is_playing()
+                        && view.awaiting.is_none()
+                        && view.retry.is_none()
+                        && view.external_wait.is_none()
+                }));
+        if no_presenter {
+            // A queued headless capture may need this device on its next
+            // turn. Keep the rest pending rather than marking it released.
+            if !self.cache_requested.is_empty() || !self.cache_previews.is_empty() {
+                return;
+            }
+            // Headless sessions keep their document and translated sources,
+            // but no presentation surface needs this device. All submitted
+            // frames and readbacks have finished at this point.
+            if let Some(composer) = gpu.composer.as_mut() {
+                if !composer.definitions_quiescent() {
+                    return;
+                }
+                for key in self.docs.keys().copied() {
+                    if let Some((effects, loaded)) = composer.take_prepared_definitions(key) {
+                        self.prepared.stage(key, effects, loaded);
+                    }
+                }
+            }
+            self.gpu = None;
+            self.rest.released = true;
+            self.stats().rest_releases += 1;
+            return;
+        }
+        let mut freed = gpu.snapshot_target.take().map_or(0, |t| t.bytes());
+        freed += gpu.snapshot_readback.capacity_bytes();
+        gpu.snapshot_readback.release_idle();
+        freed -= gpu.snapshot_readback.capacity_bytes();
+        if let Some(composer) = gpu.composer.as_mut() {
+            freed += composer.renderer().release_idle_targets();
+        }
+        for view in self.views.values_mut() {
+            if let Some(live) = view.pool.as_mut()
+                && let Some(working) = live.working.take()
+            {
+                freed += u64::from(working.size.width)
+                    * u64::from(working.size.height)
+                    * u64::from(WORKING_FORMAT.block_copy_size(None).unwrap_or(8));
+            }
+        }
+        self.rest.released = true;
+        let mut stats = self.stats();
+        stats.rest_releases += 1;
+        stats.rest_released_bytes += freed;
+    }
+
     /// Copies the render thread's live resource sizes into shared status.
     /// Sampling follows completed work so the first frame's caches and a
     /// retired pool are reflected without reading mutable state off-thread.
     fn snapshot_allocations(&mut self, sampled_at_us: i64) {
+        let metal_device = self
+            .gpu
+            .as_ref()
+            .and_then(|g| pm_gpu::device::metal_device_allocation(&g.device));
         let mut inventory = AllocationInventory {
             sampled_at_us,
             gpu_created: self.gpu.is_some(),
@@ -1253,6 +1512,14 @@ impl Thread {
                 .gpu
                 .as_ref()
                 .map_or(0, |g| g.snapshot_readback.capacity_bytes()),
+            metal_allocated_bytes: metal_device.map(|d| d.current_allocated_bytes),
+            metal_device: metal_device.map(Into::into),
+            metal_snapshot_texture: self
+                .gpu
+                .as_ref()
+                .and_then(|g| g.snapshot_target.as_ref())
+                .and_then(|target| pm_gpu::device::metal_texture_allocation(&target.texture))
+                .map(Into::into),
             ..AllocationInventory::default()
         };
         for (&(port, session), view) in &self.views {
@@ -1264,15 +1531,21 @@ impl Thread {
                 .depth
                 .as_ref()
                 .map(|live| SurfaceAllocation::of(live.spec, &live.pool));
-            let working_target_bytes = view.pool.as_ref().map_or(0, |live| {
-                u64::from(live.working.size.width)
-                    * u64::from(live.working.size.height)
-                    * u64::from(
-                        pm_gpu::bridge_out::display::WORKING_FORMAT
-                            .block_copy_size(None)
-                            .unwrap_or(8),
-                    )
-            });
+            let working_target_bytes = view
+                .pool
+                .as_ref()
+                .and_then(|live| live.working.as_ref())
+                .map_or(0, |working| {
+                    u64::from(working.size.width)
+                        * u64::from(working.size.height)
+                        * u64::from(WORKING_FORMAT.block_copy_size(None).unwrap_or(8))
+                });
+            let metal_working_texture = view
+                .pool
+                .as_ref()
+                .and_then(|live| live.working.as_ref())
+                .and_then(|working| pm_gpu::device::metal_texture_allocation(&working.texture))
+                .map(Into::into);
             inventory.color_surface_bytes += color.as_ref().map_or(0, |pool| pool.iosurface_bytes);
             inventory.depth_surface_bytes += depth.as_ref().map_or(0, |pool| pool.iosurface_bytes);
             inventory.working_target_bytes += working_target_bytes;
@@ -1282,6 +1555,7 @@ impl Thread {
                 color,
                 depth,
                 working_target_bytes,
+                metal_working_texture,
             });
         }
         if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
@@ -2023,13 +2297,20 @@ impl Thread {
                 // definition that fails (contract 10; the kernel fills the
                 // shader UI from these).
                 let mut failures = Vec::new();
-                if self.config.document
-                    && let Some(gpu) = self.gpu.as_mut()
-                {
-                    let composer = gpu.composer_with(&self.config, self.frame_cache);
-                    failures = composer
-                        .use_definitions(key, definitions.as_ref(), &registered)
-                        .unwrap_or_default();
+                if self.config.document {
+                    if let Some(composer) = self.gpu.as_mut().and_then(|gpu| gpu.composer.as_mut())
+                    {
+                        failures = composer
+                            .use_definitions(key, definitions.as_ref(), &registered)
+                            .unwrap_or_default();
+                    } else if let Some(definitions) = definitions.as_ref() {
+                        failures = self.prepared.prepare(
+                            key,
+                            definitions,
+                            &registered,
+                            self.config.shader_cache.as_ref(),
+                        );
+                    }
                 } else if let Some(doc) = self.docs.get_mut(&key) {
                     // Applied with the view's next frame.
                     doc.keep_registered(registered);
@@ -2167,7 +2448,7 @@ impl Thread {
                     let (w, h) = (raster.width, raster.height);
                     let stored = match self.gpu.as_mut() {
                         Some(gpu) => gpu
-                            .composer_with(&self.config, self.frame_cache)
+                            .composer_with(&self.config, self.frame_cache, &mut self.prepared)
                             .renderer()
                             .put_svg_raster(raster, data),
                         None => Err("the engine has no GPU device".into()),
@@ -2338,7 +2619,7 @@ impl Thread {
     fn svg_failed(&mut self, raster: pm_protocol::svg_raster::SvgRasterKey, why: &str) {
         let log = self.svg.failed(&raster, now());
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.composer_with(&self.config, self.frame_cache)
+            gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared)
                 .renderer()
                 .fail_svg_raster(raster.clone());
         }
@@ -2417,6 +2698,7 @@ impl Thread {
     }
 
     fn forget_session(&mut self, key: Key) {
+        self.prepared.forget(key);
         self.cancel_cache_preview(key);
         self.preview_controls.forget(key);
         self.preview_candidates.retain(|(k, _), _| *k != key);
@@ -2471,6 +2753,15 @@ impl Thread {
         self.audio_ingress.forget(key);
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
+        if self
+            .views
+            .values()
+            .all(|view| view.state.headless == Some(true))
+        {
+            // A still-open session may already have completed its idle
+            // cleanup. Start a new rest when the final attached viewer closes.
+            self.rest = Rest::default();
+        }
         if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
             composer.forget_definitions(key);
         }
@@ -3126,6 +3417,7 @@ impl Thread {
         }
         self.warm_audio(key);
         if self.views[&key].state.headless == Some(true) {
+            self.rest = Rest::default();
             if let Some(blender) = &self.blender {
                 // Presentation leaves; captures still belong to this session.
                 blender.submit(key, None, self.views[&key].revision, None, None);
@@ -3323,7 +3615,7 @@ impl Thread {
             spec.count,
         )
         .map_err(|e| e.to_string())?;
-        let working = WorkingTexture::new(&gpu.device, spec.size);
+        let working = Some(WorkingTexture::new(&gpu.device, spec.size));
         let source = (!document).then(|| TestSource::new(&gpu.device, spec.size, extra_passes));
         let bridge = self.bridge.as_ref().ok_or("no bridge")?;
         let format = match spec.format {
@@ -3764,7 +4056,8 @@ impl Thread {
             let revision = Some(view.revision);
             let needs = view.svg_without.clone();
             if let Some(gpu) = self.gpu.as_mut() {
-                let composer = gpu.composer_with(&self.config, self.frame_cache);
+                let composer =
+                    gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
                 if Self::ask_svg(
                     &mut self.svg,
                     &self.sink,
@@ -4430,6 +4723,10 @@ impl Thread {
         let view = self.views.get_mut(&key)?;
         let live = view.pool.as_mut()?;
         let index = live.ledger.free()?;
+        let size = live.spec.size;
+        let working = live
+            .working
+            .get_or_insert_with(|| WorkingTexture::new(&gpu.device, size));
         let seq = view.next_seq;
         let start = now();
         let overlay;
@@ -4448,7 +4745,7 @@ impl Thread {
         let work = pm_perf::Scope::begin();
         if document {
             let doc = self.docs.get_mut(&key)?;
-            let composer = gpu.composer_with(&self.config, self.frame_cache);
+            let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
             let composition = view.state.composition.as_str().to_owned();
             // The renderer draws with this view's definitions (one renderer
             // serves every view on the device).
@@ -4522,7 +4819,7 @@ impl Thread {
                 assets,
                 Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
                 &render_state,
-                &live.working,
+                working,
                 depth_slot
                     .as_ref()
                     .map(|(_, _, depth, coverage)| (depth, coverage)),
@@ -4879,7 +5176,7 @@ impl Thread {
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             live.source
                 .as_ref()?
-                .encode(&gpu.queue, &mut encoder, &live.working, &frame);
+                .encode(&gpu.queue, &mut encoder, working, &frame);
             gpu.queue.submit([encoder.finish()]);
         }
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -4893,7 +5190,7 @@ impl Thread {
             &gpu.device,
             &gpu.queue,
             &mut encoder,
-            &live.working,
+            working,
             surface,
             params,
         ) {
@@ -5302,7 +5599,7 @@ impl Thread {
         if doc.revision() != control.revision.get() {
             return Err("The preview document changed before Blender could start.".into());
         }
-        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
         let _ = composer.use_definitions(key, doc.definitions(), &[]);
         let renderer = composer.renderer();
         renderer.set_scrub(false);
@@ -5661,7 +5958,7 @@ impl Thread {
                 .iter()
                 .any(|u| u.feature == pm_render::Feature::Blender);
         let (composer, readback, snapshot_target) =
-            gpu.composer_and_snapshot_resources(&self.config, self.frame_cache);
+            gpu.composer_and_snapshot_resources(&self.config, self.frame_cache, &mut self.prepared);
         // The session's definitions, without consuming the re-registrations
         // its viewer's next frame applies.
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
@@ -6014,7 +6311,7 @@ impl Thread {
             },
             None => None,
         };
-        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         let composition = job.request.composition.as_str();
@@ -6473,6 +6770,7 @@ mod tests {
             stats: Arc::new(Mutex::new(Stats::default())),
             bridge: None,
             gpu: None,
+            prepared: PreparedDefinitions::default(),
             views: BTreeMap::new(),
             docs: BTreeMap::new(),
             audio: BTreeMap::new(),
@@ -6504,12 +6802,466 @@ mod tests {
             work_start: 0,
             completer: None,
             svg: super::super::svg::SvgState::default(),
+            rest: Rest::default(),
         };
         (thread, statuses)
     }
 
     fn preview_key() -> Key {
         (PortId(1), SessionId::new(2).unwrap())
+    }
+
+    fn headless_test_state(headless: bool) -> ViewerState {
+        use pm_protocol::color::ViewerColorSpace;
+        use pm_protocol::frame::MediaPreference;
+        ViewerState {
+            headless: Some(headless),
+            composition: "main".into(),
+            size: Size::new(320, 180),
+            device_pixel_ratio: 1.0,
+            zoom: 1.0,
+            pan: [0.0, 0.0],
+            resolution: PreviewResolution::Full,
+            media: MediaPreference::Automatic,
+            color_space: ViewerColorSpace::Srgb,
+            view: None,
+            play_every_frame: false,
+            edr: false,
+            view_seq: Seq::new(1).unwrap(),
+            vsync: None,
+            depth_id: None,
+            chrome_selection: None,
+            canvas: None,
+            surface_epoch: None,
+        }
+    }
+
+    #[test]
+    fn headless_rest_retires_device_and_reuses_cpu_definitions() {
+        let (mut thread, _) = preview_thread();
+        let a = preview_key();
+        let b = (PortId(2), SessionId::new(3).unwrap());
+        let mut set = pm_render::effects::builtin_definitions();
+        set.definitions.truncate(1);
+        let def = set.definitions[0].clone();
+        let set = Arc::new(set);
+        for key in [a, b] {
+            thread.apply(Command::Definitions {
+                key,
+                set: set.clone(),
+                registered: vec![],
+            });
+            thread.configure(key, headless_test_state(false), None, None);
+            thread.views.get_mut(&key).unwrap().dirty = false;
+        }
+        assert!(thread.gpu().is_some());
+        let device = thread.gpu.as_ref().unwrap().device.clone();
+        let composer = thread.gpu.as_mut().unwrap().composer_with(
+            &thread.config,
+            thread.frame_cache,
+            &mut thread.prepared,
+        );
+        let a_defs = thread.docs[&a].definitions().cloned();
+        let b_defs = thread.docs[&b].definitions().cloned();
+        assert!(composer.use_definitions(a, a_defs.as_ref(), &[]).is_none());
+        assert!(
+            composer
+                .renderer()
+                .effects_mut()
+                .build(&device, def.kind, def.id.as_str())
+                .is_none()
+        );
+        assert!(
+            composer
+                .renderer()
+                .effects()
+                .has_program(def.kind, def.id.as_str())
+        );
+        composer
+            .renderer()
+            .effects_mut()
+            .watchdog
+            .set_budget(Duration::from_millis(7));
+        assert!(composer.use_definitions(b, b_defs.as_ref(), &[]).is_none());
+        composer
+            .renderer()
+            .effects_mut()
+            .watchdog
+            .set_budget(Duration::from_millis(9));
+        drop(device);
+        let metal_before = pm_gpu::device::allocated_bytes(&thread.gpu.as_ref().unwrap().device);
+        let t0 = 1_000_000;
+        thread.release_at_rest(t0);
+        thread.release_at_rest(t0 + REST_RELEASE_US + 1);
+        assert!(thread.gpu.is_some(), "an attached viewer keeps the device");
+
+        for key in [a, b] {
+            thread.configure(key, headless_test_state(true), None, None);
+        }
+        thread.cache_previews.insert(
+            1,
+            CachePreview {
+                key: a,
+                revision: Revision::ZERO,
+                generation: Seq::new(1).unwrap(),
+            },
+        );
+        thread.release_at_rest(t0 + 2 * REST_RELEASE_US);
+        thread.release_at_rest(t0 + 4 * REST_RELEASE_US);
+        assert!(thread.gpu.is_some(), "pending preview keeps the device");
+        thread.cache_previews.clear();
+        thread.release_at_rest(t0 + 4 * REST_RELEASE_US + 1);
+        assert!(thread.gpu.is_none());
+        thread.snapshot_allocations(t0 + 4 * REST_RELEASE_US + 1);
+        assert!(!thread.stats().allocations.gpu_created);
+        assert_eq!(thread.stats().allocations.metal_allocated_bytes, None);
+        assert!(thread.stats().allocations.metal_device.is_none());
+        assert!(metal_before.is_some_and(|bytes| bytes > 0));
+        assert_eq!(thread.prepared.owners.len(), 2);
+        for (key, budget) in [(a, 7), (b, 9)] {
+            let effects = &thread.prepared.owners[&key].0;
+            assert!(effects.source_key(def.kind, def.id.as_str()).is_some());
+            assert!(!effects.has_program(def.kind, def.id.as_str()));
+            assert_eq!(
+                effects.watchdog.budget(),
+                Some(Duration::from_millis(budget))
+            );
+        }
+
+        thread.configure(a, headless_test_state(false), None, None);
+        let started = std::time::Instant::now();
+        assert!(thread.gpu().is_some());
+        let composer = thread.gpu.as_mut().unwrap().composer_with(
+            &thread.config,
+            thread.frame_cache,
+            &mut thread.prepared,
+        );
+        assert!(composer.use_definitions(a, a_defs.as_ref(), &[]).is_none());
+        let resumed_us = started.elapsed().as_micros();
+        eprintln!("headless device reattach: {resumed_us} us; prior Metal bytes: {metal_before:?}");
+        assert!(resumed_us < 50_000, "headless reattach exceeded 50 ms");
+        assert_eq!(
+            composer.renderer().effects().watchdog.budget(),
+            Some(Duration::from_millis(7))
+        );
+    }
+
+    #[test]
+    fn definitions_prepare_without_a_gpu_and_transfer_per_owner() {
+        let (mut thread, _) = preview_thread();
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let received = reports.clone();
+        thread.sink = Arc::new(move |actions| {
+            for action in actions {
+                if let Action::Send { bytes, .. } = action {
+                    let envelope = codec::decode(&bytes).unwrap();
+                    if let Message::Event {
+                        body: Event::Failure(report),
+                    } = envelope.message
+                    {
+                        received.lock().unwrap().push(report);
+                    }
+                }
+            }
+        });
+        let owner_a = preview_key();
+        let owner_b = (PortId(2), SessionId::new(3).unwrap());
+        let mut set = pm_render::effects::builtin_definitions();
+        set.definitions.truncate(1);
+        let valid = set.definitions[0].clone();
+        let mut invalid = valid.clone();
+        invalid.id = "invalid-before-gpu".into();
+        invalid
+            .glsl
+            .as_mut()
+            .expect("effect GLSL")
+            .source
+            .push_str("\nthis is invalid GLSL;");
+        set.definitions.push(invalid.clone());
+        let set = Arc::new(set);
+        assert!(thread.apply(Command::Definitions {
+            key: owner_a,
+            set: set.clone(),
+            registered: vec![(valid.kind, valid.id.clone())],
+        }));
+        assert!(thread.gpu.is_none());
+        assert_eq!(reports.lock().unwrap().len(), 1);
+        assert_eq!(
+            reports.lock().unwrap()[0].revision.get(),
+            set.generation.get()
+        );
+        let prepared = &thread.prepared.owners[&owner_a].0;
+        assert!(prepared.source_key(valid.kind, valid.id.as_str()).is_some());
+        assert!(prepared.status(invalid.kind, invalid.id.as_str()).is_some());
+        assert!(!prepared.has_program(valid.kind, valid.id.as_str()));
+
+        // A second registration keeps each unchanged translation and reports
+        // an unchanged invalid source at its current definitions generation.
+        assert!(thread.apply(Command::Definitions {
+            key: owner_a,
+            set: set.clone(),
+            registered: vec![(invalid.kind, invalid.id.clone())],
+        }));
+        let (_, loaded) = &thread.prepared.owners[&owner_a];
+        assert_eq!(loaded.1, 2);
+        assert_eq!(reports.lock().unwrap().len(), 2);
+
+        let mut other = (*set).clone();
+        other.definitions.pop();
+        let other = Arc::new(other);
+        assert!(thread.apply(Command::Definitions {
+            key: owner_b,
+            set: other,
+            registered: vec![],
+        }));
+        assert_eq!(thread.prepared.owners.len(), 2);
+        assert_eq!(reports.lock().unwrap().len(), 2);
+
+        let gpu = pm_gpu::Gpu::new("prepared definitions test").expect("a Metal device");
+        let mut composer = composer(&gpu.device, &gpu.queue, &thread.config, thread.frame_cache);
+        composer
+            .renderer()
+            .effects_mut()
+            .parity
+            .configure(Some("prepared-test".into()), None);
+        thread.prepared.install(&mut composer);
+        assert!(thread.prepared.owners.is_empty());
+        assert!(thread.prepared.base.is_none());
+        let a = thread.docs[&owner_a].definitions().cloned();
+        let b = thread.docs[&owner_b].definitions().cloned();
+        assert!(composer.use_definitions(owner_a, a.as_ref(), &[]).is_none());
+        assert_eq!(
+            composer.renderer().effects().parity.environment(),
+            Some("prepared-test")
+        );
+        composer
+            .renderer()
+            .effects_mut()
+            .watchdog
+            .set_budget(Duration::from_millis(7));
+        assert!(composer.use_definitions(owner_b, b.as_ref(), &[]).is_none());
+        assert_eq!(composer.renderer().effects().watchdog.budget(), None);
+        assert!(composer.use_definitions(owner_a, a.as_ref(), &[]).is_none());
+        assert_eq!(
+            composer.renderer().effects().watchdog.budget(),
+            Some(Duration::from_millis(7))
+        );
+        assert!(
+            composer
+                .renderer()
+                .effects()
+                .source_key(valid.kind, valid.id.as_str())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn idle_gpu_memory_goes_once_the_viewer_rests() {
+        let (mut thread, _) = preview_thread();
+        thread.docs.insert(preview_key(), ViewDocument::default());
+        let gpu = thread.gpu.insert({
+            let g = pm_gpu::Gpu::new("rest release test").expect("a Metal device");
+            Gpu {
+                display: DisplayTransform::new(&g.device, &g.queue),
+                snapshot_readback: pm_gpu::readback::ReadbackRing::default(),
+                snapshot_target: None,
+                composer: None,
+                fonts_installed: None,
+                lost: Arc::new(AtomicBool::new(false)),
+                device: g.device,
+                queue: g.queue,
+            }
+        });
+        let target = snapshot_output_target(
+            &mut gpu.snapshot_target,
+            &gpu.device,
+            320,
+            180,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        drop(target);
+        assert!(gpu.snapshot_target.is_some());
+        let t0 = 1_000_000;
+        thread.release_at_rest(t0);
+        thread.release_at_rest(t0 + REST_RELEASE_US - 1);
+        assert!(
+            thread.gpu.as_ref().unwrap().snapshot_target.is_some(),
+            "too early"
+        );
+        // A frame starts a new rest.
+        thread.stats().frames += 1;
+        thread.release_at_rest(t0 + REST_RELEASE_US + 1);
+        assert!(thread.gpu.as_ref().unwrap().snapshot_target.is_some());
+        thread.release_at_rest(t0 + 2 * REST_RELEASE_US);
+        assert!(thread.gpu.as_ref().unwrap().snapshot_target.is_some());
+        thread.release_at_rest(t0 + 2 * REST_RELEASE_US + 2);
+        assert!(thread.gpu.as_ref().unwrap().snapshot_target.is_none());
+        let stats = thread.stats().clone();
+        assert_eq!(stats.rest_releases, 1);
+        assert_eq!(stats.rest_released_bytes, 320 * 180 * 4);
+        // Once per rest.
+        thread.release_at_rest(t0 + 4 * REST_RELEASE_US);
+        assert_eq!(thread.stats().rest_releases, 1);
+
+        // Closing the final session drops the device after the same rest
+        // bound. A new session will create it on its first render.
+        assert!(thread.apply(Command::Close { key: preview_key() }));
+        thread.release_at_rest(t0 + 5 * REST_RELEASE_US);
+        thread.release_at_rest(t0 + 6 * REST_RELEASE_US);
+        assert!(thread.gpu.is_none());
+        assert_eq!(thread.stats().rest_releases, 2);
+        assert!(thread.gpu().is_some());
+    }
+
+    #[test]
+    fn rested_working_texture_recreates_without_changing_a_frame_or_pool() {
+        use pm_protocol::color::ViewerColorSpace;
+        use pm_protocol::frame::MediaPreference;
+
+        let (mut thread, _) = preview_thread();
+        thread.config.document = false;
+        let key = preview_key();
+        let size = Size::new(1496, 904);
+        thread.configure(
+            key,
+            ViewerState {
+                headless: None,
+                composition: "main".into(),
+                size,
+                device_pixel_ratio: 1.0,
+                zoom: 1.0,
+                pan: [0.0, 0.0],
+                resolution: PreviewResolution::Full,
+                media: MediaPreference::Automatic,
+                color_space: ViewerColorSpace::Srgb,
+                view: None,
+                play_every_frame: false,
+                edr: false,
+                view_seq: Seq::new(1).unwrap(),
+                vsync: None,
+                depth_id: None,
+                chrome_selection: None,
+                canvas: None,
+                surface_epoch: None,
+            },
+            None,
+            None,
+        );
+        let spec = PoolSpec {
+            generation: 7,
+            size,
+            format: SurfaceFormat::Bgra8Unorm,
+            count: 4,
+        };
+        let live = {
+            let gpu = thread.gpu().expect("a Metal device");
+            Live {
+                spec,
+                pool: SurfacePool::new(&gpu.device, spec.generation, size, spec.format, spec.count)
+                    .unwrap(),
+                ledger: PoolLedger::new(spec.count as usize),
+                working: Some(WorkingTexture::new(&gpu.device, size)),
+                source: Some(TestSource::new(&gpu.device, size, 0)),
+                remote: None,
+            }
+        };
+        let view = thread.views.get_mut(&key).unwrap();
+        view.pool = Some(live);
+        view.dirty = false;
+
+        let first = thread.render(key, 0, -1, None, false, false).unwrap();
+        let first_pixels = thread.views[&key].pool.as_ref().unwrap().pool.surfaces
+            [first.pool_index as usize]
+            .iosurface
+            .read();
+        let allocated_before =
+            pm_gpu::device::allocated_bytes(&thread.gpu.as_ref().unwrap().device);
+        thread.apply(Command::Release {
+            key,
+            release: FrameRelease {
+                pool_index: first.pool_index,
+                seq: first.seq,
+            },
+        });
+        let t0 = 1_000_000;
+        thread.release_at_rest(t0);
+        thread.release_at_rest(t0 + REST_RELEASE_US + 1);
+        let live = thread.views[&key].pool.as_ref().unwrap();
+        assert!(live.working.is_none());
+        assert_eq!(live.spec.generation, spec.generation);
+        assert_eq!(live.pool.len(), spec.count as usize);
+        assert_eq!(
+            thread.stats().rest_released_bytes,
+            u64::from(size.width * size.height * 8)
+        );
+        let allocated_at_rest =
+            pm_gpu::device::allocated_bytes(&thread.gpu.as_ref().unwrap().device);
+
+        // The same sequence drives both the pattern and display dither.
+        thread.views.get_mut(&key).unwrap().next_seq = first.seq.get();
+        let started = std::time::Instant::now();
+        let second = thread.render(key, 0, -1, None, false, false).unwrap();
+        let resumed_us = started.elapsed().as_micros();
+        let live = thread.views[&key].pool.as_ref().unwrap();
+        assert!(live.working.is_some());
+        assert_eq!(live.spec.generation, spec.generation);
+        let second_pixels = live.pool.surfaces[second.pool_index as usize]
+            .iosurface
+            .read();
+        assert_eq!(first_pixels, second_pixels);
+        let allocated_after = pm_gpu::device::allocated_bytes(&thread.gpu.as_ref().unwrap().device);
+        eprintln!(
+            "first frame after scratch rest: {resumed_us} us; Metal bytes before/rest/after: {allocated_before:?}/{allocated_at_rest:?}/{allocated_after:?}"
+        );
+        assert!(resumed_us < 50_000, "first resumed frame exceeded 50 ms");
+
+        // Closing the viewer leaves a headless session. Its surfaces are
+        // retired; attaching again must use a fresh pool generation and
+        // reproduce the exact pixels on the new device.
+        let mut state = thread.views[&key].state.clone();
+        state.headless = Some(true);
+        thread.configure(key, state.clone(), None, None);
+        assert!(thread.views[&key].pool.is_none());
+        thread.release_at_rest(t0 + 2 * REST_RELEASE_US);
+        thread.release_at_rest(t0 + 4 * REST_RELEASE_US + 1);
+        assert!(thread.gpu.is_none());
+        state.headless = None;
+        thread.configure(key, state, None, None);
+        let new_spec = PoolSpec {
+            generation: spec.generation + 1,
+            ..spec
+        };
+        let live = {
+            let gpu = thread.gpu().expect("a new Metal device");
+            Live {
+                spec: new_spec,
+                pool: SurfacePool::new(
+                    &gpu.device,
+                    new_spec.generation,
+                    size,
+                    new_spec.format,
+                    new_spec.count,
+                )
+                .unwrap(),
+                ledger: PoolLedger::new(new_spec.count as usize),
+                working: Some(WorkingTexture::new(&gpu.device, size)),
+                source: Some(TestSource::new(&gpu.device, size, 0)),
+                remote: None,
+            }
+        };
+        let view = thread.views.get_mut(&key).unwrap();
+        view.pool = Some(live);
+        view.next_seq = first.seq.get();
+        view.dirty = false;
+        let third = thread.render(key, 0, -1, None, false, false).unwrap();
+        let live = thread.views[&key].pool.as_ref().unwrap();
+        assert_eq!(live.spec.generation, spec.generation + 1);
+        assert_eq!(
+            first_pixels,
+            live.pool.surfaces[third.pool_index as usize]
+                .iosurface
+                .read()
+        );
     }
 
     #[test]

@@ -21,6 +21,8 @@ doctest = false
 
 [dependencies]
 pm-node = { path = "../pm-node" }
+# Measurement builds only (`dhat-heap`): Rust heap attribution in the app.
+dhat = { version = "0.3", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Direct, for its FFmpeg location (DEP_PM_MEDIA_NATIVE_FFMPEG_LIB in build.rs).
@@ -34,6 +36,11 @@ pm-media = { path = "../pm-media" }
 node = ["pm-node/node"]
 # The C′ prototype (pm-gpu `remote-layer`), measurement builds only.
 remote-layer = ["pm-node/remote-layer"]
+# Rust heap attribution in the running app, measurement builds only (never
+# release): every Rust allocation goes through DHAT, which slows the engine.
+# With POWERMOVE_ENGINE_DHAT=<directory outside the checkout>, each process
+# writes dhat-<pid>.json after POWERMOVE_ENGINE_DHAT_AFTER_MS (default 30 s).
+dhat-heap = ["dep:dhat"]
 
 [build-dependencies]
 napi-build = "2.6"

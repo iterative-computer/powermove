@@ -165,9 +165,11 @@ fn run(
             bytes,
             meta,
         } = pending;
-        let done = device.poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: Some(GPU_TIMEOUT),
+        let done = objc2::rc::autoreleasepool(|_| {
+            device.poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(GPU_TIMEOUT),
+            })
         });
         let gpu_done = now_us();
         let command = match done {
