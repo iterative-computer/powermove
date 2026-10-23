@@ -1749,8 +1749,9 @@ impl MediaCache {
                             .then_some(color.primaries)
                     },
                     separate_matrix: !self.canvas_video
-                        && v.codec.codec == "vp9"
-                        && frame.format.bits == 10,
+                        && ((v.codec.codec == "vp9" && frame.format.bits == 10)
+                            || (matches!(v.codec.codec.as_str(), "h264" | "hevc")
+                                && frame.format.range == pm_protocol::color::Range::Limited)),
                     canvas_source_bias_first: false,
                 },
                 reuse,
@@ -1956,6 +1957,10 @@ mod round4_tests;
 #[cfg(test)]
 #[path = "media/hdr_parity_tests.rs"]
 mod hdr_parity_tests;
+
+#[cfg(test)]
+#[path = "media/older_live_tests.rs"]
+mod older_live_tests;
 
 #[cfg(test)]
 mod stamp_frame_tests {

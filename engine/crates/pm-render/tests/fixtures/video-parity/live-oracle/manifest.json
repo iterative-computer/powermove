@@ -1,0 +1,596 @@
+{
+  "schemaVersion": 1,
+  "captureVersions": {
+    "electron": "44.0.0",
+    "chrome": "152.0.7977.54",
+    "v8": "15.2.124.13-electron.0"
+  },
+  "sourceSet": "original",
+  "sources": [
+    {
+      "id": "h264-601-limited",
+      "sourceFile": "h264-601-limited.mp4",
+      "sourceSha256": "8307dba8fd5eeb9fb8f4b921d4d665d9d4d669b037c5f3930f690c42b0296b32",
+      "mediaFile": "h264-601-limited.mp4",
+      "mediaSha256": "8307dba8fd5eeb9fb8f4b921d4d665d9d4d669b037c5f3930f690c42b0296b32",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ]
+    },
+    {
+      "id": "h264-709-limited",
+      "sourceFile": "h264-709-limited.mp4",
+      "sourceSha256": "d78e4d48ddf25d750c725be64bd5c8cf881dc25c75ce9999daf944e9065d83fb",
+      "mediaFile": "h264-709-limited.mp4",
+      "mediaSha256": "d78e4d48ddf25d750c725be64bd5c8cf881dc25c75ce9999daf944e9065d83fb",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ]
+    },
+    {
+      "id": "h264-709-matrix-only",
+      "sourceFile": "h264-709-matrix-only.mp4",
+      "sourceSha256": "e34a2116467d922723cb8f7257bb6f35d8d3c89a0a18fd76c2122af7cb9b12c9",
+      "mediaFile": "h264-709-matrix-only.mp4",
+      "mediaSha256": "e34a2116467d922723cb8f7257bb6f35d8d3c89a0a18fd76c2122af7cb9b12c9",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ]
+    },
+    {
+      "id": "h264-hd-709-matrix-only",
+      "sourceFile": "h264-hd-709-matrix-only.mp4",
+      "sourceSha256": "e2e7fb24b01829fd8897c59b0fb27498334fe5a186a2d3e021df1674ae99f9f1",
+      "mediaFile": "h264-hd-709-matrix-only.mp4",
+      "mediaSha256": "e2e7fb24b01829fd8897c59b0fb27498334fe5a186a2d3e021df1674ae99f9f1",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ]
+    },
+    {
+      "id": "h264-709-full",
+      "sourceFile": "h264-709-full.mp4",
+      "sourceSha256": "9e95b2f2688af9fc38ad714018325f38dc11018f9431fe48225814962b7b9ba6",
+      "mediaFile": "h264-709-full.mp4",
+      "mediaSha256": "9e95b2f2688af9fc38ad714018325f38dc11018f9431fe48225814962b7b9ba6",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ]
+    },
+    {
+      "id": "h264-2020-limited",
+      "sourceFile": "h264-2020-limited.mp4",
+      "sourceSha256": "d9d704bb2727f2f25e19cb506a417b5e9ef7053e0cdfe2f29083210690a8f013",
+      "mediaFile": "h264-2020-limited.mp4",
+      "mediaSha256": "d9d704bb2727f2f25e19cb506a417b5e9ef7053e0cdfe2f29083210690a8f013",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ]
+    },
+    {
+      "id": "hevc10-709-limited",
+      "sourceFile": "hevc10-709-limited.mp4",
+      "sourceSha256": "1bebc74543f55cf5b011af68b3b3df1baed4b3689373f718f6ffaba8a2964db8",
+      "mediaFile": "hevc10-709-limited.mp4",
+      "mediaSha256": "1bebc74543f55cf5b011af68b3b3df1baed4b3689373f718f6ffaba8a2964db8",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ]
+    },
+    {
+      "id": "vp9-709-limited",
+      "sourceFile": "vp9-709-limited.webm",
+      "sourceSha256": "0f03d094c32e9193dbaf52fce192b4dbf4c0801b9433b66841b52359eb8f4ebc",
+      "mediaFile": "vp9-709-limited.webm",
+      "mediaSha256": "0f03d094c32e9193dbaf52fce192b4dbf4c0801b9433b66841b52359eb8f4ebc",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ]
+    },
+    {
+      "id": "vp9-untagged",
+      "sourceFile": "vp9-untagged.webm",
+      "sourceSha256": "3af5ea989a017346927930b02ddb43bdb4eabaf9b17034784b7f53e8c5ccca7a",
+      "mediaFile": "vp9-untagged.webm",
+      "mediaSha256": "3af5ea989a017346927930b02ddb43bdb4eabaf9b17034784b7f53e8c5ccca7a",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ]
+    },
+    {
+      "id": "av1-709-limited",
+      "sourceFile": "av1-709-limited.mp4",
+      "sourceSha256": "0cdb6f6764dd98112ecede7c9f34ed3b4fce850ed286de26cdcfc2471b6b89c0",
+      "mediaFile": "av1-709-limited.mp4",
+      "mediaSha256": "0cdb6f6764dd98112ecede7c9f34ed3b4fce850ed286de26cdcfc2471b6b89c0",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ]
+    },
+    {
+      "id": "prores422-709",
+      "sourceFile": "prores422-709.mov",
+      "sourceSha256": "9c0620afedf4087f7a3a88cc3b45656bacba77b6010bf57077c0596c39798ef8",
+      "mediaFile": "prores422-709.playback.webm",
+      "mediaSha256": "d58c22ff10235662abfd8e5dfeb113196655da952335263be01e2db4d5ceb079",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ],
+      "playback": {
+        "proxy": true,
+        "liveElementMatched": true,
+        "container": "video/webm"
+      }
+    },
+    {
+      "id": "prores4444-709",
+      "sourceFile": "prores4444-709.mov",
+      "sourceSha256": "eff8ca3cf1091751b2fe2eb82277625b13dca32297219c6a08ab9539eda9e42c",
+      "mediaFile": "prores4444-709.playback.webm",
+      "mediaSha256": "781982e8742a79581b6c38b39a5fa3906697566da52e0bcddf28bc87911e5932",
+      "times": [
+        0.125,
+        0.625,
+        1.125
+      ],
+      "playback": {
+        "proxy": true,
+        "liveElementMatched": true,
+        "container": "video/webm"
+      }
+    },
+    {
+      "id": "h264-handoff",
+      "sourceFile": "handoff.mp4",
+      "sourceSha256": "8156e98be47f96df52becc880b5564f41c3f1f98e3a52a538e045a182ec4fc08",
+      "mediaFile": "handoff.mp4",
+      "mediaSha256": "8156e98be47f96df52becc880b5564f41c3f1f98e3a52a538e045a182ec4fc08",
+      "times": [
+        0.5,
+        1.5
+      ]
+    }
+  ],
+  "frames": [
+    {
+      "source": "h264-601-limited",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-601-limited-0.live.rgba.zlib",
+      "sha256": "dd95a91e92fa8e7a83602f548c54f666b47cd4d1cc50ca71ab131bff823d1c5f",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-601-limited",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-601-limited-1.live.rgba.zlib",
+      "sha256": "fa7ec65d74c35f9e6980f85438f1180d5d671b06e3b94eb0864b6a21c323bfe1",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-601-limited",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-601-limited-2.live.rgba.zlib",
+      "sha256": "98ded144264a20d92b4f8c46f086f6fe3a69ad53df147bbada78786da37ddb22",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-709-limited",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-709-limited-0.live.rgba.zlib",
+      "sha256": "cbc9ad20a178e39e841c666525f24c0dd1470f72970e337a6110352d1df06231",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-709-limited",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-709-limited-1.live.rgba.zlib",
+      "sha256": "d976a6466097c4ddeafff3e0c91395840b5ee3d9caaefcf62a12fed5a7de3c1e",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-709-limited",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-709-limited-2.live.rgba.zlib",
+      "sha256": "37e0475914250e970efc3fccbb0b30c46e47a32031780fb36388d775dbd680d3",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-709-matrix-only",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-709-matrix-only-0.live.rgba.zlib",
+      "sha256": "1976b805b8aa5840d90982e6479ad49196abc6c2f875313d37236f5683b368bf",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-709-matrix-only",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-709-matrix-only-1.live.rgba.zlib",
+      "sha256": "37fb8169f7c1c2b00c2786f393e2943b98ada5216d7eb3b5a0af43135df58123",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-709-matrix-only",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-709-matrix-only-2.live.rgba.zlib",
+      "sha256": "68c548ab1146498d6444246ddeba2448de965d28a3139f7d471e2f89e4a587d3",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-hd-709-matrix-only",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83333,
+      "width": 1280,
+      "height": 720,
+      "file": "h264-hd-709-matrix-only-0.live.rgba.zlib",
+      "sha256": "2abc9d8936b1e9ce0f84328d328a42fc5644e6fca41318c4c40f1e185c0a0aa3",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-hd-709-matrix-only",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583333,
+      "width": 1280,
+      "height": 720,
+      "file": "h264-hd-709-matrix-only-1.live.rgba.zlib",
+      "sha256": "45ba4a7dd5e49a4c02c61bb0b7d93e7f7ce9af467fce817eec76bbc70e7f936e",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-hd-709-matrix-only",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083333,
+      "width": 1280,
+      "height": 720,
+      "file": "h264-hd-709-matrix-only-2.live.rgba.zlib",
+      "sha256": "ccaef12931fe958a00aae8d407e0ea63bce52159f7c22f9f0178ed5596d03bf2",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-709-full",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-709-full-0.live.rgba.zlib",
+      "sha256": "cdda573d38007c0b21ee5f637eb30a988d151f3e3c93d8148f6e8ffcf91e295e",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-709-full",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-709-full-1.live.rgba.zlib",
+      "sha256": "ff751268710df4adc35e5f858ed69cef25e844f233ccdc0be76434adc02b6fdf",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-709-full",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-709-full-2.live.rgba.zlib",
+      "sha256": "783d24201c0c0c8f1b649bf1a6360216547ebb6785103bed966e23a1c4e42bed",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-2020-limited",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-2020-limited-0.live.rgba.zlib",
+      "sha256": "9c8faab44e6501a072b789058d0ee39e35d86f200aeffb4c77b07318edaeefbc",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-2020-limited",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-2020-limited-1.live.rgba.zlib",
+      "sha256": "d73547b5e43feb756e3e6375f15253af57f34e61ef29b8dc90c9310d9a5ec39c",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-2020-limited",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083333,
+      "width": 256,
+      "height": 144,
+      "file": "h264-2020-limited-2.live.rgba.zlib",
+      "sha256": "6ec8774a8f6f7eae3ee30174f88066eead323e97516400bf4f2a7062f44cae53",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "hevc10-709-limited",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83333,
+      "width": 256,
+      "height": 144,
+      "file": "hevc10-709-limited-0.live.rgba.zlib",
+      "sha256": "d4ee72a34390e14563fd4e715c81af43727d4727aed13277d48a822dc43791d5",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "hevc10-709-limited",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583333,
+      "width": 256,
+      "height": 144,
+      "file": "hevc10-709-limited-1.live.rgba.zlib",
+      "sha256": "116f35b5681ecf6e56149f0ed860ac719cfe92723054dffbf617d055d8d1fb31",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "hevc10-709-limited",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083333,
+      "width": 256,
+      "height": 144,
+      "file": "hevc10-709-limited-2.live.rgba.zlib",
+      "sha256": "67aa67d743daf8e383fe8fa2baf28041e2aef2f76cf42010f63ac2f713bc9c5d",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "vp9-709-limited",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83000,
+      "width": 256,
+      "height": 144,
+      "file": "vp9-709-limited-0.live.rgba.zlib",
+      "sha256": "0153c992ca6068e655273374f8a4a45f6f23eb491332814696346e3b9a2ad992",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "vp9-709-limited",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583000,
+      "width": 256,
+      "height": 144,
+      "file": "vp9-709-limited-1.live.rgba.zlib",
+      "sha256": "e4fefe958136f57ff46c9f8ff7de25e63323bfcbb33d5af25e2e9acba9b3b23f",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "vp9-709-limited",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083000,
+      "width": 256,
+      "height": 144,
+      "file": "vp9-709-limited-2.live.rgba.zlib",
+      "sha256": "00d67709fce11fb9fd73cf330da4ba73b39ccbecf35f37f7533e57156c1b5f2e",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "vp9-untagged",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83000,
+      "width": 256,
+      "height": 144,
+      "file": "vp9-untagged-0.live.rgba.zlib",
+      "sha256": "bab560881d1bbdb3fcce4065c45fdaeb5db049dc708ebab3b028c60fd6641800",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "vp9-untagged",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583000,
+      "width": 256,
+      "height": 144,
+      "file": "vp9-untagged-1.live.rgba.zlib",
+      "sha256": "cb5b2be3207d5603f80a0b6f1f276900ac0c007165cedd2c96c80c87f3e996fe",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "vp9-untagged",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083000,
+      "width": 256,
+      "height": 144,
+      "file": "vp9-untagged-2.live.rgba.zlib",
+      "sha256": "1e96a9d120bbeaf84bb04bcf53b2d85267cc8fddcb5d9d0709cd26eab0d0fbdc",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "av1-709-limited",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83333,
+      "width": 256,
+      "height": 144,
+      "file": "av1-709-limited-0.live.rgba.zlib",
+      "sha256": "14feb5462a31679998ff50dd625756d778f6b79baa05ce82d05f809efacda2d8",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "av1-709-limited",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583333,
+      "width": 256,
+      "height": 144,
+      "file": "av1-709-limited-1.live.rgba.zlib",
+      "sha256": "e7079cb9c44c8f4a4f0ff0a38882e03f1e829a05e5b626eda8b1c2d1b1574f98",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "av1-709-limited",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083333,
+      "width": 256,
+      "height": 144,
+      "file": "av1-709-limited-2.live.rgba.zlib",
+      "sha256": "04090d2361cc5d3480969e9af7c5f9ec12cf2cb837ed640f9112402409589e88",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "prores422-709",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83000,
+      "width": 256,
+      "height": 144,
+      "file": "prores422-709-0.live.rgba.zlib",
+      "sha256": "a22d49427ffca95c90bcd317a0dc64270fb2f5a754d37e48123092c1e8e4716e",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "prores422-709",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583000,
+      "width": 256,
+      "height": 144,
+      "file": "prores422-709-1.live.rgba.zlib",
+      "sha256": "8b48b65bc31a78af75616a912f1bde2f6896a92ce64de67d37e636b7eb2e9356",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "prores422-709",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083000,
+      "width": 256,
+      "height": 144,
+      "file": "prores422-709-2.live.rgba.zlib",
+      "sha256": "5fea9f13de4160f0e20d6976ed1efa660d0ad48d62cada787438fb81b1c28262",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "prores4444-709",
+      "sample": 0,
+      "time": 0.125,
+      "timestampUs": 83000,
+      "width": 256,
+      "height": 144,
+      "file": "prores4444-709-0.live.rgba.zlib",
+      "sha256": "22ed4d0cf3b9adc42aa0c8fc57c7c51e3a9175e4b8bb513dad3ef08305101ac3",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "prores4444-709",
+      "sample": 1,
+      "time": 0.625,
+      "timestampUs": 583000,
+      "width": 256,
+      "height": 144,
+      "file": "prores4444-709-1.live.rgba.zlib",
+      "sha256": "2ea5e964c613180aa02c8298bad1d4bd279891beddc9f2d3244373bc0ecec6e6",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "prores4444-709",
+      "sample": 2,
+      "time": 1.125,
+      "timestampUs": 1083000,
+      "width": 256,
+      "height": 144,
+      "file": "prores4444-709-2.live.rgba.zlib",
+      "sha256": "c8430657c7c9ec56f281a6a62adf3c476774ac4aab83d2c3b80676f92ed07aca",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-handoff",
+      "sample": 0,
+      "time": 0.5,
+      "timestampUs": 500000,
+      "width": 160,
+      "height": 90,
+      "file": "h264-handoff-0.live.rgba.zlib",
+      "sha256": "5bf9deb4bf5d612c285f693135f884302c7dcbd1fa339386f044e75ea3396b93",
+      "alphaMode": "opaque"
+    },
+    {
+      "source": "h264-handoff",
+      "sample": 1,
+      "time": 1.5,
+      "timestampUs": 1500000,
+      "width": 160,
+      "height": 90,
+      "file": "h264-handoff-1.live.rgba.zlib",
+      "sha256": "dfdc5cc56f353bfe6e67666e8bf2229cace7a0dacf58c11bfc18e4027e002960",
+      "alphaMode": "opaque"
+    }
+  ]
+}

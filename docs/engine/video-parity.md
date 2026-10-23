@@ -19,8 +19,14 @@ SDR Canvas frames are exact, bringing the source total to 98. Of the 36 new
 SDR live frames, all 36 are exact. Round 4's six HEVC SDR P3/BT.2020 control
 frames also match Canvas and live exactly, bringing the Canvas total to 104.
 All 12 captured PQ/HLG/P3 frames now match Canvas and live exactly, bringing
-the total to 116 exact Canvas frames. The independent RGB transfer oracle
+the total to 116 exact Canvas and live source cases. The independent RGB transfer oracle
 also matches all 36,374 colors for HLG BT.2020, PQ BT.2020, and PQ P3.
+
+The original 62 frames now also have independent direct-upload regressions,
+including freshly imported ProRes renditions with measured premultiplied
+alpha. Their Canvas references remain unchanged. Limited H.264 and HEVC
+direct uploads use matrix products before translation, matching the measured
+Skia operation order at the nine remaining half-code channel boundaries.
 
 ## Conversion order and precision
 
