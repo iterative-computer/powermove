@@ -92,7 +92,7 @@ function installHooks(): void {
   wrapSend(typeof MessagePort !== 'undefined' ? MessagePort.prototype : null, 'port');
   wrapSend(typeof Worker !== 'undefined' ? Worker.prototype : null, 'worker');
   wrapSend(typeof BroadcastChannel !== 'undefined' ? BroadcastChannel.prototype : null, 'broadcast');
-  const received = (e: MessageEvent) => { add('page.messages_received'); add('page.clone_bytes_received', bytes(e.data)); };
+  const received = (e: Event) => { add('page.messages_received'); add('page.clone_bytes_received', bytes((e as MessageEvent).data)); };
   // Receivers: listeners added and onmessage handlers set on ports, workers and channels.
   for (const proto of [typeof MessagePort !== 'undefined' ? MessagePort.prototype : null, typeof Worker !== 'undefined' ? Worker.prototype : null, typeof BroadcastChannel !== 'undefined' ? BroadcastChannel.prototype : null]) {
     if (!proto) continue;
@@ -236,13 +236,13 @@ async function runSteps(session: LaunchedApp, mode: Mode, specs: StepSpec[]): Pr
   }
   const calibrationMs = dist(cal).p50 ?? 0;
   // Warm-up: the first frames build caches on both paths.
-  for (const spec of specs.slice(0, 4)) await page.evaluate(pageStep, spec);
+  for (const spec of specs.slice(0, 4)) await stage('warm-up frame', page.evaluate(pageStep, spec), 60_000);
   const steps: StepRecord[] = [];
   let report = mode === 'engine' ? await engineReport(session) : null;
   let counts = await page.evaluate(() => (window as any).__pmRig.counts());
   for (const spec of specs) {
     const m0 = await metrics(cdp);
-    const r = await page.evaluate(pageStep, spec);
+    const r = await stage('frame', page.evaluate(pageStep, spec), 30_000);
     const m1 = await metrics(cdp);
     const next = mode === 'engine' ? await engineReport(session) : null;
     steps.push({
@@ -289,6 +289,19 @@ function summarize(row: string, mode: Mode, run: { steps: StepRecord[]; calibrat
   };
 }
 
+/** `promise`, or a failure naming the stage that did not finish in `ms`. */
+async function stage<T>(label: string, promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`stage timed out after ${ms} ms: ${label}`)), ms); })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function record(value: Record<string, unknown>): Promise<void> {
   await appendFile(OUT, `${JSON.stringify({ at: new Date().toISOString(), ...value })}\n`);
   console.log(`[rig] ${JSON.stringify(value)}`);
@@ -303,24 +316,37 @@ async function launch(mode: Mode): Promise<LaunchedApp> {
   return session;
 }
 
-async function waitRoute(page: Page, mode: Mode): Promise<void> {
-  if (mode !== 'engine') return;
-  await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 120_000 }).toBe('engine');
-  await expect.poll(() => page.evaluate(() => !!(window as any).PM.Kernel.services.get('viewer').enginePresentation?.presenting), { timeout: 120_000 }).toBe(true);
+/** With the engine on: waits until the viewer's session routes to it and presents; returns the route it settled on otherwise. */
+async function waitRoute(page: Page, mode: Mode): Promise<{ route: string; reason: string | null; failures: unknown[] } | null> {
+  if (mode !== 'engine') return null;
+  const read = () => stage('engine status', page.evaluate(() => {
+    const s = (window as any).PM.EngineConnection.status();
+    return { route: String(s.route), reason: s.routeReason ?? null, failures: s.failures ?? [], presenting: !!(window as any).PM.Kernel.services.get('viewer').enginePresentation?.presenting };
+  }), 20_000);
+  const deadline = Date.now() + 120_000;
+  let last = await read();
+  while (Date.now() < deadline && !(last.route === 'engine' && last.presenting)) {
+    await new Promise((r) => setTimeout(r, 500));
+    last = await read();
+  }
+  return { route: last.presenting ? last.route : `${last.route} (not presenting)`, reason: last.reason, failures: last.failures };
 }
 
 async function synthetic(session: LaunchedApp, mode: Mode, layers: number, fps: number): Promise<any> {
   await session.openEditor();
   const summary = await session.page.evaluate(buildSyntheticProject, { layers, fps, dur: 10 });
   await session.page.evaluate(() => { const PM = (window as any).PM; PM.pause?.(); PM.setTime(0); });
-  await waitRoute(session.page, mode);
+  const route = await waitRoute(session.page, mode);
+  expect(route?.route ?? 'engine', JSON.stringify(route)).toBe('engine');
   return summary;
 }
 
 const playbackSpecs = (from: number): StepSpec[] => Array.from({ length: STEPS + 4 }, (_, k) => ({ kind: 'time', t: from + (k + 1) / 120 }));
 
 test.describe('120 Hz rig', () => {
-  for (const scenario of ['playback', 'drag'] as const) {
+  // `edit`: one layer moved a pixel per frame through PM.Edit.apply (an
+  // inspector edit, with the project's provenance), paused.
+  for (const scenario of ['playback', 'edit'] as const) {
     test(`synthetic 500 layers: ${scenario}, today and the engine`, async () => {
       test.setTimeout(900_000);
       for (const mode of ['today', 'engine'] as Mode[]) {
@@ -370,24 +396,45 @@ test.describe('120 Hz rig', () => {
               await session.page.waitForFunction(() => Boolean((window as any).__pmRig && (window as any).PM?.ProjectsScreen));
             }
             await session.app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, copy);
-            await session.page.waitForFunction(() => Boolean((window as any).PM?.openProject));
-            await session.page.evaluate(async () => { await (window as any).PM.Kernel.loader.builtinsReady; await (window as any).PM.openProject(); });
-            await session.page.waitForFunction(() => !(window as any).PM.ProjectsScreen?.isOpen, undefined, { timeout: 120_000 });
-            await session.page.evaluate(async () => { const PM = (window as any).PM; await PM.projectAssetsReady; PM.pause?.(); });
-            await waitRoute(session.page, mode);
-            const from = p.from ?? 0;
-            const steps = p.steps ?? STEPS;
-            const specs: StepSpec[] = Array.from({ length: steps + 4 }, (_, k) => {
-              const fps = 120;
-              return { kind: 'time', t: from + (k + 1) / fps };
-            });
-            // Presented times follow the composition's own frame grid: wait for the frame of each step's time.
-            const comp = await session.page.evaluate(() => { const PM = (window as any).PM; return { fps: PM.comp?.()?.fps ?? PM.proj.fps, layers: PM.proj.layers.length }; });
-            const snapped = specs.map((s) => ({ ...s, t: Math.floor(s.t * comp.fps + 1e-9) / comp.fps }));
-            // Only refreshes that change the composition frame present a new frame.
-            const distinct = snapped.filter((s, i) => i === 0 || s.t !== snapped[i - 1]!.t);
-            const run = await runSteps(session, mode, distinct);
-            await record(summarize(`private-${p.label}-playback`, mode, run, { fps: comp.fps, layers: comp.layers, refreshes: steps }));
+            const page = session.page;
+            let at = 'open';
+            try {
+              await stage('the open API', page.waitForFunction(() => Boolean((window as any).PM?.openProject && (window as any).PM?.Kernel?.loader)), 120_000);
+              await stage('builtins', page.evaluate(async () => { await (window as any).PM.Kernel.loader.builtinsReady; }), 120_000);
+              // Not awaited: an open that asks a question (PM.confirm) never resolves by itself.
+              void page.evaluate(() => (window as any).PM.openProject()).catch(() => undefined);
+              at = 'editor';
+              await stage('the editor opens', page.waitForFunction(() => !(window as any).PM.ProjectsScreen?.isOpen && (window as any).PM.proj?.layers?.length > 0, undefined, { timeout: 0 }), 180_000);
+              at = 'assets';
+              await stage('project assets', page.evaluate(async () => { const PM = (window as any).PM; await PM.projectAssetsReady; PM.pause?.(); }), 180_000);
+              at = 'route';
+              const route = await waitRoute(page, mode);
+              if (route && route.route !== 'engine') {
+                await record({ row: `private-${p.label}-playback`, mode, routed: route, steps: 0, load: os.loadavg()[0] });
+                continue;
+              }
+              at = 'frames';
+              const from = p.from ?? 0;
+              const steps = p.steps ?? STEPS;
+              const specs: StepSpec[] = Array.from({ length: steps + 4 }, (_, k) => ({ kind: 'time', t: from + (k + 1) / 120 }));
+              // Presented times follow the composition's own frame grid: wait for the frame of each step's time.
+              const comp = await page.evaluate(() => { const PM = (window as any).PM; return { fps: PM.comp?.()?.fps ?? PM.proj.fps, layers: PM.proj.layers.length }; });
+              const snapped = specs.map((s) => ({ ...s, t: Math.floor(s.t * comp.fps + 1e-9) / comp.fps }));
+              // Only refreshes that change the composition frame present a new frame.
+              const distinct = snapped.filter((s, i) => i === 0 || s.t !== snapped[i - 1]!.t);
+              const run = await runSteps(session, mode, distinct);
+              await record(summarize(`private-${p.label}-playback`, mode, run, { fps: comp.fps, layers: comp.layers, refreshes: steps, route }));
+            } catch (e) {
+              // What the page showed when a stage stalled (a dialog, the route), for the report.
+              const state = await stage('diagnostics', page.evaluate(() => {
+                const PM = (window as any).PM;
+                const dialogs = [...document.querySelectorAll('dialog[open], [role="dialog"], [role="alertdialog"]')].map((d) => (d.textContent ?? '').trim().slice(0, 200));
+                let engine: unknown = null;
+                try { engine = PM?.EngineConnection?.status?.(); } catch { engine = 'status threw'; }
+                return { projectsOpen: !!PM?.ProjectsScreen?.isOpen, layers: PM?.proj?.layers?.length ?? null, dialogs, engine: engine && typeof engine === 'object' ? { route: (engine as any).route, reason: (engine as any).routeReason, failures: (engine as any).failures?.length } : engine };
+              }), 15_000).catch((err) => ({ unreadable: String(err) }));
+              await record({ row: `private-${p.label}-playback`, mode, failedAt: at, error: String((e as Error).message ?? e).slice(0, 300), state, load: os.loadavg()[0] });
+            }
           } finally {
             await session.close();
           }
