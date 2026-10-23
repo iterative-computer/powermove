@@ -125,6 +125,9 @@ export type SessionOptions = {
    * not, so the connection asks for that layout here.
    */
   onLoaded?: () => void;
+  /** The session id is bound, before definitions/resync can make it usable.
+   * Session-scoped producers must be posted before that first document. */
+  onOpened?: () => void;
   /** Before resyncing a replacement document, preserve its requested UI time. */
   onLoading?: () => void;
   /** Resync bodies above this are staged as a cache file (bytes). */
@@ -235,6 +238,7 @@ export class DocumentSession {
     this.id = opened.session;
     this.unlisten = connection.listen(opened.session, (message, arrived) => this.receive(message, arrived));
     this.unsubscribe = this.options.stream.subscribe((batch) => this.onBatch(batch));
+    this.options.onOpened?.();
     // Definitions before the document, so the first frame has them
     // (contract 10, read-your-registrations).
     this.startDefinitions();

@@ -357,6 +357,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       // Replace a seek queued on the home screen before any old clock can
       // overwrite the replacement document's requested UI position.
       onLoading: () => transport.seek(Number(PM.time) || 0, false),
+      onOpened: () => renderTransport.syncProducers(session),
       onLoaded: () => {
         if (session.headless) session.sendHeadless(openComposition());
         PM.bus?.emit?.('layout');
@@ -374,7 +375,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     current = session;
     transport.resetLoop();
     session.sendHeadless(openComposition());
-    sessionReady = session.start().then(() => renderTransport.syncProducers(session)).catch((error: unknown) => {
+    sessionReady = session.start().catch((error: unknown) => {
       log('warn', `engine session: ${error instanceof Error ? error.message : String(error)}`);
       session.close();
       sessions.delete(session);

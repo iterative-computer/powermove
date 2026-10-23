@@ -107,6 +107,27 @@ async function connected(port = engine()) {
 }
 
 describe('the engine connection', () => {
+  it('registers session producers before the initial document can become usable', async () => {
+    const { connection, port } = await connected();
+    const opened = vi.fn(() => {
+      expect(session.id).toBe(5);
+      expect(session.applied).toBe(0);
+      expect(port.requests('resync')).toHaveLength(0);
+      session.post({ type: 'compat', compat: 'producers', sources: ['rasterOverride'] });
+    });
+    const session = new DocumentSession({
+      connection, stream: stream(), documentId: () => 'P', log: () => {},
+      handlers: { message: () => {}, closed: () => {} }, onOpened: opened
+    });
+    await session.start();
+    expect(opened).toHaveBeenCalledOnce();
+    const producer = port.sent.indexOf(port.events('compat')[0]!);
+    const resync = port.sent.indexOf(port.requests('resync')[0]!);
+    expect(producer).toBeGreaterThanOrEqual(0);
+    expect(producer).toBeLessThan(resync);
+    session.close(); connection.close('test complete');
+  });
+
   it('shares the viewer service names with the viewer', () => {
     expect(ENGINE_VIEWER_SERVICE).toBe(VIEWER_SERVICE);
     expect(ENGINE_VIEWER_CHANGED).toBe(VIEWER_CHANGED);
