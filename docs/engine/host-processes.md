@@ -843,7 +843,9 @@ what the previous code did. Two tests prove it:
   (50 off, 25 on, 10 settled), 30 recovering the document, all clean
   (315 in all since the fixture fix). With the recheck-3 changes (closed
   journal, the barrier), seeds 22 to 26 at 2fff8632d gave 75 more (50 off,
-  25 on, 10 settled), 30 recovering the document, all clean: 390 in all.
+  25 on, 10 settled), 30 recovering the document, all clean: 390 in all. With SAVE-1b, seeds 27 to 31 at 378c574bc
+  gave 75 more (50 off, 25 on, 10 settled), 34 recovering the document,
+  all clean: 465 in all.
   The e2e kills the whole app with no
   slot write failing, so the failure cases are the model check's and the
   crash tests'. Opening now
