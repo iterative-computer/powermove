@@ -32,8 +32,8 @@
       "gpu.uploads": 1920
     },
     "export_120": {
-      "cpu.heap_alloc_bytes": 440793888,
-      "cpu.heap_allocs": 4618168,
+      "cpu.heap_alloc_bytes": 393039012,
+      "cpu.heap_allocs": 3493472,
       "engine.comp_passes": 3600,
       "engine.file_stats": 242,
       "engine.layers_planned": 66000,
@@ -50,7 +50,7 @@
     },
     "import_3d_600k": {
       "cpu.heap_alloc_bytes": 50870987,
-      "cpu.heap_allocs": 109866,
+      "cpu.heap_allocs": 109754,
       "engine.comp_passes": 11,
       "engine.layers_planned": 33,
       "gpu.bind_group_binds": 88,
@@ -97,8 +97,8 @@
       "gpu.uploads": 121
     },
     "playback_500": {
-      "cpu.heap_alloc_bytes": 341465520,
-      "cpu.heap_allocs": 4584241,
+      "cpu.heap_alloc_bytes": 291850800,
+      "cpu.heap_allocs": 3443161,
       "engine.comp_passes": 3600,
       "engine.file_stats": 240,
       "engine.layers_planned": 66000,
@@ -112,8 +112,8 @@
       "gpu.uploads": 3840
     },
     "scrub_24": {
-      "cpu.heap_alloc_bytes": 1489762,
-      "cpu.heap_allocs": 14208,
+      "cpu.heap_alloc_bytes": 1480100,
+      "cpu.heap_allocs": 13921,
       "engine.comp_passes": 24,
       "engine.file_stats": 24,
       "engine.layers_planned": 48,
@@ -146,94 +146,94 @@
     }
   },
   "tolerance": {
-    "export_120": {
-      "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
-      },
-      "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166). The export thread also parks on the encoder thread a different number of times per run."
-      }
-    },
     "drag_500": {
-      "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
-      },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "edit_playback_500": {
-      "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
-      },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
+      }
+    },
+    "export_120": {
+      "cpu.heap_alloc_bytes": {
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166). The export thread also parks on the encoder thread a different number of times per run.",
+        "relative": 0.001
       }
     },
     "import_3d_600k": {
-      "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
-      },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "inspector_edit_500": {
-      "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
-      },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "open_large_2000": {
-      "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
-      },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "playback_500": {
-      "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
-      },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "scrub_24": {
-      "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
-      },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     },
     "typing_60": {
-      "cpu.heap_allocs": {
-        "relative": 0.001,
-        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166)."
-      },
       "cpu.heap_alloc_bytes": {
-        "relative": 0.001,
-        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800)."
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
       }
     }
   },
