@@ -90,6 +90,42 @@ describe('Svelte shell', () => {
     expect(PM.Projects.openProjects).not.toHaveBeenCalled();
   });
 
+  it('measures the tabs for their animation only when an edit changes what they show', async () => {
+    const { PM, bus, projects } = fakePM();
+    PM.Tabs = { list: vi.fn(() => ['p1', 'p2']), activate: vi.fn(), close: vi.fn(async () => true) };
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+    const measured = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
+    const tabMeasures = () => measured.mock.contexts.filter((el) => (el as HTMLElement).classList?.contains('project-doc')).length;
+    const settle = () => new Promise<void>((resolve) => queueMicrotask(resolve));
+    try {
+      // Edits emit `project`; the tabs show the same: nothing is measured.
+      for (let i = 0; i < 5; i++) flushSync(() => bus.emit('project'));
+      await settle();
+      expect(tabMeasures()).toBe(0);
+      // The first edit marks the project dirty: the strip reconciles (its
+      // tabs animate) as before.
+      flushSync(() => { PM.app.dirty = true; bus.emit('project'); });
+      await settle();
+      const afterDirty = tabMeasures();
+      expect(afterDirty).toBeGreaterThan(0);
+      expect(target.querySelector('[data-project-id="p1"]')?.classList.contains('dirty')).toBe(true);
+      // A rename reconciles too, and the label follows.
+      flushSync(() => { projects.p2.name = 'Renamed'; bus.emit('project'); });
+      await settle();
+      expect(tabMeasures()).toBeGreaterThan(afterDirty);
+      expect(target.querySelector('[data-project-id="p2"] .project-doc-label')?.textContent).toBe('Renamed');
+      // A reordered strip follows the list.
+      PM.Tabs.list.mockReturnValue(['p2', 'p1']);
+      flushSync(() => bus.emit('project'));
+      expect([...target.querySelectorAll<HTMLElement>('.project-doc')].map((t) => t.dataset.tabId)).toEqual(['p2', 'p1']);
+    } finally {
+      measured.mockRestore();
+    }
+  });
+
   it('lists this window\'s tabs in strip order and raises the one on screen', () => {
     const { PM } = fakePM();
     PM.Tabs = { list: vi.fn(() => ['p2', 'p1']), activate: vi.fn(), close: vi.fn(async () => true) };
