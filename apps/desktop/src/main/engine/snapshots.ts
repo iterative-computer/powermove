@@ -85,6 +85,8 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (v['session'] === null ? document === undefined : !safeUint(v['session'])) return false;
   const fallback = v['fallbackPixels'];
   if (fallback !== undefined && (document === undefined || !validFallback(fallback))) return false;
+  const compat = v['compatEvents'];
+  if (compat !== undefined && (document === undefined || !validCompatEvents(compat))) return false;
   const svg = v['svgPixels'];
   if (svg !== undefined && (document === undefined || !validSvgPixels(svg))) return false;
   if (v['revision'] !== null && !safeUint(v['revision'])) return false;
@@ -106,6 +108,13 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (s['captionsHidden'] !== undefined && typeof s['captionsHidden'] !== 'boolean') return false;
   const uploaded = s['uploaded'];
   if (!Array.isArray(uploaded) || uploaded.length > 64 || !uploaded.every((k) => typeof k === 'string' && k.length > 0 && k.length <= 512)) return false;
+  const compatUploaded = s['compatUploaded'];
+  if (compatUploaded !== undefined && (!Array.isArray(compatUploaded) || compatUploaded.length > 256 || !compatUploaded.every((n) => {
+    if (!n || typeof n !== 'object' || !id(n.composition) || !id(n.layer) || !Number.isSafeInteger(n.time)
+      || !['rasterOverride', 'compatContext'].includes(n.source) || !finite(n.scale) || n.scale <= 0 || n.scale > 32) return false;
+    const c = n.crop;
+    return c === undefined || c === null || (typeof c === 'object' && ['x', 'y', 'width', 'height'].every((k) => safeUint(c[k])) && c.width > 0 && c.height > 0 && c.x + c.width <= 8192 && c.y + c.height <= 8192);
+  }))) return false;
   const target = s['target'] as Record<string, unknown> | null;
   if (!target || typeof target !== 'object') return false;
   if (target['kind'] === 'frame') {
@@ -117,7 +126,9 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
     const cropOk = crop === null || (crop && typeof crop === 'object' && ['x', 'y', 'width', 'height'].every((k) => safeUint(crop[k])) && (crop['width'] as number) > 0 && (crop['height'] as number) > 0);
     const content = target['content'];
     const contentOk = content === undefined || content === null || (content instanceof Uint8Array && content.byteLength > 0 && content.byteLength <= MAX_LAYER_CONTENT_BYTES);
-    return id(target['layer']) && finite(target['scale']) && (target['scale'] as number) >= 0.01 && (target['scale'] as number) <= 16 && !!cropOk && contentOk;
+    // Any positive scale, as today's `PM.raster` (its density is capped by
+    // the 8192-pixel edge, not by the scale; pm_protocol's `valid_layer_raster_scale`).
+    return id(target['layer']) && finite(target['scale']) && (target['scale'] as number) > 0 && !!cropOk && contentOk;
   }
   return false;
 }
@@ -127,6 +138,8 @@ export const MAX_DOCUMENT_BYTES = 512 * 1024 * 1024;
 /** Most fallback programs one request carries, and their bytes. */
 export const MAX_FALLBACK_PIXELS = 16;
 export const MAX_FALLBACK_BYTES = 256 * 1024 * 1024;
+/** Compatibility events in one `document` snapshot request (bands included). */
+export const MAX_COMPAT_EVENTS = 4096;
 /** Most SVG rasters one request carries, and their bytes (a material
  *  map may be three.js's largest texture, 16384 × 16384). */
 export const MAX_SVG_PIXELS = 64;
@@ -170,6 +183,22 @@ function validFallback(value: unknown): boolean {
     const data = p['rgba16f'];
     if (!(data instanceof Uint8Array) || data.byteLength !== (p['width'] as number) * (p['height'] as number) * 8) return false;
     bytes += data.byteLength;
+  }
+  return bytes <= MAX_FALLBACK_BYTES;
+}
+
+/** Compatibility events a window sends with a `document` snapshot: their
+ *  shape and size here; the engine checks each message fully. */
+export function validCompatEvents(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > MAX_COMPAT_EVENTS) return false;
+  let bytes = 0;
+  for (const e of value as Record<string, unknown>[]) {
+    if (!e || typeof e !== 'object' || e['type'] !== 'compat') return false;
+    if (!['producers', 'native', 'reuse', 'pixels'].includes(e['compat'] as string)) return false;
+    if (e['compat'] === 'pixels') {
+      if (!(e['data'] instanceof Uint8Array)) return false;
+      bytes += e['data'].byteLength;
+    }
   }
   return bytes <= MAX_FALLBACK_BYTES;
 }
@@ -256,7 +285,13 @@ export class SnapshotService {
       try {
         // Bounded like the snapshot itself: a blocked window always gets a reply.
         prepared = await Promise.race([
-          sessions.prepare(windowId, request.document, (request.fallbackPixels ?? []).map((p) => ({ ...p })), (request.svgPixels ?? []).map((p) => ({ key: { ...p.key }, data: p.data }))),
+          sessions.prepare(
+            windowId,
+            request.document,
+            (request.fallbackPixels ?? []).map((p) => ({ ...p })),
+            (request.svgPixels ?? []).map((p) => ({ key: { ...p.key }, data: p.data })),
+            request.compatEvents ?? []
+          ),
           new Promise<'timeout'>((resolve) => {
             prepareTimer = setTimeout(() => resolve('timeout'), Math.max(0, deadline - now()));
           })

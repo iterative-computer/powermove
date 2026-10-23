@@ -2,6 +2,7 @@
 import type { CompatSource } from "./CompatSource";
 import type { CompositionId } from "./CompositionId";
 import type { LayerId } from "./LayerId";
+import type { PixelRect } from "./PixelRect";
 import type { Ticks } from "./Ticks";
 
 /**
@@ -14,4 +15,12 @@ export type CompatNeed = { composition: CompositionId, layer: LayerId, time: Tic
 /**
  * Output pixels per layer pixel the frame draws the layer at.
  */
-scale: number, };
+scale: number, 
+/**
+ * Today's preview crop window (`legacy/gl/shape-raster-window.ts`, in
+ * the raster's pixels at `scale`) the producer is called with, as the
+ * compositor passes it to `PM.raster` for a viewer frame; absent: the
+ * whole raster (exports and snapshots never crop). Part of the need's
+ * identity: another window is another answer.
+ */
+crop?: PixelRect, };

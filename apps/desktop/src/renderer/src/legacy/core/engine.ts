@@ -544,7 +544,13 @@ function frame(now: any) {
       }
       if (now - clock.t0 > 500) { E.fps = Math.round(clock.frames * 1000 / (now - clock.t0)); clock.frames = 0; clock.t0 = now; PM.invalidate('status'); }
     }
-    if (needsDraw) { needsDraw = false; PM.bus.emit('overlay'); }
+    if (needsDraw) {
+      needsDraw = false;
+      // Today's paused redraw announces the frame it draws (`preview:presented`,
+      // then `overlay`); the engine presents one only for a change.
+      if (!PM.playing) (PM as any).EngineRedraw?.();
+      PM.bus.emit('overlay');
+    }
     return;
   }
   if (PM.playing) {

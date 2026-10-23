@@ -76,6 +76,20 @@ describe('engine rasters in today’s RasterSurface shape', () => {
     expect(JSON.parse(new TextDecoder().decode(options.content))).toEqual(copy);
   });
 
+  it('a non-positive or NaN scale is today\'s transparent one-pixel canvas; captions keep their ink', () => {
+    const inked = () => snap({ width: 1, height: 1, data: new Uint8ClampedArray([200, 200, 200, 82]), raster: { canvas: [1, 1], window: [0, 0], cropped: false, selection: [0, 0, 1, 1] } });
+    const seen: Uint8ClampedArray[] = [];
+    const transport = { rasterSync: () => inked(), toCanvas: (s: EngineSnapshot) => { seen.push(s.data); return canvas(s); } } as unknown as EngineRenderTransport;
+    const host = { locate: () => ({ composition: null, own: true }) };
+    for (const scale of [0, -1, NaN]) {
+      for (const type of ['text', 'shape']) engineRasterSync(transport, host, { id: 'L', type, d: {} }, scale, 0, null);
+    }
+    expect(seen.map((d) => [...d])).toEqual(Array(6).fill([0, 0, 0, 0]));
+    engineRasterSync(transport, host, { id: 'c', type: 'captions', d: {} }, 0, 0, null);
+    engineRasterSync(transport, host, { id: 'L', type: 'text', d: {} }, 0.005, 0, null);
+    expect(seen.slice(6).map((d) => [...d])).toEqual([[200, 200, 200, 82], [200, 200, 200, 82]]);
+  });
+
   it('a layer that draws nothing is null, as today', () => {
     const transport = { rasterSync: () => null, toCanvas: canvas } as unknown as EngineRenderTransport;
     expect(engineRasterSync(transport, { locate: () => ({ composition: null, own: true }) }, { id: 'c', type: 'captions' }, 1, 0, null)).toBeNull();

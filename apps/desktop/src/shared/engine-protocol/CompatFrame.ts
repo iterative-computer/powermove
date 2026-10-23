@@ -5,4 +5,14 @@ import type { PixelPayload } from "./PixelPayload";
 /**
  * The answer to a [`CompatFrameRequest`].
  */
-export type CompatFrame = { key: string, width: number, height: number, format: CompatFormat, origin: [number, number], scale: number, payload: PixelPayload, };
+export type CompatFrame = { key: string, width: number, height: number, format: CompatFormat, origin: [number, number], scale: number, payload: PixelPayload, 
+/**
+ * The producer passed the layer through: the engine draws it itself
+ * (the payload is empty).
+ */
+native?: boolean, 
+/**
+ * The quad in layer pixels and the part of the raster it samples (as
+ * [`CompatPixels`]).
+ */
+size?: [number, number], uv?: [number, number, number, number], };

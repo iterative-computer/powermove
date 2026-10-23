@@ -79,7 +79,7 @@ struct Entry {
 /// translation. Built-in definitions are never listed (every built-in is
 /// bit-exact natively).
 ///
-/// - Store `mrsigma/liquid-glass-ios27` 2.0.8 (`liquid-glass-ios27.glass`):
+/// - Store `mrsigma/private-extension-19` 2.0.8 (`private-extension-19.glass`):
 ///   its rim search bisects the bilinear alpha of `u_orig` at coordinates
 ///   derived from screen-space derivatives, a matrix inverse, and
 ///   trigonometry, and branches on `alpha < 0.5`. A coordinate one ulp
@@ -88,11 +88,11 @@ struct Entry {
 ///   to 111 CV) differ even with ANGLE's built-in calls; WebGL itself moves
 ///   26 to 33 pixels by up to 67 CV under a one-step input perturbation
 ///   (docs/engine/effects.md, "ANGLE-only programs"). The Store's other
-///   `liquid-glass-ios27` (zellzoi, 2.0.1) matches natively and is not
+///   `private-extension-19` (zellzoi, 2.0.1) matches natively and is not
 ///   listed.
 pub const ANGLE_ONLY: &[(&str, &str)] = &[(
     "2e2c56341184fc54c1d6537996d2e172ae19e124ee3c89ca50d2d3ebfe0526ff",
-    "Store mrsigma/liquid-glass-ios27 2.0.8 (liquid-glass-ios27.glass)",
+    "Store mrsigma/private-extension-19 2.0.8 (private-extension-19.glass)",
 )];
 
 /// The renderer's definitions and their programs.

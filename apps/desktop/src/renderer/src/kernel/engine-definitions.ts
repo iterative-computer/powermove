@@ -156,7 +156,10 @@ export class EngineShaderMeta {
       if (!id || this.layerReports.has(id) || this.watchdogLayers.has(id)) continue;
       const meta = ui.getShaderMeta(layer) ?? {};
       if (layer.type === 'shader') {
-        const shaderKey = 'engine:' + id;
+        // Today's key for the program (`sh:<layer>:<hashStr(code)>`,
+        // legacy/gl/compositor.ts); `compileError` reads the layer's engine
+        // report under it.
+        const shaderKey = shaderLayerKey(layer);
         if (meta.shaderKey !== shaderKey) ui.setShaderMeta(layer, { shaderKey });
       } else if (layer.type === 'extension') {
         const definitionId = String(layer.d?.definition ?? '');
@@ -225,8 +228,10 @@ export class EngineShaderMeta {
     if (previous && previous.kind !== kind) this.clearLayer(scope.layer);
     this.layerReports.set(scope.layer, { revision, kind });
     if (error.code === 'shaderCompile' || error.code === 'notHeadlessRenderable') {
-      const shaderKey = 'engine:' + scope.layer;
-      this.errors.set(shaderKey, text);
+      this.errors.set('engine:' + scope.layer, text);
+      // A shader layer's compile error is named by today's program key (a
+      // layer the WebGL fallback draws compiles today: the engine's own key).
+      const shaderKey = layer.type === 'shader' && error.code === 'shaderCompile' ? shaderLayerKey(layer) : 'engine:' + scope.layer;
       this.PM.UIState?.setShaderMeta?.(layer, { shaderKey, definition, missing: false });
     } else if (error.code === 'definitionMissing') {
       this.PM.UIState?.setShaderMeta?.(layer, { definition, missing: true, missingAsset: null });
@@ -357,4 +362,16 @@ export async function installEngineDefinitions(PM: any, bridge: { nativeEngine?:
   }
   PM.EngineDefinitions = definitions;
   return definitions;
+}
+
+/** `hashStr` of legacy/gl/compositor.ts (djb2, 32-bit). */
+export function hashStr(s: string): number {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+/** Today's program key of a shader layer: `sh:<layer id>:<hashStr(d.code)>`. */
+export function shaderLayerKey(layer: { id?: unknown; d?: { code?: unknown } }): string {
+  return `sh:${String(layer.id)}:${hashStr(String(layer.d?.code ?? ''))}`;
 }

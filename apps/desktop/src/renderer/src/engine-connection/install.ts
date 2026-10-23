@@ -25,14 +25,15 @@ import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { EngineBridge } from '../../../shared/engine-ipc';
 import { ENGINE_WINDOW_MESSAGE } from '../../../shared/engine-ipc';
 import type { EngineViewerChannel, EngineViewerHandlers, EngineViewerService } from '../../../extensions/viewer/engine-present/presentation';
-import type { ClockSample } from '../../../shared/engine-protocol';
+import type { ClockSample, FrameDescriptor } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
 import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
-import { EngineRenderTransport } from './render-transport';
+import { EngineRenderTransport, EngineSnapshotError } from './render-transport';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
+import { resolveFrameRate, TICKS_PER_SECOND } from '../../../shared/frame-rate';
 import { installAppCaptures, usesBlender } from './app-captures';
 // The presentation is platform code hosted in the viewer's folder; the
 // kernel's `render.gl.init` binding uses it for viewers that do not present
@@ -42,7 +43,7 @@ import { PresentationWarmup } from '../../../extensions/viewer/engine-present/pr
 import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
 import { SvgRasters } from './svg-rasters';
 import { BlenderPngs } from './blender-png';
-import { EngineTransport, TICKS_PER_SECOND } from './transport';
+import { EngineTransport, ticks } from './transport';
 import { EnginePreview, documentWake } from './preview';
 import { EngineSceneMetadata } from './scene-metadata';
 import { previewEngine } from '../core/scene3d/rendering';
@@ -131,6 +132,21 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     else if (level === 'warn') console.warn(line);
     else console.info(line);
   };
+  // Capture a compatibility context's engine surfaces before presentation
+  // returns their pool slots. An import can arrive after its descriptor.
+  const pendingCompatFrames = new Map<string, FrameDescriptor>();
+  const captureCompatFrame = (desc: FrameDescriptor): boolean => {
+    if (!PM.CompatContext?.active) return true;
+    const frame = source.videoFrame(desc.poolGeneration, desc.poolIndex);
+    if (!frame) return false;
+    try { PM.CompatContext.captureFrame(desc, frame); } finally { frame.close(); }
+    return true;
+  };
+  const offCompatSurface = source.onSurface((generation, poolIndex) => {
+    for (const [key, desc] of pendingCompatFrames) {
+      if (desc.poolGeneration === generation && desc.poolIndex === poolIndex && captureCompatFrame(desc)) pendingCompatFrames.delete(key);
+    }
+  });
   const drawingWarmup = new PresentationWarmup(target.document, () => new Worker(new URL('../../../extensions/viewer/engine-present/present-worker-entry.ts', import.meta.url), { type: 'module', name: 'engine-present' }));
   drawingWarmup.warm();
   const hostClock = new HostClock(() => native.hostTime());
@@ -186,6 +202,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         try { doc.api?.syncScene3dFrame(frame.pts / TICKS_PER_SECOND); }
         catch (error) { log('error', `native 3D scene synchronization: ${error instanceof Error ? error.message : String(error)}`); }
       }
+      PM.CompatContext?.selectFrame?.(frame);
       emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj });
     },
     (fn) => target.requestAnimationFrame(fn)
@@ -194,6 +211,25 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const stats = new EngineStatsView();
   (PM as any).EngineStats = stats;
   (PM as any).EnginePresentedEvents = presentedEvents;
+  /** A paused redraw request with nothing new for the engine to present:
+   *  today's frame loop announces the frame it draws again
+   *  (`PresentedEvents.redraw`). Called by the frame loop on `draw`. */
+  (PM as any).EngineRedraw = (): boolean => {
+    const doc = PM.EngineDoc;
+    doc?.barrier?.flush();
+    const fps = Number((PM.curComp?.() ?? PM.proj)?.fps) || 30;
+    return presentedEvents.redraw(
+      { revision: doc?.barrier?.revision ?? current?.applied ?? null, viewSeq: current?.viewSeq ?? null, pts: Number.isFinite(PM.time) ? ticks(PM.time) : null, frameTicks: ticks(1) / fps },
+      (frame, quality) => {
+        // Today's redraw calls the raster wrappers again: an output that
+        // changed is the engine's to draw and present (once, as today).
+        if (renderTransport.refreshShown(frame.pts)) return false;
+        PM.CompatContext?.selectFrame?.(frame);
+        PM.bus?.emit?.('preview:presented', { viewport: PM.GL?.previewViewport ?? null, time: frame.pts / TICKS_PER_SECOND, version: versions.at(frame.revision), project: PM.proj, quality });
+        return true;
+      }
+    );
+  };
   PM.setTransportDriver?.(transport);
 
   // The engine's levels, monitor solo, and waveform peaks for today's audio
@@ -238,8 +274,13 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if (!sessions.size) return;
       flushing = true;
       try {
+        const before = PM.EngineDoc?.barrier?.revision ?? null;
         PM.EngineDoc?.barrier?.flush();
         noteVersion();
+        // An edit while paused: the producers prepare the frame on screen at
+        // the new revision now, beside the engine's render that will ask
+        // for it (today draws an edit in the frame it happens).
+        if (before !== null && (PM.EngineDoc?.barrier?.revision ?? null) !== before) renderTransport.prepareShown();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
@@ -269,12 +310,19 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       stage: (id, bytes) => native.stageDocument({ process: 'interactive', session: id, bytes }),
       definitions: () => ((PM as any).EngineDefinitions ?? null),
       fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
+      // The `raster` override's answers (kernel/raster-compat.ts).
+      onCompat: (message) => renderTransport.receiveCompat(message, session),
       svgRasters: () => svgRasters,
       handlers: {
         message: (message, arrivedMs) => {
           if (message.type === 'frame' && !firstFrame) {
             firstFrame = true;
             performance.mark?.('powermove:engine-first-frame');
+          }
+          if (message.type === 'frame' && !captureCompatFrame(message.frame)) {
+            const desc = message.frame;
+            pendingCompatFrames.set(`${desc.poolGeneration}:${desc.seq}`, desc);
+            while (pendingCompatFrames.size > 8) pendingCompatFrames.delete(pendingCompatFrames.keys().next().value!);
           }
           if (viewerHandlers) viewerHandlers.message(message as never, arrivedMs);
           else if (message.type === 'frame') session.release(message.frame);
@@ -323,7 +371,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     current = session;
     transport.resetLoop();
     session.sendHeadless(openComposition());
-    sessionReady = session.start().catch((error: unknown) => {
+    sessionReady = session.start().then(() => renderTransport.syncProducers(session)).catch((error: unknown) => {
       log('warn', `engine session: ${error instanceof Error ? error.message : String(error)}`);
       session.close();
       sessions.delete(session);
@@ -335,10 +383,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     openSession();
     return sessionReady ?? Promise.resolve();
   };
+  let lastProducerFailure = -Infinity;
   const documentEncoder = new TextEncoder();
   const renderTransport = new EngineRenderTransport({
     native,
     session: snapshotSession,
+    sessions: () => [...sessions],
     revision: () => {
       const barrier = PM.EngineDoc?.barrier;
       if (!barrier) return null;
@@ -373,6 +423,37 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       };
     },
     usesBlender: () => usesBlender(PM.proj),
+    // A `raster` override that throws fails the frame, reported as today's
+    // frame loop reports a compositor throw (legacy/core/engine.ts).
+    playing: () => !!PM.playing,
+    frameTicks: () => {
+      const rate = resolveFrameRate(PM.proj?.fps, PM.proj?.fpsRational);
+      const ticks = rate ? (TICKS_PER_SECOND * rate.den) / rate.num : 0;
+      return Number.isInteger(ticks) && ticks > 0 ? ticks : null;
+    },
+    playhead: () => {
+      const position = transport.now(performance.now());
+      const rate = current?.clock?.rate;
+      return position ? { time: ticks(position.time), rate: rate ? rate.num / rate.den : 1 } : null;
+    },
+    span: () => {
+      const loop = current?.clock?.loopRange;
+      // The engine's clock wraps by the loop it was sent (today's looping
+      // playback: the work area while `PM.loop` is on).
+      if (loop) return { start: Number(loop.start), end: Number(loop.end), loop: true };
+      const duration = Number((PM.curComp?.() ?? PM.proj)?.dur);
+      return duration > 0 ? { start: 0, end: ticks(duration) } : null;
+    },
+    // A snapshot's own failure (an extension's request): recorded, never on the stage.
+    onFailure: (code, message) => current?.reportFailure(code, message, undefined, false),
+    onProducerError: (error) => {
+      current?.reportFailure(error instanceof EngineSnapshotError ? error.code : 'internal', error instanceof Error ? error.message : String(error));
+      const now = performance.now();
+      if (now - lastProducerFailure <= 2000) return;
+      lastProducerFailure = now;
+      console.error('[engine] frame render failed', error);
+      PM.toast?.('The preview could not be rendered. See the console for details.');
+    },
     captionsHidden: () => PM.captionsHidden === true,
     svgRasters: () => svgRasters,
     log
@@ -389,8 +470,21 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // engine on, nothing asks the current engine for pixels. The exporter's
   // methods ask `PM.EngineCaptures` (it installs after this module).
   const unrouteCaptures = installAppCaptures(PM, renderTransport);
+  // The kernel's raster override producer answers through it (kernel/raster-compat.ts).
+  const detachRasterCompat = (PM as any).RasterCompat?.attach?.(renderTransport) ?? (() => {});
+  // And the compatibility context draws over WebM export frames (kernel/compat-context.ts).
+  const detachContextExports = (PM as any).CompatContextExports?.attach?.(renderTransport) ?? (() => {});
+  // Playback: keep compatibility answers ahead of the clock (render-transport.ts).
+  const offPresented = PM.bus?.on?.('preview:presented', () => renderTransport.presentedWhilePlaying());
+  let wasPlaying = !!PM.playing;
+  const offTransport = PM.bus?.on?.('transport', () => {
+    const playing = !!PM.playing;
+    if (playing && !wasPlaying) renderTransport.playbackStarted();
+    wasPlaying = playing;
+  });
 
   async function connect(nextGeneration: number, port: PortLike): Promise<void> {
+    pendingCompatFrames.clear();
     connection?.close('a new interactive engine launch');
     const next = new EngineConnection(nextGeneration, port, log);
     connection = next;
@@ -598,6 +692,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       clock: current?.clock ?? null
     }),
     dispose: () => {
+      offCompatSurface();
+      pendingCompatFrames.clear();
       preview.dispose();
       drawingWarmup.dispose();
       offShaderFallback();
@@ -612,6 +708,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
+      delete (PM as any).EngineRedraw;
       registration.dispose();
       target.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
       for (const s of [...sessions]) s.close();
@@ -620,6 +717,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       viewerHandlers = null;
       sessionReady = null;
       unrouteCaptures();
+      detachRasterCompat();
+      detachContextExports();
+      if (typeof offPresented === 'function') offPresented();
+      if (typeof offTransport === 'function') offTransport();
       renderTransport.dispose();
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;
       if ((PM as any).EngineStats === stats) (PM as any).EngineStats = null;

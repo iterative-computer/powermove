@@ -62,7 +62,7 @@ export interface AgentEngineJobs {
   finishRun?(run: string): Promise<void>;
   /** `onStarted` runs once when the job starts rendering (tool timeouts
    *  count from then: plan section 17). */
-  exportVideo(owner: number, run: string, project: unknown, input: ExportVideoInput, onStarted?: () => void): Promise<ExportVideoResult>;
+  exportVideo(owner: number, run: string, project: unknown, input: ExportVideoInput, onStarted?: () => void, compat?: readonly import('../../shared/engine-protocol').CompatSource[]): Promise<ExportVideoResult>;
   renderFrames(owner: number, run: string, plan: FramesPlan, options?: FramesOptions): Promise<AgentFramesResult>;
   saveProject?(project: unknown, document?: unknown): Promise<string>;
   status(owner: number, jobId: string): RenderStatus;
@@ -850,7 +850,9 @@ export class PowermoveAgentToolBridge {
     const context = await this.rendererValue(session, '__mcp_context', {});
     if (context?.home === true) throw new Error('Open a project before exporting.');
     const project = JSON.parse(String(context?.projectJSON ?? 'null'));
-    const result = await engine.exportVideo(session.owner.id, session.runId, project, input, onJobStarted);
+    // The window's compatibility producers (a `raster` override): the job asks it for those layers.
+    const compat = Array.isArray(context?.compat) ? context.compat : [];
+    const result = await engine.exportVideo(session.owner.id, session.runId, project, input, onJobStarted, compat);
     const value = result.status === 'done'
       ? { path: result.path, projectId: context.projectId, width: result.width, height: result.height, fps: result.fps, jobId: result.jobId }
       : { status: 'queued', jobId: result.jobId, projectId: context.projectId };

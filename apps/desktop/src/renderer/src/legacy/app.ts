@@ -9,7 +9,7 @@ import { pasteMedia } from './core/media-paste';
 import { isFieldTarget, selectableTextRoot } from '../kernel/keychord';
 import { canAnimateContent, isProperty } from './core/content-properties';
 /* Ported from js/app.js — behavior-preserving. */
-import { normalizeExportDefaults, type ExportDefaults } from '../core/export-defaults';
+import { normalizeExportDefaults, storedExportDefaults, type ExportDefaults } from '../core/export-defaults';
 import { compactEditLog } from '../core/edit-log';
 import { normalizeCaptionsContent } from '../captions/model';
 import type { PMRegistry } from './registry';
@@ -237,7 +237,7 @@ function hydrate(p: any) {
   };
   base.params = sanitizeParams(p.params);
   base.shutter = p.shutter == null ? .5 : p.shutter;
-  base.exportDefaults = normalizeExportDefaults(p.exportDefaults, base.fps);
+  base.exportDefaults = storedExportDefaults(normalizeExportDefaults(p.exportDefaults, base.fps), p.exportDefaults);
   /* Production rule: a saved project must never poison the renderer. Every channel,
      keyframe, effect and layer field is normalized here so malformed data degrades
      to a static value instead of NaN transforms or a broken keyframe search.
@@ -618,7 +618,7 @@ function readExportDefaults(): ExportDefaults {
 function writeExportDefaults(patch: Partial<ExportDefaults>) {
   if (!PM.proj) return;
   const next = normalizeExportDefaults({ ...readExportDefaults(), ...patch }, PM.proj.fps);
-  PM.hist.do('Export settings', () => { PM.proj.exportDefaults = next; });
+  PM.hist.do('Export settings', () => { PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults); });
 }
 PM.exportDefaults = { read: readExportDefaults, write: writeExportDefaults };
 
@@ -1019,7 +1019,7 @@ async function openFiles(files: File[]) {
     switchProject(PM.mkProject({
       name: media[0]!.name.replace(/\.[^.]+$/, '') || 'Untitled',
       w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur, bg: PM.proj.bg,
-      exportDefaults: { ...readExportDefaults(), fps: PM.proj.fps },
+      exportDefaults: storedExportDefaults({ ...readExportDefaults(), fps: PM.proj.fps }, PM.proj.exportDefaults),
     }));
     PM.ProjectsScreen?.hide?.();
   }
@@ -1047,7 +1047,7 @@ PM.newProject = () => {
       const values = form.values();
       switchProject(PM.mkProject({
         ...values,
-        exportDefaults: { ...(PM.proj ? readExportDefaults() : {}), fps: values.fps },
+        exportDefaults: PM.proj ? storedExportDefaults({ ...readExportDefaults(), fps: values.fps }, PM.proj.exportDefaults) : { fps: values.fps },
       }));
       PM.ProjectsScreen?.hide?.();
     } },
@@ -1489,7 +1489,7 @@ async function importFiles(files: any, placement?: { at: number; index?: number 
         if (rate?.ok) {
           targetProject.fps = rate.fps;
           targetProject.fpsRational = rate.fpsRational;
-          targetProject.exportDefaults = { ...readExportDefaults(), fps: rate.fps };
+          targetProject.exportDefaults = storedExportDefaults({ ...readExportDefaults(), fps: rate.fps }, PM.proj?.exportDefaults);
         }
         if (Number.isFinite(source.dur) && source.dur > 0) {
           targetProject.dur = source.dur;

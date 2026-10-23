@@ -206,6 +206,14 @@ describe('publish: prepare', () => {
     await expect(publisher.publish('glass-blur', firstForm)).rejects.toMatchObject({ code: 'folder_invalid', detail: text });
   });
 
+  it('lists deprecated compatibility APIs in the plan as advice that never blocks publishing', async () => {
+    const { publisher } = await setup({ folder: files('export default function activate(api) {\n  return api.render.snapshot(0);\n}\n') });
+    const plan = await publisher.prepare('glass-blur');
+    expect(plan.deprecationFindings).toEqual([expect.objectContaining({ file: 'index.ts', line: 2, member: 'render.snapshot', replacement: 'await api.render.snapshotAsync(time, maxWidth)' })]);
+    expect(plan.blockedFindings).toEqual([]);
+    expect(plan.waivableFindings).toEqual([]);
+  });
+
   it('lets apiVersion 2 code that reads the project publish without declaring anything', async () => {
     const { publisher } = await setup({ folder: files('api.on("selection", draw);\nconst p = await api.project.get();\n') });
     const plan = await publisher.prepare('glass-blur');

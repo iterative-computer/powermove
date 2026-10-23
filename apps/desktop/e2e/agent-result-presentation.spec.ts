@@ -17,9 +17,9 @@ test('agent results preserve work above the reply and omit file and external act
     PM.AgentUI.update({ flush: true });
     PM.AgentUI.update = () => {};
 
-    PM.Kernel.loader.records = () => [{ id: 'pexels-browser', manifest: { name: 'Pexels Browser' }, health: { state: 'ok' } }];
+    PM.Kernel.loader.records = () => [{ id: 'private-extension-27', manifest: { name: 'Pexels Browser' }, health: { state: 'ok' } }];
     const entries = PM.Kernel.panels.entries.bind(PM.Kernel.panels);
-    PM.Kernel.panels.entries = () => [...entries(), { id: 'pexels-panel', ownerId: 'pexels-browser', item: { id: 'pexels-panel', title: 'Pexels Browser' } }];
+    PM.Kernel.panels.entries = () => [...entries(), { id: 'pexels-panel', ownerId: 'private-extension-27', item: { id: 'pexels-panel', title: 'Pexels Browser' } }];
     (window as any).__openedResultPanel = '';
     PM.LibraryUI.reveal = (id: string) => { (window as any).__openedResultPanel = id; };
     const steps = Array.from({ length: 18 }, (_, index) => ({
@@ -34,7 +34,7 @@ test('agent results preserve work above the reply and omit file and external act
         ] },
         { role: 'assistant', text: 'Created a Pexels panel with photo/video search, thumbnails, and import into Assets.' },
         { role: 'assistant', text: 'Added mod Pexels Browser', modResult: {
-          id: 'pexels-browser', name: 'Pexels Browser', action: 'created', status: 'ready'
+          id: 'private-extension-27', name: 'Pexels Browser', action: 'created', status: 'ready'
         } }
       ],
       run: { autonomous: true, changed: true, externalActions: ['Downloaded reference media'], artifacts: ['check.cjs', 'library.cjs', 'panel.cjs', 'verification.txt'].map((name, index) => ({

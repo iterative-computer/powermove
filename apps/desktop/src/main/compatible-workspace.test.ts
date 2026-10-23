@@ -372,3 +372,25 @@ it.runIf(process.platform === 'darwin')('lets Project commands write to their in
   expect(device.exitCode).not.toBe(0);
   expect(device.output).toContain('not permitted');
 });
+
+it('returns deprecated compatibility API uses on write, read, compile and completion without refusing any', async () => {
+  const ws = await workspace();
+  const dir = path.join(ws.layout.stagingDirectory, 'old-snapshot');
+  const json = async (name: string, args: Record<string, unknown>) => JSON.parse(((await ws.call(name, args, signal()))[0] as any).text);
+  await ws.call('write_file', { path: path.join(dir, 'manifest.json'), text: JSON.stringify({ id: 'old-snapshot', name: 'Old', version: '1.0.0', apiVersion: 2, contributes: ['commands'] }) }, signal());
+  const source = 'export default function activate(api) {\n  api.render.snapshot(0, 480);\n}\n';
+  const written = await json('write_file', { path: path.join(dir, 'index.ts'), text: source });
+  expect(written.deprecations).toEqual([expect.objectContaining({ extension: 'old-snapshot', file: 'index.ts', line: 2, member: 'render.snapshot', replacement: 'await api.render.snapshotAsync(time, maxWidth)' })]);
+  expect(written.guidance).toMatch(/suggest the migration/);
+  expect((await json('read_file', { path: path.join(dir, 'index.ts') })).deprecations).toHaveLength(1);
+  expect((await json('read_file', { path: path.join(dir, 'manifest.json') })).deprecations).toBeUndefined();
+  const compiled = await json('compile_extension', { id: 'old-snapshot' });
+  expect(compiled).toMatchObject({ ok: true, deprecations: [expect.objectContaining({ line: 2, member: 'render.snapshot' })] });
+  const finished = await ws.finish({ summary: 'Done', commands: [], artifacts: [], extensions: [{ id: 'old-snapshot', action: 'created' }], notes: [], externalActions: [] }, signal());
+  expect(finished.ok).toBe(true);
+  if (!finished.ok) return;
+  expect(finished.extensionWarnings).toEqual([expect.objectContaining({ extension: 'old-snapshot', line: 2 })]);
+  expect(JSON.parse(finished.text).extensionWarnings).toHaveLength(1);
+  // Published unchanged: the deprecated call stays.
+  expect(await readFile(path.join(ws.layout.liveDirectory, 'old-snapshot', 'index.ts'), 'utf8')).toBe(source);
+}, 30_000);

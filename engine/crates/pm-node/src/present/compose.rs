@@ -866,6 +866,7 @@ impl Composer {
                 scale: place.scale,
                 origin: place.origin,
                 region: Some(region),
+                preview_canvas: place.canvas,
                 precision: Precision::Float16,
                 depth_id: false,
                 background: true,

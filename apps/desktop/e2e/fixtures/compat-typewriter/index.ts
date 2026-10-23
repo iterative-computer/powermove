@@ -21,10 +21,11 @@ const params: EffectParamDefinition[] = [
   { k: 'gradCycle', label: 'Gradient Cycle', def: 0, min: -10, max: 10, step: 0.05, unit: 'Hz' }
 ];
 
-export default function activate(api: PowermoveAPI): void {
+export default function activate(api: PowermoveAPI, options: { viewportSafe?: boolean } = {}): void {
   installTypingRaster(api, params);
   api.effects.register({
     id: 'typewriter', label: 'Typewriter', group: 'Text', params,
+    ...(options.viewportSafe ? { viewportSafe: true } : {}),
     // The text stage renders the typed prefix and cursor together. Subsequent
     // effects, layer transforms, masks and export use the same native surface.
     frag: 'o = texture(u_tex, v_st);'

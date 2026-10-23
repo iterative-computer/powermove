@@ -17,6 +17,7 @@ import { isArrayOf, isBytes, isOneOf, isRecord, isString } from '../../shared/gu
 import { buildAutonomousArgv, buildEditorArgv } from './adapter';
 import { publishExtensionChanges, withStageSnapshot } from './change-history';
 import { AgentResultValidationError, repairAgentResult } from './result-repair';
+import type { ExtensionDeprecationWarning } from '../../shared/extension-analysis';
 import { validateStagedExtensions } from './validate-staged-extensions';
 import { collectArtifacts } from './artifacts';
 import { consumeToken } from './consent';
@@ -513,11 +514,14 @@ export class CodexRunner {
         parsed.access = authority;
         const extensions = parseAgentExtensionChanges(parsed.extensions);
         // One private copy is checked and published; later stage writes cannot ship.
+        let warnings: ExtensionDeprecationWarning[] = [];
         const changeSet = await withStageSnapshot(layout, async snapshot => {
-          await validateStagedExtensions(snapshot, extensions ?? []);
+          warnings = await validateStagedExtensions(snapshot, extensions ?? []);
           if (this.cancelled.has(req.id)) throw new Error('The Codex run was cancelled.');
           return publishExtensionChanges(snapshot, extensions ?? []);
         }, (extensions ?? []).map(change => change.id));
+        // Deprecated compatibility APIs in what was published (amendment 23): returned to the agent, never refused.
+        if (warnings.length) parsed.extensionWarnings = warnings;
         return { parsed, extensions, changeSet };
       }, async prompt => {
         repairingResult = true;
@@ -531,7 +535,8 @@ export class CodexRunner {
         text: JSON.stringify(sortJsonValue(parsed)),
         access: authority,
         ...(extensions === undefined ? {} : { extensions }),
-        ...(changeSet === null ? {} : { extensionChangeSetId: changeSet.id })
+        ...(changeSet === null ? {} : { extensionChangeSetId: changeSet.id }),
+        ...(Array.isArray(parsed.extensionWarnings) && parsed.extensionWarnings.length ? { extensionWarnings: parsed.extensionWarnings as ExtensionDeprecationWarning[] } : {})
       };
     } catch (error) {
       if (this.cancelled.has(req.id)) {

@@ -517,6 +517,18 @@ impl RenderFonts {
         }
     }
 
+    /// The same fonts for a renderer on another thread (the layer raster
+    /// worker): the same broker and scoped seeds, with its own health, so a
+    /// failure one thread met is reported by that thread's render only.
+    pub fn sibling(&self) -> Self {
+        Self {
+            broker: self.broker.clone(),
+            health: FontHealth::default(),
+            hub: self.hub.clone(),
+            reinstall: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// Includes seed changes as well as registry changes.
     pub fn generation(&self) -> u64 {
         self.hub.as_ref().map_or_else(

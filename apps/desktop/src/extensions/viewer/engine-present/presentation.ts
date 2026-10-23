@@ -1003,6 +1003,13 @@ export class ViewerPresentation {
           if (!leases) { leases = new Set(); this.poolLeases.set(message.pool.generation, leases); }
           leases.add(this.chromeLeases);
         }
+        if (message.type === 'failure') {
+          this.routedSeq = this.deliveredSeq;
+          this.latestFrame = null;
+          this.setStatus(`The preview could not be rendered: ${message.reason}`);
+          this.hide(this.canvasElement, false);
+          return;
+        }
         if (message.type === 'routed') {
           // The engine cannot draw this composition at this revision: its
           // frames (older ones still in flight too) leave the stage.

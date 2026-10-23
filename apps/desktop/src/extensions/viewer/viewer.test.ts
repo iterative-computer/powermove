@@ -57,7 +57,7 @@ function viewerApi(configure?: (api: PowermoveAPI) => void): PowermoveAPI {
       ],
     },
     model: { TYPE_META: { shape: {}, audio: { pickable: false } }, layer: (id: string) => project.layers.find((layer: any) => layer.id === id), curComp: () => project },
-    render: { gl: { bounds: () => null, pick: () => null, context: null, previewViewport: null } },
+    render: { gl: { bounds: () => null, pick: () => null, context: null, canvas: null, previewViewport: null } },
     transport: { time: () => 0, playing: () => false, quality: 1, perf: { auto: false }, previewResolution: 1, invalidate() {} },
     util: { clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)) },
     events: { on: () => ({ dispose() {} }) },

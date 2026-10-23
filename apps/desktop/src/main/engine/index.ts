@@ -309,6 +309,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   });
 
   const engineNowUs = engineClock(bridgeAddon);
+  /** The job records' snapshots (set once the job engine's client exists below). */
+  let agentJobsRef: { compatLayer(session: number | null, request: import('../../shared/engine-protocol').CompatFrameRequest): string | null } | null = null;
   const cacheDirectory = path.join(options.userData, 'Engine Cache');
   // Exports of layers only a window draws (a `raster` override, a
   // compatibility WebGL2 context): the job engine asks, the windows answer.
@@ -317,7 +319,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       .filter((w) => !w.isDestroyed())
       .map((w) => ({ id: w.webContents.id, ask: (ask) => w.webContents.send(ENGINE_IPC.compatAsk, ask) })),
     publishPixels: bridgeAddon?.publishPixels ? (bytes) => bridgeAddon.publishPixels!(bytes) : null,
-    unlinkPixels: bridgeAddon?.unlinkPixels ? (name) => bridgeAddon.unlinkPixels!(name) : null
+    unlinkPixels: bridgeAddon?.unlinkPixels ? (name) => bridgeAddon.unlinkPixels!(name) : null,
+    takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null
   });
   options.ipc.on(ENGINE_IPC.compatAnswer, (event, answer: unknown) => {
     if (!options.isTrustedSender(event)) return;
@@ -328,7 +331,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     eagerJobs: !options.isPackaged && env['POWERMOVE_ENGINE_EAGER_JOBS'] === '1',
     // A test control only: how long an unused job engine stays.
     ...(!options.isPackaged && Number(env['POWERMOVE_ENGINE_JOB_IDLE_MS']) > 0 ? { jobIdleMs: Number(env['POWERMOVE_ENGINE_JOB_IDLE_MS']) } : {}),
-    compatFrame: (request) => compatFrames.serve(request),
+    // The export's own snapshot of the layer goes with the ask (agent-jobs.ts).
+    compatFrame: (request, session) => compatFrames.serve(request, agentJobsRef?.compatLayer(session, request) ?? null),
     spawn: (process) => {
       const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
       const child = utilityProcess.fork(script, [], {
@@ -498,7 +502,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     }
   };
   let renderQueue: RenderQueue | null = null;
-  const agentJobs = new AgentJobs({
+  const agentJobs = agentJobsRef = new AgentJobs({
     engine,
     ...(options.resolveAsset ? { packProject: (project: Record<string, any>, session: number, document: unknown) => packAgentProject(project, {
       directory: options.automaticOutputDirectory ?? path.join(options.home, 'Powermove'),

@@ -450,6 +450,7 @@ in-realm API after the person installing the extension accepts the trust dialog.
 - **menus** — `contribute(location, ctx => items[])`, `collect(location, ctx?)` (in a Store sandbox, only your own contributions); locations: `panel:context`, `layer:context`, `timeline:context`, `viewer:context`. The function runs on every open with that open's `ctx`; it may return a Promise, which the menu waits for at most 100 ms. `gather(location, ctx)` resolves every contribution for one open, for `ui.menu`; `collect` returns only the ones that answer synchronously and never asks a Store extension's. Titlebar extension shortcuts are retired; registered panels appear in the panel Library automatically.
 - **status** — `register({ id, text: () => string|null, side?, onClick? })` for the status bar.
 - **project** — `get()`, `latest()`, `revision()`, `apply(commands, meta?)`, `selection()`, `select()`, `time()`, `setTime()`, `play/pause/playing`, `undo/redo`, `snapshot(t?, maxWidth?)`. `latest()`, `revision()`, `selection()`, `time()` and `playing()` are reactive in components.
+  The project's `exportDefaults.format` (and saved render presets) keep today's ids where one exists (`prores` for ProRes 4444, `mp4` for H.264, `webm` for VP9, `png`, `still`, `web`, `json`); formats added with the new engine (`prores-hq`, `hevc`, `webm-vp8`, …) use their own ids.
   `apply` takes the typed edit commands (`set_property`, `replace_keyframes`, `set_easing`, `set_expression`, `set_content`, `set_layer`, `set_composition`, `add_layer`, `delete_layers`, `reorder_layer`, `add_effect`, `remove_effect`, `set_effect`, `set_scene_parameter`, `add_marker`, `create_section`, `update_section`, `transform_layers`). Every apply is one undo step, validated, lock-aware.
 - **anim** — channel evaluation, property/keyframe edits, easing, expression errors, animation versioning, and 2D transform matrices.
 - **model** — property/keyframe/layer/project factories, model schema tables, current composition, layer lookups, `cloneLayer(layer)`, and `normalizeFill(value, fallback?)`.
@@ -458,10 +459,10 @@ in-realm API after the person installing the extension accepts the trust dialog.
 - **transport** — time and playback (`time()` and `playing()` are reactive in components), stepping, quality/performance, preview resolution, and render/UI invalidation.
 - **history** — raw transaction begin/commit/cancel, undo/redo, external entries, and transaction-aware selection history.
 - **edit** — validated one-shot edits, gesture transactions, dispatch, cancel/rollback, and structural mutation.
-- **media** — timing, file import, asset-to-layer commands, waveform drawing, runtime assets, and font loading.
+- **media** — timing, file import, asset-to-layer commands, waveform drawing, runtime assets, and font loading. `media.assets.source(id)` resolves to `{ url, kind, mime, rendition }`, a browser-playable URL for your own element, once the asset has loaded; `media.assets.audio(id)` resolves to its audio as a Blob. Both resolve to null when there is nothing to play and wait at most `timeoutMs` (30 s by default).
 - **media import defaults** — `registerImportDefaults({ anchor: { x: 0.5, y: 0.5 } })` sets normalized anchors for future image, video and SVG imports and asset-to-timeline additions. `getImportDefaults()` reads the active override. Registration is owned by the mod; unloading restores the prior default. Existing layers/keyframes and audio/3D origins are untouched.
 - **inspector** — `registerSection({ id, title, after: 'content' | 'transform' | 'effects', when?, build })` adds controls to Properties. `build(target, { layerIds })` returns a disposer or cleanup function. Sections rebuild on selection changes, and disappear when the mod unloads. Use `sections()` to inspect active contributions.
-- **render** — WebGL bounds/picking/setup and `gl.compileError(key)`, raster access, offscreen frame rendering, and snapshots.
+- **render** — WebGL bounds/picking/setup and `gl.compileError(key)`, raster access, offscreen frame rendering, and snapshots. `snapshotAsync(time, maxWidth?)`, `renderFrameToAsync(time, width, height, options?)` and `rasterAsync(layer, scale?, time?, crop?)` return the same results as `snapshot`, `renderFrameTo` and `raster` without blocking the editor; use them in new code ([Deprecated compatibility APIs](#deprecated-compatibility-apis)).
 - **uiState** — layer/FX disclosure, key handles, timeline reveal state, and shader metadata via `getShaderMeta(layer)` / `setShaderMeta(layer, patch)`.
 - **ui** — API-backed controls, overlays, menus, pointer drag, parent picking, shader editor opening, edit/history-backed `gesture` construction, and `openExternal(url)` for https links.
 - **dnd** — canonical asset/FX MIME payloads, drag detection/parsing, live media drag state, and FX drop application.
@@ -481,12 +482,140 @@ in-realm API after the person installing the extension accepts the trust dialog.
 - **render.gl.compileError** — `compileError(key): string | null` reads the latest shader compilation diagnostic for a program key.
 - **events.fonts** — `on('fonts', families => …)` receives the complete ordered font-family list whenever the catalogue changes.
 
-### Deprecated
+### Deprecated compatibility APIs
 
-`api.host.pm` and `api.host.state` exist for compatibility with older user
-extensions only. They are unstable, untyped escape hatches; new code must use the
-typed namespaces above. Both forms, plus the standalone `PM` identifier, fail the
-built-in extension boundary lint.
+Everything below keeps working at `apiVersion` 1 to 3, with the same
+signatures, synchronous return types and live objects as before, with "Use New
+Engine" on or off (the compatibility context's exact behavior and its few
+limits are in [The compatibility WebGL context](#the-compatibility-webgl-context)). Nothing refuses, disables or rewrites code that uses them,
+and no `apiVersion` change is needed to keep using them or to move off them:
+every replacement is available to every `apiVersion` (apiVersion 4 makes them
+part of its documented contract). New code must not use them.
+
+| Deprecated member | Replacement | What changes |
+| --- | --- | --- |
+| `render.snapshot` | `await api.render.snapshotAsync(time, maxWidth)` | Resolves to the same JPEG data URL without blocking the editor while the engine draws the frame. |
+| `render.renderFrameTo` | `await api.render.renderFrameToAsync(time, width, height, options)` | Resolves to the same opaque canvas without blocking the editor. |
+| `render.raster` | `await api.render.rasterAsync(layer, scale, time, crop)` | Resolves to the same raster surface (pixels, anchor, selection, fontOffset) without blocking the editor. |
+| `render.gl.context` | `api.layers.register({ renderer: { kind: 'fragment', fragment } }) to draw, await api.render.renderFrameToAsync(time, width, height) to read the frame` | A registered GLSL layer is drawn by the engine in preview and export; the compatibility context is a separate offscreen context that reads the frame on screen back and shows its drawing in the viewer until the next frame and in WebM exports after each frame:rendered handler; MP4, ProRes, PNG and still captures read the engine frame without that drawing. |
+| `services.raster` | `api.layers.register or api.effects.register (GLSL) to change pixels, await api.render.rasterAsync(layer) to read a layer` | Engine-drawn layers and effects need no synchronous round trip per layer and frame. |
+| `media.assets.get().el` | `await api.media.assets.source(id) and an element of your own` | Resolves to a browser-playable URL for the asset; your element owns its playback state. |
+| `media.assets.get().url` | `await api.media.assets.source(id)` | Resolves once a browser-playable rendition exists, instead of reading a field that may not be set yet. |
+| `media.assets.get().audioBlob` | `await api.media.assets.audio(id)` | Resolves to the asset's audio as a Blob once it is available. |
+| `media.assets.get().object3d` | `api.scene3d.describe(layerId)` | Describes the model's objects, materials and lights as data instead of a live three.js object. |
+| `host.pm` | `the typed namespaces (api.project, api.anim, api.model, api.transport, …)` | The legacy registry has no stable shape; every capability built-ins use is on a typed namespace. |
+| `host.state` | `api.project.latest(), api.project.selection(), api.project.time() and api.project.playing() (reactive in Svelte)` | The typed reads are reactive inside Svelte components and stable across versions. |
+
+- `media.assets.get()` means `api.media.assets.get(id)`: the live fields on its
+  result. `peaks` and `audioDecodeError` stay current members.
+- `services.raster` means registering or capturing the `raster` service with
+  `api.services.register('raster', …)` or `api.services.get('raster')`
+  ([Raster overrides](#raster-overrides-and-verification)).
+- The synchronous render members block the editor while the engine draws: the
+  engine renders in its own process, and the call waits for it. With the
+  engine on, `render.snapshot` returns `''` only when the frame really could
+  not be drawn, and throws today's error for an unprepared Blender frame.
+- `api.host.pm`, `api.host.state` and the standalone `PM` identifier also fail
+  the built-in extension boundary lint.
+
+### The compatibility WebGL context
+
+`api.render.gl.context` is null until a viewer hands a canvas to
+`api.render.gl.init`, then a WebGL2 context whose `canvas` is that canvas
+(`context.canvas === api.render.gl.canvas`), with "Use New Engine" on or off.
+Old custom viewers that find their canvas through it, or call `init` only
+while it is null, behave as before.
+
+With the engine off it is the compositor's own context, as it always was.
+With the engine on there is no compositor context; the context is a WebGL2
+context on an offscreen canvas with the compositor's attributes (no alpha,
+premultiplied, `preserveDrawingBuffer`, no antialiasing), sized like the bound
+canvas's drawing buffer. It behaves like the compositor's context:
+
+- **Reading the frame back.** Its default framebuffer holds the frame the
+  viewer shows: before the first `readPixels`, `copyTexImage2D`,
+  `copyTexSubImage2D` or `blitFramebuffer` that reads it, or the first draw
+  into it, after a frame was presented, the engine's frame on screen (the part
+  under the bound canvas) is put into it over opaque black. Reads return
+  today's layout: bottom row first, opaque.
+- **Drawing into it.** What you draw into the default framebuffer (clears,
+  draw calls, blits) shows in the viewer on top of the frame, under the
+  viewer's overlay, until the next frame is presented, as drawing into the
+  compositor's canvas did. Draw in a `frame:rendered` handler to draw on every
+  frame: the context holds the new frame by then.
+- **Exports.** WebM exports render each frame into the compositor's canvas
+  and emit `frame:rendered` before encoding it, so what a handler draws into
+  the context then is in the exported frame, as before. With the engine, each
+  WebM frame comes to the window first: the context holds it at the export's
+  size while `frame:rendered` runs (`time` is the frame's), and the frame
+  encoded is what the context then holds, or the engine's own frame when no
+  handler drew. MP4, ProRes, PNG and still exports, `render.snapshot`,
+  `renderFrameTo` and thumbnails draw their own frames and never include it,
+  as before.
+- **`context.canvas`** is the bound canvas, and it holds what today's canvas
+  held: the frame on screen, then anything drawn over it. `drawImage`,
+  `toDataURL()`, `toBlob()` and texture uploads from it read them. The bound
+  canvas stays hidden under the engine's presentation.
+- **Its own resources** (textures, framebuffers, programs) work as in any
+  WebGL2 context. It is not the context that draws the frame, so state you set
+  does not affect the engine's drawing (it could break the compositor's).
+
+The context stays the same object while the same canvas is bound. The
+offscreen canvas is `context.compatCanvas`. Reading back costs one copy of the
+frame per presented frame, and only for frames you read or draw on. Draw
+layers with a registered GLSL layer or effect, read frames with
+`api.render.renderFrameToAsync`, and find the canvas with
+`api.render.gl.canvas` instead.
+
+### Raster overrides with the new engine
+
+A `raster` service override keeps working in the viewer, in snapshots and
+captures, and in exports, with "Use New Engine" on or off. For every text,
+captions, and shape layer, the engine runs the override chain at the layer's
+own time and raster density, as today's compositor did, over the engine's
+raster of the layer. A layer the override returns unchanged (the captured
+service's own result object) is drawn by the engine itself; any other result
+is drawn on the quad it describes (`w`, `h`, `anchorX`, `anchorY`, `uv`).
+Return the captured service's result object itself for layers you do not
+change: a copy (`{ ...surface }`), a field you set on it, or its canvas you
+took (`surface.cv`) is treated as changed pixels. The fifth argument is
+today's preview crop window: in the viewer, a large text raster or a partly
+visible shape is asked for only the visible window of its raster (pass it
+on to the captured service, which returns `sourceWindow` for text and `uv`
+for shapes), a shape the viewport misses is not asked for, and a viewport
+inside a plain rectangle's fill draws the fill without calling the service,
+as before. Exports and snapshots pass no crop. A wrapper assigned to
+`PM.raster` through `api.host.pm` (the pattern before the services
+registry) runs outside the registered ones, as before. Give changed
+surfaces a `key` that changes whenever the pixels do: an unchanged key is not
+sent to the engine again. A wrapper that throws fails the frame, as it did:
+the viewer keeps the last frame and reports the error, and an export fails
+with its message. The plain layer is never drawn in its place.
+
+Exports from the export sheet, the render queue and `export_video` ask an
+editor window for these layers frame by frame, and the window draws the layer
+as the export's snapshot holds it (a queued job draws the project as it was
+queued). With no editor window that has the override, the export fails with
+that reason rather than drawing the layer without the override. The hidden
+host (`powermove mcp` without the app) and `pm-cli` have no window, so such an
+export fails there by name.
+
+**When Powermove finds one.** Reading, writing or compiling extension source
+in an agent run, validating and publishing staged extensions (every agent
+provider, and `publish_extensions` over MCP), and preparing a Store publish
+return a structured warning per use: `{ extension, file, line, column, member,
+replacement, access, message }`. `access` says how it was found: `static`
+(`api.render.snapshot`), `alias` (through a variable), `destructured`,
+`computed` (`api.render['snapshot']`), or `dynamic` (a computed key that may be
+one). The analysis is lexical and best-effort; it does not follow values
+through function parameters other than `activate`'s, object properties or
+imports. Warnings never block anything.
+
+**For agents.** Never use these members in new code. When an extension you
+read, compile or publish uses one, tell the user the file, line and
+replacement and suggest the migration. Make the change only when the user
+agrees; never rewrite working code silently, and never raise `apiVersion` for
+it.
 
 ## Patterns
 
@@ -775,6 +904,10 @@ changed in `extensions` so the app reloads them. If the app reports a build or
 activation error, fix the extension; do not work around by touching the app bundle.
 
 ### Raster overrides and verification
+
+Raster overrides are a [deprecated compatibility API](#deprecated-compatibility-apis):
+existing ones keep working in preview and export; new code draws with
+`api.layers.register` or `api.effects.register`.
 
 The host registers a `raster` service with the `RenderAPI['raster']` signature. Capture it with `api.services.get` before registering a wrapper under the same name. Delegate unaffected layers to the captured implementation; calling `api.render.raster` from inside the wrapper recurses. Native raster surfaces store their canvas in `cv`, with `w`, `h`, `anchorX`, `anchorY`, `selection` and a texture cache `key`. Preserve those fields when replacing pixels. The override affects preview and export and is removed automatically when the extension disposes.
 

@@ -81,6 +81,19 @@ export function migrateFormat(value: unknown, fallback: SheetFormat = 'h264'): S
   return LEGACY_FORMATS[value] ?? fallback;
 }
 
+/**
+ * The id a document or saved preset stores for a format: today's id where one
+ * exists (`prores`, `mp4`, `webm`), the new id otherwise. Extensions at
+ * apiVersion 1 to 3 read project documents and presets as today's app wrote
+ * them (issue P1); every reader in the app goes through `migrateFormat`.
+ * `previous`, the value stored before, is kept when it is an alias of the
+ * same format (today's `rec` still reads as `rec`).
+ */
+export function storedFormatId(format: SheetFormat, previous?: unknown): string {
+  if (typeof previous === 'string' && Object.hasOwn(LEGACY_FORMATS, previous) && LEGACY_FORMATS[previous] === format) return previous;
+  return legacyFormatId(format) ?? format;
+}
+
 /** The current exporter's id for a format it writes, or null. */
 export function legacyFormatId(format: SheetFormat): 'prores' | 'mp4' | 'webm' | 'png' | 'still' | 'web' | 'json' | null {
   switch (format) {

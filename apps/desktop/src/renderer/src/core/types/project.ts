@@ -1,4 +1,4 @@
-import type { ExportDefaults } from '../export-defaults';
+import type { StoredExportDefaults } from '../export-defaults';
 import type { CaptionsContent } from './captions';
 
 export type { CaptionCue, CaptionStyle, CaptionWord, CaptionsContent } from './captions';
@@ -448,7 +448,8 @@ export interface Comp {
    * mix wherever the composition plays: preview, export, and when nested. */
   audioGain?: number;
   /** Per-project export settings; nested comps carry the field but never use it. */
-  exportDefaults?: ExportDefaults;
+  /** Stored with today's format ids (`storedExportDefaults`); read through `normalizeExportDefaults`. */
+  exportDefaults?: StoredExportDefaults;
   /** The legacy library module installs this lazily. */
   library?: Record<string, unknown>;
   /** Free-form project notes are persisted by the demo and user projects. */

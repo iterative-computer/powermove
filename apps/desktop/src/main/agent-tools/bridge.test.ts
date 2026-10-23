@@ -161,7 +161,7 @@ describe('native Powermove agent tool bridge', () => {
     // The renderer stand-in answers the private plan and context tools.
     owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
       this.requests.push(request);
-      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(project), home: false }
+      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(project), home: false, compat: ['rasterOverride'] }
         : request.tool === '__engine_frames_plan' ? { times: [0, 0.5], width: 320, project: JSON.stringify(project), revision: 4 }
         : { tool: request.tool };
       queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 4 }));
@@ -185,7 +185,8 @@ describe('native Powermove agent tool bridge', () => {
       const session = await bridge.openSession({ runId: 'engine-run', owner: owner as never, baseRevision: 0 });
       const done = await bridge.callTool(session, 'export_video', { name: 'P', audio: false });
       expect(JSON.parse((done.content[0] as { text: string }).text)).toEqual({ path: '/exports/P.mp4', projectId: 'P', width: 320, height: 180, fps: 30, jobId: 'job-1' });
-      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, { name: 'P', format: 'mp4', range: 'all', audio: false, motionBlur: true, alpha: false, mode: 'wait' }, undefined);
+      // The window's raster override goes with the job (its layers are drawn by the window).
+      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, { name: 'P', format: 'mp4', range: 'all', audio: false, motionBlur: true, alpha: false, mode: 'wait' }, undefined, ['rasterOverride']);
       const queued = await bridge.callTool(session, 'export_video', { mode: 'async' });
       expect(JSON.parse((queued.content[0] as { text: string }).text)).toEqual({ status: 'queued', jobId: 'job-1', projectId: 'P' });
       const status = await bridge.callTool(session, 'get_render_status', { jobId: 'job-1' });

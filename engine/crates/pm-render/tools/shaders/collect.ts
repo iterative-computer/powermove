@@ -349,7 +349,7 @@ for (const dir of (await readdir(join(REPO, 'apps/cloud/samples'))).sort()) {
 }
 
 /* ── 5. e2e ────────────────────────────────────────────────────────── */
-for (const file of ['e2e/fixtures/typewriter-effect/index.ts', 'test/fixtures/sandboxed-ext/index.ts']) {
+for (const file of ['e2e/fixtures/compat-typewriter/index.ts', 'test/fixtures/sandboxed-ext/index.ts']) {
   if (existsSync(join(APP, file))) addRegistered('e2e', slug(file), await activate(join(APP, file)), `apps/desktop/${file}`);
 }
 for (const file of (await readdir(join(APP, 'e2e'))).filter((f) => f.endsWith('.spec.ts') && !f.includes(' 2.')).sort()) {
