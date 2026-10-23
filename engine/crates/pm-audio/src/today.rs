@@ -560,6 +560,9 @@ pub(crate) struct Shape {
     /// The clip's trim (`max(0, finite(trim))`).
     trim: f64,
     stepping: bool,
+    /// A precomposition on the path has an animated `trim`: the shape
+    /// depends on the time it is read at ([`Shape::new`]).
+    pub(crate) precomp_trim_animated: bool,
     step: f64,
     keys: Vec<f64>,
 }
@@ -619,7 +622,17 @@ impl Shape {
     /// Today's walk over the voice's path, or `None` for a voice today's
     /// model does not cover (a time map that is not linear, a negative
     /// layer start, a conformed rate).
-    pub(crate) fn new(plan: &VoicePlan, comps: &[Comp<'_>], root: &Node) -> Option<Shape> {
+    /// `at`: the evaluator and the time a precomposition's animated `trim` is
+    /// read at. Today's `audioLayers` reads it once with the precomposition
+    /// (`evaluatedValue(PM, layer, layer.d.trim, PM.time)`) when it builds
+    /// its index, at the playhead; the engine reads it where the range or
+    /// the run starts. Without `at` the static value is used.
+    pub(crate) fn new(
+        plan: &VoicePlan,
+        comps: &[Comp<'_>],
+        root: &Node,
+        mut at: Option<(&mut Evaluator, f64)>,
+    ) -> Option<Shape> {
         // Speed and remaps follow the picture (AUDIO-4). Everything else is
         // today's: a conformed rate is ignored (today plays a video's
         // soundtrack at its own rate), a negative start is clamped to 0,
@@ -631,6 +644,7 @@ impl Shape {
         let mut offset = 0.0f64;
         let mut window = (0.0f64, f64::INFINITY);
         let mut chain = Vec::new();
+        let mut precomp_trim_animated = false;
         for level in chain_levels {
             let layer = comps.get(level.comp)?.layers().get(level.layer)?;
             let from = number(node::member(Some(layer), "from"), 0.0);
@@ -638,7 +652,26 @@ impl Shape {
             let natural = offset + from.max(0.0);
             window = (window.0.max(natural), window.1.min(natural + dur));
             let d = node::member(Some(layer), "d");
-            let trim = static_value(node::member(d, "trim"));
+            let trim_node = node::member(d, "trim");
+            let trim = match (&mut at, is_property(trim_node)) {
+                (Some((ev, t)), true) => {
+                    precomp_trim_animated = true;
+                    ev.ev_p(
+                        comps.get(level.comp)?,
+                        Some(layer),
+                        trim_node,
+                        *t,
+                        &JsString::from("c.trim"),
+                    )
+                    .ok()?
+                }
+                (None, true) => {
+                    precomp_trim_animated = true;
+                    static_value(trim_node)
+                }
+                _ => static_value(trim_node),
+            };
+            // `Number(trim || 0)`.
             let trim = if trim.truthy() { trim.to_number() } else { 0.0 };
             let nested_id = node::string(node::member(d, "comp"))?.to_string_lossy();
             let nested = node::member(node::member(Some(root), "comps"), &nested_id)
@@ -702,6 +735,7 @@ impl Shape {
             window,
             trim,
             stepping,
+            precomp_trim_animated,
             step: 1.0 / fps.max(30.0),
             keys,
         })

@@ -203,7 +203,8 @@ fn offline_mixes_match_todays_export_audio() {
         }
         let rate = 48_000u32;
         let expected_len = (dur * rate as f64).round() as usize;
-        let (ours, problems) = render(loaded.clone(), &comp, &media, rate, expected_len);
+        let playhead = num(get(p, "playhead"));
+        let (ours, problems) = render(loaded.clone(), &comp, &media, rate, expected_len, playhead);
         if !problems.is_empty() {
             failures.push(format!("{name}: media problems {problems:?}"));
         }
@@ -214,7 +215,7 @@ fn offline_mixes_match_todays_export_audio() {
         // of the chain.
         let mut quantized = loaded;
         let whole_sample = quantize_in_points(&mut quantized, rate as f64)
-            .then(|| render(quantized, &comp, &media, rate, expected_len).0);
+            .then(|| render(quantized, &comp, &media, rate, expected_len, playhead).0);
         let (_, channels, legacy_rate, legacy) =
             read_wav(&std::fs::read(pdir.join("legacy.wav")).unwrap()).unwrap();
         assert_eq!(legacy_rate, rate);
@@ -418,6 +419,7 @@ fn render(
     media: &HashMap<String, PathBuf>,
     rate: u32,
     len: usize,
+    playhead: Option<f64>,
 ) -> ([Vec<f32>; 2], Problems) {
     let doc = Document::new(Some(loaded), 1);
     let cache = SourceCache::new(128 << 20, 0);
@@ -432,6 +434,8 @@ fn render(
         Evaluator::new(),
         cache,
     );
+    // Today reads a precomposition's animated trim at the playhead.
+    mixer.set_today_playhead(playhead);
     let mut ours = [Vec::new(), Vec::new()];
     offline::render(&mut mixer, 0, len as i64, 8192, |_, inter| {
         for (i, v) in inter.iter().enumerate() {

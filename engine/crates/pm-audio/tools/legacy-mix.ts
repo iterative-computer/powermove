@@ -296,6 +296,18 @@ function projects(): AudioProject[] {
   out.push({ name: 'conformed', doc: b.root, notes: 'A video interpreted at 24 fps.',
     after: `(() => { const PM = window.PM; for (const a of Object.values(PM.proj.assets || {})) if (a && a.kind === 'video') a.interpret = { frameRate: 24, frameRateRational: [24, 1] }; return true; })()` });
 
+  // A precomposition's animated trim: today reads it at the playhead when it
+  // builds its audio index. Captured with the playhead at the range start and
+  // elsewhere.
+  for (const [name, playhead] of [['precomp-trim', 0], ['precomp-trim-playhead', 1.2]] as const) {
+    b = newProject(`audio/${name}`, { name: 'Precomp animated trim', fps: 30, dur: 2.5 });
+    const inner2 = b.composition({ name: 'Inner', fps: 30, dur: 3 });
+    b.within(inner2, () => b.add(audioLayer(b, 'noise48.wav', { gain: 0.6 }, { from: 0, dur: 3 }), inner2));
+    b.add(b.layer('precomp', { name: 'Trimmed', from: 0.2, dur: 2, d: { comp: inner2.id, trim: b.ch(0.1, [[0, 0.1], [2, 0.9]]), audioGain: 0.9 } }));
+    out.push({ name, doc: b.root, notes: `A precomposition with a keyframed trim, playhead at ${playhead} s.`,
+      after: `(() => { const PM = window.PM; PM.time = ${playhead}; PM.bus.emit('layers'); return true; })()` });
+  }
+
   b = newProject('audio/embedded', { name: 'Embedded audio', fps: 30, dur: 2 });
   b.add(b.layer('video', { name: 'MOV soundtrack', from: 0.2, dur: 1.6, d: { asset: ref('h264-aac.mov'), fit: 'contain', w: 320, h: 180, trim: 0.3, embeddedAudio: true, audioGain: 0.8 } }));
   out.push({ name: 'embedded', doc: b.root, notes: 'A video soundtrack, offset and trimmed.' });
@@ -428,6 +440,7 @@ async function main() {
         record.mediaPending = await legacy.evaluate(() => (window as any).__corpus.waitForMedia(30000));
         // An edit after import (the asset records exist only now).
         if (project.after) await legacy.evaluateScript(project.after);
+        record.playhead = await legacy.evaluate(() => (window as any).PM.time);
         const loaded = await legacy.evaluate(() => JSON.stringify((window as any).PM.proj));
         writeFileSync(path.join(dir, 'loaded.json'), loaded + '\n');
         const mix = await renderLegacy(legacy, project.doc.dur);

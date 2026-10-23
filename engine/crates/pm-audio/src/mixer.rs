@@ -278,6 +278,9 @@ pub struct Mixer {
     bus_lead: Option<usize>,
     /// Scratch for [`Self::signed_zeros`].
     zero_state: Vec<u8>,
+    /// The playhead today's audio index was built at, when known
+    /// ([`Self::set_today_playhead`]).
+    today_playhead: Option<f64>,
     /// Scratch for wide bands.
     wide_out: Vec<Vec<f32>>,
     band_out: Vec<Vec<f32>>,
@@ -875,6 +878,7 @@ impl Mixer {
             bus: 0,
             bus_lead: None,
             zero_state: vec![],
+            today_playhead: None,
             wide_out: vec![],
             band_out: vec![],
             band_strips: vec![],
@@ -898,6 +902,21 @@ impl Mixer {
             origin,
             live: false,
         });
+    }
+
+    /// The playhead (seconds) at which today's `audioLayers` built its index:
+    /// it reads a precomposition's animated `trim` there. Without it the
+    /// range's or the run's start stands in.
+    pub fn set_today_playhead(&mut self, time: Option<f64>) {
+        if self.today_playhead == time {
+            return;
+        }
+        self.today_playhead = time;
+        for voice in self.voices.iter_mut() {
+            if matches!(&voice.today, Today::On(t) if t.shape.precomp_trim_animated) {
+                voice.today = Today::Unbuilt;
+            }
+        }
     }
 
     /// Today's playback from project sample `start` (a run of the player).
@@ -935,6 +954,13 @@ impl Mixer {
         plan: &VoicePlan,
         comps: &[pm_eval::Comp<'_>],
     ) -> Result<()> {
+        if let Today::On(t) = &self.voices[vi].today
+            && t.stale
+            && t.shape.precomp_trim_animated
+        {
+            // The path's offsets follow the trim read at the new start.
+            self.voices[vi].today = Today::Unbuilt;
+        }
         if let Today::On(t) = &mut self.voices[vi].today {
             if t.stale {
                 t.clip = crate::today::Clip::new(
@@ -958,7 +984,9 @@ impl Mixer {
         }
         let p = self.format.sample_rate;
         let root = self.doc.root();
-        let shape = root.and_then(|root| crate::today::Shape::new(plan, comps, root));
+        let t0 = self.today_playhead.unwrap_or(self.today_range.t0);
+        let shape = root
+            .and_then(|root| crate::today::Shape::new(plan, comps, root, Some((&mut self.ev, t0))));
         let source = &plan.source;
         let built = match (shape, source.length()) {
             (Some(shape), Some(frames)) => {

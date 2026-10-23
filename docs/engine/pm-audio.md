@@ -252,8 +252,15 @@ Matched since 2026-10-22: a negative layer start is clamped to 0 as `audioLayers
 (the clip plays from 0, shifted, with its local time from there); an animated `trim`
 is read once where the range or the run starts (`plan()`), and a video's from its own
 start; a conformed frame rate (Interpret Footage) is ignored, as today plays a
-video's soundtrack at its own rate and pitch. A precomposition's animated `trim`
-uses its static value (today evaluates it at the playhead when the export starts).
+video's soundtrack at its own rate and pitch. A precomposition's animated `trim`:
+today's `audioLayers` reads it with the precomposition at `PM.time`, the playhead
+when it last built its audio index (captures `precomp-trim` with the playhead at 0 and
+`precomp-trim-playhead` at 1.2 s differ by −16 dBFS from each other). The mixer reads
+it at `Mixer::set_today_playhead` when given, else at the range's (export) or the
+run's (playback) start; with the capture's playhead both projects are bit-identical.
+The export job does not receive the app's playhead yet (no `ExportSettings` field),
+so an export with such a trim matches today only when the playhead is at the range
+start: open, needs a protocol field.
 
 **Beta list (bug fixes against today, orchestrator decisions):**
 
