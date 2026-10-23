@@ -6,14 +6,17 @@
  * and journal patches; the checker explores, depth first by re-execution,
  * every order in which those posts and the pending disk operations can
  * happen, with one injected fault: a disk operation that fails, a slot write
- * the engine refuses, or the storage worker replaced (its operations
- * abandoned before or after they landed).
+ * or a journal entry the engine refuses (the window keeps the edit in its
+ * document), or the storage worker replaced (its operations abandoned before
+ * or after they landed).
  *
  * Every disk state any schedule passes through is a crash point. Each must
  * recover (shared/project-journal.ts recoverProject):
  * - a state the document actually had (after some number of its patches);
  * - never fewer patches than an earlier crash point in the same schedule;
  * - every patch the engine had acknowledged as written by then.
+ * And once every write has settled (quiescence), disk recovers the final
+ * document, or main's failing keys name the project.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -51,6 +54,7 @@ class ModelDisk {
       readFile: ((file: string) => live(() => { const data = this.files.get(String(file)); if (data === undefined) throw missing(String(file)); return data; })) as any,
       writeFile: ((file: string, data: any) => live(() => { this.files.set(String(file), typeof data === 'string' ? data : Buffer.from(data).toString('utf8')); })) as any,
       open: ((file: string) => live(() => {
+        if (String(file) === DIR) return { sync: async () => {}, close: async () => {} };
         const data = this.files.get(String(file));
         if (data === undefined) throw missing(String(file));
         return {
@@ -178,13 +182,14 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
       engine,
       // What a replacement engine would be given (only while one can still happen).
       unwritten: budget ? [...internal.unwritten].sort((a: any, b: any) => a[1] - b[1]).map(([name, id]: any) => [name, asVersion(id), internal.committed.get(name)?.toString('utf8') ?? null]) : null,
+      failing: [...internal.failing].map(([name, value]: any) => `${name}:${value.after !== undefined}`).sort(),
     }));
   };
   for (let step = 0; ; step++) {
     const here: Choice[] = [];
     if (next < script.length) {
       here.push('post');
-      if (budget && script[next] === 'S') here.push('refuse');
+      if (budget) here.push('refuse');
     }
     disk.gates.forEach((_, index) => { here.push(`ok:${index}`); if (budget) here.push(`fail:${index}`); });
     if (budget && (disk.gates.length || step > 0)) here.push('restart');
@@ -206,8 +211,8 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
         const patches = [{ path: ['edits'], exists: true, value: [...doc.edits, version] }, { path: ['f', String(version % 2)], exists: true, value: version }];
         doc = { ...doc, edits: [...doc.edits, version], f: { ...doc.f, [version % 2]: version } };
         docs.push(JSON.stringify(doc));
-        void store.appendJournal!('projectJournal.P', JSON.stringify({ revision: version, patches })).catch(() => {});
-        posted.set(lastPostId, { kind, version });
+        void store.appendJournal!('projectJournal.P', choice === 'refuse' ? '{refused' : JSON.stringify({ revision: version, patches })).catch(() => {});
+        if (choice !== 'refuse') posted.set(lastPostId, { kind, version });
       } else {
         void Promise.resolve(store.setSerialized!('project.P', choice === 'refuse' ? '{refused' : JSON.stringify({ v: '1', proj: doc }))).catch(() => {});
         if (choice !== 'refuse') posted.set(lastPostId, { kind, version });
@@ -225,6 +230,26 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
   }
 
   check();
+
+  // Quiescence: every write settles (no more faults); disk then holds the final document, or main says it does not.
+  for (let round = 0; round < 50; round++) {
+    let flushed = false;
+    void store.flushAll().then(() => { flushed = true; });
+    await settle();
+    while (disk.gates.length) {
+      const gate = disk.gates.shift()!;
+      try { gate.apply(); gate.settle(); } catch (error) { gate.settle(error as Error); }
+      await settle();
+    }
+    if (flushed && !disk.gates.length) break;
+  }
+  check();
+  const last = disk.states.at(-1)!;
+  const final = last.slot === null ? null : JSON.stringify(recoverProject(JSON.parse(last.slot), last.journal === null ? null : JSON.parse(last.journal)));
+  const failing = (store as any).failingKeys() as string[];
+  if (final !== docs.at(-1) && !failing.some(key => key === 'project.P' || key === 'projectJournal.P')) {
+    violations.push(`quiescent: disk recovers ${final === null ? 'nothing' : `version ${docs.indexOf(final)}`} of ${docs.length - 1}, and main reports nothing failing`);
+  }
   return { options, violations };
 }
 
@@ -278,7 +303,9 @@ describe('SAVE-1 model check', () => {
      has seen so far). Mutations of the protocol it catches: a failed slot
      write that shrinks the journal, recovery that ignores sequence numbers,
      a journal shrunk before its slot is on disk, a replacement engine that
-     does not read the journal on disk first. */
+     does not read the journal on disk first, an entry accepted after a
+     refused one, a journal reopened by a slot older than the refusal, and a
+     journal write silently skipped (quiescence). */
   it('every interleaving of 3 slot writes and 4 patches, with any one fault or worker restart, recovers a real state with every acknowledged patch', { timeout: 1_800_000 }, async () => {
     let schedules = 0;
     for (const script of scripts(3, 4)) {
@@ -287,5 +314,19 @@ describe('SAVE-1 model check', () => {
       expect(result.violations, script.join('')).toEqual([]);
     }
     console.log(`SAVE-1 model check (3 slot writes, 4 patches, 1 fault): ${schedules} schedules`);
+    expect(schedules).toBeGreaterThan(100_000);
+  });
+
+  /* Two faults: a refused entry then a worker replacement (which must keep
+     the journal closed), both slot writes failing, and the like. */
+  it('every interleaving of 2 slot writes and 3 patches, with any two faults, recovers a real state with every acknowledged patch', { timeout: 1_800_000 }, async () => {
+    let schedules = 0;
+    for (const script of scripts(2, 3)) {
+      const result = await explore(script, 2);
+      schedules += result.schedules;
+      expect(result.violations, script.join('')).toEqual([]);
+    }
+    console.log(`SAVE-1 model check (2 slot writes, 3 patches, 2 faults): ${schedules} schedules`);
+    expect(schedules).toBeGreaterThan(10_000);
   });
 });
