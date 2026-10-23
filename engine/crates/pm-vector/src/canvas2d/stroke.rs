@@ -53,6 +53,7 @@ struct Writer {
     n_p4: f32,
     deferred: Option<StrokePatch>,
     tolerance_n4: f32,
+    max_tolerance_n4: f32,
 }
 
 fn tangent_point(p0: P, p1: P, p2: P, p3: P) -> P {
@@ -66,7 +67,12 @@ fn tangent_point(p0: P, p1: P, p2: P, p3: P) -> P {
 }
 
 fn mix4(a: [f32; 4], b: [f32; 4], t: [f32; 4]) -> [f32; 4] {
-    [(b[0] - a[0]) * t[0] + a[0], (b[1] - a[1]) * t[1] + a[1], (b[2] - a[2]) * t[2] + a[2], (b[3] - a[3]) * t[3] + a[3]]
+    [
+        (b[0] - a[0]) * t[0] + a[0],
+        (b[1] - a[1]) * t[1] + a[1],
+        (b[2] - a[2]) * t[2] + a[2],
+        (b[3] - a[3]) * t[3] + a[3],
+    ]
 }
 
 impl Writer {
@@ -81,6 +87,7 @@ impl Writer {
             n_p4: -1.0,
             deferred: None,
             tolerance_n4: 1.0,
+            max_tolerance_n4: 1.0,
         }
     }
 
@@ -111,11 +118,16 @@ impl Writer {
         if p0 == p1 && p1 == p2 && p2 == last {
             return;
         }
-        let patch = StrokePatch { p: [p0, p1, p2, p3], conic, join: self.join };
+        let patch = StrokePatch {
+            p: [p0, p1, p2, p3],
+            conic,
+            join: self.join,
+        };
         if self.must_defer() {
             self.n_p4 = self.tolerance_n4;
             self.deferred = Some(patch);
         } else {
+            self.max_tolerance_n4 = self.max_tolerance_n4.max(self.tolerance_n4);
             self.out.push(patch);
         }
         self.last = last;
@@ -137,7 +149,11 @@ impl Writer {
             0
         } else {
             self.tolerance_n4 = MAX_PARAMETRIC_SEGMENTS_P4;
-            libm::ceilf((n4.min(MAX_SEGMENTS_PER_CURVE_P4) / MAX_PARAMETRIC_SEGMENTS_P4).sqrt().sqrt()) as i32
+            libm::ceilf(
+                (n4.min(MAX_SEGMENTS_PER_CURVE_P4) / MAX_PARAMETRIC_SEGMENTS_P4)
+                    .sqrt()
+                    .sqrt(),
+            ) as i32
         }
     }
 
@@ -148,12 +164,20 @@ impl Writer {
 
     fn write_circle(&mut self, p: P) {
         self.tolerance_n4 = 1.0;
-        self.out.push(StrokePatch { p: [p; 4], conic: false, join: p });
+        self.out.push(StrokePatch {
+            p: [p; 4],
+            conic: false,
+            join: p,
+        });
     }
 
     fn write_square(&mut self, p: P, join_to: Option<P>) {
         self.tolerance_n4 = 1.0;
-        self.out.push(StrokePatch { p: [p, p, p, [1.0, f32::INFINITY]], conic: true, join: join_to.unwrap_or(p) });
+        self.out.push(StrokePatch {
+            p: [p, p, p, [1.0, f32::INFINITY]],
+            conic: true,
+            join: join_to.unwrap_or(p),
+        });
     }
 
     fn write_cubic(&mut self, p: [P; 4]) {
@@ -165,7 +189,12 @@ impl Writer {
         let mut p = p;
         let mut n = n;
         while n >= 3 {
-            let t = [1.0 / n as f32, 1.0 / n as f32, 2.0 / n as f32, 2.0 / n as f32];
+            let t = [
+                1.0 / n as f32,
+                1.0 / n as f32,
+                2.0 / n as f32,
+                2.0 / n as f32,
+            ];
             let xy = |q: P| [q[0], q[1], q[0], q[1]];
             let ab = mix4(xy(p[0]), xy(p[1]), t);
             let bc = mix4(xy(p[1]), xy(p[2]), t);
@@ -201,8 +230,14 @@ impl Writer {
         let n4 = (v[0] * v[0] + v[1] * v[1]) * ((4.0 / 64.0) * (PRECISION * PRECISION));
         let n = self.account(n4);
         let as_cubic = |p0: P, p1: P, p2: P| -> [P; 4] {
-            let c1 = [(p1[0] - p0[0]) * (2.0 / 3.0) + p0[0], (p1[1] - p0[1]) * (2.0 / 3.0) + p0[1]];
-            let c2 = [(p1[0] - p2[0]) * (2.0 / 3.0) + p2[0], (p1[1] - p2[1]) * (2.0 / 3.0) + p2[1]];
+            let c1 = [
+                (p1[0] - p0[0]) * (2.0 / 3.0) + p0[0],
+                (p1[1] - p0[1]) * (2.0 / 3.0) + p0[1],
+            ];
+            let c2 = [
+                (p1[0] - p2[0]) * (2.0 / 3.0) + p2[0],
+                (p1[1] - p2[1]) * (2.0 / 3.0) + p2[1],
+            ];
             [p0, c1, c2, p2]
         };
         if n == 0 {
@@ -212,7 +247,12 @@ impl Writer {
         let (mut p0, mut p1) = (p0, p1);
         let mut n = n;
         while n >= 3 {
-            let t = [1.0 / n as f32, 1.0 / n as f32, 2.0 / n as f32, 2.0 / n as f32];
+            let t = [
+                1.0 / n as f32,
+                1.0 / n as f32,
+                2.0 / n as f32,
+                2.0 / n as f32,
+            ];
             let xy = |q: P| [q[0], q[1], q[0], q[1]];
             let ab = mix4(xy(p0), xy(p1), t);
             let bc = mix4(xy(p1), xy(p2), t);
@@ -263,12 +303,22 @@ impl Writer {
             let bc = mix4(h1, h2, t);
             let abc = mix4(ab, bc, t);
             let mid = [abc[0] / abc[3], abc[1] / abc[3]];
-            self.write_conic_patch([h0[0] / h0[3], h0[1] / h0[3]], [ab[0] / ab[3], ab[1] / ab[3]], mid, ab[3] / (h0[3] * abc[3]).sqrt());
+            self.write_conic_patch(
+                [h0[0] / h0[3], h0[1] / h0[3]],
+                [ab[0] / ab[3], ab[1] / ab[3]],
+                mid,
+                ab[3] / (h0[3] * abc[3]).sqrt(),
+            );
             h0 = abc;
             h1 = bc;
             n -= 1;
         }
-        self.write_conic_patch([h0[0] / h0[3], h0[1] / h0[3]], [h1[0] / h1[3], h1[1] / h1[3]], [h2[0], h2[1]], h1[3] / h0[3].sqrt());
+        self.write_conic_patch(
+            [h0[0] / h0[3], h0[1] / h0[3]],
+            [h1[0] / h1[3], h1[1] / h1[3]],
+            [h2[0], h2[1]],
+            h1[3] / h0[3].sqrt(),
+        );
     }
 
     /// `writeDeferredStrokePatch(moveTo, cap)`.
@@ -296,6 +346,7 @@ impl Writer {
                 }
             };
             patch.join = join;
+            self.max_tolerance_n4 = self.max_tolerance_n4.max(self.n_p4);
             self.out.push(patch);
         } else if let (Some(cap), true) = (cap, self.has_verb()) {
             match cap {
@@ -355,7 +406,10 @@ pub fn find_cubic_convex_180_chops(p: &[P]) -> (Vec<f32>, bool) {
             let root = b_over_minus_2 / qa;
             return if inside(root) { (vec![root], true) } else { (vec![], true) };
         }
-        let tan0 = [if c[0] != 0.0 { c[0] } else { p[2][0] - p[0][0] }, if c[1] != 0.0 { c[1] } else { p[2][1] - p[0][1] }];
+        let tan0 = [
+            if c[0] != 0.0 { c[0] } else { p[2][0] - p[0][0] },
+            if c[1] != 0.0 { c[1] } else { p[2][1] - p[0][1] },
+        ];
         let dot = |u: P, v: P| u[0] * v[0] + u[1] * v[1];
         qa = dot(tan0, a);
         b_over_minus_2 = -dot(tan0, b);
@@ -402,11 +456,24 @@ fn chop_cubic_at2(p: &[P], t0: f32, t1: f32) -> [P; 10] {
     // The second chop is at t1 within the remainder: (t1 - t0) / (1 - t0).
     let t = (t1 - t0) / (1.0 - t0);
     let second = chop_cubic_at(&first[3..7], t);
-    [first[0], first[1], first[2], first[3], second[1], second[2], second[3], second[4], second[5], second[6]]
+    [
+        first[0], first[1], first[2], first[3], second[1], second[2], second[3], second[4],
+        second[5], second[6],
+    ]
 }
 
 /// The stroke patches `TessellateStrokesRenderStep::writeVertices` writes.
 pub fn stroke_patches(path: &SkPath, m: &Mat, cap: Cap) -> Vec<StrokePatch> {
+    stroke_patches_with_tolerance(path, m, cap).0
+}
+
+/// Retain the allocator's pre-chop tolerance, including deferred patches.
+/// Recomputing it from the emitted cubics changes quad/line edge counts.
+pub(super) fn stroke_patches_with_tolerance(
+    path: &SkPath,
+    m: &Mat,
+    cap: Cap,
+) -> (Vec<StrokePatch>, f32) {
     let mut w = Writer::new(Vx::of(m));
     for (verb, pts) in path.segments() {
         match verb {
@@ -469,7 +536,7 @@ pub fn stroke_patches(path: &SkPath, m: &Mat, cap: Cap) -> Vec<StrokePatch> {
         }
     }
     w.write_deferred([0.0, 0.0], Some(cap));
-    w.out
+    (w.out, w.max_tolerance_n4)
 }
 
 fn eval_quad(p: &[P], t: f32) -> P {
@@ -480,7 +547,10 @@ fn eval_quad(p: &[P], t: f32) -> P {
 fn quad_mid_tangent(p: &[P]) -> f32 {
     // SkFindQuadMidTangent for the flat cusp case: the turnaround is where
     // the tangent reverses, at the parameter of the extreme point.
-    let a = [p[0][0] - 2.0 * p[1][0] + p[2][0], p[0][1] - 2.0 * p[1][1] + p[2][1]];
+    let a = [
+        p[0][0] - 2.0 * p[1][0] + p[2][0],
+        p[0][1] - 2.0 * p[1][1] + p[2][1],
+    ];
     let b = [p[1][0] - p[0][0], p[1][1] - p[0][1]];
     let den = a[0] * a[0] + a[1] * a[1];
     if den == 0.0 { 0.5 } else { (-(a[0] * b[0] + a[1] * b[1]) / den).clamp(0.0, 1.0) }
@@ -543,8 +613,14 @@ fn umix2(a: P, b: P, t: f32) -> P {
 /// The GPU's Wang's formula for a cubic (`wangs_formula_cubic`, not log2).
 fn gpu_wang_cubic(p: &[P; 4], m: &[f32; 4]) -> f32 {
     let mv = |v: P| [m[0] * v[0] + m[2] * v[1], m[1] * v[0] + m[3] * v[1]];
-    let d0 = mv([(-2.0f32).mul_add(p[1][0], p[2][0]) + p[0][0], (-2.0f32).mul_add(p[1][1], p[2][1]) + p[0][1]]);
-    let d1 = mv([(-2.0f32).mul_add(p[2][0], p[3][0]) + p[1][0], (-2.0f32).mul_add(p[2][1], p[3][1]) + p[1][1]]);
+    let d0 = mv([
+        (-2.0f32).mul_add(p[1][0], p[2][0]) + p[0][0],
+        (-2.0f32).mul_add(p[1][1], p[2][1]) + p[0][1],
+    ]);
+    let d1 = mv([
+        (-2.0f32).mul_add(p[2][0], p[3][0]) + p[1][0],
+        (-2.0f32).mul_add(p[2][1], p[3][1]) + p[1][1],
+    ]);
     let mm = (d0[0] * d0[0] + d0[1] * d0[1]).max(d1[0] * d1[0] + d1[1] * d1[1]);
     let k = (3.0 * 2.0 / 8.0) * PRECISION;
     libm::ceilf((k * mm.sqrt()).sqrt()).max(1.0)
@@ -563,7 +639,10 @@ fn gpu_wang_conic(p0: P, p1: P, p2: P, w: f32) -> f32 {
     }
     let dot = |a: P| a[0] * a[0] + a[1] * a[1];
     let m = dot(q[0]).max(dot(q[1])).max(dot(q[2])).sqrt();
-    let dp = [(-2.0 * w).mul_add(q[1][0], q[0][0]) + q[2][0], (-2.0 * w).mul_add(q[1][1], q[0][1]) + q[2][1]];
+    let dp = [
+        (-2.0 * w).mul_add(q[1][0], q[0][0]) + q[2][0],
+        (-2.0 * w).mul_add(q[1][1], q[0][1]) + q[2][1],
+    ];
     let dw = (-2.0f32).mul_add(w, 2.0).abs();
     let rp_minus_1 = m.mul_add(PRECISION, -1.0).max(0.0);
     let numer = dot(dp).sqrt() * PRECISION + rp_minus_1 * dw;
@@ -573,7 +652,15 @@ fn gpu_wang_conic(p0: P, p1: P, p2: P, w: f32) -> f32 {
 
 /// `tessellate_stroked_curve` for one vertex: device coordinates.
 #[allow(clippy::too_many_arguments)]
-fn stroked_vertex(edge_id: f32, max_edges: f32, affine: &[f32; 4], translate: P, max_scale: f32, patch: &StrokePatch, params: StrokeParams) -> P {
+fn stroked_vertex(
+    edge_id: f32,
+    max_edges: f32,
+    affine: &[f32; 4],
+    translate: P,
+    max_scale: f32,
+    patch: &StrokePatch,
+    params: StrokeParams,
+) -> P {
     let [mut p0, mut p1, mut p2, mut p3] = patch.p;
     let mut w = -1.0f32;
     if patch.conic {
@@ -589,7 +676,12 @@ fn stroked_vertex(edge_id: f32, max_edges: f32, affine: &[f32; 4], translate: P,
     } else if p0 == p1 || p1 == p2 {
         1.0
     } else {
-        let mv = |v: P| [affine[0] * v[0] + affine[2] * v[1], affine[1] * v[0] + affine[3] * v[1]];
+        let mv = |v: P| {
+            [
+                affine[0] * v[0] + affine[2] * v[1],
+                affine[1] * v[0] + affine[3] * v[1],
+            ]
+        };
         gpu_wang_conic(mv(p0), mv(p1), mv(p2), w)
     };
     let mut num_parametric_segments = num_parametric_segments_init;
@@ -603,7 +695,12 @@ fn stroked_vertex(edge_id: f32, max_edges: f32, affine: &[f32; 4], translate: P,
         num_radial_segments_per_radian(max_scale * params.radius)
     };
     let mut last_control = patch.join;
-    let mv = |v: P| [affine[0] * v[0] + affine[2] * v[1], affine[1] * v[0] + affine[3] * v[1]];
+    let mv = |v: P| {
+        [
+            affine[0] * v[0] + affine[2] * v[1],
+            affine[1] * v[0] + affine[3] * v[1],
+        ]
+    };
     if is_hairline {
         p0 = mv(p0);
         p1 = mv(p1);
@@ -611,8 +708,22 @@ fn stroked_vertex(edge_id: f32, max_edges: f32, affine: &[f32; 4], translate: P,
         p3 = mv(p3);
         last_control = mv(last_control);
     }
-    let mut tan0 = robust_normalize_diff(if p0 == p1 { if p1 == p2 { p3 } else { p2 } } else { p1 }, p0);
-    let mut tan1 = robust_normalize_diff(p3, if p3 == p2 { if p2 == p1 { p0 } else { p1 } } else { p2 });
+    let mut tan0 = robust_normalize_diff(
+        if p0 == p1 {
+            if p1 == p2 { p3 } else { p2 }
+        } else {
+            p1
+        },
+        p0,
+    );
+    let mut tan1 = robust_normalize_diff(
+        p3,
+        if p3 == p2 {
+            if p2 == p1 { p0 } else { p1 }
+        } else {
+            p2
+        },
+    );
     let mut prev_tan = robust_normalize_diff(p0, last_control);
     if tan0 == [0.0, 0.0] {
         join_type = 0.0;
@@ -632,7 +743,10 @@ fn stroked_vertex(edge_id: f32, max_edges: f32, affine: &[f32; 4], translate: P,
                 tan0 = prev_tan;
                 tan1 = prev_tan;
             } else {
-                p2 = [p0[0] + stroke_radius * prev_tan[0], p0[1] + stroke_radius * prev_tan[1]];
+                p2 = [
+                    p0[0] + stroke_radius * prev_tan[0],
+                    p0[1] + stroke_radius * prev_tan[1],
+                ];
                 p3 = p2;
             }
         }
@@ -644,7 +758,10 @@ fn stroked_vertex(edge_id: f32, max_edges: f32, affine: &[f32; 4], translate: P,
         let n = libm::ceilf(join_rads * num_radial_segments_per_radian).max(1.0);
         (n + 2.0).min(max_edges - 2.0)
     };
-    let mut turn = cross([p2[0] - p0[0], p2[1] - p0[1]], [p3[0] - p1[0], p3[1] - p1[1]]);
+    let mut turn = cross(
+        [p2[0] - p0[0], p2[1] - p0[1]],
+        [p3[0] - p1[0], p3[1] - p1[1]],
+    );
     let mut combined_edge_id = edge_id.abs() - num_edges_in_join;
     if combined_edge_id < 0.0 {
         tan1 = tan0;
@@ -707,8 +824,14 @@ fn stroked_vertex(edge_id: f32, max_edges: f32, affine: &[f32; 4], translate: P,
             a = [(-3.0f32).mul_add(e[0], d[0]), (-3.0f32).mul_add(e[1], d[1])];
         }
         c = cc;
-        let b_ = [b[0] * (num_parametric_segments * 2.0), b[1] * (num_parametric_segments * 2.0)];
-        let c_ = [c[0] * (num_parametric_segments * num_parametric_segments), c[1] * (num_parametric_segments * num_parametric_segments)];
+        let b_ = [
+            b[0] * (num_parametric_segments * 2.0),
+            b[1] * (num_parametric_segments * 2.0),
+        ];
+        let c_ = [
+            c[0] * (num_parametric_segments * num_parametric_segments),
+            c[1] * (num_parametric_segments * num_parametric_segments),
+        ];
         let mut last_parametric = 0.0f32;
         let max_parametric = (num_parametric_segments - 1.0).min(combined_edge_id);
         let neg_abs_rads = -rads_per_segment.abs();
@@ -781,9 +904,15 @@ fn stroked_vertex(edge_id: f32, max_edges: f32, affine: &[f32; 4], translate: P,
     }
     let ortho = [tangent[1], -tangent[0]];
     let k = stroke_radius * stroke_outset;
-    stroke_coord = [stroke_coord[0] + ortho[0] * k, stroke_coord[1] + ortho[1] * k];
+    stroke_coord = [
+        stroke_coord[0] + ortho[0] * k,
+        stroke_coord[1] + ortho[1] * k,
+    ];
     if is_hairline {
-        [stroke_coord[0] + translate[0], stroke_coord[1] + translate[1]]
+        [
+            stroke_coord[0] + translate[0],
+            stroke_coord[1] + translate[1],
+        ]
     } else {
         let d = mv(stroke_coord);
         [d[0] + translate[0], d[1] + translate[1]]
@@ -830,7 +959,12 @@ pub fn stroke_triangles(path: &SkPath, m: &Mat, params: StrokeParams, cap: Cap) 
 
 /// The number of strip edges a patch uses (join edges, combined segments,
 /// and the final edge), from the same formulas as the vertex function.
-fn edges_needed(patch: &StrokePatch, affine: &[f32; 4], max_scale: f32, params: StrokeParams) -> usize {
+fn edges_needed(
+    patch: &StrokePatch,
+    affine: &[f32; 4],
+    max_scale: f32,
+    params: StrokeParams,
+) -> usize {
     // Generous bound: join edges (at most the radial segments of half a
     // turn plus 2) plus parametric (at most the GPU's Wang count) plus
     // radial (at most half a turn per patch) plus 2.
@@ -839,8 +973,17 @@ fn edges_needed(patch: &StrokePatch, affine: &[f32; 4], max_scale: f32, params: 
     let half_turn = libm::ceilf(per_rad * core::f32::consts::PI).max(1.0);
     let [p0, p1, p2, p3] = patch.p;
     let param = if patch.conic {
-        let mv = |v: P| [affine[0] * v[0] + affine[2] * v[1], affine[1] * v[0] + affine[3] * v[1]];
-        if p0 == p1 || p1 == p2 { 1.0 } else { gpu_wang_conic(mv(p0), mv(p1), mv(p2), p3[0]) }
+        let mv = |v: P| {
+            [
+                affine[0] * v[0] + affine[2] * v[1],
+                affine[1] * v[0] + affine[3] * v[1],
+            ]
+        };
+        if p0 == p1 || p1 == p2 {
+            1.0
+        } else {
+            gpu_wang_conic(mv(p0), mv(p1), mv(p2), p3[0])
+        }
     } else if p0 == p1 && p2 == p3 {
         1.0
     } else {
@@ -851,7 +994,7 @@ fn edges_needed(patch: &StrokePatch, affine: &[f32; 4], max_scale: f32, params: 
 }
 
 /// `compute_svd`'s maximum (or the diagonal's for rect-stays-rect).
-fn svd_max(m00: f32, m01: f32, m10: f32, m11: f32, m: &Mat) -> f32 {
+pub(super) fn svd_max(m00: f32, m01: f32, m10: f32, m11: f32, m: &Mat) -> f32 {
     if m.kx == 0.0 && m.ky == 0.0 {
         return m.sx.abs().max(m.sy.abs());
     }

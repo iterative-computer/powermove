@@ -673,5 +673,13 @@ font seeds before resync, fail on a rejected binding and clear stale bindings
 before session ids are reused after a restart. Per-capture caption visibility
 is carried through the typed protocol and restored for later captures and
 viewer frames. See `text-render.md` and RFC 16. The fresh Round 7 app matrix
-passes 22/22; all 23 measured residuals match their FONTS-R budgets in debug
-and release, with every other case on its original strict bound.
+passed 22/22; the 23 measured residuals then matched their FONTS-R budgets
+in debug and release, with every other case on its original strict bound.
+
+Since textexact (10 retired) and textexact2 (the remaining 13), the FONTS-R
+ratchet holds no residuals: its fixture and approved ceilings are empty, and
+every case, including the 23 historical identities, is held to its original
+strict bound (1 CV raster, 2 CV composed). Eight of the 13 cases retired by
+textexact2 are byte-exact; five are within those bounds but not exact
+(`path-stroke-0001` and the composed and text-only frames of one private
+project at two times). See `text-render.md`, “Textexact2”.

@@ -871,7 +871,8 @@ SVG text. It avoids a circular dependency and keeps a single path renderer.
 Canonical glyphs of a draw share one recorded pass. Resolving each glyph
 separately was wrong for analytic rectangular glyphs next to curved paths:
 the curved draw requests MSAA for the pass, including the rectangle's
-triangle coverage at its corners. Device-space region rendering keeps the
+triangle coverage at its corners (textexact2 round 3 extends this to every
+unfiltered path draw of the canvas). Device-space region rendering keeps the
 full canvas's viewport round trip before cropping; its regression test
 compares a crop byte for byte with the full canvas for curved fills,
 rectangles and round strokes. Canonical fake-bold outlines are framed at
@@ -1544,27 +1545,305 @@ residual and raise no budget. The new synthetic oracles cover black COLR
 spans, the center-ignoring stroker and the convexity and rectangle
 classifications.
 
-## Gaps
+## Textexact2: Chromium 152 GPU and N32 execution
 
-FONTS-R now governs 13 nonzero residual checks, after ten closures above.
-They pass only at their exact recorded snapshot budgets and are not
-owner-rule blockers.
-Every unlisted case keeps its original strict bound; any regression, new
-residual or improvement with a stale budget still fails. The Round 4–6
-strict-failure counts above are historical; Round 7 adds the explicit
-orchestrator-approved ratchet while keeping glyph rasterization and reference
-captures unchanged. The separate capture-transport fixes are described above.
+This round retires the thirteen remaining FONTS-R snapshots. Both the JSON
+case list and the immutable `APPROVED` table are empty; contract tests reject
+restoring any retired raster or corpus measurement. The original raster
+bound remains 1 CV and the composed-text bound remains 2 CV. Captures,
+profiles and routing decisions are unchanged.
 
-- Three paper-caption captures remain nonexact: each has one pixel by
-  2 CV. Caption-pop, colored caption stroke and whisper now meet their
-  original bound. Counts and review filenames are in the ratchet; the lane
-  report resolves full-resolution legacy/native/difference sheets for all
-  13 remaining cases. The exact stage producing the paper pixel is not
-  established; no profile parameter was changed to hide it.
-- The closure distance-field residual `sdf-sizes-0004` remains (4 pixels by
-  2 CV). The three stroke/bold SDF failures are closed by the tangent fix.
-  The row-local backward distance walk still works with debug overflow
-  checks; it never subtracts beyond the first row.
+The native renderer now executes Graphite's analytic rectangle/rrect,
+fixed-count filled-curve and stroked-curve render steps on the GPU. Instance
+attributes, pre-chop/deferred tessellation allocation counts, middle-out
+vertices and indices follow the pinned source. Path unions use stencil and
+per-sample blending into desktop BGRA N32, with Metal's standard four-sample
+pattern and hardware resolve. Full canvas viewports are retained before
+cropping; shrinking a viewport changes interpolation and AA rounding.
+
+Electron 44.0.0 / Chromium 152.0.7977.54 pins Skia
+`b6d106297ff9ef2ff8094033695d045e87775581` and Dawn
+`571752c9cb3ed36a3194854374984427794c4dda`. The relevant shader modules
+and render-step sources agree with the independently built chrome/m152
+Skia `747cf654ed6f864f4402e7d6eb54a6ede60141e5`. Chromium disables
+Graphite ShaderF16 by default: its Dawn shaders execute this arithmetic in
+f32, despite the SkSL source's half declarations. The checked-in WGSL comes
+from the pinned Skia compiler; the production Metal stages come from that
+WGSL through the pinned Tint writer, using Dawn's relaxed math mode.
+Hidden diagnostic Electron runs confirmed the backend, source and buffer
+layout. Regeneration instructions and source licenses accompany the oracles.
+
+Unfiltered A8 glyphs retain coverage until their draw reaches the canvas.
+Paint and source-over blending happen directly into N32, eliminating the
+extra colored word-image quantization that caused the paper-caption pixel.
+Filtered draws retain their N32 save layer. Level 2 keeps its floating-point
+canvas. N32 readback explicitly converts BGRA storage into RGBA channels.
+
+The SDF path samples the source-generated R8 atlas with the source f32
+shader. A8 masks and distance fields share the skyline allocation history;
+original font-size identity is retained alongside the common SDF strike.
+A diagnostic sequence proved why both matter: the same 255 px glyph shader
+produces alpha 87 with a fresh atlas and the captured 89 after the preceding
+161/162/163/180/210 px draws. Repeating a size reuses its coordinates. The
+native sequence now reproduces all eight size captures byte-for-byte,
+including the retired `sdf-sizes-0004` and the previously newly failing
+`sdf-sizes-0005`. Direct masks still use their cached paint textures, while
+participating in the shared A8 allocator; this preserves their existing
+sampling path.
+
+Blink narrows the canvas draw origin before alignment and keeps glyph
+positions relative to the text blob. Canvas translate/scale/concat also
+narrow every argument and use SkM44's operation order. Preserving those
+boundaries closes the large-path sample disagreements and their composed
+frames; baking the origin into each glyph or concatenating in f64 changes
+one or more MSAA samples. Independent synthetic SkM44 records test both
+caption and animated-glyph operation sequences.
+
+Public independent oracles cover tessellation counts, eight complete
+synthetic padded distance fields, thirty skyline allocations and two
+Canvas matrix sequences. Private glyph checks also compared the actual
+padded fields and canonical outlines with pinned Skia, without putting
+fonts, captures or machine logs in Git. Final debug/release and app results
+are recorded in the lane report; no unobserved run is implied here.
+
+| Gate | Debug | Release (shipping thin-LTO) |
+|---|---:|---:|
+| Main raster, 1 CV | 495/495 strict | 495/495 strict |
+| Closure raster, 1 CV | 116/116 strict | 116/116 strict |
+| Large paths, 1 CV | 4/4 strict | 4/4 strict |
+| Source textures, 1 CV | 3/3 byte-identical | 3/3 byte-identical |
+| Composed text, 2 CV | 576/576 strict | 576/576 strict |
+| Ratchet contracts | 13 pass | 13 pass |
+| Canvas2D | 529, existing gate passes | 529, existing gate passes |
+| Path masks, text colors, GPU paint, level 2 | Pass | Pass |
+
+The 113 pm-render, 78 pm-vector and 78 pm-text unit checks pass in both
+profiles, including the new source oracles. All fourteen generated shader
+files reproduce byte-for-byte; the fifteenth file is the hand-written
+primitive input. All eight Metal stages compile with Metal 4.0.
+Canvas2D retains its four pre-existing exceptions; none is added or changed.
+The composed corpus retains the pre-existing non-text typewriter-definition
+refusal, comparing that project's text in isolation. These text results do
+not qualify the missing custom effect. Test-only SVG fixtures now clean up
+their own directories; the changed tests leave no files in a scoped temp
+root in either profile.
+
+The hidden app now replays all thirteen retired cases with Use New Engine
+off and on: nine source rasters through the public kernel `render.raster`
+API and four composed/isolated frames through `render.renderFrameTo`.
+All twenty-six setting comparisons meet the unchanged bounds. Every native
+case has the same maximum CV error as the Rust gate: eight source rasters
+are byte-identical, the remaining path stroke differs by at most 1 CV,
+and the four frames have maxima 2, 2, 2 and 1 CV. Raw snapshot bytes and
+the returned Canvas2D surfaces agree. Native versus freshly captured legacy
+app pixels also meets each case's original bound. The legacy app's SDF
+draw history produces twenty-nine 1-CV differences from the standalone
+capture; the native SDF raster remains byte-identical to the Rust reference.
+These comparisons do not add an exception or change a budget. The twelve
+app parity checks pass on Electron 44 / Chromium 152.
+
+This app replay exposed a layer-raster snapshot bug outside the direct
+Rust raster gate: `TextPlan::crop` stores edges, while `LayerPixels::Float`
+and the snapshot transport require an origin and extent. Passing the edges
+as extents changed the source row stride when restoring the padded canvas.
+The layer-raster adapter now converts the rectangle at that boundary. The
+served-font snapshot regression independently copies the expected cropped
+rows into a full canvas, instead of sharing the placement helper with the
+implementation.
+
+App integration now passes all twenty non-latency text cases. Separate native
+typing responsiveness checks cover sixty keys each in a 96 px title, a 48 px
+paragraph and 24 px system-ui text: every key reaches a newer presented
+revision, the resulting text is exact, and render/layer failures remain zero.
+The title's final document and displayed revision agree, with no pending
+key, protocol request, patch batch or fallback raster.
+
+The apparent fifteen-minute typing stall was the harness's machine-load
+wait before Electron launched. Measurement preconditions now fail immediately;
+quiet-machine waiting belongs outside the Electron lock. The busy-machine
+guard regression returns before launching the app. A distinct
+`PM_TEXT_TYPING_DIAGNOSE=1` mode exercises responsiveness under contention
+without qualifying the unchanged 33 ms latency target. A missed frame now
+fails after five seconds and saves the pending key, recent frames/batches,
+renderer and engine state, console and hidden-window capture. Fixture
+startup, shutdown and disposable-profile cleanup have their own lifecycle
+timeout; interaction deadlines are unchanged. All six canvas-editing checks
+pass after separating that cleanup from the interaction budget. The 33 ms
+typing measurement remains unqualified under machine contention.
+
+### Textexact2 round 2: glyph images beyond the atlas
+
+Review found a crash the shared A8 atlas introduced. Every unfiltered direct
+mask reserved atlas space, and `Atlas::allocate` ended in an `expect` that
+the glyph fits a 512 px plot. A transformed glyph could exceed that while
+its upright outline passed the scene's bounds check. For example, an
+animator skew near its 80° clamp on 75 px text at 2x gives a mask over
+600 px wide, which panicked the native render thread. Before textexact2,
+the same mask was composited as an image. Neither is what Chromium does.
+
+`SubRunContainer` (Skia m152, the pinned source) has two gates, now ported
+for level 1 canvas text under a non-axis-aligned matrix:
+
+- Masks and distance fields are drawn only while
+  `ApproximateTransformedTextSize` is below 256. That size is the text
+  size times `SkMatrix::getMaxScale`, the largest singular value. A skew
+  or non-uniform scale makes it larger than the uniform device size
+  (`sqrt|det|`) the scene previously used. At or above 256, every glyph of
+  the run draws in the path sub run: the canonical 64 px platform outline
+  under the glyph's matrix. Axis-aligned text is unchanged; for it, the
+  two sizes are equal.
+
+  Source, verified for Canvas2D in Chromium 152 (tag 152.0.7977.89, whose
+  `DEPS` pins Skia `b6d106297ff9ef2ff8094033695d045e87775581`; the files
+  below are byte-identical at the textexact pin `747cf654`):
+  - [`src/text/gpu/SubRunContainer.cpp`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/text/gpu/SubRunContainer.cpp#L1403-L1445),
+    `SubRunContainer::MakeInAlloc`: `maxMaskSize = subRunControl->maxSize()`;
+    per run, `approximateDeviceTextSize =
+    SkFontPriv::ApproximateTransformedTextSize(runFont, positionMatrix, ...)`;
+    the SDFT and direct-mask cases run only inside
+    `if (... && approximateDeviceTextSize < maxMaskSize)`. Otherwise the
+    whole run reaches the drawable and then the path case
+    (`SkStrikeSpec::MakePath`, `PathSubRun`), and outline glyphs end there.
+  - [`src/core/SkFont.cpp`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/core/SkFont.cpp#L372-L375):
+    without perspective, `ApproximateTransformedTextSize` returns
+    `font.getSize() * matrix.getMaxScale()`.
+  - [`src/text/gpu/SubRunControl.h`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/text/gpu/SubRunControl.h#L56)
+    `maxSize()` returns `fMaxDistanceFieldFontSize`, which
+    [`src/gpu/graphite/Caps.cpp`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/gpu/graphite/Caps.cpp#L365-L374)
+    `Caps::getSubRunControl` sets to `glyphsAsPathsFontSize()`, from
+    [`ContextOptions::fGlyphsAsPathsFontSize`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/include/gpu/graphite/ContextOptions.h#L84-L92):
+    256 under `SK_BUILD_FOR_MAC`.
+  - Chromium's
+    [`GetDefaultGraphiteContextOptions`](https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.89/gpu/command_buffer/service/skia_utils.cc)
+    does not override `fGlyphsAsPathsFontSize`.
+
+  The position matrix is the canvas transform including the raster
+  density, so an accelerated Canvas2D `fillText` under a skew animator is
+  routed by it. A 100 px title at 2x under a 30° skew (largest scale
+  1.33, size 266, every glyph mask under 256 px) draws as paths in
+  Chromium and in the engine; before this gate the engine drew it in the
+  large-text regime.
+- A direct mask over `kSkSideTooBigForAtlas` (256 px in either dimension,
+  `SkGlyphDigest::fitsInAtlasDirect`) is rejected to the same path sub run.
+  An example is a Zapfino glyph that fits upright but is rotated 45°. This
+  applies to plain, synthetic-bold and transformed masks, as
+  `strokeText` already did. CoreGraphics no longer rasterizes such a mask:
+  `matrix_mask` returns its bounds only, with empty coverage. The
+  previous 4096 px cap had dropped those glyphs silently.
+
+The atlas no longer panics. Allocation is fallible. A mask or field larger
+than a plot is never placed and never resets the atlas generation, so
+placements of fitting glyphs (and the SDF history they feed) are
+unaffected. If a distance field over a plot ever reached the native
+Graphite executor, it would keep the CPU primitive image. The scene emits
+fields only up to 256 px.
+
+Regression tests:
+
+- `transformed_text_at_the_path_size_draws_as_paths` (pm-text) covers the
+  size gate alone. Arial `.`, `i` and `l` at 60 px under 2x and a 60° skew
+  (size 262.7) and at 48 px under 2 × scale(2.8, 1) (size 268.8) draw as
+  canonical paths, although each glyph's matrix mask is under 256 px and
+  the uniform device size (120 and 160.6 px) is below the large and
+  distance-field ranges. Controls at a 55° skew and scale(2.5, 1) (233.1
+  and 240) stay in the atlas. With the `max_scale` term removed, the test
+  fails on the first case (`skew 60 '.'`: a mask instead of a path).
+- `glyph_images_beyond_the_atlas_draw_as_paths` (pm-text) covers
+  `fitsInAtlasDirect`. Its 45° Zapfino rotation keeps the largest scale at
+  2 (100 px), so only the mask-size gate sends it to paths. The 80° skew
+  of 75 px `H` is also above the size gate (about 860 px), so it passes
+  with either gate alone; so does `text_gpu`'s skew80 render. A nearly
+  upright rotation keeps its mask.
+- `glyphs_beyond_a_plot_are_never_placed` (pm-render atlas, 624×114 and
+  64×4096 masks and a 513 px field) and `text_gpu`'s skew80/rotated
+  renders through the full GPU path. Without the fix, the last one panics
+  at the old `expect`.
+
+Chromium pixel reference (2026-10-22, Apple M4 Max, Electron 44 /
+Chromium 152, under `pm-electron-lock`). `capture/transformed-project.ts`
+writes four Arial "Hill." layers at layer scale 200% under a skew
+animator at time 0; `capture/source.ts --project ... --times 0 --out
+text-transformed-<stamp>` rasterizes them with today's app
+(`PM.raster`, density 2). Compared through `text_raster`
+(`PM_TEXT_RASTER=<capture>`):
+
+| Case | Size × max scale | Route | Pixels > 1 CV (max) | Without the gate |
+|---|---|---|---|---|
+| 60 px, skew 60° | 262.7 | paths | 6 (19 CV) | 2657 (217 CV), ink SSIM 0.906 |
+| 100 px, skew 30° | 265.9 | paths | 7 (24 CV) | 2644 (201 CV), ink SSIM 0.951 |
+| 60 px, skew 55° | 233.1 | distance fields | 3 (2 CV) | 8 (3 CV) |
+| 100 px, skew 20° | 239.7 | distance fields | 0 (1 CV) | 0 (1 CV) |
+
+The gate is confirmed: Chromium draws both path-size cases as paths, and
+without the gate the engine differs on about 2650 pixels. The residuals
+in the table were closed in round 3 (below), and the capture set is now
+gated; the table records the state before round 3.
+
+The exactness wording for the thirteen retired cases: eight are
+byte-identical, and five are within their original strict bounds but not
+exact. These are `path-stroke-0001` (1 CV) and the composed and text-only
+frames at t16/t18 (maxima 2, 2, 2, 1 CV, the 2 CV bound).
+
+Determinism. Native SDF pixels depend on the process-wide atlas history,
+as in Chromium. A distance field's atlas texel position changes f32
+interpolation, so `sdf-sizes-0004` matches only after the preceding
+161–210 px draws. Preview and export pixels of 162–256 px text can
+therefore depend on what was drawn before in the same process. The text
+raster cache key does not include atlas placement, so a cached raster
+keeps the placement of its first draw. Exports are reproducible for the
+same draw order, not across arbitrary orders. Matching Chromium exactly
+requires this, and it is disclosed rather than changed.
+
+Unmeasured performance risk in the native Graphite executor (`Gpu::render`):
+
+- Each draw is its own render pass that loads and stores the full
+  canvas-viewport target.
+- MSAA color and depth/stencil attachments are allocated per raster at full
+  viewport size, without pooling.
+- Uniform, storage and vertex buffers and bind groups are created per
+  draw.
+- Atlas lookups are linear scans until the four-page generation reset.
+
+Frame time and memory for large or animated text (for example a 5688×991
+viewport at 4× MSAA) are unmeasured; the performance lane owns them.
+
+The app-level replay of the thirteen cases is now in the repository as
+`e2e/native-engine-text-app-parity.spec.ts`. Every identifier and capture
+path comes from a private manifest named by `PM_TEXT_APP_PARITY`; without
+it, the spec skips. The e2e session fixture now attaches each test's
+`session-teardown` durations (app close and profile cleanup), so a slow
+native shutdown shows up as a number, not only as a fixture timeout.
+
+Round 2 measurements (2026-10-22, release thin-LTO gates, release addon):
+
+| Check | Result |
+|---|---|
+| `text_raster` (main, closure, large paths, source) | 495, 116, 4, 3: all within 1 CV, 0 ratcheted, 0 failed |
+| `text_corpus` | 576/576 within 2 CV; every per-frame line identical to the previous qualified run |
+| `text_residuals`, `text_gpu` (incl. skew80/rotated), `text_colors`, `text_level2` | pass |
+| pm-text (cg-masks) / pm-render lib / pm-vector `render` (debug) | 79 / 114 / 78 + integration, pass |
+| App replay, 18 tests (12 parity + 6 canvas-text), host load about 8–10 | 18/18 |
+
+The app parity rows are unchanged from the first textexact2 run. Natively,
+eight rasters are byte-identical; `path-stroke-0001` has max 1 CV over
+1065 px; the composed and isolated t16/t18 frames have maxima 2, 2, 2 and
+1 CV over 1262, 1331, 860 and 984 px. All are within their strict bounds.
+With the setting off, everything is identical except the legacy SDF
+history's 29 px of 1 CV on `sdf-sizes-0004`. Teardown in this run: app
+close took 55–774 ms and profile cleanup 4–10 ms. The roughly 30 s
+teardowns seen at load 53–67 were not reproduced at this load, so their
+cause remains undiagnosed.
+
+Before round 3, none of the gated captures had a rotated or skewed glyph.
+Round 3 adds the `text-transformed-*` set, which covers both gates with
+captured Chromium pixels (below).
+
+
+All thirteen previous FONTS-R residuals meet their original strict bounds
+in the full comparisons above. No residual budget remains. Full
+qualification results and any outstanding measurement gaps are in the
+textexact2 lane report. Every case retains its original strict bound.
+
 - COLR v0's two residuals are closed by ordered N32 span blending above.
   Whole-pixel placement uses the text blob's 1/8-pixel x bias.
   Radial/sweep paints, composite modes,
@@ -1573,13 +1852,25 @@ captures unchanged. The separate capture-transport fixes are described above.
   treat them as a closed parity class. Black solid layers (palette black or
   black foreground) match Skia's black blitter in the synthetic N32
   oracle, but none of the captured COLR glyphs has a black layer.
-- The real project is compared in full and in isolation. Shared Canvas2D
-  pass decisions reduce its actual t16/18/24 source-texture residuals to
-  6/6/2 pixels beyond 1 CV, max 64/64/5. Sparse curved-edge/MSAA sample
-  disagreements remain, including with the shared path renderer. These
-  remain nonexact and are covered only by their exact FONTS-R snapshots;
-  the 2-CV composition bound is unchanged. The ratchet lists each composed
-  frame separately.
+- The real project's t16/18/24 source textures are byte-identical in the
+  source-texture gates. Its composed and isolated t16/18 frames meet the
+  unchanged 2-CV bound. Other platform/Chromium versions remain unmeasured.
+- Viewports larger than the GPU's maximum 2D texture dimension retain the
+  CPU primitive reference. The SDF atlas uses bounded generations when all
+  four pages fill, preserving already-encoded texture reads; it does not
+  reproduce Chromium's complete memory-pressure eviction/draw-token policy.
+  Those oversized and eviction paths lack independent captured parity.
+- Skewed, rotated or non-uniformly scaled canvas text follows Skia's
+  `ApproximateTransformedTextSize` and `fitsInAtlasDirect` gates (round 2),
+  pixel-qualified at 1 CV by the gated `text-transformed-*` capture
+  (round 3). Within a box around pixels where an item drawn between two
+  path draws of the same canvas has ink under the later one, the path
+  draws keep separate passes; per-sample blending of such an item with
+  two path draws that share an edge pixel inside that box is not modelled
+  (no capture reaches it).
+- The CPU SDF reference retains its earlier half-precision draw emulation;
+  native GPU rendering uses the f32 Dawn shader. CPU-only SDF parity has
+  not been newly qualified by this round.
 - Animator blur now meets the unchanged 2-CV corpus bound through the
   shared quantized Graphite plan/executor, including isolation and the
   original project. It no longer uses the text-only float Gaussian.
@@ -1631,8 +1922,167 @@ captures unchanged. The separate capture-transport fixes are described above.
   reported missing bitcode. The cause was pm-media bundling CrabbyAvif's
   Rust staticlib into its rlib, not the compile cache; the shipping profile
   is verified since, see [release-build.md](release-build.md).
+- Textexact2's release gates and native addons use the shipping thin-LTO
+  profile; earlier rounds' non-LTO results remain historical.
+
+### Textexact2 round 3: one render pass per canvas
+
+Review of round 2 found the transformed-size capture outside the gated
+sets: two path-size cases failed the strict bound (6 and 7 pixels, up to
+24 CV) and the 55° distance-field control had 3 pixels at 2 CV. A
+glyph beyond the atlas under a rotation or skew had no captured pixels.
+
+**Cause of the path residuals.** Every pixel over the bound was on a glyph
+drawn as an analytic rectangle: Arial `l` and `.` are rectangles, so
+`Device::drawPath` sends their canonical paths to `AnalyticRRectRenderStep`
+(`SkPath::isRect`). The tessellated glyphs (`H`, `i`) need MSAA. Chromium
+replays the canvas into one Graphite render pass, and Graphite picks one
+sample count per pass: `DrawList` records whether any draw needs MSAA and
+`DrawContext::flush` multisamples the whole pass. The rectangles of an
+animator's per-glyph `fillText` calls are therefore rasterized per sample
+at their mesh edges. The engine rasterized each call's paths in a pass of
+its own, so a call holding only rectangles resolved pixel centers: the
+acute corners of the skewed rectangles lost samples (for example alpha 62
+instead of 79, and 0 instead of 18 below a baseline corner). Forcing
+those passes multisampled made both cases exact before any other change.
+
+**Fix.** `scene::resolve_canvas_pass` runs after a canvas's draws are
+recorded (animated text, plain text, captions, `render::text_raster`):
+
+- The pass is multisampled when any unfiltered path draw needs MSAA, or
+  when the caller says so (a caption box is a tessellated fill).
+- Unfiltered path draws are drawn again together, in order, into one
+  target (`PathRasterizer::raster_pass`; `Context::multisample_pass`
+  marks a pass multisampled for draws recorded elsewhere). Overlapping
+  draws then blend per sample before the resolve, as in Chromium. The
+  Zapfino capture below needs this: two rotated `g`s share edge pixels
+  whose samples they cover between them (alpha 223 per item composite,
+  255 per sample).
+- The merged pass takes the place of the first draw. Where an item drawn
+  between them (a direct mask, an image) has ink under a later path
+  draw, the draws keep their own places and passes inside the box around
+  those pixels; the rest of the merged pass is emitted as crops of the
+  same viewport around that box. A filtered or vector-coverage item
+  within reach of a later draw ends the group.
+- A filtered `fillText` keeps its save layer's own pass.
+- Direct-mask quads are pixel aligned and distance-field quads end two
+  texels outside the field's padded ink, so neither depends on the pass's
+  sample count; they keep their items.
+
+**Distance-field control.** The 55° residual is atlas history. The app
+capture of round 2 loaded the project visibly, so its preview drew the
+text into Chromium's shared glyph atlas before `PM.raster` ran. All three
+pixels sit on the right edge of `H`'s field quad, where the derivative of
+the distance uses a helper pixel that samples beyond the field, into
+whatever the atlas holds next to it. `source.ts --hide-layers` now loads
+the project with every layer hidden, so the atlas holds only the captured
+rasters, in capture order, as `text_raster` replays them. With hidden
+layers the 55° case is within 1 CV. Captured again without hiding (the
+preview variant, kept outside the corpus), the same 3 pixels at 2 CV
+return: the difference follows Chromium's history, not the shader.
+Reordering the engine's own history moves three other pixels of that case
+by 1 CV and leaves these three unchanged.
+
+**Capture.** `capture/transformed-project.ts` now writes eight layers:
+the four Arial cases, Arial at 75 px under 80° (`text_gpu`'s skew80),
+and Zapfino "gag" at 50 px rotated 45°, skewed 30° and rotated 1°. At
+2x the Zapfino sizes are 100 and 133 px, below the distance-field range;
+each `g` is a direct mask whose transformed image exceeds 256 px, so it
+draws as its canonical path (`fitsInAtlasDirect`), while each `a` stays a
+mask. The 1° control keeps every mask. `text-transformed-*` is now one of
+`text_raster`'s gated sets.
+
+Chromium reference: 2026-10-23, Apple M4 Max, Electron 44 / Chromium 152,
+`source.ts --hide-layers` under `pm-electron-lock`. Release (thin-LTO)
+`text_raster`, strict 1 CV, no ratchet entries:
+
+| Case | Route | Before round 3 | Round 3 |
+|---|---|---|---|
+| Arial 60 px, skew 60° | paths (size 262.7) | 6 px (19 CV) | 0 (max 1) |
+| Arial 60 px, skew 55° | distance fields | 3 px (2 CV), visible preview | 0 (max 1) |
+| Arial 100 px, skew 30° | paths (size 265.9) | 7 px (24 CV) | 0 (max 0) |
+| Arial 100 px, skew 20° | distance fields | 0 (max 1) | 0 (max 1) |
+| Arial 75 px, skew 80° | paths (size gate) | not captured | 0 (max 1) |
+| Zapfino 50 px, rotated 45° | `g` paths, `a` mask | not captured; 2 px (32 CV) with per-item passes | 0 (max 1) |
+| Zapfino 50 px, skew 30° | `g` paths, `a` mask | not captured | 0 (max 1) |
+| Zapfino 50 px, rotated 1° | masks | not captured | 0 (max 0) |
+
+Regression tests (pm-vector `canvas2d::text`):
+
+- `a_multisampled_pass_draws_earlier_analytic_glyphs_per_sample`: a
+  skewed rectangle and an `H` outline drawn by separate calls differ from
+  one call at the rectangle's corners; after `resolve_canvas_pass` they
+  are byte-identical to one call. A filtered call keeps its own pass; a
+  caller-multisampled pass redraws a lone rectangle.
+- `overlapping_draws_of_a_pass_blend_per_sample`: two concave halves with
+  a slanted seam composite with a lighter seam per item, and exactly as
+  one pass after resolution.
+- `a_pass_keeps_the_order_of_items_between_its_draws`: an image between
+  two path draws merges them when it is disjoint from the later one; under
+  an opaque later draw the result equals the one-pass draw; under a
+  translucent one, the image's box keeps the original order pixel for
+  pixel and the rest is the merged pass.
+
+App replay (2026-10-23, release thin-LTO addon, hidden app,
+`native-engine-text-app-parity.spec.ts` with a private manifest that adds
+the transformed set, replayed in capture order): with Use New Engine on,
+all eight transformed rasters are within 1 CV of the capture (maxima 0–1,
+0 pixels over), and the earlier paper, distance-field, path, source,
+composed and isolated groups still pass: 7 of 7 "on" tests. With the
+setting off, today's renderer differs from its own capture on the 55°
+distance-field case: 3 pixels at 2 CV (5 pixels in a second session). The
+app session's own text (UI, preview) fills Chromium's glyph atlas first,
+so today's pixels for that case vary between sessions by up to 2 CV on
+distance-field quad edges. That is a property of today's renderer; the
+gated capture fixes the history (hidden layers) and the engine reproduces
+it. The off-mode check of that case fails the 1-CV bound and is reported,
+not loosened.
+
+The CPU primitive images of Graphite items (kept for viewports beyond the
+GPU texture limit) are not exact. Forcing them for every case: the main
+set still passes; `sdf-sizes-0004` (4 px, 2 CV), `path-stroke-0000`
+(154 px, 4 CV), the three source textures (2 px each, up to 13 CV) and five
+transformed cases (up to 32 CV) fail. Only the native executor is
+qualified; those viewports remain an open gap, unchanged by this round.
 
 ## Changes outside the lane
+
+2026-10-23 (lane ne-textexact2, round 3):
+
+- `pm-vector/src/canvas2d/context.rs` (shared Canvas2D): `multisample_pass`
+  marks a context's pass multisampled for draws recorded elsewhere; the
+  existing per-op MSAA decision is unchanged otherwise.
+- `pm-vector/Cargo.toml`: `pm-skia-path` as a dev-dependency (test paths).
+- `pm-render/tests/text_raster.rs`: the `text-transformed-*` gated set.
+
+2026-10-22 (lane ne-textexact2, round 2):
+
+- `apps/desktop/e2e/helpers/app.ts`: `LaunchedApp.teardown` records the
+  app close and profile cleanup durations; the session fixture attaches
+  them (`session-teardown`) to every test.
+- `apps/desktop/e2e/native-engine-text-app-parity.spec.ts` (new): the
+  manifest-driven app parity replay.
+
+2026-10-21 (lane ne-textexact2):
+
+- `pm-gpu/src/readback.rs` and `tests/readback.rs`: BGRA N32 readback
+  returns RGBA channels; a two-pixel test covers both storage formats.
+- `pm-render/src/vector/{svg,svg_rasters}.rs`: test-only scoped fixture
+  cleanup. Product SVG rendering is unchanged.
+- `apps/desktop/e2e/helpers/app.ts`: the `session` fixture has its own
+  60 s timeout, separate from the test's deadline. This applies to every
+  e2e spec. App shutdown and profile cleanup had taken about 30 s under
+  load, failing four canvas-text tests in teardown. That slow teardown
+  was not diagnosed; round 2 records its durations.
+- `pm-render/src/renderer/layer_raster.rs`: the text crop converts
+  `TextPlan::crop` edges to the `[x, y, w, h]` origin and extent that
+  `LayerPixels::Float` documents. This is the app crop-stride fix.
+- `pm-node/tests/render_fonts.rs`: served-font snapshot regression for
+  that crop, with independently placed expected rows.
+- `pm-vector/src/canvas2d/{context,stroke,mod,text}.rs` and the new
+  `native.rs`: the `native_paths` opt-in (`retain_native_paths`) that hands
+  Canvas2D glyph paths to the native Graphite executor. `context.rs` and
+  `stroke.rs` also carry large rustfmt-only reformatting.
 
 2026-10-19 (lane ne-textl2, round 4):
 
