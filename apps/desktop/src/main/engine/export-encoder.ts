@@ -91,6 +91,7 @@ export class ExportEncoders {
   private live: Promise<Live> | null = null;
   private receiverWindow: EncoderWindow | null = null;
   private closeTimer: Timer | null = null;
+  private disposed = false;
   private readonly schedule: (fn: () => void, ms: number) => Timer;
   private readonly closeMs: number;
   private readonly idleMs: number;
@@ -104,6 +105,13 @@ export class ExportEncoders {
   receiver(): Receiver | null { return this.receiverWindow?.receiver ?? null; }
 
   retireSurface(generation: number): void { this.receiverWindow?.retire?.(generation); }
+
+  /** Open only the hidden window while a user WebM snapshot is prepared. */
+  warm(): void {
+    if (this.disposed) return;
+    void this.window().catch(() => undefined);
+    this.scheduleCloseIfIdle();
+  }
 
   /** Encodes in flight (tests and diagnostics). */
   get active(): number {
@@ -189,6 +197,7 @@ export class ExportEncoders {
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const session of [...this.sessions.values()]) this.end(session);
     this.closeTimer?.cancel();
     this.closeTimer = null;
@@ -243,7 +252,11 @@ export class ExportEncoders {
     session.idle = null;
     if (this.sessions.get(session.key) !== session) return;
     this.sessions.delete(session.key);
-    if (this.sessions.size === 0 && !this.closeTimer) {
+    this.scheduleCloseIfIdle();
+  }
+
+  private scheduleCloseIfIdle(): void {
+    if (!this.disposed && this.sessions.size === 0 && !this.closeTimer) {
       this.closeTimer = this.schedule(() => {
         this.closeTimer = null;
         if (this.sessions.size) return;
@@ -299,9 +312,13 @@ export class ExportEncoders {
   }
 
   private window(): Promise<Live> {
+    if (this.disposed) return Promise.reject(new ProtocolError('cancelled', 'The export encoder host is shutting down.'));
     if (!this.live) {
-      const opening = this.options.openWindow().then((window) => {
-        this.receiverWindow = window;
+      const opening = Promise.resolve().then(() => {
+        if (this.disposed) throw new ProtocolError('cancelled', 'The export encoder host is shutting down.');
+        return this.options.openWindow();
+      }).then((window) => {
+        if (this.live === opening) this.receiverWindow = window;
         const live: Live = { window, seq: 0, waiting: new Map(), gone: false };
         window.onReply((reply) => {
           if (reply.type === 'ready') return;
@@ -311,10 +328,11 @@ export class ExportEncoders {
           waiting.resolve(reply);
         });
         window.onGone((reason) => {
-          if (this.live === opening) this.live = null;
+          const current = this.live === opening;
+          if (current) this.live = null;
           this.retire(live, reason);
           // Every encode in the window is lost with it.
-          for (const session of [...this.sessions.values()]) this.end(session);
+          if (current) for (const session of [...this.sessions.values()]) this.end(session);
         });
         return live;
       });
