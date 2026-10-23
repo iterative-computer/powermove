@@ -1407,7 +1407,16 @@ pub fn run(
     let mut last_inventory_us = 0;
     loop {
         let timeout = thread.next_wake();
-        match rx.recv_timeout(timeout) {
+        let waiting_at = thread.config.trace.then(now);
+        let received = rx.recv_timeout(timeout);
+        if let Some(waiting_at) = waiting_at {
+            let woke_at = now();
+            let late_us = wake_lateness_us(waiting_at, woke_at, timeout);
+            if late_us >= 2_000 {
+                thread.trace_event("render wake late", woke_at - late_us, late_us, -1);
+            }
+        }
+        match received {
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(command) => {
                 let started = now();
@@ -1416,7 +1425,10 @@ pub fn run(
                     break;
                 }
                 thread.note_turn(what, started);
+                let drain_started = thread.config.trace.then(now);
+                let mut drained = 0;
                 while let Ok(command) = rx.try_recv() {
+                    drained += 1;
                     let started = now();
                     let what = command_name(&command);
                     if matches!(command, Command::Shutdown)
@@ -1426,6 +1438,12 @@ pub fn run(
                         return;
                     }
                     thread.note_turn(what, started);
+                }
+                if let Some(drain_started) = drain_started {
+                    let drain_us = now() - drain_started;
+                    if drain_us >= 2_000 {
+                        thread.trace_event("command drain", drain_started, drain_us, drained);
+                    }
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -1448,6 +1466,15 @@ pub fn run(
 /// A render-thread turn longer than this is a stall (diagnostics: the
 /// status report and a warning in the engine log).
 pub const STALL_US: i64 = 250_000;
+
+/// Time the render thread woke after its requested deadline, distinct from
+/// work it did on that turn. A loaded OS can suspend an otherwise idle
+/// thread; attributing that gap to the next raster would be misleading.
+fn wake_lateness_us(started: i64, woke: i64, timeout: Duration) -> i64 {
+    (woke - started)
+        .saturating_sub(timeout.as_micros().min(i64::MAX as u128) as i64)
+        .max(0)
+}
 
 /// The lower bounds of the slow-turn bands in [`Stats::slow_turns`].
 pub const SLOW_TURN_BANDS_US: [i64; 4] = [50_000, 100_000, STALL_US, 1_000_000];
@@ -2483,6 +2510,18 @@ impl Thread {
                     | pm_protocol::snapshot::CompatMessage::SvgRequests { .. }),
             } => self.svg_message(key, message),
             Command::Compat { key, message } => {
+                if let pm_protocol::snapshot::CompatMessage::Producers { ref sources } = message {
+                    self.trace_event(
+                        if sources.is_empty() {
+                            "compat producers cleared"
+                        } else {
+                            "compat producers registered"
+                        },
+                        now(),
+                        0,
+                        key.1.get() as i64,
+                    );
+                }
                 let (applied, rasters, bytes, answers, evicted) = {
                     let mut store = self.compat_store();
                     let applied = store.apply(key, message);
@@ -6346,6 +6385,19 @@ impl Thread {
             self.run_layer_snapshot(job, started);
             return;
         }
+        if self.config.trace {
+            let produces = self.compat_store().has_producers(job.key);
+            self.trace_event(
+                if produces {
+                    "snapshot with compat producers"
+                } else {
+                    "snapshot without compat producers"
+                },
+                started,
+                0,
+                job.request.time.get(),
+            );
+        }
         if self.snapshot_poller.is_none() {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
@@ -7086,6 +7138,14 @@ fn compat_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wake_lateness_excludes_the_requested_wait_and_early_commands() {
+        let wait = Duration::from_micros(1_000);
+        assert_eq!(wake_lateness_us(10, 510, wait), 0);
+        assert_eq!(wake_lateness_us(10, 1_010, wait), 0);
+        assert_eq!(wake_lateness_us(10, 330_010, wait), 329_000);
+    }
 
     #[test]
     fn snapshot_target_cache_policy_accounts_for_format_and_resize() {
