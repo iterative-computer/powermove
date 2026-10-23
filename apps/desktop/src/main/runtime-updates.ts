@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createWriteStream, readFileSync } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, mkdtemp, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
@@ -39,10 +39,36 @@ const RELATIVE_BINARY: Record<RuntimeProvider, string> = {
 
 let root: string | null = null;
 let appVersion = '';
+let scratchSweep: Promise<void> = Promise.resolve();
+
+/** Recover downloads left behind when the process exits before finally runs.
+    Only old runtime scratch directories with our archive/extraction layout
+    qualify; never follow symlinks or remove other temporary directories. */
+export async function sweepRuntimeScratch(tmpDir = os.tmpdir(), now = Date.now()): Promise<void> {
+  const cutoff = now - 60 * 60 * 1000;
+  for (const entry of await readdir(tmpDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^powermove-(claude|codex)-.+$/.test(entry.name)) continue;
+    const scratch = path.join(tmpDir, entry.name);
+    try {
+      const info = await lstat(scratch);
+      if (!info.isDirectory() || info.mtimeMs >= cutoff) continue;
+      const archive = await lstat(path.join(scratch, 'package.tgz')).catch(() => null);
+      const extracted = await lstat(path.join(scratch, 'package')).catch(() => null);
+      if (archive?.isFile() || extracted?.isDirectory()) {
+        await rm(scratch, { recursive: true, force: true });
+      }
+    } catch {
+      // A concurrent cleanup or an inaccessible entry must not stop the sweep.
+    }
+  }
+}
 
 export function configureRuntimeUpdates(options: { root: string; appVersion: string }): void {
   root = options.root;
   appVersion = options.appVersion;
+  // Start in the background without delaying boot. New installs wait for the
+  // sweep so it cannot race their scratch directories.
+  scratchSweep = sweepRuntimeScratch().catch(() => {});
 }
 
 function installed(provider: RuntimeProvider): InstalledRuntime | null {
@@ -153,9 +179,13 @@ export async function installLatestRuntime(provider: RuntimeProvider): Promise<R
 
 async function installRelease(provider: RuntimeProvider, release: Release): Promise<RuntimeUpdateResult> {
   if (root === null) throw new Error('Runtime updates aren’t available in this build.');
+  await scratchSweep;
   const scratch = await mkdtemp(path.join(os.tmpdir(), `powermove-${provider}-`));
   try {
     const archive = path.join(scratch, 'package.tgz');
+    // Leave a recognizable marker even if fetching is interrupted before the
+    // response arrives. Startup can reclaim this path after an unclean exit.
+    await writeFile(archive, '');
     await download(release, archive);
     await run('/usr/bin/tar', ['-xzf', archive, '-C', scratch]);
 
