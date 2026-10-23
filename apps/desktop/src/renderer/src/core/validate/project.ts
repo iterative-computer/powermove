@@ -1,5 +1,7 @@
 import { validateFrameRate } from '../../../../shared/frame-rate';
 import { CHANNELS_3D } from '../../legacy/core/space-3d';
+import { normalizeColorDepth } from '../color-depth';
+import { migrateProjectColorDepth } from '../../../../shared/project-color';
 import { canAnimateContent, isProperty } from '../../legacy/core/content-properties';
 import { adoptTemporalEase } from '../anim/temporal-ease';
 import { compactEditLog } from '../edit-log';
@@ -505,7 +507,7 @@ function sanitizeLayer(raw: unknown, index: number, comp: Pick<Comp, 'w' | 'h' |
     // semantics until their own level 2 lands.
     ...(type === 'text' && (source.compat === 1 || source.compat === 2) ? { compat: source.compat } : {}),
     name: nonEmptyStringOr(source.name, `Layer ${index + 1}`),
-    from: Math.max(type === 'group' ? -Infinity : 0, finite(source.from)),
+    from: finite(source.from),
     dur: Math.max(0.01, finite(source.dur, 5)),
     on: isProperty(source.on) ? sanitizeLooseChannel(source.on, true) : source.on !== false,
     lock: !!source.lock,
@@ -664,7 +666,7 @@ export function sanitizeProject(raw: unknown): Project {
     catch { input = {}; }
   }
   if (isRecord(input) && isRecord(input.proj)) input = input.proj;
-  const source = copyRecord(input);
+  const source = migrateProjectColorDepth(copyRecord(input));
   const w = finite(source.w, 1920) || 1920;
   const h = finite(source.h, 1080) || 1080;
   const fps = finite(source.fps, 30) || 30;
@@ -674,6 +676,7 @@ export function sanitizeProject(raw: unknown): Project {
   const backgroundFill = normalizeFill(source.backgroundFill, fallbackBg);
   const project: Project = {
     ...source,
+    colorDepth: normalizeColorDepth(source.colorDepth),
     id: nonEmptyStringOr(source.id, uid('P')),
     name: nonEmptyStringOr(source.name, 'Untitled'),
     w, h, fps, dur,

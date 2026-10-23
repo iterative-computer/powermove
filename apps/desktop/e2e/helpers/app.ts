@@ -66,8 +66,7 @@ export type LaunchedApp = {
   /** A fresh profile boots to the Projects home screen. Specs that exercise
    * editor panels open an empty composition first, the way a user would. */
   openEditor(): Promise<void>;
-  /** Opens the agent popover under its titlebar launcher. Sending a message
-   * folds it away, so call again to read the conversation after a send. */
+  /** Opens the agent popover under its titlebar launcher. */
   openAgent(): Promise<void>;
   close(): Promise<void>;
   /** Wall time of the last close: app shutdown, then profile cleanup. */
@@ -107,6 +106,9 @@ async function startElectron(
   await ensureBuilt();
   const launchEnv = {
     ...process.env,
+    // Fresh test profiles must not download runtimes from a connected account.
+    // Runtime-update specs can opt in with an explicit env override below.
+    POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
     // Offline UI regressions must not depend on the developer's subscription
     // state (or race a real account check that replaces the composer).
     ...(process.env.POWERMOVE_E2E_LIVE ? {} : {
@@ -159,7 +161,35 @@ async function startElectron(
   instrument(page);
   await page.waitForLoadState('domcontentloaded');
   await page.waitForFunction(() => Boolean((window as any).PM));
+  await page.waitForFunction(() => Boolean((window as any).PM?.app));
+  await page.evaluate(async () => { await (window as any).PM.projectReady; });
   return { app, page };
+}
+
+/** Cleanup of an isolated test process must finish even when OS shutdown work hangs. */
+async function closeDisposableApp(app: ElectronApplication): Promise<void> {
+  const process = app.process();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      (async () => {
+        await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
+        await app.close();
+      })(),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('disposable app shutdown exceeded 5 s')), 5_000); })
+    ]);
+  } catch (error) {
+    console.warn(`E2E process cleanup: ${String(error)}`);
+  } finally {
+    clearTimeout(timer);
+    if (process.exitCode === null && process.signalCode === null) {
+      const exited = new Promise<void>(resolve => process.once('exit', () => resolve()));
+      process.kill('SIGKILL');
+      let exitTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([exited, new Promise<void>(resolve => { exitTimer = setTimeout(resolve, 2_000); })]);
+      clearTimeout(exitTimer);
+    }
+  }
 }
 
 export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedApp> {
@@ -182,7 +212,12 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
   }
   const diagnostics: RendererDiagnostics = { console: [], pageErrors: [] };
   const switches = [...(options.args ?? []), ...(options.chromiumSwitches ?? [])];
-  let active = await startElectron(userData, env, diagnostics, options.normalWindow, switches);
+  let active: Awaited<ReturnType<typeof startElectron>>;
+  try { active = await startElectron(userData, env, diagnostics, options.normalWindow, switches); }
+  catch (error) {
+    if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    throw error;
+  }
   let closed = false;
 
   const session: LaunchedApp = {
@@ -192,7 +227,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     diagnostics,
     teardown: null,
     async relaunch() {
-      await active.app.close();
+      await closeDisposableApp(active.app);
       active = await startElectron(userData, env, diagnostics, options.normalWindow, switches);
       session.app = active.app;
       session.page = active.page;
@@ -227,9 +262,8 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
       closed = true;
       // A failed close-decision assertion must not leave its Cancel mock
       // preventing cleanup of this disposable test process.
-      await active.app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
       const started = performance.now();
-      await active.app.close().catch(() => undefined);
+      await closeDisposableApp(active.app);
       const closedAt = performance.now();
       if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       (session as { teardown: LaunchedApp['teardown'] }).teardown = {

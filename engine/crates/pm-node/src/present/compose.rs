@@ -524,6 +524,70 @@ impl Composer {
         &mut self.renderer
     }
 
+    /// Adopts a definition set translated before this device and renderer
+    /// existed. Runtime parity belongs to the renderer; prepared sets only
+    /// carry CPU translation and their per-owner watchdog state.
+    pub fn park_prepared_definitions(
+        &mut self,
+        owner: impl std::hash::Hash,
+        mut effects: Effects,
+        loaded: (usize, u64),
+    ) {
+        let parity = &self.renderer.effects().parity;
+        if effects.parity.environment() != parity.environment()
+            || effects.parity.directory() != parity.directory()
+        {
+            effects.parity.configure(
+                parity.environment().map(str::to_owned),
+                parity.directory().map(std::path::Path::to_path_buf),
+            );
+        }
+        self.parked
+            .insert(owner_hash(owner), (effects, Some(loaded)));
+    }
+
+    /// Polls all owners before their CPU definition state leaves this device.
+    /// An owner may have been parked while its last frame was in flight.
+    pub fn definitions_quiescent(&mut self) -> bool {
+        let device = self.renderer.device().clone();
+        let queue = self.renderer.queue().clone();
+        self.renderer
+            .effects_mut()
+            .watchdog
+            .collect(&device, &queue, false);
+        for (effects, _) in self.parked.values_mut() {
+            effects.watchdog.collect(&device, &queue, false);
+        }
+        self.renderer.effects().watchdog.frames_in_flight() == 0
+            && self
+                .parked
+                .values()
+                .all(|(effects, _)| effects.watchdog.frames_in_flight() == 0)
+    }
+
+    /// Moves one owner's translated definitions out of a retiring composer.
+    /// Programs and query objects are discarded; source preparation,
+    /// watchdog judgments and parity decisions survive until reattachment.
+    pub fn take_prepared_definitions(
+        &mut self,
+        owner: impl std::hash::Hash,
+    ) -> Option<(Effects, (usize, u64))> {
+        let owner = owner_hash(owner);
+        let (mut effects, loaded) = if self.definitions.map(|d| d.0) == Some(owner) {
+            let (_, loaded) = self.definitions.take().expect("owner above");
+            let mut empty = self.renderer.effects().sibling();
+            self.renderer.swap_effects(&mut empty);
+            (empty, loaded)
+        } else {
+            self.parked.remove(&owner)?
+        };
+        if !effects.release_device() {
+            self.parked.insert(owner, (effects, loaded));
+            return None;
+        }
+        loaded.map(|loaded| (effects, loaded))
+    }
+
     /// Puts `owner`'s definition set in the renderer (parking the one it
     /// held) and brings it up to `definitions` when that set changed: a
     /// changed set translates only definitions whose source changed, and
@@ -802,6 +866,7 @@ impl Composer {
                 scale: place.scale,
                 origin: place.origin,
                 region: Some(region),
+                preview_canvas: place.canvas,
                 precision: Precision::Float16,
                 depth_id: false,
                 background: true,
@@ -824,17 +889,17 @@ impl Composer {
                 },
                 video_end: pm_render::VideoEnd::Preview,
             };
-            let reuse = self
-                .scratch
-                .as_ref()
-                .is_some_and(|t| t.width() == region.width && t.height() == region.height);
+            let format = self.renderer.device_target_format(doc, &request);
+            let reuse = self.scratch.as_ref().is_some_and(|t| {
+                t.width() == region.width && t.height() == region.height && t.format() == format
+            });
             if !reuse {
                 self.scratch = Some(Target::new(
                     &device,
                     "viewer region",
                     region.width,
                     region.height,
-                    WORKING_FORMAT,
+                    format,
                     pm_gpu::target::working_usage(),
                 ));
             }

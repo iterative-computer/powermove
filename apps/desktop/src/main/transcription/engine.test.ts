@@ -21,7 +21,7 @@ beforeEach(async () => {
   media = path.join(dir, 'clip.wav');
   await writeFile(media, 'not really audio');
 });
-afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); await rm(dir, { recursive: true, force: true }); });
 
 class FakeWorker implements WorkerChannel {
   posted: WorkerRequest[] = [];
@@ -63,20 +63,29 @@ function fakeModels(ready: CatalogModel[] | boolean = true, language = 'auto'): 
 const segments = [{ text: 'Hello there.', start: 0.5, end: 1.2, words: [{ text: 'Hello', start: 0.5, end: 0.8 }, { text: 'there.', start: 0.8, end: 1.2 }] }];
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-function engine(options: { ready?: boolean | CatalogModel[]; language?: string } = {}) {
+function engine(options: { ready?: boolean | CatalogModel[]; language?: string; idleMs?: number } = {}) {
   const workers: FakeWorker[] = [];
   const requestModel = vi.fn();
+  const models = fakeModels(options.ready ?? true, options.language);
   const instance = new TranscriptionEngine({
-    models: fakeModels(options.ready ?? true, options.language),
+    models,
     cache: new TranscriptCache(path.join(dir, 'cache')),
     ffmpeg: '/bin/ffmpeg',
     spawnWorker: () => { const worker = new FakeWorker(); workers.push(worker); return worker; },
     requestModel,
     cancelGraceMs: 30,
-    idleMs: 50,
+    idleMs: options.idleMs ?? 50,
     threads: 2
   });
-  return { instance, workers, requestModel };
+  return { instance, workers, requestModel, models };
+}
+
+function warmRequest(worker: FakeWorker, index = worker.posted.length - 1) {
+  return worker.posted[index] as Extract<WorkerRequest, { type: 'warm' }>;
+}
+
+function warmError(worker: FakeWorker, request = warmRequest(worker)) {
+  worker.reply({ type: 'warm-error', id: request.id, file: request.model.file });
 }
 
 async function until(check: () => boolean) {
@@ -234,7 +243,7 @@ describe('TranscriptionEngine', () => {
     const { instance, workers } = engine();
     const warmed = instance.warm({ release: true });
     await until(() => workers[0]?.posted.length === 1);
-    expect(workers[0]!.posted[0]).toEqual({ type: 'warm', model: { file: '/models/parakeet/parakeet.gguf', timing: 'word' }, threads: 2 });
+    expect(workers[0]!.posted[0]).toEqual({ type: 'warm', id: expect.stringMatching(/^w\d+$/), model: { file: '/models/parakeet/parakeet.gguf', timing: 'word' }, threads: 2 });
     workers[0]!.reply({ type: 'loaded', file: '/models/parakeet/parakeet.gguf' });
     expect(await warmed).toBe(true);
     expect(workers[0]!.killed).toBe(true);
@@ -276,6 +285,183 @@ describe('TranscriptionEngine', () => {
     await until(() => workers[0]?.posted.length === 1);
     workers[0]!.crash();
     expect(await warmed).toBe(false);
+    instance.dispose();
+  });
+
+  it.each([true, false])('releases a failed warm-up immediately with release=%s and allows a fresh retry', async (release) => {
+    const { instance, workers } = engine();
+    const failed = instance.warm({ release });
+    await until(() => workers[0]?.posted.length === 1);
+    const old = warmRequest(workers[0]!);
+    warmError(workers[0]!, old);
+    expect(await failed).toBe(false);
+    expect(workers[0]!.killed).toBe(true);
+
+    const retry = instance.warm();
+    await until(() => workers[1]?.posted.length === 1);
+    // Messages left in the old process's channel must not affect its replacement.
+    warmError(workers[0]!, old);
+    workers[0]!.reply({ type: 'loaded', file: old.model.file });
+    expect(workers[1]!.killed).toBe(false);
+    workers[1]!.reply({ type: 'loaded', file: warmRequest(workers[1]!).model.file });
+    expect(await retry).toBe(true);
+    expect(workers[1]!.killed).toBe(false);
+    instance.dispose();
+  });
+
+  it('does not stop active or queued transcription jobs when their earlier warm-up fails', async () => {
+    const { instance, workers } = engine();
+    const warmed = instance.warm({ release: true });
+    await until(() => workers[0]?.posted.length === 1);
+    const warm = warmRequest(workers[0]!);
+    const first = instance.transcribe({ path: media, start: 1 });
+    await until(() => workers[0]!.posted.length === 2);
+    const queued = instance.transcribe({ path: media, start: 2 });
+    warmError(workers[0]!, warm);
+    expect(await warmed).toBe(false);
+    expect(workers[0]!.killed).toBe(false);
+    workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments });
+    await until(() => workers[0]!.posted.length === 3);
+    workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 2, segments });
+    expect((await first).duration).toBe(1);
+    expect((await queued).duration).toBe(2);
+    expect(workers).toHaveLength(1);
+    instance.dispose();
+  });
+
+  it('ignores an old warm failure after a later transcription has completed', async () => {
+    const { instance, workers } = engine();
+    const warmed = instance.warm({ release: true });
+    await until(() => workers[0]?.posted.length === 1);
+    const warm = warmRequest(workers[0]!);
+    const pending = instance.transcribe({ path: media });
+    await until(() => workers[0]!.posted.length === 2);
+    workers[0]!.reply({ type: 'done', id: workers[0]!.last().id, duration: 1, segments });
+    await pending;
+    warmError(workers[0]!, warm);
+    expect(await warmed).toBe(false);
+    expect(workers[0]!.killed).toBe(false);
+    instance.dispose();
+  });
+
+  it('keeps a newer model warm-up alive when an earlier one succeeds or fails', async () => {
+    for (const earlierSucceeded of [true, false]) {
+      const other = fakeModel('other');
+      const { instance, workers, models } = engine({ ready: [fakeModel('parakeet'), other] });
+      const first = instance.warm({ release: true });
+      await until(() => workers[0]?.posted.length === 1);
+      const old = warmRequest(workers[0]!);
+      vi.spyOn(models, 'activeModel').mockReturnValue({ model: other, dir: '/models/other' });
+      const second = instance.warm({ release: true });
+      await until(() => workers[0]!.posted.length === 2);
+      if (earlierSucceeded) workers[0]!.reply({ type: 'loaded', file: old.model.file });
+      else warmError(workers[0]!, old);
+      expect(await first).toBe(earlierSucceeded);
+      expect(workers[0]!.killed).toBe(false);
+      workers[0]!.reply({ type: 'loaded', file: warmRequest(workers[0]!).model.file });
+      expect(await second).toBe(true);
+      expect(workers[0]!.killed).toBe(true);
+      instance.dispose();
+    }
+  });
+
+  it('keeps a newer successfully prefetched model after a delayed failure of an older model', async () => {
+    const other = fakeModel('other');
+    const { instance, workers, models } = engine({ ready: [fakeModel('parakeet'), other] });
+    const first = instance.warm({ release: true });
+    await until(() => workers[0]?.posted.length === 1);
+    const old = warmRequest(workers[0]!);
+    vi.spyOn(models, 'activeModel').mockReturnValue({ model: other, dir: '/models/other' });
+    const second = instance.warm();
+    await until(() => workers[0]!.posted.length === 2);
+    workers[0]!.reply({ type: 'loaded', file: warmRequest(workers[0]!).model.file });
+    expect(await second).toBe(true);
+    warmError(workers[0]!, old);
+    expect(await first).toBe(false);
+    expect(workers[0]!.killed).toBe(false);
+    expect(await instance.warm()).toBe(true);
+    expect(workers[0]!.posted).toHaveLength(2);
+    instance.dispose();
+  });
+
+  it('releases a newer completed launch warm-up after an older failure delivers the last reply', async () => {
+    const other = fakeModel('other');
+    const { instance, workers, models } = engine({ ready: [fakeModel('parakeet'), other] });
+    const first = instance.warm();
+    await until(() => workers[0]?.posted.length === 1);
+    const old = warmRequest(workers[0]!);
+    vi.spyOn(models, 'activeModel').mockReturnValue({ model: other, dir: '/models/other' });
+    const second = instance.warm({ release: true });
+    await until(() => workers[0]!.posted.length === 2);
+    workers[0]!.reply({ type: 'loaded', file: warmRequest(workers[0]!).model.file });
+    expect(await second).toBe(true);
+    expect(workers[0]!.killed).toBe(false);
+    warmError(workers[0]!, old);
+    expect(await first).toBe(false);
+    expect(workers[0]!.killed).toBe(true);
+    instance.dispose();
+  });
+
+  it('releases a failed latest warm-up after an older load delivers its delayed success', async () => {
+    const other = fakeModel('other');
+    const { instance, workers, models } = engine({ ready: [fakeModel('parakeet'), other] });
+    const first = instance.warm();
+    await until(() => workers[0]?.posted.length === 1);
+    const old = warmRequest(workers[0]!);
+    vi.spyOn(models, 'activeModel').mockReturnValue({ model: other, dir: '/models/other' });
+    const second = instance.warm();
+    await until(() => workers[0]!.posted.length === 2);
+    warmError(workers[0]!);
+    expect(await second).toBe(false);
+    expect(workers[0]!.killed).toBe(false);
+    workers[0]!.reply({ type: 'loaded', file: old.model.file });
+    expect(await first).toBe(true);
+    expect(workers[0]!.killed).toBe(true);
+    instance.dispose();
+  });
+
+  it.each([false, true])('handles two same-model failures with newest-first=%s without leaking the process', async (newestFirst) => {
+    const { instance, workers } = engine();
+    const first = instance.warm();
+    const second = instance.warm();
+    await until(() => workers[0]?.posted.length === 2);
+    const older = warmRequest(workers[0]!, 0), newer = warmRequest(workers[0]!, 1);
+    warmError(workers[0]!, newestFirst ? newer : older);
+    expect(workers[0]!.killed).toBe(false);
+    warmError(workers[0]!, newestFirst ? older : newer);
+    expect(await Promise.all([first, second])).toEqual([false, false]);
+    expect(workers[0]!.killed).toBe(true);
+    instance.dispose();
+  });
+
+  it('matches the warm attempt and model before accepting a failure', async () => {
+    const { instance, workers } = engine();
+    let settled: boolean | undefined;
+    const warmed = instance.warm().then((result) => { settled = result; return result; });
+    await until(() => workers[0]?.posted.length === 1);
+    const request = warmRequest(workers[0]!);
+    workers[0]!.reply({ type: 'warm-error', id: request.id, file: '/models/wrong.gguf' });
+    workers[0]!.reply({ type: 'warm-error', id: 'old-attempt', file: request.model.file });
+    await Promise.resolve();
+    expect(settled).toBeUndefined();
+    expect(workers[0]!.killed).toBe(false);
+    warmError(workers[0]!, request);
+    expect(await warmed).toBe(false);
+    expect(workers[0]!.killed).toBe(true);
+    instance.dispose();
+  });
+
+  it('retains the production idle period for a successfully prefetched model', async () => {
+    vi.useFakeTimers();
+    const { instance, workers } = engine({ idleMs: 180_000 });
+    const warmed = instance.warm();
+    await vi.advanceTimersByTimeAsync(0);
+    workers[0]!.reply({ type: 'loaded', file: warmRequest(workers[0]!).model.file });
+    expect(await warmed).toBe(true);
+    await vi.advanceTimersByTimeAsync(179_999);
+    expect(workers[0]!.killed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(workers[0]!.killed).toBe(true);
     instance.dispose();
   });
 

@@ -856,3 +856,150 @@ describe('api.vars', () => {
     expect(plan.order).toEqual([]);
   });
 });
+
+describe('bounded extension deactivation', () => {
+  it('retires a hanging owner before later reloads and bridge changes', async () => {
+    vi.useFakeTimers();
+    const { deps } = fakeDeps();
+    const disposed = vi.fn();
+    const log: string[] = [];
+    const bridge = fakeBridge([builtinRec('stuck'), builtinRec('healthy')]);
+    const loader = createLoader({
+      kernel, bridge: bridge.bridge, deps, activateTimeoutMs: 20,
+      builtins: {
+        stuck: async () => ({
+          default: api => {
+            log.push('stuck');
+            api.commands.register({ id: 'stuck.run', label: 'Stuck', run: () => 'ok' });
+            api.onDispose(disposed);
+          },
+          deactivate: () => new Promise<void>(() => {})
+        }),
+        healthy: mod(log, 'healthy')
+      }
+    });
+    await loader.boot();
+    const stalled = loader.reload('stuck');
+    bridge.emit({ ids: ['healthy'], reason: 'watch' });
+    let settled = false;
+    void Promise.all([stalled, loader.whenIdle()]).then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(settled, 'Hanging cleanup must not block the extension change queue').toBe(true);
+    expect(disposed).toHaveBeenCalledTimes(1);
+    expect(log).toEqual(['stuck', 'healthy', 'stuck', 'healthy']);
+    expect(kernel.commands.get('stuck.run')?.run()).toBe('ok');
+    expect(loader.activeIds()).toEqual(['stuck', 'healthy']);
+    expect(errorSpy).toHaveBeenCalledWith('[kernel] extension "stuck" deactivate() threw', expect.objectContaining({ message: 'deactivate() of "stuck" timed out' }));
+    expect(vi.getTimerCount()).toBe(0);
+    const closing = loader.dispose();
+    await vi.advanceTimersByTimeAsync(21);
+    await closing;
+  });
+
+  it('bounds shutdown cleanup and releases every host contribution', async () => {
+    vi.useFakeTimers();
+    const { deps } = fakeDeps();
+    const disposed = vi.fn();
+    const loader = createLoader({ kernel, bridge: null, deps, activateTimeoutMs: 20, builtins: {
+      stuck: async () => ({ default: api => {
+        api.commands.register({ id: 'stuck.run', label: 'Stuck', run: () => true });
+        api.panels.register({ id: 'stuck.panel', title: 'Stuck', build: () => {} });
+        api.onDispose(disposed);
+      }, deactivate: () => new Promise<void>(() => {}) })
+    } });
+    await loader.boot();
+    let settled = false;
+    const closing = loader.dispose().then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(21);
+    expect(settled, 'Loader shutdown must complete after its cleanup deadline').toBe(true);
+    await closing;
+    expect(disposed).toHaveBeenCalledTimes(1);
+    expect(kernel.commands.has('stuck.run')).toBe(false);
+    expect(kernel.panels.has('stuck.panel')).toBe(false);
+    expect(loader.activeIds()).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['throw', 'reject'] as const)('releases registrations when cleanup fails by %s', async mode => {
+    vi.useFakeTimers();
+    const { deps } = fakeDeps();
+    const disposed = vi.fn();
+    const failure = new Error('Cleanup failed');
+    const loader = createLoader({ kernel, bridge: null, deps, activateTimeoutMs: 20, builtins: {
+      broken: async () => ({ default: api => {
+        api.commands.register({ id: 'broken.run', label: 'Broken', run: () => true });
+        api.onDispose(disposed);
+      }, deactivate: () => {
+        if (mode === 'throw') throw failure;
+        return Promise.reject(failure);
+      } })
+    } });
+    await loader.boot();
+    await loader.deactivate('broken');
+    expect(kernel.commands.has('broken.run')).toBe(false);
+    expect(disposed).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith('[kernel] extension "broken" deactivate() threw', failure);
+    expect(vi.getTimerCount()).toBe(0);
+    await loader.dispose();
+  });
+
+  it('clears a pending deadline when asynchronous cleanup finishes promptly', async () => {
+    vi.useFakeTimers();
+    const { deps } = fakeDeps();
+    const dispose = vi.fn();
+    const loader = createLoader({ kernel, bridge: null, deps, activateTimeoutMs: 20, builtins: {
+      clean: async () => ({ default: api => api.onDispose(dispose), deactivate: async () => {} })
+    } });
+    await loader.boot();
+    await loader.deactivate('clean');
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    await loader.dispose();
+  });
+
+  it('cannot let late cleanup remove the newly activated owner', async () => {
+    vi.useFakeTimers();
+    const { deps } = fakeDeps();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let latestApi!: PowermoveAPI;
+    let latestRegistration!: { dispose(): void };
+    let generation = 0;
+    const disposed: number[] = [];
+    const loader = createLoader({ kernel, bridge: null, deps, activateTimeoutMs: 20, builtins: {
+      late: async () => ({
+        default: api => {
+          const current = ++generation;
+          latestApi = api;
+          latestRegistration = api.commands.register({ id: 'late.run', label: 'Late', run: () => current });
+          api.onDispose(() => disposed.push(current));
+        },
+        deactivate: async () => {
+          const api = latestApi, registration = latestRegistration;
+          await gate;
+          registration.dispose();
+          // A stale async task using its retired API also cannot overwrite the new owner.
+          api.commands.register({ id: 'late.run', label: 'Stale', run: () => -1 });
+        }
+      })
+    } });
+    await loader.boot();
+    const reload = loader.reload('late');
+    let settled = false;
+    void reload.then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(21);
+    expect(settled).toBe(true);
+    await reload;
+    expect(disposed).toEqual([1]);
+    expect(kernel.commands.get('late.run')?.run()).toBe(2);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kernel.commands.get('late.run')?.run()).toBe(2);
+    expect(loader.activeIds()).toEqual(['late']);
+    expect(disposed).toEqual([1]);
+    expect(vi.getTimerCount()).toBe(0);
+    await loader.dispose();
+    expect(disposed).toEqual([1, 2]);
+  });
+});

@@ -122,7 +122,10 @@ test('the agent watches and listens to imported footage through the media tools'
     expect(compSheet.json).toMatchObject({ target: 'composition', columns: 2, rows: 2 });
     expect(check.ok).toBe(true);
     expect(check.json.issues.map((issue: any) => issue.code)).toContain('empty-frames');
-    const images = last.messages.filter((message: any) => message.role === 'user' && Array.isArray(message.content))
+    // Tool-result image batches contain only images; the initial user request
+    // also carries text and the agent's captured context frames.
+    const images = last.messages.filter((message: any) => message.role === 'user' && Array.isArray(message.content)
+      && message.content.every((item: any) => item.type === 'image_url'))
       .flatMap((message: any) => message.content).filter((item: any) => item.image_url?.url?.startsWith('data:image/'));
     expect(images.length).toBe(2 + 1 + 1);
 
@@ -145,18 +148,20 @@ test('the agent watches and listens to imported footage through the media tools'
 
     }
 
-    // With the original file gone, the stored bytes are staged for tools instead.
-    // A slowed media store keeps that call running long enough to see its live row.
+    // With the original gone, tools read the library file directly. No second
+    // media copy or renderer download is needed.
     await rm(media);
     await page.evaluate(() => {
       const store = (window as any).PM.MediaStore;
       const get = store.get.bind(store);
-      store.get = async (value: unknown) => { await new Promise(resolve => setTimeout(resolve, 2500)); return get(value); };
+      (window as any).__mediaToolStoreReads = 0;
+      store.get = async (value: unknown) => { (window as any).__mediaToolStoreReads++; return get(value); };
     });
     const before = seen.length;
     await page.evaluate(() => (window as any).PM.AgentUI.submit('Look at the middle of the interview.'));
-    await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.trace
-      .some((step: any) => step.kind === 'tool' && step.status === 'running' && step.label === 'Sampling 3 frames from interview.mp4…')), { timeout: 20_000 }).toBe(true);
+    await expect.poll(() => seen.length, { timeout: 20_000 }).toBeGreaterThan(before);
+    await expect.poll(() => seen.slice(before).at(-1)?.messages.filter((message: any) => message.role === 'tool').length ?? 0, { timeout: 30_000 }).toBeGreaterThan(0);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.AgentUI.state.phase), { timeout: 30_000 }).not.toBe('running');
     if (SCREENSHOTS) {
       await session.openAgent();
       for (const theme of ['light', 'dark']) {
@@ -173,8 +178,9 @@ test('the agent watches and listens to imported footage through the media tools'
       const response = await (window as any).PM.AgentHarness.test.handleLiveAgentTool({ runId: 'staging', callId: 'c', tool: '__media_source', arguments: { assetId }, baseRevision: 0 });
       return JSON.parse(response.content[0].text);
     }, asset);
-    expect(staged.origin).toBe('cache');
-    expect(staged.path).toContain(path.join(session.userData, 'Media Tool Cache'));
+    expect(staged.origin).toBe('host');
+    expect(staged.path).toContain(path.join(session.userData, 'Media Store'));
+    expect(await page.evaluate(() => (window as any).__mediaToolStoreReads)).toBe(0);
     expect((await stat(staged.path)).size).toBeGreaterThan(1000);
   } finally {
     await session?.close();

@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 /** The bytes each loaded model was parsed from, for the engine's geometry (picks and bounds). */
 const modelSources=new WeakMap<THREE.Object3D,ArrayBuffer>();
@@ -29,6 +28,9 @@ export async function loadGltf(blob:Blob):Promise<{object3d:THREE.Group;animatio
   for(const mesh of json.meshes || [])for(const primitive of mesh.primitives || [])
     predictedVertices+=json.accessors?.[primitive.attributes?.POSITION]?.count || 0;
   if(predictedVertices>1_000_000 || (json.nodes?.length || 0)>4096)throw new Error('GLB exceeds the scene complexity budget');
+  // Keep the decoder out of startup; unsafe files are rejected before loading
+  // it, and valid models still use the same Three.js parser.
+  const {GLTFLoader}=await import('three/addons/loaders/GLTFLoader.js');
   const manager=new THREE.LoadingManager(),embedded=new Map<string,string>();
   manager.setURLModifier(url=>{
     if(url.startsWith('blob:'))return url;

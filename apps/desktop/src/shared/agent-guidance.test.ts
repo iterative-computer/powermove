@@ -27,4 +27,16 @@ describe('task guidance', () => {
     expect(prompt).toContain('clip');
     expect(prompt).not.toContain('EXTENSION LOAD REPORT');
   });
+
+  it('returns deprecated compatibility API uses to the agent as suggestions, not repairs', () => {
+    const prompt = resultVerificationPrompt('Make a frame grabber', [], [], [], [{
+      extension: 'grabber', file: 'index.ts', line: 4, column: 3, member: 'render.snapshot', access: 'static',
+      replacement: 'await api.render.snapshotAsync(time, maxWidth)', message: 'api.render.snapshot is a deprecated compatibility API.'
+    }]);
+    expect(prompt).toContain('DEPRECATED COMPATIBILITY APIS');
+    expect(prompt).toContain('grabber/index.ts:4: api.render.snapshot is a deprecated compatibility API.');
+    expect(prompt).toContain('Change the code only when the user agrees');
+    expect(prompt).toContain('do not change them in this verification pass');
+    expect(resultVerificationPrompt('Trim', [], [], [])).not.toContain('DEPRECATED');
+  });
 });

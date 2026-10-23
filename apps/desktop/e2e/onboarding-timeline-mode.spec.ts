@@ -8,6 +8,7 @@ test('onboarding lets a new user choose the track timeline before opening the ed
   test.setTimeout(90_000);
   const userData = await mkdtemp(path.join(os.tmpdir(), 'pm-onb-'));
   const env: Record<string, string> = { ...process.env as any, POWERMOVE_USER_DATA: userData, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_TEST_ONBOARDING: '1',
+    POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
     CODEX_BINARY: path.join(repoRoot, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'), POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch({ args: ['.'], cwd: repoRoot, env });

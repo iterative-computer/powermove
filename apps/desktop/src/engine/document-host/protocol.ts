@@ -109,8 +109,10 @@ export interface DocumentHostServices {
   /** The profile store (main's StorageEngine on the desktop, the CLI host's store). */
   store: {
     read(key: string): Promise<unknown | null>;
-    write(key: string, value: unknown): Promise<void>;
+    write(key: string, value: unknown, base?: unknown): Promise<void>;
     remove(key: string): Promise<void>;
+    /** Initial synchronous editor preferences/library view. */
+    snapshot?(): Promise<Record<string, unknown>>;
   };
   /**
    * The project session: the document every member shares. `join` answers
@@ -127,6 +129,10 @@ export interface DocumentHostServices {
   };
   /** Agent media and captions find a project's media through the host's store. */
   mediaPath?: { lookup(request: MediaPathLookupRequest): Promise<MediaPathResult | null> };
+  /** Agent media imports (macOS hidden host): today's editor import, run in
+   *  the host's project-pinned editor tab; its commit reaches the worker as a
+   *  session patch before the answer (import-media.ts). */
+  mediaImport?: { run(projectId: string, args: Record<string, unknown>, replace: boolean): Promise<Record<string, unknown>> };
   /** On-device transcription (captions). Absent: `generate_captions` says no model is available. */
   transcription?: {
     status(): Promise<TranscriptionStatus>;
@@ -250,14 +256,18 @@ export type FromWorker =
   | { t: 'log'; line: string };
 
 export type ServiceName =
-  | 'store.read' | 'store.write' | 'store.remove'
+  | 'store.read' | 'store.write' | 'store.remove' | 'store.snapshot'
   | 'session.join' | 'session.patch' | 'session.leave'
-  | 'mediaPath.lookup'
+  | 'mediaPath.lookup' | 'mediaImport.run'
   | 'transcription.status' | 'transcription.transcribe' | 'transcription.cancelTranscribe'
   | 'extensions.list' | 'extensions.bundle' | 'extensions.values';
 
-/** Tool routes the hidden host keeps outside workers (mirrors pm_protocol::document_host). */
-export const DOM_TOOLS = ['capture_panel', 'computer_use_panel', 'interact_panel', 'get_panel_state', 'open_panel', 'get_panel_layout', 'set_panel_layout'] as const;
+/** Tool routes the hidden host keeps outside workers (mirrors pm_protocol::document_host).
+ *  `manage_project` and `publish_visual_reply` act on an editor window (its
+ *  project library and window ownership; the run's thread attachments), not
+ *  on the document: a worker refuses them (`wrong-route`) rather than answer
+ *  from its own in-memory library. */
+export const DOM_TOOLS = ['capture_panel', 'computer_use_panel', 'interact_panel', 'get_panel_state', 'open_panel', 'get_panel_layout', 'set_panel_layout', 'manage_project', 'publish_visual_reply'] as const;
 export const JOB_TOOLS = ['export_video', 'get_render_status'] as const;
 
 /** Explicit entries in the default document route (schema and arguments are

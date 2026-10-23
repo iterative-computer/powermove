@@ -18,6 +18,14 @@ describe('layoutTracks', () => {
     expect(layout.video).toBe(3);
   });
 
+  it('treats a clip rounded onto a neighbour\'s edge as touching, not overlapping', () => {
+    // A snap to 166/30 s is stored rounded to 6 decimals, a hair before the edge.
+    const end = 166 / 30;
+    const dropped = Number(end.toFixed(6));
+    expect(dropped).toBeLessThan(end);
+    expect(lanes([clip('moved', dropped, 3, { track: 0 }), clip('rest', 0, end)])).toEqual({ moved: 'v0', rest: 'v0' });
+  });
+
   it('honours a preferred track as a minimum', () => {
     expect(lanes([clip('a', 0, 2, { track: 3 }), clip('b', 0, 2)])).toEqual({ a: 'v3', b: 'v0' });
     // Overlap constraints still win over a lower preference.

@@ -1,78 +1,55 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from 'vitest';
-
-import type { PowermoveAPI } from 'powermove';
-
+import { afterEach, expect, it, vi } from 'vitest';
 import { mountCompTabs } from './comp-tabs';
 
-function setup() {
-  const comps = [{ id: 'A', name: 'Main' }, { id: 'B', name: 'Precomp' }];
-  let open = 'A';
-  let tabs = ['A', 'B'];
-  const changes = new Set<() => void>();
-  const projectListeners = new Set<(payload: { kind: string }) => void>();
+afterEach(() => { document.body.replaceChildren(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+function harness() {
+  let active = 'main', next = 0;
+  let changed!: () => void, event!: (value: { kind: string }) => void;
+  const tabs = [{ id: 'main', name: 'Main' }, { id: 'child', name: 'Nested composition' }];
+  const frames = new Map<number, FrameRequestCallback>();
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++next, callback); return next; });
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
   const model = {
-    openTabs: () => tabs,
-    get: (id: string) => comps.find((c) => c.id === id) ?? null,
-    isOpen: (id: string) => id === open,
-    open: (id: string) => { open = id; changes.forEach((fn) => fn()); return true; },
-    close: (id: string) => { tabs = tabs.filter((t) => t !== id); return true; },
-    onChange: (fn: () => void) => { changes.add(fn); return () => changes.delete(fn); },
+    openTabs: () => tabs.map(tab => tab.id), get: (id: string) => tabs.find(tab => tab.id === id),
+    isOpen: (id: string) => id === active,
+    open: vi.fn((id: string) => { active = id; changed(); return true; }), close: vi.fn(),
+    onChange: (listener: () => void) => { changed = listener; return vi.fn(); },
   };
-  const api = {
-    services: { get: () => model },
-    events: { on: (_: string, fn: (payload: { kind: string }) => void) => { projectListeners.add(fn); return { dispose: () => projectListeners.delete(fn) }; } },
-    ui: { menu: () => undefined },
-    commands: { run: () => undefined },
-  } as unknown as PowermoveAPI;
-  const host = document.createElement('div');
-  document.body.append(host);
-  let scrolls = 0;
-  const original = Element.prototype.scrollIntoView;
-  Element.prototype.scrollIntoView = function () { scrolls++; };
-  const dispose = mountCompTabs(api, host);
-  const changed = (kind = 'layers') => projectListeners.forEach((fn) => fn({ kind }));
-  return {
-    host, comps, changed, model,
-    scrolls: () => scrolls,
-    restore: () => { Element.prototype.scrollIntoView = original; dispose(); host.remove(); },
-  };
+  const dispose = vi.fn();
+  const api = { services: { get: () => model }, events: { on: (_name: string, listener: typeof event) => { event = listener; return { dispose }; } } };
+  const host = document.createElement('div'); document.body.append(host);
+  const unmount = mountCompTabs(api as any, host);
+  const flush = () => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback(0)); };
+  flush();
+  return { host, model, tabs, changed, event, frames, flush, unmount, dispose };
 }
 
-describe('composition tabs', () => {
-  it('keep the strip as it is when a project change leaves the tabs unchanged', () => {
-    const t = setup();
-    try {
-      const first = [...t.host.children];
-      expect(first.map((e) => (e as HTMLElement).dataset.compId)).toEqual(['A', 'B']);
-      expect(t.scrolls()).toBe(1);
-      // An edit announces history, layers, and project changes: nothing to redraw.
-      t.changed('history');
-      t.changed('layers');
-      t.changed('project');
-      expect([...t.host.children]).toEqual(first);
-      expect(t.scrolls()).toBe(1);
-    } finally {
-      t.restore();
-    }
-  });
+it('coalesces project-switch notifications and retains unchanged tab DOM and focus', () => {
+  const h = harness(), replace = vi.spyOn(h.host, 'replaceChildren');
+  const first = h.host.firstElementChild as HTMLElement; first.focus();
+  for (let n = 0; n < 8; n++) { h.event({ kind: 'structure' }); h.changed(); }
+  expect(h.frames.size).toBe(1); h.flush();
+  expect(replace).not.toHaveBeenCalled(); expect(document.activeElement).toBe(first);
+  h.tabs[0]!.name = 'Renamed'; h.changed(); h.changed(); h.flush();
+  expect(replace).toHaveBeenCalledOnce(); expect(h.host.textContent).toContain('Renamed');
+  h.unmount();
+});
 
-  it('rebuild when a name, the open composition, or the set of tabs changes', () => {
-    const t = setup();
-    try {
-      t.comps[1]!.name = 'Renamed';
-      t.changed('project');
-      expect((t.host.children[1] as HTMLElement).title).toBe('Renamed');
-      t.model.open('B');
-      expect(t.host.children[1]!.getAttribute('aria-selected')).toBe('true');
-      expect(t.scrolls()).toBe(3);
-      t.model.close('A');
-      t.changed('project');
-      expect([...t.host.children].map((e) => (e as HTMLElement).dataset.compId)).toEqual(['B']);
-      // A single tab has no close button.
-      expect(t.host.querySelector('button')).toBeNull();
-    } finally {
-      t.restore();
-    }
-  });
+it('switches nested composition tabs by pointer and keyboard without scrolling parent panels', () => {
+  const h = harness();
+  const scroll = vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(() => {});
+  h.host.querySelector('[data-comp-id="child"]')!.dispatchEvent(new PointerEvent('pointerdown', { button: 0 }));
+  h.flush(); h.flush();
+  expect(h.host.querySelector('[aria-selected="true"]')?.getAttribute('data-comp-id')).toBe('child');
+  h.host.querySelector('[data-comp-id="main"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+  h.flush(); h.flush();
+  expect(h.host.querySelector('[aria-selected="true"]')?.getAttribute('data-comp-id')).toBe('main');
+  expect(scroll).not.toHaveBeenCalled(); h.unmount();
+});
+
+it('cancels deferred work and unsubscribes on disposal', () => {
+  const h = harness(); h.changed(); expect(h.frames.size).toBe(1);
+  h.unmount(); expect(h.frames.size).toBe(0); expect(h.dispose).toHaveBeenCalledOnce();
 });

@@ -6,8 +6,9 @@ import path from 'node:path';
 import type { CodexAnswerRequest, CodexQuestion, CodexRunRequest, CodexRunResult, CodexTraceEvent } from '../../shared/ipc';
 import { isRecord, isString } from '../../shared/guards';
 import { collectArtifacts } from '../codex/artifacts';
-import { publishExtensionChanges, withStageSnapshot } from '../codex/change-history';
+import { ExtensionPublicationConflictError, publishExtensionChanges, withStageSnapshot } from '../codex/change-history';
 import { AgentResultValidationError, repairAgentResult } from '../codex/result-repair';
+import type { ExtensionDeprecationWarning } from '../../shared/extension-analysis';
 import { validateStagedExtensions } from '../codex/validate-staged-extensions';
 import { consumeToken } from '../codex/consent';
 import { agentInstructions, agentResultSchema } from '../codex/instructions';
@@ -320,11 +321,14 @@ export class ClaudeRunner {
         parsed.access = authority;
         const extensions = parseAgentExtensionChanges(parsed.extensions);
         // One private copy is checked and published; later stage writes cannot ship.
+        let warnings: ExtensionDeprecationWarning[] = [];
         const changeSet = await withStageSnapshot(layout, async snapshot => {
-          await validateStagedExtensions(snapshot, extensions ?? []);
+          warnings = await validateStagedExtensions(snapshot, extensions ?? []);
           if (this.cancelled.has(req.id)) throw new Error('The Claude run was cancelled.');
           return publishExtensionChanges(snapshot, extensions ?? []);
         }, (extensions ?? []).map(change => change.id));
+        // Deprecated compatibility APIs in what was published (amendment 23): returned to the agent, never refused.
+        if (warnings.length) parsed.extensionWarnings = warnings;
         return { parsed, extensions, changeSet };
       }, async prompt => {
         repairingResult = true;
@@ -338,17 +342,19 @@ export class ClaudeRunner {
         text: JSON.stringify(sortJson(parsed)),
         access: authority,
         ...(extensions === undefined ? {} : { extensions }),
-        ...(changeSet === null ? {} : { extensionChangeSetId: changeSet.id })
+        ...(changeSet === null ? {} : { extensionChangeSetId: changeSet.id }),
+        ...(Array.isArray(parsed.extensionWarnings) && parsed.extensionWarnings.length ? { extensionWarnings: parsed.extensionWarnings as ExtensionDeprecationWarning[] } : {})
       };
     } catch (error) {
       if (this.cancelled.has(req.id)) {
         await this.cleanupCancelled(state, options.userData);
         return failure('The Claude run was cancelled.', true);
       }
-      if ((error instanceof AgentResultValidationError || repairingResult) && state.layout) {
+      if ((error instanceof AgentResultValidationError || error instanceof ExtensionPublicationConflictError || repairingResult) && state.layout) {
         await preserveCancelledRun(state.layout).catch(checkpointError => options.onWarning?.(`Could not save the agent checkpoint: ${String(checkpointError)}`));
       }
-      return failure(error instanceof Error ? error.message : String(error));
+      return { ...failure(error instanceof Error ? error.message : String(error)),
+        ...(error instanceof ExtensionPublicationConflictError ? { preserveLiveEdits: true } : {}) };
     } finally {
       if (state.killTimer) clearTimeout(state.killTimer);
       this.active.delete(req.id);

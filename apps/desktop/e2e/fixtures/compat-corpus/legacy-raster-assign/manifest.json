@@ -1,0 +1,10 @@
+{
+  "id": "legacy-raster-assign",
+  "name": "Legacy Raster Assign",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "A raster wrapper the way early extensions wrote one: it assigns PM.raster through api.host.pm. Shapes named Tinted draw red; text named Shifted moves 24 px left through its anchor.",
+  "entry": "index.ts",
+  "contributes": ["hooks"],
+  "author": "user"
+}

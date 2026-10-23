@@ -6,15 +6,13 @@ const record = (value: any): value is RecordValue => value !== null && typeof va
 export const isHistoryDictionary = (value: any): boolean => record(value) && value.format === FORMAT;
 const history = (value: any): boolean => record(value) && value.version === 1 && Array.isArray(value.entries)
   && value.entries.every((entry: any) => record(entry) && Array.isArray(entry.forward) && Array.isArray(entry.backward));
-/** A patch path that replaces a whole layer or edit list: `['layers']` and
- *  `['edits']` from before compositions, and the composition-independent
- *  `['comps', <id>, 'layers' | 'edits']` that history entries hold since. */
-const recordPath = (path: any): boolean => Array.isArray(path) && (
-  (path.length === 1 && (path[0] === 'layers' || path[0] === 'edits'))
-  || (path.length === 3 && path[0] === 'comps' && typeof path[1] === 'string' && path[1].length > 0
-    && (path[2] === 'layers' || path[2] === 'edits')));
-const recordArray = (patch: any): boolean => record(patch) && patch.exists === true && recordPath(patch.path)
-  && Array.isArray(patch.value);
+/** Legacy history targets the root; current history identifies its composition. */
+export function isHistoryRecordArrayPath(value: unknown): boolean {
+  return Array.isArray(value) && ['layers', 'edits'].includes(value.at(-1))
+    && (value.length === 1 || value.length === 3 && value[0] === 'comps' && typeof value[1] === 'string' && value[1].length > 0);
+}
+const recordArray = (patch: any): boolean => record(patch) && patch.exists === true
+  && isHistoryRecordArrayPath(patch.path) && Array.isArray(patch.value);
 
 /** Weak ownership prevents removed projects/Redo branches living in this index. */
 export class HistoryRecords {
@@ -96,7 +94,7 @@ export function unpackHistory(value: any): any {
   const unpack = (item: any) => {
     if (!record(item) || !record(item.patch)) throw new Error('Invalid history patch');
     if (!Object.hasOwn(item, 'refs')) return item.patch;
-    if (!Array.isArray(item.refs) || !recordPath(item.patch.path) || item.patch.exists !== true
+    if (!Array.isArray(item.refs) || !isHistoryRecordArrayPath(item.patch.path) || item.patch.exists !== true
       || item.refs.some((id: any) => !Number.isSafeInteger(id) || id < 0 || id >= value.records.length)) throw new Error('Invalid history reference');
     return { ...item.patch, value: item.refs.map((id: number) => value.records[id]) };
   };

@@ -56,6 +56,21 @@ pub const MAX_SHARED_NAME: usize = 31;
 pub const MAX_COMPAT_BAND_BYTES: usize = 8 * 1024 * 1024;
 /// Largest compatibility raster edge.
 pub const MAX_COMPAT_EDGE: u32 = 16384;
+/// Today's continuousRasterScale reaches 32 for text/shape/captions.
+/// This is raster density, independent of the output frame's scale limit.
+/// It bounds the compositor's compatibility rasters (needs, answers, export
+/// requests), which only ever ask for `continuousRasterScale`; a public
+/// layer raster ([`SnapshotTarget::Layer`]) has no upper bound.
+pub const MAX_RASTER_SCALE: f64 = 32.0;
+
+/// A public layer raster's scale (`render.raster(layer, scale)` at
+/// apiVersion 1 to 3): any positive finite number. Today's `PM.raster`
+/// (legacy `gl/raster.ts`) takes any scale and caps only the density, at
+/// `min(scale, 8192 / w, 8192 / h)`, which the engine's rasterizers apply
+/// themselves, so a small layer at scale 50 or 0.005 is a valid surface.
+pub fn valid_layer_raster_scale(scale: f64) -> bool {
+    scale.is_finite() && scale > 0.0
+}
 /// Longest compatibility cache key (UTF-8 bytes).
 pub const MAX_COMPAT_KEY: usize = 512;
 /// Largest layer object a `Layer` snapshot may carry (canonical JSON).
@@ -118,7 +133,9 @@ pub enum SnapshotTarget {
     },
     /// One layer's raster (the base pixels `render.raster()` returns at
     /// apiVersion 1 to 3), at `scale` output pixels per layer pixel,
-    /// optionally cropped to `crop` (in the raster's pixels).
+    /// optionally cropped to `crop` (in the raster's pixels). Any positive
+    /// finite `scale` ([`valid_layer_raster_scale`]): today's `PM.raster`
+    /// has no upper bound, its density is `min(scale, 8192 / w, 8192 / h)`.
     Layer {
         layer: LayerId,
         scale: f64,
@@ -174,6 +191,12 @@ pub struct SnapshotRequest {
     /// again: the engine waits for those pixels (they are already on their
     /// way) instead of naming them again.
     pub uploaded: Vec<String>,
+    /// Compatibility needs the caller answered and posted after the last
+    /// `needsRenderer` round. Only these answers are already on their way:
+    /// a viewer ask may still need the caller's now-blocked event loop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<Vec<CompatNeed>>", optional))]
+    pub compat_uploaded: Vec<CompatNeed>,
 }
 
 impl SnapshotRequest {
@@ -239,6 +262,18 @@ impl Validate for SnapshotRequest {
             C,
             || "too many uploaded keys".into(),
         )?;
+        ensure(self.compat_uploaded.len() <= MAX_COMPAT_NEEDS, C, || {
+            "too many uploaded compatibility needs".into()
+        })?;
+        for need in &self.compat_uploaded {
+            ensure(
+                need.composition.is_valid() && need.layer.is_valid(),
+                C,
+                || "invalid uploaded compatibility layer".into(),
+            )?;
+            valid_crop(need.crop)?;
+            valid_scale(need.scale)?;
+        }
         match &self.target {
             SnapshotTarget::Frame {
                 motion_blur_samples,
@@ -260,12 +295,9 @@ impl Validate for SnapshotRequest {
                     C,
                     || "layer content outside 1 byte..4 MiB".into(),
                 )?;
-                ensure(
-                    scale.is_finite()
-                        && (crate::frame::MIN_SCALE..=crate::frame::MAX_SCALE).contains(scale),
-                    C,
-                    || format!("raster scale {scale} outside 0.01..16"),
-                )?;
+                ensure(valid_layer_raster_scale(*scale), C, || {
+                    format!("layer raster scale {scale} is not a positive finite number")
+                })?;
                 ensure(crop.is_none_or(|c| !c.is_empty()), C, || {
                     "an empty raster crop".into()
                 })
@@ -349,6 +381,14 @@ pub struct CompatNeed {
     pub source: CompatSource,
     /// Output pixels per layer pixel the frame draws the layer at.
     pub scale: f64,
+    /// Today's preview crop window (`legacy/gl/shape-raster-window.ts`, in
+    /// the raster's pixels at `scale`) the producer is called with, as the
+    /// compositor passes it to `PM.raster` for a viewer frame; absent: the
+    /// whole raster (exports and snapshots never crop). Part of the need's
+    /// identity: another window is another answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub crop: Option<crate::common::PixelRect>,
 }
 
 /// The answer to a [`HostSnapshot`].
@@ -630,10 +670,46 @@ pub struct CompatPixels {
     pub row: u32,
     pub rows: u32,
     pub data: Bytes,
+    /// The raster's size in layer pixels (today's `RasterSurface` `w`,
+    /// `h`, the quad the compositor draws it on). Absent: the pixel size
+    /// over `scale`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub size: Option<[f64; 2]>,
+    /// The part of the raster the quad samples (today's `uv`: offset and
+    /// scale, 0..1). Absent: the whole raster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub uv: Option<[f64; 4]>,
+    /// The crop window of the need this raster answers ([`CompatNeed::crop`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub crop: Option<crate::common::PixelRect>,
+}
+
+/// A layer at one frame that a producer passed through: the engine draws it
+/// natively (a `raster` override that returned the base raster unchanged).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct CompatNative {
+    pub composition: CompositionId,
+    pub layer: LayerId,
+    pub time: Ticks,
+    pub source: CompatSource,
+    /// Output pixels per layer pixel the producer was asked at.
+    pub scale: f64,
+    /// The document revision the producer decided at.
+    pub revision: Revision,
+    /// The crop window of the need it answers ([`CompatNeed::crop`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub crop: Option<crate::common::PixelRect>,
 }
 
 /// Renderer ↔ interactive engine (session-bound, the viewer's port):
-/// every variant travels from the renderer except `SvgRequests`.
+/// `Pixels`, `Forget`, `Producers`, `Native`, `Reuse`, `SvgPixels`, and
+/// `SvgFailed` go to the engine, `Needs` and `SvgRequests` to the renderer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
@@ -649,6 +725,34 @@ pub enum CompatMessage {
     Forget {
         composition: CompositionId,
         layer: LayerId,
+    },
+    /// Renderer → engine: the producers the session has now (a registered
+    /// `raster` override, a drawing compatibility context), replacing the
+    /// previous list. Without a producer for a source the engine never asks
+    /// for it; a change drops every answer of the sources that went.
+    Producers { sources: Vec<CompatSource> },
+    /// Renderer → engine: the producer passed the layer through at this
+    /// frame; the engine draws it itself.
+    Native(CompatNative),
+    /// Renderer → engine: the raster stored under `id` (already uploaded)
+    /// is the producer's answer at `revision` and `scale` too (its cache
+    /// key did not change), so no pixels are sent again.
+    Reuse {
+        id: CompatKey,
+        scale: f64,
+        revision: Revision,
+        /// The crop window of the need it answers ([`CompatNeed::crop`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        crop: Option<crate::common::PixelRect>,
+    },
+    /// Engine → renderer: what a viewer frame at `revision` needs before it
+    /// can be drawn. The renderer answers each need with `Pixels`,
+    /// `Native`, or `Reuse`; the engine draws the frame once every answer
+    /// arrived (the shader fallback runner's pattern, decision 19).
+    Needs {
+        revision: Revision,
+        needs: Vec<CompatNeed>,
     },
     /// Interactive engine → renderer: level 1 SVG rasters a frame drew
     /// without (`crate::svg_raster`).
@@ -667,6 +771,11 @@ pub enum CompatMessage {
     },
 }
 
+/// Most needs in one [`CompatMessage::Needs`].
+pub const MAX_COMPAT_NEEDS: usize = 256;
+/// Most producers a session names.
+pub const MAX_COMPAT_SOURCES: usize = 4;
+
 impl Validate for CompatMessage {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Frame;
@@ -676,6 +785,7 @@ impl Validate for CompatMessage {
                     "PNG is not a compatibility pixel band".into()
                 })?;
                 p.id.validate()?;
+                valid_crop(p.crop)?;
                 ensure(
                     (1..=MAX_COMPAT_EDGE).contains(&p.width)
                         && (1..=MAX_COMPAT_EDGE).contains(&p.height),
@@ -700,19 +810,58 @@ impl Validate for CompatMessage {
                         )
                     },
                 )?;
+                ensure(p.origin.iter().all(|v| v.is_finite()), C, || {
+                    "compatibility origin must be finite".into()
+                })?;
+                valid_scale(p.scale)?;
                 ensure(
-                    p.origin.iter().all(|v| v.is_finite())
-                        && p.scale.is_finite()
-                        && p.scale > 0.0
-                        && p.scale <= crate::frame::MAX_SCALE,
+                    p.size
+                        .is_none_or(|s| s.iter().all(|v| v.is_finite() && *v > 0.0))
+                        && p.uv.is_none_or(|u| u.iter().all(|v| v.is_finite())),
                     C,
-                    || "compatibility origin and scale must be finite".into(),
+                    || "compatibility size and uv must be finite".into(),
                 )
             }
             CompatMessage::Forget { composition, layer } => {
                 ensure(composition.is_valid() && layer.is_valid(), C, || {
                     "invalid compatibility layer".into()
                 })
+            }
+            CompatMessage::Producers { sources } => {
+                ensure(sources.len() <= MAX_COMPAT_SOURCES, C, || {
+                    format!("{} compatibility producers", sources.len())
+                })
+            }
+            CompatMessage::Native(n) => {
+                ensure(n.composition.is_valid() && n.layer.is_valid(), C, || {
+                    "invalid compatibility layer".into()
+                })?;
+                valid_crop(n.crop)?;
+                valid_scale(n.scale)
+            }
+            CompatMessage::Reuse {
+                id, scale, crop, ..
+            } => {
+                id.validate()?;
+                valid_crop(*crop)?;
+                valid_scale(*scale)
+            }
+            CompatMessage::Needs { needs, .. } => {
+                ensure(
+                    !needs.is_empty() && needs.len() <= MAX_COMPAT_NEEDS,
+                    C,
+                    || format!("{} compatibility needs", needs.len()),
+                )?;
+                for need in needs {
+                    ensure(
+                        need.composition.is_valid() && need.layer.is_valid(),
+                        C,
+                        || "invalid compatibility layer".into(),
+                    )?;
+                    valid_crop(need.crop)?;
+                    valid_scale(need.scale)?;
+                }
+                Ok(())
             }
             CompatMessage::SvgRequests { requests } => {
                 crate::svg_raster::validate_requests(requests)
@@ -725,6 +874,31 @@ impl Validate for CompatMessage {
             } => crate::svg_raster::validate_failure(key, reason, message),
         }
     }
+}
+
+/// A crop window is a non-empty part of a raster no larger than today's
+/// largest (8192 × 8192 device pixels, `textRasterGeometry`).
+fn valid_crop(crop: Option<crate::common::PixelRect>) -> Result<(), Violation> {
+    crop.map_or(Ok(()), |c| {
+        ensure(
+            !c.is_empty()
+                && u64::from(c.x) + u64::from(c.width) <= MAX_COMPAT_CROP
+                && u64::from(c.y) + u64::from(c.height) <= MAX_COMPAT_CROP,
+            ContractId::Frame,
+            || format!("compatibility crop {c:?}"),
+        )
+    })
+}
+
+/// The largest crop edge: the raster edge today allows (8192 device pixels).
+pub const MAX_COMPAT_CROP: u64 = 8192;
+
+fn valid_scale(scale: f64) -> Result<(), Violation> {
+    ensure(
+        scale.is_finite() && scale > 0.0 && scale <= MAX_RASTER_SCALE,
+        ContractId::Frame,
+        || format!("compatibility raster scale {scale} outside 0..=32 (exclusive zero)"),
+    )
 }
 
 /// Job engine → host (contract 14): the compatibility pixels of one layer at
@@ -753,9 +927,62 @@ pub struct CompatFrameRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub svg: Option<crate::svg_raster::SvgRasterRequest>,
+    /// For [`CompatSource::CompatContext`] (and only then): the export
+    /// frame as today's compositor canvas held it before `frame:rendered`
+    /// (RGBA8, top-down, opaque, display-encoded). The window runs its
+    /// `frame:rendered` handlers over it in the compatibility context and
+    /// answers the frame they leave, or a pass-through when none drew
+    /// (docs/engine/extensions-compat.md, "Exports"). `layer` names the
+    /// composition then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub frame: Option<CompatFrameInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub blender: Option<BlenderPngRequest>,
+}
+
+/// An export frame a compatibility context draws over
+/// ([`CompatFrameRequest::frame`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct CompatFrameInput {
+    pub width: u32,
+    pub height: u32,
+    /// `width × height × 4` bytes.
+    pub payload: PixelPayload,
+}
+
+impl Validate for CompatFrameInput {
+    fn validate(&self) -> Result<(), Violation> {
+        const C: ContractId = ContractId::HostServices;
+        ensure(
+            (1..=MAX_OUTPUT_DIMENSION).contains(&self.width)
+                && (1..=MAX_OUTPUT_DIMENSION).contains(&self.height),
+            C,
+            || format!("compatibility frame {}×{}", self.width, self.height),
+        )?;
+        let expected = u64::from(self.width) * u64::from(self.height) * 4;
+        ensure(self.payload.len() == expected, C, || {
+            format!(
+                "{} bytes for a {}×{} compatibility frame",
+                self.payload.len(),
+                self.width,
+                self.height
+            )
+        })?;
+        match &self.payload {
+            PixelPayload::Inline { bytes } => {
+                ensure(bytes.0.len() <= INLINE_PIXEL_BYTES, C, || {
+                    "inline pixels over the inline limit".into()
+                })
+            }
+            PixelPayload::SharedMemory { name, .. } => ensure(shared_name_ok(name), C, || {
+                "invalid shared-memory name".into()
+            }),
+        }
+    }
 }
 
 impl Validate for CompatFrameRequest {
@@ -783,9 +1010,22 @@ impl Validate for CompatFrameRequest {
             blender.validate()?;
         }
         ensure(
-            self.scale.is_finite() && self.scale > 0.0 && self.scale <= crate::frame::MAX_SCALE,
+            (self.source == CompatSource::CompatContext) == self.frame.is_some(),
             C,
-            || format!("compatibility scale {}", self.scale),
+            || "a compatContext frame carries the export frame, and only it".into(),
+        )?;
+        if let Some(frame) = &self.frame {
+            frame.validate()?;
+        }
+        ensure(
+            self.scale.is_finite() && self.scale > 0.0 && self.scale <= MAX_RASTER_SCALE,
+            C,
+            || {
+                format!(
+                    "compatibility raster scale {} outside 0..=32 (exclusive zero)",
+                    self.scale
+                )
+            },
         )
     }
 }
@@ -802,16 +1042,51 @@ pub struct CompatFrame {
     pub origin: [f64; 2],
     pub scale: f64,
     pub payload: PixelPayload,
+    /// The producer passed the layer through: the engine draws it itself
+    /// (the payload is empty).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub native: bool,
+    /// The quad in layer pixels and the part of the raster it samples (as
+    /// [`CompatPixels`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub size: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub uv: Option<[f64; 4]>,
 }
 
 impl Validate for CompatFrame {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::HostServices;
         ensure(
+            self.scale.is_finite() && self.scale > 0.0 && self.scale <= MAX_RASTER_SCALE,
+            C,
+            || {
+                format!(
+                    "compatibility raster scale {} outside 0..=32 (exclusive zero)",
+                    self.scale
+                )
+            },
+        )?;
+        if self.native {
+            return ensure(self.payload.is_empty(), C, || {
+                "a pass-through carries no pixels".into()
+            });
+        }
+        ensure(
             (1..=MAX_COMPAT_EDGE).contains(&self.width)
                 && (1..=MAX_COMPAT_EDGE).contains(&self.height),
             C,
             || format!("compatibility frame {}×{}", self.width, self.height),
+        )?;
+        ensure(
+            self.size
+                .is_none_or(|s| s.iter().all(|v| v.is_finite() && *v > 0.0))
+                && self.uv.is_none_or(|u| u.iter().all(|v| v.is_finite())),
+            C,
+            || "compatibility size and uv must be finite".into(),
         )?;
         if self.format == CompatFormat::Png {
             ensure(
@@ -913,6 +1188,7 @@ mod tests {
             blender_wait_ms: 0,
             captions_hidden: false,
             uploaded: Vec::new(),
+            compat_uploaded: Vec::new(),
         }
     }
 
@@ -1042,6 +1318,240 @@ mod tests {
     }
 
     #[test]
+    fn a_compat_context_frame_carries_the_export_frame_and_only_it() {
+        let frame = |source, frame| CompatFrameRequest {
+            document: "doc".into(),
+            composition: "c".into(),
+            layer: "c".into(),
+            time: Ticks::ZERO,
+            source,
+            scale: 1.0,
+            revision: Revision::ZERO,
+            svg: None,
+            frame,
+            blender: None,
+        };
+        let input = |w: u32, h: u32, len: usize| CompatFrameInput {
+            width: w,
+            height: h,
+            payload: PixelPayload::Inline {
+                bytes: Bytes(vec![0; len]),
+            },
+        };
+        assert!(
+            frame(CompatSource::CompatContext, Some(input(4, 2, 32)))
+                .validate()
+                .is_ok()
+        );
+        assert!(frame(CompatSource::CompatContext, None).validate().is_err());
+        assert!(
+            frame(CompatSource::CompatContext, Some(input(4, 2, 31)))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            frame(CompatSource::CompatContext, Some(input(0, 2, 0)))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            frame(CompatSource::RasterOverride, Some(input(4, 2, 32)))
+                .validate()
+                .is_err()
+        );
+        assert!(frame(CompatSource::RasterOverride, None).validate().is_ok());
+    }
+
+    #[test]
+    fn a_public_layer_raster_takes_any_positive_scale_as_today() {
+        for scale in [
+            1e-9,
+            0.005,
+            0.01,
+            1.0,
+            32.0,
+            33.0,
+            40.0,
+            50.0,
+            1_000.0,
+            f64::MAX,
+        ] {
+            let mut layer = request(8, 8);
+            layer.target = SnapshotTarget::Layer {
+                layer: "L".into(),
+                scale,
+                crop: None,
+                content: None,
+            };
+            assert!(layer.validate().is_ok(), "layer raster at scale {scale}");
+        }
+        for scale in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut layer = request(8, 8);
+            layer.target = SnapshotTarget::Layer {
+                layer: "L".into(),
+                scale,
+                crop: None,
+                content: None,
+            };
+            assert!(layer.validate().is_err(), "layer raster at scale {scale}");
+        }
+    }
+
+    #[test]
+    fn raster_density_matches_todays_continuous_scale_through_32() {
+        let id = CompatKey {
+            composition: "c".into(),
+            layer: "L".into(),
+            time: Ticks::ZERO,
+            source: CompatSource::RasterOverride,
+            key: "k".into(),
+        };
+        for scale in [16.01, 24.0, 32.0, 32.01, 0.0, f64::NAN, f64::INFINITY] {
+            let good = scale.is_finite() && scale > 0.0 && scale <= 32.0;
+            let mut layer = request(8, 8);
+            layer.target = SnapshotTarget::Layer {
+                layer: "L".into(),
+                scale,
+                crop: None,
+                content: None,
+            };
+            // A public layer raster takes any positive finite scale.
+            assert_eq!(
+                layer.validate().is_ok(),
+                scale.is_finite() && scale > 0.0,
+                "layer {scale}"
+            );
+            let need = CompatNeed {
+                composition: "c".into(),
+                layer: "L".into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale,
+                crop: None,
+            };
+            let messages = [
+                CompatMessage::Needs {
+                    revision: Revision::ZERO,
+                    needs: vec![need],
+                },
+                CompatMessage::Native(CompatNative {
+                    composition: "c".into(),
+                    layer: "L".into(),
+                    time: Ticks::ZERO,
+                    source: CompatSource::RasterOverride,
+                    scale,
+                    revision: Revision::ZERO,
+                    crop: None,
+                }),
+                CompatMessage::Reuse {
+                    id: id.clone(),
+                    scale,
+                    revision: Revision::ZERO,
+                    crop: None,
+                },
+                CompatMessage::Pixels(CompatPixels {
+                    id: id.clone(),
+                    revision: Revision::ZERO,
+                    width: 1,
+                    height: 1,
+                    format: CompatFormat::Rgba8Straight,
+                    origin: [0.0, 0.0],
+                    scale,
+                    row: 0,
+                    rows: 1,
+                    data: Bytes(vec![0; 4]),
+                    size: None,
+                    uv: None,
+                    crop: None,
+                }),
+            ];
+            for message in messages {
+                assert_eq!(message.validate().is_ok(), good, "{message:?}");
+            }
+            let frame_request = CompatFrameRequest {
+                document: "doc".into(),
+                composition: "c".into(),
+                layer: "L".into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale,
+                revision: Revision::ZERO,
+                svg: None,
+                frame: None,
+                blender: None,
+            };
+            assert_eq!(
+                frame_request.validate().is_ok(),
+                good,
+                "export request {scale}"
+            );
+            for native in [false, true] {
+                let frame = CompatFrame {
+                    key: "k".into(),
+                    width: 1,
+                    height: 1,
+                    format: CompatFormat::Rgba8Straight,
+                    origin: [0.0, 0.0],
+                    scale,
+                    payload: PixelPayload::Inline {
+                        bytes: Bytes(vec![0; if native { 0 } else { 4 }]),
+                    },
+                    native,
+                    size: None,
+                    uv: None,
+                };
+                assert_eq!(
+                    frame.validate().is_ok(),
+                    good,
+                    "export answer {scale} {native}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compat_crops_are_windows_of_a_raster() {
+        use crate::common::PixelRect;
+        let need = |crop: Option<PixelRect>| CompatMessage::Needs {
+            revision: Revision::ZERO,
+            needs: vec![CompatNeed {
+                composition: "c".into(),
+                layer: "L".into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale: 4.0,
+                crop,
+            }],
+        };
+        let rect = |x, y, width, height| {
+            Some(PixelRect {
+                x,
+                y,
+                width,
+                height,
+            })
+        };
+        assert!(need(None).validate().is_ok());
+        assert!(need(rect(256, 512, 1024, 768)).validate().is_ok());
+        assert!(need(rect(0, 0, 8192, 8192)).validate().is_ok());
+        assert!(need(rect(0, 0, 0, 10)).validate().is_err());
+        assert!(need(rect(8000, 0, 256, 10)).validate().is_err());
+        let native = |crop| {
+            CompatMessage::Native(CompatNative {
+                composition: "c".into(),
+                layer: "L".into(),
+                time: Ticks::ZERO,
+                source: CompatSource::RasterOverride,
+                scale: 1.0,
+                revision: Revision::ZERO,
+                crop,
+            })
+        };
+        assert!(native(rect(0, 0, 256, 256)).validate().is_ok());
+        assert!(native(rect(0, 0, 256, 0)).validate().is_err());
+    }
+
+    #[test]
     fn compat_bands_must_fit_their_rows() {
         let band = |row: u32, rows: u32, len: usize, format: CompatFormat| {
             CompatMessage::Pixels(CompatPixels {
@@ -1061,6 +1571,9 @@ mod tests {
                 row,
                 rows,
                 data: Bytes(vec![0; len]),
+                size: None,
+                uv: None,
+                crop: None,
             })
         };
         assert!(
@@ -1097,6 +1610,7 @@ mod tests {
             scale: 1.0,
             revision: Revision::ZERO,
             svg: None,
+            frame: None,
             blender: Some(BlenderPngRequest {
                 asset: "a1".into(),
                 content: crate::common::ContentHash([7; 32]),
@@ -1118,6 +1632,9 @@ mod tests {
             origin: [0.0, 0.0],
             scale: 1.0,
             payload: PixelPayload::Inline { bytes: Bytes(png) },
+            native: false,
+            size: None,
+            uv: None,
         };
         assert!(frame.validate().is_ok());
         let mut bad = frame.clone();

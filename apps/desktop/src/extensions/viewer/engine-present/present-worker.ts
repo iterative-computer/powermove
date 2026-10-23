@@ -27,9 +27,9 @@
  * This module is the worker's side; `present-worker-entry.ts` is the
  * worker script.
  */
-import type { FramePainter, PaintTarget } from './gpu';
+import type { FramePainter, FramePainterMemory, PaintTarget } from './gpu';
 import { createFramePainter } from './painter';
-import { EnginePresenter, type PresentedFrame, type PresenterStats, type TraceRecord } from './presenter';
+import { EnginePresenter, type PresentedFrame, type PresenterMemory, type PresenterStats, type TraceRecord } from './presenter';
 import type { ClockSample, FrameDescriptor, FrameRelease, SurfacePool, VsyncHint } from './protocol';
 
 /** Page → worker. */
@@ -49,7 +49,11 @@ export type ToWorker =
   | { type: 'display'; session: number; displayHz: number | null }
   | { type: 'resize'; session: number }
   | { type: 'takeTrace'; session: number; id: number }
+  | { type: 'trim' }
+  | { type: 'memoryStats'; id: number }
   | { type: 'dispose' };
+
+export type WorkerMemoryStats = { painter: FramePainterMemory | null; presenter: PresenterMemory | null; sessionOpen: boolean; closingSessions: number };
 
 /** Worker → page. */
 export type FromWorker =
@@ -68,6 +72,7 @@ export type FromWorker =
   /** A frame of pool `generation` could not be read (`onUnusable`). */
   | { type: 'unusable'; session: number; generation: number; message: string }
   | { type: 'trace'; session: number; id: number; trace: TraceRecord | null }
+  | { type: 'memoryStats'; id: number; stats: WorkerMemoryStats }
   /** The session's presenter is gone: nothing more comes for it. */
   | { type: 'closed'; session: number }
   | { type: 'disposed' };
@@ -244,6 +249,14 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
     }
     if (message.type === 'open') {
       open(message);
+      return;
+    }
+    if (message.type === 'trim') {
+      if (!session && !closing.size) painter?.trim?.();
+      return;
+    }
+    if (message.type === 'memoryStats') {
+      post({ type: 'memoryStats', id: message.id, stats: { painter: painter?.memoryStats?.() ?? null, presenter: session?.presenter.memoryStats() ?? null, sessionOpen: !!session, closingSessions: closing.size } });
       return;
     }
     // Everything else belongs to one session; an ended one's is dropped.

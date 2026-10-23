@@ -26,11 +26,15 @@ debug = "line-tables-only"
 
 The scripts source `engine/env.sh` (pinned toolchain, four jobs, kache as
 `RUSTC_WRAPPER` when installed). `scripts/release-mac.mjs --with-engine`
-runs `build-engine-addon.mjs` and requires both `.node` files in the bundle;
-the GitHub release workflow does not pass `--with-engine` and has no Rust
-toolchain. `release-mac.mjs` does not build `pm_wasm.wasm`: it packages
-whatever `build:wasm` last wrote. The wasm identity workflow builds the
-module with the same script on a hosted runner.
+builds `pm_wasm.wasm` (before the renderer bundle, checking
+`out/renderer/engine/` carries those bytes), runs `build-engine-addon.mjs`,
+stages FFmpeg, and after packaging checks that both `.node` files are in
+the bundle and export `napi_register_module_v1` and that `app.asar` holds
+the module just built. Without `--with-engine` a stray `native/` addon or
+`pm_wasm.wasm` is refused. The GitHub release workflow passes
+`--with-engine`, installs the pinned toolchain and restores or builds
+FFmpeg. The wasm identity workflow builds the module with the same script
+on a hosted runner.
 
 Build the two addons in separate cargo invocations: in one, feature
 unification compiles pm-bridge's napi glue into `pm_node.node` as well. The
@@ -179,7 +183,6 @@ Release tests and examples need no `CARGO_PROFILE_RELEASE_LTO` override.
 - Thin LTO through kache (the `env.sh` default) was not rebuilt here; the
   failure never depended on it, but the first kache build after this change
   should be checked with the `nm` line above.
-- `release-mac.mjs --with-engine` does not run `build:wasm`.
 - CrabbyAvif still links its own copy of std (separate panic hook and thread
   locals for its internals). Building it from source inside the workspace
   would remove the copy and let it join LTO.

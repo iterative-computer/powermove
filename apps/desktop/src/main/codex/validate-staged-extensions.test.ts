@@ -59,7 +59,7 @@ describe('promotion scan', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       const layout = await stage({ 'index.ts': 'fetch("https://example.com");\napi.render.draw();\n' });
-      await expect(validateStagedExtensions(layout, [{ id: 'weather', action: 'created' }])).resolves.toBeUndefined();
+      await expect(validateStagedExtensions(layout, [{ id: 'weather', action: 'created' }])).resolves.toEqual([]);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('Uses fetch() at index.ts:1'));
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('Uses api.render (full access) at index.ts:2'));
       expect(compileExtension).toHaveBeenCalledTimes(1);
@@ -70,7 +70,7 @@ describe('promotion scan', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
       const layout = await stage({ 'index.ts': 'api.events.on("project:changed", async () => draw(await api.project.get()));\napi.on("selection", draw);\n' });
-      await expect(validateStagedExtensions(layout, [{ id: 'weather', action: 'created' }])).resolves.toBeUndefined();
+      await expect(validateStagedExtensions(layout, [{ id: 'weather', action: 'created' }])).resolves.toEqual([]);
       expect(warn).not.toHaveBeenCalled();
       expect(compileExtension).toHaveBeenCalledTimes(1);
     } finally { warn.mockRestore(); }
@@ -80,7 +80,23 @@ describe('promotion scan', () => {
     const layout = await stage({
       'index.ts': `// powermove-secret-ok: fixture hash for the test palette\nconst id = '${RANDOM}';\nexport default () => id;\n`
     });
-    await expect(validateStagedExtensions(layout, [{ id: 'weather', action: 'updated' }])).resolves.toBeUndefined();
+    await expect(validateStagedExtensions(layout, [{ id: 'weather', action: 'updated' }])).resolves.toEqual([]);
+    expect(compileExtension).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('deprecated compatibility APIs', () => {
+  it('returns each use with its file, line and replacement, and still publishes', async () => {
+    const layout = await stage({
+      'index.ts': "export default function activate(api) {\n  const shot = api.render.snapshot(0);\n}\n",
+      'Panel.svelte': "<script>\n  let { api } = $props();\n  const live = api.media.assets.get('a');\n</script>\n<video src={live.url}></video>\n"
+    });
+    const warnings = await validateStagedExtensions(layout, [{ id: 'weather', action: 'updated', summary: '' }]);
+    expect(warnings.map((w) => `${w.extension}/${w.file}:${w.line} ${w.member}`)).toEqual([
+      'weather/index.ts:2 render.snapshot',
+      'weather/Panel.svelte:5 media.assets.get().url'
+    ]);
+    expect(warnings[0]).toMatchObject({ replacement: 'await api.render.snapshotAsync(time, maxWidth)', access: 'static' });
     expect(compileExtension).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,21 +1,27 @@
 import { app, autoUpdater as nativeUpdater, BrowserWindow, dialog, ipcMain, Menu, MenuItem } from 'electron';
-import { autoUpdater } from 'electron-updater';
+import type { AppUpdater } from 'electron-updater';
 
 import { IPC, type AppUpdateState } from '../shared/ipc';
 
 /** macOS stages updates with Squirrel and applies them on normal quit. Never
  * bypass the editor's before-quit save barrier with quitAndInstall(): the
  * renderer's Update button quits normally with autoRunAppAfterInstall on. */
-export function installUpdates(menu: Menu): void {
+export function installUpdates(
+  menu: Menu,
+  loadUpdater: () => Promise<AppUpdater> = async () => {
+    const runtime = await import('electron-updater');
+    // Node exposes this CommonJS getter through the default export; bundled
+    // module namespaces can expose it directly instead.
+    return ('default' in runtime ? runtime.default as typeof runtime : runtime).autoUpdater;
+  }
+): void {
   if (!app.isPackaged || process.platform !== 'darwin') return;
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.autoRunAppAfterInstall = false;
-  autoUpdater.allowPrerelease = app.getVersion().includes('-beta.');
-  autoUpdater.allowDowngrade = false;
 
   const state: AppUpdateState = { status: 'idle', current: app.getVersion(), version: null };
   let manual = false;
+  let updater: AppUpdater | undefined;
+  let loading: Promise<AppUpdater> | undefined;
+  let stopped = false;
   const show = (message: string, detail: string): void => {
     void dialog.showMessageBox({ type: 'info', title: 'Powermove Updates', message, detail }).catch(console.error);
   };
@@ -32,6 +38,7 @@ export function installUpdates(menu: Menu): void {
   }
 
   async function check(interactive = false): Promise<void> {
+    if (stopped) return;
     if (state.status === 'ready') {
       if (interactive) show('An update is ready', 'Quit Powermove normally to install it. Your session will be saved before quitting.');
       return;
@@ -43,46 +50,71 @@ export function installUpdates(menu: Menu): void {
     manual = interactive;
     set({ status: 'checking' });
     try {
-      await autoUpdater.checkForUpdates();
-    } catch {
+      const ready = await initialize();
+      if (!stopped) await ready.checkForUpdates();
+    } catch (error) {
       // electron-updater emits the error event as well as rejecting; only
       // record the failure if that event did not already move the state on.
-      if ((state.status as AppUpdateState['status']) === 'checking') set({ status: 'error' });
+      if (!stopped && (state.status as AppUpdateState['status']) === 'checking') {
+        set({ status: 'error' });
+        console.error('[updates]', error);
+        if (manual) show('Could not check for updates', 'Please try again later. You can continue using Powermove.');
+        manual = false;
+      }
     }
   }
-  autoUpdater.on('update-available', (info: { version?: string }) => {
-    set({ status: 'downloading', version: info?.version ?? null });
-  });
-  autoUpdater.on('update-not-available', () => {
-    set({ status: 'idle', version: null });
-    if (manual) show('Powermove is up to date', `You’re running ${app.getVersion()}.`);
-    manual = false;
-  });
-  autoUpdater.on('error', (error) => {
-    set({ status: 'error' });
-    console.error('[updates]', error);
-    if (manual) show('Could not check for updates', 'Please try again later. You can continue using Powermove.');
-    manual = false;
-  });
-  // The electron-updater event precedes Squirrel staging. Only announce the
-  // update after the native updater confirms it can install on exit.
-  nativeUpdater.on('update-downloaded', () => {
-    manual = false;
-    item.label = 'Update Ready — Quit to Install';
-    set({ status: 'ready' });
-    // Windows show the in-app notice; without one, fall back to a dialog.
-    if (windows().length === 0) {
-      show('A Powermove update is ready', 'It will install when you quit Powermove. Keep working and quit whenever you’re ready.');
-    }
-  });
+
+  /** The update runtime is large and the first check waits 30 seconds. Keep
+   * its modules out of startup; a manual check can still load it immediately. */
+  function initialize(): Promise<AppUpdater> {
+    loading ??= Promise.resolve().then(loadUpdater).then((ready) => {
+      if (stopped) return ready;
+      updater = ready;
+      ready.autoDownload = true;
+      ready.autoInstallOnAppQuit = true;
+      ready.autoRunAppAfterInstall = false;
+      ready.allowPrerelease = app.getVersion().includes('-beta.');
+      ready.allowDowngrade = false;
+      ready.on('update-available', (info: { version?: string }) => {
+        set({ status: 'downloading', version: info?.version ?? null });
+      });
+      ready.on('update-not-available', () => {
+        set({ status: 'idle', version: null });
+        if (manual) show('Powermove is up to date', `You’re running ${app.getVersion()}.`);
+        manual = false;
+      });
+      ready.on('error', (error) => {
+        set({ status: 'error' });
+        console.error('[updates]', error);
+        if (manual) show('Could not check for updates', 'Please try again later. You can continue using Powermove.');
+        manual = false;
+      });
+      // The electron-updater event precedes Squirrel staging. Only announce
+      // the update after the native updater confirms it can install on exit.
+      nativeUpdater.on('update-downloaded', () => {
+        manual = false;
+        item.label = 'Update Ready — Quit to Install';
+        set({ status: 'ready' });
+        // Windows show the in-app notice; without one, fall back to a dialog.
+        if (windows().length === 0) {
+          show('A Powermove update is ready', 'It will install when you quit Powermove. Keep working and quit whenever you’re ready.');
+        }
+      });
+      return ready;
+    }).catch((error) => {
+      loading = undefined;
+      throw error;
+    });
+    return loading;
+  }
 
   ipcMain.handle(IPC.updateStatus, () => ({ ...state }));
   ipcMain.handle(IPC.updateCheck, () => check(false));
   ipcMain.handle(IPC.updateInstall, () => {
-    if (state.status !== 'ready') return;
+    if (state.status !== 'ready' || !updater) return;
     // A normal quit runs the save barrier; Squirrel installs on exit and
     // relaunches into the new version.
-    autoUpdater.autoRunAppAfterInstall = true;
+    updater.autoRunAppAfterInstall = true;
     app.quit();
   });
 
@@ -90,5 +122,5 @@ export function installUpdates(menu: Menu): void {
   const interval = setInterval(() => { void check(); }, 4 * 60 * 60 * 1000);
   startup.unref();
   interval.unref();
-  app.on('will-quit', () => { clearTimeout(startup); clearInterval(interval); });
+  app.on('will-quit', () => { stopped = true; clearTimeout(startup); clearInterval(interval); });
 }

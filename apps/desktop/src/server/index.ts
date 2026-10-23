@@ -1,3 +1,7 @@
+import { createRequire } from 'node:module';
+import { ENGINE_IPC } from '../shared/engine-ipc';
+import { ENGINE_FONTS_IPC } from '../shared/engine-fonts-ipc';
+import { registerMediaStoreIpc } from '../main/media-store/ipc';
 /*
  * `powermove serve`: the Powermove host without Electron. The same main-process
  * modules that back the desktop app run here in plain Node, and each browser
@@ -8,6 +12,7 @@
  * Agents (Codex, Claude) run on this machine, so a laptop can close while a
  * Linux box keeps working on the project.
  */
+import { parseStoreKey } from '../shared/store-keys';
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createReadStream } from 'node:fs';
@@ -19,7 +24,7 @@ import type { Duplex } from 'node:stream';
 import { WebSocketServer, type WebSocket } from 'ws';
 
 import { IPC, PROJECT_ID, type WindowClaimResult, type WindowInitialProject, type WindowOpenResult } from '../shared/ipc';
-import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello } from '../shared/wire';
+import { WEB, WEB_UPLOAD_CHUNK_BYTES, type WebHello, encodeFrame, decodeFrame } from '../shared/wire';
 import { isRecord } from '../shared/guards';
 import { CONTENT_SECURITY_POLICY, extensionSandboxCsp } from '../main/security-policy';
 import { MIME_TYPES } from '../main/mime';
@@ -51,12 +56,17 @@ import { UpdateChecker, type InstallKind } from './updates';
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { BrowserWindow, IpcMain, WebContents } from 'electron';
 import type { CodexIpcContext } from '../main/codex';
+import { NativeHiddenHost, type NativeBrowser } from './native/host';
+import { registerEngineFontsIpc, installSyncFonts, loadNativeFontRegistry } from '../main/engine-fonts';
+import { EXT_IPC } from '../shared/extensions';
 
 /** Electron's own types for main's modules; the remote stand-ins have the members they use. */
 const asWebContents = (client: RemoteClient): WebContents => client as unknown as WebContents;
 const asBrowserWindow = (window: RemoteWindow | null): BrowserWindow | null => window as unknown as BrowserWindow | null;
 
 export interface ServeOptions {
+  /** Present only for the macOS native hidden host; browser is lazy. */
+  nativeBrowser?: NativeBrowser;
   host: string;
   port: number;
   /** Profile directory: store, extensions, agent workspaces. */
@@ -89,6 +99,7 @@ export interface ServeOptions {
 }
 
 export interface RunningServer {
+  native?: NativeHiddenHost;
   url: string;
   urls: string[];
   token: string;
@@ -242,6 +253,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   /* store */
   const store = createStore(path.join(userData, 'store'));
   await store.load();
+  const remoteProjects = new Map<RemoteWindow, { id: string; release(): void }>();
+  const pinRemoteProject = (window: RemoteWindow, id: string | null): void => {
+    const previous = remoteProjects.get(window);
+    if (previous?.id === id) return;
+    const next = id ? { id, release: store.acquireProject!(id) } : null;
+    if (next) remoteProjects.set(window, next); else remoteProjects.delete(window);
+    previous?.release();
+  };
   registerStoreIpc(ipcMain, store, {
     isTrustedSender,
     broadcastChange: (keys, sender) => { for (const client of ipc.all()) if (client !== sender) client.send(IPC.storeChanged, { keys }); }
@@ -249,7 +268,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
 
   /* project sessions: every tab on a project shares the host's document */
   const sessions = new ProjectSessions({
-    read: (key) => { const raw = store.getSerialized?.(key); return raw == null ? store.snapshot()[key] ?? null : JSON.parse(raw); },
+    acquireProject: id => store.acquireProject!(id),
+    read: (key) => { const raw = store.getSerialized?.(key); return raw == null ? (store.get ? store.get(key) : store.snapshot()[key]) ?? null : JSON.parse(raw); },
     set: (key, value) => store.set(key, value)
   }, { channel: WEB.syncPatch, version: options.version, log });
   ipc.handle(WEB.syncJoin, (event, payload) => {
@@ -267,7 +287,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   });
 
   /* agent runs outlive tabs: a RunOwner is the sender codex/index.ts sees */
+  let nativeHost: NativeHiddenHost | undefined;
   const runs = new RunHub({
+    native: project => nativeHost?.owner(project) ?? null,
     engine: () => ipc.engine(),
     tabs: () => [...ipc.all()].reverse(),
     tabsOn: (projectId) => sessions.members(projectId).filter((member): member is RemoteClient => member instanceof RemoteClient && member.kind === 'tab').reverse(),
@@ -327,6 +349,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const builtinResourcesDir = path.join(options.resourcesDir, 'builtin-extensions');
   let refreshRestoredExtensions: ((ids: string[]) => Promise<void>) | undefined;
   let stopWatcher: (() => void) | undefined;
+  let extensionRegistry: ReturnType<typeof createExtensionRegistry> | undefined;
+  const extensionListeners = new Set<(event: import('../shared/extensions').ExtensionsChangedEvent) => void>();
   try {
     await recoverAllInterruptedExtensionTransactions(userData, userDir);
     await mkdir(userDir, { recursive: true });
@@ -334,16 +358,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     try {
       builtinIds = (await readdir(builtinResourcesDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => entry.name).sort();
     } catch { /* partial checkout: kernel still boots */ }
-    const registry = createExtensionRegistry({ store, userDir, buildDir, builtinIds, resourcesDir: builtinResourcesDir,
+    const registry = extensionRegistry = createExtensionRegistry({ store, userDir, buildDir, builtinIds, resourcesDir: builtinResourcesDir,
+      broadcast: event => { for (const listener of extensionListeners) listener(event); for (const client of ipc.all()) client.send(EXT_IPC.changed, event); },
       trustFor: serveTrustFor(userData) });
     registerExtensionsIpc(ipcMain, { registry, resourcesDir: builtinResourcesDir, isTrusted: isTrustedSender });
     refreshRestoredExtensions = async (ids) => { await registry.refresh(ids); registry.emitChanged({ ids, reason: 'reload' }); };
-    void registry.refresh().then(() => {
+    const refreshed = registry.refresh().then(() => {
       registry.emitChanged({ ids: [], reason: 'reload' });
       const watcher = startExtensionWatcher({ userDir, buildDir, registry });
       stopWatcher = () => { void watcher.close(); };
-    }).catch((error) => log(`[extensions] initial refresh failed: ${String(error)}`));
+    }).catch((error) => { if (options.nativeBrowser) throw error; log(`[extensions] initial refresh failed: ${String(error)}`); });
+    if (options.nativeBrowser) await refreshed;
   } catch (error) {
+    if (options.nativeBrowser) throw new Error(`native-extensions-unavailable: ${String(error)}`);
     log(`[extensions] boot skipped: ${String(error)}`);
   }
 
@@ -358,9 +385,35 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   registerMediaProxyIpc(ipcMain, mediaProxies, ctx);
   registerRenderEncoder(ipcMain, { ...ctx, ffmpeg });
 
+  if (options.nativeBrowser) {
+    if (!extensionRegistry) throw new Error('native-extensions-unavailable: The extension registry could not start.');
+    nativeHost = new NativeHiddenHost({ ownerForRun: id => runs.controlOwner(id)?.id ?? null, userData, exportsDir: options.exportsDir, distDir: path.join(options.appPath, 'dist'),
+      rendererDir: options.rendererDir, ipc, store, sessions, browser: options.nativeBrowser, log,
+      mediaConversions: { convertStill: file => mediaProxies.createStillImage(file), convertVideo: file => mediaProxies.create(file) },
+      extensions: { list: async () => extensionRegistry!.list(), bundle: async url => {
+        const asset = await serveExtensionAsset(new URL(url).pathname);
+        if (!asset) throw new Error(`extension-bundle-unavailable: ${url}`);
+        return asset.text();
+      }, onChanged: listener => { extensionListeners.add(listener); return () => { extensionListeners.delete(listener); }; } } });
+    installSyncFonts(ipcMain, ctx, () => loadNativeFontRegistry(process.env['POWERMOVE_PM_BRIDGE'] ?? path.join(options.appPath, 'dist/native', `${process.platform}-${process.arch}`, 'pm_bridge.node'), createRequire(path.join(options.appPath, 'dist/server.mjs'))));
+    registerEngineFontsIpc(ipcMain, ctx, nativeHost.fonts);
+    registerMediaStoreIpc(ipcMain, nativeHost.media, ctx);
+    try { await nativeHost.start(); } catch (error) { await nativeHost.close(); stopWatcher?.(); throw error; }
+    ipc.handle(ENGINE_IPC.getStatus, event => {
+      trustedClient(event);
+      return { enabled: true, processes: nativeHost!.engine.status() };
+    });
+    ipc.handle(ENGINE_IPC.hostTime, event => { trustedClient(event); return nativeHost!.nowUs(); });
+    ipc.on(ENGINE_IPC.definitions, (event, update) => {
+      const client = trustedClient(event);
+      nativeHost!.engine.definitions.update(client.id, update as never);
+    });
+  }
+
   /* agents */
   const apiPackDir = path.join(options.resourcesDir, 'api-pack');
   registerCodexIpc(ipcMain, {
+    acquireProject: id => store.acquireProject!(id),
     getWindow: () => asBrowserWindow(ipc.current()?.window ?? null),
     broadcast: (send) => { for (const client of ipc.all()) send(asWebContents(client)); },
     userData,
@@ -378,8 +431,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     agentToolServerPath: path.join(options.resourcesDir, 'agent-tools', 'mcp-server.mjs'),
     agentToolCommand: process.execPath,
     agentMediaFfmpeg: ffmpeg,
+    agentExportDirectory: options.exportsDir,
+    agentEngineJobs: nativeHost?.jobs,
     refreshExtensions: refreshRestoredExtensions,
-    externalMcp: options.externalMcp ?? {},
+    externalMcp: { ...options.externalMcp, ...(nativeHost ? { getOwner: () => asWebContents(nativeHost!.owner()) } : {}) },
     builtinExtensionsDir: builtinResourcesDir,
     openExternal: async (url) => { for (const client of ipc.all()) client.send(WEB.openExternal, url); log(`[serve] sign in from your browser: ${url}`); }
   });
@@ -402,14 +457,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const recent = editors.all().filter((other) => other !== window).map((other) => editors.projectOf(other)).find((id) => !!id) ?? null;
     const projectId = own ?? recent;
     if (projectId && !own) editors.claim(window, projectId);
+    pinRemoteProject(window, projectId);
     event.returnValue = { projectId, taken: [] } satisfies WindowInitialProject;
   });
-  ipc.handle(IPC.windowClaimProject, (event, payload): WindowClaimResult => {
+  ipc.handle(IPC.windowClaimProject, async (event, payload): Promise<WindowClaimResult> => {
     const window = trustedClient(event).window;
     const projectId = readProjectId(payload, IPC.windowClaimProject);
     // Unlike desktop windows, tabs share a project through its session, so a
     // claim never bounces to another tab.
     editors.claim(window, projectId);
+    pinRemoteProject(window, projectId);
+    if (projectId) await store.preloadProject?.(projectId);
     return { claimed: true, focused: false };
   });
   ipc.handle(IPC.windowOpenProject, (event, payload): WindowOpenResult => {
@@ -426,7 +484,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   /* web-only channels */
   ipc.handle(WEB.hello, (event): WebHello => {
     if (!isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
-    return { node: process.versions.node, version: options.version, platform: process.platform, exportsDir: options.exportsDir };
+    return { node: process.versions.node, version: options.version, platform: process.platform, exportsDir: options.exportsDir, ...(nativeHost ? { nativeHidden: true } : {}) };
   });
   const uploads = new Map<string, Upload>();
   const uploadsRoot = { media: path.join(userData, 'Remote Uploads'), project: path.join(userData, 'Remote Projects'), blob: path.join(userData, 'Remote Uploads') };
@@ -535,6 +593,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const relative = path.relative(root, resolved);
     if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('media: path is not an upload');
     await mkdir(mediaStoreDir, { recursive: true });
+    if (nativeHost) {
+      await nativeHost.media.store.putFile(resolved, { key: payload.key, type: typeof payload.type === 'string' ? payload.type : '', origin: 'stream' });
+      await rm(path.dirname(resolved), { recursive: true, force: true }); return true;
+    }
     const target = path.join(mediaStoreDir, mediaFileName(payload.key));
     await rename(resolved, target).catch(async () => { await copyFile(resolved, target); });
     await rm(path.dirname(resolved), { recursive: true, force: true });
@@ -548,6 +610,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const present: string[] = [];
     for (const key of keys) {
       if (typeof key !== 'string' || !MEDIA_KEY.test(key)) continue;
+      if (nativeHost && await nativeHost.media.store.record(key)) { present.push(key); continue; }
       try { await stat(path.join(mediaStoreDir, mediaFileName(key))); present.push(key); } catch { /* not here */ }
     }
     return present;
@@ -572,6 +635,27 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         return;
       }
       if (!authorized(request)) { text(response, 401, 'Powermove serve: open the URL with the token printed in the terminal.'); return; }
+      if (nativeHost && ['/__powermove/native-snapshot', '/__powermove/native-fonts'].includes(url.pathname) && request.method === 'POST') {
+        const chunks: Buffer[] = []; let size = 0;
+        for await (const chunk of request) {
+          size += chunk.length;
+          if (size > 768 * 1024 * 1024) { text(response, 413, 'Snapshot request too large'); request.destroy(); return; }
+          chunks.push(chunk);
+        }
+        const value = decodeFrame(Buffer.concat(chunks)) as { project: string; request: import('../shared/engine-ipc').EngineSnapshotRequest; definitions: import('./native/host').NativeSnapshot['definitions'] };
+        let result: unknown;
+        if (url.pathname === '/__powermove/native-fonts') {
+          const input = value as unknown as { project: string; channel: string; args: unknown[] };
+          if (!Object.values(ENGINE_FONTS_IPC).includes(input.channel as never) || !Array.isArray(input.args)) throw new Error('Invalid native font request');
+          const owner = nativeHost.owner(input.project);
+          const event: import('./clients').RemoteEvent = { sender: owner, senderFrame: owner.mainFrame, preventDefault() {} };
+          const handler = ipc.handlerFor(input.channel);
+          if (handler) result = await handler(event, ...input.args);
+          else { ipc.emitOn(input.channel, event, ...input.args); result = event.returnValue; }
+        } else result = await nativeHost.cpuSnapshot(value.project, value.request, value.definitions);
+        const body = encodeFrame(result);
+        response.writeHead(200, headers('application/octet-stream', { 'Content-Length': String(body.length), 'Cache-Control': 'no-store' })); response.end(body); return;
+      }
       if (request.method !== 'GET' && request.method !== 'HEAD') { text(response, 405, 'Method not allowed'); return; }
       const pathname = decodeURIComponent(url.pathname);
       if (pathname.startsWith('/ext/')) {
@@ -580,6 +664,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         const body = Buffer.from(await asset.arrayBuffer());
         response.writeHead(asset.status, headers('text/javascript; charset=utf-8', { 'Cache-Control': 'no-store', 'Content-Length': String(body.byteLength), 'Access-Control-Allow-Origin': '*' }));
         response.end(body);
+        return;
+      }
+      // Legacy browser consumers still read synchronously. This authenticated
+      // single-key endpoint keeps that API without shipping the whole store.
+      if (pathname === '/__powermove/store') {
+        const key = url.searchParams.get('key') ?? '';
+        if (!parseStoreKey(key)) { text(response, 400, 'Invalid store key'); return; }
+        const value = store.getEncodedSerializedAsync
+          ? await store.getEncodedSerializedAsync(key)
+          : store.getEncodedSerialized?.(key) ?? store.getSerialized?.(key) ?? null;
+        response.writeHead(200, headers('application/json; charset=utf-8', { 'Cache-Control': 'no-store' }));
+        response.end(JSON.stringify(value));
         return;
       }
       if (pathname === '/__powermove/fonts/file') {
@@ -592,10 +688,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       if (pathname === '/__powermove/media') {
         const key = url.searchParams.get('key') ?? '';
         if (!MEDIA_KEY.test(key)) { text(response, 400, 'Bad key'); return; }
-        const file = path.join(mediaStoreDir, mediaFileName(key));
+        const record = await nativeHost?.media.store.record(key);
+        const file = record ? nativeHost!.media.store.objectPath(record.hash) : path.join(mediaStoreDir, mediaFileName(key));
         let info;
         try { info = await stat(file); } catch { text(response, 404, 'Not found'); return; }
-        const type = await readFile(`${file}.type`, 'utf8').catch(() => 'application/octet-stream');
+        const type = record?.type || await readFile(`${file}.type`, 'utf8').catch(() => 'application/octet-stream');
         response.writeHead(200, headers(type.trim(), { 'Content-Length': String(info.size), 'Cache-Control': 'private, max-age=31536000, immutable' }));
         createReadStream(file).pipe(response);
         return;
@@ -637,6 +734,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       const origin = `${request.headers.origin ?? `${scheme}://localhost`}/`;
       const client = ipc.connect({ send: (data) => ws.send(data), close: (code, reason) => ws.close(code, reason) }, origin);
       if (isEngine) { client.kind = 'engine'; engineRestarts = 0; } else editors.add(client.window, projectId);
+      if (!isEngine) pinRemoteProject(client.window, projectId);
       log(`[serve] ${isEngine ? 'engine' : 'client'} ${client.id} connected${projectId ? ` (project ${projectId})` : ''}`);
       ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
         if (!isBinary) return;
@@ -654,7 +752,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         try { ws.ping(); } catch { ws.terminate(); }
       }, HEARTBEAT_MS);
       heartbeat.unref();
-      ws.on('close', () => { clearInterval(heartbeat); log(`[serve] ${client.kind} ${client.id} disconnected`); editors.remove(client.window); client.destroy(); });
+      ws.on('close', () => { clearInterval(heartbeat); log(`[serve] ${client.kind} ${client.id} disconnected`); editors.remove(client.window); client.destroy(); pinRemoteProject(client.window, null); });
       ws.on('error', (error: Error) => log(`[serve] client ${client.id}: ${error.message}`));
     });
   });
@@ -694,6 +792,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   if (isLoopback(options.host)) log('[serve] bound to loopback only; pass --host 0.0.0.0 to reach it from another machine');
 
   return {
+    ...(nativeHost ? { native: nativeHost } : {}),
     url: urls[0]!,
     urls,
     token,
@@ -702,6 +801,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       engineStopped = true;
       engine?.kill();
       runs.shutdown();
+      await nativeHost?.close();
       stopWatcher?.();
       for (const client of ipc.all()) client.destroy();
       for (const socket of sockets.clients) socket.terminate();

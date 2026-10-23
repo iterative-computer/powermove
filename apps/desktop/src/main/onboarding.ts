@@ -139,6 +139,8 @@ export class OnboardingFlow {
     });
     this.ipc.on(IPC.onboardingAnimationEnding, (event) => {
       if (!this.isMainFrameOf(event, this.animationWindow)) return;
+      // The welcome window is ready to take input while the logo finishes.
+      this.animationWindow?.setIgnoreMouseEvents(true);
       void this.showWelcome(this.generation, true);
     });
     this.ipc.on(IPC.onboardingAnimationFailed, (event, message: unknown) => {
@@ -205,13 +207,14 @@ export class OnboardingFlow {
     const window = new BrowserWindow(onboardingOverlayOptions(bounds, this.options.backgroundTest));
     this.animationWindow = window;
     this.options.secure(window);
-    window.setIgnoreMouseEvents(true);
+    // The intro has a keyboard-accessible skip control.
+    window.setIgnoreMouseEvents(false);
     if (!this.options.backgroundTest) window.setAlwaysOnTop(true, 'screen-saver');
     this.applyOverlayBounds(window, bounds);
     window.once('ready-to-show', () => {
       if (!window.isDestroyed() && !this.options.backgroundTest) {
         if (!this.applyOverlayBounds(window, bounds)) console.warn('[onboarding] overlay bounds were constrained', window.getBounds(), bounds);
-        window.showInactive();
+        window.show();
       }
     });
     window.webContents.once('did-fail-load', () => void this.showWelcome(generation));

@@ -2,8 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { install as installExporter } from '../legacy/core/exporter';
-import { renderState, onRenderState } from '../core/scene3d/rendering';
-import { CAPTURE_BUSY, installAppCaptures, usesBlender } from './app-captures';
+import { CAPTURE_BUSY, installAppCaptures } from './app-captures';
 
 vi.mock('../legacy/core/export-preview', () => ({ animateExportPreview: () => () => {} }));
 vi.mock('../player/export-web', () => ({
@@ -28,7 +27,7 @@ function legacyPM() {
 
 const engine = () => ({
   snapshotDataUrlSync: vi.fn((time: number, width: number) => `data:engine-sync:${time}:${width}`),
-  snapshotDataUrl: vi.fn(async (time: number, width: number, _size?: unknown, _options?: { prepareBlender?: boolean }) => `data:engine-async:${time}:${width}`)
+  snapshotDataUrl: vi.fn(async (time: number, width: number, _size?: unknown, _options?: { captionsHidden?: boolean }) => `data:engine-async:${time}:${width}`)
 });
 
 describe('the app’s captures with the new engine on', () => {
@@ -67,7 +66,7 @@ describe('the app’s captures with the new engine on', () => {
     expect(e.snapshotDataUrlSync).toHaveBeenCalledWith(0, 480, PM.proj, { captionsHidden: false });
   });
 
-  it('snapshotAsync keeps today’s contract: Blender prepares the frame, playback pauses and resumes, one capture at a time', async () => {
+  it('snapshotAsync keeps today’s contract: playback pauses and resumes, one capture at a time', async () => {
     const { PM } = legacyPM();
     const calls: string[] = [];
     PM.playing = true;
@@ -80,46 +79,46 @@ describe('the app’s captures with the new engine on', () => {
     installExporter(PM);
     const pending = PM.Export.snapshotAsync(1, 320);
     await Promise.resolve();
-    expect(e.snapshotDataUrl).toHaveBeenCalledWith(1, 320, PM.proj, { prepareBlender: true, captionsHidden: false });
+    expect(e.snapshotDataUrl).toHaveBeenCalledWith(1, 320, PM.proj, { captionsHidden: false });
     expect(PM.agentFrameCapture).toBe(true);
     // A second capture while one runs is refused with today's words.
     await expect(PM.Export.snapshotAsync(2, 320)).rejects.toThrow(CAPTURE_BUSY);
-    finish('data:blender');
-    expect(await pending).toBe('data:blender');
+    finish('data:engine');
+    expect(await pending).toBe('data:engine');
     expect(calls).toEqual(['pause', 'capture', 'play']);
     expect(PM.agentFrameCapture).toBe(false);
     // While an export runs, too.
     PM.Export.busy = true;
     await expect(PM.Export.snapshotAsync(0, 320)).rejects.toThrow(CAPTURE_BUSY);
     PM.Export.busy = false;
-    // A failure (Blender missing) still resumes playback and frees the slot.
-    e.snapshotDataUrl.mockImplementation(async () => { throw new Error('This composition renders with Blender. Install Blender 4.5 or later.'); });
+    // A failure still resumes playback and frees the slot.
+    e.snapshotDataUrl.mockImplementation(async () => { throw new Error('The engine could not draw this frame.'); });
     PM.playing = true;
     calls.length = 0;
-    await expect(PM.Export.snapshotAsync(0, 320)).rejects.toThrow(/Install Blender/);
+    await expect(PM.Export.snapshotAsync(0, 320)).rejects.toThrow(/could not draw/);
     expect(calls).toEqual(['pause', 'play']);
     expect(PM.agentFrameCapture).toBe(false);
   });
 
-  it('mirrors Blender capture busy and error through the existing rendering controls state', async () => {
+  it('snapshotAsync honours the capture signal: refused when aborted, rejected on abort, busy until the draw ends', async () => {
     const { PM } = legacyPM();
-    PM.proj.render3d = { enabled: true };
-    const states: Array<{ busy: boolean; error: string | null }> = [];
-    const off = onRenderState(PM, s => states.push({ busy: s.busy, error: s.error }));
+    let finish: (url: string) => void = () => {};
     const e = engine();
-    let finish!: (url: string) => void;
-    e.snapshotDataUrl.mockImplementation(() => new Promise<string>(resolve => { finish = resolve; }));
+    e.snapshotDataUrl.mockImplementation(() => new Promise<string>((resolve) => { finish = resolve; }));
     installAppCaptures(PM, e);
-    const capture = PM.EngineCaptures.snapshotAsync(0);
-    expect(renderState(PM).busy).toBe(true);
-    finish('data:ok');
-    await capture;
-    expect(renderState(PM).busy).toBe(false);
-    e.snapshotDataUrl.mockRejectedValue(new Error('Blender failed'));
-    await expect(PM.EngineCaptures.snapshotAsync(0)).rejects.toThrow('Blender failed');
-    expect(renderState(PM)).toMatchObject({ busy: false, error: 'Blender failed' });
-    expect(states).toContainEqual({ busy: true, error: null });
-    off();
+    installExporter(PM);
+    const early = new AbortController();
+    early.abort(new DOMException('gone', 'AbortError'));
+    await expect(PM.Export.snapshotAsync(0, 320, { signal: early.signal })).rejects.toThrow('gone');
+    expect(e.snapshotDataUrl).not.toHaveBeenCalled();
+    const controller = new AbortController();
+    const pending = PM.Export.snapshotAsync(1, 320, { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(PM.agentFrameCapture).toBe(true);
+    finish('data:late');
+    await vi.waitFor(() => expect(PM.agentFrameCapture).toBe(false));
   });
 
   it('reads caption visibility separately for synchronous and asynchronous captures', async () => {
@@ -131,14 +130,7 @@ describe('the app’s captures with the new engine on', () => {
       PM.EngineCaptures.snapshot(0, 320);
       await PM.EngineCaptures.snapshotAsync(0, 320);
       expect(e.snapshotDataUrlSync).toHaveBeenLastCalledWith(0, 320, PM.proj, { captionsHidden: hidden });
-      expect(e.snapshotDataUrl).toHaveBeenLastCalledWith(0, 320, PM.proj, { prepareBlender: true, captionsHidden: hidden });
+      expect(e.snapshotDataUrl).toHaveBeenLastCalledWith(0, 320, PM.proj, { captionsHidden: hidden });
     }
-  });
-
-  it('knows a Blender document by any composition with render3d on', () => {
-    expect(usesBlender({ render3d: { enabled: true } })).toBe(true);
-    expect(usesBlender({ render3d: { enabled: false }, comps: { a: { render3d: { enabled: true } } } })).toBe(true);
-    expect(usesBlender({ comps: { a: { render3d: null }, b: null } })).toBe(false);
-    expect(usesBlender(null)).toBe(false);
   });
 });

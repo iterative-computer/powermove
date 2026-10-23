@@ -483,13 +483,14 @@
     const from = wantsMotion() ? cardBox(id)?.getBoundingClientRect() ?? null : null;
     landed = !from;
     editingId = id;
-    if (!from) { focusScope(id); return; }
-    /* Render the editor now so the stage frame can be measured at its real
-       size before the first painted frame of the animation. */
     flushSync();
     rootEl?.focus({ preventScroll: true });
+    // Scope and composer are ready now; only the live panel waits for its snapshot.
+    focusScope(id);
+    if (!from) return;
+    // Measure the stage at its final size before the first painted frame.
     const stage = stageBox();
-    const joined = () => { if (editingId === id) { landed = true; focusScope(id); } };
+    const joined = () => { if (editingId === id) landed = true; };
     if (stage) {
       const to = stage.getBoundingClientRect();
       const preview = previews.get(id);
@@ -996,9 +997,8 @@
             </div>
           </div>
         </section>
-        <aside class="library-chat" class:ready={landed} aria-label="Panel conversation">
-          {#if landed}
-            <div class="library-chat-body" in:fly={pageFly(1)}>
+        <aside class="library-chat ready" aria-label="Panel conversation">
+            <div class="library-chat-body">
               <ThreadPicker {PM} />
               <div class="library-chat-log">
                 {#key agentState.threadId}<Conversation {PM} welcome={panelWelcome} />{/key}
@@ -1007,7 +1007,6 @@
                 <Composer {PM} panelId="library" placeholder={`Describe a change to ${editingPanel.title}…`} />
               </div>
             </div>
-          {/if}
         </aside>
       </div>
     {/if}

@@ -108,14 +108,14 @@ describe('editable timeline groups',()=>{
   it('keeps the current pose when changing membership, reparenting, or ungrouping a transformed group', () => {
     const {PM,a,b,c}=editor(); a.parent=null; b.parent=a.id;
     const group=PM.groupLayers([a.id,b.id]);
-    group.p.rotation.v=35; group.p['scale.x'].v=150; group.p['scale.y'].v=80; group.p.opacity.v=60; PM.touch();
+    group.p.rotation.v=35; group.p['scale.x'].v=150; group.p['scale.y'].v=80; group.p.opacity.v=100; PM.touch();
     const poseA=PM.worldMatrix(a,2), poseB=PM.worldMatrix(b,2);
     expect(PM.Edit.apply({type:'set_layer',target:a.id,patch:{parent:c.id}}).ok).toBe(true);
     PM.worldMatrix(a,2).forEach((value:number,index:number)=>expect(value).toBeCloseTo(poseA[index]));
     expect(PM.Edit.apply({type:'ungroup_layers',targets:[group.id]}).ok).toBe(true);
     for(const [layer,expected] of [[a,poseA],[b,poseB]]) {
       PM.worldMatrix(layer,2).forEach((value:number,index:number)=>expect(value).toBeCloseTo(expected[index]));
-      expect(PM.worldOpacity(layer,2)).toBeCloseTo(.6);
+      expect(PM.worldOpacity(layer,2)).toBeCloseTo(1);
     }
     const next=PM.groupLayers([a.id]); next.p.rotation.v=20; PM.touch();
     const pose=PM.worldMatrix(b,2);

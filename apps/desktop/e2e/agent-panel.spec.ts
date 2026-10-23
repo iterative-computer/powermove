@@ -113,6 +113,45 @@ test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', (
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  test('dragging re-pins a closed agent and keeps it visible after restarting', async ({ session }, testInfo) => {
+    await session.openEditor();
+    let { page } = session;
+    // Closing a pinned panel saves an explicit false preference.
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((ws: any) => PM.Layout.addPanel(ws, 'agent', 'left'));
+    });
+    await expect(page.locator('#dock-left #panel-agent')).toBeVisible();
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.WS.mutate((ws: any) => PM.Layout.closePanel(ws, 'agent'));
+    });
+    await session.openAgent();
+    const composer = page.getByRole('textbox', { name: 'Message Powermove agent', exact: true });
+    await composer.fill('Keep this draft after docking');
+    const grip = (await page.getByRole('button', { name: 'Move agent panel', exact: true }).boundingBox())!;
+    const dock = (await page.locator('#dock-left').boundingBox())!;
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(dock.x + dock.width / 2, dock.y + 16, { steps: 16 });
+    await expect(page.locator('.panel-drop-preview')).toHaveClass(/on/);
+    await page.mouse.up();
+    await expect(page.locator('#dock-left #panel-agent')).toBeVisible();
+    await expect(page.locator('#dock-left .agent-inline-prompt')).toHaveText('Keep this draft after docking');
+    expect(await page.evaluate(() => (window as any).PM.store.get('panelVisibility').agent)).toBe(true);
+    await session.relaunch();
+    await session.openEditor();
+    page = session.page;
+    await expect(page.locator('#dock-left #panel-agent')).toBeVisible();
+    await expect(page.locator('#dock-left .agent-inline-prompt')).toBeInViewport();
+    for (const theme of ['dark', 'light']) {
+      await page.evaluate(theme => (window as any).PM.theme.apply(theme), theme);
+      await expect(page.locator('#dock-left .agent-inline-prompt')).toBeInViewport();
+      await page.screenshot({ path: testInfo.outputPath(`agent-repinned-${theme}.png`) });
+    }
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('the floating grip moves, cancels and docks the same conversation', async ({ session }) => {
     await session.openEditor(); await session.openAgent();
     const { page } = session;
@@ -151,7 +190,8 @@ test.describe('@agent-panel Svelte agent panel drives a real editor-mode run', (
     const last = (await grip.boundingBox())!;
     await page.mouse.move(last.x + last.width / 2, last.y + last.height / 2);
     await page.mouse.down();
-    await page.mouse.move(dock.x + dock.width / 2, dock.y + dock.height - 40, { steps: 16 });
+    // Floating panels dock within the column's edge zone, leaving its middle free.
+    await page.mouse.move(dock.x + dock.width / 2, dock.y + dock.height - 16, { steps: 16 });
     await expect(page.locator('.panel-drop-preview')).toHaveClass(/on/);
     await page.mouse.up();
     await expect(page.locator('#dock-right #panel-agent')).toBeVisible();

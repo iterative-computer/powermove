@@ -57,6 +57,41 @@ describe('legacy assistant harness install', () => {
     expect(PM.AgentHarness.sanitizeProposal({ commands }).commands).toEqual(commands);
   });
 
+  it('plans contact-sheet cells at the times today\'s render_frames batches draw, one per cell', async () => {
+    const PM = harnessRegistry();
+    const answer = await PM.AgentHarness.test.handleLiveAgentTool({
+      runId: 'sheet', callId: 'c1', tool: '__engine_frames_plan',
+      arguments: { times: [0.12345], width: 320, cells: [0.12345, 2.0004, 7, -1, 2.0004] },
+    });
+    const value = JSON.parse(answer.content[0].text);
+    // Clamped to the 6 s composition and rounded to the millisecond (safeTimes), never deduplicated or cut to 5.
+    expect(value.cells).toEqual([0.123, 2, 6, 0, 2]);
+    expect(value.times).toEqual([0.123]);
+    expect(value.width).toBe(320);
+    const plain = await PM.AgentHarness.test.handleLiveAgentTool({ runId: 'sheet', callId: 'c2', tool: '__engine_frames_plan', arguments: { times: [1] } });
+    expect(JSON.parse(plain.content[0].text).cells).toBeUndefined();
+  });
+
+  it('plans an agent save after pending imports, refuses during an export, and records the saved project', async () => {
+    const PM = harnessRegistry();
+    const order: string[] = [];
+    let land!: () => void;
+    PM.proj = { ...PM.proj, id: 'P1' };
+    PM.app = { importQueue: new Promise<void>((resolve) => { land = () => { order.push('import landed'); resolve(); }; }) };
+    PM.serialize = () => { order.push('serialized'); return JSON.stringify({ proj: PM.proj }); };
+    PM.hist = { export: () => ({ entries: [] }) };
+    PM.Projects = { put: (project: any) => order.push(`put ${project.id}`) };
+    const planned = PM.AgentHarness.test.handleLiveAgentTool({ runId: 'save', callId: 's1', tool: '__engine_save_plan', arguments: {} });
+    await Promise.resolve();
+    land();
+    const plan = JSON.parse((await planned).content[0].text);
+    expect(JSON.parse(plan.documentJSON)).toEqual({ proj: PM.proj, history: { entries: [] } });
+    await PM.AgentHarness.test.handleLiveAgentTool({ runId: 'save', callId: 's2', tool: '__engine_save_plan', arguments: { saved: true } });
+    expect(order).toEqual(['import landed', 'serialized', 'put P1']);
+    PM.Export = { busy: true };
+    await expect(PM.AgentHarness.test.handleLiveAgentTool({ runId: 'save', callId: 's3', tool: '__engine_save_plan', arguments: {} })).rejects.toThrow('An export is already running.');
+  });
+
   it('keeps group commands available to live and returned agent edits', () => {
     const PM = harnessRegistry();
     for (const command of [

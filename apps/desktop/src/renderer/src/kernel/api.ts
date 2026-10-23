@@ -162,12 +162,6 @@ export interface KeybindingDefinition {
   looseModifiers?: boolean;
   /** Lower runs first; extension bindings default to 0, built-ins to 100. */
   priority?: number;
-  /**
-   * The command applies only in some context and returns false otherwise.
-   * The key's browser default is then cancelled only when the command handles
-   * it, so a declined key keeps its normal behavior (e.g. Shift+Tab focus).
-   */
-  contextual?: boolean;
 }
 
 export interface KeybindingsAPI {
@@ -215,7 +209,7 @@ export interface EffectDefinition {
   id: string;
   label: string;
   group: string;
-  /** At most 32 params; keys must be unique and match /^[a-z][a-zA-Z0-9]*$/. */
+  /** Parameter keys must be unique and match /^[a-z][a-zA-Z0-9]*$/. */
   params: EffectParamDefinition[];
   /** Visual controls bind existing keys; project data and animation paths stay the same. */
   ui?: ParameterWidget[];
@@ -299,99 +293,39 @@ export interface ExtensionLayerDefinition {
   };
 }
 
-export type Scene3DViewportShading='wireframe'|'solid'|'material'|'rendered';
-export type Scene3DViewportTool='tweak'|'box'|'cursor'|'move'|'rotate'|'scale';
-/** Blender viewport state. Preferences persist locally; view, cursor and active object are per composition. */
-export interface Scene3DViewportState {
-  tool:Scene3DViewportTool;
-  orientation:'global'|'local'|'view';
-  pivot:'median'|'individual'|'cursor'|'active'|'bounds';
-  snap:boolean;
-  overlays:boolean;
-  toolbar:boolean;
-  sidebar:boolean;
-  lockCamera:boolean;
-  xray:boolean;
-  shading:Scene3DViewportShading;
-  /** The composition contains 3D layers; the viewport UI is shown only then. */
-  hasScene:boolean;
-  /** Blender keys apply: pointer over the viewer, 3D composition, no 2D layers selected. */
-  inContext:boolean;
-  view:{mode:'camera'|'editor';projection:'perspective'|'orthographic';axis:'front'|'back'|'right'|'left'|'top'|'bottom'|null;label:string;fov:number};
-  cursor:[number,number,number];
-  active:string|null;
-  selected:string[];
-  modal:boolean;
-  hasCamera:boolean;
-  /** Edit Mode: the edited model and its selected/total points. */
-  editMode:{layer:string;selected:number;total:number}|null;
-  /**
-   * The editor view's camera as the engine renders it (`view`: world-to-camera,
-   * column-major), or null in the camera view.
-   */
-  engineCamera?:{view:number[];projection:{kind:'perspective';fovYDegrees:number;near:number;far:number}|{kind:'orthographic';halfHeight:number;near:number;far:number}}|null;
-  /** Local View: the object layers it shows, or null outside Local View. */
-  localView?:string[]|null;
-}
-/** The 3D viewport attached over a composition stage. */
-export interface Scene3DViewportController {
-  update(rect:{x:number;y:number;width:number;height:number},selection?:readonly string[]):void;
-  pointerDown(event:PointerEvent):boolean;
-  objectPress(event:PointerEvent,layerId:string):boolean;
+export interface Scene3DGizmo {
+  update(rect:{x:number;y:number;width:number;height:number},selection?:string[]):void;
   hover(clientX:number,clientY:number):boolean;
-  cursorAt(clientX:number,clientY:number):string|null;
-  wheel(event:WheelEvent):boolean;
-  contextMenu(event:MouseEvent):boolean;
-  startTransform(mode:'translate'|'rotate'|'scale'|'trackball'):boolean;
-  armBoxSelect():boolean;
-  armZoomBorder():boolean;
-  startWalk():boolean;
-  extrude():boolean;
-  takeBoxSelect():boolean;
-  modalActive():boolean;
-  pointer():{clientX:number;clientY:number}|null;
-  covers(ids:readonly string[]):boolean;
-  glyphsIn(box:{x0:number;y0:number;x1:number;y1:number}):string[];
+  pointerDown(event:PointerEvent):boolean;
   active():boolean;
+  covers(ids:readonly string[]):boolean;
   cancel():void;
   dispose():void;
 }
-export interface Scene3DViewportAPI {
-  attach(stage:HTMLElement,host:{panComposition(dx:number,dy:number):void;zoomComposition(factor:number,clientX:number,clientY:number):void}):Scene3DViewportController;
-  state():Scene3DViewportState;
-  onChange(listener:(state:Scene3DViewportState)=>void):Disposable;
-  inContext():boolean;
-  readonly operators:readonly string[];
-  /** Run a Blender viewport operator by name, e.g. `view.front`, `transform.translate`, `select.all`. False when it does not apply. */
-  run(operator:string,...args:unknown[]):boolean;
-}
 export interface Scene3DAPI {
-  model(args:{operation:'create_model'|'regenerate_model'|'import_blend';recipe?:unknown;target?:string;name?:string;file?:File;sourceAssetId?:string},meta?:EditMeta):Promise<EditResult>;
-  modelRecipes:ReadonlyArray<{id:string;label:string;parameters:Record<string,string|number>}>;
-  modelFieldsFor(kind:string):Record<string,{label?:string;min?:number;max?:number;step?:number;kind?:string}>;
-  getAutoKey():boolean;
-  setAutoKey(enabled:boolean):void;
-  modelFields:Record<string,{label:string;min?:number;max?:number;step?:number;kind?:string}>;
-  materialPresets:ReadonlyArray<{id:string;label:string}>;
-  createMaterial(preset?:import('../../../shared/blender').BlenderMaterial['preset']):import('../../../shared/blender').BlenderMaterial;
-  materials():Array<{id:string;name:string;users:number;material:any}>;
-  setMaterial(target:string,slot:string,material:any,shared?:boolean):EditResult;
-  getRendering():import('../../../shared/blender').Render3DSettings;
-  setRendering(patch:Partial<import('../../../shared/blender').Render3DSettings>,meta?:EditMeta):EditResult;
-  blenderStatus():Promise<import('../../../shared/blender').BlenderStatus>;
-  chooseBlender():Promise<import('../../../shared/blender').BlenderStatus|null>;
-  previewState():{mode:'draft'|'rendered';busy:boolean;error:string|null;engine:'eevee'|'cycles';shading:Scene3DViewportShading};
-  setPreviewMode(mode:'draft'|'rendered'):void;
-  onPreviewChange(listener:(state:{mode:'draft'|'rendered';busy:boolean;error:string|null;engine:'eevee'|'cycles';shading:Scene3DViewportShading})=>void):Disposable;
-  renderFrame():Promise<void>;
-  cancelRender():Promise<void>;
   isGroup(layerId:string):boolean;
   getView():'camera'|'editor';
   setView(mode:'camera'|'editor'):void;
   onViewChange(listener:(mode:'camera'|'editor')=>void):Disposable;
+  getNavigationMode():'select'|'orbit'|'pan'|'dolly';
+  setNavigationMode(mode:'select'|'orbit'|'pan'|'dolly'):void;
+  onNavigationChange(listener:(mode:'select'|'orbit'|'pan'|'dolly')=>void):Disposable;
+  createNavigation(element:HTMLElement):{
+    update(rect:{width:number;height:number},selection:string[]):void;
+    pointerDown(event:PointerEvent):boolean;
+    wheel(event:WheelEvent):boolean;
+    frame(selected?:boolean):void;
+    active():boolean;
+    cancel():void;
+    dispose():void;
+  };
   frame(selected?:boolean):void;
-  /** Blender-style 3D viewport: view, tools, selection, transforms and editor settings. */
-  readonly viewport:Scene3DViewportAPI;
+  getMode(): 'translate'|'rotate'|'scale';
+  setMode(mode:'translate'|'rotate'|'scale'):void;
+  getSpace():'world'|'local';
+  setSpace(space:'world'|'local'):void;
+  onGizmoChange(listener:(state:{mode:'translate'|'rotate'|'scale';space:'world'|'local'})=>void):Disposable;
+  createGizmo(element:HTMLElement):Scene3DGizmo;
   /** Pack selected OBJ/MTL/texture files into a durable GLB, or return a standalone model. */
   prepareImport(files: File[]): Promise<File>;
   /** Explicit undoable upgrade of a v1 model layer, preserving channels and baking camera animation. */
@@ -756,12 +690,59 @@ export interface ImportFilesOptions {
   /** For a dropped folder: keep it as a media folder of individual files rather than an image sequence. */
   asFolder?: boolean;
 }
+/**
+ * The live media of an asset (`media.assets.get`): the durable record plus what
+ * the editor loaded for it. The live fields stay at apiVersion 1 to 3 with
+ * today's values; with "Use New Engine" on they come from the engine's media
+ * store and a browser-playable rendition.
+ */
 export interface RuntimeAsset extends AssetRecord {
   blob?: Blob;
   sourceText?: string;
-  /** @deprecated Extension compatibility view. Prefer scene3d APIs for geometry. */
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use `await api.media.assets.source(id)`,
+   * which resolves once a browser-playable rendition exists.
+   *
+   * An object URL of a browser-playable copy of the media (the original when
+   * Chromium can play it, otherwise a generated web rendition).
+   */
+  url?: string;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use `await api.media.assets.source(id)`
+   * and an element of your own.
+   *
+   * The editor's own `<img>` or `<video>` element for the media. Reading it is
+   * supported; changing its playback state affects the editor's previews.
+   */
+  el?: HTMLImageElement | HTMLVideoElement;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use `await api.media.assets.audio(id)`.
+   *
+   * The asset's audio (an audio asset, or a video's soundtrack) as a Blob.
+   */
+  audioBlob?: Blob;
+  /** Waveform peaks once decoded (min/max pairs per bucket); draw them with `media.audio.drawWaveform`. */
+  peaks?: Float32Array | number[];
+  /** Why the audio could not be decoded, once decoding failed. */
+  audioDecodeError?: string | null;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use `api.scene3d.describe(layerId)`.
+   *
+   * A three.js object tree for an imported model (OBJ, glTF).
+   */
   object3d?: import('three').Object3D;
   [key: string]: unknown;
+}
+
+/** A browser-playable source for an asset (`media.assets.source`). */
+export interface AssetSource {
+  /** An object URL your own `<img>`, `<video>` or `<audio>` element can play. Valid until the asset is removed. */
+  url: string;
+  kind: 'image' | 'video' | 'audio' | 'model';
+  /** The rendition's MIME type when known. */
+  mime: string | null;
+  /** True when the URL is a generated web rendition rather than the original bytes. */
+  rendition: boolean;
 }
 export interface WaveformOptions { [key: string]: unknown }
 export interface FontCatalog {
@@ -797,9 +778,23 @@ export interface MediaAPI {
   readonly audio: { drawWaveform(ctx: CanvasRenderingContext2D, layer: Layer, options?: WaveformOptions): boolean };
   /** Requires the full-access permission for Store extensions. */
   readonly assets: {
+    /** The live asset. Its `url`, `el`, `audioBlob` and `object3d` fields are deprecated compatibility members. */
     get(id: string): RuntimeAsset | undefined;
     add(file: File, options?: Record<string, unknown>): Promise<RuntimeAsset>;
     kind(file: File): 'image' | 'video' | 'audio' | 'model' | null;
+    /**
+     * A browser-playable URL for the asset (apiVersion 4; available to every
+     * apiVersion). Waits up to `timeoutMs` (default 30 s) for the asset to load
+     * and its rendition to exist; null when there is no such asset, or it has no
+     * playable media (a model, or media that failed to load).
+     */
+    source(id: string, options?: { timeoutMs?: number }): Promise<AssetSource | null>;
+    /**
+     * The asset's audio (an audio asset, or a video's soundtrack) as a Blob
+     * (apiVersion 4; available to every apiVersion). Waits like `source`; null
+     * when the asset has no audio.
+     */
+    audio(id: string, options?: { timeoutMs?: number }): Promise<Blob | null>;
   };
   /** Requires the full-access permission for Store extensions. */
   readonly fonts: FontCatalog;
@@ -818,18 +813,81 @@ export interface RenderAPI {
   readonly gl: {
     bounds(layer: Layer, time: number): Bounds | null;
     pick(x: number, y: number, time: number, options?: { includeLocked?: boolean }): Layer | null;
+    /** Binds the editor's frame presentation to `canvas` (a custom viewer). With "Use New Engine" on, the engine presents into it. */
     init(canvas: HTMLCanvasElement, options?: { alpha?: boolean; quiet?: boolean }): boolean;
     resize(width: number, height: number, previewViewport?: PreviewViewport | null): boolean;
     compileError(key: string): string | null;
     readonly previewViewport: PreviewViewport | null;
+    /**
+     * The canvas the editor's frame presentation is bound to (the last canvas
+     * passed to `init`), or null before any viewer called `init`. Available to
+     * every apiVersion; use it instead of `context.canvas`.
+     */
+    readonly canvas: HTMLCanvasElement | null;
+    /**
+     * @deprecated Compatibility member (apiVersion 1 to 3). Find the bound
+     * canvas with `api.render.gl.canvas`; to draw, register a GLSL layer with
+     * `api.layers.register({ renderer: { kind: 'fragment', fragment } })` or an
+     * effect with `api.effects.register`; to read the frame, use
+     * `await api.render.renderFrameToAsync(time, width, height)`.
+     *
+     * Null until a viewer called `init`, then a WebGL2 context whose
+     * `canvas` is the bound canvas (`context.canvas === render.gl.canvas`),
+     * as today. With "Use New Engine" on it is a compatibility context on an
+     * offscreen canvas: its default framebuffer holds the frame on screen
+     * when you read it (`readPixels`, bottom row first) or draw on it, and
+     * what you draw into it shows in the viewer until the next frame. As
+     * before, what a `frame:rendered` handler draws there is in WebM exports
+     * (they encode that canvas); other exports and captures never include it.
+     * `context.canvas` holds the frame and the drawing, so
+     * `drawImage(context.canvas)` and `toDataURL()` read them (see "The
+     * compatibility WebGL context" in EXTENSIONS.md).
+     */
     readonly context: WebGL2RenderingContext | null;
   };
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use
+   * `await api.render.rasterAsync(layer, scale, time, crop)`, which resolves to
+   * the same surface without blocking the editor.
+   *
+   * A layer's raster surface, synchronously. With "Use New Engine" on the
+   * pixels come from the engine through a synchronous request.
+   */
   raster(layer: Layer, scale?: number, time?: number, uploaded?: (key: string) => unknown, crop?: RasterWindow): RasterSurface | null;
   /** Caret geometry for a text layer in its local space, produced by the same
       measuring and wrapping as the rasterizer. */
   textLayout(layer: Layer, time?: number): TextCaretLayout | null;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use
+   * `await api.render.renderFrameToAsync(time, width, height, options)`.
+   *
+   * Renders a frame of the open composition into a new opaque canvas,
+   * synchronously (the editor waits while the engine draws it).
+   */
   renderFrameTo(time: number, width: number, height: number, options?: Record<string, unknown>): HTMLCanvasElement;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use
+   * `await api.render.snapshotAsync(time, maxWidth)`.
+   *
+   * A JPEG data URL (quality 0.74) of a frame, synchronously; `''` only when
+   * the frame could not be drawn.
+   */
   snapshot(time: number, maxWidth?: number): string;
+  /**
+   * A JPEG data URL (quality 0.74) of a frame at most `maxWidth` wide (default
+   * 480). apiVersion 4; available to every apiVersion. Never blocks the editor;
+   * a Blender composition renders the frame's Blender surfaces first.
+   */
+  snapshotAsync(time: number, maxWidth?: number): Promise<string>;
+  /** `renderFrameTo` without blocking the editor. apiVersion 4; available to every apiVersion. */
+  renderFrameToAsync(time: number, width: number, height: number, options?: Record<string, unknown>): Promise<HTMLCanvasElement>;
+  /**
+   * `raster` without blocking the editor: the same surface shape (`cv`, `w`,
+   * `h`, `anchorX`, `anchorY`, `selection`, and `fontOffset` for text), or null
+   * when the layer draws nothing then. A registered `raster` service override
+   * runs around it as for `raster`. apiVersion 4; available to every apiVersion.
+   */
+  rasterAsync(layer: Layer, scale?: number, time?: number, crop?: RasterWindow | null): Promise<RasterSurface | null>;
 }
 
 export interface KeyHandleState { [key: string]: unknown }
@@ -888,7 +946,7 @@ export interface DndAPI {
 export interface WorkspaceMutateOptions { inPlace?: boolean }
 
 /**
- * Workspace exposes the active layout and persists mutations through the legacy workspace manager, including built-in-to-user cloning unless `inPlace` is requested. Panel operations mutate layout state, normalize dock fill, apply the layout and emit workspace/layout events; they do not touch project history.
+ * Workspace exposes the active layout and persists mutations through the legacy workspace manager, including built-in-to-user cloning unless `inPlace` is requested. For user mods, current() returns a snapshot; mutate() owns appearance changes (density, theme overrides, chrome and dock/panel geometry) until unload, retaining later user edits. Panel membership/order remains a saved layout edit. Panel operations normalize dock fill, apply the layout and emit workspace/layout events; they do not touch project history.
  */
 export interface WorkspaceAPI {
   current(): WorkspaceManifest | null;
@@ -1132,11 +1190,33 @@ export interface CaptionsService {
  * The host registers `raster` (RenderAPI['raster']). Capture that service before
  * wrapping it; calling api.render.raster from inside its override would recurse.
  * Native surfaces expose their pixels as `cv`; preserve key, dimensions, anchor
- * and selection geometry. Overrides affect preview and export and must delegate
- * unaffected layers to the captured service.
+ * and selection geometry. Overrides affect the viewer, snapshots and exports
+ * (with "Use New Engine" on, the engine asks the window for each such layer;
+ * an export with no editor window that has the override fails by name) and
+ * must delegate unaffected layers to the captured service: return the captured
+ * service's own result object for a layer you do not change. A wrapper that
+ * throws fails the frame (and an export), never drawing the plain layer.
+ *
+ * Overriding the `raster` service is a deprecated compatibility pattern
+ * (apiVersion 1 to 3; it keeps working fully). New code changes pixels with
+ * `api.layers.register` or `api.effects.register` (GLSL) and reads a layer's
+ * pixels with `await api.render.rasterAsync(layer)`.
  */
 export interface ServicesAPI {
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3; it keeps working
+   * fully). Overriding the `raster` service: change pixels with
+   * `api.layers.register` or `api.effects.register` (GLSL) instead, and read
+   * a layer's pixels with `await api.render.rasterAsync(layer)`.
+   */
+  register(name: 'raster', implementation: RenderAPI['raster']): Disposable;
   register<T>(name: string, implementation: T): Disposable;
+  /**
+   * @deprecated Compatibility member (apiVersion 1 to 3; it keeps working
+   * fully). Capturing the `raster` service to wrap it: read a layer's pixels
+   * with `await api.render.rasterAsync(layer)` instead.
+   */
+  get(name: 'raster'): RenderAPI['raster'] | null;
   get<T>(name: string): T | null;
 }
 
@@ -1246,7 +1326,8 @@ export interface VarsAPI {
 
 export interface HostAPI {
   /**
-   * @deprecated Use the typed top-level API namespaces instead.
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use the typed namespaces
+   * (`api.project`, `api.anim`, `api.model`, `api.transport`, …).
    *
    * UNSTABLE. The legacy `PM` registry. Built-ins use it mid-migration; user
    * extensions should prefer the typed surface. Shape may change between app
@@ -1254,7 +1335,9 @@ export interface HostAPI {
    */
   readonly pm: unknown;
   /**
-   * @deprecated Use the typed top-level API namespaces instead.
+   * @deprecated Compatibility member (apiVersion 1 to 3). Use `api.project.latest()`,
+   * `api.project.selection()`, `api.project.time()` and `api.project.playing()`
+   * (reactive in Svelte components).
    *
    * UNSTABLE. Escape hatch to the renderer's rune stores. Built-ins use it
    * mid-migration; shapes may change between app versions without an

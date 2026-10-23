@@ -131,7 +131,7 @@ impl Compiled {
     }
 
     fn binding_bits(&self, cx: &ExprContext<'_>) -> Option<Vec<u64>> {
-        let host = NodeHost(&self.source.keys);
+        let host = NodeHost(&self.source.keys, None);
         let ctx = self.binding_context(cx);
         let mut bits = self.source.expression.numeric_fixed_bits(&host, &ctx)?;
         // `needsIdx` is a source regex, including mentions inside literals.
@@ -177,9 +177,10 @@ fn js_str(s: &JsString) -> JsStr {
     JsStr::from_units(s.utf16_units().collect::<Vec<u16>>())
 }
 
-/// Reads the mirror's nodes (and computed values) for `pm-expr`.
+/// Reads the mirror's nodes (and computed values) for `pm-expr`, with the
+/// channel's context for the `sample` and `motionPath` helpers.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct NodeHost<'a>(&'a [(JsStr, JsString)]);
+pub struct NodeHost<'a>(&'a [(JsStr, JsString)], Option<&'a ExprContext<'a>>);
 
 impl<'a> NodeHost<'a> {
     pub fn node(node: &'a Node) -> Value<Obj<'a>> {
@@ -218,6 +219,47 @@ impl<'a> NodeHost<'a> {
 
 impl<'a> Host for NodeHost<'a> {
     type Obj = Obj<'a>;
+
+    fn sample(
+        &self,
+        layer: &JsStr,
+        channel: &JsStr,
+        local_time: f64,
+    ) -> Option<Result<Value<Obj<'a>>, String>> {
+        let cx = self.1?;
+        let layer = JsString::from_utf16_units(layer.units());
+        let channel = JsString::from_utf16_units(channel.units());
+        Some(
+            cx.sample(&layer, &channel, local_time)
+                .map(|got| match got {
+                    pm_eval::node::Got::Node(n) => NodeHost::node(n),
+                    // A keyed object value (a path) is computed, not a node.
+                    pm_eval::node::Got::Value(JsValue::Object(_)) => Value::Undefined,
+                    pm_eval::node::Got::Value(v) => match v {
+                        JsValue::Null => Value::Null,
+                        JsValue::Bool(b) => Value::Bool(b),
+                        JsValue::Number(n) => Value::Number(n),
+                        JsValue::String(s) => Value::String(js_str(&s)),
+                        _ => Value::Undefined,
+                    },
+                    pm_eval::node::Got::Undefined => Value::Undefined,
+                }),
+        )
+    }
+
+    fn motion_path(
+        &self,
+        layer: &JsStr,
+        channel: &JsStr,
+        progress: f64,
+        start: f64,
+        end: f64,
+    ) -> Option<Result<f64, String>> {
+        let cx = self.1?;
+        let layer = JsString::from_utf16_units(layer.units());
+        let channel = JsString::from_utf16_units(channel.units());
+        Some(cx.motion_path(&layer, &channel, progress, start, end))
+    }
 
     fn shape(&self, obj: &Obj<'a>) -> Shape {
         match obj {
@@ -287,7 +329,7 @@ impl CompiledExpression for Compiled {
 
     fn bind(&self, cx: &ExprContext<'_>) -> Option<Arc<dyn CompiledExpression>> {
         if self.source.expression.has_general_binding() {
-            let host = NodeHost(&self.source.keys);
+            let host = NodeHost(&self.source.keys, None);
             let ctx = self.binding_context(cx);
             let (bound, binding) = self.source.expression.bind_general(&host, &ctx)?;
             return Some(Arc::new(Self {
@@ -325,7 +367,7 @@ impl CompiledExpression for Compiled {
                 Some((stamp, Arc::downgrade(&existing)));
             return Some(existing);
         }
-        let host = NodeHost(&self.source.keys);
+        let host = NodeHost(&self.source.keys, None);
         let ctx = self.binding_context(cx);
         let compiled = Arc::new(Self {
             source: self.source.clone(),
@@ -367,7 +409,7 @@ impl CompiledExpression for Compiled {
             // The bound program keeps the index it was bound at.
             let same_index = !self.source.expression.needs_idx()
                 || self.index.map(f64::to_bits) == Some(cx.idx.to_bits());
-            let host = NodeHost(&self.source.keys);
+            let host = NodeHost(&self.source.keys, None);
             let result = same_index
                 && self.source.expression.general_binding_matches(
                     &host,
@@ -393,7 +435,7 @@ impl CompiledExpression for Compiled {
         {
             return Some(result);
         }
-        let host = NodeHost(&self.source.keys);
+        let host = NodeHost(&self.source.keys, None);
         let ctx = self.binding_context(cx);
         let fixed = if self.source.expression.needs_idx() {
             // The index is the last fixed input (see `binding_bits`).
@@ -429,7 +471,9 @@ impl CompiledExpression for Compiled {
     }
 
     fn evaluate(&self, cx: &ExprContext<'_>) -> Result<JsValue, ExprError> {
-        let host = NodeHost(&self.source.keys);
+        // The complete evaluator answers `sample` and `motionPath` from the
+        // context; bindings and numeric plans never contain them.
+        let host = NodeHost(&self.source.keys, Some(cx));
         let ctx = Context {
             t: cx.t,
             time: cx.time,

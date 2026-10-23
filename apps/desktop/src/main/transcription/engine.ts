@@ -113,7 +113,11 @@ export class TranscriptionEngine implements TranscriptionService {
   /** The model file the running process last finished loading. */
   private loadedFile: string | null = null;
   /** warm() callers waiting for a model file to load. */
-  private warming: Array<{ file: string; resolve: (loaded: boolean) => void }> = [];
+  private warming: Array<{ id: string; file: string; resolve: (loaded: boolean) => void }> = [];
+  /** A delayed warm failure must not stop work requested after that attempt. */
+  private latestModelRequest: string | null = null;
+  /** Remember the latest failure while replies for older warm-ups drain. */
+  private latestWarmFailed = false;
   /** Stop the process once the warm-up load lands, if nothing else wants it. */
   private releaseAfterWarm = false;
 
@@ -201,8 +205,11 @@ export class TranscriptionEngine implements TranscriptionService {
     if (this.current || this.queue.length) return false;
     const worker = this.ensureWorker();
     this.releaseAfterWarm = options.release === true;
-    const loaded = new Promise<boolean>((resolve) => this.warming.push({ file: model.file, resolve }));
-    worker.post({ type: 'warm', model, threads: this.threads(), ...(this.options.runtime ? { runtime: this.options.runtime } : {}) });
+    const id = `w${++sequence}`;
+    const loaded = new Promise<boolean>((resolve) => this.warming.push({ id, file: model.file, resolve }));
+    this.latestModelRequest = id;
+    this.latestWarmFailed = false;
+    worker.post({ type: 'warm', id, model, threads: this.threads(), ...(this.options.runtime ? { runtime: this.options.runtime } : {}) });
     this.idle();
     return loaded;
   }
@@ -285,6 +292,8 @@ export class TranscriptionEngine implements TranscriptionService {
   /** The process is gone: nothing is loaded, and warm-ups waiting on it never land. */
   private forgetLoaded(): void {
     this.loadedFile = null;
+    this.latestModelRequest = null;
+    this.latestWarmFailed = false;
     this.releaseAfterWarm = false;
     const waiting = this.warming;
     this.warming = [];
@@ -316,6 +325,8 @@ export class TranscriptionEngine implements TranscriptionService {
     this.idleTimer = null;
     this.releaseAfterWarm = false;
     this.current = job;
+    this.latestModelRequest = job.id;
+    this.latestWarmFailed = false;
     job.started = true;
     const threads = this.threads();
     this.ensureWorker().post({
@@ -334,12 +345,21 @@ export class TranscriptionEngine implements TranscriptionService {
 
   private receive(worker: WorkerChannel, message: WorkerResponse): void {
     if (worker !== this.worker || message.type === 'ready') return;
+    if (message.type === 'warm-error') {
+      const failed = this.warming.find((waiter) => waiter.id === message.id && waiter.file === message.file);
+      if (!failed) return;
+      this.warming = this.warming.filter((waiter) => waiter !== failed);
+      failed.resolve(false);
+      if (this.latestModelRequest === message.id) this.latestWarmFailed = true;
+      if ((this.releaseAfterWarm || this.latestWarmFailed) && !this.current && !this.queue.length && !this.warming.length) this.stopWorker();
+      return;
+    }
     if (message.type === 'loaded') {
       this.loadedFile = message.file;
       const landed = this.warming.filter((waiter) => waiter.file === message.file);
       this.warming = this.warming.filter((waiter) => waiter.file !== message.file);
       for (const waiter of landed) waiter.resolve(true);
-      if (this.releaseAfterWarm && !this.current && !this.queue.length) this.stopWorker();
+      if ((this.releaseAfterWarm || this.latestWarmFailed) && !this.current && !this.queue.length && !this.warming.length) this.stopWorker();
       return;
     }
     const job = this.current;

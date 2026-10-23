@@ -11,6 +11,11 @@ export function installPointerFocus(doc: Document = document): () => void {
     let active = doc.activeElement;
     while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
     if (active === control) control.blur();
+    // Keep sheet keyboard handling reachable after releasing an action's focus.
+    // Its handler may still move focus to a field or close the sheet afterwards.
+    if (doc.activeElement === doc.body) {
+      control.closest<HTMLElement>('[data-svelte-overlay-modal]')?.focus({ preventScroll: true });
+    }
   };
   doc.addEventListener('click', release, true);
   return () => doc.removeEventListener('click', release, true);

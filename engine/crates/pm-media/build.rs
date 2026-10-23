@@ -50,6 +50,13 @@ fn native_dir(manifest: &Path) -> PathBuf {
     let rust_lock = native.join("crabby.Cargo.lock");
     println!("cargo:rerun-if-changed={}", rust_lock.display());
     h.update(std::fs::read(&rust_lock).expect("native/crabby.Cargo.lock"));
+    let target = std::env::var("TARGET").expect("Cargo target");
+    let arch = if target.starts_with("x86_64-") {
+        "x86_64"
+    } else {
+        "arm64"
+    };
+    h.update(arch.as_bytes());
     let stamp: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
     let cache = home().join("Library/Caches/powermove-engine/media-native");
     let dir = std::env::var_os("PM_MEDIA_NATIVE_DIR")
@@ -66,6 +73,7 @@ fn native_dir(manifest: &Path) -> PathBuf {
         let status = Command::new("bash")
             .arg(&script)
             .env("PM_MEDIA_NATIVE_DIR", &dir)
+            .env("PM_MEDIA_NATIVE_ARCH", arch)
             .env(
                 "PM_MEDIA_NATIVE_WORK",
                 cache.join(format!("work-{}", &stamp[..16])),
@@ -193,6 +201,28 @@ fn main() {
     println!("cargo:rustc-link-lib=static=OpenEXRCore-3_5");
     println!("cargo:rustc-link-lib=static=turbojpeg");
     println!("cargo:rustc-link-lib=dylib=c++");
+    if std::env::var("TARGET").is_ok_and(|target| target.starts_with("x86_64-apple-darwin")) {
+        // OpenEXR's Intel target clones use clang's CPU dispatch helpers.
+        // Rust's final link suppresses default C libraries; retain the runtime
+        // explicitly rather than leaving hidden RIP-relative symbols to dyld.
+        let runtime = Command::new("clang")
+            .arg("--print-file-name=libclang_rt.osx.a")
+            .output()
+            .expect("locate clang's Darwin runtime");
+        assert!(runtime.status.success(), "clang runtime lookup failed");
+        let runtime = PathBuf::from(
+            String::from_utf8(runtime.stdout)
+                .expect("clang runtime path")
+                .trim(),
+        );
+        assert!(runtime.is_file(), "clang's Darwin runtime is missing");
+        println!(
+            "cargo:rustc-link-search=native={}",
+            runtime.parent().unwrap().display()
+        );
+        println!("cargo:rustc-link-lib=static=clang_rt.osx");
+    }
+
     let inc = native.join("include");
     bindings(
         "dav1d",

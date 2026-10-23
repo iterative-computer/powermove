@@ -45,7 +45,6 @@ import type { ChannelFactory, ClientPortInfo, PortLike, SpawnEngine } from './po
 import { isRecord, isSafeUint, ProtocolError } from './protocol';
 import { serveHostFallback, type ShaderFallbackResult } from './shader-fallback-relay';
 import { CACHE_DIRS, HostServicesCore } from './services';
-import { EngineBlender, type BlenderLocator } from './blender';
 import { EngineSupervisor, type Launch, type SupervisorState } from './supervisor';
 
 export const DEFAULT_SLICING_POLICY: SlicingPolicy = {
@@ -60,8 +59,36 @@ export const DEFAULT_SLICING_POLICY: SlicingPolicy = {
 /** Staged resync documents kept per engine launch before the oldest goes. */
 const STAGED_PER_LAUNCH = 16;
 
+/** A job utility with no session, job, probe, or request for this long
+ *  exits; it holds a Node runtime, a Metal device, and its caches
+ *  (docs/engine/memory.md, "Process lifetime"). */
+export const JOB_IDLE_MS = 60_000;
+/** A lost agent-session finish signal cannot pin a job utility forever.
+ *  Tool calls renew this hold while the run is still active. */
+export const JOB_RUN_HOLD_MS = 30 * 60_000;
+
+/** Whether a job engine report shows nothing that needs the process: no
+ *  session (exports, agent frames, validations hold one), nothing in
+ *  flight, no unfinished job, queued work, probe, frame run, or compile. */
+export function jobReportIdle(report: unknown): boolean {
+  if (typeof report !== 'object' || report === null) return false;
+  const r = report as { sessions?: unknown; inFlight?: unknown; jobs?: Record<string, unknown> | null };
+  const jobs = r.jobs;
+  if (!Array.isArray(r.sessions) || r.sessions.length !== 0 || r.inFlight !== 0) return false;
+  if (typeof jobs !== 'object' || jobs === null) return false;
+  const queued = jobs['queued'] as Record<string, unknown> | undefined;
+  const zero = (v: unknown): boolean => v === 0;
+  return zero(jobs['active']) && zero(jobs['probes']) && zero(jobs['frameRuns']) && zero(jobs['compiles']) &&
+    typeof queued === 'object' && queued !== null && Object.values(queued).every(zero);
+}
+
 export type NativeEngineOptions = {
   spawn: SpawnEngine;
+  /** Start job utilities on demand; eager startup is for host integration tests. */
+  eagerJobs?: boolean;
+  /** How long an unused job utility stays before it exits (default
+   *  `JOB_IDLE_MS`). The next job request starts it again. */
+  jobIdleMs?: number;
   channel: ChannelFactory;
   /** Engine caches (one directory per cache kind). */
   cacheDirectory: string;
@@ -78,19 +105,16 @@ export type NativeEngineOptions = {
   resolveProxy?: (asset: string) => Promise<{ path: string; contentHash: ContentHash | null } | null>;
   now?: () => number;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
-  /** Finds the user's Blender (contract 11 Blender jobs from the job
-   *  engine's exports and the interactive engine's paused viewer); without
-   *  it Blender requests answer `unsupported` and the current engine runs
-   *  Blender. */
-  blender?: { locate: BlenderLocator; tempRoot: string };
-  /** Compatibility pixels drawn by the document's window
-   *  (compat-frames.ts): job renders and interactive Blender PNG maps.
-   *  Without it they answer `notHeadlessRenderable`. */
-  compatFrame?: (request: import('../../shared/engine-protocol').CompatFrameRequest) => Promise<Response>;
+  /** The job engine's `compatFrame` requests: a layer's compatibility
+   *  pixels drawn by the document's window (compat-frames.ts).
+   *  `session`: the job engine's session (its export snapshot's layers),
+   *  `null` for the interactive engine. Without it they answer
+   *  `notHeadlessRenderable`. */
+  compatFrame?: (request: import('../../shared/engine-protocol').CompatFrameRequest, session: number | null) => Promise<Response>;
   /** Runs a job engine fallback request in a window's runner
    *  (`shader-fallback-relay.ts`); without it such requests answer
    *  `unsupported` and the job fails naming the program. */
-  shaderFallback?: (session: number, request: ShaderFallbackRequest, textures: Uint16Array[]) => Promise<ShaderFallbackResult>;
+  shaderFallback?: (session: number, request: ShaderFallbackRequest, textures: (Uint16Array | Float32Array)[]) => Promise<ShaderFallbackResult>;
 };
 
 export type EngineProcessStatus = { state: SupervisorState; generation: number; pid: number | null; attempts: number };
@@ -116,7 +140,7 @@ export const RENDERER_CLIENT: ClientKind = { peer: 'renderer', processes: ['inte
 export interface NativeEngineListener {
   crash?(report: CrashReport): void;
   status?(status: NativeEngineStatus): void;
-  /** Playback started or stopped (Blender supervision pauses its workers). */
+  /** Playback started or stopped. */
   playback?(playing: boolean): void;
   jobStatus?(status: JobStatus): void;
 }
@@ -142,8 +166,6 @@ const SESSION_EVENTS: ReadonlySet<string> = new Set(['patchesApplied', 'renderSt
 
 export class NativeEngine {
   readonly services: HostServicesCore;
-  /** Blender supervision for both engines (contract 11, `blender.ts`). */
-  readonly blender: EngineBlender | null;
   readonly definitions = new DefinitionRelay();
   /** Texture bands the interactive engine sends ahead of a snapshot's
    *  `needsRenderer` answer (fallback-inputs.ts). */
@@ -166,7 +188,23 @@ export class NativeEngine {
   private staged = new Map<number, string[]>();
   /** Set by `stop()`: no control messages go to engines that are shutting
    *  down (they would be dropped anyway; see `Launch.exiting`). */
-  private stopping = false;
+  private stopping = true;
+  private started = false;
+  private jobDemanded = false;
+  private prepared: Promise<void> = Promise.resolve();
+  private readiness = new Map<EngineProcess, Promise<void>>();
+  private cancelReadiness = new Set<() => void>();
+  /** Main's own job requests not yet answered, and a stamp bumped by any
+   *  job activity (requests, job statuses, staging): retirement only
+   *  follows a quiet `jobIdleMs` with an unchanged stamp. */
+  private jobOutstanding = 0;
+  private jobActivity = 0;
+  private jobIdleTimer: { cancel(): void } | null = null;
+  private jobRunHolds = new Map<string, { cancel(): void }>();
+  private jobUtilityHolds = new Set<symbol>();
+  /** Set while main checks an idle job utility and stops it; job requests
+   *  wait for it, then start a new utility if it stopped. */
+  private retiring: Promise<void> | null = null;
   /** Interpret Footage probes per asset: the one in flight and the newest
    *  request waiting behind it (the sheet probes on every change and keeps
    *  only its latest answer, so a waiting request a newer one replaces is
@@ -198,9 +236,6 @@ export class NativeEngine {
       ...(options.resolveProxy ? { resolveProxy: options.resolveProxy } : {}),
       ...(options.now ? { now: options.now } : {})
     });
-    this.blender = options.blender
-      ? new EngineBlender({ locate: options.blender.locate, handles: this.services.handles, tempRoot: options.blender.tempRoot, log: options.log })
-      : null;
     const make = (process: EngineProcess): EngineSupervisor => {
       const supervisor = new EngineSupervisor({
         process,
@@ -230,15 +265,84 @@ export class NativeEngine {
   }
 
   async start(): Promise<void> {
+    if (this.started) return;
     this.stopping = false;
-    await this.prepareCaches();
-    this.supervisors.interactive.start();
-    this.supervisors.job.start();
+    this.started = true;
+    try {
+      this.prepared = this.prepareCaches();
+      await this.prepared;
+      if (this.stopping) return;
+      this.supervisors.interactive.start();
+      if (this.options.eagerJobs) {
+        this.jobDemanded = true;
+        this.supervisors.job.start();
+      }
+    } catch (error) {
+      this.started = false;
+      throw error;
+    }
   }
 
   async stop(): Promise<void> {
     this.stopping = true;
-    await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop(), this.blender?.dispose()]);
+    this.started = false;
+    this.jobDemanded = false;
+    this.jobIdleTimer?.cancel();
+    this.jobIdleTimer = null;
+    for (const hold of this.jobRunHolds.values()) hold.cancel();
+    this.jobRunHolds.clear();
+    this.jobUtilityHolds.clear();
+    for (const cancel of this.cancelReadiness) cancel();
+    await Promise.all([this.supervisors.interactive.stop(), this.supervisors.job.stop()]);
+  }
+
+  /** Cold job utilities can accept work; a fatal startup remains unavailable. */
+  canRequest(process: EngineProcess): boolean {
+    return this.started && !this.stopping && (this.isReady(process) ||
+      (process === 'job' && !this.jobDemanded) || this.supervisors[process].state !== 'stopped');
+  }
+
+  /** One startup shared by concurrent callers. Never retries a fatal addon load. */
+  async ensureReady(process: EngineProcess): Promise<void> {
+    await this.prepared;
+    if (process === 'job') {
+      while (this.retiring) await this.retiring;
+      this.touchJob();
+    }
+    if (!this.started || this.stopping) return Promise.reject(new Error('The engine host is stopped.'));
+    if (this.isReady(process)) return Promise.resolve();
+    const pending = this.readiness.get(process);
+    if (pending) return pending;
+    if (!this.canRequest(process)) return Promise.reject(new Error(`The ${process} engine could not start.`));
+    const supervisor = this.supervisors[process];
+    let unlisten = (): void => {};
+    let cancel = (): void => {};
+    let timer: ReturnType<typeof setTimeout>;
+    const ready = new Promise<void>((resolve, reject) => {
+      const finish = (error?: Error): void => {
+        clearTimeout(timer);
+        unlisten();
+        this.cancelReadiness.delete(cancel);
+        if (error) reject(error);
+        else resolve();
+      };
+      cancel = () => finish(new Error('The engine host stopped while starting.'));
+      this.cancelReadiness.add(cancel);
+      unlisten = supervisor.listen({
+        ready: () => finish(),
+        state: (state) => { if (state === 'stopped') finish(new Error(`The ${process} engine could not start.`)); }
+      });
+      timer = setTimeout(() => finish(new Error(`The ${process} engine did not become ready.`)), 15_000);
+      if (process === 'job' && !this.jobDemanded) {
+        this.jobDemanded = true;
+        supervisor.start();
+      }
+    });
+    this.readiness.set(process, ready);
+    void ready.finally(() => {
+      if (this.readiness.get(process) === ready) this.readiness.delete(process);
+    }).catch(() => {});
+    return ready;
   }
 
   supervisor(process: EngineProcess): EngineSupervisor {
@@ -387,8 +491,109 @@ export class NativeEngine {
   /** A request main itself sends to an engine (sessions main opens for
    *  exports and agent snapshots; tests). `revision` is the envelope
    *  revision (an agent frame request's read-your-writes revision). */
-  request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
-    return this.supervisors[process].request(body, session, revision);
+  async request(process: EngineProcess, body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
+    if (process !== 'job') return this.supervisors[process].request(body, session, revision);
+    await this.ensureReady(process);
+    this.jobOutstanding++;
+    this.touchJob();
+    try {
+      return await this.supervisors.job.request(body, session, revision);
+    } finally {
+      this.jobOutstanding--;
+      this.touchJob();
+    }
+  }
+
+  /** Keep an agent run's already-started job utility available across model
+   *  thinking pauses. Idempotent by run id, renewed by later tool calls. */
+  holdJobRun(run: string): void {
+    if (!this.started || this.stopping) return;
+    this.jobRunHolds.get(run)?.cancel();
+    this.jobActivity++;
+    this.jobIdleTimer?.cancel();
+    this.jobIdleTimer = null;
+    const schedule = this.options.schedule ?? ((fn: () => void, ms: number) => {
+      const timer = setTimeout(fn, ms);
+      timer.unref?.();
+      return { cancel: () => clearTimeout(timer) };
+    });
+    const hold = schedule(() => {
+      if (this.jobRunHolds.get(run) === hold) this.releaseJobRun(run);
+    }, JOB_RUN_HOLD_MS);
+    this.jobRunHolds.set(run, hold);
+  }
+
+  /** Release a completed or cancelled run. The ordinary quiet countdown
+   *  resumes once the last run ends; active sessions and jobs remain protected
+   *  by the engine's status report. */
+  releaseJobRun(run: string): void {
+    const hold = this.jobRunHolds.get(run);
+    if (!hold) return;
+    hold.cancel();
+    this.jobRunHolds.delete(run);
+    if (!this.jobRunHolds.size) this.touchJob();
+  }
+
+  /** Keep the job utility available while a user-facing export sheet or save
+   *  panel is open. The owner releases this non-expiring hold on close or loss;
+   *  acquiring it alone does not start a utility. */
+  holdJobUtility(): () => void {
+    if (!this.started || this.stopping) return () => {};
+    const hold = Symbol();
+    this.jobUtilityHolds.add(hold);
+    this.touchJob();
+    return () => {
+      if (this.jobUtilityHolds.delete(hold)) this.touchJob();
+    };
+  }
+
+  /** Records job activity and restarts the idle countdown. */
+  private touchJob(): void {
+    this.jobActivity++;
+    if (this.options.eagerJobs || !this.started || this.stopping) return;
+    this.jobIdleTimer?.cancel();
+    if (this.jobRunHolds.size || this.jobUtilityHolds.size) {
+      this.jobIdleTimer = null;
+      return;
+    }
+    const schedule = this.options.schedule ?? ((fn: () => void, ms: number) => {
+      const timer = setTimeout(fn, ms);
+      timer.unref?.();
+      return { cancel: () => clearTimeout(timer) };
+    });
+    this.jobIdleTimer = schedule(() => {
+      this.jobIdleTimer = null;
+      void this.retireIdleJob();
+    }, this.options.jobIdleMs ?? JOB_IDLE_MS);
+  }
+
+  /**
+   * Stops a job utility nothing has used for `jobIdleMs`, after its own
+   * report confirms it holds no session and no work. Requests arriving
+   * meanwhile wait (`retiring`) and then start a new utility; activity
+   * during the check cancels the stop.
+   */
+  private async retireIdleJob(): Promise<void> {
+    const launch = this.supervisors.job.current;
+    if (!launch || launch.exiting || this.stopping || !this.started || this.retiring || this.jobOutstanding || this.jobRunHolds.size || this.jobUtilityHolds.size ||
+      this.readiness.has('job')) return;
+    const stamp = this.jobActivity;
+    let release = (): void => {};
+    this.retiring = new Promise<void>((resolve) => { release = resolve; });
+    let retired = false;
+    try {
+      const report = await launch.report(2000);
+      if (stamp !== this.jobActivity || this.jobOutstanding || this.jobRunHolds.size || this.jobUtilityHolds.size || this.supervisors.job.current !== launch || !jobReportIdle(report)) return;
+      this.jobDemanded = false;
+      await this.supervisors.job.stop();
+      retired = true;
+      this.options.log('info', `the job engine exited after ${Math.round((this.options.jobIdleMs ?? JOB_IDLE_MS) / 1000)} s unused (generation ${launch.generation})`);
+    } finally {
+      this.retiring = null;
+      release();
+      // Still running (busy or a failed check): look again later.
+      if (!retired) this.touchJob();
+    }
   }
 
   /** A destination the user chose for a job, as a write handle bound to the
@@ -405,10 +610,10 @@ export class NativeEngine {
     this.services.setDraftSession(session, draft);
   }
 
-  /** Interpret Footage's facts of an asset's file. Main resolves the asset
-   *  (the media store) and mints a `mediaRead` handle bound to the job
-   *  engine's host port and session 0; the job engine resolves it, reads
-   *  the file, and answers `mediaFacts`. The handle is revoked after. */
+  /** Interpret Footage's facts of an asset's file. The interactive utility
+   *  is already running and serves CPU-only probes without starting the job
+   *  utility. Its host port and session 0 own the short-lived mediaRead
+   *  capability, so another utility cannot resolve it. */
   async probeMedia(asset: string, interpret: string | null): Promise<MediaFacts> {
     const slot = this.probes.get(asset);
     if (slot) {
@@ -440,14 +645,15 @@ export class NativeEngine {
   }
 
   private async probeOnce(asset: string, interpret: string | null): Promise<MediaFacts> {
-    const launch = this.supervisors.job.current;
-    if (!launch) throw new Error('the job engine is not running');
+    await this.ensureReady('interactive');
+    const launch = this.supervisors.interactive.current;
+    if (!launch) throw new Error('the interactive engine is not running');
     const resolved = await this.options.resolveAsset?.(asset);
     if (!resolved) throw new Error('The asset’s file is not available.');
     const handle = this.handles.mint({ kind: { kind: 'mediaRead', asset }, session: 0, port: launch.hostPort, path: resolved.path });
     try {
-      const answer = await this.request('job', { type: 'probeMedia', handle, interpret });
-      if (answer.type !== 'mediaFacts') throw new Error(`the job engine answered ${answer.type}`);
+      const answer = await this.request('interactive', { type: 'probeMedia', handle, interpret });
+      if (answer.type !== 'mediaFacts') throw new Error(`the interactive engine answered ${answer.type}`);
       const { type: _type, ...facts } = answer;
       return facts as MediaFacts;
     } finally {
@@ -474,6 +680,7 @@ export class NativeEngine {
     this.options.log('info', `the ${process} engine is ready (generation ${launch.generation}, pid ${launch.pid ?? '?'})`);
     this.sendGrants(this.memory.initial(process));
     if (process === 'job') {
+      this.touchJob();
       launch.connection.event({ type: 'slicing', ...DEFAULT_SLICING_POLICY });
       if (this.lastPlaybackStarted) launch.connection.event({ type: 'deadline', ...this.lastPlaybackStarted });
     }
@@ -496,7 +703,6 @@ export class NativeEngine {
 
   private onEnded(launch: Launch, report: CrashReport | null): void {
     const { process } = launch;
-    this.blender?.endPort(launch.hostPort);
     void this.services.endLaunch(process, launch.hostPort).then((n) => {
       if (n) this.options.log('info', `removed ${n} unfinished output(s) of the ${process} engine`);
     });
@@ -575,22 +781,6 @@ export class NativeEngine {
       request: (body, session) => {
         const current = launch();
         if (!current) return Promise.reject(new ProtocolError('internal', 'the engine launch ended'));
-        const blender = this.blender;
-        if (blender) {
-          if (body.type === 'blenderStatus') return blender.status();
-          if (body.type === 'blenderRender') {
-            // The job engine's exports, and the interactive engine's paused
-            // viewer (Material Preview and Rendered shading). Surfaces and
-            // progress go to the launch that asked, before the answer.
-            const send = (event: Event): void => {
-              if (launch() === current) this.supervisors[process].event(event, session);
-            };
-            return blender.render(body, session ?? 0, current.hostPort, send).then(() => ({ type: 'ack' }) as Response);
-          }
-          if (body.type === 'cancelJobs' && body.kind === 'job' && (process === 'job' || blender.owns(body.job, current.hostPort))) {
-            return Promise.resolve({ type: 'jobsCancelled', jobs: blender.cancel(body.job) ? [body.job] : [] } as Response);
-          }
-        }
         if (body.type === 'shaderFallback') {
           if (process !== 'job') return Promise.reject(new ProtocolError('capabilityRejected', 'Only the job engine asks the host to run fallback requests.'));
           return this.runShaderFallback(body, session ?? 0, current.hostPort);
@@ -606,7 +796,7 @@ export class NativeEngine {
           }
           if (!this.options.compatFrame) return Promise.reject(new ProtocolError('notHeadlessRenderable', 'This host draws no compatibility frames.'));
           const { type: _type, ...request } = body;
-          return this.options.compatFrame(request);
+          return this.options.compatFrame(request, process === 'job' ? session ?? null : null);
         }
         return this.services.serve(process, current.hostPort, body, session);
       },
@@ -656,6 +846,7 @@ export class NativeEngine {
         return;
       case 'jobStatus':
         if (process !== 'job') throw new Error('only the job engine reports jobs');
+        this.touchJob();
         for (const l of this.listeners) l.jobStatus?.(body);
         return;
       default:
@@ -719,7 +910,6 @@ export class NativeEngine {
     this.supervisors.job.event({ type: 'deadline', ...signal });
     this.lastPlaybackStarted = signal;
     if (was) return;
-    if (DEFAULT_SLICING_POLICY.blender.kind === 'pause') this.blender?.setPaused(true);
     this.sendGrants(this.memory.playbackStarted());
     for (const l of this.listeners) l.playback?.(true);
   }
@@ -728,7 +918,6 @@ export class NativeEngine {
     if (this.lastPlaybackStarted === null) return;
     this.supervisors.job.event({ type: 'deadline', ...(signal ?? { signal: 'playbackStopped', at: this.options.hostNow() }) });
     this.lastPlaybackStarted = null;
-    this.blender?.setPaused(false);
     if (grants) this.sendGrants(this.memory.playbackStopped());
     for (const l of this.listeners) l.playback?.(false);
   }

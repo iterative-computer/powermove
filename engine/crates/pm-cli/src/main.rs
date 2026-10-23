@@ -11,15 +11,17 @@
 //!
 //! `render` and `parity render` exit 0 done, 1 failed, 2 usage, 3 the engine
 //! cannot render this yet (the reasons are printed; the desktop app routes
-//! such projects to the current engine); `render` exits 4 when a program
+//! such projects to the current engine); `render` and `scope` exit 4 when a program
 //! only the app's WebGL fallback runner draws makes the project not
 //! headless-renderable (named per layer and definition). `parity eval` (evaluation parity,
 //! section 25; docs/engine/phase1-gate.md) keeps its own statuses, listed in
 //! `pm-cli parity eval --help`.
 
+mod angle;
 mod compare;
 mod corpus;
 mod fonts;
+mod parameters;
 mod parity;
 mod render;
 mod render_parity;
@@ -73,13 +75,19 @@ const USAGE: &str = "usage:
       --audio pcm16|pcm24|float|aac        (default 24-bit PCM in MOV, AAC in MP4)
       --timecode HH:MM:SS:FF  --reel NAME  start timecode (`;` for drop-frame), MOV
       --no-audio  --no-captions  --color quicktime|broadcast|srgb|rec709
-      --dither on|off  --precision 16|32
+      --dither on|off  --precision 8|16|32
       --composition ID  --media ASSET=FILE  --force (replace an existing file)
       --definitions FILE  a definition set snapshot (contract 10, JSON) to draw
                effects, transitions, and extension layers with (default: the
                built-in definitions)
+      --param NAME=JSON (repeatable; validates against the parameter definition)
       --ui-scale S  the editor's display scale factor, which fixes how its
                     renderer measures system-ui text (default 2)
+      --approximate-svg  level 1 SVG images are rasterized by the Chromium
+               helper (`powermove render` starts it; a bundled pm-cli starts
+               native-angle-child.cjs). Without one, a project that draws
+               them fails (svg-chromium-unavailable) unless this flag accepts
+               resvg's approximation, named in a notice
   pm-cli parity render [--capture DIR]... [--only PREFIX] [--diffs DIR] [--json FILE]
                        [--real FILE.pmv] [--no-definitions] [--determinism]
                        [--svg-rasters DIR]
@@ -102,7 +110,25 @@ const USAGE: &str = "usage:
       captured frame): waveform.png, parade.png, vectorscope.png, scope.json
       --time S  --composition ID  --size WxH | --scale S  --media ASSET=FILE
       --motion-blur off|export|N (default export)  --transparent  --columns N
+      --definitions FILE  --approximate-svg (as for render: user GLSL programs
+               the desktop pinned to its WebGL runner, or has not verified,
+               run in the helper's Chromium, else exit 4)
       --ui-scale S (default 2)";
+
+/// Exit 4 (`render` and `scope`): user programs only the app's WebGL
+/// runner may draw here, and no Chromium helper is attached.
+fn not_headless(reasons: &[String]) -> ExitCode {
+    eprintln!(
+        "pm-cli: not headless-renderable: only the app's WebGL fallback runner draws these \
+         programs (the native pipeline cannot translate them, the desktop pinned them to its \
+         runner, or they are not verified natively yet), and pm-cli has no Chromium helper \
+         (`powermove render` and a bundled pm-cli start one):"
+    );
+    for r in reasons {
+        eprintln!("  {r}");
+    }
+    ExitCode::from(4)
+}
 
 fn list(v: &str) -> Vec<String> {
     v.split(',')
@@ -232,6 +258,10 @@ fn parse_render(args: &[String]) -> Result<render::Options, String> {
             "--timecode" => o.timecode = Some(value(args, &mut i, a)?.into()),
             "--reel" => o.reel = Some(value(args, &mut i, a)?.into()),
             "--no-captions" => o.no_captions = true,
+            "--approximate-svg" => o.approximate_svg = true,
+            "--param" => o
+                .parameters
+                .push(parameters::parse(value(args, &mut i, a)?)?),
             "--definitions" => o.definitions = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
@@ -284,6 +314,8 @@ fn parse_scope(args: &[String]) -> Result<scope::Options, String> {
             }
             "--motion-blur" => o.motion_blur = Some(value(args, &mut i, a)?.into()),
             "--transparent" => o.transparent = true,
+            "--approximate-svg" => o.approximate_svg = true,
+            "--definitions" => o.definitions = Some(PathBuf::from(value(args, &mut i, a)?)),
             "--ui-scale" => o.ui_scale = Some(fonts::parse_ui_scale(value(args, &mut i, a)?)?),
             "--columns" => {
                 let v = value(args, &mut i, a)?;
@@ -364,17 +396,7 @@ fn main() -> ExitCode {
                     }
                     ExitCode::from(3)
                 }
-                Err(render::Failure::NotHeadless(reasons)) => {
-                    eprintln!(
-                        "pm-cli: not headless-renderable: these programs compile in WebGL but \
-                         not in the native pipeline, and only the app's WebGL fallback runner \
-                         draws them (pm-cli has none):"
-                    );
-                    for r in reasons {
-                        eprintln!("  {r}");
-                    }
-                    ExitCode::from(4)
-                }
+                Err(render::Failure::NotHeadless(reasons)) => not_headless(&reasons),
                 Err(render::Failure::Failed(m)) => {
                     eprintln!("pm-cli: {m}");
                     ExitCode::FAILURE
@@ -450,9 +472,8 @@ fn main() -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(render::Failure::Usage(m)) => fail_usage(&m),
-                Err(
-                    render::Failure::Unsupported(reasons) | render::Failure::NotHeadless(reasons),
-                ) => {
+                Err(render::Failure::NotHeadless(reasons)) => not_headless(&reasons),
+                Err(render::Failure::Unsupported(reasons)) => {
                     eprintln!("pm-cli: the new engine cannot render this project yet:");
                     for r in reasons {
                         eprintln!("  {r}");

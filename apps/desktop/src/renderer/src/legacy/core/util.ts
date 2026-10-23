@@ -1,5 +1,6 @@
 /* Ported from js/core/util.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { writeBlobChunks } from './blob-chunks';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { dropFrameTimecode, formatTimecode, parseTimecode } from './timecode';
 
@@ -324,9 +325,7 @@ PM.download = (blob: any, name: any) => {
   if (upload) return (async () => {
     const token = await upload.begin(blob.size);
     try {
-      for (let offset = 0; offset < blob.size; offset += 1024 * 1024) {
-        await upload.chunk(token, new Uint8Array(await blob.slice(offset, offset + 1024 * 1024).arrayBuffer()));
-      }
+      await writeBlobChunks(blob, bytes => upload.chunk(token, bytes));
       const result = await upload.finish(token, { name: String(name || 'powermove.bin') });
       if (!result.ok && !result.cancelled) throw new Error(result.error || 'Save failed');
       return result;

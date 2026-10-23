@@ -8,6 +8,55 @@
 #include <stdio.h>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <mutex>
+
+// Core Text publishes process changes locally and user/session changes through
+// the distributed center. Only advance a counter here: notifications may arrive
+// off the Node thread, where N-API and JavaScript values cannot be accessed.
+static std::atomic<uint32_t> fontRegistryVersion{0};
+static std::mutex fontObserverMutex;
+static uint32_t fontObserverEnvironments = 0;
+struct FontObserverEnvironment { bool watching = false; };
+static void FontRegistryChanged(CFNotificationCenterRef center, void *observer,
+                                CFStringRef name, const void *object, CFDictionaryRef info) {
+  fontRegistryVersion.fetch_add(1, std::memory_order_relaxed);
+}
+static void RemoveFontObservers(void *data) {
+  FontObserverEnvironment *environment = static_cast<FontObserverEnvironment *>(data);
+  bool watching = environment->watching;
+  delete environment;
+  if (!watching) return;
+  std::lock_guard<std::mutex> lock(fontObserverMutex);
+  if (--fontObserverEnvironments != 0) return;
+  CFNotificationCenterRemoveObserver(CFNotificationCenterGetLocalCenter(), &fontRegistryVersion,
+                                     kCTFontManagerRegisteredFontsChangedNotification, nullptr);
+  CFNotificationCenterRemoveObserver(CFNotificationCenterGetDistributedCenter(), &fontRegistryVersion,
+                                     kCTFontManagerRegisteredFontsChangedNotification, nullptr);
+}
+static void ObserveFontRegistry(FontObserverEnvironment *environment) {
+  if (environment->watching) return;
+  std::lock_guard<std::mutex> lock(fontObserverMutex);
+  if (fontObserverEnvironments++ == 0) {
+    for (CFNotificationCenterRef center : {CFNotificationCenterGetLocalCenter(), CFNotificationCenterGetDistributedCenter()}) {
+      CFNotificationCenterAddObserver(center, &fontRegistryVersion, FontRegistryChanged,
+                                     kCTFontManagerRegisteredFontsChangedNotification, nullptr,
+                                     CFNotificationSuspensionBehaviorDeliverImmediately);
+    }
+  }
+  environment->watching = true;
+}
+static napi_value FontRegistryVersion(napi_env env, napi_callback_info info) {
+  napi_value result;
+  // Font IPC runs on the application thread, whose run loop delivers session
+  // notifications. Other Node workers retain uncached enumeration behavior.
+  if (![NSThread isMainThread]) { napi_get_null(env, &result); return result; }
+  void *data;
+  napi_get_cb_info(env, info, nullptr, nullptr, nullptr, &data);
+  ObserveFontRegistry(static_cast<FontObserverEnvironment *>(data));
+  napi_create_uint32(env, fontRegistryVersion.load(std::memory_order_relaxed), &result);
+  return result;
+}
 
 static void PerformAlignmentFeedback(void) {
   [[NSHapticFeedbackManager defaultPerformer]
@@ -229,6 +278,8 @@ static napi_value SandboxDeniesLookup(napi_env env, napi_callback_info info) {
 }
 
 static napi_value Init(napi_env env, napi_value exports) {
+  FontObserverEnvironment *fontEnvironment = new FontObserverEnvironment();
+  napi_add_env_cleanup_hook(env, RemoveFontObservers, fontEnvironment);
   napi_value trigger;
   napi_create_function(env, "triggerAlignment", NAPI_AUTO_LENGTH,
                        TriggerAlignment, nullptr, &trigger);
@@ -236,6 +287,9 @@ static napi_value Init(napi_env env, napi_value exports) {
   napi_value fonts;
   napi_create_function(env, "fontFamilies", NAPI_AUTO_LENGTH, FontFamilies, nullptr, &fonts);
   napi_set_named_property(env, exports, "fontFamilies", fonts);
+  napi_value fontVersion;
+  napi_create_function(env, "fontRegistryVersion", NAPI_AUTO_LENGTH, FontRegistryVersion, fontEnvironment, &fontVersion);
+  napi_set_named_property(env, exports, "fontRegistryVersion", fontVersion);
   napi_value cloud;
   napi_create_function(env, "cloudFileState", NAPI_AUTO_LENGTH, CloudFileState, nullptr, &cloud);
   napi_set_named_property(env, exports, "cloudFileState", cloud);

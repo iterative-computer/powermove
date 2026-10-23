@@ -5,6 +5,10 @@ import { expect, test } from './helpers/app';
 test('compact history preserves pixels, every action, and pending redo through pressure and relaunch', async ({ session }) => {
   await session.openEditor();
   await session.page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
+  await session.app.evaluate(({ dialog }, filePath) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+  }, path.join(session.userData, 'History persistence.pmv'));
+  expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
   const before = await session.page.evaluate(async () => {
     const PM = (window as any).PM;
     PM.hist.clear();

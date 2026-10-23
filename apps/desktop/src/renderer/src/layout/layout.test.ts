@@ -379,8 +379,12 @@ describe('Svelte DockLayout panel pool', () => {
     splitter.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }) as unknown as PointerEvent);
     dragOptions.move(0, -1000, new MouseEvent('pointermove') as unknown as PointerEvent);
 
-    expect(specs[divider]).toEqual({ id: specs[divider]!.id, size: 88, collapsed: false });
-    expect(specs[divider + 1]).toEqual({ id: specs[divider + 1]!.id, size: heights[divider]! + heights[divider + 1]! - 88, collapsed: false });
+    // The panel above stops at its floor (200 while it stays fluid) and the
+    // panel below takes the height it gave up; a fluid one stays fluid.
+    const expected = divider === 0
+      ? [{ id: 'inspector', size: 200, flex: true, collapsed: false }, { id: 'fxbrowser', size: 180, collapsed: false }]
+      : [{ id: 'fxbrowser', size: 88, collapsed: false }, { id: 'pexels', size: 432, flex: true, collapsed: false }];
+    expect([specs[divider], specs[divider + 1]]).toEqual(expected);
     expect(specs[untouched]).toEqual(original);
     expect(elements[untouched]!.style.flex).toBe(originalFlex);
 
@@ -555,11 +559,12 @@ describe('Svelte DockLayout panel pool', () => {
     installSvelteLayout(PM);
     PM.Layout.apply(PM.WS.current);
 
-    // Fluid panel in the left dock: shrinkable, but not below the shared floor.
+    // Fluid panel in the left dock: shrinkable, but not below the shared floor,
+    // which a side column raises so it scrolls before the panel crushes.
     const alpha = document.getElementById('panel-alpha')!;
-    expect(alpha.style.flex).toBe('1 1 auto');
-    expect(alpha.style.minHeight).toBe(`${panelMinHeight({ id: 'alpha' }, PM.PANELS.alpha)}px`);
-    expect(alpha.style.minHeight).toBe('140px');
+    expect(alpha.style.flex).toBe('1 0 200px');
+    expect(alpha.style.minHeight).toBe(`${panelMinHeight({ id: 'alpha' }, PM.PANELS.alpha, 'left')}px`);
+    expect(alpha.style.minHeight).toBe('200px');
 
     // A panel declaring no minimum still floors at the default, never at 56px.
     const beta = document.getElementById('panel-beta')!;

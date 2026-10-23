@@ -30,6 +30,20 @@ function addText(PM, id = 'title') {
   return layer;
 }
 
+it('persists color depth and restores it through scoped Undo and Redo', () => {
+  const { PM } = editor();
+  assert.equal(PM.proj.colorDepth, 16);
+  PM.Edit.apply({ type: 'set_composition', patch: { colorDepth: 32 } });
+  assert.equal(PM.proj.colorDepth, 32);
+  assert.equal(PM.deserialize(PM.serialize()).colorDepth, 32);
+  PM.hist.undo(); assert.equal(PM.proj.colorDepth, 16);
+  PM.hist.redo(); assert.equal(PM.proj.colorDepth, 32);
+  assert.equal(PM.Edit.apply({ type: 'set_composition', patch: { colorDepth: 24 } }).ok, false);
+  assert.equal(PM.proj.colorDepth, 32);
+  PM.GL = { supportedColorDepths: [8, 16] };
+  assert.equal(PM.Edit.apply({ type: 'set_composition', patch: { colorDepth: 32 } }).ok, false);
+});
+
 it('canvas, agent, and generated UI origins use the same source command', () => {
   const outcomes = [];
   for (const origin of ['canvas', 'agent', 'generated-ui']) {

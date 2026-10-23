@@ -230,6 +230,43 @@ describe('the compositor context for offline renders', () => {
     return { getContext: () => gl, addEventListener() {} };
   };
 
+  it('defers the unused native-viewer context and creates the same real context synchronously for compatibility access', () => {
+    const PM = compositorRegistry();
+    PM.EngineConnection = {} as never;
+    PM.EngineCanvas = {} as never;
+    const context = { ...fakeCanvas().getContext(), canvas: null as unknown };
+    const canvas = {
+      width: 1, height: 1,
+      getContext: vi.fn(() => context), addEventListener: vi.fn(),
+    } as unknown as HTMLCanvasElement;
+    context.canvas = canvas;
+
+    expect(PM.GL.init(canvas, { alpha: false, quiet: true })).toBe(true);
+    expect(PM.GL.init(canvas, { alpha: true, quiet: true })).toBe(true);
+    expect(PM.GL.peekContext()).toBeNull();
+    expect(canvas.getContext).not.toHaveBeenCalled();
+    expect(PM.GL.resize(640, 360, { x: 0, y: 0, width: 640, height: 360 })).toBe(true);
+    expect(canvas.width).toBe(640);
+    expect(canvas.height).toBe(360);
+    expect(canvas.getContext).not.toHaveBeenCalled();
+
+    expect(PM.GL.gl).toBe(context);
+    expect(PM.GL.gl).toBe(context);
+    expect(canvas.getContext).toHaveBeenCalledOnce();
+    expect(canvas.getContext).toHaveBeenCalledWith('webgl2', expect.objectContaining({ alpha: false }));
+    expect(PM.GL.compatFirstUseMs).toBeGreaterThanOrEqual(0);
+    expect(PM.GL.init(canvas)).toBe(true);
+    expect(canvas.getContext).toHaveBeenCalledTimes(2);
+  });
+
+  it('still initializes immediately with the native engine off', () => {
+    const PM = compositorRegistry();
+    const canvas = { ...fakeCanvas(), getContext: vi.fn(fakeCanvas().getContext) };
+    expect(PM.GL.init(canvas)).toBe(true);
+    expect(canvas.getContext).toHaveBeenCalledOnce();
+    expect(PM.GL.peekContext()).toBe(PM.GL.gl);
+  });
+
   it('waits for the viewer to give it a canvas, and stops waiting per frame after a timeout', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('window', { setTimeout, clearTimeout });

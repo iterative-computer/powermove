@@ -44,6 +44,11 @@ export function installLayerMenu(PM: PMRegistry): void {
       { header: selected.length > 1 ? `${selected.length} layers` : layer.name },
       { label: 'Duplicate', icon: 'copy', kb: '⌘D', disabled: !editable, run: () => PM.cmd('duplicate') },
       { label: 'Group layers', icon: 'stack', kb: '⌘G', disabled: !editable, run: () => PM.cmd('groupLayers') },
+      { label: 'Simplify Keyframes', disabled: !editable, run: () => {
+        const result = apply({ type: 'simplify_keyframes', scope: 'layers', targets: selected.map((item: any) => item.id) }, 'Simplify Keyframes');
+        const data = result.data?.results?.[0]?.data;
+        PM.toast(result.ok ? `${data.keysBefore.toLocaleString()} → ${data.keysAfter.toLocaleString()} keyframes` : result.message, 4000, { error: !result.ok });
+      } },
       { label: 'Pre-compose…', icon: 'layers', kb: '⇧⌘C', disabled: !editable, run: () => PM.cmd('precompose') },
     ];
     if (selected.length === 2) {

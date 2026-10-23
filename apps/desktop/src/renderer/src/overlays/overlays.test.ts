@@ -557,6 +557,25 @@ describe('installSvelteOverlays', () => {
     expect(document.querySelector('.toast')).toBeNull();
   });
 
+  it('keeps a toast action available when its separate dismiss button is disabled', () => {
+    const run = vi.fn(), onDismiss = vi.fn(), onClose = vi.fn();
+    PM.toast('Ready to restore', 8000, {
+      sticky: true, dismissible: false,
+      action: { label: 'Restore', run }, onDismiss, onClose,
+    });
+    flushSync();
+    const action = document.querySelector<HTMLButtonElement>('.toast-action');
+    expect(action).not.toBeNull();
+    expect(action?.textContent).toBe('Restore');
+    expect(document.querySelector('.toast-dismiss')).toBeNull();
+    action!.click();
+    flushSync();
+    expect(run).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onDismiss).not.toHaveBeenCalled();
+    expect(document.querySelector('.toast')).toBeNull();
+  });
+
   it('skips nullish toasts and accepts explicit sticky and dismissible behavior', () => {
     vi.useFakeTimers();
     PM.toast(undefined);

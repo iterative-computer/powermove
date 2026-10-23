@@ -12,8 +12,6 @@ import { canonicalProject } from '../../../shared/canonical-json';
 import { alignDelta, deltaInParent, unionBox, type AlignMode } from '../../../extensions/inspector/align';
 import { makePM } from '../legacy/__tests__/make-pm';
 import { is3DLayer } from '../legacy/core/space-3d';
-import { initializeLayer3D, parseLayer3DData } from '../core/scene3d/layers';
-import { materialPreset } from '../core/scene3d/materials';
 import { adoptKeys, compareSplit, editDiffers, knownIds, timeGrid } from './edits';
 import { installEngineDoc, type EngineDoc } from './install';
 import { parseMode } from './flags';
@@ -268,75 +266,6 @@ describe.skipIf(!built)('pm-edit in the edit pipeline', () => {
       expect(audit.doc.dual!.stats.mismatched['edit.reparent'] ?? 0, `t ${t} dual`).toBe(0);
       expect(audit.doc.dual!.stats.compared['edit.reparent'], `t ${t} compared`).toBe(1);
     }
-  });
-});
-
-/** Two compositions whose 3D objects share shader materials (base and slot). */
-function materialProject(seed: number): string {
-  const random = rng(seed);
-  const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing');
-  PM.proj = PM.mkProject({ dur: 4, fps: random() < 0.5 ? 29.97 : 30 });
-  const fps = PM.proj.fps;
-  const channel = () => {
-    const prop = PM.P(Math.round(random() * 100) / 100);
-    if (random() < 0.7) prop.kf = [PM.KF(Math.round(random() * 20) / fps, random(), 'linear'), PM.KF((30 + Math.round(random() * 20)) / fps, random(), 'easeOut')];
-    return prop;
-  };
-  const shader = (id: string) => {
-    const preset: any = materialPreset('surface', id, `Shader ${id}`);
-    preset.p.roughness = channel();
-    preset.p.metalness = channel();
-    return preset;
-  };
-  const material = (id: string) => ({ ...parseLayer3DData('object', { object: { source: { primitive: 'box' } } }).object.material, shader: shader(id) });
-  const object = (name: string, from: number, slots: boolean) => {
-    const layer = PM.mkLayer('null', { name, from, dur: 4 });
-    layer.type = 'extension';
-    const data = parseLayer3DData('object', { object: { source: { primitive: 'box' } } });
-    if (slots) data.object.slots = [{ id: 's0', name: 'Slot 0', material: material('A') }, { id: 's1', name: 'Slot 1', material: material('B') }];
-    else data.object.material = material('A');
-    layer.d = { definition: 'powermove.3d.object', data: parseLayer3DData('object', data) };
-    initializeLayer3D(layer);
-    return layer;
-  };
-  PM.proj.layers = [object('O0', 0, true), object('O1', Math.round(random() * 20) / fps, false), object('O2', 0.5, true)];
-  PM.proj.comps = { Kother: { id: 'Kother', name: 'Other', w: 640, h: 360, fps: 24, dur: 4, bg: '#000000', layers: [object('O3', 0.25, false)] } };
-  return JSON.stringify(own(PM.proj));
-}
-
-describe.skipIf(!built)('material peers through pm-edit', () => {
-  it('copies shared shader channels to every surface as the TypeScript edit does', async () => {
-    let applied = 0, compared = 0;
-    for (const seed of [11, 12, 13, 14]) {
-      const json = materialProject(seed);
-      const known = knownIds(JSON.parse(json));
-      for (const id of [JSON.parse(json).compId, 'Kother']) known.add(id);
-      const edit = (PM: any) => {
-        PM.time = 1;
-        const o0 = byName(PM, 'O0');
-        const results = [
-          PM.Edit.apply({ type: 'set_property', target: o0.id, path: 'slots.s0.shader.roughness', value: 0.25, time: 1, mode: 'auto' }, { origin: 'user' }),
-          PM.Edit.apply({ type: 'set_property', target: byName(PM, 'O1').id, path: 'shader.metalness', value: 0.75, time: 2, mode: 'static' }, { origin: 'user' }),
-          PM.Edit.apply({ type: 'offset_property', target: o0.id, path: 'slots.s1.shader.roughness', delta: 0.1 }, { origin: 'user' }),
-        ];
-        return results.map((r: any) => r.ok);
-      };
-      const legacy = await editor('off', json);
-      const want = edit(legacy.PM);
-      const native = await editor('on', json);
-      const got = edit(native.PM);
-      expect(got).toEqual(want);
-      const after = canonical(legacy.PM, known);
-      expect(editDiffers(canonical(native.PM, known), after, known, timeGrid(after.comps)), `seed ${seed}`).toBeNull();
-      applied += native.doc.edits!.stats.applied.syncPeers ?? 0;
-      const audit = await editor('audit', json);
-      edit(audit.PM);
-      const dual = audit.doc.dual!.stats;
-      expect(dual.mismatched['edit.syncPeers'] ?? 0, `seed ${seed} dual`).toBe(0);
-      compared += dual.compared['edit.syncPeers'] ?? 0;
-    }
-    expect(applied).toBeGreaterThan(0);
-    expect(compared).toBeGreaterThan(0);
   });
 });
 

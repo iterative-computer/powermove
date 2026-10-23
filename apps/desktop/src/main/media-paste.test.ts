@@ -17,12 +17,12 @@ function harness(formats = ['image/png']) {
 }
 
 describe('native media paste', () => {
-  it.each(['image/png', 'video/mp4', 'audio/wav', 'text/uri-list', 'electron application/osclipboard;format="public.file-url"'])('requests native paste for %s without returning any clipboard data', async type => {
+  it.each(['image/png', 'video/mp4', 'audio/wav', 'text/html', 'text/uri-list', 'electron application/osclipboard;format="public.file-url"'])('requests native paste for %s without returning any clipboard data', async type => {
     const h = harness([type]);
     expect(await h.run()).toBe(true);
     expect(h.sender.paste).toHaveBeenCalledOnce();
   });
-  it.each([{ formats: [] }, { formats: ['text/plain'] }, { formats: ['text/html'] }])('leaves the app clipboard available for non-media formats $formats', async ({ formats }) => {
+  it.each([{ formats: [] }, { formats: ['text/plain'] }])('leaves the app clipboard available for non-media formats $formats', async ({ formats }) => {
     const h = harness(formats);
     expect(await h.run()).toBe(false);
     expect(h.sender.paste).not.toHaveBeenCalled();

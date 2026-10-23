@@ -1,10 +1,10 @@
 import { decodeProjectContainer, encodeProjectContainerBlob, encodeTextChunks, isProjectContainer, projectContainerIndex, type ProjectMediaRange } from '../../../../shared/project-container';
 import { stringifyAsync } from './serialize-async';
+import { parseAsync } from './parse-async';
 import { bridge as hostBridge } from '../../kernel/bridge';
-import { isIncrementalProject, readIncrementalIndex, type LinkedRecord, type SaveMedia } from '../../../../shared/project-incremental';
+import { isIncrementalProject, readIncrementalIndex, type LinkedRecord, type ProjectRecord, type SaveMedia } from '../../../../shared/project-incremental';
 import { Sha256, sha256HexOf } from '../../../../shared/sha256';
 import type { PowermoveBridge, FileSaveResult } from '../../../../shared/ipc';
-import { applyEngineStamp } from '../../../../shared/engine-stamp';
 
 type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob: Blob, metadata: any, revision?: string): Promise<boolean>;
   getForSave?(asset: any): Promise<{ blob: Blob; revision: string } | null>;
@@ -13,42 +13,8 @@ type MediaStore = { get(asset: any): Promise<Blob | null>; put(id: string, blob:
   /** Host media store (new engine): main copies a range of the open project file into the store. */
   putProjectRange?(readToken: string, source: ProjectMediaRange, asset: any, onBytes?: (bytes: number) => void): Promise<boolean> };
 
-const isLinkedAsset = (asset: any) => asset?.storage === 'linked' && !!asset?.link && typeof asset.link.path === 'string';
-
-/**
- * Export › Project and agent `save_project` (section 21): every linked
- * original is embedded, so the exported file is self-contained as before.
- * Embedded linked assets become copied assets in the exported document and
- * the engine stamp is recomputed, so the copy opens in either engine.
- */
-export function embedLinkedAssets(document: any, embedded: ReadonlySet<string>): number {
-  const assets = (document?.proj || document)?.assets;
-  let changed = 0;
-  for (const [id, asset] of Object.entries<any>(assets || {})) {
-    if (!isLinkedAsset(asset) || !embedded.has(id)) continue;
-    if (!asset.contentHash && asset.link.hash) asset.contentHash = asset.link.hash;
-    if (!asset.sourcePath) asset.sourcePath = asset.link.path;
-    delete asset.storage;
-    delete asset.link;
-    changed++;
-  }
-  applyEngineStamp(document?.proj || document);
-  return changed;
-}
-
-/** Include media reachable only by undo/redo, such as a deleted image. */
-function fileAssets(document: any): Record<string, any> {
-  const assets: Record<string, any> = Object.create(null);
-  for (const entry of document.history?.entries || []) {
-    for (const patch of [...(entry.forward || []), ...(entry.backward || [])]) {
-      if (!patch?.exists || !Array.isArray(patch.path)) continue;
-      if (!patch.path.length) Object.assign(assets, patch.value?.assets || {});
-      else if (patch.path[0] === 'assets' && patch.path.length === 1) Object.assign(assets, patch.value || {});
-      else if (patch.path[0] === 'assets' && patch.path.length === 2 && patch.value?.id) assets[patch.path[1]] = patch.value;
-    }
-  }
-  return Object.assign(assets, (document.proj || document).assets || {});
-}
+import { embedLinkedAssets, fileAssets, isLinkedAsset } from '../../../../shared/project-assets';
+export { embedLinkedAssets } from '../../../../shared/project-assets';
 
 /** Pin immutable Blobs and their storage revisions before any native upload.
  * Only the main process decides which prior file ranges may be reused. */
@@ -190,17 +156,40 @@ export async function unpackProjectFileBlob(file: Blob): Promise<any> {
     const index = await readIncrementalIndex(file.size, async (offset, length) => new Uint8Array(await file.slice(offset, offset + length).arrayBuffer()));
     const bytes = new Uint8Array(await file.slice(index.document.offset, index.document.offset + index.document.length).arrayBuffer());
     if (await sha256HexOf(bytes) !== index.document.sha256) throw new Error('The project document checksum does not match.');
-    const document = JSON.parse(new TextDecoder().decode(bytes));
+    const document = await parseAsync(new TextDecoder().decode(bytes));
     document.containerMedia = index.media.map(item => ({ ...item, data: file.slice(item.offset, item.offset + item.length, item.type) }));
     return document;
   }
-  if (!isProjectContainer(prefix)) return JSON.parse(await file.text());
+  if (!isProjectContainer(prefix)) return parseAsync(await file.text());
   if (prefix.length < 9) throw new Error('The project container is truncated.');
   const headerLength = new DataView(prefix.buffer).getUint32(5, true);
   if (headerLength < 2 || headerLength > file.size - 9) throw new Error('The project container header is invalid.');
-  const index = projectContainerIndex(JSON.parse(await file.slice(9, 9 + headerLength).text()), 9 + headerLength, file.size);
+  const index = projectContainerIndex(await parseAsync(await file.slice(9, 9 + headerLength).text()), 9 + headerLength, file.size);
   index.document.containerMedia = index.media.map(item => ({ ...item, data: file.slice(item.offset, item.offset + item.length, item.type) }));
   return index.document;
+}
+
+/** Large document graphs must not cross Electron's context bridge. Decode the
+ * validated file range through bounded reads, retaining project and Undo data. */
+export async function readProjectFileDocument(range: ProjectRecord, size: number,
+  read: (offset: number, length: number) => Promise<Uint8Array>,
+  onProgress?: (completed: number, total: number) => void): Promise<any> {
+  if (!range || !Number.isSafeInteger(size) || !Number.isSafeInteger(range.offset) || range.offset < 0
+      || !Number.isSafeInteger(range.length) || range.length < 2 || range.offset > size || range.length > size - range.offset
+      || typeof range.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(range.sha256)) throw new Error('The project document range is invalid.');
+  const parts: string[] = [], decoder = new TextDecoder(), digest = new Sha256();
+  for (let offset = 0; offset < range.length;) {
+    const length = Math.min(1024 * 1024, range.length - offset);
+    const chunk = await read(range.offset + offset, length);
+    if (!(chunk instanceof Uint8Array) || !chunk.length || chunk.length > length) throw new Error('The project document is truncated.');
+    digest.update(chunk);
+    parts.push(decoder.decode(chunk, { stream: true }));
+    offset += chunk.length;
+    onProgress?.(offset, range.length);
+  }
+  parts.push(decoder.decode());
+  if (digest.digest() !== range.sha256) throw new Error('The project document checksum does not match.');
+  return parseAsync(parts.join(''));
 }
 
 /** Stage native ranges on disk, then commit file-backed Blobs to the media store. */

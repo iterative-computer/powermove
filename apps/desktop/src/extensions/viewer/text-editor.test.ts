@@ -18,6 +18,7 @@ function fixture(text = 'Hello', extra: Partial<{ name: string; lock: boolean }>
   const layers = new Map<string, any>([[layer.id, layer]]);
   const dispatched: any[] = [];
   const api = {
+    groups: { ancestors: () => [] },
     selection: { select: vi.fn() },
     transport: { time: () => 0, pause: vi.fn(), invalidate: vi.fn() },
     anim: { resolveContent: (target: any) => target.d, worldMatrix: () => [1, 0, 0, 1, 100, 200] },
@@ -53,6 +54,20 @@ const type = (value: string) => { const el = field(); el.value = value; el.dispa
 const key = (init: KeyboardEventInit) => { const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }); field().dispatchEvent(event); return event; };
 
 describe('text editing session', () => {
+  it.each(['direct', 'group', 'nested group'])('refuses %s locks before changing selection or opening a transaction', protection => {
+    const f = fixture('Hello', { lock: protection === 'direct' });
+    const outer = { lock: protection === 'nested group' };
+    const inner = { lock: protection === 'group' };
+    f.api.groups.ancestors = () => [inner, outer] as any;
+    expect(beginTextEdit(f.api, f.V, f.layer)).toBeNull();
+    expect(f.api.selection.select).not.toHaveBeenCalled();
+    expect(f.api.edit.begin).not.toHaveBeenCalled();
+    expect(document.querySelector('.canvas-text-input')).toBeNull();
+    f.layer.lock = false; outer.lock = false; inner.lock = false;
+    const session = beginTextEdit(f.api, f.V, f.layer);
+    expect(session).not.toBeNull(); session!.finish();
+  });
+
   it('opens one transaction, writes live and commits on Escape without losing text', () => {
     const { api, V, layer } = fixture();
     const session = beginTextEdit(api, V, layer)!;

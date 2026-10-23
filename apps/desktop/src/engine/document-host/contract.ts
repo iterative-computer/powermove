@@ -58,7 +58,8 @@ export const CONTRACT_SEQUENCE: ContractCall[] = [
     { type: 'set_property', target: 'Lrig', path: 'position.x', value: 520, time: 2, ease: 'easeInOut' },
     { type: 'replace_keyframes', target: 'Lplate', path: 'rotation', keyframes: [{ time: 0, value: 0 }, { time: 1, value: 45, ease: 'easeOut' }, { time: 3, value: 90 }] },
     { type: 'set_expression', target: 'Lplate', path: 'opacity', expression: '50 + Math.sin(time * 2) * 50' },
-    { type: 'offset_property', target: 'Lplate', path: 'position.y', delta: 30 },
+    // main removed offset_property (2b1fa379a); the same write as a set.
+    { type: 'set_property', target: 'Lplate', path: 'position.y', value: 30 },
     { type: 'set_layer', target: 'Lbadge', patch: { from: 0.5, duration: 4, name: 'Badge 2' } },
     { type: 'set_content', target: 'Ltitle', patch: { text: 'Powermove engine' } },
   ] } },
@@ -93,6 +94,17 @@ export const CONTRACT_SEQUENCE: ContractCall[] = [
   { runId: 'run-1', tool: 'validate_effect', arguments: { definition: { id: 'contract.tint', label: 'Tint', group: 'Color', params: [{ k: 'amount', label: 'Amount', def: 0.5, min: 0, max: 1 }],
     frag: '#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nuniform float u_p0;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_st) * u_p0; }' } } },
   { runId: 'run-1', tool: 'validate_effect', arguments: { definition: { id: '', params: [] } }, fails: true },
+  // validate_effect through the engine pipeline: the bridge reads the definition snapshot from the harness.
+  { runId: 'run-1', tool: '__validate_effect_snapshot', arguments: { definition: { id: 'contract.tint', label: 'Tint', group: 'Color', params: [{ k: 'amount', label: 'Amount', def: 0.5, min: 0, max: 1 }],
+    frag: '#version 300 es\nprecision highp float;\nin vec2 v_st;\nuniform sampler2D u_tex;\nuniform float u_p0;\nout vec4 o;\nvoid main(){ o = texture(u_tex, v_st) * u_p0; }' } } },
+  { runId: 'run-1', tool: '__validate_effect_snapshot', arguments: { definition: { id: '', params: [] } }, fails: true },
+  // Timeline strips (main's 2b1fa379a): read, then gestures on explicit layer ids.
+  { runId: 'run-1', tool: 'get_timeline', arguments: {} },
+  { runId: 'run-1', tool: 'get_timeline', arguments: { offset: 1, limit: 2 } },
+  { runId: 'run-1', tool: 'edit_layer_strips', arguments: { operation: 'move', layerIds: ['Lbadge'], delta: 0.5, label: 'Nudge badge' } },
+  { runId: 'run-1', tool: 'edit_layer_strips', arguments: { operation: 'duplicate', layerIds: ['Lbadge'], at: 3 } },
+  { runId: 'run-1', tool: 'edit_layer_strips', arguments: { operation: 'state', layerIds: ['Lrig'], patch: { name: 'Rig 2', locked: true } } },
+  { runId: 'run-1', tool: 'edit_layer_strips', arguments: { operation: 'move', layerIds: ['Lmissing'], delta: 1 }, fails: true },
   // Clip edits on media the project references (no bytes needed).
   { runId: 'run-1', tool: 'edit_video', arguments: { label: 'Cut', operation: 'split', layerId: 'Lvoice', at: 2 } },
   { runId: 'run-1', tool: 'edit_video', arguments: { label: 'Trim', operation: 'trim', layerId: 'Lvoice', start: 0.5, end: 1.75 } },

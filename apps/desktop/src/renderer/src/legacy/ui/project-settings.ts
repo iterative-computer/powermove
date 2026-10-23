@@ -10,7 +10,8 @@ import {
 } from '../../core/export-defaults';
 import { writableFormat } from '../../../../shared/delivery';
 import { createSettingsSection } from './settings-section';
-import { PRECISION_OPTIONS, type ProjectColorSettings } from '../../../../shared/project-color';
+import { COLOR_DEPTH_OPTIONS, normalizeColorDepth, type ColorDepth } from '../../core/color-depth';
+import type { ProjectColorSettings } from '../../../../shared/project-color';
 import { bridge as hostBridge } from '../../kernel/bridge';
 
 /** Whether this launch runs the native engine, which writes every delivery
@@ -25,6 +26,7 @@ export function deliveryEngineOn(): boolean {
 
 /** Composition fields the Project tab and the New project dialog both edit. */
 export interface CompositionValues {
+  colorDepth?: ColorDepth;
   name: string;
   w: number;
   h: number;
@@ -34,6 +36,7 @@ export interface CompositionValues {
 
 /** Field names accepted by the `set_composition` edit command. */
 export interface CompositionPatch {
+  colorDepth?: ColorDepth;
   name?: string;
   width?: number;
   height?: number;
@@ -42,6 +45,7 @@ export interface CompositionPatch {
 }
 
 export interface ProjectSettingsBridge {
+  supportedColorDepths?(): readonly ColorDepth[];
   /** Current composition, re-read on every refresh. */
   composition(): CompositionValues;
   applyComposition(patch: CompositionPatch): void;
@@ -61,9 +65,8 @@ export interface ProjectSettingsBridge {
   mediaImport?(): MediaImportMode;
   applyMediaImport?(mode: MediaImportMode): void;
   /**
-   * Settings › Project › Color (section 9): blending in linear light and
-   * intermediate precision. Present only with the new engine, which renders
-   * them. Each change is one Undo step.
+   * Settings › Project › Color (section 9): blending in linear light.
+   * Present only with the new engine. Each change is one Undo step.
    */
   projectColor?(): ProjectColorSettings;
   applyProjectColor?(patch: Partial<ProjectColorSettings>): void;
@@ -285,6 +288,9 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   const frameRate = numberInput('Frame rate', MIN_FRAME_RATE, MAX_FRAME_RATE, 0.001);
   const duration = numberInput('Duration in seconds', MIN_DURATION, MAX_DURATION, 0.5);
 
+  const colorDepth = select('Color depth');
+  fillOptions(colorDepth, COLOR_DEPTH_OPTIONS);
+
   const sizeRow = row('Size', 'Width and height of every frame, in pixels.', size);
   const durationRow = row('Duration', 'Total length of the composition, in seconds.', duration);
   composition.body.append(
@@ -292,7 +298,8 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
     row('Resolution', 'Pick a common size, or set your own pixel dimensions.', preset).element,
     sizeRow.element,
     row('Frame rate', 'Frames rendered per second of the composition, from 1 to 240, including 23.976, 29.97, and 59.94.', frameRate).element,
-    durationRow.element
+    durationRow.element,
+    row('Color depth', 'Precision per color channel. Applies to every composition in this project.', colorDepth).element
   );
 
   let backgroundControl: HTMLElement | null = null;
@@ -318,29 +325,20 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   }
 
   let linearLight: Switch | null = null;
-  let precision: HTMLSelectElement | null = null;
   const color = bridge.projectColor && bridge.applyProjectColor ? createSettingsSection('Color') : null;
   if (color) {
     linearLight = switchControl('Blend in linear light', (next) => {
       bridge.applyProjectColor?.({ linearBlending: next });
       syncColor();
     });
-    precision = select('Precision');
-    fillOptions(precision, PRECISION_OPTIONS);
     color.body.append(
-      row('Blend in linear light', 'Mix layers, opacity, and soft edges as light adds up. Off keeps the classic look.', linearLight.element).element,
-      row('Precision', 'Bit depth of the images the project is composited in.', precision).element
+      row('Blend in linear light', 'Mix layers, opacity, and soft edges as light adds up. Off keeps the classic look.', linearLight.element).element
     );
-    precision.addEventListener('change', () => {
-      bridge.applyProjectColor?.({ precision: precision!.value === 'float32' ? 'float32' : 'float16' });
-      syncColor();
-    });
   }
   const syncColor = (): void => {
     if (!bridge.projectColor) return;
     const current = bridge.projectColor();
     if (linearLight) linearLight.value = current.linearBlending;
-    if (precision) precision.value = current.precision;
   };
 
   let mediaImport: HTMLSelectElement | null = null;
@@ -433,6 +431,9 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
     if (!editing(height)) height.value = String(current.h);
     if (!editing(frameRate)) frameRate.value = String(current.fps);
     if (!editing(duration)) duration.value = String(current.dur);
+    colorDepth.value = String(normalizeColorDepth(current.colorDepth));
+    const supported = bridge.supportedColorDepths?.();
+    for (const item of colorDepth.options) item.disabled = !!supported && !supported.includes(Number(item.value) as ColorDepth);
     if (backgroundSwatch && bridge.background && !editing(backgroundSwatch)) {
       backgroundSwatch.value = bridge.background().toLowerCase();
     }
@@ -514,6 +515,11 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   duration.addEventListener('change', () => {
     const next = clampDuration(duration.value, current.dur);
     if (next !== current.dur) bridge.applyComposition({ duration: next });
+    refresh();
+  });
+  colorDepth.addEventListener('change', () => {
+    const next = normalizeColorDepth(Number(colorDepth.value));
+    if (next !== normalizeColorDepth(current.colorDepth)) bridge.applyComposition({ colorDepth: next });
     refresh();
   });
 
@@ -608,6 +614,13 @@ export function createNewProjectForm(
   let backgroundValue = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(seed.bg) ? seed.bg.toUpperCase() : NEW_PROJECT_DEFAULTS.bg;
   const element = document.createElement('div');
   element.className = 'new-project-form';
+  // Initial focus is deferred until the modal mounts. Rapid entry may already
+  // have moved to another field or positioned a caret before that callback runs.
+  let interacted = false;
+  const markInteraction = (): void => { interacted = true; };
+  for (const event of ['pointerdown', 'keydown', 'input']) {
+    element.addEventListener(event, markInteraction, { capture: true });
+  }
 
   const field = (label: string, control: HTMLElement | HTMLElement[]): HTMLElement => {
     const wrap = document.createElement('label');
@@ -699,6 +712,11 @@ export function createNewProjectForm(
       dur: clampDuration(duration.value, seed.dur),
       bg: backgroundValue
     }),
-    focus: () => { name.focus(); name.select(); }
+    focus: () => {
+      if (!element.isConnected || interacted
+        || (element.contains(document.activeElement) && document.activeElement !== name)) return;
+      name.focus();
+      name.select();
+    }
   };
 }

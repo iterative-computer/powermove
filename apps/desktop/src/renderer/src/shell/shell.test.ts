@@ -164,6 +164,75 @@ describe('Svelte shell', () => {
     expect(target.querySelector('.tb-export')).toBeNull();
   });
 
+  it('selects a project that is still opening and marks its tab busy until it lands', () => {
+    const { PM, bus } = fakePM();
+    PM.Tabs = { list: vi.fn(() => ['p1', 'p2']), activate: vi.fn() };
+    PM.projectFileState = vi.fn(() => ({ path: '/tmp/x.pmv', dirty: true }));
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+
+    PM.projectFileState.mockClear();
+    flushSync(() => {
+      PM.projectLoading = { id: 'p2', name: 'Second', generation: 1 };
+      bus.emit('project:loading');
+    });
+    const opening = target.querySelector<HTMLElement>('[data-tab-id="p2"]')!;
+    const outgoing = target.querySelector<HTMLElement>('[data-tab-id="p1"]')!;
+    expect(opening.getAttribute('aria-selected')).toBe('true');
+    expect(opening.getAttribute('aria-busy')).toBe('true');
+    expect(opening.classList.contains('pending')).toBe(true);
+    expect(opening.getAttribute('aria-label')).toBe('Second, opening');
+    // The opening tab never reads the saved state the load is reading.
+    expect(PM.projectFileState).not.toHaveBeenCalledWith('p2', expect.anything());
+    expect(outgoing.getAttribute('aria-selected')).toBe('false');
+    expect(outgoing.classList.contains('dirty')).toBe(true);
+    expect(target.querySelector('.project-doc.pending:not([data-tab-id])')).toBeNull();
+
+    flushSync(() => {
+      PM.proj = { id: 'p2', name: 'Second' };
+      PM.projectLoading = null;
+      bus.emit('project:loading');
+    });
+    expect(opening.hasAttribute('aria-busy')).toBe(false);
+    expect(opening.classList.contains('pending')).toBe(false);
+    expect(opening.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('shows one inert placeholder tab for a project opening on a cold boot', () => {
+    const { PM, bus } = fakePM();
+    PM.Tabs = { list: vi.fn(() => []), activate: vi.fn() };
+    PM.proj = undefined;
+    PM.projectLoading = { id: 'p9', name: 'Long Film', generation: 1 };
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+
+    const chips = target.querySelectorAll<HTMLElement>('.project-doc.pending');
+    expect(chips).toHaveLength(1);
+    const chip = chips[0]!;
+    expect(chip.textContent).toBe('Long Film');
+    expect(chip.dataset.tabId).toBeUndefined();
+    expect(chip.getAttribute('aria-disabled')).toBe('true');
+    expect(chip.getAttribute('aria-busy')).toBe('true');
+    expect(chip.getAttribute('aria-selected')).toBe('true');
+    expect(chip.tabIndex).toBe(-1);
+    expect(chip.querySelector('.project-doc-close')).toBeNull();
+    // Keyboard focus stays on a real tab.
+    expect(target.querySelector<HTMLElement>('.project-home')!.tabIndex).toBe(0);
+
+    flushSync(() => {
+      PM.Tabs.list = vi.fn(() => ['p9']);
+      PM.proj = { id: 'p9', name: 'Long Film' };
+      PM.projectLoading = null;
+      bus.emit('project:loading');
+    });
+    expect(target.querySelector('.project-doc.pending')).toBeNull();
+    expect(target.querySelector('[data-tab-id="p9"]')?.getAttribute('aria-selected')).toBe('true');
+  });
+
   it('updates the window document from the same mutable file state after the file bridge appears', () => {
     const { PM } = fakePM();
     const target = document.getElementById('titlebar')!;

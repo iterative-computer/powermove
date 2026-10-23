@@ -55,6 +55,8 @@ pub const MAX_QUEUED_PER_SESSION: usize = 16;
 /// Most pixels one snapshot renders (an 8K UHD frame is 33.2 million). The
 /// render target (binary16) and its readback take 12 bytes a pixel.
 pub const MAX_PIXELS: u64 = 40_000_000;
+/// Today's layer bitmap cap, independent of a full-frame capture's 40 MP.
+pub const MAX_LAYER_PIXELS: u64 = 8192 * 8192;
 /// Most bytes of results queued or published in shared memory and not yet
 /// taken by main.
 pub const MAX_PENDING_BYTES: u64 = 1 << 30;
@@ -106,9 +108,9 @@ pub struct SnapshotJob {
     /// Host µs it reached the render thread, and its deadline.
     pub received: i64,
     pub deadline: i64,
-    /// Shader fallback keys whose pixels the renderer posted before asking
-    /// (`SnapshotRequest::uploaded`) and that had not landed when the job
-    /// last rendered: it waits until none of them is outstanding.
+    /// Dependencies the caller explicitly posted before asking
+    /// (`SnapshotRequest::uploaded` and `compat_uploaded`) and that had not
+    /// landed when the job last rendered: wait until none is outstanding.
     pub waiting_for: Vec<String>,
     /// Its Blender stage, once it needed one.
     pub blender: Option<BlenderPrep>,
@@ -219,15 +221,15 @@ pub enum Ready {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refused {
     Full,
-    TooLarge(u64),
+    TooLarge { pixels: u64, limit: u64 },
 }
 
 impl Refused {
     pub fn message(&self) -> String {
         match self {
             Refused::Full => "Too many snapshots are waiting; try again when they finish.".into(),
-            Refused::TooLarge(pixels) => {
-                format!("A {pixels}-pixel snapshot is over the engine's {MAX_PIXELS}-pixel limit.")
+            Refused::TooLarge { pixels, limit } => {
+                format!("A {pixels}-pixel snapshot is over the engine's {limit}-pixel limit.")
             }
         }
     }
@@ -239,8 +241,11 @@ pub struct SnapshotQueue {
     jobs: VecDeque<SnapshotJob>,
     /// Exponential average of a snapshot's render time (µs).
     cost_us: Option<f64>,
-    /// Bytes of results published to shared memory and not reaped yet.
-    published: VecDeque<(i64, u64)>,
+    /// Names and bytes of results main has not taken (or the reaper unlinked).
+    published: VecDeque<(String, u64)>,
+    /// Result bytes of the layer rasters handed to the raster worker and not
+    /// finished (`super::rasters`): they left the queue but not memory.
+    in_worker: u64,
 }
 
 impl SnapshotQueue {
@@ -268,13 +273,26 @@ impl SnapshotQueue {
     fn pending_bytes(&self) -> u64 {
         self.jobs.iter().map(SnapshotJob::bytes).sum::<u64>()
             + self.published.iter().map(|(_, b)| b).sum::<u64>()
+            + self.in_worker
     }
 
-    /// Records a result published to shared memory at `now`, and forgets
-    /// those older than `orphan_us` (taken or reaped by then).
-    pub fn published(&mut self, now: i64, bytes: u64, orphan_us: i64) {
-        self.published.retain(|(at, _)| now - at < orphan_us);
-        self.published.push_back((now, bytes));
+    /// The raster worker's jobs' result bytes, counted against
+    /// [`MAX_PENDING_BYTES`] while they are drawn.
+    pub fn set_in_worker(&mut self, bytes: u64) {
+        self.in_worker = bytes;
+    }
+
+    /// Records a result until main takes it or orphan cleanup unlinks it.
+    pub fn published(&mut self, name: String, bytes: u64) {
+        self.published.push_back((name, bytes));
+    }
+
+    /// Main unlinks a result before reading it. Count only actual outstanding
+    /// results, rather than keeping already-consumed pixels charged for 60 s.
+    /// An OS error retains the charge conservatively.
+    fn reclaim_published(&mut self) {
+        self.published
+            .retain(|(name, _)| pm_bridge::shm::exists(name).unwrap_or(true));
     }
 
     /// Adds a job, or refuses it (too large, or the queue or its memory is
@@ -282,9 +300,18 @@ impl SnapshotQueue {
     pub fn push(&mut self, job: SnapshotJob) -> Result<(), Box<(SnapshotJob, Refused)>> {
         let size = job.request.output_size;
         let pixels = u64::from(size.width) * u64::from(size.height);
-        if pixels > MAX_PIXELS {
-            return Err(Box::new((job, Refused::TooLarge(pixels))));
+        let limit = if matches!(
+            job.request.target,
+            pm_protocol::snapshot::SnapshotTarget::Layer { .. }
+        ) {
+            MAX_LAYER_PIXELS
+        } else {
+            MAX_PIXELS
+        };
+        if pixels > limit {
+            return Err(Box::new((job, Refused::TooLarge { pixels, limit })));
         }
+        self.reclaim_published();
         let per_session = self.jobs.iter().filter(|j| j.key == job.key).count();
         if self.jobs.len() >= MAX_QUEUED
             || per_session >= MAX_QUEUED_PER_SESSION
@@ -400,6 +427,49 @@ impl SnapshotQueue {
         None
     }
 
+    /// The next layer raster for the worker ([`super::rasters`]): `sync`
+    /// first, then `async`, in arrival order. They run off the render
+    /// thread, so playback does not hold them back; `idle` ones still wait
+    /// for the views like every idle job (thumbnails yield to playback and
+    /// gestures on the GPU too).
+    pub fn next_layer(
+        &mut self,
+        revision: impl Fn(Key) -> Option<u64>,
+        outstanding: impl Fn(&str) -> bool,
+        pressure: Pressure,
+        now: i64,
+    ) -> Option<SnapshotJob> {
+        let unpressed = Pressure {
+            playing: false,
+            due_in_us: None,
+            last_interactive: None,
+        };
+        for class in [
+            SnapshotClass::Sync,
+            SnapshotClass::Async,
+            SnapshotClass::Idle,
+        ] {
+            let found = self.jobs.iter().position(|j| {
+                let p = if class == SnapshotClass::Idle {
+                    pressure
+                } else {
+                    unpressed
+                };
+                j.request.class == class
+                    && matches!(
+                        j.request.target,
+                        pm_protocol::snapshot::SnapshotTarget::Layer { .. }
+                    )
+                    && !j.waiting_for.iter().any(|k| outstanding(k))
+                    && self.ready(j, revision(j.key), p, now) == Ready::Run
+            });
+            if let Some(index) = found {
+                return self.jobs.remove(index);
+            }
+        }
+        None
+    }
+
     /// Puts a job back at the front of the queue (it needs another turn).
     pub fn requeue(&mut self, job: SnapshotJob) {
         self.jobs.push_front(job);
@@ -430,7 +500,7 @@ pub fn encode_rgba8(half: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
     out
 }
 
-/// The mapped half/float32 rows of one completed snapshot ticket. This is
+/// The mapped RGBA8/half/float32 rows of one completed snapshot ticket. This is
 /// the single final allocation, preserving alpha, row-order, and rounding.
 pub fn encode_mapped_rgba8(
     format: wgpu::TextureFormat,
@@ -442,6 +512,9 @@ pub fn encode_mapped_rgba8(
     rows: pm_render::SnapshotRows,
 ) -> Result<Vec<u8>, pm_gpu::readback::ReadbackError> {
     match format {
+        wgpu::TextureFormat::Rgba8Unorm => Ok(encode_rgba8_unorm_rows(
+            data, row, stride, height, pixels, rows,
+        )),
         wgpu::TextureFormat::Rgba16Float => {
             Ok(encode_rgba8_rows(data, row, stride, height, pixels, rows))
         }
@@ -450,6 +523,28 @@ pub fn encode_mapped_rgba8(
         )),
         other => Err(pm_gpu::readback::ReadbackError::Format(other)),
     }
+}
+
+fn encode_rgba8_unorm_rows(
+    raw: &[u8],
+    row: usize,
+    stride: usize,
+    height: usize,
+    pixels: SnapshotPixels,
+    rows: pm_render::SnapshotRows,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(row * height);
+    for y in 0..height {
+        let source_y = match rows {
+            pm_render::SnapshotRows::TopDown => y,
+            pm_render::SnapshotRows::Gl => height - 1 - y,
+        };
+        let source = &raw[source_y * stride..source_y * stride + row];
+        for px in source.chunks_exact(4) {
+            push_rgba8_unorm(&mut out, [px[0], px[1], px[2], px[3]], pixels);
+        }
+    }
+    out
 }
 
 fn encode_rgba8_f32_rows(
@@ -515,16 +610,25 @@ pub fn encode_rgba8_f32(rgba: &[f32], pixels: SnapshotPixels) -> Vec<u8> {
 
 /// [`encode_rgba8`] from premultiplied RGBA8 (a Canvas2D raster's pixels).
 pub fn encode_rgba8_unorm(rgba: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
+    if pixels == SnapshotPixels::Premultiplied {
+        return rgba.to_vec();
+    }
+    let mut out = Vec::with_capacity(rgba.len());
+    for px in rgba.chunks_exact(4) {
+        push_rgba8_unorm(&mut out, [px[0], px[1], px[2], px[3]], pixels);
+    }
+    out
+}
+
+fn push_rgba8_unorm(out: &mut Vec<u8>, [r, g, b, a]: [u8; 4], pixels: SnapshotPixels) {
     match pixels {
-        // Already in the encoding: no round trip through floats.
-        SnapshotPixels::Premultiplied => rgba.to_vec(),
-        _ => {
-            let mut out = Vec::with_capacity(rgba.len());
-            for px in rgba.chunks_exact(4) {
-                let f = |v: u8| f32::from(v) / 255.0;
-                push_rgba8(&mut out, [f(px[0]), f(px[1]), f(px[2]), f(px[3])], pixels);
-            }
-            out
+        SnapshotPixels::Opaque => out.extend_from_slice(&[r, g, b, 255]),
+        SnapshotPixels::Premultiplied => out.extend_from_slice(&[r, g, b, a]),
+        SnapshotPixels::Straight if a == 0 => out.extend_from_slice(&[0, 0, 0, 0]),
+        SnapshotPixels::Straight => {
+            let un =
+                |v: u8| ((u32::from(v) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8;
+            out.extend_from_slice(&[un(r), un(g), un(b), a]);
         }
     }
 }
@@ -631,6 +735,7 @@ mod tests {
                 blender_wait_ms: 0,
                 captions_hidden: false,
                 uploaded: Vec::new(),
+                compat_uploaded: Vec::new(),
             },
             revision.map(|r| Revision::new(r).unwrap()),
             now,
@@ -701,6 +806,53 @@ mod tests {
         );
     }
 
+    fn layer_job(class: SnapshotClass, k: Key, revision: Option<u64>) -> SnapshotJob {
+        let mut j = job(class, k, revision, 0);
+        j.request.target = SnapshotTarget::Layer {
+            layer: "l".into(),
+            scale: 1.0,
+            crop: None,
+            content: None,
+        };
+        j
+    }
+
+    /// Layer rasters run on the worker, off the render thread: sync and
+    /// async ones do not wait for a playing view's next frame; idle ones
+    /// still wait; frame snapshots are never handed to the worker.
+    #[test]
+    fn layer_rasters_leave_for_the_worker_during_playback() {
+        let mut q = SnapshotQueue::default();
+        let k = key(3, 1);
+        let due_now = Pressure {
+            playing: true,
+            due_in_us: Some(0),
+            last_interactive: None,
+        };
+        q.push(job(SnapshotClass::Async, k, None, 0)).unwrap();
+        q.push(layer_job(SnapshotClass::Idle, k, None)).unwrap();
+        q.push(layer_job(SnapshotClass::Async, k, Some(4))).unwrap();
+        q.push(layer_job(SnapshotClass::Sync, k, None)).unwrap();
+        let first = q.next_layer(|_| Some(3), |_| false, due_now, 0).unwrap();
+        assert_eq!(first.request.class, SnapshotClass::Sync);
+        // The async raster waits for its revision, never for the frame due.
+        assert!(q.next_layer(|_| Some(3), |_| false, due_now, 0).is_none());
+        let second = q.next_layer(|_| Some(4), |_| false, due_now, 0).unwrap();
+        assert_eq!(second.request.class, SnapshotClass::Async);
+        // The idle raster waits for playback to stop (and the async frame
+        // snapshot is not the worker's).
+        assert!(q.next_layer(|_| Some(4), |_| false, due_now, 0).is_none());
+        assert!(
+            q.next_layer(|_| Some(4), |_| false, idle(), 0).is_none(),
+            "an urgent frame snapshot waits"
+        );
+        let frame = q.next(|_| Some(4), |_| false, idle(), 0).unwrap();
+        assert!(matches!(frame.request.target, SnapshotTarget::Frame { .. }));
+        let last = q.next_layer(|_| Some(4), |_| false, idle(), 0).unwrap();
+        assert_eq!(last.request.class, SnapshotClass::Idle);
+        assert!(q.is_empty());
+    }
+
     #[test]
     fn idle_waits_while_urgent_jobs_wait_for_their_revision() {
         let mut q = SnapshotQueue::default();
@@ -757,18 +909,67 @@ mod tests {
             .unwrap();
         let mut big = job(SnapshotClass::Sync, key(4, 1), None, 0);
         big.request.output_size = Size::new(16_000, 16_000);
-        assert!(matches!(q.push(big).unwrap_err().1, Refused::TooLarge(_)));
-        // Memory: published results count until they are reaped.
+        assert!(matches!(
+            q.push(big).unwrap_err().1,
+            Refused::TooLarge { .. }
+        ));
+        // Memory: outstanding results retain the same hard cap. Main taking
+        // a result releases its charge immediately, without waiting 60 s.
         let mut m = SnapshotQueue::default();
-        m.published(0, MAX_PENDING_BYTES, 60_000_000);
+        let name = pm_bridge::shm::publish(&[7; 16]).unwrap();
+        let mut segments = pm_bridge::shm::Segments::default();
+        segments.add(name.clone());
+        m.published(name.clone(), MAX_PENDING_BYTES);
         assert_eq!(
             m.push(job(SnapshotClass::Sync, key(3, 1), None, 0))
                 .unwrap_err()
                 .1,
             Refused::Full
         );
-        m.published(60_000_001, 16, 60_000_000);
+        assert_eq!(pm_bridge::shm::take(&name, 16).unwrap(), vec![7; 16]);
         assert!(m.push(job(SnapshotClass::Sync, key(3, 1), None, 0)).is_ok());
+        // Layer rasters the worker is drawing left the queue, not memory.
+        let mut w = SnapshotQueue::default();
+        w.set_in_worker(MAX_PENDING_BYTES);
+        assert_eq!(
+            w.push(job(SnapshotClass::Sync, key(3, 1), None, 0))
+                .unwrap_err()
+                .1,
+            Refused::Full
+        );
+        w.set_in_worker(0);
+        assert!(w.push(job(SnapshotClass::Sync, key(3, 1), None, 0)).is_ok());
+    }
+
+    #[test]
+    fn layer_bitmaps_retain_todays_8192_square_cap_without_raising_frame_limits() {
+        let mut q = SnapshotQueue::default();
+        let mut frame = job(SnapshotClass::Sync, key(9, 1), None, 0);
+        frame.request.output_size = Size::new(8192, 8192);
+        assert!(matches!(
+            q.push(frame).unwrap_err().1,
+            Refused::TooLarge {
+                limit: MAX_PIXELS,
+                ..
+            }
+        ));
+        let mut layer = job(SnapshotClass::Sync, key(9, 1), None, 0);
+        layer.request.output_size = Size::new(8192, 8192);
+        layer.request.target = pm_protocol::snapshot::SnapshotTarget::Layer {
+            layer: "label".into(),
+            scale: 32.0,
+            crop: None,
+            content: None,
+        };
+        q.push(layer.clone()).unwrap();
+        layer.request.output_size = Size::new(8193, 8192);
+        assert!(matches!(
+            q.push(layer).unwrap_err().1,
+            Refused::TooLarge {
+                limit: MAX_LAYER_PIXELS,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -974,6 +1175,83 @@ mod tests {
                 encode_rgba8_f32_rows(&padded, 16, 32, 2, pixels, pm_render::SnapshotRows::Gl),
                 encode_rgba8_f32(&[bottom, top].concat(), pixels)
             );
+        }
+    }
+
+    #[test]
+    fn mapped_rgba8_rows_keep_exact_codes_flip_and_straight_alpha() {
+        let top = [64, 32, 16, 128, 9, 7, 5, 0];
+        let bottom = [12, 24, 48, 255, 128, 64, 32, 128];
+        let mut mapped = top.to_vec();
+        mapped.extend([0xa5; 8]);
+        mapped.extend(bottom);
+        for pixels in [
+            SnapshotPixels::Opaque,
+            SnapshotPixels::Premultiplied,
+            SnapshotPixels::Straight,
+        ] {
+            for rows in [
+                pm_render::SnapshotRows::TopDown,
+                pm_render::SnapshotRows::Gl,
+            ] {
+                let expected = if rows == pm_render::SnapshotRows::TopDown {
+                    [top.as_slice(), bottom.as_slice()].concat()
+                } else {
+                    [bottom.as_slice(), top.as_slice()].concat()
+                };
+                assert_eq!(
+                    encode_mapped_rgba8(
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        &mapped,
+                        8,
+                        16,
+                        2,
+                        pixels,
+                        rows,
+                    )
+                    .unwrap(),
+                    encode_rgba8_unorm(&expected, pixels),
+                    "{pixels:?} {rows:?}"
+                );
+            }
+        }
+        assert_eq!(
+            encode_mapped_rgba8(
+                wgpu::TextureFormat::Rgba8Unorm,
+                &mapped,
+                8,
+                16,
+                2,
+                SnapshotPixels::Straight,
+                pm_render::SnapshotRows::TopDown,
+            )
+            .unwrap(),
+            vec![
+                128, 64, 32, 128, 0, 0, 0, 0, 12, 24, 48, 255, 255, 128, 64, 128
+            ]
+        );
+    }
+
+    #[test]
+    fn byte_snapshot_alpha_matches_existing_float_conversion_for_all_codes() {
+        for alpha in u8::MIN..=u8::MAX {
+            for value in u8::MIN..=u8::MAX {
+                let byte = [value, value, value, alpha];
+                let float = byte.map(|code| f32::from(code) / 255.0);
+                for mode in [
+                    SnapshotPixels::Opaque,
+                    SnapshotPixels::Premultiplied,
+                    SnapshotPixels::Straight,
+                ] {
+                    let mut expected = Vec::new();
+                    push_rgba8(&mut expected, float, mode);
+                    assert_eq!(
+                        encode_rgba8_unorm(&byte, mode),
+                        expected,
+                        "{mode:?} {byte:?}"
+                    );
+                }
+            }
         }
     }
 }

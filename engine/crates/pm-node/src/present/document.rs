@@ -75,7 +75,9 @@ struct Cached {
 /// A view's document, media, and routing.
 #[derive(Debug, Default)]
 pub struct ViewDocument {
-    doc: Document,
+    /// Shared with the layer raster worker only to seed its mirror
+    /// (`super::rasters`): updates apply in place once the worker let go.
+    doc: Arc<Document>,
     has_document: bool,
     /// A batch did not apply; frames wait for the renderer's resync.
     broken: Option<String>,
@@ -92,6 +94,9 @@ pub struct ViewDocument {
     /// The renderer has fonts (`crate::fonts::render`): text and captions
     /// layers are drawn, not routed.
     fonts: bool,
+    /// Updates that had to copy the document because the raster worker
+    /// still held it ([`Self::shared_document`]).
+    copies: u64,
 }
 
 impl ViewDocument {
@@ -167,6 +172,22 @@ impl ViewDocument {
         &self.doc
     }
 
+    /// The document itself, for a reader on another thread that takes a
+    /// copy of its own (the layer raster worker's mirror): no copy here.
+    pub fn shared_document(&self) -> Arc<Document> {
+        self.doc.clone()
+    }
+
+    /// Updates so far that copied the document (a reader held it).
+    pub fn copies(&self) -> u64 {
+        self.copies
+    }
+
+    /// A batch did not apply: the mirror waits for a resync.
+    pub fn is_broken(&self) -> bool {
+        self.broken.is_some()
+    }
+
     pub fn has_document(&self) -> bool {
         self.has_document
     }
@@ -187,7 +208,21 @@ impl ViewDocument {
         if self.broken.is_some() && !replace {
             return Err("waiting for a resync".into());
         }
-        match update.apply_to(&mut self.doc) {
+        let applied = if replace {
+            // A resync replaces the mirror: never copy the old one first.
+            let mut fresh = Document::default();
+            let applied = update.apply_to(&mut fresh);
+            self.doc = Arc::new(fresh);
+            applied
+        } else {
+            // In place unless a reader still holds this revision (then a
+            // copy, as `Arc::make_mut` does).
+            if Arc::strong_count(&self.doc) > 1 {
+                self.copies += 1;
+            }
+            update.apply_to(Arc::make_mut(&mut self.doc))
+        };
+        match applied {
             Ok(()) => {
                 self.has_document = true;
                 self.broken = None;
@@ -362,6 +397,43 @@ mod tests {
     }
 
     #[test]
+    fn updates_apply_in_place_unless_a_raster_seed_still_holds_the_document() {
+        let mut view = ViewDocument::default();
+        view.update(&replace(r#"{"title":"a"}"#, 1)).unwrap();
+        let set = |title: &str, revision: u64| DocumentUpdate::Patches {
+            patches: Arc::from(vec![pm_model::patch::Patch::set(
+                vec![pm_model::patch::PathPart::Key("title".into())],
+                pm_model::json::parse(&format!("{title:?}")).unwrap(),
+            )]),
+            revision: Revision::new(revision).unwrap(),
+        };
+        let title = |d: &Document| d.root().and_then(|r| r.get("title")).map(|n| n.to_value());
+        // Nobody else holds it: patched in place.
+        view.update(&set("b", 2)).unwrap();
+        assert_eq!(view.copies(), 0);
+        // A seed the worker has not copied yet: the update copies, and
+        // the seed keeps the revision it was taken at.
+        let seed = view.shared_document();
+        view.update(&set("c", 3)).unwrap();
+        assert_eq!(view.copies(), 1);
+        assert_eq!(seed.revision(), 2);
+        assert_eq!(title(&seed), Some(pm_model::json::parse(r#""b""#).unwrap()));
+        assert_eq!(view.revision(), 3);
+        assert_eq!(
+            title(view.document()),
+            Some(pm_model::json::parse(r#""c""#).unwrap())
+        );
+        // Once it let go, in place again; a resync never copies.
+        drop(seed);
+        view.update(&set("d", 4)).unwrap();
+        let held = view.shared_document();
+        view.update(&replace(r#"{"title":"e"}"#, 5)).unwrap();
+        assert_eq!(view.copies(), 1);
+        assert_eq!(held.revision(), 4);
+        assert_eq!(view.revision(), 5);
+    }
+
+    #[test]
     fn routing_follows_features_media_and_composition() {
         let mut view = ViewDocument::default();
         assert_eq!(
@@ -405,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn blender_compositions_are_drawn_by_the_engine_in_the_viewer() {
+    fn retired_blender_settings_change_nothing() {
         let object = r#"{"id":"o","type":"extension","on":true,"from":0,"dur":2,"blend":"normal","fx":[],"masks":[],"threeD":true,"p":{},"d":{"definition":"powermove.3d.object","version":1,"w":64,"h":36,"params":{},"data":{"object":{"source":{"primitive":"box","parameters":{}},"material":{"p":{},"maps":{},"doubleSided":true},"useSourceMaterials":false,"slots":[],"castShadow":true,"receiveShadow":true}}}}"#;
         let doc = |render3d: &str| {
             format!(
@@ -417,13 +489,14 @@ mod tests {
         let mut blender = ViewDocument::default();
         let with = doc(r#""render3d":{"enabled":true,"engine":"eevee","samples":8},"#);
         blender.update(&replace(&with, 1)).unwrap();
-        // The static check lists Blender for exports ...
+        // Blender is retired (main 2b1fa379a): `render3d` is inert, so the
+        // static check never lists it, and the viewer routes the
+        // composition exactly as the same scene without.
         assert!(
-            pm_render::unsupported(blender.document(), "c")
+            !pm_render::unsupported(blender.document(), "c")
                 .iter()
                 .any(|u| u.feature == pm_render::Feature::Blender)
         );
-        // ... and the viewer routes it exactly as the same scene without.
         assert_eq!(blender.route("c"), native.route("c"));
         if let Route::Legacy(reasons) = blender.route("c") {
             assert!(

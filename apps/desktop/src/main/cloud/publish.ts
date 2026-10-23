@@ -64,6 +64,7 @@ import { StoreLocalError, type StoreInstallerRegistry } from './install';
 import type { ProvenanceOrigin, ProvenancePublished, ProvenanceRecord, ProvenanceStore } from './provenance';
 import { categoryFor } from './store-ipc';
 import { permissionFindings } from './permission-scan';
+import { analyzeExtensionSource } from '../../shared/extension-analysis';
 
 /* ── the registry calls publishing needs ─────────────────── */
 
@@ -315,10 +316,11 @@ export function createPublisher(options: PublisherOptions): Publisher {
   const prepared = new Map<string, Prepared>();
   /* One publish at a time: they share the provenance file and the
      confirmation, and a double click must not upload twice. */
-  let queue: Promise<unknown> = Promise.resolve();
+  let queue: Promise<void> = Promise.resolve();
   const serial = <T>(task: () => Promise<T>): Promise<T> => {
     const run = queue.then(task);
-    queue = run.catch(() => undefined);
+    // A completed plan's findings belong to its caller, not the idle queue.
+    queue = run.then(() => undefined, () => undefined);
     return run;
   };
 
@@ -503,6 +505,9 @@ export function createPublisher(options: PublisherOptions): Publisher {
         try { return [{ path: input.path, text: utf8.decode(input.bytes) }]; } catch { return []; }
       }), local.manifest),
       waivableFindings: frozen.findings.waivable,
+      deprecationFindings: analyzeExtensionSource(frozen.inputs.flatMap((input) => {
+        try { return [{ path: input.path, text: utf8.decode(input.bytes) }]; } catch { return []; }
+      })),
       manifest: { id: local.manifest.id, name: local.manifest.name, description: local.manifest.description ?? null },
       listing
     };

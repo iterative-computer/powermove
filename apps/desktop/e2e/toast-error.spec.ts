@@ -40,7 +40,7 @@ test('notification close buttons stay at the trailing edge and dismiss by mouse 
       expect(layout.overflow).toBeLessThanOrEqual(1);
     };
     await checkPlacement();
-    const disclosure = toast.getByRole('button', { name: 'Technical details' });
+    const disclosure = toast.getByRole('button', { name: 'Details', exact: true });
     if (await disclosure.count()) {
       await disclosure.click();
       await expect(toast.locator('pre')).toBeVisible();
@@ -55,6 +55,30 @@ test('notification close buttons stay at the trailing edge and dismiss by mouse 
     await expect(toast).toHaveCount(0);
     expect(await page.evaluate(() => (window as any).__toastDismissals)).toBe(1);
   }
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('notification actions remain usable when the separate close button is disabled', async ({ session }) => {
+  await session.openEditor();
+  const { page } = session;
+  const originalName = await page.evaluate(() => {
+    const PM = (window as any).PM, originalName = PM.proj.name;
+    PM.hist.do('Rename project', () => { PM.proj.name = 'Toast action check'; });
+    (window as any).__toastActionClosed = 0;
+    PM.toast('Project renamed', 8000, {
+      sticky: true, dismissible: false,
+      action: { label: 'Undo rename', run: () => PM.hist.undo() },
+      onClose: () => { (window as any).__toastActionClosed++; },
+    });
+    return originalName;
+  });
+  const toast = page.locator('.toast').filter({ hasText: 'Project renamed' });
+  await expect(toast.getByRole('button', { name: 'Undo rename', exact: true })).toBeVisible();
+  await expect(toast.getByRole('button', { name: 'Dismiss notification', exact: true })).toHaveCount(0);
+  await toast.getByRole('button', { name: 'Undo rename', exact: true }).click();
+  await expect(toast).toHaveCount(0);
+  expect(await page.evaluate(() => ({ name: (window as any).PM.proj.name, closed: (window as any).__toastActionClosed })))
+    .toEqual({ name: originalName, closed: 1 });
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
@@ -88,7 +112,7 @@ test('the error toast matches the status toast it stacks with', async ({ session
     await stack.screenshot({ path: info.outputPath(`toast-error-${theme}.png`) });
   }
 
-  await error.getByRole('button', { name: 'Technical details' }).click();
+  await error.getByRole('button', { name: 'Details', exact: true }).click();
   await expect(error.locator('pre')).toContainText('ENOSPC');
   await stack.screenshot({ path: info.outputPath('toast-error-details.png') });
   await error.getByRole('button', { name: 'Dismiss notification' }).click();

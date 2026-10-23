@@ -58,6 +58,21 @@ describe('lossless history memory', () => {
       expect(() => unpackHistory(packed)).toThrow('Invalid history reference');
     });
 
+  it('shares canonical composition records and packs them without changing paths or the cursor', () => {
+    const value = fixture();
+    for (const entry of value.entries) for (const patch of [...entry.forward, ...entry.backward]) patch.path = ['comps', 'main-comp', 'layers'];
+    const expected = structuredClone(value);
+    const records = new HistoryRecords();
+    records.share(value);
+    expect(value.entries[0]!.forward[0]!.value[0]).toBe(value.entries[2]!.backward[0]!.value[0]);
+    const packed = packHistory(value);
+    expect(packed.format).toBe('powermove-history-dictionary');
+    expect(packed.records).toHaveLength(4);
+    const restored = unpackHistory(JSON.parse(JSON.stringify(packed)));
+    expect(restored).toEqual(expected);
+    expect(restored.entries[0].forward[0].value[0]).toBe(restored.entries[2].backward[0].value[0]);
+  });
+
   it('does not reinterpret unrelated store values or invalid legacy histories', () => {
     const unrelated = { entries: [{ payload: 'recovery metadata' }] };
     const records = new HistoryRecords();

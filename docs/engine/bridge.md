@@ -103,10 +103,17 @@ keeps it hidden until the engine presents a frame for the session, and:
 
 - **View override.** Sends `ViewerState` with size in device pixels, DPR,
   zoom, pan, preview resolution, media preference, canvas color space, EDR,
-  Play Every Frame, and the 3D viewport's shading and X-ray. `ViewSequencer`
-  numbers each distinct state; descriptors echo it. The editor camera is not
-  in the 3D viewport's API yet, so the override carries no camera (see
-  gaps).
+  Play Every Frame, and, in the 3D editor's Editor view, its camera.
+  `ViewSequencer` numbers each distinct state; descriptors echo it. The
+  camera comes from `engine.viewer`'s `editorCamera()`
+  (`core/scene3d/viewport.ts` `viewportEngineCamera`: world-to-camera,
+  three.js's zoom folded into the vertical field of view) and is sent again
+  at each `scene3d.onViewChange`, which fires for every pose the editor's
+  orbit, pan, dolly, and frame set. In the Camera view there is no
+  override. The 3D editor has no viewport shading or X-ray since main
+  removed the Blender viewport (2b1fa379a), so the override never sets them
+  and Blender is retired in the engine too (`pm-render` `blender` module
+  notes).
 - **Revision tagging and overlay geometry.** Every drawn frame's `revision`,
   `viewSeq`, and overlay geometry go to `onPresented` listeners;
   `overlayInCss` converts the geometry with the DPR of the state that frame
@@ -1747,8 +1754,6 @@ P5) now belong to the perf3 lane.
 - The pool retry after a failed hand-off is covered by unit tests of its
   policy (`PoolRetry`, `Generations`) only; making a real Mach send fail
   part-way through a pool in a test needs a fault hook in pm-bridge.
-- The editor camera of the 3D viewport is not exposed by its API, so the
-  view override sends shading and X-ray without a camera.
 - A signed end-to-end run (Team ID through Electron) needs the release
   signing identity; the Team ID check is covered by Rust tests against a
   real Developer ID process.

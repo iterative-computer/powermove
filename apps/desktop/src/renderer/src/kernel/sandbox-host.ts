@@ -36,7 +36,7 @@ const HOST_EVENTS = new Set(['project:changed', 'selection', 'time', 'transport'
 // still required for suffixes so `foo` can't claim `foo-bar.*`.
 export const ownId = (extension: string, id: string): boolean => id === extension || id.startsWith(`${extension}.`);
 /** Place a store extension's id in its own namespace (idempotent): a bare `hud`
- * becomes `contour-hud.hud`; anything already in the namespace is left alone. The
+ * becomes `private-extension-09.hud`; anything already in the namespace is left alone. The
  * system does this at the sandbox boundary so authors never prefix, yet the kernel
  * and projects only ever see globally-unique ids. */
 export const qualifyId = (extension: string, id: string): string => id && !ownId(extension, id) ? `${extension}.${id}` : id;

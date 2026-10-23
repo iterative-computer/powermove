@@ -207,3 +207,190 @@ fn a_call_without_a_host_connection_is_answered_at_once() {
         [(9, Err(ErrorCode::Internal))]
     );
 }
+
+/// The interactive engine's probe service (pm-node's probes-only
+/// `JobEngineService`): it answers `probeMedia` and nothing else. Every call
+/// it receives is recorded so a test sees what leaked into it.
+#[derive(Clone, Default)]
+struct Probes(Arc<Mutex<Vec<&'static str>>>);
+
+impl Probes {
+    fn calls(&self) -> Vec<&'static str> {
+        self.0.lock().unwrap().clone()
+    }
+    fn note(&self, call: &'static str) {
+        self.0.lock().unwrap().push(call);
+    }
+}
+
+impl pm_engine::jobs::JobService for Probes {
+    fn submit(
+        &mut self,
+        _: PortId,
+        _: pm_protocol::priority::SubmitJob,
+        _: Option<pm_engine::jobs::JobDocument>,
+    ) -> Result<pm_protocol::priority::JobAccepted, Box<EngineError>> {
+        self.note("submit");
+        panic!("the interactive engine submitted a job to its probe service");
+    }
+    fn cancel(
+        &mut self,
+        _: &pm_protocol::priority::CancelJobs,
+    ) -> pm_protocol::priority::JobsCancelled {
+        self.note("cancel");
+        pm_protocol::priority::JobsCancelled { jobs: Vec::new() }
+    }
+    fn agent_frames(
+        &mut self,
+        _: PortId,
+        _: RequestId,
+        _: pm_engine::jobs::JobDocument,
+        _: pm_protocol::priority::AgentFrameRequest,
+    ) -> Result<(), Box<EngineError>> {
+        self.note("agent_frames");
+        panic!("the interactive engine sent agent frames to its probe service");
+    }
+    fn probe_media(
+        &mut self,
+        _: PortId,
+        _: RequestId,
+        _: pm_protocol::media::ProbeMedia,
+    ) -> Result<(), Box<EngineError>> {
+        self.note("probe_media");
+        Ok(())
+    }
+    fn signal(&mut self, _: &pm_protocol::slicing::DeadlineSignal) {
+        self.note("signal");
+    }
+    fn policy(&mut self, _: &pm_protocol::slicing::SlicingPolicy) {
+        self.note("policy");
+    }
+    fn host_answer(&mut self, _: u64, _: Result<Response, EngineError>) {
+        self.note("host_answer");
+    }
+    fn host_event(&mut self, _: &Event) {
+        self.note("host_event");
+    }
+    fn drain(&mut self) -> pm_engine::jobs::Drained {
+        pm_engine::jobs::Drained::default()
+    }
+    fn session_closed(&mut self, _: SessionId) {
+        self.note("session_closed");
+    }
+    fn port_closed(&mut self, _: PortId) {
+        self.note("port_closed");
+    }
+}
+
+fn blender_surface(job: &str) -> BlenderSurface {
+    BlenderSurface {
+        job: JobId::new(job),
+        request_index: 0,
+        key: ContentHash([5; 32]),
+        size: Size::new(8, 8),
+        crop: PixelRect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        },
+        handle: CapabilityHandle::from_random_bytes([2; 16]),
+        bytes: ByteSize::new(100).unwrap(),
+        device: ResolvedDevice::Cpu,
+    }
+}
+
+/// Regression: the interactive engine also holds a probe service (so a
+/// retired job utility need not start for media facts). The paused viewer's
+/// Blender surfaces and progress must still reach the presenter, never the
+/// probe service, or Material Preview draws nothing.
+#[test]
+fn blender_events_reach_the_presenter_when_the_interactive_engine_has_a_probe_service() {
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let probes = Probes::default();
+    let mut engine = Engine::new(EngineConfig::new(EngineProcess::Interactive));
+    engine.set_presenter(Box::new(Asker(seen.clone())));
+    engine.set_job_service(Box::new(probes.clone()));
+    assert!(!engine.has_job_service());
+    engine.attach(HOST, PeerKind::Host);
+    engine.receive(HOST, &hello(PeerRole::Host), at(0));
+
+    let surface = Event::BlenderSurface(blender_surface("preview-blender-2"));
+    let progress = Event::BlenderProgress(pm_protocol::blender::BlenderProgress {
+        job: JobId::new("preview-blender-2"),
+        completed: 1,
+        total: 2,
+    });
+    for (n, event) in [progress.clone(), surface.clone()].into_iter().enumerate() {
+        let envelope = Envelope::new(Message::Event { body: event });
+        engine.receive(
+            HOST,
+            &codec::encode(&envelope).unwrap(),
+            at(1_000 + n as u64),
+        );
+    }
+    // Periodic work and wake-ups do not reach job-only paths either.
+    let _ = engine.tick(at(2_000));
+    let _ = engine.pump();
+
+    assert_eq!(seen.lock().unwrap().events, [progress, surface]);
+    assert!(probes.calls().is_empty(), "{:?}", probes.calls());
+}
+
+/// The probe service still answers `probeMedia` in the interactive engine,
+/// while jobs, cancels, and agent frames stay the job engine's.
+#[test]
+fn the_interactive_probe_service_takes_probes_and_refuses_jobs() {
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let probes = Probes::default();
+    let mut engine = Engine::new(EngineConfig::new(EngineProcess::Interactive));
+    engine.set_presenter(Box::new(Asker(seen)));
+    engine.set_job_service(Box::new(probes.clone()));
+    engine.attach(HOST, PeerKind::Host);
+    engine.receive(HOST, &hello(PeerRole::Host), at(0));
+    let request = |id: u64, body: Request| {
+        let mut envelope = Envelope::new(Message::Request {
+            id: RequestId::new(id).unwrap(),
+            body,
+        });
+        if matches!(
+            envelope.message,
+            Message::Request {
+                body: Request::AgentFrames(_),
+                ..
+            }
+        ) {
+            envelope.session = Some(SessionId::new(1).unwrap());
+            envelope.revision = Some(Revision::new(1).unwrap());
+        }
+        codec::encode(&envelope).unwrap()
+    };
+    let probe = pm_protocol::media::ProbeMedia {
+        handle: CapabilityHandle::from_random_bytes([3; 16]),
+        interpret: None,
+    };
+    engine.receive(HOST, &request(1, Request::ProbeMedia(probe)), at(1));
+    let frames = pm_protocol::priority::AgentFrameRequest::render_frames_default(
+        "run-1".into(),
+        vec![pm_protocol::priority::AgentFrame {
+            composition: "C".into(),
+            time: pm_protocol::common::Ticks::ZERO,
+        }],
+    );
+    let refused = engine.receive(HOST, &request(2, Request::AgentFrames(frames)), at(2));
+    let cancel = pm_protocol::priority::CancelJobs::Run {
+        run: "run-1".into(),
+    };
+    let cancelled = engine.receive(HOST, &request(3, Request::CancelJobs(cancel)), at(3));
+    for out in [&refused, &cancelled] {
+        let errors: Vec<ErrorCode> = sent(out, HOST)
+            .into_iter()
+            .filter_map(|e| match e.message {
+                Message::Error { error, .. } => Some(error.code),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors, [ErrorCode::Unsupported]);
+    }
+    assert_eq!(probes.calls(), ["probe_media"]);
+}

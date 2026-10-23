@@ -22,6 +22,22 @@ function harness(slot: Record<string, unknown> = {}) {
 }
 
 describe('ProjectSessions', () => {
+  it('holds a store lease through the last member and saves before releasing it', () => {
+    const release = vi.fn();
+    const store = { read: vi.fn(() => null), set: vi.fn(), acquireProject: vi.fn(() => release) };
+    const sessions = new ProjectSessions(store, { channel: 'sync', version: 't' });
+    const a = member(1), b = member(2);
+    sessions.join(a, 'p1', { id: 'p1' }); sessions.join(b, 'p1', { id: 'p1' });
+    expect(store.acquireProject).toHaveBeenCalledExactlyOnceWith('p1');
+    expect(store.acquireProject.mock.invocationCallOrder[0]).toBeLessThan(store.read.mock.invocationCallOrder[0]!);
+    sessions.patch(a, 'p1', [{ path: ['name'], exists: true, value: 'saved' }]);
+    sessions.leave(a, 'p1');
+    expect(release).not.toHaveBeenCalled();
+    b.destroy();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(store.set.mock.invocationCallOrder[0]).toBeLessThan(release.mock.invocationCallOrder[0]!);
+  });
+
   it('seeds from the first member and forwards patches to the others only', () => {
     const { sessions } = harness();
     const a = member(1), b = member(2);
@@ -89,4 +105,27 @@ describe('ProjectSessions', () => {
     expect(a.sent[0]![1]).toMatchObject({ seq: 1, patches: [{ path: [], exists: true, value: { id: 'p1', n: 2 } }] });
     expect(b.sent).toHaveLength(1);
   });
+});
+
+it('recovers the checkpoint journal for a native member that has no browser document to bring', () => {
+  const checkpoint = { id: 'p1', revision: 0, layers: [] };
+  const expected = { id: 'p1', revision: 2, layers: [{ id: 'l1', name: 'Recovered', effects: ['user.effect'] }] };
+  const journal = [
+    { revision: 1, patches: [{ path: ['layers'], exists: true, value: [{ id: 'l1', name: 'Recovered' }] }, { path: ['revision'], exists: true, value: 1 }] },
+    { revision: 2, patches: [{ path: ['layers', 0, 'effects'], exists: true, value: ['user.effect'] }, { path: ['revision'], exists: true, value: 2 }] }
+  ];
+  const { sessions, store, slot } = harness({ 'project.p1': { v: 't', proj: checkpoint }, 'projectJournal.p1': journal });
+  expect(sessions.document('p1')).toEqual(expected);
+  expect(sessions.document('p1')).toEqual(expected);
+  expect(sessions.join(member(1), 'p1', null).doc).toEqual(expected);
+  expect(checkpoint).toEqual({ id: 'p1', revision: 0, layers: [] });
+  expect(slot['projectJournal.p1']).toEqual(journal);
+  expect(store.set).not.toHaveBeenCalled();
+});
+
+it('reads old bare or string project slots with the same journal recovery semantics', () => {
+  for (const raw of [{ id: 'p1', revision: 1, name: 'Before' }, JSON.stringify({ v: 'old', proj: { id: 'p1', revision: 1, name: 'Before' } })]) {
+    const { sessions } = harness({ 'project.p1': raw, 'projectJournal.p1': [{ revision: 2, patches: [{ path: ['name'], exists: true, value: 'After' }, { path: ['revision'], exists: true, value: 2 }] }] });
+    expect(sessions.join(member(1), 'p1', null).doc).toEqual({ id: 'p1', revision: 2, name: 'After' });
+  }
 });

@@ -1,6 +1,6 @@
 import { expect, test } from './helpers/app';
 import { fixturePath, importFixture } from './helpers/media';
-import { copyFile, unlink } from 'node:fs/promises';
+import { copyFile, realpath, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
 for (const fixture of ['tone.wav', 'tone.mp3', 'h264-aac.mp4', 'converted.mkv', 'still.heic', 'animated.gif']) {
@@ -14,19 +14,21 @@ test(`restores ${fixture} from its local source when cached bytes are missing`, 
     const PM = (window as any).PM;
     const meta = Object.values(PM.proj.assets).find((asset: any) => asset.name === name) as any;
     const layers = JSON.stringify(PM.proj.layers);
-    const sourceState = await (window as any).__powermoveTestBridge.media.cloudStatus([meta.sourcePath]);
     await PM.MediaStore.remove(meta);
     PM.assets.clear();
     const restored = await PM.assets.restoreProject(PM.proj);
     return {
-      id: meta.id, local: sourceState[meta.sourcePath],
+      id: meta.id, sourcePath: meta.sourcePath,
       restored: restored.restored.length, missing: restored.missing.length,
       layersUnchanged: JSON.stringify(PM.proj.layers) === layers,
       cached: !!await PM.MediaStore.get(meta),
       playable: !!PM.assets.get(meta.id),
     };
   }, fixture);
-  expect(result.local).toBe('local');
+  expect(await realpath(result.sourcePath)).toBe(await realpath(fixturePath(fixture)));
+  const source = await stat(result.sourcePath);
+  expect(source.isFile()).toBe(true);
+  expect(source.size).toBeGreaterThan(0);
   expect(result).toMatchObject({ restored: 1, missing: 0, layersUnchanged: true, cached: true, playable: true });
   const card = page.locator(`[data-asset-id="${result.id}"]`);
   await expect(card).not.toHaveClass(/is-offline/);

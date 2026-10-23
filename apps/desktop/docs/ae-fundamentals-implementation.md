@@ -31,7 +31,7 @@ The recorded expression-performance threshold also fails on the pre-implementati
 
 ## Runtime and visual evidence
 
-With explicit restart authorization, computer use saved the original project to `/Users/chike/Downloads/Powermove commercial — restart backup 2026-09-05.pmv` and quit normally. The first launch used the default profile; it was closed normally and the original profile `/private/tmp/powermove-build-open-profile.ozzZhm` was restored. Computer use confirmed the original project with two layers and six keys plus the new Pen, preview, text-animation, and matte controls. Playback and window switching were exercised, but concurrent user interaction changed the project and transport, so exact live A/V sync remains unverified. User changes were not reverted. Runtime log: `/private/tmp/pm-live-correct-profile-20260905.log`.
+Manual preview, playback and window-switching checks did not establish exact live A/V sync.
 
 Hidden-renderer screenshots were reviewed in light and dark themes, including a 1100-pixel-wide window. They exposed and led to repairs for overlapping timeline controls, path raster/vertex alignment, an empty Content section, preview control styling, and mixed-content display.
 

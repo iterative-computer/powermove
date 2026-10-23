@@ -6,6 +6,8 @@
  * checks. Exit code 0 on pass.
  *
  *   node scripts/engine-host-integration.mjs [--skip-build] [--json out.json]
+ *   PM_IT_ELECTRON_LAUNCHER=/path/to/pm-electron-lock wraps only Electron,
+ *   leaving the optional addon build and bundling outside the lock.
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -45,13 +47,15 @@ try {
   const env = {
     ...process.env,
     PM_IT_ENGINE_PROCESS: path.join(out, 'engine-process.js'),
+    PM_IT_MEDIA_FIXTURE: path.join(desktop, 'e2e', 'fixtures', 'h264-aac.mp4'),
     POWERMOVE_ENGINE_ADDON: path.join(desktop, 'native', 'pm_node.node'),
     // Main's host clock is the engines' clock through pm-bridge (built with pm-node).
     POWERMOVE_PM_BRIDGE: path.join(desktop, 'native', 'pm_bridge.node'),
     ELECTRON_DISABLE_SECURITY_WARNINGS: '1'
   };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(electron, [path.join(out, 'main.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const launcher = process.env.PM_IT_ELECTRON_LAUNCHER;
+  const child = spawn(launcher ?? electron, launcher ? [electron, path.join(out, 'main.js')] : [path.join(out, 'main.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; });

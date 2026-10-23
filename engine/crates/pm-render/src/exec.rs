@@ -529,6 +529,18 @@ impl Exec<'_> {
                             Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
                         }
                     }
+                    Source::Compat(compat) => {
+                        // A canvas's backing store: premultiplied E values,
+                        // top row first, like a text raster (linear light
+                        // decodes them).
+                        r.view = Some(crate::compat::upload(
+                            self.device,
+                            self.queue,
+                            &compat.0,
+                            self.precision,
+                        ));
+                        r.encoded = true;
+                    }
                     Source::Blender(blender) => {
                         r.view = Some(crate::blender::gpu::upload(
                             self.device,
@@ -587,13 +599,14 @@ impl Exec<'_> {
                         ) {
                             return;
                         }
-                        match self.scene3d.render(
+                        match self.scene3d.render_at_precision(
                             self.device,
                             self.queue,
                             encoder,
                             self.pool,
                             object,
                             self.depth_id,
+                            self.precision,
                         ) {
                             Ok(out) => {
                                 // The pass renders in GL row order.

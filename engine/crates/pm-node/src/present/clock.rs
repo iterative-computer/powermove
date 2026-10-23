@@ -80,6 +80,11 @@ impl TransportClock {
         self.end = end.filter(|e| *e > 0);
     }
 
+    /// Where host-clock runs stop ([`Self::set_end`]).
+    pub fn end(&self) -> Option<i64> {
+        self.end
+    }
+
     pub fn loop_range(&self) -> Option<TickRange> {
         self.loop_range
     }

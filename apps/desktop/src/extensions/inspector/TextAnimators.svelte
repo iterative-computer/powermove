@@ -7,6 +7,7 @@
   import SectionHeading from './SectionHeading.svelte';
   import { structuredProperties } from 'powermove';
   import { inspectorRefresh } from './refresh.svelte';
+  import { isInspectorLayerEditable } from './multi-edit';
   import {
     ANIMATOR_PRESETS, EASINGS, ORDERS, SHAPES, UNITS, TEXT_ANIMATOR_PROPERTIES,
     animatorMode, animatorProperties, makeAnimator, outDelay, setAnimatorMode,
@@ -45,8 +46,11 @@
 
   let collapsed = $state<string[]>([]);
   let renaming = $state<string | null>(null);
+  const editable = $derived((doc.tick.structure, doc.tick.values, doc.tick.history, doc.proj, inspectorRefresh.version, isInspectorLayerEditable(api, layer)));
+  const canChange = () => isInspectorLayerEditable(api, layer);
 
   function mutate(label: string, fn: () => void) {
+    if (!canChange()) return;
     inspectorEdit.mutate(label, fn, { origin: 'inspector' });
     api.transport.invalidate();
     inspectorRefresh.bump();
@@ -54,7 +58,7 @@
   const set = (label: string, fn: (value: any) => void) => ({
     mode: 'set' as const,
     label,
-    set: (value: any) => { fn(value); api.transport.invalidate(); inspectorRefresh.bump(); }
+    set: (value: any) => { if (!canChange()) return; fn(value); api.transport.invalidate(); inspectorRefresh.bump(); }
   });
   const bind = (path: string) => ({
     mode: 'command' as const, label: 'Edit ' + path, origin: 'inspector' as const,
@@ -75,13 +79,14 @@
   }
 
   function presetMenu(): MenuContribution[] {
+    const locked = !canChange();
     const group = (id: string) => ANIMATOR_PRESETS.filter((preset) => preset.group === id)
-      .map((preset) => ({ label: preset.label, run: () => addPreset(preset) }));
+      .map((preset) => ({ label: preset.label, disabled: locked, run: () => addPreset(preset) }));
     return [
       { header: 'Animate in' }, ...group('in'), '-',
       { header: 'Loop' }, ...group('loop'), '-',
       { header: 'Custom' }, ...group('custom'), '-',
-      { label: 'Style selected text', icon: 'type', run: styleSelection }
+      { label: 'Style selected text', icon: 'type', disabled: locked, run: styleSelection }
     ];
   }
 
@@ -97,19 +102,20 @@
 
   function animatorMenu(event: PointerEvent, animator: any) {
     const list = layer.d.animators || [], index = list.indexOf(animator);
+    const locked = !canChange();
     const move = (to: number) => mutate('Reorder text animator', () => {
       list.splice(index, 1);
       list.splice(to, 0, animator);
     });
     api.ui.menu(event.currentTarget as HTMLElement, [
-      { label: 'Rename', run: () => { renaming = animator.id; } },
-      { label: 'Duplicate', icon: 'copy', run: () => mutate('Duplicate text animator', () => {
+      { label: 'Rename', disabled: locked, run: () => { if (canChange()) renaming = animator.id; } },
+      { label: 'Duplicate', icon: 'copy', disabled: locked, run: () => mutate('Duplicate text animator', () => {
         list.splice(index + 1, 0, { ...JSON.parse(JSON.stringify(animator)), id: api.util.uid('ta'), name: animator.name + ' copy' });
       }) },
-      { label: 'Move up', disabled: index <= 0, run: () => move(index - 1) },
-      { label: 'Move down', disabled: index >= list.length - 1, run: () => move(index + 1) },
+      { label: 'Move up', disabled: locked || index <= 0, run: () => move(index - 1) },
+      { label: 'Move down', disabled: locked || index >= list.length - 1, run: () => move(index + 1) },
       '-',
-      { label: 'Remove', icon: 'trash', run: () => mutate('Remove text animator', () => {
+      { label: 'Remove', icon: 'trash', disabled: locked, run: () => mutate('Remove text animator', () => {
         layer.d.animators = list.filter((candidate: any) => candidate !== animator);
       }) }
     ]);
@@ -123,6 +129,7 @@
       return {
         label: definition.label,
         on,
+        disabled: !canChange(),
         run: () => mutate(on ? 'Remove animator property' : 'Add animator property', () => {
           if (on) delete animator.p[key];
           // Scale and opacity rest at 100 %, so a fresh row starts visibly off-rest.
@@ -166,7 +173,7 @@
 {#snippet segmented(options: Array<{ v: string; label: string }>, current: string, name: string, pick: (value: any) => void)}
   <div class="segmented" role="group" aria-label={name}>
     {#each options as option (option.v)}
-      <button type="button" aria-pressed={current === option.v} onclick={() => pick(option.v)}>{option.label}</button>
+      <button type="button" aria-pressed={current === option.v} disabled={!editable} onclick={() => pick(option.v)}>{option.label}</button>
     {/each}
   </div>
 {/snippet}
@@ -177,7 +184,7 @@
 {/snippet}
 
 <SectionHeading title="Text animators" empty={!views.length && !styles.length}>
-  <button class="section-action" onpointerdown={(event) => { event.preventDefault(); api.ui.menu(event.currentTarget as HTMLElement, presetMenu()); }} aria-label="Add text animator" title="Add text animator"><Icon name="plus" /></button>
+  <button class="section-action" disabled={!editable} onpointerdown={(event) => { event.preventDefault(); api.ui.menu(event.currentTarget as HTMLElement, presetMenu()); }} aria-label="Add text animator" title="Add text animator"><Icon name="plus" /></button>
 </SectionHeading>
 
 {#each views as view (view.animator.id)}
@@ -188,14 +195,15 @@
       <span class="twirl" class:open aria-hidden="true"><Icon name="chev" /></span>
     </button>
     {#if renaming === animator.id}
-      <input class="ta-rename" aria-label="Animator name" value={animator.name} use:focusSelect
+      <input class="ta-rename" aria-label="Animator name" value={animator.name} disabled={!editable} use:focusSelect
         onblur={(event) => rename(animator, event.currentTarget.value)}
         onkeydown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); else if (event.key === 'Escape') renaming = null; event.stopPropagation(); }} />
     {:else}
-      <button type="button" class="ta-label" ondblclick={() => { renaming = animator.id; }} onclick={() => toggleOpen(animator.id)}>{animator.name}</button>
+      <button type="button" class="ta-label" ondblclick={() => { if (canChange()) renaming = animator.id; }} onclick={() => toggleOpen(animator.id)}>{animator.name}</button>
     {/if}
     <button type="button" class="stopwatch" class:on={view.enabled} aria-pressed={view.enabled}
       aria-label={`${view.enabled ? 'Disable' : 'Enable'} ${animator.name}`}
+      disabled={!editable}
       onclick={() => mutate('Toggle text animator', () => { animator.enabled = !view.enabled; })}><Icon name={view.enabled ? 'eye' : 'eyeoff'} /></button>
     <button type="button" class="stopwatch" aria-label={`${animator.name} options`} onpointerdown={(event) => { event.preventDefault(); animatorMenu(event, animator); }}><Icon name="more" /></button>
   </div>
@@ -205,20 +213,20 @@
       <Row {api} label="Mode">
         {@render segmented(MODES, view.mode, 'Selector mode', (mode) => mutate('Change animator mode', () => setAnimatorMode(api.model.P, animator, mode)))}
       </Row>
-      <Row {api} label="Based on">
-        <SelectField {api} {mixed} label="Based on" get={() => view.unit} options={UNITS}
+      <fieldset disabled={!editable}><Row {api} label="Based on">
+        <SelectField {api} {mixed} label="Based on" get={() => view.unit} options={UNITS} onChange={canChange}
           edit={set('Change animator unit', (unit) => { animator.unit = unit; delete animator.p.unit; })} />
-      </Row>
-      <Row {api} label="Order">
+      </Row></fieldset>
+      <fieldset disabled={!editable}><Row {api} label="Order">
         <div class="with-action">
-          <SelectField {api} {mixed} label="Order" get={() => view.order} options={ORDERS}
+          <SelectField {api} {mixed} label="Order" get={() => view.order} options={ORDERS} onChange={canChange}
             edit={set('Change animator order', (order) => { animator.order = order; })} />
           {#if view.order === 'random'}
             <button type="button" class="stopwatch" title="Shuffle" aria-label="Shuffle order"
               onclick={() => mutate('Shuffle animator order', () => { animator.seed = Math.floor(Math.random() * 1e6) + 1; })}><Icon name="rotate" /></button>
           {/if}
         </div>
-      </Row>
+      </Row></fieldset>
 
       {#if view.mode === 'stagger'}
         <Row {api} label="Direction">
@@ -227,18 +235,18 @@
         {@render number(animator, 'delay', 'Start', 's', { step: 0.01, precision: 2 })}
         {@render number(animator, 'duration', 'Duration', 's', { step: 0.01, min: 0, precision: 2 })}
         {@render number(animator, 'stagger', 'Stagger', 's', { step: 0.005, min: 0, precision: 3 })}
-        <Row {api} label="Easing">
-          <SelectField {api} {mixed} label="Easing" get={() => view.easing} options={EASINGS}
+        <fieldset disabled={!editable}><Row {api} label="Easing">
+          <SelectField {api} {mixed} label="Easing" get={() => view.easing} options={EASINGS} onChange={canChange}
             edit={set('Change animator easing', (easing) => { animator.easing = easing; })} />
-        </Row>
+        </Row></fieldset>
       {:else if view.mode === 'range'}
         {@render number(animator, 'start', 'Start', '%')}
         {@render number(animator, 'end', 'End', '%')}
         {@render number(animator, 'offset', 'Offset', '%')}
-        <Row {api} label="Shape">
-          <SelectField {api} {mixed} label="Shape" get={() => view.shape} options={SHAPES}
+        <fieldset disabled={!editable}><Row {api} label="Shape">
+          <SelectField {api} {mixed} label="Shape" get={() => view.shape} options={SHAPES} onChange={canChange}
             edit={set('Change range shape', (shape) => { animator.shape = shape; })} />
-        </Row>
+        </Row></fieldset>
         {#if view.shape === 'square' && animator.p.smoothness}
           {@render number(animator, 'smoothness', 'Softness', '%', { min: 0, max: 100 })}
         {/if}
@@ -252,7 +260,7 @@
 
       <div class="ta-props-head">
         <span>{PROPERTY_HEADINGS[view.mode === 'stagger' ? view.direction : view.mode]}</span>
-        <button type="button" class="stopwatch" aria-label={`Add property to ${animator.name}`} title="Add property" onpointerdown={(event) => { event.preventDefault(); propertyMenu(event, animator); }}><Icon name="plus" /></button>
+        <button type="button" class="stopwatch" aria-label={`Add property to ${animator.name}`} title="Add property" disabled={!editable} onpointerdown={(event) => { event.preventDefault(); propertyMenu(event, animator); }}><Icon name="plus" /></button>
       </div>
       {#each view.properties as key (key)}
         {@const definition = TEXT_ANIMATOR_PROPERTIES[key as TextAnimatorProperty]}
@@ -275,7 +283,7 @@
     {@const prefix = 'ts.' + style.id}
     <div class="row ta-head">
       <span class="ta-label static">{`Characters ${style.start + 1}–${style.end}`}</span>
-      <button type="button" class="stopwatch" aria-label="Remove text style" title="Remove"
+      <button type="button" class="stopwatch" aria-label="Remove text style" title="Remove" disabled={!editable}
         onclick={() => mutate('Remove text style', () => { layer.d.styles = layer.d.styles?.filter((candidate: any) => candidate.id !== style.id); })}><Icon name="x" /></button>
     </div>
     <div class="grp ta-params">
@@ -289,6 +297,7 @@
 {/if}
 
 <style>
+  fieldset { border: 0; padding: 0; margin: 0; min-inline-size: 0; }
   .ta-head { margin-top: 4px; background: var(--ink-1); }
   .ta-head.off .ta-label { color: var(--tx-3); }
   .ta-expand { display: grid; flex: none; align-self: stretch; width: 18px; padding: 0; place-items: center; border: 0; background: transparent; color: inherit; }

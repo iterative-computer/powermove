@@ -145,14 +145,14 @@ body:has(> #settings-screen.on) #body,body:has(> #settings-screen.on) #status,bo
 .sg-group>.settings-extension-row:hover{background:var(--ink-1)}
 .settings-extension-open{flex:1;min-width:0;display:flex;align-items:center;min-height:56px;padding:10px 0 10px 12px;text-align:left;color:inherit;font:inherit}
 .settings-extension-open:focus-visible{outline:0}
-.settings-extension-copy{padding:0 4px 0 0}
+.settings-extension-copy{min-width:0;flex:1;padding:0 4px 0 0}
 .settings-extension-name{display:flex;min-width:0;align-items:center;gap:7px}
 .settings-extension-name>b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .settings-extension-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--tx-4)}
 .settings-extension-dot[data-tone="ok"]{background:var(--success)}
 .settings-extension-dot[data-tone="warning"]{background:var(--danger)}
 .settings-extension-tag{flex:none;padding:0 5px;border-radius:var(--r-xs);background:var(--ink-1);color:var(--tx-3);font-size:var(--fs-xs);line-height:16px}
-.settings-extension-copy>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.settings-extension-copy>span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .settings-extension-copy>.settings-extension-error,.settings-copy>.settings-extension-error{color:var(--danger)}
 .settings-copy>.is-replacement{color:var(--accent-tx)}
 .settings-extension-controls{flex:none;display:flex;align-items:center;gap:10px}
@@ -165,7 +165,7 @@ body:has(> #settings-screen.on) #body,body:has(> #settings-screen.on) #status,bo
 /* detail */
 /* An open extension takes over the page: the page heading steps aside and
    the extension's name becomes the title, with the way back above it. */
-.sg-page:has(.settings-extension-detail:not([hidden]))>.sg-heading{display:none}
+
 .settings-extension-detail{display:flex;flex-direction:column;gap:32px}
 .settings-extension-back{align-self:flex-start;display:inline-flex;align-items:center;gap:2px;height:22px;margin:-4px 0 -26px -6px;padding:0 8px 0 3px;border-radius:var(--r-sm);color:var(--tx-3);font-size:var(--fs-sm);font-weight:var(--fw-medium);transition:color var(--dur-1),background var(--dur-1)}
 .settings-extension-back svg{width:12px;height:12px;transform:rotate(180deg)}
@@ -204,3 +204,65 @@ body:has(> #settings-screen.on) #body,body:has(> #settings-screen.on) #status,bo
 @media (prefers-reduced-motion:reduce){}
 
 .sg-column .settings-background-control>.color-field{width:100%;height:30px;padding:0 10px 0 6px;border:0;border-radius:var(--sg-control-radius);background:var(--bg-float);box-shadow:none}
+.sg-section.is-dim{opacity:.45;transition:opacity var(--dur-1)}
+
+/* Extension rows flow with the existing Settings page scroll. */
+.settings-extension-root{gap:0;min-width:0}
+.settings-extension-toolbar{display:flex;flex-direction:column;gap:10px;margin:0 0 12px}
+.settings-extension-search-row{display:flex;align-items:center;gap:10px}
+.settings-extension-search-row .settings-extension-search{text-align:left;flex:1;min-width:0;height:34px}
+.settings-extension-search-row .settings-select{max-width:150px;min-width:0}
+.settings-extension-filters{display:flex;gap:4px;flex-wrap:wrap}
+.settings-extension-filters .btn{height:28px;padding:0 9px;color:var(--tx-3);background:transparent}
+.settings-extension-filters .btn.on{color:var(--tx);background:var(--ink-2)}
+.settings-extension-list.sg-group{display:block;height:auto;max-height:none;overflow:visible;margin:0 -14px;padding:6px 0;background:var(--sg-row)}
+.settings-extension-category{min-width:0}
+.settings-extension-group{display:flex;align-items:center;gap:8px;width:100%;height:36px;padding:0 16px;border-radius:var(--r-sm);text-align:left;color:var(--tx-2);font-size:var(--fs-sm);font-weight:var(--fw-medium);background:transparent}
+.settings-extension-group:hover{background:var(--ink-1)}
+.settings-extension-group::before{content:'›';width:12px;flex:none;text-align:center;font-size:16px;transform:rotate(90deg)}
+.settings-extension-group[aria-expanded="false"]::before{transform:none}
+.settings-extension-group-icon{display:grid;place-items:center;width:14px;height:14px;flex:none;color:var(--tx-3)}
+.settings-extension-group-icon svg{width:14px;height:14px}
+.settings-extension-group-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.settings-extension-count{flex:none;min-width:20px;padding:0 5px;border:var(--hairline) solid var(--line);border-radius:var(--r-xs);color:var(--tx-3);font-size:var(--fs-xs);font-weight:var(--fw-regular);line-height:18px;font-variant-numeric:tabular-nums;text-align:center}
+.settings-extension-group-body{margin:0 0 4px}
+.settings-extension-group-body[hidden]{display:none}
+.settings-extension-group-body .settings-extension-row{display:flex;align-items:center;gap:10px;height:48px;padding-right:12px;content-visibility:auto;contain-intrinsic-size:auto 48px}
+.settings-extension-group-body .settings-extension-row:hover{background:var(--ink-1)}
+.settings-extension-row .settings-extension-open{height:48px;min-height:48px;padding-left:38px}
+.settings-extension-open:focus-visible,.settings-extension-group:focus-visible,.settings-extension-list:focus-visible,.settings-extension-toolbar :focus-visible{outline:2px solid var(--line-strong);outline-offset:-2px;border-radius:var(--r-sm)}
+.settings-extension-status.is-ok,.settings-extension-status.is-quiet,.settings-extension-status.is-setup{color:var(--tx-3)}
+.settings-extension-footer,.settings-extension-message{padding-top:10px;font-size:var(--fs-sm);color:var(--tx-3)}
+.settings-extension-message:empty{display:none}
+.settings-extension-empty{display:flex;flex-direction:column;align-items:flex-start;gap:12px}
+/* Native dialog supplies top-layer placement, inert background and focus containment. */
+dialog.settings-extension-detail{position:fixed;inset:0;width:min(560px,calc(100vw - 40px));max-height:calc(100dvh - 80px);margin:auto;padding:28px 32px;border:0;border-radius:var(--r-xl);background:var(--bg-panel);color:var(--tx);box-shadow:0 16px 70px rgb(0 0 0 / .22);overflow-y:auto;overscroll-behavior:contain;gap:24px;--sg-row:var(--bg-panel);--sg-group-radius:var(--r-xl);--sg-row-padding:10px}
+dialog.settings-extension-detail[open]{display:flex}
+dialog.settings-extension-detail:not([open]),dialog.settings-extension-detail[hidden]{display:none!important}
+dialog.settings-extension-detail::backdrop{background:rgb(0 0 0 / .22)}
+dialog.settings-extension-detail .settings-extension-back{align-self:flex-end;height:30px;margin:0;padding:0 12px;color:var(--tx-2);background:var(--ink-1)}
+dialog.settings-extension-detail .settings-section-heading{display:flex;gap:6px;padding-bottom:8px;font-size:var(--fs-sm);color:var(--tx-3)}
+dialog.settings-extension-detail .settings-row{display:flex;align-items:center;gap:12px;min-height:52px;padding:10px}
+dialog.settings-extension-detail :focus-visible{outline:2px solid var(--line-strong);outline-offset:2px}
+@container (max-width:460px){
+  .settings-extension-search-row{flex-wrap:wrap}
+  .settings-extension-search-row .settings-extension-search{flex-basis:100%}
+  .settings-extension-controls{gap:6px}
+  .settings-extension-row .settings-extension-status{display:none}
+  .settings-extension-row .settings-extension-tag{display:none}
+}
+@media(max-width:620px){
+  #settings-screen .sg-sidebar{width:150px;padding-inline:8px}
+  #settings-screen .sg-scroll{padding-inline:18px}
+  dialog.settings-extension-detail{padding:20px 24px}
+}
+.settings-extension-root>.settings-section>.settings-section-heading{justify-content:flex-end}
+
+.settings-extension-footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+
+.settings-extension-kinds{min-width:0;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx-3);font-size:var(--fs-xs);font-weight:var(--fw-regular)}
+
+.settings-extension-group.is-subgroup{height:32px;padding-left:48px;font-weight:var(--fw-regular)}
+.settings-extension-subgroup-body{margin:0 0 4px}
+.settings-extension-subgroup-body[hidden]{display:none}
+.settings-extension-subgroup-body .settings-extension-open{padding-left:68px}

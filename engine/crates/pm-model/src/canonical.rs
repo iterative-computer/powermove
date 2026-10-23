@@ -42,7 +42,7 @@ use crate::patch::{Patch, PathPart};
 
 /// Fields that belong to a composition rather than to the project. Must equal
 /// `COMP_FIELDS` in `legacy/core/compositions.ts` (a test reads that file).
-pub const COMP_FIELDS: [&str; 13] = [
+pub const COMP_FIELDS: [&str; 12] = [
     "w",
     "h",
     "fps",
@@ -55,12 +55,11 @@ pub const COMP_FIELDS: [&str; 13] = [
     "work",
     "shutter",
     "audioGain",
-    "render3d",
 ];
 
 /// Composition fields that may be absent; cleared rather than inherited when
 /// the open composition changes.
-pub const OPTIONAL_COMP_FIELDS: [&str; 3] = ["fpsRational", "audioGain", "render3d"];
+pub const OPTIONAL_COMP_FIELDS: [&str; 2] = ["fpsRational", "audioGain"];
 
 fn is_comp_field(key: &str) -> bool {
     COMP_FIELDS.contains(&key)
