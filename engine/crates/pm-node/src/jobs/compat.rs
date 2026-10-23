@@ -44,13 +44,14 @@ const MAX_BATCH: usize = 512;
 /// asks it has at once to the window together, which answers them in one
 /// task: a large project's frame asks for hundreds of layers. A frame asks
 /// only for what the background fetch did not get ahead of it.
-const HOST_ASKS: usize = 64;
+const HOST_ASKS: usize = 32;
 /// Most requests the background fetch has at the host at once: with a
 /// frame's own turn ([`HOST_ASKS`]) never above main's bound of 1024. Each
-/// turn is a round trip through main and the window, so the fetch keeps
-/// ahead of the export only with turns of a frame or more (PMV3: about 350
-/// layers a frame; in turns of 96 the export still waited 62% of its time).
-const AHEAD_ASKS: usize = 512;
+/// turn is a round trip through main and the window, but the window answers
+/// a turn in one task and returns its answers when that task ends: turns of
+/// 512 put a frame's own asks behind a second of answers for later frames
+/// (PMV3's export took 431 s against 168 s in turns of 96).
+const AHEAD_ASKS: usize = 96;
 /// Frames past the one drawn whose answers a pipelined export keeps asked
 /// for, and how close the drawn frame may come to the last one asked for
 /// before more are asked.
