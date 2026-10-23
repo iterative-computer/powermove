@@ -52,10 +52,13 @@ Fallback shaders at depth 8 allocate RGBA8 attachments, upload/read exact byte
 codes, and carry those codes in the existing u16 wire slots. They never round
 through binary16 before the RGBA8 write. Requests, pending results, program
 parity verdicts, and textures distinguish working depth. Older runner requests
-omit depth and retain their existing 16-bit interpretation. The pre-existing
-WebGL fallback transport for a 32-bit project also remains binary16; a real
-float32 fallback transport and its parity proof remain unqualified. Native
-compiled shaders do use the project's float32 targets. Asynchronous frame
+omit depth and retain their existing 16-bit interpretation. At depth 32 the
+runner uses RGBA32F/FLOAT throughout, with `OES_texture_float_linear` enabled.
+Inputs, results, PBO reads, session bands, snapshot relays and job scratch files
+carry little-endian binary32 values in `rgba32f`; the legacy `rgba16f` field is
+empty. No binary16 conversion occurs. Cache keys, byte budgets and validation
+retain the requested depth. Native compiled shaders also use float32 targets.
+Asynchronous frame
 snapshots accept mapped RGBA8 rows directly, preserving row order and the
 existing premultiplied/straight/opaque snapshot encoding.
 
@@ -83,18 +86,46 @@ Level 2 retains its ink crop. The capture's `--text-only` mode also records
 the actual uploaded Canvas texture, and the native example compares it
 separately from composition sampling.
 
-The real WebGL fallback runner preserves 24,576 checked codes exactly across
-synchronous/asynchronous readback, three passes, and depth switches. Targeted
+Retaining the full level-1 canvas can use more memory than the former native
+ink crop. A maximal 8192² source is 256 MiB; sources beyond half the 192 MiB
+text cache budget draw without being retained. This is a correctness tradeoff
+to preserve today's sampling geometry, not an added 8-bit quantization point.
+Parity verdicts compare exact byte codes at 8 and exact binary32 bits at 32;
+the existing binary16 bound is unchanged. The 32-bit policy can keep programs
+with small arithmetic differences on the WebGL runner; its throughput is not
+qualified by the ordinary native composition counter slice.
+
+The real WebGL fallback runner preserves 24,576 RGBA8 codes and 24,576 binary32
+bit patterns exactly across synchronous/asynchronous readback, three passes,
+and depth switches. The float32 witness includes values binary16 cannot
+represent. A separate depth-32 shader-layer project with a three-pass effect
+uses the production first-use ANGLE parity path for both programs. Its two
+runner requests settle to the same 8,192 float32 channels as today's app,
+with zero differing float bits. The reference includes 6,144 channels that
+would change if rounded to binary16. This gate uses
+`color-depth-fallback.ts` and the prebuilt `color_depth_fallback` example;
+build and prepare outside the Electron lock. Native transport regressions
+also cover interactive float32 input/result bands, job `.rgba32f` scratch
+files, short-file rejection, and snapshot validation. Targeted
 Rust tests exercise all depth switches, caller-owned targets, a native 3D scene
 with a 2D overlay, source conversion/cache isolation, and actual session frame
 snapshots. Settings/migration and runner unit tests pass. Protocol fixtures and
 generated TypeScript are regenerated from the contract sources.
 
+The video/3D gate (`color-depth-media.ts`, `color_depth_media`) adds two video
+times and one visible three.js cube with a translucent 2D overlay at every
+depth. All nine samples match both output bytes and raw float values exactly.
+The video reference must show the fixture's expected red/green image, and the
+3D reference must contain visible geometry and settle to two identical frames.
+The seven depth-8 slice projects also export through the native PNG job with
+the app's Float32 request hint and dither enabled; all decoded PNG pixels
+match the app readback. The full 8-bit delivery matrix, independent codec
+decoding and half-alpha witnesses are described in `color-depth-export.md`.
+
 At 320×180, one output texture uses 230,400 / 460,800 / 921,600 bytes at
 8 / 16 / 32 bits respectively. The warmed target pools of this slice have the
-same 1:2:4 ratio. Concurrent debug-build microbenchmarks are diagnostic only:
-8-bit was faster on gradient, blending, mask and blur, but slower on glow,
-vector and text in this run. No general throughput win is claimed. The
-`pm-perfbench` counters are not yet on the merged integration base; a quiet
-paired performance gate remains required, together with broader video/3D,
-export-format and native-app qualification.
+same 1:2:4 ratio. Concurrent debug-build timings are diagnostic only; no general
+throughput win is claimed. The `pm-perfbench` counters are not yet on the merged
+integration base; the paired upload, texture-allocation and pass-count gate
+remains pending that merge. These synthetic qualification scenes do not replace
+the integration owner's complete native-app corpus gate.

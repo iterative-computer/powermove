@@ -71,7 +71,22 @@ try {
         runner.renderSync({ ...request, key: 'depth-sixteen', colorDepth: 16 }, [new Uint16Array(input.length).fill(0x3800)]);
       }
       if (differing) throw new Error(`RGBA8 fallback changed ${differing}/${compared} codes`);
-      return { compared, differing, passes: 3, depthSwitches: 3 };
+      const floats = Float32Array.from({ length: input.length }, (_, i) => [0.5001234, 0.00012345, 1.0001234, 1][i % 4]!);
+      const bits = new Uint32Array(floats.buffer);
+      let floatCompared = 0, floatDiffering = 0;
+      for (let i = 0; i < 3; i++) {
+        const r = { ...request, key: 'depth-thirty-two', colorDepth: 32 };
+        const sync = runner.renderSync(r, [floats]);
+        const asyncResult = await runner.render(r, [floats]);
+        for (const pixels of [sync.rgba32f, asyncResult.rgba32f]) {
+          if (!(pixels instanceof Float32Array)) throw new Error('Float32 runner result missing');
+          const actual = new Uint32Array(pixels.buffer, pixels.byteOffset, pixels.length);
+          for (let j = 0; j < bits.length; j++) { floatCompared++; if (actual[j] !== bits[j]) floatDiffering++; }
+        }
+        runner.renderSync({ ...request, key: 'depth-sixteen', colorDepth: 16 }, [new Uint16Array(input.length).fill(0x3800)]);
+      }
+      if (floatDiffering) throw new Error(`RGBA32F fallback changed ${floatDiffering}/${floatCompared} float bit patterns`);
+      return { compared, differing, floatCompared, floatDiffering, passes: 3, depthSwitches: 6 };
     } finally { runner.dispose(); }
   });
   writeFileSync(path.join(out, 'fallback.json'), JSON.stringify(fallback, null, 2));
