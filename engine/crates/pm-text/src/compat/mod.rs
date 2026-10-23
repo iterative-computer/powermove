@@ -273,7 +273,10 @@ fn placed_runs(
     x: f64,
     baseline: f64,
 ) -> Vec<GlyphRun> {
-    let mut pen = x;
+    // ShapeResult::ForEachGlyphImpl accumulates InlineLayoutUnit (16
+    // fractional bits), and passes its float conversion to the bloberizer.
+    // The blob position is rounded before drawTextBlob adds its origin.
+    let mut advance = 0.0_f32;
     let mut runs = Vec::new();
     for item in &measured.items {
         // Runs are in logical order; an RTL item's runs read right to left.
@@ -283,18 +286,22 @@ fn placed_runs(
             item.runs.iter().collect()
         };
         for run in ordered {
+            let mut pen = (f64::from(advance) * 65536.0).round() as i64;
             let info = m.resolver.face(run.face);
             let mut glyphs = Vec::with_capacity(run.glyphs.len());
             for g in &run.glyphs {
                 if g.glyph != UNMATCHED_VS_GLYPH {
                     glyphs.push(PlacedGlyph {
                         id: g.glyph,
-                        x: pen + g.x_offset as f64 / 65536.0,
-                        y: baseline - g.y_offset as f64 / 65536.0,
+                        x: f64::from(
+                            (pen as f32 / 65536.0 + g.x_offset as f32 / 65536.0) + x as f32,
+                        ),
+                        y: f64::from(baseline as f32 - g.y_offset as f32 / 65536.0),
                     });
                 }
-                pen += g.advance as f64 / 65536.0;
+                pen += i64::from(g.advance);
             }
+            advance = pen as f32 / 65536.0;
             runs.push(GlyphRun {
                 face: run.face,
                 size: run.size,
