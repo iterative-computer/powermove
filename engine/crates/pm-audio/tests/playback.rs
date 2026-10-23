@@ -3435,8 +3435,12 @@ fn assert_sixteen_voice_edit_starts(cold: bool, distinct: bool) {
         // The ring captures both clocks around the same acquired publication.
         // Its earlier upper bound tolerates either producer or observer being
         // descheduled after the PCM became visible.
+        // Poll without spinning: the measured instant is the producer's own
+        // publication stamp (or the observation, whichever is earlier), so
+        // the poll interval cannot lengthen it, while a spinning observer
+        // would take a core from the preparation workers it is timing.
         while side.queued_frames() < 512 && at.elapsed() < Duration::from_secs(5) {
-            std::thread::yield_now();
+            std::thread::sleep(Duration::from_micros(100));
         }
         let observed = at.elapsed();
         let publication = side
