@@ -517,3 +517,74 @@ fn level_1_svg_images_without_chromium_fail_with_a_named_error() {
         "a failed export must remove temporary outputs"
     );
 }
+
+/// The production helper is configured but its Chromium is missing: an
+/// SVG-only project fails by name on `render` and `scope` and writes
+/// nothing (no resvg fallback when a helper is configured). Skipped with a
+/// printed reason without `POWERMOVE_ANGLE_HELPER` (a built CLI
+/// dist/native-angle-child.cjs); `POWERMOVE_REQUIRE_ANGLE_HELPER=1` makes
+/// that a failure.
+#[test]
+fn level_1_svg_images_with_the_helper_but_no_browser_fail_by_name() {
+    let helper = match std::env::var("POWERMOVE_ANGLE_HELPER") {
+        Ok(helper) if !helper.is_empty() => helper,
+        _ if std::env::var_os("POWERMOVE_REQUIRE_ANGLE_HELPER").is_some() => {
+            panic!("POWERMOVE_REQUIRE_ANGLE_HELPER is set: set POWERMOVE_ANGLE_HELPER")
+        }
+        _ => {
+            eprintln!(
+                "skipped: this gate needs the production ANGLE helper (set POWERMOVE_ANGLE_HELPER to a built CLI dist/native-angle-child.cjs)"
+            );
+            return;
+        }
+    };
+    let fixture = svg_project("svg-no-browser");
+    let dir = &fixture.0;
+    let project_file = dir.join("p.json");
+    let still = dir.join("svg.png");
+    let scopes = dir.join("scopes");
+    for (command, args) in [
+        (
+            "render",
+            vec![
+                project_file.to_str().unwrap(),
+                "-o",
+                still.to_str().unwrap(),
+                "--format",
+                "still",
+                "--approximate-svg",
+            ],
+        ),
+        (
+            "scope",
+            vec![
+                project_file.to_str().unwrap(),
+                "-o",
+                scopes.to_str().unwrap(),
+                "--approximate-svg",
+            ],
+        ),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_pm-cli"))
+            .arg(command)
+            .args(&args)
+            .env_remove("POWERMOVE_ANGLE_ENDPOINT")
+            .env_remove("POWERMOVE_ANGLE_TOKEN")
+            .env("POWERMOVE_ANGLE_HELPER", &helper)
+            .env("POWERMOVE_CHROMIUM", dir.join("missing-chromium"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{command}: {stderr}");
+        assert!(
+            stderr.contains("chromium-unavailable"),
+            "{command}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("notice (approximate SVG)"),
+            "{command}: a configured helper never falls back to resvg: {stderr}"
+        );
+    }
+    assert!(!still.exists(), "render published a still");
+    assert!(!scopes.join("scope.json").exists(), "scope wrote scopes");
+}
