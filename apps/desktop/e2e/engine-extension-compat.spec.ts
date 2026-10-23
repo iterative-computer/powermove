@@ -837,10 +837,11 @@ test.describe('Use New Engine: existing extensions', () => {
 
   test('editing a large document with a raster override that reads its base copies the document only to seed the raster worker', async ({ session }) => {
     test.setTimeout(360_000);
-    // Drags the overridden ellipse in a document of megabytes of JSON, one
-    // move per presented frame: each move is a revision whose base raster
-    // the override reads (a layer raster drawn by the engine's raster
-    // worker), on the engine and in today's app.
+    // Drags and resizes the overridden ellipse in a document of megabytes
+    // of JSON, one move per presented frame: each move is a revision whose
+    // new base raster the override reads (a layer raster drawn by the
+    // engine's raster worker; content-identical bases are reused, as
+    // today's raster cache reuses them), on the engine and in today's app.
     const drag = (page: Page) => page.evaluate(async () => {
       const PM = (window as any).PM;
       const api = PM.Kernel.api('drag-probe');
@@ -852,7 +853,9 @@ test.describe('Use New Engine: existing extensions', () => {
           const began = performance.now();
           const shown = new Promise<boolean>((resolve) => { presented = () => resolve(true); setTimeout(() => resolve(false), 2000); });
           const before = PM.EngineDoc?.barrier?.revision ?? null;
-          PM.proj.layers.find((l: any) => l.id === 'tinted').p['position.x'].v = 200 + i * 4;
+          const tinted = PM.proj.layers.find((l: any) => l.id === 'tinted');
+          tinted.p['position.x'].v = 200 + i * 4;
+          tinted.d.w = 240 + i;
           // As the app's own edits do (anim.ts): the edit, then a redraw.
           PM.touch();
           PM.invalidate();
