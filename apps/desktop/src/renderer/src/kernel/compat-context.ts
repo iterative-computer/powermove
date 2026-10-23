@@ -86,6 +86,9 @@ export type CompatContextEnv = {
   engine(): boolean;
   /** The compositor's own context (the flag off). */
   legacy(): WebGL2RenderingContext | null;
+  /** Reserve a deferred compositor's WebGL context before mirroring can
+   * claim its canvas as Canvas2D. Only an explicit context read pays this. */
+  beforeContext?(bound: HTMLCanvasElement): void;
   /** Makes the offscreen canvas. */
   makeCanvas?(width: number, height: number): OffscreenCanvas | HTMLCanvasElement;
   /** The engine's canvas presenting over `bound`, when it shows a frame. */
@@ -160,6 +163,7 @@ export class CompatContextHost {
     let state = this.state;
     if (!state || state.bound !== bound || state.lost) {
       this.drop();
+      this.env.beforeContext?.(bound);
       state = this.make(bound);
       if (!state) return null;
       this.state = state;
@@ -730,6 +734,9 @@ export function createCompatContextHost(PM: LegacyPM): CompatContextHost {
   return new CompatContextHost({
     bound: () => (PM?.EngineCanvas?.bound ?? null) as HTMLCanvasElement | null,
     engine: () => !!PM?.EngineRender && !!PM?.EngineCanvas,
-    legacy: () => (PM?.GL?.gl ?? null) as WebGL2RenderingContext | null
+    legacy: () => (PM?.GL?.gl ?? null) as WebGL2RenderingContext | null,
+    beforeContext: (bound) => {
+      if (PM?.GL?.canvas === bound) void PM.GL.gl;
+    }
   });
 }

@@ -80,6 +80,22 @@ function rig(options: { width?: number; height?: number } = {}) {
 }
 
 describe('render.gl.context, the compatibility context', () => {
+  it('reserves a deferred compositor context before creating a mirror, only on explicit context access', () => {
+    const r = rig();
+    const order: string[] = [];
+    r.env.bound.mockReturnValue(r.bound);
+    const host = new CompatContextHost({
+      ...r.env,
+      beforeContext: (bound) => { expect(bound).toBe(r.bound); order.push('reserve WebGL'); },
+      makeCanvas: (...args) => { order.push('compatibility canvas'); return r.env.makeCanvas(...args); }
+    });
+    expect(order).toEqual([]);
+    expect(host.context()).not.toBeNull();
+    expect(order[0]).toBe('reserve WebGL');
+    host.context();
+    expect(order.filter(stage => stage === 'reserve WebGL')).toHaveLength(1);
+  });
+
   it('is the compositor\'s context with the engine off, as today', () => {
     const gl = { canvas: {} };
     expect(compatContext({ GL: { gl } })).toBe(gl);
