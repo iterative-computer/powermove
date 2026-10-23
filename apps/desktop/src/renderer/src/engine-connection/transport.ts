@@ -269,6 +269,10 @@ export class EngineTransport implements TransportDriver {
     const moving = sample.state !== 'stopped' && sample.rate.num !== 0;
     const run = this.run;
     if (run && moving && sample.epoch !== run.before) run.played = true;
+    // A new Play (or an exact Seek during it) has not produced a playing
+    // sample yet. Hold only an old stopped sample: the new run's stopped
+    // seek reply and its eventual end both have a newer epoch.
+    if (run && !run.played && !moving && sample.epoch === run.before) return { time: this.lastTime, playing: false, ended: false };
     const host = this.clock.hostUs(nowMs);
     if (moving && host === null) return null;
     // A run's first sample is anchored where it starts, at a host time

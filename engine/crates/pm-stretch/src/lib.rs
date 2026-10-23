@@ -20,7 +20,16 @@ use std::ffi::{c_int, c_long, c_void};
 use std::ptr::NonNull;
 
 unsafe extern "C" {
+    fn pm_stretch_diag_enable(enabled: c_int);
+    fn pm_stretch_diag_snapshot(packed: *mut u64, capacity: c_int) -> c_int;
     fn pm_stretch_new(channels: c_int, block: c_int, interval: c_int, seed: c_long) -> *mut c_void;
+    fn pm_stretch_new_with_checkpoint(
+        channels: c_int,
+        block: c_int,
+        interval: c_int,
+        seed: c_long,
+        checkpoint: Option<extern "C" fn()>,
+    ) -> *mut c_void;
     fn pm_stretch_free(handle: *mut c_void);
     fn pm_stretch_input_latency(handle: *const c_void) -> c_int;
     fn pm_stretch_output_latency(handle: *const c_void) -> c_int;
@@ -29,6 +38,10 @@ unsafe extern "C" {
     fn pm_stretch_seek_length(handle: *const c_void) -> c_int;
     fn pm_stretch_output_seek_length(handle: *const c_void, rate: f32) -> c_int;
     fn pm_stretch_reset(handle: *mut c_void) -> c_int;
+    fn pm_stretch_reset_with_checkpoint(
+        handle: *mut c_void,
+        checkpoint: Option<extern "C" fn()>,
+    ) -> c_int;
     fn pm_stretch_set_transpose(handle: *mut c_void, factor: f32) -> c_int;
     fn pm_stretch_seek(
         handle: *mut c_void,
@@ -40,6 +53,7 @@ unsafe extern "C" {
         handle: *mut c_void,
         inputs: *const *const f32,
         samples: c_int,
+        checkpoint: Option<extern "C" fn()>,
     ) -> c_int;
     fn pm_stretch_process(
         handle: *mut c_void,
@@ -47,6 +61,7 @@ unsafe extern "C" {
         input_samples: c_int,
         outputs: *const *mut f32,
         output_samples: c_int,
+        checkpoint: Option<extern "C" fn()>,
     ) -> c_int;
     fn pm_stretch_exact(
         handle: *mut c_void,
@@ -60,6 +75,7 @@ unsafe extern "C" {
         outputs: *const *mut f32,
         output_samples: c_int,
         rate: f32,
+        checkpoint: Option<extern "C" fn()>,
     ) -> c_int;
 }
 
@@ -74,6 +90,57 @@ pub const DEFAULT_INTERVAL_SECONDS: f64 = 0.03;
 /// The most channels one stretcher processes (the widest layout pm-media
 /// reports is 24 channels, 22.2).
 pub const MAX_CHANNELS: usize = 32;
+
+/// Native DSP regions measured by the optional process-wide diagnostic.
+#[doc(hidden)]
+pub const DSP_DIAGNOSTIC_REGIONS: [&str; 10] = [
+    "energy",
+    "input-copy",
+    "new-block-setup",
+    "analysis-step",
+    "analysis-fft",
+    "spectrum-step",
+    "synthesis-step",
+    "synthesis-fft",
+    "inter-block-output-run",
+    "logical-step",
+];
+
+/// Native entry points recorded separately by the process-wide diagnostic.
+#[doc(hidden)]
+pub const DSP_DIAGNOSTIC_ENTRIES: [&str; 3] = ["process", "output-seek", "flush"];
+
+#[doc(hidden)]
+pub type DspDiagnosticSnapshot =
+    [[(u64, u16); DSP_DIAGNOSTIC_REGIONS.len()]; DSP_DIAGNOSTIC_ENTRIES.len()];
+
+/// Enable native DSP timing once on an ordinary thread before audio work.
+/// This process-wide diagnostic resets its maxima when enabled.
+#[doc(hidden)]
+pub fn enable_dsp_diagnostics() {
+    // SAFETY: no borrowed buffers; callers enable this before audio work.
+    unsafe { pm_stretch_diag_enable(1) }
+}
+
+/// Process-global maximum thread CPU time and native local step marker per
+/// entry point and region since diagnostics were last enabled. The marker is
+/// not a global ordinal: FFT regions may report a sentinel or local index.
+/// Returns `None` if the native diagnostic cannot fill the fixed-size snapshot.
+#[doc(hidden)]
+pub fn dsp_diagnostic_snapshot() -> Option<DspDiagnosticSnapshot> {
+    let mut packed = [0u64; DSP_DIAGNOSTIC_ENTRIES.len() * DSP_DIAGNOSTIC_REGIONS.len()];
+    // SAFETY: the native function writes at most `capacity` entries to this array.
+    let written = unsafe { pm_stretch_diag_snapshot(packed.as_mut_ptr(), packed.len() as c_int) };
+    if written != packed.len() as c_int {
+        return None;
+    }
+    Some(std::array::from_fn(|entry| {
+        std::array::from_fn(|region| {
+            let value = packed[entry * DSP_DIAGNOSTIC_REGIONS.len() + region];
+            (value >> 16, value as u16)
+        })
+    }))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StretchError {
@@ -124,12 +191,34 @@ impl Stretcher {
         Stretcher::with_config(channels, block, interval, SEED)
     }
 
+    /// Default preset with cooperative checkpoints during native setup.
+    /// The callback must not unwind across the C boundary.
+    pub fn new_with_checkpoint(
+        channels: usize,
+        sample_rate: u32,
+        checkpoint: extern "C" fn(),
+    ) -> Result<Stretcher> {
+        let block = (sample_rate as f64 * DEFAULT_BLOCK_SECONDS) as usize;
+        let interval = (sample_rate as f64 * DEFAULT_INTERVAL_SECONDS) as usize;
+        Self::with_config_inner(channels, block, interval, SEED, Some(checkpoint))
+    }
+
     /// Analysis blocks of `block` samples every `interval` samples.
     pub fn with_config(
         channels: usize,
         block: usize,
         interval: usize,
         seed: i64,
+    ) -> Result<Stretcher> {
+        Self::with_config_inner(channels, block, interval, seed, None)
+    }
+
+    fn with_config_inner(
+        channels: usize,
+        block: usize,
+        interval: usize,
+        seed: i64,
+        checkpoint: Option<extern "C" fn()>,
     ) -> Result<Stretcher> {
         if !(1..=MAX_CHANNELS).contains(&channels) {
             return Err(StretchError::Shape(format!(
@@ -143,12 +232,21 @@ impl Stretcher {
         }
         // SAFETY: plain values; a null return is an allocation failure.
         let raw = unsafe {
-            pm_stretch_new(
-                channels as c_int,
-                block as c_int,
-                interval as c_int,
-                seed as c_long,
-            )
+            match checkpoint {
+                Some(callback) => pm_stretch_new_with_checkpoint(
+                    channels as c_int,
+                    block as c_int,
+                    interval as c_int,
+                    seed as c_long,
+                    Some(callback),
+                ),
+                None => pm_stretch_new(
+                    channels as c_int,
+                    block as c_int,
+                    interval as c_int,
+                    seed as c_long,
+                ),
+            }
         };
         let handle = NonNull::new(raw).ok_or(StretchError::Alloc)?;
         Ok(Stretcher {
@@ -202,6 +300,13 @@ impl Stretcher {
     pub fn reset(&mut self) -> Result<()> {
         // SAFETY: a live handle.
         status(unsafe { pm_stretch_reset(self.handle.as_ptr()) })
+    }
+
+    /// Resets the seeded state with cooperative native setup checkpoints.
+    /// A failed reset leaves the previous native state intact.
+    pub fn reset_with_checkpoint(&mut self, checkpoint: extern "C" fn()) -> Result<()> {
+        // SAFETY: a live handle; the callback must not unwind across FFI.
+        status(unsafe { pm_stretch_reset_with_checkpoint(self.handle.as_ptr(), Some(checkpoint)) })
     }
 
     /// Shifts every frequency by `factor` (1: none).
@@ -266,16 +371,59 @@ impl Stretcher {
     /// [`Self::output_seek_length`] samples for the rate to come): the next
     /// output of [`Self::process`] is aligned with that sample.
     pub fn output_seek(&mut self, input: &[&[f32]]) -> Result<()> {
+        self.output_seek_inner(input, None)
+    }
+
+    /// The same output seek, with checkpoints inside its pre-roll processing.
+    /// The callback must not panic or unwind over C++.
+    pub fn output_seek_with_checkpoint(
+        &mut self,
+        input: &[&[f32]],
+        checkpoint: extern "C" fn(),
+    ) -> Result<()> {
+        self.output_seek_inner(input, Some(checkpoint))
+    }
+
+    fn output_seek_inner(
+        &mut self,
+        input: &[&[f32]],
+        checkpoint: Option<extern "C" fn()>,
+    ) -> Result<()> {
         let n = self.input_pointers(input)?;
         // SAFETY: as in `seek`.
         status(unsafe {
-            pm_stretch_output_seek(self.handle.as_ptr(), self.inputs.as_ptr(), n as c_int)
+            pm_stretch_output_seek(
+                self.handle.as_ptr(),
+                self.inputs.as_ptr(),
+                n as c_int,
+                checkpoint,
+            )
         })
     }
 
     /// Consumes every sample of `input` and fills every sample of `output`.
     /// `input` may be empty (a frozen spectrum, or silence).
     pub fn process(&mut self, input: &[&[f32]], output: &mut [&mut [f32]]) -> Result<()> {
+        self.process_inner(input, output, None)
+    }
+
+    /// The same processing call, with a cooperative callback before each
+    /// indivisible DSP step. The callback must not panic or unwind over C++.
+    pub fn process_with_checkpoint(
+        &mut self,
+        input: &[&[f32]],
+        output: &mut [&mut [f32]],
+        checkpoint: extern "C" fn(),
+    ) -> Result<()> {
+        self.process_inner(input, output, Some(checkpoint))
+    }
+
+    fn process_inner(
+        &mut self,
+        input: &[&[f32]],
+        output: &mut [&mut [f32]],
+        checkpoint: Option<extern "C" fn()>,
+    ) -> Result<()> {
         let n_in = if input.is_empty() {
             for p in &mut self.inputs {
                 *p = std::ptr::null();
@@ -295,12 +443,33 @@ impl Stretcher {
                 n_in as c_int,
                 self.outputs.as_ptr(),
                 n_out as c_int,
+                checkpoint,
             )
         })
     }
 
     /// Reads the remaining output with no further input.
     pub fn flush(&mut self, output: &mut [&mut [f32]], rate: f64) -> Result<()> {
+        self.flush_inner(output, rate, None)
+    }
+
+    /// The same flush, with checkpoints inside any tail processing.
+    /// The callback must not panic or unwind over C++.
+    pub fn flush_with_checkpoint(
+        &mut self,
+        output: &mut [&mut [f32]],
+        rate: f64,
+        checkpoint: extern "C" fn(),
+    ) -> Result<()> {
+        self.flush_inner(output, rate, Some(checkpoint))
+    }
+
+    fn flush_inner(
+        &mut self,
+        output: &mut [&mut [f32]],
+        rate: f64,
+        checkpoint: Option<extern "C" fn()>,
+    ) -> Result<()> {
         let n = self.output_pointers(output)?;
         // SAFETY: as in `process`.
         status(unsafe {
@@ -309,6 +478,7 @@ impl Stretcher {
                 self.outputs.as_ptr(),
                 n as c_int,
                 rate as f32,
+                checkpoint,
             )
         })
     }
@@ -359,6 +529,90 @@ impl std::fmt::Debug for Stretcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn optional_dsp_diagnostics_preserve_pcm_and_report_native_steps() {
+        extern "C" fn checkpoint() {}
+
+        fn render(channels: usize, rate: f64) -> Vec<u32> {
+            let mut stretch = Stretcher::new(channels, 48_000).unwrap();
+            let input: Vec<Vec<f32>> = (0..channels)
+                .map(|channel| {
+                    (0..65_536)
+                        .map(|i| ((i as f32 * 0.013) + channel as f32 * 0.37).sin() * 0.25)
+                        .collect()
+                })
+                .collect();
+            let lead = stretch.output_seek_length(rate);
+            let seek: Vec<&[f32]> = input.iter().map(|channel| &channel[..lead]).collect();
+            stretch
+                .output_seek_with_checkpoint(&seek, checkpoint)
+                .unwrap();
+            let interval = stretch.interval_samples();
+            let mut output = Vec::new();
+            let mut blocks = vec![vec![0.0; interval]; channels];
+            let mut fed = lead;
+            for step in 0..8 {
+                let produced = (step + 1) * interval;
+                let want = (lead as f64 + produced as f64 * rate).round() as usize;
+                let read: Vec<&[f32]> = input.iter().map(|channel| &channel[fed..want]).collect();
+                {
+                    let mut write: Vec<&mut [f32]> =
+                        blocks.iter_mut().map(Vec::as_mut_slice).collect();
+                    stretch
+                        .process_with_checkpoint(&read, &mut write, checkpoint)
+                        .unwrap();
+                }
+                for frame in 0..interval {
+                    for channel in &blocks {
+                        output.push(channel[frame].to_bits());
+                    }
+                }
+                fed = want;
+            }
+            output
+        }
+
+        struct DisableDiagnostics;
+        impl Drop for DisableDiagnostics {
+            fn drop(&mut self) {
+                // SAFETY: no borrowed buffers; changing the diagnostic does not
+                // change the stretcher or its PCM output.
+                unsafe { pm_stretch_diag_enable(0) }
+            }
+        }
+
+        let _disable = DisableDiagnostics;
+        // SAFETY: test setup runs on an ordinary thread, outside native DSP.
+        unsafe { pm_stretch_diag_enable(0) }
+        let variants = [(1, 1.5), (1, 1.6), (2, 1.5), (2, 1.6)];
+        let reference: Vec<_> = variants
+            .iter()
+            .map(|&(channels, rate)| render(channels, rate))
+            .collect();
+        let disabled = dsp_diagnostic_snapshot().expect("all native diagnostic regions");
+        assert!(
+            disabled
+                .iter()
+                .flatten()
+                .all(|&(ns, marker)| ns == 0 && marker == 0)
+        );
+        enable_dsp_diagnostics();
+        for ((channels, rate), expected) in variants.into_iter().zip(reference) {
+            assert_eq!(
+                expected,
+                render(channels, rate),
+                "{channels} channels at {rate}x"
+            );
+        }
+        let snapshot = dsp_diagnostic_snapshot().expect("all native diagnostic regions");
+        assert_eq!(snapshot.len(), DSP_DIAGNOSTIC_ENTRIES.len());
+        assert!(snapshot[1].iter().any(|(ns, _)| *ns > 0));
+        for region in [3, 5, 6, 9] {
+            assert!(snapshot[0][region].0 > 0, "process region {region}");
+        }
+    }
 
     #[test]
     fn rejects_bad_shapes() {

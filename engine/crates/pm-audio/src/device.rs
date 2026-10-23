@@ -319,19 +319,20 @@ impl OutputStream {
     }
 }
 
-/// The output I/O buffer today's app runs at, so the real-time deadline,
-/// callback rate and underrun margin are the same. Chromium's macOS output
-/// (`AudioManagerMac::ChooseBufferSize`, used by WebAudio's "interactive"
-/// latency hint) asks for 256 frames up to 96 kHz and 512 above, clamped to
-/// the device's I/O range; the app measured `AudioContext.baseLatency`
-/// 5.333 ms (256 frames at 48 kHz). The 128-frame WebAudio render quantum
-/// is not the device buffer: requesting it halves the deadline and doubles
-/// wakeups, which Chromium avoids because CoreAudio underruns under load.
-/// Without a fixed size the HAL default can be 512 frames, adding up to a
-/// further 10.7 ms to an interactive start. Devices with larger minima keep
-/// them (the producer adapts its reserve to the actual callback size).
+/// Bound 44.1/48 kHz callback phase to about 1.5 ms.
+/// The callback only copies already mixed PCM and publishes its clock; DSP
+/// stays on the producer with its callback-adapted reserve. Unlike today's
+/// WebAudio graph, it can request 64 frames through 48 kHz without putting
+/// mixing on that tighter deadline. Higher rates keep 256/512 frames.
+/// Clamp to the device's advertised range; unknown ranges use its default.
 fn interactive_buffer(supported: &cpal::SupportedBufferSize, sample_rate: u32) -> cpal::BufferSize {
-    let frames = if sample_rate > 96_000 { 512 } else { 256 };
+    let frames = if sample_rate > 96_000 {
+        512
+    } else if sample_rate > 48_000 {
+        256
+    } else {
+        64
+    };
     match *supported {
         cpal::SupportedBufferSize::Range { min, max } => {
             cpal::BufferSize::Fixed(frames.clamp(min, max))
@@ -345,10 +346,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interactive_buffer_matches_todays_output_buffer() {
+    fn interactive_buffer_bounds_callback_phase_within_device_limits() {
         use cpal::{BufferSize::*, SupportedBufferSize::Range};
         let wide = Range { min: 14, max: 4096 };
-        for rate in [44_100, 48_000, 88_200, 96_000] {
+        for rate in [44_100, 48_000] {
+            assert_eq!(interactive_buffer(&wide, rate), Fixed(64), "{rate}");
+        }
+        for rate in [88_200, 96_000] {
             assert_eq!(interactive_buffer(&wide, rate), Fixed(256), "{rate}");
         }
         for rate in [176_400, 192_000] {

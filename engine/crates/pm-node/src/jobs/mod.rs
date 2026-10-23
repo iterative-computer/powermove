@@ -35,6 +35,7 @@
 pub(crate) mod compat;
 mod compile;
 mod definitions;
+mod encode;
 mod fallback;
 pub mod gate;
 mod svg;
@@ -51,7 +52,7 @@ use pm_engine::priority::Scheduler;
 use pm_export::render::{
     ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
     encode_jpeg, encode_png, offline_media, plan_export_for, render_still, run_export_into,
-    sink_for, to_rgba8,
+    sink_for_with, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
 use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
@@ -374,7 +375,22 @@ impl Shared {
     }
 }
 
-impl fallback::HostPort for Shared {
+/// The host port as the job engine's helpers use it (the fallback runner,
+/// the host encoder): calls made from a lane thread, answered by the
+/// engine's host connection.
+pub(crate) trait HostPort: Send + Sync {
+    fn call(&self, request: Request, session: Option<SessionId>) -> Result<Response, EngineError>;
+    /// One call answered by `deadline`, or `None` once `cancel` is set.
+    fn call_until(
+        &self,
+        request: Request,
+        session: Option<SessionId>,
+        deadline: Instant,
+        cancel: &AtomicBool,
+    ) -> Option<Result<Response, EngineError>>;
+}
+
+impl HostPort for Shared {
     fn call(&self, request: Request, session: Option<SessionId>) -> Result<Response, EngineError> {
         Shared::call(self, request, session)
     }
@@ -1521,7 +1537,16 @@ fn run_job(
             Some(session),
         );
     };
-    let sink = match sink_for(&plan) {
+    // Opaque WebM goes to the host's WebCodecs encoders, as today's
+    // exporter encodes it (decision EXPORT-1).
+    let encoder: Box<dyn pm_export::webcodecs::EncodeHost> = Box::new(encode::HostEncoder::new(
+        shared.clone(),
+        session,
+        job.clone(),
+        cancel.clone(),
+        dest.handle.clone(),
+    ));
+    let sink = match sink_for_with(&plan, Some(encoder)) {
         Ok(s) => s,
         Err(e) => {
             discard(shared);

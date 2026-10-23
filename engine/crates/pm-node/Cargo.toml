@@ -58,8 +58,11 @@ remote-layer = ["pm-gpu/remote-layer"]
 test-hooks = []
 
 [dev-dependencies]
+tempfile = "3"
 dhat = "0.3"
 pm-model = { path = "../pm-model" }
+# Export frame rates in the WebCodecs encode tests.
+pm-time = { path = "../pm-time" }
 # The audio status test holds and fails decoders (pm-audio's test hooks).
 pm-audio = { path = "../pm-audio", features = ["test-hooks"] }
 pm-node = { path = ".", features = ["test-hooks"] }

@@ -27,6 +27,7 @@ encoding_rs = "0.8"
 
 [dev-dependencies]
 pm-color = { path = "../pm-color" }
+tempfile = "3.27"
 
 [build-dependencies]
 bindgen = "0.72"

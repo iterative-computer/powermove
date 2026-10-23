@@ -347,25 +347,27 @@ impl Drop for BackgroundHasher {
 mod tests {
     use super::*;
 
-    fn tmp(name: &str, bytes: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pm-media-hash-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join(name);
+    fn tmp(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> PathBuf {
+        let p = dir.path().join(name);
         std::fs::write(&p, bytes).unwrap();
         p
     }
 
     #[test]
     fn fingerprint_matches_the_typescript_algorithm() {
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-hash-")
+            .tempdir()
+            .unwrap();
         // Small file: one sample of the whole file, offsets deduplicated.
-        let p = tmp("small.bin", b"hello");
+        let p = tmp(&dir, "small.bin", b"hello");
         let mut h = Sha256::new();
         h.update(b"powermove-media-v2\n5\nhello");
         let want: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(sampled_fingerprint(&p).unwrap(), format!("v2:5:{want}"));
         // Large file: start, middle, end samples.
         let data: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
-        let p = tmp("large.bin", &data);
+        let p = tmp(&dir, "large.bin", &data);
         let mut h = Sha256::new();
         h.update(b"powermove-media-v2\n300000\n");
         let mid = (300_000 - 65_536) / 2;
@@ -381,12 +383,16 @@ mod tests {
 
     #[test]
     fn fingerprints_hint_and_full_hashes_decide() {
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-hash-")
+            .tempdir()
+            .unwrap();
         // Same size and the same three sampled windows, different bytes
         // between them: the fingerprints collide.
         let mut a: Vec<u8> = (0..400_000u32).map(|i| (i % 249) as u8).collect();
-        let pa = tmp("collide-a.bin", &a);
+        let pa = tmp(&dir, "collide-a.bin", &a);
         a[100_000] ^= 0xff;
-        let pb = tmp("collide-b.bin", &a);
+        let pb = tmp(&dir, "collide-b.bin", &a);
         let (fa, fb) = (
             sampled_fingerprint(&pa).unwrap(),
             sampled_fingerprint(&pb).unwrap(),
@@ -422,8 +428,12 @@ mod tests {
 
     #[test]
     fn background_hash_waits_for_a_settled_file() {
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-hash-")
+            .tempdir()
+            .unwrap();
         let data = vec![7u8; 3 << 20];
-        let p = tmp("bg.bin", &data);
+        let p = tmp(&dir, "bg.bin", &data);
         let hasher = BackgroundHasher::new(Settle {
             quiet: Duration::from_millis(300),
             poll: Duration::from_millis(20),

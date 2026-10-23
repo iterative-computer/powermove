@@ -1,6 +1,6 @@
 import { agentExportDestination } from './agent-export';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtemp, rm, stat, copyFile, appendFile, link } from 'node:fs/promises';
+import { mkdtemp, rm, stat, copyFile, appendFile, link, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { app, BrowserWindow, dialog, type IpcMain } from 'electron';
@@ -19,7 +19,7 @@ export function takeRoutedDestination(owner:number,extension:string,now=Date.now
   return routed&&now-routed.at<=ROUTED_TTL_MS&&path.extname(routed.file).slice(1).toLowerCase()===extension?routed.file:undefined;
 }
 export type EncoderOptions={width:number;height:number;fps:number;format:'prores'|'mp4';alpha:boolean;name:string;bitrateMbps?:number;expectsAudio?:boolean};
-type Job={destination?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;mux?:{process:ChildProcessWithoutNullStreams;done:Promise<void>};bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string;retained?:Uint8Array;pendingFrame?:Uint8Array};
+type Job={destination?:string;capture?:string;dir:string;file:string;audio:string;process:ChildProcessWithoutNullStreams;done:Promise<void>;mux?:{process:ChildProcessWithoutNullStreams;done:Promise<void>};bytes:number;frameBytes:number;frames:number;options:EncoderOptions;owner:number;error:string;retained?:Uint8Array;pendingFrame?:Uint8Array};
 /* CICP 1-13-1, limited range: "Rec.709 (QuickTime and Safari)" (plan section 9,
    S2). VideoToolbox takes primaries and transfer from the frames' attachments,
    not from the output options, so the frames are tagged too (setparams).
@@ -59,10 +59,14 @@ export async function deliverEncodedVideo(source: string, destination: string): 
 export class RenderEncoder {
   jobs=new Map<string,Job>();
   constructor(readonly binary:string,readonly tempRoot:string){}
-  async start(raw:unknown,owner:number){const options=validateEncoderOptions(raw),dir=await mkdtemp(path.join(this.tempRoot,'powermove-render-')),file=path.join(dir,options.format==='prores'?'video.mov':'video.mp4');
+  async start(raw:unknown,owner:number){const options=validateEncoderOptions(raw);
+    // Parity captures are explicit, hidden-test-only, and owned by the harness.
+    const capture=process.env['POWERMOVE_BACKGROUND_TEST']==='1'?process.env['PM_EXPORT_INPUT_CAPTURE_DIR']:undefined;
+    if(capture){await writeFile(path.join(capture,'legacy.rgba'),new Uint8Array(),{mode:0o600});await writeFile(path.join(capture,'legacy.wav'),new Uint8Array(),{mode:0o600});}
+    const dir=await mkdtemp(path.join(this.tempRoot,'powermove-render-')),file=path.join(dir,options.format==='prores'?'video.mov':'video.mp4');
     const proc=spawn(this.binary,encoderArgs(options,file),{stdio:['pipe','pipe','pipe']});let error='';proc.stderr.on('data',d=>{error=(error+d.toString()).slice(-8000);});
     const done=new Promise<void>((resolve,reject)=>{proc.once('error',reject);proc.once('close',code=>code===0?resolve():reject(new Error(error||'Video encoder stopped')));});done.catch(()=>undefined);proc.stdin.on('error',()=>undefined);
-    const token=randomUUID();this.jobs.set(token,{dir,file,audio:path.join(dir,'audio.wav'),process:proc,done,bytes:0,frameBytes:options.width*options.height*4,frames:0,options,owner,error});return token;
+    const token=randomUUID();this.jobs.set(token,{capture,dir,file,audio:path.join(dir,'audio.wav'),process:proc,done,bytes:0,frameBytes:options.width*options.height*4,frames:0,options,owner,error});return token;
   }
   job(token:string,owner:number){const job=this.jobs.get(token);if(!job||job.owner!==owner)throw new Error('Unknown render job');return job;}
   async write(token: string, owner: number, data: Uint8Array, audio = false, retain = false) {
@@ -70,6 +74,7 @@ export class RenderEncoder {
     if (!(data instanceof Uint8Array) || data.byteLength === 0 || data.byteLength > 4 * 1024 * 1024) {
       throw new Error('Invalid render chunk');
     }
+    if (job.capture) await appendFile(path.join(job.capture, audio ? 'legacy.wav' : 'legacy.rgba'), data);
     if (audio) { await appendFile(job.audio, data); return; }
     if (retain) {
       // Retain one explicitly marked frame, assembled from bounded IPC chunks.
@@ -104,6 +109,7 @@ export class RenderEncoder {
         await job.done;
         throw new Error('Video encoder stopped');
       }
+      if (job.capture) await appendFile(path.join(job.capture, 'legacy.rgba'), frame);
       await new Promise<void>((resolve, reject) => job.process.stdin.write(frame, error => error ? reject(error) : resolve()));
       job.bytes += frame.byteLength;
     }

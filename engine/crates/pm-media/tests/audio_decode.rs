@@ -5,6 +5,7 @@
 use pm_media::audio::{AudioDecoder, Speaker};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::TempDir;
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../apps/desktop/e2e/fixtures")
@@ -20,11 +21,10 @@ fn ffmpeg() -> PathBuf {
     dir.join("bin/ffmpeg")
 }
 
-/// Generates a file with `ffmpeg -f lavfi -i <source> <args> <out>` once per test run.
-fn generated(name: &str, source: &str, args: &[&str]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pm-media-audio-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let out = dir.join(name);
+/// Generates a file with `ffmpeg -f lavfi -i <source> <args> <out>` in the
+/// caller's test directory, which remains alive while decoders use the file.
+fn generated(dir: &TempDir, name: &str, source: &str, args: &[&str]) -> PathBuf {
+    let out = dir.path().join(name);
     if !out.exists() {
         let status = Command::new(ffmpeg())
             .args([
@@ -49,8 +49,8 @@ fn generated(name: &str, source: &str, args: &[&str]) -> PathBuf {
 /// HE-AAC (AAC with SBR) from macOS's `afconvert`, in M4A and remuxed to
 /// Matroska; our LGPL FFmpeg build has no HE-AAC encoder. `None` where
 /// `afconvert` is missing (not macOS).
-fn he_aac(stem: &str, source: &str) -> Option<(PathBuf, PathBuf)> {
-    let files = afconvert_aac(stem, source, "aach", "64000", &["mkv"])?;
+fn he_aac(dir: &TempDir, stem: &str, source: &str) -> Option<(PathBuf, PathBuf)> {
+    let files = afconvert_aac(dir, stem, source, "aach", "64000", &["mkv"])?;
     Some((files[0].clone(), files[1].clone()))
 }
 
@@ -59,13 +59,14 @@ fn he_aac(stem: &str, source: &str) -> Option<(PathBuf, PathBuf)> {
 /// of `remux` (extensions). Returns the M4A first. `None` where `afconvert`
 /// is missing (not macOS).
 fn afconvert_aac(
+    dir: &TempDir,
     stem: &str,
     source: &str,
     format: &str,
     bitrate: &str,
     remux: &[&str],
 ) -> Option<Vec<PathBuf>> {
-    let wav = generated(&format!("{stem}.wav"), source, &["-c:a", "pcm_s16le"]);
+    let wav = generated(dir, &format!("{stem}.wav"), source, &["-c:a", "pcm_s16le"]);
     let m4a = wav.with_extension("m4a");
     if !m4a.exists() {
         let status = Command::new("afconvert")
@@ -190,12 +191,18 @@ fn priming_is_reported() {
 /// only the alignment is checked (the best match over ±64 samples is at 0).
 #[test]
 fn seeks_land_on_the_exact_sample() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-audio-")
+        .tempdir()
+        .unwrap();
     let flac44 = generated(
+        &dir,
         "noise-44k.flac",
         "anoisesrc=color=white:sample_rate=44100:amplitude=0.5:duration=20:seed=7",
         &["-ac", "2", "-c:a", "flac"],
     );
     let aac44 = generated(
+        &dir,
         "noise-44k.m4a",
         "anoisesrc=color=pink:sample_rate=44100:amplitude=0.5:duration=20:seed=7",
         &["-ac", "2", "-c:a", "aac", "-b:a", "192k"],
@@ -276,7 +283,12 @@ fn seeks_land_on_the_exact_sample() {
 /// gives the same samples whatever was decoded in between.
 #[test]
 fn seeks_are_deterministic() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-audio-")
+        .tempdir()
+        .unwrap();
     let aac = generated(
+        &dir,
         "noise-44k-det.m4a",
         "anoisesrc=color=pink:sample_rate=44100:amplitude=0.5:duration=8:seed=3",
         &["-ac", "2", "-c:a", "aac", "-b:a", "128k"],
@@ -296,7 +308,12 @@ fn seeks_are_deterministic() {
 
 #[test]
 fn layouts_and_rates() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-audio-")
+        .tempdir()
+        .unwrap();
     let mono = generated(
+        &dir,
         "mono-22k.wav",
         "sine=frequency=1000:sample_rate=22050:duration=1",
         &["-c:a", "pcm_s24le"],
@@ -306,6 +323,7 @@ fn layouts_and_rates() {
     assert_eq!(d.info().speakers, vec![Speaker::FrontCenter]);
     assert_eq!(d.info().length, Some(22_050));
     let surround = generated(
+        &dir,
         "surround.flac",
         "sine=frequency=500:sample_rate=48000:duration=1",
         &[
@@ -329,6 +347,7 @@ fn layouts_and_rates() {
     );
     // A long file streams without holding it: read in chunks and count.
     let long = generated(
+        &dir,
         "long.flac",
         "sine=frequency=100:sample_rate=48000:duration=600",
         &["-c:a", "flac"],
@@ -351,6 +370,10 @@ fn layouts_and_rates() {
 /// Section 13's audio formats decode to their full program length.
 #[test]
 fn container_formats() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-audio-")
+        .tempdir()
+        .unwrap();
     for (name, args) in [
         ("t.aiff", &["-c:a", "pcm_s16be"][..]),
         ("t.caf", &["-c:a", "pcm_s24le"][..]),
@@ -361,6 +384,7 @@ fn container_formats() {
         ("t.mkv", &["-c:a", "flac"][..]),
     ] {
         let file = generated(
+            &dir,
             name,
             "sine=frequency=500:sample_rate=48000:duration=3",
             args,
@@ -475,7 +499,12 @@ fn shift_ts_timestamps(src: &Path, dst: &Path, from: i64, delta: i64) -> usize {
 /// the stream after the jump agree.
 #[test]
 fn gaps_are_silence_and_overlaps_are_dropped() {
+    let generated_dir = tempfile::Builder::new()
+        .prefix("pm-media-audio-")
+        .tempdir()
+        .unwrap();
     let ramp = generated(
+        &generated_dir,
         "ramp302.ts",
         "aevalsrc=exprs='n/8388608|n/8388608':s=48000:d=4",
         &["-c:a", "s302m", "-strict", "-2"],
@@ -557,6 +586,10 @@ fn gaps_are_silence_and_overlaps_are_dropped() {
 /// frame early.
 #[test]
 fn coarse_timebase_seeks_start_near_their_target() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-audio-")
+        .tempdir()
+        .unwrap();
     let source = "aevalsrc=exprs='0.3*sin(2*PI*440*t)+0.2*sin(2*PI*3001*t)|0.3*sin(2*PI*660*t)':s=48000:d=40";
     let mut files = vec![];
     for (name, args, lossless) in [
@@ -580,9 +613,13 @@ fn coarse_timebase_seeks_start_near_their_target() {
         ("c-pcm.mkv", &["-c:a", "pcm_s24le"][..], true),
         ("c-alac.mkv", &["-c:a", "alac"][..], true),
     ] {
-        files.push((name.to_string(), generated(name, source, args), lossless));
+        files.push((
+            name.to_string(),
+            generated(&dir, name, source, args),
+            lossless,
+        ));
     }
-    match he_aac("c-aac-he", source) {
+    match he_aac(&dir, "c-aac-he", source) {
         Some((m4a, mkv)) => {
             files.push(("c-aac-he.m4a".into(), m4a, false));
             files.push(("c-aac-he.mkv".into(), mkv, false));
@@ -591,7 +628,7 @@ fn coarse_timebase_seeks_start_near_their_target() {
     }
     // HE-AAC v2: a fresh decoder has no stereo until a Parametric Stereo
     // header, which Apple's encoder repeats about every 1.8 s.
-    match afconvert_aac("c-aac-ps", source, "aacp", "32000", &["mkv"]) {
+    match afconvert_aac(&dir, "c-aac-ps", source, "aacp", "32000", &["mkv"]) {
         Some(ps) => {
             files.push(("c-aac-ps.m4a".into(), ps[0].clone(), false));
             files.push(("c-aac-ps.mkv".into(), ps[1].clone(), false));
@@ -720,11 +757,16 @@ fn coarse_timebase_seeks_start_near_their_target() {
 /// 1.9 s.
 #[test]
 fn he_aac_v2_blocks_match_the_sequential_decode() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-audio-")
+        .tempdir()
+        .unwrap();
     let mut covered = 0;
     for rate in [32_000, 44_100, 48_000] {
         let source =
             format!("aevalsrc=exprs='0.3*sin(2*PI*440*t)|0.3*sin(2*PI*660*t)':s={rate}:d=40");
         let Some(files) = afconvert_aac(
+            &dir,
             &format!("ps-{rate}"),
             &source,
             "aacp",
@@ -776,7 +818,7 @@ fn he_aac_v2_blocks_match_the_sequential_decode() {
     assert_eq!(covered, 12);
     // HE-AAC v1 keeps AAC's short pre-roll.
     let source = "aevalsrc=exprs='0.3*sin(2*PI*440*t)|0.3*sin(2*PI*660*t)':s=48000:d=5";
-    if let Some((m4a, _)) = he_aac("he-v1-short", source) {
+    if let Some((m4a, _)) = he_aac(&dir, "he-v1-short", source) {
         let d = AudioDecoder::open(&m4a, None).unwrap();
         assert!(!d.info().parametric_stereo);
         assert_eq!(d.info().preroll, 4_096);
@@ -791,8 +833,12 @@ fn he_aac_v2_blocks_match_the_sequential_decode() {
 /// target across two anchor spacings now starts from its anchor.
 #[test]
 fn he_aac_seeks_inside_the_codec_delay_window() {
+    let dir = tempfile::Builder::new()
+        .prefix("pm-media-audio-")
+        .tempdir()
+        .unwrap();
     let source = "aevalsrc=exprs='0.3*sin(2*PI*440*t)+0.2*sin(2*PI*3001*t)|0.3*sin(2*PI*660*t)':s=48000:d=40";
-    let Some((m4a, mkv)) = he_aac("c-aac-he", source) else {
+    let Some((m4a, mkv)) = he_aac(&dir, "c-aac-he", source) else {
         eprintln!("afconvert is missing: HE-AAC not covered");
         return;
     };
