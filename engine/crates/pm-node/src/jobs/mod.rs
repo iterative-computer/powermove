@@ -552,17 +552,26 @@ pub struct StatsHandle(Arc<Shared>);
 
 impl StatsHandle {
     pub fn json(&self) -> serde_json::Value {
-        let gpu_created = self
-            .0
-            .gpu
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
+        let gpu = self.0.gpu.lock().unwrap_or_else(|e| e.into_inner());
+        let gpu_created = gpu.is_some();
+        let metal_device = gpu
+            .as_ref()
+            .and_then(|(device, _)| pm_gpu::device::metal_device_allocation(device))
+            .map(|allocation| {
+                serde_json::json!({
+                    "currentAllocatedBytes": allocation.current_allocated_bytes,
+                    "recommendedMaxWorkingSetBytes": allocation.recommended_max_working_set_bytes,
+                    "unifiedMemory": allocation.unified_memory,
+                    "maxTransferBytesPerSecond": allocation.max_transfer_bytes_per_second,
+                })
+            });
+        drop(gpu);
         let st = self.0.lock();
         serde_json::json!({
             "service": st.stats,
             "gate": self.0.gate.stats(),
             "gpuCreated": gpu_created,
+            "metalDevice": metal_device,
             "queued": {
                 "snapshots": st.snapshots.len(),
                 "agentExports": st.agent_exports.len(),

@@ -24,6 +24,9 @@ pub mod present;
 #[cfg(target_os = "macos")]
 pub mod jobs;
 
+#[cfg(target_os = "macos")]
+mod memory;
+
 pub mod fonts;
 
 /// Parses `"interactive"` or `"job"`.
@@ -79,6 +82,8 @@ pub struct EngineHost {
     #[cfg(target_os = "macos")]
     control: Option<present::PresenterControl>,
     jobs: Option<JobStats>,
+    #[cfg(target_os = "macos")]
+    memory_inventory: bool,
     /// The font service: created with the host when it runs on the
     /// process's main thread (AppKit's font manager), else when main first
     /// attaches a font port.
@@ -105,6 +110,8 @@ impl EngineHost {
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         apply_process_qos(process)?;
+        #[cfg(target_os = "macos")]
+        let memory_inventory = env("POWERMOVE_ENGINE_ALLOCATION_INVENTORY").as_deref() == Some("1");
         #[allow(unused_mut)]
         let mut engine = Engine::new(EngineConfig::new(process));
         // Render threads lay text out over the font service (both engines:
@@ -171,6 +178,8 @@ impl EngineHost {
             #[cfg(target_os = "macos")]
             control,
             jobs: job_stats,
+            #[cfg(target_os = "macos")]
+            memory_inventory,
             fonts: font_service,
             font_ports: Default::default(),
             font_hub,
@@ -376,6 +385,13 @@ impl EngineHost {
     pub fn status_json(&self) -> String {
         let mut value = serde_json::to_value(self.status()).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
+            #[cfg(target_os = "macos")]
+            if self.memory_inventory {
+                object.insert(
+                    "mallocMemory".into(),
+                    serde_json::to_value(memory::sample()).unwrap_or_default(),
+                );
+            }
             object.insert("qos".into(), current_qos().into());
             object.insert("fontPorts".into(), self.font_ports.len().into());
             object.insert(
@@ -438,6 +454,26 @@ mod tests {
         assert!(parse_process("Job").is_err());
         assert_eq!(parse_peer("peer"), Ok(PeerKind::PeerEngine));
         assert!(parse_peer("main").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn malloc_attribution_is_opt_in_and_reports_process_zones() {
+        let ordinary = EngineHost::with_sink(EngineProcess::Interactive, None, |_| None).unwrap();
+        let ordinary: serde_json::Value = serde_json::from_str(&ordinary.status_json()).unwrap();
+        assert!(ordinary.get("mallocMemory").is_none());
+        let measured = EngineHost::with_sink(EngineProcess::Interactive, None, |key| {
+            (key == "POWERMOVE_ENGINE_ALLOCATION_INVENTORY").then(|| "1".into())
+        })
+        .unwrap();
+        let measured: serde_json::Value = serde_json::from_str(&measured.status_json()).unwrap();
+        let malloc = &measured["mallocMemory"];
+        assert!(malloc["blocksInUse"].as_u64().unwrap() > 0);
+        assert!(malloc["sizeInUseBytes"].as_u64().unwrap() > 0);
+        assert!(
+            malloc["reservedBytes"].as_u64().unwrap() >= malloc["sizeInUseBytes"].as_u64().unwrap()
+        );
+        assert_eq!(malloc.as_object().unwrap().len(), 4);
     }
 
     #[test]

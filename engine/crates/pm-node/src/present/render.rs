@@ -655,7 +655,50 @@ pub struct AllocationInventory {
     /// buffer, texture and heap the driver holds for it, measured rather
     /// than nominal (`pm_gpu::device::allocated_bytes`).
     pub metal_allocated_bytes: Option<u64>,
+    /// Public Metal device counters; capacity and transfer rate are adapter
+    /// properties, not resident-memory measurements.
+    pub metal_device: Option<MetalDeviceInventory>,
+    /// The cached snapshot attachment's own Metal resource allocation.
+    /// This can overlap heap or IOSurface allocations and is not additive
+    /// with the device-wide counter.
+    pub metal_snapshot_texture: Option<MetalTextureInventory>,
     pub renderer: Option<RendererAllocation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetalDeviceInventory {
+    pub current_allocated_bytes: u64,
+    pub recommended_max_working_set_bytes: Option<u64>,
+    pub unified_memory: Option<bool>,
+    pub max_transfer_bytes_per_second: Option<u64>,
+}
+
+impl From<pm_gpu::device::MetalDeviceAllocation> for MetalDeviceInventory {
+    fn from(value: pm_gpu::device::MetalDeviceAllocation) -> Self {
+        Self {
+            current_allocated_bytes: value.current_allocated_bytes,
+            recommended_max_working_set_bytes: value.recommended_max_working_set_bytes,
+            unified_memory: value.unified_memory,
+            max_transfer_bytes_per_second: value.max_transfer_bytes_per_second,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetalTextureInventory {
+    pub allocated_bytes: u64,
+    pub heap_backed: bool,
+}
+
+impl From<pm_gpu::device::MetalTextureAllocation> for MetalTextureInventory {
+    fn from(value: pm_gpu::device::MetalTextureAllocation) -> Self {
+        Self {
+            allocated_bytes: value.allocated_bytes,
+            heap_backed: value.heap_backed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -666,6 +709,8 @@ pub struct ViewAllocation {
     pub color: Option<SurfaceAllocation>,
     pub depth: Option<SurfaceAllocation>,
     pub working_target_bytes: u64,
+    /// This view's live scratch attachment, if one exists.
+    pub metal_working_texture: Option<MetalTextureInventory>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1417,6 +1462,10 @@ impl Thread {
     /// Sampling follows completed work so the first frame's caches and a
     /// retired pool are reflected without reading mutable state off-thread.
     fn snapshot_allocations(&mut self, sampled_at_us: i64) {
+        let metal_device = self
+            .gpu
+            .as_ref()
+            .and_then(|g| pm_gpu::device::metal_device_allocation(&g.device));
         let mut inventory = AllocationInventory {
             sampled_at_us,
             gpu_created: self.gpu.is_some(),
@@ -1430,10 +1479,14 @@ impl Thread {
                 .gpu
                 .as_ref()
                 .map_or(0, |g| g.snapshot_readback.capacity_bytes()),
-            metal_allocated_bytes: self
+            metal_allocated_bytes: metal_device.map(|d| d.current_allocated_bytes),
+            metal_device: metal_device.map(Into::into),
+            metal_snapshot_texture: self
                 .gpu
                 .as_ref()
-                .and_then(|g| pm_gpu::device::allocated_bytes(&g.device)),
+                .and_then(|g| g.snapshot_target.as_ref())
+                .and_then(|target| pm_gpu::device::metal_texture_allocation(&target.texture))
+                .map(Into::into),
             ..AllocationInventory::default()
         };
         for (&(port, session), view) in &self.views {
@@ -1454,6 +1507,12 @@ impl Thread {
                         * u64::from(working.size.height)
                         * u64::from(WORKING_FORMAT.block_copy_size(None).unwrap_or(8))
                 });
+            let metal_working_texture = view
+                .pool
+                .as_ref()
+                .and_then(|live| live.working.as_ref())
+                .and_then(|working| pm_gpu::device::metal_texture_allocation(&working.texture))
+                .map(Into::into);
             inventory.color_surface_bytes += color.as_ref().map_or(0, |pool| pool.iosurface_bytes);
             inventory.depth_surface_bytes += depth.as_ref().map_or(0, |pool| pool.iosurface_bytes);
             inventory.working_target_bytes += working_target_bytes;
@@ -1463,6 +1522,7 @@ impl Thread {
                 color,
                 depth,
                 working_target_bytes,
+                metal_working_texture,
             });
         }
         if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
@@ -6717,6 +6777,7 @@ mod tests {
         thread.snapshot_allocations(t0 + 4 * REST_RELEASE_US + 1);
         assert!(!thread.stats().allocations.gpu_created);
         assert_eq!(thread.stats().allocations.metal_allocated_bytes, None);
+        assert!(thread.stats().allocations.metal_device.is_none());
         assert!(metal_before.is_some_and(|bytes| bytes > 0));
         assert_eq!(thread.prepared.owners.len(), 2);
         for (key, budget) in [(a, 7), (b, 9)] {
