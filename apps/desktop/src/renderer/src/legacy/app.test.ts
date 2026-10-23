@@ -408,6 +408,18 @@ describe('legacy app install', () => {
     expect(restored.comps.nested.layers[0].from).toBe(-6);
   });
 
+  it('migrates saved precision during hydration while preserving explicit Color depth', () => {
+    const { PM } = appRegistry();
+    const old = { ...PM.proj, colorDepth: undefined, color: { precision: 'float32', linearBlending: true } };
+    const restored = PM.hydrateProject(old);
+    expect(restored.colorDepth).toBe(32);
+    expect(restored.color).toEqual({ linearBlending: true });
+    expect(old.color.precision).toBe('float32');
+    const explicit = PM.hydrateProject({ ...old, colorDepth: 8 });
+    expect(explicit.colorDepth).toBe(8);
+    expect(explicit.color).toEqual({ linearBlending: true });
+  });
+
   it('compacts oversized provenance when reopening without removing source', () => {
     const { PM } = appRegistry();
     const source = { ...PM.proj, edits: [{ id: 'bulk', summary: ['Cut out subject'], operations: [{ value: 'x'.repeat(200_000) }] }] };

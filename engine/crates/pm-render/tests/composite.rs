@@ -58,13 +58,17 @@ fn render_with(
     precision: Precision,
     region: Option<PixelRect>,
 ) -> (Vec<f32>, Vec<pm_render::LayerFailure>) {
+    let mut doc = doc.clone();
+    if doc.get("colorDepth").is_none() && doc["color"].get("precision").is_none() {
+        doc["colorDepth"] = json!(match precision { Precision::Unorm8 => 8, Precision::Float16 => 16, Precision::Float32 => 32 });
+    }
     let w = doc["w"].as_u64().unwrap() as u32;
     let h = doc["h"].as_u64().unwrap() as u32;
     let mut request = RenderRequest::at_scale(Size::new(w, h), 1.0, precision);
     request.region = region;
     let frame = r
         .render(
-            &load(doc),
+            &load(&doc),
             "Ptest-root",
             ticks(t),
             &request,
@@ -109,6 +113,7 @@ fn input(v: [f64; 4], working: WorkingEncoding) -> [f64; 4] {
 /// rounds to 11 significant bits) or single-precision storage.
 fn tolerance(precision: Precision) -> f64 {
     match precision {
+        Precision::Unorm8 => 1.0 / 255.0,
         Precision::Float16 => 4e-3,
         Precision::Float32 => 2e-5,
     }
@@ -1022,7 +1027,7 @@ fn compositing_is_deterministic() {
     }
 }
 
-/// Settings › Project › Color: the precision setting is a floor for
+/// Settings › Project › Color: the historical precision setting selects
 /// intermediates, unknown settings are routed, and linear blending is
 /// rendered (not routed).
 #[test]

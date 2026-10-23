@@ -95,21 +95,24 @@ pub(crate) struct Resampler {
     layout: wgpu::BindGroupLayout,
     mip_layout: wgpu::BindGroupLayout,
     trilinear: wgpu::Sampler,
-    /// `[format][blend]`: rgba16float, rgba32float × over, additive.
-    draw: [[wgpu::RenderPipeline; 2]; 2],
-    copy: [wgpu::RenderPipeline; 2],
-    down: [wgpu::RenderPipeline; 2],
+    /// `[format][blend]`: rgba16float, rgba32float, rgba8unorm × over, additive.
+    draw: [[wgpu::RenderPipeline; 2]; 3],
+    copy: [wgpu::RenderPipeline; 3],
+    down: [wgpu::RenderPipeline; 3],
 }
 
-const FORMATS: [wgpu::TextureFormat; 2] = [
+const FORMATS: [wgpu::TextureFormat; 3] = [
     wgpu::TextureFormat::Rgba16Float,
     wgpu::TextureFormat::Rgba32Float,
+    wgpu::TextureFormat::Rgba8Unorm,
 ];
 
 fn format_index(format: wgpu::TextureFormat) -> usize {
     match format {
+        wgpu::TextureFormat::Rgba16Float => 0,
         wgpu::TextureFormat::Rgba32Float => 1,
-        _ => 0,
+        wgpu::TextureFormat::Rgba8Unorm => 2,
+        other => panic!("unsupported resampler format: {other:?}"),
     }
 }
 

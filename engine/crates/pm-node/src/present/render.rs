@@ -39,10 +39,11 @@ use pm_protocol::envelope::{Envelope, Event, Message, Response};
 use pm_protocol::error::{EngineError, ErrorCode, ErrorDetail, ErrorScope, FailureReport, Retry};
 use pm_protocol::frame::{
     FrameDescriptor, FrameQuality, FrameRelease, FrameRequest, PoolLedger, PreviewResolution,
-    Representation, ViewerState,
+    Representation, Shading3d, ViewOverride, ViewerState,
 };
 use pm_protocol::host::PortId;
 use pm_protocol::interop::SurfaceFormat;
+use pm_protocol::preview::{PreviewAction, PreviewControl, PreviewPhase, PreviewStatus};
 use serde::Serialize;
 
 use super::audio::{AudioCtl, AudioLink, AudioStatus};
@@ -62,6 +63,62 @@ enum RemoteLayer {}
 pub type Sink = Arc<dyn Fn(Vec<Action>) + Send + Sync>;
 
 pub type Key = (PortId, SessionId);
+
+#[derive(Clone)]
+struct PreviewCandidate {
+    generation: Option<Seq>,
+    auto_generation: Option<Seq>,
+    revision: Revision,
+    composition: String,
+    time: Ticks,
+    shading: Shading3d,
+    complete: bool,
+    failure: Option<String>,
+}
+
+#[derive(Clone)]
+struct AutoPreview {
+    generation: Seq,
+    revision: Revision,
+    composition: String,
+    time: Ticks,
+    shading: Shading3d,
+    phase: PreviewPhase,
+}
+
+#[derive(Clone, Copy)]
+struct CachePreview {
+    key: Key,
+    revision: Revision,
+    generation: Seq,
+}
+
+impl AutoPreview {
+    fn matches(&self, candidate: &PreviewCandidate) -> bool {
+        self.revision == candidate.revision
+            && self.composition == candidate.composition
+            && self.time == candidate.time
+            && self.shading == candidate.shading
+    }
+
+    /// Even a cached, complete candidate starts a new status generation:
+    /// its Ready event follows the descriptor actually sent for that frame.
+    fn next(old: Option<&Self>, last: Option<Seq>, candidate: &PreviewCandidate) -> Option<Self> {
+        if candidate.generation.is_some() || old.is_some_and(|old| old.matches(candidate)) {
+            return None;
+        }
+        Some(Self {
+            generation: last
+                .and_then(|g| g.next())
+                .unwrap_or(Seq::new(1).expect("1 is safe")),
+            revision: candidate.revision,
+            composition: candidate.composition.clone(),
+            time: candidate.time,
+            shading: candidate.shading,
+            phase: PreviewPhase::Queued,
+        })
+    }
+}
 
 /// Pool generation numbers, shared by the JavaScript side (new pools) and
 /// the render thread (a pool made again after a failed hand-off).
@@ -90,6 +147,62 @@ impl Generations {
 /// part-way (a send timed out, main's queue was full). After the last one
 /// the view waits for its next viewer state.
 pub const POOL_RETRY_US: [i64; 4] = [50_000, 250_000, 1_000_000, 4_000_000];
+
+/// When a paused frame that failed with an error drawing it again may fix
+/// (the GPU, a readback, media, the shader fallback runner, an SVG raster)
+/// is drawn again on its own, after the failure: then it waits for the next
+/// edit, view or transport change, as a deterministic failure does at once.
+pub const RENDER_RETRY_US: [i64; 3] = [100_000, 500_000, 2_000_000];
+
+/// Whether drawing the same frame again can succeed: errors of the GPU,
+/// its readbacks, media, the fallback runner and SVG rasters are of the
+/// moment; an invalid request, a missing composition and a stopped job
+/// watchdog are not (they wait for a change).
+pub fn transient_render_error(error: &pm_render::RenderError) -> bool {
+    use pm_render::RenderError as E;
+    match error {
+        E::Device(_)
+        | E::Readback(_)
+        | E::Gpu(_)
+        | E::Media(_)
+        | E::Fallback(_)
+        | E::SvgRaster(_) => true,
+        E::Unsupported(_)
+        | E::Composition(_)
+        | E::Request(_)
+        | E::Watchdog(_)
+        | E::ShaderFallbackPending(_)
+        | E::WatchdogPending
+        | E::SvgRastersPending(_) => false,
+    }
+}
+
+/// A paused frame's redraw after a transient failure (`RENDER_RETRY_US`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderRetry {
+    /// When it is drawn again; `None` once the retries ran out.
+    pub at: Option<i64>,
+    /// Retries scheduled for this frame so far.
+    pub attempts: usize,
+    /// The frame: document revision and view sequence. A failure of
+    /// another frame starts over.
+    pub frame: (u64, u64),
+}
+
+impl RenderRetry {
+    /// The retry after a transient failure of `frame` at `now`, following
+    /// `previous` (a retry of the same frame counts on).
+    pub fn after(previous: Option<RenderRetry>, frame: (u64, u64), now: i64) -> RenderRetry {
+        let attempts = previous
+            .filter(|r| r.frame == frame)
+            .map_or(0, |r| r.attempts);
+        RenderRetry {
+            at: RENDER_RETRY_US.get(attempts).map(|delay| now + delay),
+            attempts: attempts + 1,
+            frame,
+        }
+    }
+}
 
 /// A pool to make again: the spec the JavaScript side charged, and when.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +289,12 @@ pub enum Command {
         meta: Box<super::complete::FrameMeta>,
         error: String,
     },
+    /// A mapped snapshot slot completed on the GPU completion worker.
+    SnapshotMapReady,
+    SnapshotPollFailed {
+        lost: Arc<AtomicBool>,
+        error: String,
+    },
     /// The session's document changed (document source). `posted`: host
     /// µs the engine handed it to the presenter (the per-frame trace).
     Document {
@@ -230,9 +349,29 @@ pub enum Command {
     FontsChanged,
     /// The paused viewer's Blender previews (sent once, at start).
     UseBlender(Arc<super::blender::PreviewBlender>),
+    PreviewControl {
+        key: Key,
+        control: PreviewControl,
+    },
+    BlenderStarted {
+        key: Key,
+        revision: Revision,
+        generation: Option<Seq>,
+        shading: Shading3d,
+    },
     /// Preview surfaces of the view arrived: draw it again when paused.
     BlenderReady {
         key: Key,
+        revision: Revision,
+        generation: Option<Seq>,
+        shading: Shading3d,
+    },
+    BlenderFailed {
+        key: Key,
+        revision: Revision,
+        generation: Option<Seq>,
+        shading: Shading3d,
+        error: String,
     },
     /// A snapshot's Blender frames are prepared, or why not
     /// ([`super::blender::PreviewBlender::capture`]).
@@ -258,6 +397,8 @@ pub struct ThreadConfig {
     pub trace: bool,
     /// Keep [`Stats::stand_in_log`] (measurements only).
     pub stand_in_log: bool,
+    /// Sample live resource sizes for allocation probes (off in normal use).
+    pub allocation_inventory: bool,
     /// Fraction of a refresh after the viewer's BeginFrame at which timed
     /// frames start rendering, once the viewer sent its vsync hint; `None`
     /// renders at the due time.
@@ -462,8 +603,80 @@ pub struct Stats {
     pub depth_frames: u64,
     pub compat_rasters: BTreeMap<String, usize>,
     pub compat_bytes: u64,
+    /// A render-thread snapshot of live allocations. Surface bytes are the
+    /// IOSurface allocation sizes; target and cache bytes are nominal texel
+    /// counts. Lease reservations are not included.
+    pub allocations: AllocationInventory,
     #[serde(skip)]
     pub trace: Vec<FrameTrace>,
+}
+
+/// Live resource inventory copied into status without touching render-thread
+/// state from the utility process's JavaScript thread.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AllocationInventory {
+    pub sampled_at_us: i64,
+    pub gpu_created: bool,
+    pub composer_created: bool,
+    pub views: Vec<ViewAllocation>,
+    pub color_surface_bytes: u64,
+    pub depth_surface_bytes: u64,
+    pub working_target_bytes: u64,
+    pub snapshot_target_bytes: u64,
+    pub snapshot_readback_bytes: u64,
+    pub renderer: Option<RendererAllocation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewAllocation {
+    pub port: u32,
+    pub session: u64,
+    pub color: Option<SurfaceAllocation>,
+    pub depth: Option<SurfaceAllocation>,
+    pub working_target_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SurfaceAllocation {
+    pub generation: u32,
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+    pub count: usize,
+    pub iosurface_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RendererAllocation {
+    pub target_pool_bytes: u64,
+    pub target_pool_idle: usize,
+    pub target_pool_created: u64,
+    pub pyramid_bytes: u64,
+    pub media_texture_bytes: u64,
+    pub media: pm_media::decode::service::MediaUsage,
+    pub text_cache_bytes: u64,
+    pub vector_cache_bytes: u64,
+    pub scene3d_meshes: usize,
+    pub scene3d_mesh_bytes: u64,
+    pub scene3d_maps: usize,
+    pub scene3d_map_bytes: u64,
+}
+
+impl SurfaceAllocation {
+    fn of(spec: PoolSpec, pool: &SurfacePool) -> Self {
+        Self {
+            generation: spec.generation,
+            width: spec.size.width,
+            height: spec.size.height,
+            format: format!("{:?}", spec.format),
+            count: pool.len(),
+            iosurface_bytes: pool.bytes(),
+        }
+    }
 }
 
 const TRACE_CAP: usize = 200_000;
@@ -478,6 +691,10 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     display: DisplayTransform,
+    /// Reused by serial snapshot copies on this device.
+    snapshot_readback: pm_gpu::readback::ReadbackRing,
+    /// One reusable snapshot color attachment. Every capture still redraws it.
+    snapshot_target: Option<pm_gpu::Target>,
     /// Draws documents (made with the first document frame).
     composer: Option<Composer>,
     /// The font generation the composer's renderer lays text out with.
@@ -500,6 +717,63 @@ impl Gpu {
         }
         composer
     }
+
+    fn composer_and_snapshot_resources(
+        &mut self,
+        config: &ThreadConfig,
+        frame_cache: usize,
+    ) -> (
+        &mut Composer,
+        &mut pm_gpu::readback::ReadbackRing,
+        &mut Option<pm_gpu::Target>,
+    ) {
+        self.composer_with(config, frame_cache);
+        (
+            self.composer.as_mut().expect("made above"),
+            &mut self.snapshot_readback,
+            &mut self.snapshot_target,
+        )
+    }
+}
+
+/// Keep at most one moderate-sized snapshot attachment on a device. Large
+/// captures are still rendered normally, then their attachment is released.
+const MAX_CACHED_SNAPSHOT_TARGET_BYTES: u64 = 64 * 1024 * 1024;
+
+fn cache_snapshot_target(width: u32, height: u32, format: wgpu::TextureFormat) -> bool {
+    let bpp = u64::from(format.block_copy_size(None).unwrap_or(16));
+    u64::from(width) * u64::from(height) * bpp <= MAX_CACHED_SNAPSHOT_TARGET_BYTES
+}
+
+fn snapshot_output_target(
+    slot: &mut Option<pm_gpu::Target>,
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> pm_gpu::Target {
+    if let Some(target) = slot.as_ref()
+        && target.width() == width
+        && target.height() == height
+        && target.format() == format
+    {
+        return target.clone();
+    }
+    // Release the old attachment before a resize or format change, including
+    // an oversized one-off capture, so it cannot overlap the new allocation.
+    *slot = None;
+    let target = pm_gpu::Target::new(
+        device,
+        "pm snapshot output",
+        width,
+        height,
+        format,
+        pm_gpu::target::working_usage(),
+    );
+    if cache_snapshot_target(width, height, format) {
+        *slot = Some(target.clone());
+    }
+    target
 }
 
 struct Live {
@@ -565,6 +839,15 @@ struct View {
     /// The GPU watchdog held the last frame (`RenderError::WatchdogPending`):
     /// it is drawn again once the watchdog has judged the suspect frame.
     watchdog_held: bool,
+    /// The last frame failed. As today's viewer does, the failure is
+    /// logged once and the paused frame is drawn again at the next edit,
+    /// view or transport change, not at every turn; a failure drawing it
+    /// again may fix (`transient_render_error`) is also retried on its own
+    /// a few times first (`render_retry`).
+    render_failed: bool,
+    /// After a transient failure (`transient_render_error`), when the
+    /// paused frame is drawn again on its own (`RENDER_RETRY_US`).
+    render_retry: Option<RenderRetry>,
     /// What presenting this session costs (`RenderStats`).
     costs: super::stats::ViewStats,
     /// The depth and object-id pool, while the viewer asks for it.
@@ -590,6 +873,74 @@ struct AudioPrefs {
 /// the host clock.
 pub const AUDIO_START_TIMEOUT_US: i64 = 1_500_000;
 
+struct PendingSnapshot {
+    job: super::snapshot::SnapshotJob,
+    ticket: pm_gpu::readback::ReadbackTicket,
+    started: i64,
+    map_deadline: i64,
+    revision: Revision,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    rows: pm_render::SnapshotRows,
+    draft_3d: bool,
+}
+
+/// Drives map callbacks off the presentation thread. Mapping still follows
+/// every fresh render+copy submission; this worker never reads the pixels.
+struct SnapshotPoller {
+    tx: Option<Sender<(wgpu::Device, Arc<AtomicBool>)>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SnapshotPoller {
+    fn start(back: Sender<Command>) -> Result<Self, String> {
+        let (tx, rx) = std::sync::mpsc::channel::<(wgpu::Device, Arc<AtomicBool>)>();
+        let thread = pm_engine::qos::spawn_engine_thread(
+            pm_protocol::error::EngineProcess::Interactive,
+            "pm-snapshot-complete",
+            move || {
+                // A synchronous capture's answer waits on this wakeup: it
+                // runs at the presenter's class, as the frame completer
+                // does (a default-class thread can wait behind background
+                // work for milliseconds on a loaded machine).
+                pm_bridge::set_thread_user_interactive();
+                for (device, lost) in rx {
+                    if let Err(error) = device.poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: Some(Duration::from_secs(2)),
+                    }) {
+                        let _ = back.send(Command::SnapshotPollFailed {
+                            lost,
+                            error: error.to_string(),
+                        });
+                    }
+                }
+            },
+        )
+        .map_err(|e| format!("could not start snapshot completion thread: {e}"))?;
+        Ok(Self {
+            tx: Some(tx),
+            thread: Some(thread),
+        })
+    }
+
+    fn submit(&self, device: wgpu::Device, lost: Arc<AtomicBool>) -> bool {
+        self.tx
+            .as_ref()
+            .is_some_and(|tx| tx.send((device, lost)).is_ok())
+    }
+}
+
+impl Drop for SnapshotPoller {
+    fn drop(&mut self) {
+        self.tx.take();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 struct Thread {
     config: ThreadConfig,
     sink: Sink,
@@ -613,6 +964,12 @@ struct Thread {
     blender: Option<Arc<super::blender::PreviewBlender>>,
     /// The last capture token handed to the Blender worker.
     blender_token: u64,
+    preview_controls: super::preview_control::PreviewControls,
+    cache_requested: BTreeMap<Key, PreviewControl>,
+    cache_previews: BTreeMap<u64, CachePreview>,
+    preview_candidates: BTreeMap<(Key, u64), PreviewCandidate>,
+    auto_preview: BTreeMap<Key, AutoPreview>,
+    auto_generation: BTreeMap<Key, Seq>,
     /// Shader fallback requests sent to each view's renderer and not yet
     /// answered (by request key), and the bands received so far.
     fallback: Fallback,
@@ -620,6 +977,10 @@ struct Thread {
     frame_cache: usize,
     /// Host snapshots waiting for their revision or their turn.
     snapshots: super::snapshot::SnapshotQueue,
+    /// Frame copies waiting for their own staging slot's map callback.
+    pending_snapshots: Vec<PendingSnapshot>,
+    snapshot_back: Sender<Command>,
+    snapshot_poller: Option<SnapshotPoller>,
     /// Shared-memory segments published for main and not reaped yet.
     segments: pm_bridge::shm::Segments,
     /// Host µs of the newest frame drawn for a gesture, scrub, or edit
@@ -644,6 +1005,7 @@ struct Thread {
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
+const SNAPSHOT_GPU_TIMEOUT_US: i64 = 2_000_000;
 
 /// The decision 19 fallback runner's state on this thread.
 #[derive(Default)]
@@ -685,9 +1047,8 @@ pub fn run(
     pm_bridge::set_thread_user_interactive();
     let fps = i64::from(config.fps.max(1));
     let peaks = super::peaks::PeakWorker::new(sink.clone());
-    // Without the completion thread every frame waits for the GPU here.
-    let completer = match super::complete::Completer::start(sink.clone(), back, config.send_delay) {
-        Ok(c) => Some(c),
+    let snapshot_poller = match SnapshotPoller::start(back.clone()) {
+        Ok(worker) => Some(worker),
         Err(error) => {
             sink(vec![Action::Log {
                 level: LogLevel::Warn,
@@ -696,6 +1057,18 @@ pub fn run(
             None
         }
     };
+    // Without the completion thread every frame waits for the GPU here.
+    let completer =
+        match super::complete::Completer::start(sink.clone(), back.clone(), config.send_delay) {
+            Ok(c) => Some(c),
+            Err(error) => {
+                sink(vec![Action::Log {
+                    level: LogLevel::Warn,
+                    message: error,
+                }]);
+                None
+            }
+        };
     let mut thread = Thread {
         frame_ticks: TICKS_PER_SECOND / fps,
         frame_cache: pm_render::media::DEFAULT_FRAME_CACHE,
@@ -712,8 +1085,17 @@ pub fn run(
         generations,
         blender: None,
         blender_token: 0,
+        preview_controls: Default::default(),
+        cache_requested: BTreeMap::new(),
+        cache_previews: BTreeMap::new(),
+        preview_candidates: BTreeMap::new(),
+        auto_preview: BTreeMap::new(),
+        auto_generation: BTreeMap::new(),
         fallback: Fallback::default(),
         snapshots: super::snapshot::SnapshotQueue::default(),
+        pending_snapshots: Vec::new(),
+        snapshot_back: back,
+        snapshot_poller,
         segments: pm_bridge::shm::Segments::default(),
         last_interactive: None,
         snapshot_costs: BTreeMap::new(),
@@ -725,6 +1107,7 @@ pub fn run(
         svg: super::svg::SvgState::default(),
     };
     thread.check_in();
+    let mut last_inventory_us = 0;
     loop {
         let timeout = thread.next_wake();
         match rx.recv_timeout(timeout) {
@@ -751,6 +1134,13 @@ pub fn run(
         let started = now();
         thread.work();
         thread.note_turn("work", started);
+        let sampled_at_us = now();
+        if thread.config.allocation_inventory
+            && sampled_at_us.saturating_sub(last_inventory_us) >= 50_000
+        {
+            thread.snapshot_allocations(sampled_at_us);
+            last_inventory_us = sampled_at_us;
+        }
     }
     thread.shutdown();
 }
@@ -784,6 +1174,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::ShaderFallback { .. } => "shader fallback",
         Command::FrameCache { .. } => "frame cache",
         Command::Snapshot(_) => "snapshot",
+        Command::SnapshotMapReady => "snapshot map ready",
+        Command::SnapshotPollFailed { .. } => "snapshot poll failed",
         Command::Compat { .. } => "compat",
         Command::LoseDevice => "lose device",
         Command::FontsChanged => "fonts",
@@ -793,6 +1185,74 @@ fn command_name(command: &Command) -> &'static str {
 }
 
 impl Thread {
+    /// Copies the render thread's live resource sizes into shared status.
+    /// Sampling follows completed work so the first frame's caches and a
+    /// retired pool are reflected without reading mutable state off-thread.
+    fn snapshot_allocations(&mut self, sampled_at_us: i64) {
+        let mut inventory = AllocationInventory {
+            sampled_at_us,
+            gpu_created: self.gpu.is_some(),
+            composer_created: self.gpu.as_ref().is_some_and(|g| g.composer.is_some()),
+            snapshot_target_bytes: self
+                .gpu
+                .as_ref()
+                .and_then(|g| g.snapshot_target.as_ref())
+                .map_or(0, pm_gpu::Target::bytes),
+            snapshot_readback_bytes: self
+                .gpu
+                .as_ref()
+                .map_or(0, |g| g.snapshot_readback.capacity_bytes()),
+            ..AllocationInventory::default()
+        };
+        for (&(port, session), view) in &self.views {
+            let color = view
+                .pool
+                .as_ref()
+                .map(|live| SurfaceAllocation::of(live.spec, &live.pool));
+            let depth = view
+                .depth
+                .as_ref()
+                .map(|live| SurfaceAllocation::of(live.spec, &live.pool));
+            let working_target_bytes = view.pool.as_ref().map_or(0, |live| {
+                u64::from(live.working.size.width)
+                    * u64::from(live.working.size.height)
+                    * u64::from(
+                        pm_gpu::bridge_out::display::WORKING_FORMAT
+                            .block_copy_size(None)
+                            .unwrap_or(8),
+                    )
+            });
+            inventory.color_surface_bytes += color.as_ref().map_or(0, |pool| pool.iosurface_bytes);
+            inventory.depth_surface_bytes += depth.as_ref().map_or(0, |pool| pool.iosurface_bytes);
+            inventory.working_target_bytes += working_target_bytes;
+            inventory.views.push(ViewAllocation {
+                port: port.0,
+                session: session.get(),
+                color,
+                depth,
+                working_target_bytes,
+            });
+        }
+        if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
+            let renderer = composer.renderer();
+            let scene3d = renderer.scene3d_resident();
+            inventory.renderer = Some(RendererAllocation {
+                target_pool_bytes: renderer.target_pool_bytes(),
+                target_pool_idle: renderer.target_pool_idle(),
+                target_pool_created: renderer.target_pool_created(),
+                pyramid_bytes: renderer.pyramid_bytes(),
+                media_texture_bytes: renderer.media_texture_bytes(),
+                media: renderer.media_usage(),
+                text_cache_bytes: renderer.text_cache_bytes(),
+                vector_cache_bytes: renderer.vector_cache_bytes(),
+                scene3d_meshes: scene3d.meshes,
+                scene3d_mesh_bytes: scene3d.mesh_bytes,
+                scene3d_maps: scene3d.maps,
+                scene3d_map_bytes: scene3d.map_bytes,
+            });
+        }
+        self.stats().allocations = inventory;
+    }
     fn log(&self, level: LogLevel, message: String) {
         (self.sink)(vec![Action::Log { level, message }]);
     }
@@ -906,6 +1366,8 @@ impl Thread {
                         device,
                         queue,
                         display,
+                        snapshot_readback: pm_gpu::readback::ReadbackRing::default(),
+                        snapshot_target: None,
                         composer: None,
                         fonts_installed: None,
                         lost,
@@ -929,6 +1391,10 @@ impl Thread {
     fn recover_gpu(&mut self) {
         // A lost device fails its submissions at once.
         self.drain_frames();
+        self.fail_pending_snapshot_maps(
+            ErrorCode::DeviceLost,
+            "The GPU was lost before the snapshot finished.",
+        );
         let Some(gpu) = self.gpu.take() else {
             return;
         };
@@ -1005,6 +1471,253 @@ impl Thread {
         self.send(key.0, envelope);
     }
 
+    fn preview_status(&self, key: Key, status: PreviewStatus) {
+        let revision = status.revision;
+        self.event(key, Event::PreviewStatus(status), Some(revision));
+    }
+
+    fn fail_preview_snapshot(
+        &mut self,
+        key: Key,
+        revision: Revision,
+        generation: Option<Seq>,
+        error: Option<String>,
+    ) {
+        if let Some(error) = error
+            && let Some(status) = self
+                .preview_controls
+                .failed(key, revision, generation, error)
+        {
+            self.preview_status(key, status);
+        }
+    }
+
+    /// A build that produced no frame cannot enter `queue_auto_preview` or
+    /// `preview_frame_sent`; end its pending preview generation here.
+    #[allow(clippy::too_many_arguments)]
+    fn fail_preview_without_frame(
+        &mut self,
+        key: Key,
+        revision: Revision,
+        generation: Option<Seq>,
+        shading: Option<Shading3d>,
+        composition: &str,
+        time: Ticks,
+        viewer_frame: bool,
+        error: String,
+    ) {
+        if let Some(generation) = generation {
+            if let Some(status) =
+                self.preview_controls
+                    .failed(key, revision, Some(generation), error)
+            {
+                self.preview_status(key, status);
+            }
+            return;
+        }
+        if !viewer_frame {
+            return;
+        }
+        let Some(shading) = shading else { return };
+        let candidate = PreviewCandidate {
+            generation: None,
+            auto_generation: None,
+            revision,
+            composition: composition.to_owned(),
+            time,
+            shading,
+            complete: false,
+            failure: Some(error.clone()),
+        };
+        if let Some(auto) = AutoPreview::next(
+            self.auto_preview.get(&key),
+            self.auto_generation.get(&key).copied(),
+            &candidate,
+        ) {
+            self.auto_generation.insert(key, auto.generation);
+            self.auto_preview.insert(key, auto);
+        }
+        if let Some(auto) = self.auto_preview.get_mut(&key)
+            && auto.matches(&candidate)
+            && auto.phase != PreviewPhase::Failed
+        {
+            auto.phase = PreviewPhase::Failed;
+            let status = Self::auto_status(auto, PreviewPhase::Failed, None, Some(error));
+            self.preview_status(key, status);
+        }
+    }
+
+    /// A frame that cannot be delivered must settle the accepted preview.
+    /// The candidate carries the identity sampled when this render began.
+    fn fail_preview_delivery(
+        &mut self,
+        key: Key,
+        candidate: Option<&PreviewCandidate>,
+        error: String,
+    ) {
+        if let Some(candidate) = candidate {
+            self.fail_preview_without_frame(
+                key,
+                candidate.revision,
+                candidate.generation,
+                Some(candidate.shading),
+                &candidate.composition,
+                candidate.time,
+                true,
+                error,
+            );
+        } else if let Some(control) = self.preview_controls.current(key).cloned() {
+            self.fail_preview_snapshot(
+                key,
+                control.revision,
+                Some(control.generation),
+                Some(error),
+            );
+        }
+    }
+
+    /// The GPU completion thread can fail after the automatic status was
+    /// queued. Only that candidate's generation may receive its failure.
+    fn fail_preview_sent(&mut self, key: Key, candidate: PreviewCandidate, error: String) {
+        if let Some(generation) = candidate.generation {
+            self.fail_preview_snapshot(key, candidate.revision, Some(generation), Some(error));
+        } else if let Some(auto) = self.auto_preview.get_mut(&key)
+            && candidate.auto_generation == Some(auto.generation)
+            && auto.matches(&candidate)
+            && auto.phase != PreviewPhase::Failed
+        {
+            auto.phase = PreviewPhase::Failed;
+            let status = Self::auto_status(auto, PreviewPhase::Failed, None, Some(error));
+            self.preview_status(key, status);
+        }
+    }
+
+    fn auto_status(
+        auto: &AutoPreview,
+        phase: PreviewPhase,
+        frame_seq: Option<Seq>,
+        error: Option<String>,
+    ) -> PreviewStatus {
+        PreviewStatus {
+            generation: auto.generation,
+            automatic: true,
+            revision: auto.revision,
+            composition: auto.composition.as_str().into(),
+            time: auto.time,
+            phase,
+            frame_seq,
+            error,
+            cache_only: false,
+        }
+    }
+
+    fn queue_auto_preview(&mut self, key: Key, seq: Seq) {
+        let Some(candidate) = self.preview_candidates.get(&(key, seq.get())).cloned() else {
+            return;
+        };
+        if candidate.generation.is_some() {
+            return;
+        }
+        if let Some(auto) = AutoPreview::next(
+            self.auto_preview.get(&key),
+            self.auto_generation.get(&key).copied(),
+            &candidate,
+        ) {
+            self.auto_generation.insert(key, auto.generation);
+            let status = Self::auto_status(&auto, PreviewPhase::Queued, None, None);
+            self.auto_preview.insert(key, auto);
+            self.preview_status(key, status);
+        }
+        let generation = self
+            .auto_preview
+            .get(&key)
+            .filter(|auto| auto.matches(&candidate))
+            .map(|auto| auto.generation);
+        if let Some(candidate) = self.preview_candidates.get_mut(&(key, seq.get())) {
+            candidate.auto_generation = generation;
+        }
+        if let Some(error) = candidate.failure.as_ref()
+            && let Some(auto) = self.auto_preview.get_mut(&key)
+            && auto.matches(&candidate)
+            && auto.phase != PreviewPhase::Failed
+        {
+            auto.phase = PreviewPhase::Failed;
+            let status = Self::auto_status(auto, PreviewPhase::Failed, None, Some(error.clone()));
+            self.preview_status(key, status);
+        }
+    }
+
+    /// The completion thread already sent this descriptor after GPU success.
+    /// A generation captured while encoding prevents an older frame at the
+    /// same revision/time from completing a restarted request.
+    fn preview_frame_sent(&mut self, key: Key, seq: Seq) {
+        let Some(candidate) = self.preview_candidates.remove(&(key, seq.get())) else {
+            return;
+        };
+        if !candidate.complete {
+            return;
+        }
+        if let Some(generation) = candidate.generation {
+            if let Some(status) = self.preview_controls.presented(
+                key,
+                super::preview_control::PresentedFrame {
+                    revision: candidate.revision,
+                    composition: &candidate.composition,
+                    time: candidate.time,
+                    seq,
+                    all_surfaces: true,
+                    generation,
+                },
+            ) {
+                self.preview_status(key, status);
+            }
+        } else if let Some(auto) = self.auto_preview.get(&key)
+            && candidate.auto_generation == Some(auto.generation)
+            && auto.matches(&candidate)
+        {
+            let status = Self::auto_status(auto, PreviewPhase::Ready, Some(seq), None);
+            self.auto_preview.remove(&key);
+            self.preview_status(key, status);
+        }
+    }
+
+    fn cancel_preview(&mut self, key: Key) {
+        self.cancel_cache_preview(key);
+        if let Some(status) = self.preview_controls.cancelled(key) {
+            self.preview_status(key, status);
+        }
+        self.cancel_auto_preview(key);
+        if let Some(blender) = &self.blender {
+            let revision = self.views.get(&key).map_or(Revision::ZERO, |v| v.revision);
+            blender.submit(key, None, revision, None, None);
+        }
+    }
+
+    fn cancel_auto_preview(&mut self, key: Key) {
+        if let Some(auto) = self.auto_preview.remove(&key) {
+            self.preview_status(
+                key,
+                Self::auto_status(&auto, PreviewPhase::Cancelled, None, None),
+            );
+        }
+        self.preview_candidates.retain(|(k, _), _| *k != key);
+    }
+
+    fn cancel_cache_preview(&mut self, key: Key) {
+        self.cache_requested.remove(&key);
+        let tokens: Vec<u64> = self
+            .cache_previews
+            .iter()
+            .filter_map(|(token, job)| (job.key == key).then_some(*token))
+            .collect();
+        for token in tokens {
+            self.cache_previews.remove(&token);
+            if let Some(blender) = &self.blender {
+                blender.cancel_capture(token);
+            }
+        }
+    }
+
     fn error(&self, key: Key, id: RequestId, code: ErrorCode, message: &str) {
         let error = EngineError::new(code, ErrorScope::Request { id }, message);
         self.send(key.0, Envelope::new(Message::Error { id, error }));
@@ -1021,7 +1734,28 @@ impl Thread {
                 pool,
                 depth,
             } => {
+                if self
+                    .preview_controls
+                    .current(key)
+                    .is_some_and(|pending| pending.composition != state.composition)
+                    || (state.headless == Some(true)
+                        && self
+                            .preview_controls
+                            .current(key)
+                            .is_some_and(|pending| !pending.cache_only))
+                {
+                    self.cancel_preview(key);
+                }
                 self.configure(key, *state, revision, pool);
+                if self.views.get(&key).is_some_and(|view| {
+                    super::blender::blender_shading(view.state.view.as_ref()).is_none()
+                }) && let Some(auto) = self.auto_preview.remove(&key)
+                {
+                    self.preview_status(
+                        key,
+                        Self::auto_status(&auto, PreviewPhase::Cancelled, None, None),
+                    );
+                }
                 if let Some(depth) = depth {
                     self.configure_depth(key, depth);
                 }
@@ -1040,7 +1774,79 @@ impl Thread {
                     stats.release_mismatches += 1;
                 }
             }
-            Command::Transport { key, command, at } => self.transport(key, command, at),
+            Command::Transport { key, command, at } => {
+                let interrupts = match command {
+                    TransportCommand::Play { .. }
+                    | TransportCommand::Step { .. }
+                    | TransportCommand::PlayAround { .. } => true,
+                    TransportCommand::Pause => {
+                        self.views.get(&key).is_some_and(|v| v.clock.is_playing())
+                    }
+                    TransportCommand::Seek { time, .. } => {
+                        self.preview_controls
+                            .current(key)
+                            .is_some_and(|pending| pending.time != time)
+                            || self
+                                .auto_preview
+                                .get(&key)
+                                .is_some_and(|auto| auto.time != time)
+                    }
+                    _ => false,
+                };
+                if interrupts {
+                    if self
+                        .preview_controls
+                        .current(key)
+                        .is_some_and(|c| c.cache_only)
+                    {
+                        self.cancel_auto_preview(key);
+                    } else {
+                        self.cancel_preview(key);
+                    }
+                }
+                self.transport(key, command, at);
+            }
+            Command::PreviewControl { key, control } => {
+                let Some(status) = self.preview_controls.control(key, control.clone()) else {
+                    return true;
+                };
+                self.cancel_cache_preview(key);
+                if control.action == PreviewAction::Cancel {
+                    if let Some(blender) = &self.blender {
+                        blender.submit(key, None, control.revision, None, None);
+                    }
+                    self.preview_candidates.retain(|(k, _), _| *k != key);
+                    self.auto_preview.remove(&key);
+                    self.preview_status(key, status);
+                } else {
+                    self.preview_status(key, status);
+                    if control.cache_only {
+                        self.cache_requested.insert(key, control);
+                        return true;
+                    }
+                    let valid = self.config.document
+                        && self.blender.is_some()
+                        && self.views.get(&key).is_some_and(|v| {
+                            v.pool.is_some()
+                                && v.state.headless != Some(true)
+                                && v.state.composition == control.composition
+                        });
+                    if !valid {
+                        if let Some(failed) = self.preview_controls.failed(
+                            key,
+                            control.revision,
+                            Some(control.generation),
+                            "The native viewer cannot render this composition yet.".into(),
+                        ) {
+                            self.preview_status(key, failed);
+                        }
+                    } else {
+                        if let Some(view) = self.views.get_mut(&key) {
+                            view.dirty = true;
+                        }
+                    }
+                }
+            }
             Command::Audio { key, message } => self.audio_message(key, message),
             Command::Render {
                 key,
@@ -1084,14 +1890,28 @@ impl Thread {
                 key,
                 update,
                 posted,
-            } => self.document(key, update, posted),
+            } => {
+                self.document(key, update, posted);
+            }
             Command::FrameSent {
                 key,
                 meta,
                 gpu_done,
                 sent,
-            } => self.record_frame(key, &meta, gpu_done, sent),
+            } => {
+                self.record_frame(key, &meta, gpu_done, sent);
+                if let Ok(seq) = Seq::new(meta.seq) {
+                    self.preview_frame_sent(key, seq);
+                }
+            }
             Command::FrameFailed { key, meta, error } => {
+                if let Some(candidate) = self.preview_candidates.remove(&(key, meta.seq)) {
+                    self.fail_preview_sent(
+                        key,
+                        candidate,
+                        format!("The native viewer could not present the preview: {error}"),
+                    );
+                }
                 if let Some(view) = self.views.get_mut(&key) {
                     if let (Some(live), Ok(seq)) = (view.pool.as_mut(), Seq::new(meta.seq))
                         && live.spec.generation == meta.generation
@@ -1106,6 +1926,21 @@ impl Thread {
                 self.log(
                     LogLevel::Error,
                     format!("frame bridge: the GPU did not finish a frame: {error}"),
+                );
+            }
+            Command::SnapshotMapReady => {}
+            Command::SnapshotPollFailed { lost, error } => {
+                if !self
+                    .gpu
+                    .as_ref()
+                    .is_some_and(|gpu| Arc::ptr_eq(&gpu.lost, &lost))
+                {
+                    return true;
+                }
+                lost.store(true, Ordering::Release);
+                self.fail_pending_snapshot_maps(
+                    ErrorCode::DeviceLost,
+                    &format!("The GPU could not finish the snapshot: {error}"),
                 );
             }
             Command::Definitions {
@@ -1203,11 +2038,52 @@ impl Thread {
             }
             Command::FontsChanged => self.sync_font_generation(),
             Command::UseBlender(blender) => self.blender = Some(blender),
-            Command::BlenderReady { key } => {
+            Command::BlenderStarted {
+                key,
+                revision,
+                generation,
+                shading,
+            } => {
+                if let Some(status) = self.preview_controls.running(key, revision, generation) {
+                    self.preview_status(key, status);
+                } else if generation.is_none()
+                    && let Some(auto) = self.auto_preview.get_mut(&key)
+                    && auto.revision == revision
+                    && auto.shading == shading
+                    && auto.phase == PreviewPhase::Queued
+                {
+                    auto.phase = PreviewPhase::Running;
+                    let status = Self::auto_status(auto, PreviewPhase::Running, None, None);
+                    self.preview_status(key, status);
+                }
+            }
+            Command::BlenderReady { key, .. } => {
                 if let Some(view) = self.views.get_mut(&key)
                     && !view.clock.is_playing()
                 {
                     view.dirty = true;
+                }
+            }
+            Command::BlenderFailed {
+                key,
+                revision,
+                generation,
+                shading,
+                error,
+            } => {
+                if let Some(status) =
+                    self.preview_controls
+                        .failed(key, revision, generation, error.clone())
+                {
+                    self.preview_status(key, status);
+                } else if generation.is_none()
+                    && let Some(auto) = self.auto_preview.get_mut(&key)
+                    && auto.revision == revision
+                    && auto.shading == shading
+                {
+                    auto.phase = PreviewPhase::Failed;
+                    let status = Self::auto_status(auto, PreviewPhase::Failed, None, Some(error));
+                    self.preview_status(key, status);
                 }
             }
             Command::BlenderCaptured { token, result } => self.blender_captured(token, result),
@@ -1477,12 +2353,37 @@ impl Thread {
     }
 
     fn forget_session(&mut self, key: Key) {
+        self.cancel_cache_preview(key);
+        self.preview_controls.forget(key);
+        self.preview_candidates.retain(|(k, _), _| *k != key);
+        self.auto_preview.remove(&key);
+        self.auto_generation.remove(&key);
         if let Some(blender) = &self.blender {
             blender.forget(key);
         }
         self.snapshot_costs.remove(&key);
         self.compat.forget_session(key);
         self.peaks_waiting.retain(|(k, _)| *k != key);
+        // A frame already submitted for readback is no longer in the
+        // scheduler. Cancel its mapping too, before the session disappears.
+        let (ended, live): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_snapshots)
+            .into_iter()
+            .partition(|pending| pending.job.key == key);
+        self.pending_snapshots = live;
+        if let Some(gpu) = self.gpu.as_mut() {
+            for pending in &ended {
+                gpu.snapshot_readback
+                    .cancel(pending.ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+            }
+        }
+        for pending in ended {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &pending.job,
+                ErrorCode::UnknownSession,
+                "The window's engine session closed.",
+            );
+        }
         for job in self.snapshots.take_session(key) {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
@@ -1560,6 +2461,15 @@ impl Thread {
             if view.clock.is_playing() {
                 view.schedule.invalidate();
             }
+        }
+        if self.preview_controls.current(key).is_some_and(|control| {
+            control.cache_only
+                && self
+                    .docs
+                    .get(&key)
+                    .is_some_and(|doc| doc.revision() > control.revision.get())
+        }) {
+            self.cancel_preview(key);
         }
     }
 
@@ -2027,6 +2937,8 @@ impl Thread {
             scrub: false,
             stand_in: None,
             watchdog_held: false,
+            render_failed: false,
+            render_retry: None,
             costs: Default::default(),
             depth: None,
             #[cfg(feature = "remote-layer")]
@@ -2081,7 +2993,7 @@ impl Thread {
         if self.views[&key].state.headless == Some(true) {
             if let Some(blender) = &self.blender {
                 // Presentation leaves; captures still belong to this session.
-                blender.submit(key, None, self.views[&key].revision, None);
+                blender.submit(key, None, self.views[&key].revision, None, None);
             }
             if let Some(old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
                 self.retire_pool(key, old);
@@ -2160,6 +3072,27 @@ impl Thread {
                 );
                 if let Some(view) = self.views.get_mut(&key) {
                     view.retry = retry;
+                }
+                if retry.is_none_or(|retry| retry.at.is_none()) {
+                    let message = format!(
+                        "The native viewer could not create the preview frame surface: {error}"
+                    );
+                    if let Some(control) = self.preview_controls.current(key).cloned() {
+                        self.fail_preview_snapshot(
+                            key,
+                            control.revision,
+                            Some(control.generation),
+                            Some(message.clone()),
+                        );
+                    }
+                    if let Some(auto) = self.auto_preview.get_mut(&key)
+                        && auto.phase != PreviewPhase::Failed
+                    {
+                        auto.phase = PreviewPhase::Failed;
+                        let status =
+                            Self::auto_status(auto, PreviewPhase::Failed, None, Some(message));
+                        self.preview_status(key, status);
+                    }
                 }
             }
         }
@@ -2524,6 +3457,9 @@ impl Thread {
     fn next_wake(&self) -> Duration {
         let now = now();
         let mut wake = now + 50_000;
+        if let Some(deadline) = self.pending_snapshots.iter().map(|p| p.map_deadline).min() {
+            wake = wake.min(deadline);
+        }
         if let Some(at) = self.fallback.retry_at.values().min() {
             wake = wake.min(*at);
         }
@@ -2538,6 +3474,11 @@ impl Thread {
         }
         for view in self.views.values() {
             if let Some(at) = view.retry.and_then(|r| r.at) {
+                wake = wake.min(at);
+            }
+            if view.render_failed
+                && let Some(at) = view.render_retry.and_then(|r| r.at)
+            {
                 wake = wake.min(at);
             }
             let external_waiting = view.external_wait.as_ref().is_some_and(|w| w.until > now);
@@ -2634,6 +3575,7 @@ impl Thread {
         {
             self.recover_gpu();
         }
+        self.work_cache_previews();
         // The GPU watchdog sees completions promptly and frames that run
         // away while they run (a turn is at most 50 ms apart); a frame it
         // held is drawn again once the suspect frame is judged.
@@ -2994,6 +3936,28 @@ impl Thread {
             }
         }
         if !draws {
+            if let Some(Route::Legacy(reasons)) =
+                self.views.get(&key).and_then(|view| view.reported.as_ref())
+            {
+                let reason = format!(
+                    "The native viewer cannot render this composition: {}.",
+                    reasons.join("; ")
+                );
+                if let Some(control) = self
+                    .preview_controls
+                    .current(key)
+                    .filter(|c| !c.cache_only)
+                    .cloned()
+                    && let Some(status) = self.preview_controls.failed(
+                        key,
+                        control.revision,
+                        Some(control.generation),
+                        reason,
+                    )
+                {
+                    self.preview_status(key, status);
+                }
+            }
             // Requests wait while the legacy viewer draws this composition.
             while let Some((id, _, _)) = self
                 .views
@@ -3083,24 +4047,50 @@ impl Thread {
                 self.stats().stand_in_redraws += 1;
             }
         }
+        // A paused frame that failed for the moment is drawn again on its own.
+        if let Some(view) = self.views.get_mut(&key)
+            && view.render_failed
+            && !view.clock.is_playing()
+            && let Some(retry) = view.render_retry.as_mut()
+            && retry.at.is_some_and(|at| at <= now())
+        {
+            retry.at = None;
+            view.dirty = true;
+        }
         // A paused frame after a view or transport change.
         let paused_dirty = self
             .views
             .get(&key)
             .is_some_and(|v| v.dirty && v.pool.is_some() && !v.clock.is_playing());
         if paused_dirty {
-            let media = self.views[&key].clock.media_at(now());
+            let media = self
+                .preview_controls
+                .current(key)
+                .filter(|c| !c.cache_only)
+                .map_or_else(|| self.views[&key].clock.media_at(now()), |c| c.time.get());
             // At most `MAX_IN_FLIGHT` frames wait on the GPU; the completion
             // thread sends this one (its descriptor is not sent here).
             let deferred = self.completer.is_some();
-            if let Some(descriptor) = self.render(key, media, -1, None, deferred) {
+            if let Some(view) = self.views.get_mut(&key) {
+                view.render_failed = false;
+            }
+            if let Some(descriptor) = self.render(key, media, -1, None, deferred, true) {
+                let seq = descriptor.seq;
+                self.queue_auto_preview(key, seq);
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = false;
+                    view.render_retry = None;
                 }
                 if !deferred {
                     let revision = descriptor.revision;
                     self.event(key, Event::Frame(descriptor), Some(revision));
+                    self.preview_frame_sent(key, seq);
                 }
+            } else if let Some(view) = self.views.get_mut(&key)
+                && view.render_failed
+            {
+                // Waits for the next change (which sets `dirty` again).
+                view.dirty = false;
             }
         } else if let Some(view) = self.views.get_mut(&key)
             && view.clock.is_playing()
@@ -3137,7 +4127,8 @@ impl Thread {
                     // Timed frames are sent in order after any frame still
                     // finishing on the GPU.
                     self.drain_frames();
-                    let rendered = self.render(key, media, k, Some((shown_from, shown_for)), false);
+                    let rendered =
+                        self.render(key, media, k, Some((shown_from, shown_for)), false, false);
                     let Some(view) = self.views.get_mut(&key) else {
                         return;
                     };
@@ -3242,7 +4233,7 @@ impl Thread {
         }
         let media = request.time.get();
         self.drain_frames();
-        if let Some(descriptor) = self.render(key, media, -1, None, false) {
+        if let Some(descriptor) = self.render(key, media, -1, None, false, false) {
             self.stats().responses += 1;
             let mut envelope = Envelope::new(Message::Response {
                 id,
@@ -3271,8 +4262,15 @@ impl Thread {
         k: i64,
         timing: Option<(f64, f64)>,
         deferred: bool,
+        viewer_frame: bool,
     ) -> Option<FrameDescriptor> {
         let document = self.config.document;
+        let explicit_control = self
+            .preview_controls
+            .current(key)
+            .filter(|c| !c.cache_only)
+            .cloned();
+        let explicit_generation = explicit_control.as_ref().map(|c| c.generation);
         let gpu = self.gpu.as_mut()?;
         let view = self.views.get_mut(&key)?;
         let live = view.pool.as_mut()?;
@@ -3281,10 +4279,16 @@ impl Thread {
         let start = now();
         let overlay;
         let mut depth_surface: Option<(u32, u32)> = None;
+        let mut scene3d_meta = Vec::new();
+        let mut chrome_legend = Vec::new();
+        let mut chrome_glyphs = Vec::new();
+        let mut chrome_selection = None;
         let mut cpu_us = 0i64;
         let mut failures_n = 0usize;
         let mut stand_in = false;
         let mut stand_in_shown = None;
+        let mut preview_candidate: Option<PreviewCandidate> = None;
+        let mut preview_failure: Option<String> = None;
         if document {
             let doc = self.docs.get_mut(&key)?;
             let composer = gpu.composer_with(&self.config, self.frame_cache);
@@ -3307,8 +4311,9 @@ impl Thread {
             // Paused in Material Preview or Rendered: Blender surfaces
             // (`super::blender`); playback and draft shadings draw natively.
             let paused = timing.is_none() && !view.clock.is_playing();
-            let shading = super::blender::blender_shading(view.state.view.as_ref());
-            let preview = match (&self.blender, paused, shading, view.state.view.as_ref()) {
+            let render_state = view.state.clone();
+            let shading = super::blender::blender_shading(render_state.view.as_ref());
+            let preview = match (&self.blender, paused, shading, render_state.view.as_ref()) {
                 (Some(blender), true, Some(_), Some(v)) => Some(blender.host(v)),
                 _ => None,
             };
@@ -3323,28 +4328,70 @@ impl Thread {
             composer.renderer().set_scrub(scrub);
             let landed_before = composer.renderer().media_landed();
             // The depth and object-id surface of this frame, when the
-            // viewer asks for it: slot `seq % count` of the depth pool.
+            // viewer asks for it: the pair owned by this color slot.
             let depth_slot = view.depth.as_ref().and_then(|d| {
-                let index = (seq % u64::from(d.spec.count.max(1))) as usize;
+                // Color slot ownership also owns its depth and coverage pair.
+                // Sequence modulo can overwrite an older held slot when the
+                // viewer releases color frames out of order.
+                let index = (index as usize) * 2;
                 d.pool.surfaces.get(index).map(|s| {
                     (
                         index as u32,
                         d.spec.generation,
                         s.texture.create_view(&Default::default()),
+                        d.pool.surfaces[index + 1]
+                            .texture
+                            .create_view(&Default::default()),
                     )
                 })
             });
+            let png_resolver = self.blender.as_ref().map(|blender| {
+                crate::jobs::blender_png::HostBlenderPng::new(
+                    Arc::new(doc.media().clone()),
+                    blender.host_link(),
+                    key.1,
+                    Revision::new(doc.revision()).unwrap_or(Revision::ZERO),
+                    doc.document(),
+                )
+            });
+            let assets: &dyn pm_render::AssetResolver = png_resolver
+                .as_ref()
+                .map_or(doc.media() as &dyn pm_render::AssetResolver, |resolver| {
+                    resolver
+                });
             let composed = composer.compose_with_depth(
                 doc.document(),
                 &composition,
-                doc.media(),
+                assets,
                 Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
-                &view.state,
+                &render_state,
                 &live.working,
-                depth_slot.as_ref().map(|(_, _, v)| v),
+                depth_slot
+                    .as_ref()
+                    .map(|(_, _, depth, coverage)| (depth, coverage)),
             );
-            depth_surface = depth_slot.map(|(index, generation, _)| (index, generation));
+            depth_surface = depth_slot.map(|(index, generation, _, _)| (index, generation));
             composer.set_blender(pm_render::blender::BlenderRender::Native);
+            preview_failure = preview.as_ref().and_then(|host| host.failure());
+            if viewer_frame
+                && paused
+                && composed.is_ok()
+                && let Some(shading) = shading
+            {
+                preview_candidate = Some(PreviewCandidate {
+                    generation: explicit_generation,
+                    auto_generation: None,
+                    revision: Revision::new(doc.revision()).unwrap_or(Revision::ZERO),
+                    composition: composition.clone(),
+                    time: Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
+                    shading,
+                    complete: preview
+                        .as_ref()
+                        .is_some_and(|host| host.pending_count() == 0)
+                        && preview_failure.is_none(),
+                    failure: preview_failure.clone(),
+                });
+            }
             // What the paused frame lacked (nothing in a draft shading); a
             // frame that failed to render changes nothing.
             if paused
@@ -3352,7 +4399,13 @@ impl Thread {
                 && let Some(blender) = &self.blender
             {
                 let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
-                blender.submit(key, shading, revision, preview.as_deref());
+                blender.submit(
+                    key,
+                    shading,
+                    revision,
+                    preview.as_deref(),
+                    explicit_generation,
+                );
             }
             composer.renderer().set_scrub(false);
             let scrub_stats = composer.renderer().scrub_stats();
@@ -3370,6 +4423,10 @@ impl Thread {
                 Ok(composed) => {
                     view.revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
                     overlay = composed.overlay;
+                    scene3d_meta = composed.scene3d_meta;
+                    chrome_legend = composed.chrome_legend;
+                    chrome_glyphs = composed.chrome_glyphs;
+                    chrome_selection = composed.chrome_selection;
                     cpu_us = composed.cpu_us;
                     failures_n = composed.failures.len();
                     stand_in = !composed.stand_ins.is_empty();
@@ -3613,6 +4670,30 @@ impl Thread {
                     return None;
                 }
                 Err(error) => {
+                    view.render_failed = true;
+                    view.render_retry = transient_render_error(&error).then(|| {
+                        RenderRetry::after(
+                            view.render_retry,
+                            (doc.revision(), view.state.view_seq.get()),
+                            now(),
+                        )
+                    });
+                    if preview.is_some() {
+                        let why = preview_failure.take().unwrap_or_else(|| {
+                            format!("The Blender preview could not be prepared: {error}")
+                        });
+                        let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+                        self.fail_preview_without_frame(
+                            key,
+                            revision,
+                            explicit_generation,
+                            shading,
+                            &composition,
+                            Ticks::new(media.max(0)).unwrap_or(Ticks::ZERO),
+                            viewer_frame,
+                            why,
+                        );
+                    }
                     self.stats
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -3659,12 +4740,23 @@ impl Thread {
             let message = format!("frame bridge: display transform failed: {error}");
             (self.sink)(vec![Action::Log {
                 level: LogLevel::Error,
-                message,
+                message: message.clone(),
             }]);
+            self.fail_preview_delivery(key, preview_candidate.as_ref(), message);
             return None;
         }
         let submission = gpu.queue.submit([encoder.finish()]);
-        let seq_value = Seq::new(seq).ok()?;
+        let seq_value = match Seq::new(seq) {
+            Ok(value) => value,
+            Err(_) => {
+                self.fail_preview_delivery(
+                    key,
+                    preview_candidate.as_ref(),
+                    "The native viewer could not assign a frame sequence to the preview.".into(),
+                );
+                return None;
+            }
+        };
         let duration = timing.map(|_| Ticks::new(view.clock.frame_ticks()).unwrap_or(Ticks::MAX));
         let mut meta = super::complete::FrameMeta {
             seq,
@@ -3684,6 +4776,7 @@ impl Thread {
             held: 0,
         };
         let descriptor = FrameDescriptor {
+            scene3d_meta,
             pool_index: index,
             pool_generation: Seq::new(u64::from(live.spec.generation)).unwrap_or(Seq::MAX),
             seq: seq_value,
@@ -3702,10 +4795,17 @@ impl Thread {
                 stand_in,
             },
             overlay: Some(overlay),
-            depth_id: depth_surface.map(|(index, generation)| pm_protocol::frame::DepthIdSurface {
-                pool_index: index,
-                seq: seq_value,
-                pool_generation: Seq::new(u64::from(generation)).unwrap_or(Seq::MAX),
+            depth_id: depth_surface.map(|(index, generation)| {
+                Box::new(pm_protocol::frame::DepthIdSurface {
+                    encoding: Some("chromePlanesV1".into()),
+                    coverage_pool_index: Some(index + 1),
+                    legend: chrome_legend,
+                    glyphs: chrome_glyphs,
+                    selection: chrome_selection,
+                    pool_index: index,
+                    seq: seq_value,
+                    pool_generation: Seq::new(u64::from(generation)).unwrap_or(Seq::MAX),
+                })
             }),
             view_seq: view.state.view_seq,
             duration,
@@ -3725,13 +4825,27 @@ impl Thread {
                         level: LogLevel::Error,
                         message: format!("frame bridge: could not encode a message: {error}"),
                     }]);
+                    self.fail_preview_delivery(
+                        key,
+                        preview_candidate.as_ref(),
+                        format!("The native viewer could not encode the preview frame: {error}"),
+                    );
                     return None;
                 }
             };
             if !live.ledger.present(index, seq_value) {
+                self.fail_preview_delivery(
+                    key,
+                    preview_candidate.as_ref(),
+                    "The native viewer could not reserve the preview frame surface.".into(),
+                );
                 return None;
             }
             view.next_seq += 1;
+            if let Some(mut candidate) = preview_candidate.take() {
+                candidate.revision = descriptor.revision;
+                self.preview_candidates.insert((key, seq), candidate);
+            }
             meta.held = live.ledger.held_count() as u32;
             if timing.is_none() {
                 self.last_interactive = Some(now());
@@ -3743,6 +4857,12 @@ impl Thread {
                 bytes,
                 meta,
             });
+            self.fail_preview_snapshot(
+                key,
+                descriptor.revision,
+                explicit_generation,
+                preview_failure,
+            );
             return Some(descriptor);
         }
         let done = gpu.device.poll(wgpu::PollType::Wait {
@@ -3754,16 +4874,32 @@ impl Thread {
             let message = format!("frame bridge: the GPU did not finish a frame: {error}");
             (self.sink)(vec![Action::Log {
                 level: LogLevel::Error,
-                message,
+                message: message.clone(),
             }]);
+            self.fail_preview_delivery(key, preview_candidate.as_ref(), message);
             return None;
         }
         if !live.ledger.present(index, seq_value) {
+            self.fail_preview_delivery(
+                key,
+                preview_candidate.as_ref(),
+                "The native viewer could not reserve the preview frame surface.".into(),
+            );
             return None;
         }
         view.next_seq += 1;
+        if let Some(mut candidate) = preview_candidate {
+            candidate.revision = descriptor.revision;
+            self.preview_candidates.insert((key, seq), candidate);
+        }
         meta.held = live.ledger.held_count() as u32;
         self.record_frame(key, &meta, gpu_done, now());
+        self.fail_preview_snapshot(
+            key,
+            descriptor.revision,
+            explicit_generation,
+            preview_failure,
+        );
         Some(descriptor)
     }
 
@@ -3857,6 +4993,37 @@ impl Thread {
         token: u64,
         result: Result<Arc<Vec<super::snapshot::PreparedFrame>>, pm_blender::BlenderError>,
     ) {
+        if let Some(job) = self.cache_previews.remove(&token) {
+            let current = self.preview_controls.current(job.key);
+            if !current.is_some_and(|c| {
+                c.cache_only && c.revision == job.revision && c.generation == job.generation
+            }) {
+                return;
+            }
+            let revision = Revision::new(self.docs.get(&job.key).map_or(0, ViewDocument::revision))
+                .unwrap_or(Revision::ZERO);
+            if revision != job.revision {
+                if let Some(status) = self.preview_controls.cancelled(job.key) {
+                    self.preview_status(job.key, status);
+                }
+                return;
+            }
+            let status = match result {
+                Ok(_) => self
+                    .preview_controls
+                    .ready_cache(job.key, revision, job.generation),
+                Err(error) => self.preview_controls.failed(
+                    job.key,
+                    revision,
+                    Some(job.generation),
+                    format!("The Blender preview could not be prepared: {error}"),
+                ),
+            };
+            if let Some(status) = status {
+                self.preview_status(job.key, status);
+            }
+            return;
+        }
         match result {
             Ok(frames) => {
                 if let Some(job) = self.snapshots.preparing_mut(token) {
@@ -3879,6 +5046,167 @@ impl Thread {
                 self.snapshot_error(&job, code, &message);
             }
         }
+    }
+
+    /// Prepare Blender's interactive cache from the document mirror even if
+    /// no viewer surface exists. The transport clock and viewport are untouched.
+    fn work_cache_previews(&mut self) {
+        let ready: Vec<(Key, PreviewControl)> = self
+            .cache_requested
+            .iter()
+            .filter(|(key, control)| {
+                self.docs.get(key).is_some_and(|doc| {
+                    doc.has_document() && doc.revision() >= control.revision.get()
+                })
+            })
+            .map(|(key, control)| (*key, control.clone()))
+            .collect();
+        for (key, control) in ready {
+            self.cache_requested.remove(&key);
+            if self
+                .preview_controls
+                .current(key)
+                .is_none_or(|c| c.generation != control.generation)
+            {
+                continue;
+            }
+            let Some(blender) = self.blender.clone() else {
+                if let Some(status) = self.preview_controls.failed(
+                    key,
+                    control.revision,
+                    Some(control.generation),
+                    "The Blender capture worker is unavailable.".into(),
+                ) {
+                    self.preview_status(key, status);
+                }
+                continue;
+            };
+            if let Some(status) =
+                self.preview_controls
+                    .running(key, control.revision, Some(control.generation))
+            {
+                self.preview_status(key, status);
+            }
+            let result = self.cache_preview_snapshots(key, &control, &blender);
+            match result {
+                Ok(snapshots) if snapshots.is_empty() || blender.prepared(&snapshots).is_some() => {
+                    if let Some(status) =
+                        self.preview_controls
+                            .ready_cache(key, control.revision, control.generation)
+                    {
+                        self.preview_status(key, status);
+                    }
+                }
+                Ok(snapshots) => {
+                    self.blender_token += 1;
+                    let token = self.blender_token;
+                    self.cache_previews.insert(
+                        token,
+                        CachePreview {
+                            key,
+                            revision: control.revision,
+                            generation: control.generation,
+                        },
+                    );
+                    blender.capture(token, key, snapshots, true);
+                }
+                Err(error) => {
+                    if let Some(status) = self.preview_controls.failed(
+                        key,
+                        control.revision,
+                        Some(control.generation),
+                        error,
+                    ) {
+                        self.preview_status(key, status);
+                    }
+                }
+            }
+        }
+    }
+
+    fn cache_preview_snapshots(
+        &mut self,
+        key: Key,
+        control: &PreviewControl,
+        blender: &super::blender::PreviewBlender,
+    ) -> Result<Vec<pm_blender::snapshot::Snapshot>, String> {
+        // Headless sessions have no pool to initialize the device for us.
+        if self.gpu().is_none() {
+            return Err("The engine has no GPU device.".into());
+        }
+        let gpu = self.gpu.as_mut().ok_or("The engine has no GPU device.")?;
+        let doc = self
+            .docs
+            .get(&key)
+            .ok_or("The engine session has no document.")?;
+        if doc.revision() != control.revision.get() {
+            return Err("The preview document changed before Blender could start.".into());
+        }
+        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let _ = composer.use_definitions(key, doc.definitions(), &[]);
+        let renderer = composer.renderer();
+        renderer.set_scrub(false);
+        renderer.set_captions_hidden(false);
+        renderer.set_text_seed_scope(pm_render::text::served::SeedScope {
+            port: Some(key.0.0),
+            session: Some(key.1.get()),
+        });
+        let request = pm_render::RenderRequest {
+            output_size: control.size.ok_or("The preview has no composition size.")?,
+            scale: None,
+            region: None,
+            origin: None,
+            precision: pm_protocol::color::Precision::Float16,
+            depth_id: false,
+            background: true,
+            export: false,
+            view: None,
+            blender: pm_render::blender::BlenderRender::Native,
+            motion_blur: pm_render::motion::MotionBlur::Off,
+            sampling: pm_render::sampling::Sampling::Final,
+            video_end: pm_render::VideoEnd::of(pm_protocol::frame::FramePurpose::Viewer),
+        };
+        let png = crate::jobs::blender_png::HostBlenderPng::new(
+            Arc::new(doc.media().clone()),
+            blender.host_link(),
+            key.1,
+            control.revision,
+            doc.document(),
+        );
+        let camera = control
+            .camera
+            .map(|camera| {
+                pm_render::scene3d::View3d::from_override(&ViewOverride {
+                    camera: Some(camera),
+                    shading: control.shading,
+                    xray: false,
+                    local_view: Vec::new(),
+                })
+            })
+            .and_then(|view| view.camera);
+        let snapshots = renderer
+            .blender_snapshots(
+                doc.document(),
+                control.composition.as_str(),
+                control.time,
+                &request,
+                &png,
+                true,
+                pm_render::blender::SnapshotOptions {
+                    force_eevee: control.shading == Shading3d::Material,
+                    camera,
+                    settings: None,
+                },
+            )
+            .map_err(|error| format!("The Blender preview could not be planned: {error}"))?;
+        if let Some((frame, why)) = snapshots.errors.first() {
+            return Err(format!(
+                "The Blender frame of {} at {} s could not be prepared: {why}",
+                frame.composition(),
+                frame.time
+            ));
+        }
+        Ok(snapshots.snapshots)
     }
 
     /// What the views are doing, for the snapshot queue's scheduling.
@@ -3916,6 +5244,7 @@ impl Thread {
     /// that is ready, then at most one `idle` job (so a gesture that starts
     /// is served after one).
     fn work_snapshots(&mut self) {
+        self.finish_pending_snapshots();
         if self.snapshots.is_empty() {
             return;
         }
@@ -3967,6 +5296,24 @@ impl Thread {
             let Some(job) = self.snapshots.next(revision, outstanding, pressure, now) else {
                 return;
             };
+            if matches!(
+                &job.request.target,
+                pm_protocol::snapshot::SnapshotTarget::Frame { .. }
+            ) {
+                // Float32 is the largest possible target format. Reserving
+                // against this bound can delay a Float16 job, never let a
+                // job escape the ring's memory limit after rendering.
+                let width = u64::from(job.request.output_size.width);
+                let height = u64::from(job.request.output_size.height);
+                let estimated = (width * 16).div_ceil(256) * 256 * height;
+                if self.gpu.as_ref().is_some_and(|gpu| {
+                    !gpu.snapshot_readback
+                        .can_reserve(estimated, MAX_CACHED_SNAPSHOT_TARGET_BYTES)
+                }) {
+                    self.snapshots.requeue(job);
+                    return;
+                }
+            }
             let idle = job.request.class == pm_protocol::snapshot::SnapshotClass::Idle;
             if idle && idle_done {
                 self.snapshots.requeue(job);
@@ -3977,11 +5324,134 @@ impl Thread {
         }
     }
 
+    /// Advances map callbacks without waiting for the GPU. A pending
+    /// snapshot owns its staging ticket and result metadata; meanwhile the
+    /// normal work turn may render and submit viewer frames.
+    fn finish_pending_snapshots(&mut self) {
+        if self.pending_snapshots.is_empty() {
+            return;
+        }
+        // Responses stay in request order even if a later slot's map
+        // callback runs first.
+        while let Some(first) = self.pending_snapshots.first() {
+            let result = self
+                .gpu
+                .as_mut()
+                .expect("polled GPU")
+                .snapshot_readback
+                .try_with_mapped_rows(
+                    first.ticket,
+                    |data, row, stride, height| {
+                        super::snapshot::encode_mapped_rgba8(
+                            first.format,
+                            data,
+                            row,
+                            stride,
+                            height,
+                            first.job.request.pixels,
+                            first.rows,
+                        )
+                    },
+                    MAX_CACHED_SNAPSHOT_TARGET_BYTES,
+                );
+            let Some(result) = result else { break };
+            let pending = self.pending_snapshots.remove(0);
+            match result.and_then(|result| result) {
+                Ok(pixels) => self.complete_frame_snapshot(pending, pixels),
+                Err(error) => {
+                    self.stats().snapshot_failures += 1;
+                    self.snapshot_error(
+                        &pending.job,
+                        ErrorCode::Internal,
+                        &format!("The GPU snapshot readback failed: {error}"),
+                    );
+                }
+            }
+        }
+        if self
+            .pending_snapshots
+            .first()
+            .is_some_and(|pending| pending.map_deadline <= now())
+        {
+            if let Some(gpu) = self.gpu.as_ref() {
+                gpu.lost.store(true, Ordering::Release);
+            }
+            self.fail_pending_snapshot_maps(
+                ErrorCode::Timeout,
+                "The GPU snapshot readback did not complete within 2 seconds.",
+            );
+        }
+    }
+
+    fn fail_pending_snapshot_maps(&mut self, code: ErrorCode, message: &str) {
+        let pending = std::mem::take(&mut self.pending_snapshots);
+        if let Some(gpu) = self.gpu.as_mut() {
+            for item in &pending {
+                gpu.snapshot_readback
+                    .cancel(item.ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+            }
+        }
+        for item in pending {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(&item.job, code, message);
+        }
+    }
+
+    fn complete_frame_snapshot(&mut self, pending: PendingSnapshot, pixels: Vec<u8>) {
+        use pm_protocol::snapshot::{SnapshotOutcome, SnapshotResult};
+        let PendingSnapshot {
+            job,
+            started,
+            revision,
+            width,
+            height,
+            draft_3d,
+            ..
+        } = pending;
+        let Some(payload) = self.share_pixels(&job, pixels) else {
+            return;
+        };
+        let render_us = (now() - started).max(0);
+        self.snapshots.observe(render_us as f64);
+        {
+            let mut stats = self.stats();
+            stats.snapshots += 1;
+            stats.snapshot_us_max = stats.snapshot_us_max.max(render_us);
+        }
+        let costs = self.snapshot_costs.entry(job.key).or_default();
+        costs.0 += 1;
+        costs.1 = costs.1.max(render_us);
+        let result = SnapshotResult {
+            revision,
+            view_seq: job.request.view_seq,
+            width,
+            height,
+            pixels: job.request.pixels,
+            payload,
+            origin: [0.0, 0.0],
+            layer_box: None,
+            raster: None,
+            quality: FrameQuality {
+                resolution: PreviewResolution::Full,
+                representation: Representation::Original,
+                draft_3d,
+                cached: false,
+                stand_in: false,
+            },
+            waited_us: (started - job.received).clamp(0, i64::from(u32::MAX)) as u32,
+            render_us: render_us.clamp(0, i64::from(u32::MAX)) as u32,
+        };
+        let mut envelope = Envelope::new(Message::Response {
+            id: job.id,
+            body: Response::Snapshot(Box::new(SnapshotOutcome::Rendered(result))),
+        });
+        envelope.revision = Some(revision);
+        self.send(job.host, envelope);
+    }
+
     /// Renders one snapshot and answers it.
     fn run_snapshot(&mut self, job: super::snapshot::SnapshotJob) {
-        use pm_protocol::snapshot::{
-            SnapshotClass, SnapshotOutcome, SnapshotResult, SnapshotTarget,
-        };
+        use pm_protocol::snapshot::{SnapshotClass, SnapshotOutcome, SnapshotTarget};
         let started = now();
         if self.gpu().is_none() {
             self.stats().snapshot_failures += 1;
@@ -4000,9 +5470,20 @@ impl Thread {
             self.run_layer_snapshot(job, started);
             return;
         }
+        if self.snapshot_poller.is_none() {
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::Internal,
+                "The GPU snapshot completion worker is unavailable.",
+            );
+            return;
+        }
         let Some(gpu) = self.gpu.as_mut() else {
             return;
         };
+        let gpu_lost = gpu.lost.clone();
+        let gpu_device = gpu.device.clone();
         let Some(doc) = self.docs.get(&job.key) else {
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
@@ -4019,7 +5500,8 @@ impl Thread {
             && pm_render::unsupported(doc.document(), job.request.composition.as_str())
                 .iter()
                 .any(|u| u.feature == pm_render::Feature::Blender);
-        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let (composer, readback, snapshot_target) =
+            gpu.composer_and_snapshot_resources(&self.config, self.frame_cache);
         // The session's definitions, without consuming the re-registrations
         // its viewer's next frame applies.
         let _ = composer.use_definitions(job.key, doc.definitions(), &[]);
@@ -4085,7 +5567,7 @@ impl Thread {
                         );
                         return;
                     }
-                    blender.capture(token, job.key, snapshots);
+                    blender.capture(token, job.key, snapshots, false);
                     self.stats().snapshot_blender += 1;
                     self.snapshots.requeue(job);
                     return;
@@ -4098,6 +5580,35 @@ impl Thread {
             }
         }
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
+        let size = request.target_size();
+        let format = pm_render::Renderer::target_format(doc.document(), &request);
+        let target = snapshot_output_target(
+            snapshot_target,
+            renderer.device(),
+            size.width,
+            size.height,
+            format,
+        );
+        let (ticket, copy) = match readback.reserve(
+            renderer.device(),
+            &target.texture,
+            MAX_CACHED_SNAPSHOT_TARGET_BYTES,
+        ) {
+            Ok(Some(reserved)) => reserved,
+            Ok(None) => {
+                self.snapshots.requeue(job);
+                return;
+            }
+            Err(error) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::Internal,
+                    &format!("The snapshot could not reserve a GPU readback: {error}"),
+                );
+                return;
+            }
+        };
         // A snapshot never draws an SVG bucket's stand-in: it waits for the
         // renderer's raster (decision S1). The renderer is the viewer's
         // too: the guard gives the viewer its policy back however this
@@ -4106,23 +5617,19 @@ impl Thread {
         let rendered = {
             let mut renderer = renderer.svg_waiting();
             renderer
-                .render(
+                .render_snapshot_into_copy(
                     doc.document(),
                     job.request.composition.as_str(),
                     job.request.time,
                     &request,
                     doc.media(),
+                    &target,
+                    &copy,
                 )
-                .and_then(|frame| {
-                    let raw = pm_gpu::readback::read_raw(
-                        renderer.device(),
-                        renderer.queue(),
-                        &frame.color.texture,
-                    )?;
-                    Ok((frame.color.width(), frame.color.height(), raw))
-                })
+                .map(|(_, rows)| (target.width(), target.height(), rows))
         };
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
+            readback.cancel(ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
             self.stats().snapshot_failures += 1;
             self.snapshot_error(
                 &job,
@@ -4131,7 +5638,10 @@ impl Thread {
             );
             return;
         }
-        let (width, height, raw) = match rendered {
+        if rendered.is_err() {
+            readback.cancel(ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+        }
+        let (width, height, rows) = match rendered {
             Ok(done) => done,
             Err(pm_render::RenderError::SvgRastersPending(needs)) => {
                 // As for fallback pixels: what the renderer posted is on
@@ -4263,48 +5773,38 @@ impl Thread {
                 return;
             }
         };
-        let pixels = super::snapshot::encode_rgba8(&raw, job.request.pixels);
-        drop(raw);
-        let Some(payload) = self.share_pixels(&job, pixels) else {
-            return;
-        };
-        let done = now();
-        let render_us = (done - started).max(0);
-        self.snapshots.observe(render_us as f64);
+        let back = self.snapshot_back.clone();
+        readback.start_map(ticket, move || {
+            let _ = back.send(Command::SnapshotMapReady);
+        });
+        if !self
+            .snapshot_poller
+            .as_ref()
+            .expect("checked above")
+            .submit(gpu_device, gpu_lost.clone())
         {
-            let mut stats = self.stats();
-            stats.snapshots += 1;
-            stats.snapshot_us_max = stats.snapshot_us_max.max(render_us);
+            readback.cancel(ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
+            gpu_lost.store(true, Ordering::Release);
+            self.stats().snapshot_failures += 1;
+            self.snapshot_error(
+                &job,
+                ErrorCode::DeviceLost,
+                "The GPU snapshot completion worker stopped.",
+            );
+            return;
         }
-        let costs = self.snapshot_costs.entry(job.key).or_default();
-        costs.0 += 1;
-        costs.1 = costs.1.max(render_us);
-        let result = SnapshotResult {
+        self.pending_snapshots.push(PendingSnapshot {
+            job,
+            ticket,
+            started,
+            map_deadline: now() + SNAPSHOT_GPU_TIMEOUT_US,
             revision,
-            view_seq: job.request.view_seq,
             width,
             height,
-            pixels: job.request.pixels,
-            payload,
-            origin: [0.0, 0.0],
-            layer_box: None,
-            raster: None,
-            quality: FrameQuality {
-                resolution: PreviewResolution::Full,
-                representation: Representation::Original,
-                draft_3d,
-                cached: false,
-                stand_in: false,
-            },
-            waited_us: (started - job.received).clamp(0, i64::from(u32::MAX)) as u32,
-            render_us: render_us.clamp(0, i64::from(u32::MAX)) as u32,
-        };
-        let mut envelope = Envelope::new(Message::Response {
-            id: job.id,
-            body: Response::Snapshot(Box::new(SnapshotOutcome::Rendered(result))),
+            format,
+            rows,
+            draft_3d,
         });
-        envelope.revision = Some(revision);
-        self.send(job.host, envelope);
     }
 
     /// A layer's raster (the base pixels of today's `render.raster()`,
@@ -4605,12 +6105,27 @@ fn blender_frames(
 ) -> BlenderFrames {
     use super::snapshot::BlenderPrep;
     let composition = job.request.composition.as_str();
+    let png_resolver = blender.map(|blender| {
+        crate::jobs::blender_png::HostBlenderPng::new(
+            Arc::new(doc.media().clone()),
+            blender.host_link(),
+            job.key.1,
+            Revision::new(doc.revision()).unwrap_or(Revision::ZERO),
+            doc.document(),
+        )
+        .cached_only_if(job.request.blender_wait_ms == 0)
+    });
+    let assets: &dyn pm_render::AssetResolver = png_resolver
+        .as_ref()
+        .map_or(doc.media() as &dyn pm_render::AssetResolver, |resolver| {
+            resolver
+        });
     let snaps = match renderer.blender_snapshots(
         doc.document(),
         composition,
         job.request.time,
         request,
-        doc.media(),
+        assets,
         false,
         pm_render::blender::SnapshotOptions::default(),
     ) {
@@ -4631,6 +6146,15 @@ fn blender_frames(
             );
         }
     };
+    if png_resolver
+        .as_ref()
+        .is_some_and(|resolver| resolver.cold_miss())
+    {
+        // A cold synchronous capture cannot block this IPC turn asking the
+        // window for Canvas2D bytes. Today's capture returns immediately
+        // until a preview/export has prepared the frame and its inputs.
+        return BlenderFrames::Fail(ErrorCode::BlenderFailed, BLENDER_NOT_PREPARED.to_owned());
+    }
     if let Some((frame, why)) = snaps.errors.first() {
         return if blender_routed(why) {
             BlenderFrames::Fail(
@@ -4736,6 +6260,425 @@ mod tests {
     use super::*;
 
     #[test]
+    fn snapshot_target_cache_policy_accounts_for_format_and_resize() {
+        use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
+
+        assert!(cache_snapshot_target(320, 180, Rgba16Float));
+        assert!(cache_snapshot_target(4096, 2048, Rgba16Float));
+        assert!(!cache_snapshot_target(4096, 2049, Rgba16Float));
+        assert!(cache_snapshot_target(4096, 4096, Rgba8Unorm));
+        assert!(!cache_snapshot_target(4096, 4096, Rgba16Float));
+        assert!(!cache_snapshot_target(4096, 2048, Rgba32Float));
+    }
+
+    fn preview_thread() -> (Thread, Arc<Mutex<Vec<PreviewStatus>>>) {
+        let statuses = Arc::new(Mutex::new(Vec::new()));
+        let received = statuses.clone();
+        let sink: Sink = Arc::new(move |actions| {
+            for action in actions {
+                if let Action::Send { bytes, .. } = action {
+                    let envelope = codec::decode(&bytes).unwrap();
+                    if let Message::Event {
+                        body: Event::PreviewStatus(status),
+                    } = envelope.message
+                    {
+                        received.lock().unwrap().push(status);
+                    }
+                }
+            }
+        });
+        let peaks = super::super::peaks::PeakWorker::new(sink.clone());
+        let (snapshot_back, _snapshot_rx) = std::sync::mpsc::channel();
+        let thread = Thread {
+            config: ThreadConfig {
+                bridge_name: None,
+                lead: 1,
+                fps: 60,
+                extra_passes: 0,
+                trace: false,
+                stand_in_log: false,
+                allocation_inventory: false,
+                phase: None,
+                remote_layer: false,
+                remote_trace: None,
+                remote_rate: false,
+                document: true,
+                host_clock: true,
+                shader_cache: None,
+                fonts: None,
+                external_wait_cap_us: None,
+                send_delay: None,
+            },
+            sink,
+            stats: Arc::new(Mutex::new(Stats::default())),
+            bridge: None,
+            gpu: None,
+            views: BTreeMap::new(),
+            docs: BTreeMap::new(),
+            audio: BTreeMap::new(),
+            audio_prefs: BTreeMap::new(),
+            peaks,
+            frame_ticks: TICKS_PER_SECOND / 60,
+            generations: Generations::default(),
+            blender: None,
+            blender_token: 0,
+            preview_controls: Default::default(),
+            cache_requested: BTreeMap::new(),
+            cache_previews: BTreeMap::new(),
+            preview_candidates: BTreeMap::new(),
+            auto_preview: BTreeMap::new(),
+            auto_generation: BTreeMap::new(),
+            fallback: Fallback::default(),
+            frame_cache: pm_render::media::DEFAULT_FRAME_CACHE,
+            snapshots: super::super::snapshot::SnapshotQueue::default(),
+            pending_snapshots: Vec::new(),
+            snapshot_back,
+            snapshot_poller: None,
+            segments: pm_bridge::shm::Segments::default(),
+            last_interactive: None,
+            snapshot_costs: BTreeMap::new(),
+            compat: super::super::compat::CompatStore::default(),
+            peaks_waiting: BTreeSet::new(),
+            doc_trace: BTreeMap::new(),
+            work_start: 0,
+            completer: None,
+            svg: super::super::svg::SvgState::default(),
+        };
+        (thread, statuses)
+    }
+
+    fn preview_key() -> Key {
+        (PortId(1), SessionId::new(2).unwrap())
+    }
+
+    #[test]
+    fn cache_only_control_queues_without_viewer_or_transport_change() {
+        use pm_protocol::common::CompositionId;
+        let (mut thread, statuses) = preview_thread();
+        let key = preview_key();
+        let control = PreviewControl {
+            generation: Seq::new(7).unwrap(),
+            revision: Revision::new(3).unwrap(),
+            composition: CompositionId::new("comp"),
+            time: Ticks::new(705_600_000).unwrap(),
+            shading: Shading3d::Rendered,
+            action: PreviewAction::Render,
+            cache_only: true,
+            size: Some(Size::new(640, 360)),
+            camera: None,
+        };
+        thread.apply(Command::PreviewControl {
+            key,
+            control: control.clone(),
+        });
+        assert!(thread.views.is_empty());
+        assert_eq!(thread.cache_requested.get(&key), Some(&control));
+        assert_eq!(statuses.lock().unwrap()[0].phase, PreviewPhase::Queued);
+        thread.apply(Command::PreviewControl {
+            key,
+            control: PreviewControl {
+                generation: Seq::new(8).unwrap(),
+                action: PreviewAction::Cancel,
+                cache_only: false,
+                size: None,
+                ..control
+            },
+        });
+        assert!(!thread.cache_requested.contains_key(&key));
+        assert_eq!(
+            statuses.lock().unwrap().last().unwrap().phase,
+            PreviewPhase::Cancelled
+        );
+    }
+
+    fn candidate(shading: Shading3d, time: i64, complete: bool) -> PreviewCandidate {
+        PreviewCandidate {
+            generation: None,
+            auto_generation: None,
+            revision: Revision::new(7).unwrap(),
+            composition: "comp".into(),
+            time: Ticks::new(time).unwrap(),
+            shading,
+            complete,
+            failure: None,
+        }
+    }
+
+    #[test]
+    fn automatic_preview_shading_change_gets_a_new_generation() {
+        let material = candidate(Shading3d::Material, 0, false);
+        let first = AutoPreview::next(None, None, &material).unwrap();
+        assert!(first.matches(&material));
+        let rendered = candidate(Shading3d::Rendered, 0, false);
+        assert!(!first.matches(&rendered));
+        let second = AutoPreview::next(Some(&first), Some(first.generation), &rendered).unwrap();
+        assert_eq!(second.generation.get(), 2);
+        assert_eq!(second.shading, Shading3d::Rendered);
+    }
+
+    #[test]
+    fn cached_complete_frame_replaces_stale_automatic_busy_status() {
+        let first =
+            AutoPreview::next(None, None, &candidate(Shading3d::Rendered, 0, false)).unwrap();
+        let cached = candidate(Shading3d::Rendered, 42, true);
+        let second = AutoPreview::next(Some(&first), Some(first.generation), &cached).unwrap();
+        assert_eq!(second.generation.get(), 2);
+        assert!(second.matches(&cached));
+        assert_eq!(second.phase, PreviewPhase::Queued);
+    }
+
+    #[test]
+    fn failed_snapshot_reports_automatic_failure_without_a_ready_frame() {
+        let (mut thread, statuses) = preview_thread();
+        let key = preview_key();
+        let seq = Seq::new(11).unwrap();
+        let mut failed = candidate(Shading3d::Rendered, 0, false);
+        failed.failure = Some("The Blender preview could not be prepared: bad map".into());
+        thread.preview_candidates.insert((key, seq.get()), failed);
+
+        thread.queue_auto_preview(key, seq);
+        thread.preview_frame_sent(key, seq);
+
+        let statuses = statuses.lock().unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].phase, PreviewPhase::Queued);
+        assert_eq!(statuses[1].phase, PreviewPhase::Failed);
+        assert_eq!(statuses[0].generation, statuses[1].generation);
+        assert!(statuses[1].automatic);
+        assert_eq!(
+            statuses[1].error.as_deref(),
+            Some("The Blender preview could not be prepared: bad map")
+        );
+        assert!(statuses.iter().all(|s| s.phase != PreviewPhase::Ready));
+    }
+
+    #[test]
+    fn failed_snapshot_ends_explicit_request_and_cannot_become_ready() {
+        use pm_protocol::common::CompositionId;
+        let (mut thread, statuses) = preview_thread();
+        let key = preview_key();
+        let generation = Seq::new(3).unwrap();
+        let seq = Seq::new(11).unwrap();
+        thread
+            .preview_controls
+            .control(
+                key,
+                PreviewControl {
+                    generation,
+                    revision: Revision::new(7).unwrap(),
+                    composition: CompositionId::new("comp"),
+                    time: Ticks::ZERO,
+                    shading: Shading3d::Rendered,
+                    action: PreviewAction::Render,
+                    cache_only: false,
+                    size: None,
+                    camera: None,
+                },
+            )
+            .unwrap();
+        let mut failed = candidate(Shading3d::Rendered, 0, false);
+        failed.generation = Some(generation);
+        failed.failure = Some("The Blender preview could not be prepared: bad map".into());
+        thread.preview_candidates.insert((key, seq.get()), failed);
+
+        thread.fail_preview_snapshot(
+            key,
+            Revision::new(7).unwrap(),
+            Some(generation),
+            Some("The Blender preview could not be prepared: bad map".into()),
+        );
+        thread.preview_frame_sent(key, seq);
+
+        let statuses = statuses.lock().unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].phase, PreviewPhase::Failed);
+        assert!(!statuses[0].automatic);
+        assert_eq!(statuses[0].generation, generation);
+        assert_eq!(
+            statuses[0].error.as_deref(),
+            Some("The Blender preview could not be prepared: bad map")
+        );
+        assert!(thread.preview_controls.current(key).is_none());
+    }
+
+    #[test]
+    fn synchronous_delivery_error_fails_explicit_preview() {
+        use pm_protocol::common::CompositionId;
+        let (mut thread, statuses) = preview_thread();
+        let key = preview_key();
+        let generation = Seq::new(4).unwrap();
+        thread
+            .preview_controls
+            .control(
+                key,
+                PreviewControl {
+                    generation,
+                    revision: Revision::new(7).unwrap(),
+                    composition: CompositionId::new("comp"),
+                    time: Ticks::ZERO,
+                    shading: Shading3d::Rendered,
+                    action: PreviewAction::Render,
+                    cache_only: false,
+                    size: None,
+                    camera: None,
+                },
+            )
+            .unwrap();
+        let mut pending = candidate(Shading3d::Rendered, 0, true);
+        pending.generation = Some(generation);
+        thread.fail_preview_delivery(key, Some(&pending), "GPU did not finish".into());
+
+        let statuses = statuses.lock().unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].phase, PreviewPhase::Failed);
+        assert_eq!(statuses[0].error.as_deref(), Some("GPU did not finish"));
+        assert!(thread.preview_controls.current(key).is_none());
+    }
+
+    #[test]
+    fn deferred_frame_failure_reports_only_its_automatic_generation() {
+        let (mut thread, statuses) = preview_thread();
+        let key = preview_key();
+        let seq = Seq::new(12).unwrap();
+        thread
+            .preview_candidates
+            .insert((key, seq.get()), candidate(Shading3d::Rendered, 0, true));
+        thread.queue_auto_preview(key, seq);
+        let meta = super::super::complete::FrameMeta {
+            seq: seq.get(),
+            k: -1,
+            index: 0,
+            generation: 1,
+            timing: None,
+            view_seq: 1,
+            revision: 7,
+            start: 0,
+            work_start: 0,
+            cpu_us: 0,
+            overlay_layers: 0,
+            failures: 0,
+            stand_in_shown: None,
+            depth: false,
+            held: 0,
+        };
+        thread.apply(Command::FrameFailed {
+            key,
+            meta: Box::new(meta),
+            error: "GPU lost".into(),
+        });
+        thread.preview_frame_sent(key, seq);
+
+        let statuses = statuses.lock().unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].phase, PreviewPhase::Queued);
+        assert_eq!(statuses[1].phase, PreviewPhase::Failed);
+        assert_eq!(statuses[1].generation, statuses[0].generation);
+        assert_eq!(
+            statuses[1].error.as_deref(),
+            Some("The native viewer could not present the preview: GPU lost")
+        );
+        assert!(statuses.iter().all(|s| s.phase != PreviewPhase::Ready));
+    }
+
+    #[test]
+    fn scene_build_error_without_frame_fails_explicit_and_automatic_previews() {
+        use pm_protocol::common::CompositionId;
+        let (mut thread, statuses) = preview_thread();
+        let key = preview_key();
+        let revision = Revision::new(7).unwrap();
+        let generation = Seq::new(1).unwrap();
+        thread
+            .preview_controls
+            .control(
+                key,
+                PreviewControl {
+                    generation,
+                    revision,
+                    composition: CompositionId::new("comp"),
+                    time: Ticks::ZERO,
+                    shading: Shading3d::Rendered,
+                    action: PreviewAction::Render,
+                    cache_only: false,
+                    size: None,
+                    camera: None,
+                },
+            )
+            .unwrap();
+        thread.fail_preview_without_frame(
+            key,
+            revision,
+            Some(generation),
+            Some(Shading3d::Rendered),
+            "comp",
+            Ticks::ZERO,
+            true,
+            "scene evaluation failed".into(),
+        );
+        assert!(thread.preview_controls.current(key).is_none());
+        thread.fail_preview_without_frame(
+            key,
+            revision,
+            None,
+            Some(Shading3d::Rendered),
+            "comp",
+            Ticks::ZERO,
+            true,
+            "scene evaluation failed".into(),
+        );
+
+        let statuses = statuses.lock().unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].phase, PreviewPhase::Failed);
+        assert!(!statuses[0].automatic);
+        assert_eq!(statuses[1].phase, PreviewPhase::Failed);
+        assert!(statuses[1].automatic);
+        assert_eq!(statuses[0].error, statuses[1].error);
+        assert!(statuses.iter().all(|s| s.phase != PreviewPhase::Ready));
+    }
+
+    #[test]
+    fn terminal_pool_failure_ends_explicit_and_automatic_previews() {
+        use pm_protocol::common::CompositionId;
+        let (mut thread, statuses) = preview_thread();
+        let key = preview_key();
+        let revision = Revision::new(7).unwrap();
+        let generation = Seq::new(4).unwrap();
+        thread
+            .preview_controls
+            .control(
+                key,
+                PreviewControl {
+                    generation,
+                    revision,
+                    composition: CompositionId::new("comp"),
+                    time: Ticks::ZERO,
+                    shading: Shading3d::Rendered,
+                    action: PreviewAction::Render,
+                    cache_only: false,
+                    size: None,
+                    camera: None,
+                },
+            )
+            .unwrap();
+        let auto =
+            AutoPreview::next(None, None, &candidate(Shading3d::Rendered, 0, false)).unwrap();
+        thread.auto_preview.insert(key, auto);
+
+        // No frame bridge makes pool creation permanently impossible.
+        thread.make_pool(key, spec(), 0, None);
+
+        let statuses = statuses.lock().unwrap();
+        assert_eq!(statuses.len(), 2);
+        assert!(statuses.iter().all(|s| s.phase == PreviewPhase::Failed));
+        assert!(statuses.iter().all(|s| {
+            s.error
+                .as_deref()
+                .is_some_and(|e| e.contains("could not create the preview frame surface"))
+        }));
+        assert!(thread.preview_controls.current(key).is_none());
+    }
+
+    #[test]
     fn slow_turns_fall_in_their_bands() {
         assert_eq!(slow_turn_band(0), None);
         assert_eq!(slow_turn_band(49_999), None);
@@ -4753,6 +6696,37 @@ mod tests {
             format: SurfaceFormat::Bgra8Unorm,
             count: 8,
         }
+    }
+
+    /// A paused frame that failed for the moment is drawn again after
+    /// 100 ms, 500 ms and 2 s, then waits for a change; a deterministic
+    /// failure (an over-budget scene reports an invalid request) waits at
+    /// once. A failure of another frame starts the retries over.
+    #[test]
+    fn transient_render_failures_retry_with_backoff_then_wait_for_a_change() {
+        use pm_render::RenderError as E;
+        assert!(transient_render_error(&E::Gpu("lost".into())));
+        assert!(transient_render_error(&E::Media("decode".into())));
+        assert!(transient_render_error(&E::Fallback("runner".into())));
+        assert!(transient_render_error(&E::SvgRaster("window".into())));
+        assert!(!transient_render_error(&E::Request(
+            "viewport geometry: an imported scene over two million vertices".into()
+        )));
+        assert!(!transient_render_error(&E::Composition("main".into())));
+        assert!(!transient_render_error(&E::Watchdog("runaway".into())));
+
+        let frame = (7, 3);
+        let mut retry = None;
+        let mut at = Vec::new();
+        for now in [0, 1_000_000, 2_000_000, 3_000_000] {
+            let next = RenderRetry::after(retry, frame, now);
+            at.push(next.at.map(|t| t - now));
+            retry = Some(next);
+        }
+        assert_eq!(at, [Some(100_000), Some(500_000), Some(2_000_000), None]);
+        // Another frame (an edit) starts over.
+        let edited = RenderRetry::after(retry, (8, 3), 5_000_000);
+        assert_eq!((edited.at, edited.attempts), (Some(5_100_000), 1));
     }
 
     #[test]

@@ -182,6 +182,7 @@ function fakeGl(active: string[], fence: () => number, maxTextureSize = 16384) {
   const C = {
     VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, LINK_STATUS: 3, ARRAY_BUFFER: 4, STATIC_DRAW: 5, DEPTH_TEST: 6, BLEND: 7,
     TEXTURE_2D: 8, TEXTURE0: 100, RGBA16F: 9, RGBA: 10, HALF_FLOAT: 11, FLOAT: 12, TEXTURE_MIN_FILTER: 13, TEXTURE_MAG_FILTER: 14,
+    RGBA8: 32, UNSIGNED_BYTE: 33,
     LINEAR: 15, TEXTURE_WRAP_S: 16, TEXTURE_WRAP_T: 17, CLAMP_TO_EDGE: 18, FRAMEBUFFER: 19, COLOR_ATTACHMENT0: 20,
     COLOR_BUFFER_BIT: 21, TRIANGLE_STRIP: 22, NO_ERROR: 0, UNPACK_ALIGNMENT: 23, SYNC_GPU_COMMANDS_COMPLETE: 24,
     ALREADY_SIGNALED: 25, CONDITION_SATISFIED: 26, TIMEOUT_EXPIRED: 27, WAIT_FAILED: 28, MAX_TEXTURE_SIZE: 29
@@ -191,7 +192,7 @@ function fakeGl(active: string[], fence: () => number, maxTextureSize = 16384) {
   let lost = false;
   const bound = new Map<number, unknown>();
   const state = {
-    uploads: [] as Array<{ id: number; data: Uint16Array | null }>,
+    uploads: [] as Array<{ id: number; format: number; data: Uint16Array | Uint8Array | null }>,
     draws: [] as Array<Record<number, unknown>>,
     uniforms: [] as string[],
     lostBy: 0,
@@ -207,7 +208,7 @@ function fakeGl(active: string[], fence: () => number, maxTextureSize = 16384) {
     getAttribLocation: () => 0,
     createTexture: () => ({ id: next++ }), activeTexture: (u: number) => { unit = u - C.TEXTURE0; }, bindTexture: (_t: number, tex: unknown) => { bound.set(unit, tex); },
     pixelStorei: () => {},
-    texImage2D: (...a: unknown[]) => { state.uploads.push({ id: (bound.get(unit) as { id: number }).id, data: a[8] as Uint16Array | null }); },
+    texImage2D: (...a: unknown[]) => { state.uploads.push({ id: (bound.get(unit) as { id: number }).id, format: a[2] as number, data: a[8] as Uint16Array | Uint8Array | null }); },
     texParameteri: () => {}, createFramebuffer: () => ({}), bindFramebuffer: () => {}, framebufferTexture2D: () => {}, viewport: () => {},
     clearColor: () => {}, clear: () => {}, useProgram: () => {}, enableVertexAttribArray: () => {}, vertexAttribPointer: () => {},
     getUniformLocation: (_p: unknown, name: string) => (active.includes(name) ? { name } : null),
@@ -424,6 +425,23 @@ describe('the runner helpers', () => {
 });
 
 describe('the runner reads its target', () => {
+  it('stores and reads exact RGBA8 codes at depth 8', async () => {
+    const { canvas, state, C } = fakeGl([], () => 25);
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    const reads: number[] = [];
+    gl['readPixels'] = (_x: number, _y: number, _w: number, _h: number, _f: number, type: number, out: Uint8Array) => {
+      reads.push(type);
+      out.set([0, 1, 127, 255, 2, 128, 254, 255]);
+    };
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    const r = { ...request(2, 1, '4a'.repeat(32)), colorDepth: 8 as const, textures: 1, units: [{ unit: 0, texture: 0, chain: false }] };
+    const input = Uint16Array.from([0, 1, 127, 255, 2, 128, 254, 255]);
+    const out = await runner.render(r, [input]);
+    expect(state.uploads.map(u => u.format)).toEqual([C.RGBA8, C.RGBA8]);
+    expect(state.uploads[0]!.data).toEqual(Uint8Array.from(input));
+    expect(reads).toEqual([C.UNSIGNED_BYTE]);
+    expect(out.rgba16f).toEqual(input);
+  });
   it('as half floats when the implementation reads RGBA16F that way, else as floats', async () => {
     for (const halfRead of [true, false]) {
       const { canvas, C } = fakeGl([], () => 25);

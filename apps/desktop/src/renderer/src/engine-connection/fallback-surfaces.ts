@@ -1,7 +1,7 @@
-/* Reusable RGBA16F runner storage. Inputs are matched by exact pixels, not
+/* Reusable RGBA8/RGBA16F runner storage. Inputs are matched by exact pixels, not
  * object identity: callers may mutate or reassemble the same input buffer.
  * Leases protect a suspended multipass draw from synchronous snapshots. */
-type Entry = { texture: WebGLTexture; framebuffer: WebGLFramebuffer | null; width: number; height: number; pixels: Uint16Array | null; leases: number; used: number; deleted: boolean };
+type Entry = { texture: WebGLTexture; framebuffer: WebGLFramebuffer | null; width: number; height: number; colorDepth: 8 | 16; pixels: Uint16Array | null; leases: number; used: number; deleted: boolean };
 export type SurfaceLease = { texture: WebGLTexture; framebuffer: WebGLFramebuffer | null; release(): void };
 const BUDGET = 128 * 1024 ** 2;
 const LIMIT = 12;
@@ -26,27 +26,31 @@ export class FallbackSurfaces {
     return true;
   }
 
-  input(width: number, height: number, pixels: Uint16Array): SurfaceLease {
-    const found = this.entries.find(e => !e.deleted && e.width === width && e.height === height && e.pixels && this.same(e.pixels, pixels));
-    return this.lease(found ?? this.make(width, height, pixels));
+  input(width: number, height: number, pixels: Uint16Array, colorDepth: 8 | 16 = 16): SurfaceLease {
+    const found = this.entries.find(e => !e.deleted && e.width === width && e.height === height && e.colorDepth === colorDepth && e.pixels && this.same(e.pixels, pixels));
+    return this.lease(found ?? this.make(width, height, pixels, colorDepth));
   }
 
-  target(width: number, height: number): SurfaceLease {
-    const found = this.entries.find(e => !e.deleted && !e.leases && e.width === width && e.height === height && e.framebuffer);
-    return this.lease(found ?? this.make(width, height, null));
+  target(width: number, height: number, colorDepth: 8 | 16 = 16): SurfaceLease {
+    const found = this.entries.find(e => !e.deleted && !e.leases && e.width === width && e.height === height && e.colorDepth === colorDepth && e.framebuffer);
+    return this.lease(found ?? this.make(width, height, null, colorDepth));
   }
 
-  private make(width: number, height: number, pixels: Uint16Array | null): Entry {
+  private make(width: number, height: number, pixels: Uint16Array | null, colorDepth: 8 | 16): Entry {
     if (this.disposed) throw new Error('Fallback surface cache was disposed');
     const gl = this.gl;
     const texture = gl.createTexture();
     if (!texture) throw new Error('Cannot allocate a fallback texture');
-    const entry: Entry = { texture, framebuffer: null, width, height, pixels: pixels ? new Uint16Array(pixels) : null, leases: 0, used: ++this.tick, deleted: false };
+    const entry: Entry = { texture, framebuffer: null, width, height, colorDepth, pixels: pixels ? new Uint16Array(pixels) : null, leases: 0, used: ++this.tick, deleted: false };
     try {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, entry.pixels);
+      const data = colorDepth === 8 && entry.pixels ? Uint8Array.from(entry.pixels, v => {
+        if (v > 255) throw new Error('RGBA8 fallback code is out of range');
+        return v;
+      }) : entry.pixels;
+      gl.texImage2D(gl.TEXTURE_2D, 0, colorDepth === 8 ? gl.RGBA8 : gl.RGBA16F, width, height, 0, gl.RGBA, colorDepth === 8 ? gl.UNSIGNED_BYTE : gl.HALF_FLOAT, data);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -76,7 +80,7 @@ export class FallbackSurfaces {
   private trim(): void {
     // Include the CPU snapshot in the input's budget. Active leases can
     // exceed it only while a draw requires them; no oversized idle cache.
-    const bytes = (e: Entry) => e.width * e.height * 8 * (e.pixels ? 2 : 1);
+    const bytes = (e: Entry) => e.width * e.height * (e.colorDepth === 8 ? 4 : 8) + (e.pixels ? e.width * e.height * 8 : 0);
     let total = this.entries.reduce((n, e) => n + bytes(e), 0);
     while (total > BUDGET || this.entries.length > LIMIT) {
       const oldest = this.entries.filter(e => !e.leases).sort((a, b) => a.used - b.used)[0];

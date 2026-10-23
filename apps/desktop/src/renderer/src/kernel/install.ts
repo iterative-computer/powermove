@@ -360,6 +360,7 @@ function makeEdit(PM: LegacyPM): EditAPI {
 }
 
 function makeMedia(PM: LegacyPM): MediaAPI {
+  const warnedObject3dAssets = new Set<string>();
   const emptyFonts = {
     bundled: [], system: [], families: [],
     setSystemFamilies: (_values: string[]) => {},
@@ -380,7 +381,14 @@ function makeMedia(PM: LegacyPM): MediaAPI {
       drawWaveform: (...args) => !!PM?.Audio?.drawWaveform?.(...args)
     },
     assets: {
-      get: (id) => PM?.assets?.get?.(id),
+      get: (id) => {
+        const asset = PM?.assets?.get?.(id);
+        if (PM?.EngineDoc?.enabled && asset?.object3d && !warnedObject3dAssets.has(id)) {
+          warnedObject3dAssets.add(id);
+          console.warn('[agent] media.assets.get(id).object3d is deprecated; use scene3d APIs for new extensions. The compatibility Object3D remains available for apiVersion 1–3.');
+        }
+        return asset;
+      },
       add: (...args) => PM?.assets?.add?.(...args) ?? Promise.resolve(undefined),
       kind: (file) => PM?.assetKind?.(file) ?? null
     },

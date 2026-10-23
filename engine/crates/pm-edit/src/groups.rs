@@ -918,7 +918,13 @@ pub fn group_placement(
     let base = edit.layer_path(group);
     let p = channel::read(edit.layer(group), "p")?;
     let mut patches = Vec::new();
-    for (axis, value) in [("x", (b.x0 + b.x1) / 2.0), ("y", (b.y0 + b.y1) / 2.0)] {
+    // `if (group.threeD && bounds.z0 !== undefined)`: a model group's depth.
+    let three_d = node::truthy(node::member(edit.layer(group), "threeD"));
+    let mut axes = vec![("x", (b.x0 + b.x1) / 2.0), ("y", (b.y0 + b.y1) / 2.0)];
+    if let (true, Some((z0, z1))) = (three_d, b.z) {
+        axes.push(("z", (z0 + z1) / 2.0));
+    }
+    for (axis, value) in axes {
         // `group.p['position.x'].v = group.p['anchor.x'].v = …` (anchor first).
         for name in ["anchor", "position"] {
             let k = format!("{name}.{axis}");

@@ -85,8 +85,8 @@ pub struct ShaderFallbackUnit {
 
 /// What the runner draws for one layer at one frame: the compositor's vertex
 /// shader, the wrapped fragment program, the target size, and the uniform
-/// calls, into an RGBA16F target cleared to transparent with blending off.
-/// Textures (when `textures` > 0) are RGBA16F of the target's size, sampled
+/// calls, into an RGBA8 or RGBA16F target cleared to transparent with blending off.
+/// Textures (when `textures` > 0) share the target's format and size, sampled
 /// linear with clamp-to-edge; units not named sample nothing (0, 0, 0, 1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
@@ -99,6 +99,13 @@ pub struct ShaderFallbackRequest {
     pub fragment: String,
     pub width: u32,
     pub height: u32,
+    /// The compositor's color buffer depth. Omitted by older clients (16).
+    /// At 8, each `rgba16f` wire slot carries an exact byte code 0..255.
+    #[serde(
+        default = "default_color_depth",
+        skip_serializing_if = "is_default_color_depth"
+    )]
+    pub color_depth: u8,
     pub calls: Vec<ShaderFallbackCall>,
     /// Where the native pipeline failed (`pm_glsl::FailureStage::name`).
     pub stage: String,
@@ -115,8 +122,16 @@ pub struct ShaderFallbackRequest {
     pub more_passes: Vec<Vec<ShaderFallbackCall>>,
 }
 
-/// Rows `row .. row + rows` of texture `texture` of a request: binary16
-/// RGBA, little-endian, rows in GL order (row 0 at the bottom).
+const fn default_color_depth() -> u8 {
+    16
+}
+const fn is_default_color_depth(value: &u8) -> bool {
+    *value == 16
+}
+
+/// Rows `row .. row + rows` of texture `texture` of a request: four u16
+/// slots per pixel. At depth 8 each slot is an exact byte code; otherwise
+/// it is binary16. Little-endian, rows in GL order (row 0 at the bottom).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -163,6 +178,9 @@ fn request_ok(r: &ShaderFallbackRequest) -> Result<(), Violation> {
     ensure(key_ok(&r.key), c, || "invalid fallback key".into())?;
     ensure(size_ok(r.width, r.height), c, || {
         format!("fallback target {}×{}", r.width, r.height)
+    })?;
+    ensure(matches!(r.color_depth, 8 | 16), c, || {
+        "invalid fallback color depth".into()
     })?;
     ensure(
         r.vertex.len() <= MAX_SOURCE_BYTES && r.fragment.len() <= MAX_SOURCE_BYTES,
@@ -227,8 +245,9 @@ impl Validate for HostShaderFallback {
     }
 }
 
-/// Rows `row .. row + rows` of a request's result: binary16 RGBA,
-/// little-endian, rows in GL order (row 0 at the bottom).
+/// Rows `row .. row + rows` of a request's result: four u16 slots per
+/// pixel, byte codes at depth 8 or binary16 bits otherwise. Little-endian,
+/// rows in GL order (row 0 at the bottom).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -383,6 +402,7 @@ mod tests {
             fragment: String::new(),
             width: w,
             height: 8,
+            color_depth: 16,
             calls,
             stage: "bind".into(),
             message: String::new(),
@@ -403,6 +423,29 @@ mod tests {
             )],
         };
         assert!(ok.validate().is_ok());
+        let mut eight = request(8, vec![]);
+        eight.color_depth = 8;
+        assert!(
+            ShaderFallbackMessage::Requests {
+                requests: vec![eight.clone()]
+            }
+            .validate()
+            .is_ok()
+        );
+        let encoded = serde_json::to_value(&eight).unwrap();
+        assert_eq!(encoded["colorDepth"], 8);
+        let mut old = encoded.as_object().unwrap().clone();
+        old.remove("colorDepth");
+        let decoded: ShaderFallbackRequest = serde_json::from_value(old.into()).unwrap();
+        assert_eq!(decoded.color_depth, 16);
+        eight.color_depth = 32;
+        assert!(
+            ShaderFallbackMessage::Requests {
+                requests: vec![eight]
+            }
+            .validate()
+            .is_err()
+        );
         let mut effect = request(8, vec![call("1i", 1)]);
         effect.textures = 2;
         effect.units = vec![

@@ -8,17 +8,18 @@
  * compositor: the engine sends the compositor's vertex shader, the wrapped
  * fragment program, the target size, and the uniform calls in issue order
  * (`FallbackRequest`, `engine/crates/pm-render/src/shader_layers/fallback.rs`);
- * the runner draws into an RGBA16F target cleared to transparent with
+ * the runner draws into an RGBA8 or RGBA16F target cleared to transparent with
  * blending off, as the compositor's `grab` buffers, and reads it back in GL
- * row order as binary16. The engine draws the pixels as the layer's content,
+ * row order. Depth 8 stores exact byte codes in the existing u16 wire slots;
+ * depth 16 stores binary16. The engine draws the pixels as the layer's content,
  * uploaded like the `raster` override.
  *
  * Effects and transitions sample textures: the request names how many
- * (each the target's size, binary16 RGBA in GL row order, sent after the
+ * (each the target's size, u16 slots in GL row order, sent after the
  * request), which unit samples which (`units`; a `chain` unit samples the
  * previous pass's output from the second pass on), and the calls of every
  * pass after the first (`morePasses`, each into a new target, as the
- * compositor's ping-pong `runEffects`). Textures are RGBA16F, sampled linear
+ * compositor's ping-pong `runEffects`). Textures match the request's depth, sampled linear
  * with clamp-to-edge like the compositor's `grab` buffers. Units no request
  * names are left empty, so a sampler reads (0, 0, 0, 1), as nothing is bound
  * to one in the compositor either. A parameter call carries `setParam`'s
@@ -67,6 +68,8 @@ export interface ShaderFallbackRequest {
   fragment: string;
   width: number;
   height: number;
+  /** 8 stores exact byte codes in the existing Uint16 wire slots. */
+  colorDepth?: 8 | 16;
   calls: FallbackCall[];
   stage: string;
   message: string;
@@ -77,7 +80,7 @@ export interface ShaderFallbackRequest {
   morePasses?: FallbackCall[][];
 }
 
-/** The runner's answer: binary16 RGBA, rows in GL order (row 0 at the bottom). */
+/** The runner's answer: binary16 bits or byte codes in u16 slots, GL row order. */
 export interface ShaderFallbackPixels { key: string; width: number; height: number; rgba16f: Uint16Array }
 
 export class ShaderFallbackError extends Error {
@@ -299,7 +302,6 @@ export class ShaderFallbackRunner {
     canvas.addEventListener('webglcontextlost', (event) => { event.preventDefault(); if (this.canvas === canvas) this.lost = true; }, false);
     const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: true, preserveDrawingBuffer: false, depth: false, stencil: false }) as GL | null;
     if (!gl) throw new ShaderFallbackError('', 'unavailable', 'WebGL2 is not available for the shader fallback runner');
-    if (!gl.getExtension('EXT_color_buffer_float')) throw new ShaderFallbackError('', 'unavailable', 'EXT_color_buffer_float is not available');
     this.parallel = gl.getExtension('KHR_parallel_shader_compile');
     this.quad = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
@@ -462,6 +464,15 @@ export class ShaderFallbackRunner {
     }
     const id = `${request.vertex}\u0000${request.fragment}`;
     const gl = this.context();
+    if (request.colorDepth !== undefined && request.colorDepth !== 8 && request.colorDepth !== 16) {
+      throw new ShaderFallbackError(request.key, 'size', `unsupported color depth ${request.colorDepth}`);
+    }
+    if (request.colorDepth !== 8 && !gl.getExtension('EXT_color_buffer_float')) {
+      throw new ShaderFallbackError(request.key, 'unavailable', 'EXT_color_buffer_float is not available');
+    }
+    if (request.colorDepth === 8 && textures.some(t => t.some(v => v > 255))) {
+      throw new ShaderFallbackError(request.key, 'size', 'an RGBA8 input contains a code above 255');
+    }
     const max = this.options.maxSize ?? Number(gl.getParameter(gl.MAX_TEXTURE_SIZE));
     if (width > max || height > max) {
       throw new ShaderFallbackError(request.key, 'tooLarge', `target ${width}×${height} is larger than this GPU's ${max} px WebGL texture limit`);
@@ -478,19 +489,20 @@ export class ShaderFallbackRunner {
    */
   private *draw(gl: GL, p: Program, id: string, request: ShaderFallbackRequest, textures: Uint16Array[], readback: FallbackReadback | null = null): Generator<void, ShaderFallbackPixels | Promise<ShaderFallbackPixels>, void> {
     const { width, height } = request;
+    const colorDepth = request.colorDepth === 8 ? 8 : 16;
     const surfaces = this.surfaces!;
     const leases: SurfaceLease[] = [];
     const framebuffers: WebGLFramebuffer[] = [];
     try {
       const inputs = textures.map(pixels => {
-        const input = surfaces.input(width, height, pixels);
+        const input = surfaces.input(width, height, pixels, colorDepth);
         leases.push(input);
         return input.texture;
       });
       const passes = [request.calls, ...(request.morePasses ?? [])];
       let previous: WebGLTexture | null = null;
       for (let pass = 0; pass < passes.length; pass++) {
-        const output = surfaces.target(width, height);
+        const output = surfaces.target(width, height, colorDepth);
         leases.push(output);
         const target = output.texture, framebuffer = output.framebuffer!;
         framebuffers.push(framebuffer);
@@ -525,14 +537,18 @@ export class ShaderFallbackRunner {
       if (readback) {
         // Enqueues readPixels into its own PBO before returning/yielding.
         // Deleting these textures is safe after the read command is queued.
-        return readback.read(width, height).then(rgba16f => ({ key: request.key, width, height, rgba16f }));
+        return readback.read(width, height, colorDepth).then(rgba16f => ({ key: request.key, width, height, rgba16f }));
       }
       // The target's binary16 values as stored: read as half floats when
       // the implementation reads RGBA16F that way (ANGLE does), else as
       // floats, which convert back exactly.
       const values = width * height * 4;
       let rgba16f: Uint16Array;
-      if (gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RGBA && gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.HALF_FLOAT) {
+      if (colorDepth === 8) {
+        const pixels = new Uint8Array(values);
+        gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        rgba16f = Uint16Array.from(pixels);
+      } else if (gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_FORMAT) === gl.RGBA && gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) === gl.HALF_FLOAT) {
         rgba16f = new Uint16Array(values);
         gl.readPixels(0, 0, width, height, gl.RGBA, gl.HALF_FLOAT, rgba16f);
       } else {

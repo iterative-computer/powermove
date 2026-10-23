@@ -856,3 +856,18 @@ fixtures at both levels: level 1 draws each with no failure; level 2 names
 each in the capability check and again at execution without the check.
 Giving level 2 its own cICP/cHRM/HDR and CMYK readings is future work;
 those level 2 classes stay named until they are compared.
+
+### Blender's TIFF rendition samples (3D lane, round 4)
+
+`compat::read_tiff_png_source` reuses the level 1 TIFF decoder and pixel
+negotiation, preserving the full 16-bit integer sample instead of taking its
+high byte for Blink's bitmap. Blender gets this rendition as a PNG directly
+in today's app. `pm-render::blender::snapshot` now encodes those samples with
+straight alpha, bypassing bitmap color conversion and unpremultiplication.
+The ordinary level 1 bitmap API is unchanged.
+
+The retained 3D capture's six TIFF maps compare exactly at full decoded PNG
+depth: CMYK-alpha, planar16, float16/predictor3, float32/LZW/predictor3,
+tiled, and YCbCr/JPEG. The targeted `blender_snapshots` TIFF test passes.
+The full Blender snapshot comparison still fails on the separate AVIF
+Canvas2D conversion; no tolerance or corpus exclusion changed.

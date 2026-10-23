@@ -88,7 +88,7 @@ impl ShaderState {
             *t = tick;
             return Some(target.clone());
         }
-        let target = upload(device, queue, &pixels);
+        let target = upload(device, queue, &pixels, request.color_depth);
         self.uploaded += 1;
         self.uploads.remove(&request.key);
         if self.uploads.len() >= UPLOADS {
@@ -263,22 +263,36 @@ pub(crate) fn upload(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     pixels: &FallbackPixels,
+    color_depth: u8,
 ) -> Target {
+    let rgba8 = color_depth == 8;
     let target = Target::new(
         device,
         "pm shader fallback pixels",
         pixels.width,
         pixels.height,
-        wgpu::TextureFormat::Rgba16Float,
+        if rgba8 {
+            wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            wgpu::TextureFormat::Rgba16Float
+        },
         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
     );
-    let bytes = super::fallback::half_bytes(&pixels.rgba16f);
+    let bytes = if rgba8 {
+        pixels
+            .rgba16f
+            .iter()
+            .map(|code| u8::try_from(*code).expect("RGBA8 fallback code"))
+            .collect()
+    } else {
+        super::fallback::half_bytes(&pixels.rgba16f)
+    };
     queue.write_texture(
         target.texture.as_image_copy(),
         &bytes,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(pixels.width * 8),
+            bytes_per_row: Some(pixels.width * if rgba8 { 4 } else { 8 }),
             rows_per_image: Some(pixels.height),
         },
         wgpu::Extent3d {
@@ -299,10 +313,18 @@ impl crate::exec::Exec<'_> {
         source: &ShaderSource,
     ) -> Result<(Target, bool), Missed> {
         if let ProgramRef::Fallback(request) = &source.program {
+            let request = super::fallback::at_color_depth(
+                request,
+                if self.precision == pm_protocol::color::Precision::Unorm8 {
+                    8
+                } else {
+                    16
+                },
+            );
             // A program the runner could not draw draws nothing, as one
             // WebGL refuses, and is reported once (a draw past the
             // runner's deadline by the watchdog).
-            let program = super::fallback::program_id(request);
+            let program = super::fallback::program_id(&request);
             // Its last request failed for a transient reason (the runner's
             // context was lost): asked for again once the backoff passed,
             // drawing nothing until then, reported once.
@@ -389,10 +411,10 @@ impl crate::exec::Exec<'_> {
             }
             return match self
                 .shaders
-                .fallback_target(self.device, self.queue, request)
+                .fallback_target(self.device, self.queue, &request)
             {
                 Some(target) => Ok((target, false)),
-                None => Err(Missed::Pending(request.clone())),
+                None => Err(Missed::Pending(Arc::new(request))),
             };
         }
         // The watchdog's subject: the code's source key, or the fragment
@@ -441,13 +463,20 @@ impl crate::exec::Exec<'_> {
         };
         let probe = probe_code.as_ref().and_then(|code| {
             let mut verdict = self.effects.parity.verdict(code);
-            let request = Arc::new(super::fallback::request(
-                source.layer.clone(),
-                code.clone(),
-                source.width,
-                source.height,
-                &source.calls,
-                &crate::effects::exec::parity_failure(),
+            let request = Arc::new(super::fallback::at_color_depth(
+                &super::fallback::request(
+                    source.layer.clone(),
+                    code.clone(),
+                    source.width,
+                    source.height,
+                    &source.calls,
+                    &crate::effects::exec::parity_failure(),
+                ),
+                if self.precision == pm_protocol::color::Precision::Unorm8 {
+                    8
+                } else {
+                    16
+                },
             ));
             if verdict == crate::effects::parity::Verdict::Unknown {
                 let program = super::fallback::program_id(&request);
@@ -537,13 +566,20 @@ impl crate::exec::Exec<'_> {
             // runner draws it from this frame on, as the plan would
             // have asked had the failure been known
             // (`super::plan::program_plan`, the same request key).
-            let request = Arc::new(super::fallback::request(
-                source.layer.clone(),
-                code,
-                source.width,
-                source.height,
-                &source.calls,
-                &failure,
+            let request = Arc::new(super::fallback::at_color_depth(
+                &super::fallback::request(
+                    source.layer.clone(),
+                    code,
+                    source.width,
+                    source.height,
+                    &source.calls,
+                    &failure,
+                ),
+                if self.precision == pm_protocol::color::Precision::Unorm8 {
+                    8
+                } else {
+                    16
+                },
             ));
             return match self
                 .shaders
@@ -590,7 +626,16 @@ impl crate::exec::Exec<'_> {
                 }),
             );
             queue.submit([done.finish()]);
-            match crate::effects::exec::read_half(device, queue, &out) {
+            match crate::effects::exec::read_half(
+                device,
+                queue,
+                &out,
+                if self.precision == pm_protocol::color::Precision::Unorm8 {
+                    8
+                } else {
+                    16
+                },
+            ) {
                 Ok(native) => self
                     .effects
                     .parity

@@ -184,6 +184,33 @@ describe('MediaStoreService', () => {
     expect(await svc.resolveAsset('a1')).not.toBeNull();
   });
 
+  it("holds the viewer engine's read of a new asset until its window binds it, so it never draws as offline in the gap", async () => {
+    const svc = service({ bindWaitMs: 5000 });
+    const file = path.join(media, 'model.obj');
+    await settledFile(file, bytes(1000, 3));
+    const record = await svc.store.putFile(file, { key: 'media:v2:model' });
+    const viewer = { process: 'interactive' as const, session: 1 };
+    // The document (and so the engine's read) arrives before the import's bind.
+    const read = svc.resolveAsset('m1', viewer);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    svc.bind(1, 'project-1', { m1: { key: 'media:v2:model', hash: record.hash } });
+    expect((await read)?.path).toBe(svc.store.objectPath(record.hash));
+    // An asset no window binds is offline after the wait; jobs and other callers never wait.
+    const quick = service({ bindWaitMs: 40 });
+    const started = Date.now();
+    expect(await quick.resolveAsset('nobody', viewer)).toBeNull();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(35);
+    const unhurried = Date.now();
+    expect(await svc.resolveAsset('nobody')).toBeNull();
+    expect(await svc.resolveAsset('nobody', { process: 'job', session: 2 })).toBeNull();
+    expect(Date.now() - unhurried).toBeLessThan(1000);
+    // A bound but missing file answers at once (offline media is not a gap).
+    svc.bind(2, 'project-2', { gone: { hash: blake3Hex(bytes(9)) } });
+    const offline = Date.now();
+    expect(await svc.resolveAsset('gone', viewer)).toBeNull();
+    expect(Date.now() - offline).toBeLessThan(1000);
+  });
+
   it('keeps snapshot media after a project switch and window close, scoped to its job session', async () => {
     const svc = service();
     const file = path.join(media, 'queued.png');

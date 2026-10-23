@@ -91,6 +91,7 @@ pub struct TextGpu {
 
 fn format_index(precision: Precision) -> usize {
     match precision {
+        Precision::Unorm8 => 0,
         Precision::Float16 => 0,
         Precision::Float32 => 1,
     }

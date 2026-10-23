@@ -47,6 +47,7 @@ const FLAG_PATH_MASKS: i32 = 128;
 // The device stores `rgba16float` outputs rounded to nearest (probed;
 // `composite/half_store.rs`), else toward zero.
 const FLAG_HALF_NEAREST: i32 = 256;
+const FLAG_UNORM8: i32 = 512;
 
 @group(0) @binding(0) var<uniform> op: Op;
 @group(0) @binding(1) var ta: texture_2d<f32>;
@@ -117,6 +118,9 @@ fn half_rne(v: f32) -> f32 {
 }
 
 fn half(v: f32) -> f32 {
+    if (has(FLAG_UNORM8)) {
+        return round(clamp(v, 0.0, 1.0) * 255.0) / 255.0;
+    }
     if (has(FLAG_HALF)) {
         if (has(FLAG_HALF_NEAREST)) {
             return half_rne(v);

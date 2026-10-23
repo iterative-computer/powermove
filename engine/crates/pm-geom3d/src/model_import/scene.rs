@@ -260,6 +260,9 @@ impl Builder<'_> {
     }
 
     fn attach(&mut self, parent: usize, child: usize) {
+        if let Some(old) = self.objects[child].parent {
+            self.objects[old].children.retain(|&c| c != child);
+        }
         self.objects[child].parent = Some(parent);
         self.objects[parent].children.push(child);
     }
@@ -307,12 +310,15 @@ impl Builder<'_> {
         if self.names.refs[cache][index] > 1 {
             let k = self.uses[cache][index];
             self.uses[cache][index] += 1;
-            self.objects[object].name.push_str(&format!("_instance_{k}"));
+            self.objects[object]
+                .name
+                .push_str(&format!("_instance_{k}"));
         }
     }
 
     /// `loadNode` (`_loadNodeShallow` plus children).
     fn node(&mut self, n: usize) -> usize {
+        if let Some(node) = self.node_objects[n] { return node; }
         let def = &self.model.nodes[n];
         let node_name = self.names.nodes[n].clone();
         let mut objects = vec![];
@@ -446,11 +452,7 @@ pub fn build(model: &Model) -> Scene {
         };
     }
     Scene {
-        node_objects: b
-            .node_objects
-            .iter()
-            .map(|o| o.map(|o| remap[o]))
-            .collect(),
+        node_objects: b.node_objects.iter().map(|o| o.map(|o| remap[o])).collect(),
         objects,
     }
 }
@@ -570,7 +572,9 @@ fn normalized(w: [f32; 4], component_type: u32) -> [f64; 4] {
 pub fn bounds(model: &Model, scene: &Scene) -> Box3 {
     let mut out = Box3::default();
     for o in &scene.objects {
-        let Some((mi, pi)) = o.primitive else { continue };
+        let Some((mi, pi)) = o.primitive else {
+            continue;
+        };
         let p = &model.meshes[mi].primitives[pi];
         let local = match o.kind {
             ObjectKind::SkinnedMesh => skinned_box(model, scene, o),
@@ -668,18 +672,58 @@ const PHYSICAL: [&str; 10] = [
 /// Texture slots of the material extensions (`extendMaterialParams`'s
 /// `assignTexture` calls): extension, textureInfo key, three.js property.
 const EXTENSION_MAPS: [(&str, &str, &str); 13] = [
-    ("KHR_materials_clearcoat", "clearcoatTexture", "clearcoatMap"),
-    ("KHR_materials_clearcoat", "clearcoatRoughnessTexture", "clearcoatRoughnessMap"),
-    ("KHR_materials_clearcoat", "clearcoatNormalTexture", "clearcoatNormalMap"),
+    (
+        "KHR_materials_clearcoat",
+        "clearcoatTexture",
+        "clearcoatMap",
+    ),
+    (
+        "KHR_materials_clearcoat",
+        "clearcoatRoughnessTexture",
+        "clearcoatRoughnessMap",
+    ),
+    (
+        "KHR_materials_clearcoat",
+        "clearcoatNormalTexture",
+        "clearcoatNormalMap",
+    ),
     ("KHR_materials_sheen", "sheenColorTexture", "sheenColorMap"),
-    ("KHR_materials_sheen", "sheenRoughnessTexture", "sheenRoughnessMap"),
-    ("KHR_materials_transmission", "transmissionTexture", "transmissionMap"),
+    (
+        "KHR_materials_sheen",
+        "sheenRoughnessTexture",
+        "sheenRoughnessMap",
+    ),
+    (
+        "KHR_materials_transmission",
+        "transmissionTexture",
+        "transmissionMap",
+    ),
     ("KHR_materials_volume", "thicknessTexture", "thicknessMap"),
-    ("KHR_materials_iridescence", "iridescenceTexture", "iridescenceMap"),
-    ("KHR_materials_iridescence", "iridescenceThicknessTexture", "iridescenceThicknessMap"),
-    ("KHR_materials_specular", "specularTexture", "specularIntensityMap"),
-    ("KHR_materials_specular", "specularColorTexture", "specularColorMap"),
-    ("KHR_materials_anisotropy", "anisotropyTexture", "anisotropyMap"),
+    (
+        "KHR_materials_iridescence",
+        "iridescenceTexture",
+        "iridescenceMap",
+    ),
+    (
+        "KHR_materials_iridescence",
+        "iridescenceThicknessTexture",
+        "iridescenceThicknessMap",
+    ),
+    (
+        "KHR_materials_specular",
+        "specularTexture",
+        "specularIntensityMap",
+    ),
+    (
+        "KHR_materials_specular",
+        "specularColorTexture",
+        "specularColorMap",
+    ),
+    (
+        "KHR_materials_anisotropy",
+        "anisotropyTexture",
+        "anisotropyMap",
+    ),
     ("EXT_materials_bump", "bumpTexture", "bumpMap"),
 ];
 
@@ -706,7 +750,10 @@ pub fn material_facts(model: &Model, object: &Object) -> Option<MaterialFacts> {
     let mut maps = vec![];
     let mut add = |name: &'static str, r: &Option<super::TextureRef>| {
         if let Some(r) = r {
-            maps.push((name, r.transform.and_then(|t| t.tex_coord).unwrap_or(r.tex_coord)));
+            maps.push((
+                name,
+                r.transform.and_then(|t| t.tex_coord).unwrap_or(r.tex_coord),
+            ));
         }
     };
     let (color, opacity, side, transparent, alpha_test, name);
@@ -788,10 +835,14 @@ fn data_uri_allowed(uri: &str) -> bool {
     let mime = mime.to_ascii_lowercase();
     matches!(
         mime.as_str(),
-        "application/octet-stream" | "application/gltf-buffer" | "image/png" | "image/jpeg" | "image/webp"
-    ) && b64
-        .bytes()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=') || c.is_ascii_whitespace())
+        "application/octet-stream"
+            | "application/gltf-buffer"
+            | "image/png"
+            | "image/jpeg"
+            | "image/webp"
+    ) && b64.bytes().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=') || c.is_ascii_whitespace()
+    })
 }
 
 /// `loadGltf`'s checks before decoding: size, container, self-contained
@@ -852,6 +903,11 @@ pub fn check(bytes: &[u8]) -> Result<Value> {
 /// the object graph, and the facts.
 pub fn import(bytes: &[u8]) -> Result<(Model, Scene, ImportFacts)> {
     check(bytes)?;
+    // Which files load is decided once, by the reader the renderer and the
+    // picks use (`crate::gltf::load`: GLTFLoader's acceptance and
+    // `loadGltf`'s checks), so `assets.get().object3d` exists exactly when
+    // the engine draws the model.
+    crate::gltf::load(bytes).map_err(|e| super::Error(e.0))?;
     let model = super::load(bytes)?;
     let scene = build(&model);
     let facts = facts(&model, &scene)?;
@@ -864,7 +920,10 @@ mod tests {
 
     #[test]
     fn names_sanitize_and_stay_unique() {
-        assert_eq!(sanitize("Transmission, volume, IOR"), "Transmission,_volume,_IOR");
+        assert_eq!(
+            sanitize("Transmission, volume, IOR"),
+            "Transmission,_volume,_IOR"
+        );
         assert_eq!(sanitize("a.b[c]:d/e"), "abcde");
         let mut n = Names(HashMap::new());
         assert_eq!(n.unique("Points and lines"), "Points_and_lines");
@@ -875,15 +934,27 @@ mod tests {
     #[test]
     fn checks_match_load_gltf() {
         assert_eq!(
-            check(b"glTF\x01\0\0\0\x14\0\0\0\0\0\0\0JSON").unwrap_err().0,
+            check(b"glTF\x01\0\0\0\x14\0\0\0\0\0\0\0JSON")
+                .unwrap_err()
+                .0,
             "Invalid GLB container"
         );
-        let external = br#"{"asset":{"version":"2.0"},"buffers":[{"uri":"mesh.bin","byteLength":4}]}"#;
-        assert!(check(external).unwrap_err().0.starts_with("Use a self-contained GLB"));
-        let remote = br#"{"asset":{"version":"2.0"},"images":[{"uri":"data:image/gif;base64,AAAA"}]}"#;
+        let external =
+            br#"{"asset":{"version":"2.0"},"buffers":[{"uri":"mesh.bin","byteLength":4}]}"#;
+        assert!(
+            check(external)
+                .unwrap_err()
+                .0
+                .starts_with("Use a self-contained GLB")
+        );
+        let remote =
+            br#"{"asset":{"version":"2.0"},"images":[{"uri":"data:image/gif;base64,AAAA"}]}"#;
         assert!(check(remote).is_err());
         let huge = br#"{"asset":{"version":"2.0"},"accessors":[{"count":1500001,"componentType":5126,"type":"VEC3"}]}"#;
-        assert_eq!(check(huge).unwrap_err().0, "Invalid or oversized glTF geometry");
+        assert_eq!(
+            check(huge).unwrap_err().0,
+            "Invalid or oversized glTF geometry"
+        );
         assert!(check(br#"{"asset":{"version":"2.0"}}"#).is_ok());
     }
 }

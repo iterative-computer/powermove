@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod doc;
+pub mod reference_substitutions;
 pub mod text;
 pub mod text_residuals;
 
@@ -41,9 +42,10 @@ pub fn newest_capture(prefix: &str) -> Option<PathBuf> {
 /// render parity cases, `engine/corpus/src/projects/render.ts`), the
 /// newest `effects-*` capture (`render-effects.ts`), the newest
 /// `composite-*` capture (`engine/corpus/src/projects/composite.ts`), the
-/// newest `motion-*` capture (`motion.ts`), and the compositing closure
+/// newest `motion-*` capture (`motion.ts`), the compositing closure
 /// captures `compclose-*`, `compclose2-*` and `compclose3-*`
-/// (`compclose.ts`).
+/// (`compclose.ts`), and the newest `threed-*` capture (`space.ts`:
+/// `3d/model-group`, `3d/group-roles`, `3d/maps-level1`).
 pub fn corpus_dirs() -> Vec<PathBuf> {
     if let Ok(p) = std::env::var("PM_ENGINE_CORPUS") {
         return p.split(',').map(PathBuf::from).collect();
@@ -57,6 +59,7 @@ pub fn corpus_dirs() -> Vec<PathBuf> {
         "compclose-",
         "compclose2-",
         "compclose3-",
+        "threed-",
     ]
     .iter()
     .filter_map(|p| newest_capture(p))
@@ -96,6 +99,8 @@ pub struct Sample {
     pub width: u32,
     pub height: u32,
     pub png: PathBuf,
+    /// Owner-authorized reference metadata; `png` always retains the original.
+    pub reference_substitution: Option<pm_model::Value>,
     pub float: Option<PathBuf>,
     /// Transparent float frames at other motion-blur sample counts
     /// (`blurSamples` cases): (samples, file).
@@ -169,6 +174,7 @@ pub fn load_project(capture: &Path, dir: &Path) -> Project {
                 width: number(member(s, "width")).unwrap() as u32,
                 height: number(member(s, "height")).unwrap() as u32,
                 png: capture.join(png),
+                reference_substitution: member(s, "referenceSubstitution").cloned(),
                 float: string(
                     member(s, "float")
                         .and_then(|p| member(p, "data"))

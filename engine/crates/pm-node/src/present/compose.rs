@@ -22,9 +22,7 @@ use pm_protocol::color::Precision;
 use pm_protocol::common::{Mat3, PixelRect, Rect, Size, Ticks};
 use pm_protocol::frame::{OverlayGeometry, OverlayLayer, PreviewResolution, ViewerState};
 use pm_render::effects::Effects;
-use pm_render::{LayerFailure, RenderError, RenderRequest, Renderer};
-
-use super::document::MediaMap;
+use pm_render::{AssetResolver, LayerFailure, RenderError, RenderRequest, Renderer};
 
 /// Where the composition goes in a viewer frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -278,7 +276,11 @@ pub fn canvas_placement(
 /// What a composed frame reports.
 #[derive(Debug, Clone)]
 pub struct Composed {
+    pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
     pub overlay: OverlayGeometry,
+    pub chrome_legend: Vec<String>,
+    pub chrome_glyphs: Vec<pm_protocol::frame::ChromeGlyph>,
+    pub chrome_selection: Option<pm_protocol::frame::ChromeSelection>,
     pub failures: Vec<LayerFailure>,
     /// Render and placement time on the CPU (µs), the GPU work submitted.
     pub cpu_us: i64,
@@ -342,8 +344,6 @@ pub struct Composer {
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     scratch: Option<Target>,
-    /// The region's depth and object-id surface (`compose_with_depth`).
-    depth_scratch: Option<Target>,
     /// The region as today's 8-bit canvas (decision V1).
     canvas_scratch: Option<Target>,
     canvas_pipeline: wgpu::RenderPipeline,
@@ -509,7 +509,6 @@ impl Composer {
             linear: sampler(wgpu::FilterMode::Linear),
             nearest: sampler(wgpu::FilterMode::Nearest),
             scratch: None,
-            depth_scratch: None,
             canvas_scratch: None,
             canvas_pipeline,
             canvas_layout,
@@ -760,7 +759,7 @@ impl Composer {
         &mut self,
         doc: &pm_model::Document,
         composition: &str,
-        media: &MediaMap,
+        media: &dyn AssetResolver,
         time: Ticks,
         state: &ViewerState,
         working: &WorkingTexture,
@@ -768,20 +767,18 @@ impl Composer {
         self.compose_with_depth(doc, composition, media, time, state, working, None)
     }
 
-    /// [`Self::compose`], also writing the frame's depth and object-id
-    /// surface (r depth, g/b id − 1, a coverage; plan section 8) into
-    /// `depth`, a `rgbaf16` texture of the working texture's size, placed
-    /// like the color (never filtered: ids must stay exact).
+    /// [`Self::compose`], also writing the paired `chromePlanesV1` depth
+    /// and ID/selection surfaces at the stage's device-pixel size.
     #[allow(clippy::too_many_arguments)]
     pub fn compose_with_depth(
         &mut self,
         doc: &pm_model::Document,
         composition: &str,
-        media: &MediaMap,
+        media: &dyn AssetResolver,
         time: Ticks,
         state: &ViewerState,
         working: &WorkingTexture,
-        depth: Option<&wgpu::TextureView>,
+        depth: Option<(&wgpu::TextureView, &wgpu::TextureView)>,
     ) -> Result<Composed, RenderError> {
         let start = super::render::now_us();
         let comp = pm_eval::Comp::resolve(doc, composition)
@@ -797,6 +794,7 @@ impl Composer {
         let mut failures = Vec::new();
         let mut quads = Vec::new();
         let mut stand_ins = Vec::new();
+        let mut scene3d_meta = Vec::new();
         let mut svg_misses = Vec::new();
         if let Some(region) = place.region {
             let request = RenderRequest {
@@ -805,7 +803,7 @@ impl Composer {
                 origin: place.origin,
                 region: Some(region),
                 precision: Precision::Float16,
-                depth_id: depth.is_some(),
+                depth_id: false,
                 background: true,
                 export: false,
                 // The viewer's override: editor camera, Wireframe and
@@ -826,39 +824,22 @@ impl Composer {
                 },
                 video_end: pm_render::VideoEnd::Preview,
             };
+            let format = pm_render::Renderer::target_format(doc, &request);
             let reuse = self
                 .scratch
                 .as_ref()
-                .is_some_and(|t| t.width() == region.width && t.height() == region.height);
+                .is_some_and(|t| t.width() == region.width && t.height() == region.height && t.format() == format);
             if !reuse {
                 self.scratch = Some(Target::new(
                     &device,
                     "viewer region",
                     region.width,
                     region.height,
-                    WORKING_FORMAT,
+                    format,
                     pm_gpu::target::working_usage(),
                 ));
             }
             let scratch = self.scratch.as_ref().expect("made above");
-            if depth.is_some()
-                && !self
-                    .depth_scratch
-                    .as_ref()
-                    .is_some_and(|t| t.width() == region.width && t.height() == region.height)
-            {
-                self.depth_scratch = Some(Target::new(
-                    &device,
-                    "viewer depth and id",
-                    region.width,
-                    region.height,
-                    wgpu::TextureFormat::Rgba16Float,
-                    wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC,
-                ));
-            }
-            let depth_target = depth.and(self.depth_scratch.as_ref());
             // The viewer's documents live as long as their view and change
             // in place: frames of a paused time reuse the draws of layers
             // nothing changed (docs/engine/perf.md, "Draw reuse").
@@ -870,17 +851,11 @@ impl Composer {
             // (`super::wait`), as today draws the frame without a layer whose
             // raster throws.
             let mut renderer = self.renderer.svg_waiting_viewer();
-            let rendered = renderer.render_into(
-                doc,
-                composition,
-                time,
-                &request,
-                media,
-                scratch,
-                depth_target,
-            );
+            let rendered =
+                renderer.render_into(doc, composition, time, &request, media, scratch, None);
             renderer.set_draw_reuse(false);
             let rendered = rendered?;
+            scene3d_meta = rendered.scene3d_meta;
             failures = rendered.failures;
             quads = rendered.quads;
             stand_ins = rendered.stand_ins;
@@ -905,23 +880,41 @@ impl Composer {
             canvas.as_ref().or(self.scratch.as_ref()),
             false,
         );
-        if let Some(view) = depth {
-            self.place(
-                &mut encoder,
-                &device,
-                &queue,
-                view,
-                working.size,
-                &place,
-                self.depth_scratch.as_ref(),
-                true,
-            );
-        }
         queue.submit([encoder.finish()]);
-        if canvas.is_some() {
-            self.canvas_scratch = canvas;
+        if let Some(canvas) = canvas {
+            self.canvas_scratch = Some(canvas);
         }
+        let (chrome_legend, chrome_glyphs, chrome_selection) =
+            if let Some((depth, coverage)) = depth {
+                // Chrome follows today's fractional CSS composition frame.
+                // Color placement snaps its backing buffer independently.
+                let width = cw * state.zoom * state.device_pixel_ratio;
+                let height = ch * state.zoom * state.device_pixel_ratio;
+                let x = (f64::from(state.size.width) - width) / 2.0
+                    + state.pan[0] * state.device_pixel_ratio;
+                let y = (f64::from(state.size.height) - height) / 2.0
+                    + state.pan[1] * state.device_pixel_ratio;
+                let (legend, glyphs, selection) = self.renderer.render_viewport_chrome(
+                    doc,
+                    composition,
+                    time,
+                    media,
+                    state.view.as_ref(),
+                    state.chrome_selection.as_ref(),
+                    (state.size.width, state.size.height),
+                    [x, y, width, height],
+                    depth,
+                    coverage,
+                )?;
+                (legend, glyphs, Some(selection))
+            } else {
+                (vec![], vec![], None)
+            };
         Ok(Composed {
+            scene3d_meta,
+            chrome_legend,
+            chrome_glyphs,
+            chrome_selection,
             overlay: overlay(&place, cw, ch, &quads),
             failures,
             cpu_us: super::render::now_us() - start,
@@ -1033,7 +1026,9 @@ mod tests {
             view_seq: Seq::new(1).unwrap(),
             vsync: None,
             depth_id: None,
+            chrome_selection: None,
             canvas: None,
+            surface_epoch: None,
         }
     }
 

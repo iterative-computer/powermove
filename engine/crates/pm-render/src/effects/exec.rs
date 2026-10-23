@@ -103,20 +103,48 @@ fn runner_param_calls(params: &[Param], calls: &mut Vec<(String, Call)>) {
     }
 }
 
-/// A target's pixels as binary16 RGBA in its row order (GL order for
-/// every pm-render target).
+/// A target's pixels in GL row order. At color depth 8 each u16 carries an
+/// exact RGBA8 code; at other depths it carries binary16 bits.
 pub(crate) fn read_half(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     target: &Target,
+    color_depth: u8,
 ) -> Result<FallbackPixels, String> {
     let raw =
         pm_gpu::readback::read_raw(device, queue, &target.texture).map_err(|e| e.to_string())?;
+    let code8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u16;
     let rgba16f: Vec<u16> = match target.format() {
-        wgpu::TextureFormat::Rgba16Float => crate::shader_layers::fallback::halves(&raw),
+        wgpu::TextureFormat::Rgba8Unorm => raw
+            .iter()
+            .map(|b| {
+                if color_depth == 8 {
+                    u16::from(*b)
+                } else {
+                    pm_gpu::readback::f32_to_half(f32::from(*b) / 255.0)
+                }
+            })
+            .collect(),
+        wgpu::TextureFormat::Rgba16Float => crate::shader_layers::fallback::halves(&raw)
+            .into_iter()
+            .map(|h| {
+                if color_depth == 8 {
+                    code8(pm_gpu::readback::half_to_f32(h))
+                } else {
+                    h
+                }
+            })
+            .collect(),
         wgpu::TextureFormat::Rgba32Float => raw
             .chunks_exact(4)
-            .map(|c| pm_gpu::readback::f32_to_half(f32::from_le_bytes([c[0], c[1], c[2], c[3]])))
+            .map(|c| {
+                let value = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                if color_depth == 8 {
+                    code8(value)
+                } else {
+                    pm_gpu::readback::f32_to_half(value)
+                }
+            })
             .collect(),
         other => return Err(format!("format {other:?}")),
     };
@@ -131,6 +159,14 @@ pub(crate) fn read_half(
 /// rest of the frame's commands run: they are submitted after it).
 fn write_half(queue: &wgpu::Queue, target: &Target, pixels: &FallbackPixels) {
     let (bytes, texel): (Vec<u8>, u32) = match target.format() {
+        wgpu::TextureFormat::Rgba8Unorm => (
+            pixels
+                .rgba16f
+                .iter()
+                .map(|code| u8::try_from(*code).expect("RGBA8 fallback code"))
+                .collect(),
+            4,
+        ),
         wgpu::TextureFormat::Rgba32Float => (
             pixels
                 .rgba16f
@@ -813,7 +849,16 @@ impl<'c> Gpu<'c> {
         queue.submit([done.finish()]);
         let mut pixels = Vec::with_capacity(textures.len());
         for t in textures {
-            match read_half(device, queue, t) {
+            match read_half(
+                device,
+                queue,
+                t,
+                if self.precision == Precision::Unorm8 {
+                    8
+                } else {
+                    16
+                },
+            ) {
                 Ok(p) => pixels.push(Arc::new(p)),
                 Err(e) => {
                     self.effects.watchdog.report(EngineError::new(
@@ -835,6 +880,14 @@ impl<'c> Gpu<'c> {
             &pixels.iter().map(|p| p.as_ref()).collect::<Vec<_>>(),
             &failure,
         );
+        let request = crate::shader_layers::fallback::at_color_depth(
+            &request,
+            if self.precision == Precision::Unorm8 {
+                8
+            } else {
+                16
+            },
+        );
         if let Some(native) = native {
             if let Some(probed_frame) = self.effects.parity.take_present(&request.fragment) {
                 if probed_frame != request.key {
@@ -846,7 +899,16 @@ impl<'c> Gpu<'c> {
                 == super::parity::Verdict::Unknown
                 && !self.effects.parity.pending(&request.fragment)
             {
-                match read_half(device, queue, native) {
+                match read_half(
+                    device,
+                    queue,
+                    native,
+                    if self.precision == Precision::Unorm8 {
+                        8
+                    } else {
+                        16
+                    },
+                ) {
                     Ok(pixels) => {
                         self.effects
                             .parity
@@ -861,8 +923,7 @@ impl<'c> Gpu<'c> {
             }
         }
         if let Some(result) = self.effects.fallback.result(&request.key)
-            && result.width == w
-            && result.height == h
+            && result.fits(&request)
         {
             self.effects.parity.answer(&request.key, &result);
             self.effects.parity.take_present(&request.fragment);

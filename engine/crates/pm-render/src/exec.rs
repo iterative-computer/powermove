@@ -467,13 +467,24 @@ impl Exec<'_> {
                         }
                     },
                     Source::Object3d(object) => {
-                        match self.scene3d.render(
+                        if !self.scene3d.prepare_svg_maps(
+                            self.device,
+                            self.queue,
+                            encoder,
+                            object,
+                            &mut self.vector.svg,
+                            &plan.composition,
+                        ) {
+                            return;
+                        }
+                        match self.scene3d.render_at_precision(
                             self.device,
                             self.queue,
                             encoder,
                             self.pool,
                             object,
                             self.depth_id,
+                            self.precision,
                         ) {
                             Ok(out) => {
                                 // The pass renders in GL row order.
@@ -487,11 +498,9 @@ impl Exec<'_> {
                                     self.taken.push(d);
                                 }
                             }
-                            Err(crate::scene3d::Error3d::Unsupported(why)) => self.fail(
-                                plan,
-                                draw,
-                                MediaFailure::Unsupported(crate::capability::Feature::Scene3d(why)),
-                            ),
+                            Err(crate::scene3d::Error3d::Unsupported(feature)) => {
+                                self.fail(plan, draw, MediaFailure::Unsupported(feature))
+                            }
                             Err(crate::scene3d::Error3d::Failed(message)) => {
                                 self.fail(plan, draw, MediaFailure::Failed(message))
                             }

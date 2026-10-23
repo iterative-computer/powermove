@@ -11,7 +11,7 @@ import {
 import { writableFormat } from '../../../../shared/delivery';
 import { createSettingsSection } from './settings-section';
 import { COLOR_DEPTH_OPTIONS, normalizeColorDepth, type ColorDepth } from '../../core/color-depth';
-import { PRECISION_OPTIONS, type ProjectColorSettings } from '../../../../shared/project-color';
+import type { ProjectColorSettings } from '../../../../shared/project-color';
 import { bridge as hostBridge } from '../../kernel/bridge';
 
 /** Whether this launch runs the native engine, which writes every delivery
@@ -65,9 +65,8 @@ export interface ProjectSettingsBridge {
   mediaImport?(): MediaImportMode;
   applyMediaImport?(mode: MediaImportMode): void;
   /**
-   * Settings › Project › Color (section 9): blending in linear light and
-   * intermediate precision. Present only with the new engine, which renders
-   * them. Each change is one Undo step.
+   * Settings › Project › Color (section 9): blending in linear light.
+   * Present only with the new engine. Each change is one Undo step.
    */
   projectColor?(): ProjectColorSettings;
   applyProjectColor?(patch: Partial<ProjectColorSettings>): void;
@@ -326,29 +325,20 @@ export function createProjectSettingsControl(bridge: ProjectSettingsBridge): Pro
   }
 
   let linearLight: Switch | null = null;
-  let precision: HTMLSelectElement | null = null;
   const color = bridge.projectColor && bridge.applyProjectColor ? createSettingsSection('Color') : null;
   if (color) {
     linearLight = switchControl('Blend in linear light', (next) => {
       bridge.applyProjectColor?.({ linearBlending: next });
       syncColor();
     });
-    precision = select('Precision');
-    fillOptions(precision, PRECISION_OPTIONS);
     color.body.append(
-      row('Blend in linear light', 'Mix layers, opacity, and soft edges as light adds up. Off keeps the classic look.', linearLight.element).element,
-      row('Precision', 'Bit depth of the images the project is composited in.', precision).element
+      row('Blend in linear light', 'Mix layers, opacity, and soft edges as light adds up. Off keeps the classic look.', linearLight.element).element
     );
-    precision.addEventListener('change', () => {
-      bridge.applyProjectColor?.({ precision: precision!.value === 'float32' ? 'float32' : 'float16' });
-      syncColor();
-    });
   }
   const syncColor = (): void => {
     if (!bridge.projectColor) return;
     const current = bridge.projectColor();
     if (linearLight) linearLight.value = current.linearBlending;
-    if (precision) precision.value = current.precision;
   };
 
   let mediaImport: HTMLSelectElement | null = null;

@@ -36,7 +36,7 @@ function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
     ...(PM.HostMedia?.enabled ? {
       mediaImport: () => PM.HostMedia.projectStorage(),
       applyMediaImport: (mode: 'copy' | 'link') => PM.HostMedia.setProjectStorage(mode),
-      /* Linear blending and 32-bit precision render only in the new engine. */
+      /* Linear blending is available with the new engine. */
       projectColor: () => projectColorSettings(PM),
       applyProjectColor: (patch) => { applyProjectColor(PM, patch); }
     } : {}),

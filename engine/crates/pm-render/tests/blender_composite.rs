@@ -309,6 +309,7 @@ fn a_missing_surface_fails_the_layer_and_native_shading_needs_no_blender() {
 struct Preview {
     have: HashMap<(Vec<u8>, String), Arc<DecodedSurface>>,
     wanted: Mutex<Vec<Snapshot>>,
+    failures: Mutex<Vec<String>>,
 }
 
 impl PreviewSurfaces for Preview {
@@ -326,6 +327,50 @@ impl PreviewSurfaces for Preview {
     fn wanted(&self, snapshot: Snapshot) {
         self.wanted.lock().unwrap().push(snapshot);
     }
+    fn failed(&self, _frame: &pm_blender::snapshot::BlenderFrame, error: &str) {
+        self.failures.lock().unwrap().push(error.to_owned());
+    }
+}
+
+#[test]
+fn preview_snapshot_error_fails_layers_and_reports_host_failure() {
+    let mut source = scene(false);
+    // The material names an asset absent from the project. Snapshot
+    // construction fails after 3D planning, rather than making a surface.
+    source["layers"][2]["d"]["data"]["object"]["material"]["maps"]["color"] = json!("missing-map");
+    let doc = load(&source);
+    let mut renderer = Renderer::headless().expect("a Metal device");
+    let preview = Arc::new(Preview {
+        have: HashMap::new(),
+        wanted: Mutex::new(Vec::new()),
+        failures: Mutex::new(Vec::new()),
+    });
+    let mut request = request(Precision::Float16);
+    request.blender = BlenderRender::Preview(preview.clone());
+    let (plan, failures) = renderer
+        .plan(
+            &doc,
+            "Ptest-root",
+            ticks(0.0),
+            &request,
+            &MapResolver::default(),
+        )
+        .unwrap();
+    assert_eq!(failures.len(), 2, "{failures:?}");
+    assert!(
+        failures
+            .iter()
+            .all(|f| f.message.contains("Missing 3D asset: missing-map"))
+    );
+    assert!(plan.draws.iter().all(|draw| !matches!(
+        &draw.content,
+        Content::Texture {
+            source: Source::Object3d(_),
+            ..
+        }
+    )));
+    assert!(preview.wanted.lock().unwrap().is_empty());
+    assert_eq!(preview.failures.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -379,6 +424,7 @@ fn the_paused_preview_draws_what_it_has_and_asks_for_the_rest() {
     let preview = Arc::new(Preview {
         have: [((snap.hash().0.to_vec(), "a".to_string()), half.clone())].into(),
         wanted: Mutex::new(vec![]),
+        failures: Mutex::new(Vec::new()),
     });
     let mut req = request(Precision::Float16);
     req.blender = BlenderRender::Preview(preview.clone());

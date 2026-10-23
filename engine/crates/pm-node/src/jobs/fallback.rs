@@ -269,6 +269,7 @@ mod tests {
             fragment: "#version 300 es\nvoid main(){}".into(),
             width: 2,
             height: 1,
+            color_depth: 16,
             calls: vec![],
             stage: "bind".into(),
             message: "sampler `u` (Cube)".into(),

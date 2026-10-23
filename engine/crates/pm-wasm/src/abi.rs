@@ -140,6 +140,13 @@ pub extern "C" fn pm_out_len() -> usize {
     with(|s| s.out.len())
 }
 
+/// Release a large output after JavaScript has copied it out of linear
+/// memory. The next reply can allocate afresh.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_out_release() {
+    with(|s| s.out = Vec::new())
+}
+
 /// Whether the last JSON reply holds special-number markers (`crate::reply`).
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_out_special() -> u32 {
@@ -420,6 +427,179 @@ pub extern "C" fn pm_fonts_add(len: usize) -> u32 {
         s.engine.add_font(&key, index, data);
         0
     })
+}
+
+/// Adds a 3D model asset from `input[..len]`: a u32 id length, the id, a u8
+/// kind (0 missing, 1 OBJ text, 2 glTF or GLB bytes), then the bytes. 0 on
+/// success; 1 for a malformed input; 2 when the model did not load (kept as
+/// missing; the reason is in the reply buffer).
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_model_set(len: usize) -> u32 {
+    with(|s| {
+        let bytes = input(s, len).to_vec();
+        let Some(id_len) = bytes
+            .get(0..4)
+            .and_then(|b| b.try_into().ok())
+            .map(|b: [u8; 4]| u32::from_le_bytes(b) as usize)
+        else {
+            return 1;
+        };
+        let Some(id) = bytes
+            .get(4..4 + id_len)
+            .and_then(|k| std::str::from_utf8(k).ok())
+        else {
+            return 1;
+        };
+        let Some(kind) = bytes
+            .get(4 + id_len)
+            .and_then(|k| crate::geometry::ModelKind::from_u8(*k))
+        else {
+            return 1;
+        };
+        let id = id.to_owned();
+        match s.engine.set_model(&id, kind, &bytes[5 + id_len..]) {
+            Ok(()) => 0,
+            Err(e) => {
+                reply(s, &e, false);
+                2
+            }
+        }
+    })
+}
+
+/// Import glTF/GLB bytes with pm-geom3d and return the compatibility scene
+/// as JSON in the output buffer. A failure returns 1 and its message there.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_model_import(len: usize) -> u32 {
+    with(|s| {
+        let bytes = input(s, len);
+        let result = crate::imported_model::import(bytes);
+        match result {
+            Ok(scene) => {
+                reply(s, &scene.to_string(), false);
+                0
+            }
+            Err(message) => {
+                reply(s, &message, false);
+                1
+            }
+        }
+    })
+}
+
+/// Import glTF/GLB as a packed compatibility scene. On success, `pm_out`
+/// holds a u32 LE JSON-header length, the JSON metadata, padding to four
+/// bytes, then the numeric mesh attributes named by its packed markers.
+/// A failure returns 1 with the message in `pm_out`.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_model_import_packed(len: usize) -> u32 {
+    with(
+        |s| match crate::imported_model::import_packed(input(s, len)) {
+            Ok(packet) => {
+                s.out = packet;
+                s.out_special = false;
+                0
+            }
+            Err(message) => {
+                reply(s, &message, false);
+                1
+            }
+        },
+    )
+}
+
+/// Bundle selected OBJ/MTL/texture files through pm-geom3d. Input is a u32
+/// JSON-header length, a JSON array of {name,mime,length}, then file bytes.
+/// Status: 0 GLB bytes in output; 2 unchanged model index (decimal text);
+/// 1 an error message. The caller validates File instances before invoking.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_prepare_model_import(len: usize) -> u32 {
+    with(|s| {
+        let source = input(s, len).to_vec();
+        let input = source.as_slice();
+        let Some(header_len) = input
+            .get(..4)
+            .and_then(|b| b.try_into().ok())
+            .map(|b: [u8; 4]| u32::from_le_bytes(b) as usize)
+        else {
+            reply(s, "Invalid model import bundle", false);
+            return 1;
+        };
+        let Some(header) = input
+            .get(4..4 + header_len)
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok())
+        else {
+            reply(s, "Invalid model import bundle", false);
+            return 1;
+        };
+        let Some(entries) = header.as_array() else {
+            reply(s, "Invalid model import bundle", false);
+            return 1;
+        };
+        let mut offset = 4 + header_len;
+        let mut files = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let (Some(name), Some(mime), Some(length)) = (
+                entry.get("name").and_then(|v| v.as_str()),
+                entry.get("mime").and_then(|v| v.as_str()),
+                entry
+                    .get("length")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|n| usize::try_from(n).ok()),
+            ) else {
+                reply(s, "Invalid model import bundle", false);
+                return 1;
+            };
+            let Some(end) = offset.checked_add(length) else {
+                reply(s, "Invalid model import bundle", false);
+                return 1;
+            };
+            let Some(bytes) = input.get(offset..end) else {
+                reply(s, "Invalid model import bundle", false);
+                return 1;
+            };
+            files.push(pm_geom3d::obj::ImportFile {
+                name: name.to_owned(),
+                mime: mime.to_owned(),
+                bytes: bytes.to_vec(),
+            });
+            offset = end;
+        }
+        if offset != input.len() {
+            reply(s, "Invalid model import bundle", false);
+            return 1;
+        }
+        match pm_geom3d::obj::prepare_import(&files) {
+            Ok(pm_geom3d::obj::Prepared::Unchanged(index)) => {
+                reply(s, &index.to_string(), false);
+                2
+            }
+            Ok(pm_geom3d::obj::Prepared::Glb { bytes, .. }) => {
+                s.out = bytes;
+                s.out_special = false;
+                0
+            }
+            Err(e) => {
+                reply(s, &e.0, false);
+                1
+            }
+        }
+    })
+}
+
+/// Forgets the 3D model asset whose id is `input[..len]`.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_model_forget(len: usize) {
+    with(|s| {
+        if let Ok(id) = std::str::from_utf8(input(s, len)).map(str::to_owned) {
+            s.engine.forget_model(&id);
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_models_clear() {
+    with(|s| s.engine.clear_models())
 }
 
 /// `{misses, pending}` of the last text layout into the reply buffer.

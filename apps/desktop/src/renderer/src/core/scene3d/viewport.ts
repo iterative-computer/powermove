@@ -38,6 +38,15 @@ function initialize(PM:any,entry:ViewState):void {
 export function viewportCamera(PM:any,renderCamera:ViewCamera):ViewCamera {
   const entry=state(PM);return entry.mode==='editor'&&entry.camera?entry.camera:renderCamera;
 }
+/** The native geometry query uses the same transient camera as the viewer. */
+export function editorCamera(PM:any):ViewCamera|null {
+  const entry=state(PM);
+  if(entry.mode!=='editor'||!entry.camera)return null;
+  entry.camera.updateMatrixWorld(true);
+  return entry.camera;
+}
+/** Main's 3D editor has no Local View filter. */
+export const localViewIds=(_PM:any):null=>null;
 /** The editor camera as the native engine's view override takes it
  *  (contract 2 `EditorCamera`): the world-to-camera matrix, column-major,
  *  and a perspective camera's vertical field of view with three.js's zoom

@@ -15,8 +15,8 @@
 //! The engine describes the draw as a [`FallbackRequest`]: the compositor's
 //! vertex shader, the wrapped fragment program, the target size, and the
 //! uniform calls in issue order (the runner replays them with GL's own type
-//! rules). The runner draws into an RGBA16F target cleared to transparent
-//! with blending off, reads it back in GL row order (no flip, like the
+//! rules). The runner draws into the project's RGBA8 or RGBA16F target
+//! cleared to transparent with blending off, reads it back in GL row order (no flip, like the
 //! engine's legacy-GLSL targets), and uploads [`FallbackPixels`]; the
 //! renderer keeps them in its [`FallbackStore`] under the request's key and
 //! draws them as the layer's content. A frame whose pixels have not arrived
@@ -93,6 +93,7 @@ pub fn request(
         fragment,
         width,
         height,
+        color_depth: 16,
         calls: calls.iter().map(|(n, c)| self::call(n, c)).collect(),
         stage: failure.stage.name().into(),
         message: failure.message.lines().next().unwrap_or_default().into(),
@@ -235,6 +236,7 @@ pub fn request_with_textures(
         fragment,
         width,
         height,
+        color_depth: 16,
         calls: passes.next().unwrap_or_default(),
         stage: failure.stage.name().into(),
         message: failure.message.lines().next().unwrap_or_default().into(),
@@ -242,6 +244,24 @@ pub fn request_with_textures(
         units,
         more_passes: passes.collect(),
     }
+}
+
+/// The plan does not know the project's depth. Bind it at execution, and
+/// partition the fallback cache by depth because the same GLSL writes
+/// different stored pixels into RGBA8 and RGBA16F targets.
+pub fn at_color_depth(request: &FallbackRequest, depth: u8) -> FallbackRequest {
+    if request.color_depth == depth {
+        return request.clone();
+    }
+    let mut out = request.clone();
+    out.color_depth = depth;
+    let mut h = sha2::Sha256::new();
+    use sha2::Digest;
+    h.update(b"pm-render fallback color depth\0");
+    h.update(request.key.as_bytes());
+    h.update([depth]);
+    out.key = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    out
 }
 
 /// A program's identity for the runner's failures (its vertex and
@@ -389,8 +409,8 @@ impl Bands {
     }
 }
 
-/// The runner's result: RGBA16F (binary16 bits), `width × height × 4`
-/// values, rows in GL order (row 0 at the bottom).
+/// The runner's result: binary16 bits at depth 16, exact byte codes in u16
+/// slots at depth 8, `width × height × 4` values in GL row order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FallbackPixels {
     pub width: u32,
@@ -408,6 +428,7 @@ impl FallbackPixels {
         self.width == request.width
             && self.height == request.height
             && self.rgba16f.len() as u64 == u64::from(self.width) * u64::from(self.height) * 4
+            && (request.color_depth != 8 || self.rgba16f.iter().all(|v| *v <= 255))
     }
 }
 
@@ -529,6 +550,28 @@ impl FallbackStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgba8_requests_partition_the_cache_and_accept_only_byte_codes() {
+        let f16 = request(
+            "layer".into(),
+            "void main() {}".into(),
+            1,
+            1,
+            &[],
+            &crate::effects::exec::parity_failure(),
+        );
+        let u8_request = at_color_depth(&f16, 8);
+        assert_eq!(f16.color_depth, 16);
+        assert_eq!(u8_request.color_depth, 8);
+        assert_ne!(u8_request.key, f16.key);
+        assert_eq!(u8_request.key, at_color_depth(&f16, 8).key);
+        let mut stored = pixels(1);
+        stored.rgba16f = vec![0, 1, 127, 255];
+        assert!(stored.fits(&u8_request));
+        stored.rgba16f[0] = 256;
+        assert!(!stored.fits(&u8_request));
+    }
 
     #[test]
     fn halves_are_hashed_and_converted_as_value_by_value() {

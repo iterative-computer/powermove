@@ -52,7 +52,8 @@ pub struct RenderRequest {
     /// final output only); `None` renders all of it. The returned texture is
     /// the region's size.
     pub region: Option<PixelRect>,
-    /// Intermediate storage: `rgba16float` or `rgba32float`.
+    /// Compatibility request hint. The project Color depth controls intermediate
+    /// storage (`rgba8unorm`, `rgba16float`, or `rgba32float`).
     pub precision: Precision,
     /// Also render the depth and object-id surface (contract 2).
     pub depth_id: bool,

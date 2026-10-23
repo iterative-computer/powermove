@@ -20,6 +20,9 @@ use super::describe::{self, DrawDesc, DrawState, Layer3d, PassDesc, TextureRef};
 use super::model::Scene3d;
 use super::textures::{MapError, Textures};
 
+#[path = "chrome_gpu.rs"]
+mod chrome;
+
 /// The MSAA sample count of the output canvas (`antialias: true`; ANGLE on
 /// Metal allocates 4 samples, recorded by `tools/three-ref`).
 pub const SAMPLES: u32 = 4;
@@ -43,6 +46,7 @@ struct GpuMesh {
     position: wgpu::Buffer,
     normal: wgpu::Buffer,
     uv: wgpu::Buffer,
+    shared_zero: bool,
     index: wgpu::Buffer,
     count: u32,
     wireframe: Option<(wgpu::Buffer, u32)>,
@@ -50,20 +54,22 @@ struct GpuMesh {
 
 impl GpuMesh {
     fn bytes(&self) -> u64 {
-        [&self.position, &self.normal, &self.uv, &self.index]
+        let total = [&self.position, &self.normal, &self.uv, &self.index]
             .into_iter()
             .chain(self.wireframe.as_ref().map(|(b, _)| b))
             .map(wgpu::Buffer::size)
-            .sum()
+            .sum::<u64>();
+        total - if self.shared_zero { self.uv.size() } else { 0 }
     }
 }
 
 /// Why a 3D render drew nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error3d {
-    /// Something this pass does not draw, met at render time (the frame is
-    /// routed to the legacy engine, `MediaFailure::Unsupported`).
-    Unsupported(String),
+    /// A material map still outside the level 1 classes, met at render
+    /// time: the image feature an image layer of the file reports
+    /// (`MediaFailure::Unsupported`).
+    Unsupported(crate::capability::Feature),
     /// The layer failed and drew nothing.
     Failed(String),
 }
@@ -115,6 +121,39 @@ struct PipelineKey {
     samples: u32,
     state: DrawState,
     color4: bool,
+    constant_attributes: u16,
+}
+
+fn constant_attribute_bit(name: &str) -> u16 {
+    match name {
+        "normal" => 1 << 0,
+        "uv" => 1 << 1,
+        "tangent" => 1 << 2,
+        "color" => 1 << 3,
+        "uv1" => 1 << 4,
+        "uv2" => 1 << 5,
+        "uv3" => 1 << 6,
+        "skinIndex" => 1 << 7,
+        "skinWeight" => 1 << 8,
+        _ => 0,
+    }
+}
+
+fn constant_attributes(geometry: &super::model::Geometry3d) -> u16 {
+    [
+        "normal",
+        "uv",
+        "tangent",
+        "color",
+        "uv1",
+        "uv2",
+        "uv3",
+        "skinIndex",
+        "skinWeight",
+    ]
+    .into_iter()
+    .filter(|name| super::gltf::gpu::constant_attribute(geometry, name))
+    .fold(0, |bits, name| bits | constant_attribute_bit(name))
 }
 
 /// The vertex inputs a program reads, by location.
@@ -173,6 +212,52 @@ struct PrepassKey {
     scene: Arc<Scene3d>,
     depth_set: Vec<usize>,
     samples: u32,
+    generation: u64,
+    cross_frame_safe: bool,
+}
+
+impl PrepassKey {
+    fn reusable(
+        &self,
+        scene: &Arc<Scene3d>,
+        depth_set: &[usize],
+        samples: u32,
+        generation: u64,
+        cross_frame_safe: bool,
+    ) -> bool {
+        if self.depth_set != depth_set || self.samples != samples {
+            return false;
+        }
+        if Arc::ptr_eq(&self.scene, scene) {
+            // Preserve the existing within-frame reuse between layers. A
+            // file-backed texture can change before a later frame even if
+            // that frame happens to retain the same scene Arc.
+            return self.generation == generation || (self.cross_frame_safe && cross_frame_safe);
+        }
+        // Scene3d's equality compares content-keyed geometry rather than
+        // vertex arrays. External maps can change at the same path, while
+        // instance array equality would scan every placement each frame.
+        // Restrict cross-scene reuse to texture-free, uninstanced scenes.
+        if !self.cross_frame_safe || !cross_frame_safe {
+            return false;
+        }
+        // `PartialEq` covers camera, canvas, lights, materials, transforms,
+        // pose and morph influences. Debug's round-trip float formatting
+        // distinguishes signed zero, which numeric equality would conflate.
+        self.scene.as_ref() == scene.as_ref() && format!("{:?}", self.scene) == format!("{scene:?}")
+    }
+}
+
+fn cross_scene_prepass_safe(scene: &Scene3d) -> bool {
+    scene.objects.iter().all(|object| {
+        object.meshes.iter().all(|mesh| {
+            mesh.gltf.as_ref().is_none_or(|ext| ext.instances.is_none())
+                && mesh.materials.iter().all(|material| {
+                    material.maps.all().iter().all(|(_, map)| map.is_none())
+                        && material.ext.as_ref().is_none_or(|ext| ext.maps.is_empty())
+                })
+        })
+    })
 }
 
 const DEPTH_SURFACE_WGSL: &str = r#"
@@ -235,10 +320,13 @@ pub struct Scene3dRenderer {
     /// The last scene whose maps were loaded, and that scene with the maps
     /// that failed to load dropped (shared by the layers of one pass).
     resolved: Option<(Arc<Scene3d>, Arc<Scene3d>)>,
+    warning_scenes: HashMap<usize, (std::sync::Weak<Scene3d>, Vec<String>)>,
     attachments: Option<Attachments>,
     shadows: HashMap<usize, ShadowTarget>,
     prepass: Option<PrepassKey>,
+    prepass_recordings: u64,
     depth_surface: Option<DepthSurface>,
+    chrome: Option<chrome::Targets>,
     textures: Textures,
     empty: Option<wgpu::TextureView>,
     cache: Option<cache::ProgramCache>,
@@ -260,10 +348,13 @@ impl Default for Scene3dRenderer {
             generation: 0,
             frame_started: false,
             resolved: None,
+            warning_scenes: HashMap::new(),
             attachments: None,
             shadows: HashMap::new(),
             prepass: None,
+            prepass_recordings: 0,
             depth_surface: None,
+            chrome: None,
             textures: Textures::default(),
             empty: None,
             cache: None,
@@ -362,6 +453,8 @@ impl Scene3dRenderer {
     /// resident set follows the scenes being drawn.
     pub fn begin_frame(&mut self) {
         self.frame_started = true;
+        self.warning_scenes
+            .retain(|_, (scene, _)| scene.strong_count() > 0);
     }
 
     fn start_generation(&mut self) {
@@ -390,6 +483,12 @@ impl Scene3dRenderer {
             maps,
             map_bytes,
         }
+    }
+
+    /// Number of shared depth prepasses recorded by this renderer. Useful
+    /// for checking whether repeated scene plans avoid another depth draw.
+    pub fn prepass_recordings(&self) -> u64 {
+        self.prepass_recordings
     }
 
     /// Loads every map of `scene` before anything draws. A map that no
@@ -427,10 +526,8 @@ impl Scene3dRenderer {
                 }
             }
         }
-        let out = if failed.is_empty() {
-            scene.clone()
-        } else {
-            let mut s = Scene3d::clone(scene);
+        let mut resolved = (!failed.is_empty()).then(|| Scene3d::clone(scene));
+        if let Some(s) = resolved.as_mut() {
             let mut warnings = Vec::new();
             for o in &mut s.objects {
                 for m in &mut o.meshes {
@@ -447,10 +544,23 @@ impl Scene3dRenderer {
                 }
             }
             s.warnings.extend(warnings);
-            Arc::new(s)
-        };
+        }
+        let out = resolved.map_or_else(|| scene.clone(), Arc::new);
+        self.warning_scenes.insert(
+            Arc::as_ptr(scene) as usize,
+            (Arc::downgrade(scene), out.warnings.clone()),
+        );
         self.resolved = Some((scene.clone(), out.clone()));
         Ok(out)
+    }
+
+    /// Diagnostics of the actual decoded maps, retained with weak scene
+    /// identities while draw/prefix reuse still holds the source scene.
+    pub(crate) fn scene_warnings<'a>(&'a self, scene: &'a Arc<Scene3d>) -> &'a [String] {
+        self.warning_scenes
+            .get(&(Arc::as_ptr(scene) as usize))
+            .filter(|(key, _)| key.upgrade().is_some_and(|key| Arc::ptr_eq(&key, scene)))
+            .map_or(&scene.warnings, |(_, warnings)| warnings)
     }
 
     /// Keeps translated programs in `dir` across processes (the engine
@@ -469,6 +579,7 @@ impl Scene3dRenderer {
     pub fn set_math_mode(&mut self, math: MathMode) {
         self.math = math;
         self.by_parameters.clear();
+        self.prepass = None;
     }
 
     /// The math mode the programs compile with on `device` (fast when the
@@ -761,55 +872,99 @@ impl Scene3dRenderer {
             return m.clone();
         }
         let geometry = &g.geometry;
-        let buffer = |label: &str, mut bytes: Vec<u8>, usage: wgpu::BufferUsages| {
+        let buffer = |label: &str,
+                      words: &mut dyn Iterator<Item = u32>,
+                      len: usize,
+                      usage: wgpu::BufferUsages| {
             // naga's MSL vertex pulling admits element i only when
             // i < bound size / stride (S7 finding 6); padding keeps GL's rule.
-            bytes.resize(bytes.len() + 256, 0);
-            wgpu::util::DeviceExt::create_buffer_init(
-                device,
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents: &bytes,
-                    usage,
-                },
-            )
+            // Write directly into the mapped buffer. A large model formerly
+            // held a second full-size Vec<u8> for each upload, plus cloned or
+            // synthesized float arrays for normal and UV.
+            let b = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (len * 4 + 256) as u64,
+                usage,
+                mapped_at_creation: true,
+            });
+            {
+                let mut mapped = b
+                    .slice(..)
+                    .get_mapped_range_mut()
+                    .expect("buffer mapped at creation");
+                mapped
+                    .slice(..len * 4)
+                    .write_iter(words.flat_map(u32::to_le_bytes));
+                mapped.slice(len * 4..).fill(0);
+            }
+            b.unmap();
+            b
         };
-        let f = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
         let count = geometry.vertex_count();
-        let uvs = if geometry.uvs.is_empty() {
-            // No `uv` attribute: WebGL's constant attribute value (0, 0).
-            vec![0f32; count * 2]
-        } else {
-            geometry.uvs.clone()
-        };
-        // No `normal` attribute (flat-shaded glTF): WebGL's constant zero.
-        let normals = if geometry.normals.len() < count * 3 {
-            vec![0f32; count * 3]
-        } else {
-            geometry.normals.clone()
-        };
-        let index = |v: &[u32]| v.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<u8>>();
         let wire = wireframe.then(|| {
             let w = geometry.wireframe_indices();
             (
-                buffer("3d wireframe", index(&w), wgpu::BufferUsages::INDEX),
+                buffer(
+                    "3d wireframe",
+                    &mut w.iter().copied(),
+                    w.len(),
+                    wgpu::BufferUsages::INDEX,
+                ),
                 w.len() as u32,
+            )
+        });
+        let normals = if geometry.normals().len() < count * 3 {
+            // No `normal` attribute: WebGL's constant zero.
+            None
+        } else {
+            Some(geometry.normals())
+        };
+        let uvs = (!geometry.uvs().is_empty()).then_some(geometry.uvs());
+        let zero = (normals.is_none() || uvs.is_none()).then(|| {
+            buffer(
+                "3d missing attributes",
+                &mut std::iter::repeat_n(0, 4),
+                4,
+                wgpu::BufferUsages::VERTEX,
             )
         });
         let m = Arc::new(GpuMesh {
             position: buffer(
                 "3d position",
-                f(&geometry.positions),
+                &mut geometry.positions().iter().map(|v| v.to_bits()),
+                geometry.positions().len(),
                 wgpu::BufferUsages::VERTEX,
             ),
-            normal: buffer("3d normal", f(&normals), wgpu::BufferUsages::VERTEX),
-            uv: buffer("3d uv", f(&uvs), wgpu::BufferUsages::VERTEX),
+            normal: normals.map_or_else(
+                || zero.as_ref().expect("missing normal buffer").clone(),
+                |values| {
+                    buffer(
+                        "3d normal",
+                        &mut values.iter().map(|v| v.to_bits()),
+                        count * 3,
+                        wgpu::BufferUsages::VERTEX,
+                    )
+                },
+            ),
+            uv: uvs.map_or_else(
+                || zero.as_ref().expect("missing UV buffer").clone(),
+                |values| {
+                    buffer(
+                        "3d uv",
+                        &mut values.iter().map(|v| v.to_bits()),
+                        values.len(),
+                        wgpu::BufferUsages::VERTEX,
+                    )
+                },
+            ),
+            shared_zero: normals.is_none() && uvs.is_none(),
             index: buffer(
                 "3d index",
-                index(&geometry.indices),
+                &mut geometry.indices().iter().copied(),
+                geometry.indices().len(),
                 wgpu::BufferUsages::INDEX,
             ),
-            count: geometry.indices.len() as u32,
+            count: geometry.indices().len() as u32,
             wireframe: wire,
         });
         self.meshes.insert(g.key, (m.clone(), generation));
@@ -897,11 +1052,12 @@ impl Scene3dRenderer {
         compiled: &Compiled,
         samples: u32,
         state: DrawState,
-        extra: Option<Arc<super::gltf::VertexExtra>>,
+        geometry: &super::model::Geometry3d,
     ) -> wgpu::RenderPipeline {
+        let extra = geometry.extra.as_deref();
+        let constant_attributes = constant_attributes(geometry);
         // The color attribute's item size is part of the vertex layout.
         let color4 = extra
-            .as_ref()
             .and_then(|x| x.color.as_ref())
             .is_some_and(|c| c.1 == 4);
         let key = PipelineKey {
@@ -910,34 +1066,40 @@ impl Scene3dRenderer {
             samples,
             state,
             color4,
+            constant_attributes,
         };
         if let Some(p) = self.pipelines.get(&key) {
             return p.clone();
         }
         let inputs = vertex_inputs(compiled);
-        let attrs: Vec<[wgpu::VertexAttribute; 1]> = inputs
-            .iter()
-            .map(|(loc, name)| {
-                let (format, _, _) = super::gltf::gpu::attribute_format(name, extra.as_deref())
-                    .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
-                [wgpu::VertexAttribute {
-                    format,
-                    offset: instance_column(name) * 16,
-                    shader_location: *loc,
-                }]
-            })
-            .collect();
+        let attrs: Vec<[wgpu::VertexAttribute; 1]> =
+            inputs
+                .iter()
+                .map(|(loc, name)| {
+                    let (format, _, _) = super::gltf::gpu::attribute_format(name, extra)
+                        .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
+                    [wgpu::VertexAttribute {
+                        format,
+                        offset: instance_column(name) * 16,
+                        shader_location: *loc,
+                    }]
+                })
+                .collect();
         let layouts: Vec<Option<wgpu::VertexBufferLayout>> = inputs
             .iter()
             .zip(attrs.iter())
             .map(|((_, name), a)| {
-                let (_, stride, instance) = super::gltf::gpu::attribute_format(
-                    name,
-                    extra.as_deref(),
-                )
-                .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
+                let (_, stride, instance) = super::gltf::gpu::attribute_format(name, extra)
+                    .unwrap_or((wgpu::VertexFormat::Float32x3, 12, false));
                 Some(wgpu::VertexBufferLayout {
-                    array_stride: stride,
+                    // Missing WebGL attributes have a constant (0, 0, 0, 1)
+                    // value. Zero stride repeats one tuple without a
+                    // vertex-sized allocation.
+                    array_stride: if constant_attributes & constant_attribute_bit(name) != 0 {
+                        0
+                    } else {
+                        stride
+                    },
                     step_mode: if instance {
                         wgpu::VertexStepMode::Instance
                     } else {
@@ -1001,7 +1163,11 @@ impl Scene3dRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(state.depth_write),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(if state.depth_test {
+                    wgpu::CompareFunction::LessEqual
+                } else {
+                    wgpu::CompareFunction::Always
+                }),
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -1022,7 +1188,10 @@ impl Scene3dRenderer {
                     },
                     blend,
                     write_mask: if state.color_write {
-                        wgpu::ColorWrites::ALL
+                        state.color_mask.map_or(
+                            wgpu::ColorWrites::ALL,
+                            wgpu::ColorWrites::from_bits_truncate,
+                        )
                     } else {
                         wgpu::ColorWrites::empty()
                     },
@@ -1074,16 +1243,33 @@ impl Scene3dRenderer {
         scene: &Scene3d,
         draw: &DrawDesc,
         samples: u32,
-    ) -> Result<Prepared, Error3d> {
-        let (key, compiled) = self.program(device, &draw.params)?;
+    ) -> Result<Option<Prepared>, Error3d> {
         let mesh_desc = &scene.objects[draw.object].meshes[draw.mesh];
+        if legacy_morph_packer_error(
+            mesh_desc
+                .geometry
+                .extra
+                .as_deref()
+                .and_then(|e| e.morph.as_ref()),
+        ) {
+            return Err(Error3d::Failed(
+                "Cannot read properties of undefined (reading 'count')".into(),
+            ));
+        }
+        // WebGL rejects a short bound attribute at renderBufferDirect. Use
+        // this pass's final program: a short normal can reject the color
+        // draw while remaining inactive in its shadow depth program.
+        if super::gltf::short_attribute_blocks_draw(mesh_desc, &draw.params) {
+            return Ok(None);
+        }
+        let (key, compiled) = self.program(device, &draw.params)?;
         let pipeline = self.pipeline(
             device,
             key,
             &compiled,
             samples,
             draw.state,
-            mesh_desc.geometry.extra.clone(),
+            &mesh_desc.geometry,
         );
         let mut block = vec![0u8; compiled.block_size.max(16) as usize];
         for (name, v) in &draw.uniforms {
@@ -1150,10 +1336,7 @@ impl Scene3dRenderer {
                     ),
                 },
                 Some(TextureRef::Ltc1) | Some(TextureRef::Ltc2) => {
-                    let (a, b) = self
-                        .textures
-                        .ltc(device, queue)
-                        .map_err(Error3d::Unsupported)?;
+                    let (a, b) = self.textures.ltc(device, queue).map_err(Error3d::Failed)?;
                     let v = if matches!(bound, Some(TextureRef::Ltc1)) {
                         a
                     } else {
@@ -1230,14 +1413,14 @@ impl Scene3dRenderer {
             }
             None => 0..total,
         };
-        Ok(Prepared {
+        Ok(Some(Prepared {
             pipeline,
             bind,
             buffers,
             index,
             range,
             instances,
-        })
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1257,7 +1440,9 @@ impl Scene3dRenderer {
                 for (view, draws) in views {
                     let mut list = Vec::new();
                     for d in draws {
-                        list.push(self.prepare(device, queue, encoder, scene, d, 1)?);
+                        if let Some(prepared) = self.prepare(device, queue, encoder, scene, d, 1)? {
+                            list.push(prepared);
+                        }
                     }
                     prepared.push((view.viewport, list));
                 }
@@ -1313,7 +1498,11 @@ impl Scene3dRenderer {
                     }
                     let mut list = Vec::new();
                     for d in draws {
-                        list.push(self.prepare(device, queue, encoder, scene, d, samples)?);
+                        if let Some(prepared) =
+                            self.prepare(device, queue, encoder, scene, d, samples)?
+                        {
+                            list.push(prepared);
+                        }
                     }
                     let resolve = self
                         .gltf
@@ -1381,7 +1570,11 @@ impl Scene3dRenderer {
                 let samples = self.samples;
                 let mut list = Vec::new();
                 for d in draws {
-                    list.push(self.prepare(device, queue, encoder, scene, d, samples)?);
+                    if let Some(prepared) =
+                        self.prepare(device, queue, encoder, scene, d, samples)?
+                    {
+                        list.push(prepared);
+                    }
                 }
                 let a = self.attachments.as_ref().expect("attachments");
                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1415,7 +1608,11 @@ impl Scene3dRenderer {
                 let samples = self.samples;
                 let mut list = Vec::new();
                 for d in draws {
-                    list.push(self.prepare(device, queue, encoder, scene, d, samples)?);
+                    if let Some(prepared) =
+                        self.prepare(device, queue, encoder, scene, d, samples)?
+                    {
+                        list.push(prepared);
+                    }
                 }
                 let a = self.attachments.as_ref().expect("attachments");
                 let resolve = resolve.expect("a resolve target");
@@ -1460,6 +1657,71 @@ impl Scene3dRenderer {
         Ok(())
     }
 
+    /// Fetches the SVG map uploads this scene needs. No scene geometry is
+    /// drawn by Chromium: it only decodes the SVG image into today's texels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_svg_maps(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &super::Object3dPlan,
+        rasters: &mut crate::vector::svg_rasters::SvgRasters,
+        composition: &str,
+    ) -> bool {
+        self.start_generation();
+        let mut ready = true;
+        for object in &plan.scene.objects {
+            for mesh in &object.meshes {
+                for material in mesh.materials.iter() {
+                    for (_, map) in material.maps.all() {
+                        let Some(map) = map else { continue };
+                        let Some(request) = &map.svg else { continue };
+                        let key = &request.key;
+                        if !rasters.contains(key)
+                            && rasters.rasterizer
+                                == crate::vector::svg_rasters::SvgRasterizer::Resvg
+                        {
+                            // pm-cli's explicitly reported SVG approximation.
+                            if let Ok((doc, _)) = crate::vector::svg::document(&map.path) {
+                                let mut pixels = doc.raster(key.width, key.height).rgba;
+                                crate::blender::snapshot::unpremultiply(&mut pixels);
+                                let row = key.width as usize * 4;
+                                for y in 0..key.height as usize / 2 {
+                                    let other = key.height as usize - 1 - y;
+                                    for x in 0..row {
+                                        pixels.swap(y * row + x, other * row + x);
+                                    }
+                                }
+                                let _ = rasters.put(key.clone(), pixels);
+                            }
+                        }
+                        if rasters.rasterizer == crate::vector::svg_rasters::SvgRasterizer::Resvg {
+                            rasters.approximated += 1;
+                        }
+                        if let Some(pixels) = rasters.get(key) {
+                            // The file was probed when the scene was planned;
+                            // if it disappeared, resolve_maps reports Missing texture.
+                            let _ = self.textures.put_svg(
+                                device, queue, encoder, &map.path, map.srgb, key.width, key.height,
+                                &pixels,
+                            );
+                        } else {
+                            rasters.miss(crate::vector::svg_rasters::SvgRasterNeed {
+                                request: request.clone(),
+                                path: map.path.clone(),
+                                composition: composition.into(),
+                                layer: plan.layer.clone(),
+                            });
+                            ready = false;
+                        }
+                    }
+                }
+            }
+        }
+        ready
+    }
+
     /// Records a 3D render into `encoder`: a layer of the 3D scene pass, a
     /// legacy scene layer, or a legacy mesh layer. Targets come from `pool`;
     /// the caller returns them after the frame is submitted.
@@ -1471,6 +1733,28 @@ impl Scene3dRenderer {
         pool: &mut TargetPool,
         plan: &super::Object3dPlan,
         depth_surface: bool,
+    ) -> Result<Rendered3d, Error3d> {
+        self.render_at_precision(
+            device,
+            queue,
+            encoder,
+            pool,
+            plan,
+            depth_surface,
+            pm_protocol::color::Precision::Float16,
+        )
+    }
+
+    /// Renders with the composition's selected working precision.
+    pub fn render_at_precision(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        pool: &mut TargetPool,
+        plan: &super::Object3dPlan,
+        depth_surface: bool,
+        precision: pm_protocol::color::Precision,
     ) -> Result<Rendered3d, Error3d> {
         self.start_generation();
         match &plan.kind {
@@ -1495,7 +1779,7 @@ impl Scene3dRenderer {
             super::Render3d::ObjMesh(mesh) => {
                 let color = self
                     .legacy
-                    .render(device, queue, encoder, pool, mesh, self.samples)
+                    .render(device, queue, encoder, pool, mesh, self.samples, precision)
                     .map_err(Error3d::Failed)?;
                 Ok(Rendered3d { color, depth: None })
             }
@@ -1537,6 +1821,18 @@ impl Scene3dRenderer {
         background: bool,
         depth_surface: bool,
     ) -> Result<Rendered3d, Error3d> {
+        // Layers of one plan share immutable scene Arcs. Reuse the safety
+        // decision too, so a many-layer scene does not scan every mesh once
+        // per layer. Match both sides of map resolution: a failed map may
+        // have been removed from its resolved scene.
+        let cross_frame_safe = match (&self.prepass, &self.resolved) {
+            (Some(key), Some((source, resolved)))
+                if Arc::ptr_eq(source, scene) && Arc::ptr_eq(resolved, &key.scene) =>
+            {
+                key.cross_frame_safe
+            }
+            _ => cross_scene_prepass_safe(scene),
+        };
         let scene = &self.resolve_maps(device, queue, encoder, scene)?;
         let (w, h) = scene.canvas();
         self.attachments(device, w, h);
@@ -1546,18 +1842,35 @@ impl Scene3dRenderer {
             depth_set,
             background,
         };
-        let cached = matches!(&self.prepass, Some(k) if Arc::ptr_eq(&k.scene, scene)
-            && k.depth_set == depth_set && k.samples == self.samples);
-        if !cached {
+        let cached = self.prepass.as_ref().is_some_and(|key| {
+            key.reusable(
+                scene,
+                depth_set,
+                self.samples,
+                self.generation,
+                cross_frame_safe,
+            )
+        });
+        if cached {
+            // The next layer of this frame can take the pointer fast path;
+            // the prior frame's evaluated scene need not stay retained.
+            let key = self.prepass.as_mut().expect("reusable prepass");
+            key.scene = scene.clone();
+            key.generation = self.generation;
+            key.cross_frame_safe = cross_frame_safe;
+        } else {
             self.prepass = None;
             self.keep_shadows(scene);
             for pass in describe::prepass(&layer)? {
                 self.record(device, queue, encoder, scene, &pass, None)?;
             }
+            self.prepass_recordings += 1;
             self.prepass = Some(PrepassKey {
                 scene: scene.clone(),
                 depth_set: depth_set.to_vec(),
                 samples: self.samples,
+                generation: self.generation,
+                cross_frame_safe,
             });
         }
         let out = self.output(device, pool, w, h);
@@ -1803,6 +2116,23 @@ impl Scene3dRenderer {
     }
 }
 
+/// Three r180's `WebGLMorphtargets.update` chooses the first present morph
+/// attribute for its target count, then unconditionally reads the position
+/// target's `.count` while packing. This throws only when a drawable reaches
+/// `renderBufferDirect`; loaders, queries, and Blender snapshot construction
+/// still succeed for a normal-only or color-only target.
+fn legacy_morph_packer_error(
+    morph: Option<&(
+        bool,
+        bool,
+        bool,
+        u32,
+        std::sync::Arc<super::gltf::MorphTexture>,
+    )>,
+) -> bool {
+    morph.is_some_and(|(position, _, _, count, _)| !position && *count > 0)
+}
+
 /// A draw ready to record.
 struct Prepared {
     pipeline: wgpu::RenderPipeline,
@@ -1825,5 +2155,221 @@ impl Prepared {
         }
         pass.set_index_buffer(self.index.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(self.range.clone(), 0, 0..self.instances);
+    }
+}
+
+#[cfg(test)]
+mod constant_attribute_tests {
+    use super::*;
+    use pm_geom3d::gltf::Mode;
+
+    fn extra() -> super::super::gltf::VertexExtra {
+        super::super::gltf::VertexExtra {
+            tangent: None,
+            color: None,
+            uv1: None,
+            uv2: None,
+            uv3: None,
+            skin_index: None,
+            skin_weight: None,
+            mode: Mode::Triangles,
+            has_normal: true,
+            has_uv: true,
+            short_attributes: Vec::new(),
+            fetched_vertices: 2,
+            morph: None,
+        }
+    }
+
+    fn geometry(extra: super::super::gltf::VertexExtra) -> super::super::model::Geometry3d {
+        super::super::model::Geometry3d {
+            key: 7,
+            geometry: super::super::model::GeometryPayload::Standard(Arc::new(
+                pm_geom3d::Geometry {
+                    positions: vec![0.; 6],
+                    normals: vec![0.; 6],
+                    uvs: vec![0.; 4],
+                    indices: vec![0, 1],
+                    indexed: true,
+                    groups: vec![],
+                },
+            )),
+            sphere: ([0.; 3], 0.),
+            extra: Some(Arc::new(extra)),
+        }
+    }
+
+    #[test]
+    fn missing_and_present_extras_select_distinct_pipeline_layouts() {
+        let absent = constant_attributes(&geometry(extra()));
+        let all_extra_bits = [
+            "tangent",
+            "color",
+            "uv1",
+            "uv2",
+            "uv3",
+            "skinIndex",
+            "skinWeight",
+        ]
+        .into_iter()
+        .fold(0, |bits, name| bits | constant_attribute_bit(name));
+        assert_eq!(absent, all_extra_bits);
+
+        let mut present = extra();
+        present.tangent = Some(Arc::new(vec![0.; 8]));
+        present.color = Some((Arc::new(vec![0.; 6]), 3));
+        present.uv1 = Some(Arc::new(vec![0.; 4]));
+        present.uv2 = Some(Arc::new(vec![0.; 4]));
+        present.uv3 = Some(Arc::new(vec![0.; 4]));
+        present.skin_index = Some(Arc::new(vec![0.; 8]));
+        present.skin_weight = Some(Arc::new(vec![0.; 8]));
+        assert_eq!(constant_attributes(&geometry(present)), 0);
+
+        let mut short = extra();
+        short.tangent = Some(Arc::new(vec![0.; 7]));
+        assert_eq!(constant_attributes(&geometry(short)), all_extra_bits);
+    }
+}
+
+#[cfg(test)]
+mod prepass_reuse_tests {
+    use super::super::model::{
+        Geometry3d, GeometryPayload, Material3d, Materials, Mesh3d, Object3d, Texture3d,
+    };
+    use super::*;
+    use pm_geom3d::{Geometry, gltf::Mode};
+
+    fn scene() -> Scene3d {
+        let mut scene = Scene3d::empty(160, 90);
+        scene.objects.push(Object3d {
+            id: "object".into(),
+            visible: true,
+            origin: [0.; 3],
+            meshes: vec![Mesh3d {
+                geometry: Geometry3d {
+                    key: 17,
+                    geometry: GeometryPayload::Standard(Arc::new(Geometry {
+                        positions: vec![0.; 9],
+                        normals: vec![0.; 9],
+                        uvs: vec![0.; 6],
+                        indices: vec![0, 1, 2],
+                        indexed: true,
+                        groups: vec![],
+                    })),
+                    sphere: ([0.; 3], 0.),
+                    extra: None,
+                },
+                world: crate::three::math::IDENTITY,
+                materials: Materials::Single(Box::new(Material3d::standard_default())),
+                cast_shadow: false,
+                receive_shadow: false,
+                gltf: Some(Arc::new(super::super::gltf::MeshExt {
+                    mode: Mode::Triangles,
+                    skinning: None,
+                    instances: None,
+                    influences: vec![0.],
+                    sphere: None,
+                    skinned: false,
+                    id: 1,
+                })),
+            }],
+            layer_opacity: 1.,
+            occludes: true,
+            missing: false,
+        });
+        scene
+    }
+
+    #[test]
+    fn independent_equal_scenes_reuse_and_depth_inputs_invalidate() {
+        let original = Arc::new(scene());
+        let key = PrepassKey {
+            scene: original.clone(),
+            depth_set: vec![0],
+            samples: 4,
+            generation: 1,
+            cross_frame_safe: true,
+        };
+        let rebuilt = Arc::new(scene());
+        assert!(!Arc::ptr_eq(&original, &rebuilt));
+        assert!(key.reusable(&rebuilt, &[0], 4, 2, true));
+        assert!(!key.reusable(&rebuilt, &[], 4, 2, true));
+        assert!(!key.reusable(&rebuilt, &[0], 1, 2, true));
+
+        let mut changed = scene();
+        changed.camera.world[12] = 1.;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.objects[0].meshes[0].world[12] = 1.;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.objects[0].meshes[0]
+            .gltf
+            .as_mut()
+            .map(Arc::make_mut)
+            .unwrap()
+            .influences[0] = 1.;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.width += 1;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.shadows = true;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.objects[0].meshes[0].world[12] = -0.;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+        let mut changed = scene();
+        changed.objects[0].meshes[0].world[12] = f64::NAN;
+        assert!(!key.reusable(&Arc::new(changed), &[0], 4, 2, true));
+    }
+
+    #[test]
+    fn external_maps_and_instances_refuse_cross_scene_reuse() {
+        let mut mapped = scene();
+        let Materials::Single(material) = &mut mapped.objects[0].meshes[0].materials else {
+            unreachable!()
+        };
+        material.maps.color = Some(Texture3d {
+            asset: "image".into(),
+            path: "image.png".into(),
+            svg: None,
+            srgb: true,
+            transform: [0.; 9],
+        });
+        let mapped = Arc::new(mapped);
+        let key = PrepassKey {
+            scene: mapped.clone(),
+            depth_set: vec![0],
+            samples: 4,
+            generation: 1,
+            cross_frame_safe: false,
+        };
+        assert!(key.reusable(&mapped, &[0], 4, 1, false));
+        assert!(!key.reusable(&mapped, &[0], 4, 2, false));
+        assert!(!key.reusable(&Arc::new(mapped.as_ref().clone()), &[0], 4, 2, false));
+
+        let mut instanced = scene();
+        instanced.objects[0].meshes[0]
+            .gltf
+            .as_mut()
+            .map(Arc::make_mut)
+            .unwrap()
+            .instances = Some((
+            1,
+            Arc::new(pm_geom3d::gltf::Instances {
+                matrices: vec![[0.; 16]],
+                colors: None,
+            }),
+        ));
+        let instanced = Arc::new(instanced);
+        let key = PrepassKey {
+            scene: instanced.clone(),
+            depth_set: vec![0],
+            samples: 4,
+            generation: 1,
+            cross_frame_safe: false,
+        };
+        assert!(!key.reusable(&Arc::new(instanced.as_ref().clone()), &[0], 4, 2, false));
     }
 }

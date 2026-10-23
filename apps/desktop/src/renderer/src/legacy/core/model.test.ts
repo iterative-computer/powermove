@@ -21,6 +21,12 @@ function projectModel(): PMRegistry {
 }
 
 describe('legacy model install', () => {
+  it('migrates precision in serialized project documents', () => {
+    const PM = projectModel();
+    const source = { proj: { name: 'Old', color: { precision: 'float32' } } };
+    expect(PM.deserialize(JSON.stringify(source))).toEqual({ name: 'Old', colorDepth: 32 });
+    expect(PM.deserialize({ proj: { ...source.proj, colorDepth: 8 } })).toEqual({ name: 'Old', colorDepth: 8 });
+  });
   it('creates null objects as compact transparent, canvas-pickable controls', () => {
     const PM = projectModel();
     const project = PM.mkProject({ name: 'T', w: 1920, h: 1080, fps: 30, dur: 10 });

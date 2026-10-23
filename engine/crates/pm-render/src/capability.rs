@@ -37,9 +37,6 @@ pub enum Feature {
     LayerType(String),
     /// An extension layer whose definition is not the 3D primitive path.
     ExtensionDefinition(String),
-    /// A 3D object, light, camera, or world setting outside the Phase 2
-    /// primitive (one primitive, a sun, no shadows).
-    Scene3d(String),
     /// Effects (enabled or animatable).
     Effects,
     /// Layer masks.
@@ -105,7 +102,6 @@ impl fmt::Display for Feature {
         match self {
             Feature::LayerType(t) => write!(f, "{t} layers"),
             Feature::ExtensionDefinition(d) => write!(f, "extension layer {d}"),
-            Feature::Scene3d(s) => write!(f, "3D: {s}"),
             Feature::Effects => write!(f, "effects"),
             Feature::Masks => write!(f, "masks"),
             Feature::Transition => write!(f, "transitions"),
@@ -352,10 +348,10 @@ fn check_composition(
                             has_3d = true;
                         }
                         // Legacy scene layers: the 3D pass renders them whole,
-                        // so their embedded scene meets the 3D checks.
+                        // so their embedded scene's maps meet the image checks.
                         crate::scene3d::legacy::SCENE3D_DEFINITION => {
-                            for why in crate::scene3d::check_legacy_scene(root, layer, assets) {
-                                add(layer, Feature::Scene3d(why));
+                            for feature in crate::scene3d::check_legacy_scene(root, layer, assets) {
+                                add(layer, feature);
                             }
                         }
                         // The built-in OBJ model layer, with its fixed shading.
@@ -461,9 +457,6 @@ fn check_composition(
         // captions at output resolution (`crate::text` and shared
         // `pm_eval::text_level2` geometry), and layers that draw
         // nothing of their own.
-        if ty == "group" && js::flag(node::member(Some(layer), "d").unwrap_or(layer), "modeling") {
-            add(layer, Feature::Scene3d("model groups".into()));
-        }
         if !fonts && matches!(ty.as_str(), "text" | "captions") {
             add(
                 layer,
@@ -481,11 +474,11 @@ fn check_composition(
         }
     }
     if has_3d {
-        for issue in crate::scene3d::check(root, comp, layers, assets) {
+        for (layer, feature) in crate::scene3d::check(root, comp, layers, assets) {
             out.insert(Unsupported {
                 composition: Some(comp_id.to_owned()),
-                layer: issue.0,
-                feature: Feature::Scene3d(issue.1),
+                layer,
+                feature,
             });
         }
         if !crate::blender::retired()

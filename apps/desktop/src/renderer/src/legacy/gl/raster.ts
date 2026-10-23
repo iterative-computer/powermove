@@ -23,6 +23,7 @@ import { cornerRadii, isUniformCircular, roundedRectPath } from './corner-geomet
 import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
 import { loadGltf,disposeModel } from '../../core/scene3d/import-model';
+import { loadGltfFromEngine } from '../../core/scene3d/engine-import';
 import { disposeSceneRuntimes } from '../../core/scene3d/service';
 import { parseSvg } from '../core/svg-import';
 import { inspectorService, viewerService } from '../core/services';
@@ -752,7 +753,13 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any): 
   if (kind === 'model') {
     if(blob.size>128*1024*1024)throw new Error('3D models must be smaller than 128 MB');
     if(/\.(glb|gltf)$/i.test(name) || /^model\/gltf/.test(blob.type)) {
-      const loaded=await loadGltf(blob);
+      const useEngineImporter=PM.EngineDoc?.enabled===true;
+      const engineImporter=useEngineImporter?PM.EngineDoc.api:null;
+      if(useEngineImporter&&typeof engineImporter?.importModel!=='function')
+        throw new Error('The engine model importer is unavailable');
+      const loaded=useEngineImporter
+        ? await loadGltfFromEngine(blob,engineImporter)
+        : await loadGltf(blob);
       return {id,name,kind,format:/\.gltf$/i.test(name)?'gltf':'glb',blob,...loaded,size:blob.size};
     }
     const sourceText = await blob.text();

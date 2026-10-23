@@ -89,7 +89,7 @@ pub fn source_key_bytes(
         siting_id(desc.siting),
         desc.bit_depth,
         u8::from(project.working() == pm_protocol::color::WorkingEncoding::LinearLight),
-        u8::from(precision == Precision::Float32),
+        match precision { Precision::Float16 => 0, Precision::Float32 => 1, Precision::Unorm8 => 2 },
     ];
     match desc.alpha {
         AlphaMode::Opaque => out.push(0),
@@ -213,6 +213,8 @@ mod tests {
             assert_ne!(base, source_key_bytes(&c, &p, Precision::Float16), "{c:?}");
         }
         assert_ne!(base, source_key_bytes(&d, &p, Precision::Float32));
+        assert_ne!(base, source_key_bytes(&d, &p, Precision::Unorm8));
+        assert_ne!(source_key_bytes(&d, &p, Precision::Float32), source_key_bytes(&d, &p, Precision::Unorm8));
         assert_eq!(base, source_key_bytes(&d, &p, Precision::Float16));
     }
 

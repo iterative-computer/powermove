@@ -71,6 +71,7 @@ pub const DEFAULT_MAX_BYTES: u64 = 192 * 1024 * 1024;
 
 /// The float paint pass.
 struct Paint {
+    pipeline_u8: wgpu::RenderPipeline,
     pipeline_f16: wgpu::RenderPipeline,
     pipeline_f32: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
@@ -180,6 +181,7 @@ impl Paint {
             })
         };
         Self {
+            pipeline_u8: make(wgpu::TextureFormat::Rgba8Unorm),
             pipeline_f16: make(wgpu::TextureFormat::Rgba16Float),
             pipeline_f32: make(wgpu::TextureFormat::Rgba32Float),
             layout,
@@ -539,10 +541,7 @@ impl VectorCache {
             }
         }
         self.last_backend = Some(if used_gpu { "vello" } else { "vello_cpu" });
-        let format = match precision {
-            Precision::Float32 => wgpu::TextureFormat::Rgba32Float,
-            _ => wgpu::TextureFormat::Rgba16Float,
-        };
+        let format = pm_gpu::working_format(precision);
         let out = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pm vector level 2"),
             size: wgpu::Extent3d {
@@ -591,6 +590,8 @@ impl VectorCache {
             });
             pass.set_pipeline(if format == wgpu::TextureFormat::Rgba32Float {
                 &paint.pipeline_f32
+            } else if format == wgpu::TextureFormat::Rgba8Unorm {
+                &paint.pipeline_u8
             } else {
                 &paint.pipeline_f16
             });
@@ -649,10 +650,11 @@ impl VectorCache {
             }
         }
         queue.submit([encoder.finish()]);
-        let bpp = if format == wgpu::TextureFormat::Rgba32Float {
-            16
-        } else {
-            8
+        let bpp = match format {
+            wgpu::TextureFormat::Rgba32Float => 16,
+            wgpu::TextureFormat::Rgba16Float => 8,
+            wgpu::TextureFormat::Rgba8Unorm => 4,
+            other => panic!("unsupported vector format: {other:?}"),
         };
         Ok((
             out,

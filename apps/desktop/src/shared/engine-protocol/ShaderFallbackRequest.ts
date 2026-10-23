@@ -13,7 +13,12 @@ export type ShaderFallbackRequest = {
 /**
  * SHA-256 (hex) of everything that decides the pixels.
  */
-key: string, layer: string, vertex: string, fragment: string, width: number, height: number, calls: Array<ShaderFallbackCall>, 
+key: string, layer: string, vertex: string, fragment: string, width: number, height: number, 
+/**
+ * The compositor's color buffer depth. Omitted by older clients (16).
+ * At 8, each `rgba16f` wire slot carries an exact byte code 0..255.
+ */
+colorDepth: number, calls: Array<ShaderFallbackCall>, 
 /**
  * Where the native pipeline failed (`pm_glsl::FailureStage::name`).
  */

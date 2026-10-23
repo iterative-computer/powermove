@@ -318,7 +318,6 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
     let what = match &u.feature {
         Feature::LayerType(t) => format!("{t} layers"),
         Feature::ExtensionDefinition(d) => format!("extension layer {d}"),
-        Feature::Scene3d(s) => format!("3D: {s}"),
         Feature::Effects => "effects".into(),
         Feature::Masks => "masks".into(),
         Feature::Transition => "transitions".into(),

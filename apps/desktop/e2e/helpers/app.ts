@@ -52,6 +52,9 @@ export type LaunchOptions = {
   normalWindow?: boolean;
   /** Extra Chromium switches (for example `--force-color-profile=srgb`). */
   args?: string[];
+  /** Chromium switches placed before the app path (for example a GPU stress
+   * run's `--disable-gpu-process-crash-limit`). Joined with `args`. */
+  chromiumSwitches?: string[];
 };
 
 export type LaunchedApp = {
@@ -177,7 +180,8 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     await writeFile(path.join(userData, 'onboarding-v1.json'), '{"version":1}\n', { mode: 0o600 });
   }
   const diagnostics: RendererDiagnostics = { console: [], pageErrors: [] };
-  let active = await startElectron(userData, env, diagnostics, options.normalWindow, options.args);
+  const switches = [...(options.args ?? []), ...(options.chromiumSwitches ?? [])];
+  let active = await startElectron(userData, env, diagnostics, options.normalWindow, switches);
   let closed = false;
 
   const session: LaunchedApp = {
@@ -187,7 +191,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     diagnostics,
     async relaunch() {
       await active.app.close();
-      active = await startElectron(userData, env, diagnostics, options.normalWindow, options.args);
+      active = await startElectron(userData, env, diagnostics, options.normalWindow, switches);
       session.app = active.app;
       session.page = active.page;
     },
