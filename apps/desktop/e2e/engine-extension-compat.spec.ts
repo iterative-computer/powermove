@@ -147,6 +147,32 @@ async function shapeLongLoopProject(page: Page): Promise<void> {
   });
 }
 
+/** The shape-tint project in a large document: `count` more shape layers
+ *  (switched off, each with keyframes), so the document is megabytes of
+ *  JSON, as large projects are. Returns the document's JSON size. */
+async function largeDocumentProject(page: Page, count: number): Promise<number> {
+  return page.evaluate((count) => {
+    const PM = (window as any).PM;
+    const project = PM.mkProject({ name: 'Large document', w: 640, h: 360, fps: 30, dur: 10, bg: '#203040' });
+    project.backgroundFill = { type: 'solid', angle: 0, stops: [{ id: 's1', color: '#203040', position: 0 }] };
+    const tinted = PM.mkLayer('shape', { name: 'Tinted', from: 0, dur: 10, d: { shape: 'ellipse', w: 240, h: 160, color: '#33CC66', stroke: 0 } }, project);
+    tinted.id = 'tinted';
+    tinted.p['position.x'].v = 200; tinted.p['position.y'].v = 180;
+    const others = Array.from({ length: count }, (_, i) => {
+      const layer = PM.mkLayer('shape', { name: `Off ${i}`, from: 0, dur: 10, d: { shape: 'rect', w: 40 + (i % 50), h: 30, color: '#3366CC', stroke: 0 } }, project);
+      layer.id = `off-${i}`;
+      layer.on = false;
+      layer.p['rotation'] = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(5, i % 360), PM.KF(10, 0)] });
+      layer.p['position.x'] = PM.P(0, { kf: [PM.KF(0, i % 640), PM.KF(10, (i * 7) % 640)] });
+      return layer;
+    });
+    project.layers = [tinted, ...others];
+    PM.replaceProject(project);
+    PM.Projects?.put?.(PM.proj);
+    return JSON.stringify(PM.proj).length;
+  }, count);
+}
+
 /** A vector path whose vertex and tangent channels change on every frame. */
 async function pathProject(page: Page): Promise<void> {
   await page.evaluate(() => {
@@ -722,6 +748,79 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.wrap!.repeats).toBeLessThanOrEqual(today.wrap!.repeats);
     expect(engine.wrap!.uniqueTimes).toBeGreaterThanOrEqual(today.wrap!.uniqueTimes - 1);
     expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
+  });
+
+  test('editing a large document with a raster override that reads its base copies the document only to seed the raster worker', async ({ session }) => {
+    test.setTimeout(360_000);
+    // Drags the overridden ellipse in a document of megabytes of JSON, one
+    // move per presented frame: each move is a revision whose base raster
+    // the override reads (a layer raster drawn by the engine's raster
+    // worker), on the engine and in today's app.
+    const drag = (page: Page) => page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const api = PM.Kernel.api('drag-probe');
+      const layer = PM.proj.layers.find((l: any) => l.id === 'tinted');
+      let presented: (() => void) | null = null;
+      const off: any = api.events.on('frame:rendered', () => { presented?.(); presented = null; });
+      const latencies: number[] = [];
+      try {
+        for (let i = 0; i < 60; i++) {
+          const began = performance.now();
+          const shown = new Promise<boolean>((resolve) => { presented = () => resolve(true); setTimeout(() => resolve(false), 2000); });
+          layer.p['position.x'].v = 200 + i * 4;
+          PM.touch();
+          PM.invalidate?.('canvas');
+          if (await shown) latencies.push(performance.now() - began);
+        }
+      } finally { if (typeof off === 'function') off(); else off?.dispose?.(); }
+      const sorted = [...latencies].sort((a, b) => a - b);
+      const q = (p: number) => Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)] ?? 0);
+      return { moves: 60, shown: latencies.length, p50: q(0.5), p95: q(0.95), max: q(1) };
+    });
+    await cp(path.join(__dirname, FIXTURE['shape-tint']!), path.join(session.userData, 'extensions', 'shape-tint'), { recursive: true });
+    await session.relaunch();
+    await session.openEditor();
+    const { page } = session;
+    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint') && Boolean((window as any).PM?.EngineRender));
+    const bytes = await largeDocumentProject(page, 2500);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 90_000 }).toBe('engine');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 30_000 }).toBe(true);
+    const presenter = () => session.app.evaluate(async () => {
+      const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
+      const p = report?.presenter ?? {};
+      return { documentCopies: p.documentCopies ?? null, seeds: p.layerRasterSeeds ?? null, reseeds: p.layerRasterReseeds ?? null, offThread: p.layerRastersOffThread ?? null, slowTurns: p.slowTurns ?? null, turnUsMax: p.turnUsMax ?? null, lastStall: p.lastStall ?? null };
+    });
+    // The first raster seeds the worker's mirror (the one copy, on the worker).
+    await page.waitForTimeout(1500);
+    const before = await presenter();
+    const engine = await drag(page);
+    await page.waitForTimeout(500);
+    const after = await presenter();
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    await session.close();
+    const off = await flagOffApp('shape-tint');
+    let today: Awaited<ReturnType<typeof drag>>;
+    try {
+      await off.openEditor();
+      await off.page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint'));
+      await largeDocumentProject(off.page, 2500);
+      await off.page.waitForTimeout(1500);
+      today = await drag(off.page);
+    } finally {
+      await off.close();
+      await rm(off.userData, { recursive: true, force: true });
+    }
+    const slow = (a: number[] | null, b: number[] | null) => a && b ? a.map((n, i) => n - b[i]!) : null;
+    console.log(JSON.stringify({ editDrag: { documentBytes: bytes, load: os.loadavg(), engine, today, before, after, slowTurnsDuringDrag: slow(after.slowTurns, before.slowTurns) } }));
+    expect(bytes).toBeGreaterThan(4_000_000);
+    // Every move drew new base rasters off the render thread, from the
+    // worker's mirror: no copy of the document per revision, no reseed.
+    expect(after.offThread - before.offThread).toBeGreaterThanOrEqual(30);
+    expect(after.documentCopies - before.documentCopies).toBe(0);
+    expect(after.reseeds - before.reseeds).toBe(0);
+    expect(engine.shown).toBe(60);
+    // No render-thread turn of 100 ms or more while dragging.
+    expect(slow(after.slowTurns, before.slowTurns)?.slice(1)).toEqual([0, 0, 0]);
   });
 
   test('Play right after a seek with the typewriter override keeps today\'s cadence: the first frames wait in the native preroll, none is skipped', async ({ session }) => {
