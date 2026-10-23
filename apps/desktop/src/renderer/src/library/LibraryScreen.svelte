@@ -14,6 +14,7 @@
   import { deletePanel, deletedPanelIds } from './panel-deletion';
   import { panelBelongsInLibrary, panelPreviewSize } from './panel-preview';
   import { copyClonedCanvasBitmaps, snapshotClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
+  import { overlayFrameKey, hasOverlayFrameKey } from '../core/scene3d/overlay-frame';
   import { afterEffectsExtensionIds } from './after-effects-imports';
   import { panelFrameOf } from '../kernel/panel-frame';
   import { placePanel } from '../layout/portal';
@@ -684,6 +685,7 @@
         ?? (element.contains(PM.EngineCanvas?.bound) ? PM.EngineCanvas?.viewerPresentation : null);
       const presentation = presentedBy();
       const latest = presentation?.latest;
+      const frameKey = latest ? overlayFrameKey(latest) : null;
       const state = latest ? presentation.stateFor(latest.viewSeq) : null;
       const crop = state?.canvas?.crop ?? PM.GL?.previewViewport;
       const cropped = crop && (crop.x !== 0 || crop.y !== 0 || crop.width !== project.w || crop.height !== project.h);
@@ -712,7 +714,7 @@
         }
         const overlay = element.querySelector<HTMLCanvasElement>('canvas[data-scene-overlay]');
         if (scene?.hasScene && scene.overlays !== false && overlay
-          && overlay.dataset.sceneOverlayFrame !== `${latest?.revision}:${latest?.viewSeq}`) return null;
+          && overlay.dataset.sceneOverlayFrame !== frameKey) return null;
         // Pin the state of the frame whose chrome was cloned above. The
         // snapshot renders its original canvas, before stage presentation.
         if ((cropped || scene?.hasScene) && !state?.canvas) return null;
@@ -724,7 +726,7 @@
           current: () => current() && PM.EngineRender === transport && PM.proj === project && PM.time === time
             && PM.panelInst?.[id]?.el === element
             && presentedBy() === presentation
-            && presentation?.latest?.viewSeq === latest?.viewSeq
+            && (!presentation || hasOverlayFrameKey(presentation.latest, frameKey))
             && sceneView(PM.Kernel.api('library-card').scene3d?.viewport?.state?.()) === view,
         });
         if (!captured) return null;

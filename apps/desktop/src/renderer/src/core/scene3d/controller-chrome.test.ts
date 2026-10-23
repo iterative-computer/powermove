@@ -87,7 +87,7 @@ describe('viewport chrome while native overlay planes are pending',()=>{
     inner.getBoundingClientRect=()=>({left:110,top:70,width:400,height:225} as DOMRect);
     const plane=()=>({displayWidth:800,displayHeight:450,close:vi.fn()}) as unknown as VideoFrame;
     const presentation={presenting:true,state:{viewSeq:7},
-      latest:{viewSeq:7,revision:2,depthId:{encoding:'chromePlanesV1',selection:{selected:[],active:[]},glyphs:[]}},
+      latest:{seq:11,viewSeq:7,revision:2,depthId:{encoding:'chromePlanesV1',selection:{selected:[],active:[]},glyphs:[]}},
       onPresented:()=>()=>{},onChromeSurface:()=>()=>{},retainChromeFrame:()=>()=>{},
       depthFrame:plane,coverageFrame:plane};
     const project={id:'bound-test',w:640,h:360,fps:30,layers:[{id:'cube',d:{definition:'powermove.3d.object'}}]};
@@ -101,7 +101,11 @@ describe('viewport chrome while native overlay planes are pending',()=>{
     expect(overlayDraws).toHaveBeenCalledTimes(1);
     expect(overlayDraws.mock.calls[0]![0].native.viewport).toEqual({x:100,y:50,width:400,height:225});
     const canvas=stage.querySelector('canvas:not(:first-child)') as HTMLCanvasElement;
-    expect(canvas.dataset.sceneOverlayFrame).toBe('2:7');
+    expect(canvas.dataset.sceneOverlayFrame).toBe('2:7:11');
+    presentation.latest.seq=12;
+    controller.update({x:100,y:50,width:400,height:225});
+    drawFrame!(0);
+    expect(canvas.dataset.sceneOverlayFrame).toBe('2:7:12');
     overlayDraws.mockImplementationOnce(()=>{throw new Error('draw failed');});
     vi.spyOn(console,'error').mockImplementation(()=>{});
     controller.update({x:100,y:50,width:400,height:225});

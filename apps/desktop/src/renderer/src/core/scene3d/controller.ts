@@ -9,6 +9,7 @@ import {resolveTargets,aimPoint,type TransformMode} from './targets';
 import {ModalTransform,fitCamera,toScreen,rayAt,viewForward,type ModalMode,type Rect,type Point} from './modal';
 import {ViewportOverlay,type Glyph} from './overlay';
 import {getRetainedViewportOverlayBitmap} from './overlay-capture';
+import {overlayFrameKey} from './overlay-frame';
 import {ViewportChrome} from './chrome';
 import {createTransformGizmo,type TransformGizmo} from './gizmo';
 import {createSceneNavigation,lockedCamera,writeCameraPose,type SceneNavigation} from './navigation';
@@ -213,7 +214,9 @@ export function attachViewport(PM:any,stage:HTMLElement,host:ViewportHost):Viewp
       try { overlay.draw({camera,rect,runtime,native:depth&&coverage?{depth,coverage,...(nativeViewport?{viewport:nativeViewport}:{})}:null,userView:view.mode==='editor',axis:view.axis,distance:pose.distance,fov:view.fov,overlays:prefs.overlays,
         edit,xray:prefs.xray,selected:editing?new Set():expand(ids),active:editing?new Set():expand(active?[active]:[]),glyphs:frameGlyphs,guides:modal?.guides??[],gizmo:gizmo.attached()?gizmo.helper:null});
         if(engine&&nativeFrame&&depth&&coverage&&getRetainedViewportOverlayBitmap(overlay.canvas))
-          overlay.canvas.dataset.sceneOverlayFrame=`${nativeFrame.revision}:${nativeFrame.viewSeq}`;
+          // A paused view can present another frame at the same revision and
+          // viewSeq. The Library must not pair its new color with old chrome.
+          overlay.canvas.dataset.sceneOverlayFrame=overlayFrameKey(nativeFrame);
       } finally { if(depth&&coverage)chromeDone=overlay.workDone(); }
     }catch(error){console.error('[scene3d] viewport overlay failed',error);}finally{for(const image of readFrames)image.close();releaseChrome?.(chromeDone);}
   }
