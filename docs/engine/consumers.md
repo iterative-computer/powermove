@@ -18,9 +18,22 @@ so its pixels keep the overlay's zoom/pan coordinate system. Legacy and custom
 canvases keep their original copy behavior, and a panel's own `library.render`
 callback still controls its card after copying. Frozen viewers without a callback
 use the same presented-image copy. No second render or snapshot changes the view.
-The viewer version is 1.2.6. Section and Look thumbnails retain the synchronous
-compatibility API already backed by engine snapshots. Frozen render APIs retain
-their existing option and pixel semantics.
+Section and Look thumbnails retain the synchronous compatibility API already
+backed by engine snapshots. Frozen render APIs retain their existing option and
+pixel semantics.
+
+A user's fork or override of a viewer from before the engine (apiVersion 1,
+`render.gl.init` on its own canvas) gets an engine presentation bound to that
+canvas (`engine-connection/canvas-binding.ts`). That bound presentation now
+runs in the same presentation worker as the built-in viewer's
+(`engine-connection/install.ts`). Before, it painted on the main thread
+without a preserved drawing buffer, so its canvas read back empty after
+compositing and the Library card of a shipped-viewer fork showed only the
+selection overlay with the engine on (the composition was missing; engine off
+showed it). The worker also gives forks the built-in viewer's playback
+cadence. If the browser cannot transfer a canvas to a worker (it always can
+in the shipped Electron), both the built-in and the bound presentation fall
+back to the main thread, where a card copy would again be empty.
 
 Status/performance use native counters from startup, with zeros before the first
 stats, rather than stale GL counts. Session resync/restart clears the old view.
@@ -91,20 +104,140 @@ after the spec was written; no assertion was loosened.
   differed only in edge coverage (alpha 0x66 vs 0x80 on the outline), the
   signature of a 2D canvas moved to another rasterizer by readbacks.
 
-The viewer is 1.2.7 after merging the 3D lane's presenter fixes.
+The viewer is 1.2.10: merging `feat/native-engine` again brought the 3D
+lane's surface-epoch presentation changes into the viewer's tree (1.2.9; the
+version lock failed `check:builtins` until the bump), and the viewer now tags
+its presentation canvas with today's canvas box (1.2.10, below).
+
+### Round 5 review fixes (2026-10-22)
+
+- Library cards for forks of shipped viewers: fixed as above. The fork matrix
+  (`e2e/helpers/viewer-fork.ts`) copies the viewers of released builds by
+  commit: 1.0.8 (desktop v1.1.0, `ded961354`) and 1.0.18 (desktop v1.2.0,
+  `07ed5fa17`), beside the engine-era viewer (`8d772dac8`, a fork made after
+  this update) and the current one.
+- The fork of viewer 1.0.18 does not activate on this branch, with the engine
+  on or off: `api.scene3d.getMode is not a function`. Desktop v1.2.0 shipped
+  from `main` after `feat/native-engine` branched, and its kernel API
+  (`scene3d.getMode` and the gizmo/navigation/view calls GizmoToolbar.svelte
+  uses) reaches the engine branch with `feat/ne-mainmerge`, not merged yet.
+  Every 1.0.18 case fails at activation until then, by design of the test.
+- Library cards of the current viewer differed from today's along the
+  composition's edge. The built-in viewer's engine presentation covers the
+  whole stage with the composition drawn inside it; scaled into the card, the
+  composition edge was filtered inside that bitmap, where today's card shows
+  the edge of its own canvas element. Measured on/off at 200% (panned): 1,063
+  differing pixels, a half-covered line, up to 98 levels in light and 8 in
+  dark. The viewer now tags its presentation canvas with today's canvas box
+  for the frame on screen (`data-todays-canvas`: stage CSS box and backing
+  size, from the frame's `ViewerState.canvas`), and the card copies that
+  region at today's box and backing size (`library/viewer-preview.ts`). The
+  same cases are now identical on and off (`e2e/library-card-parity.spec.ts`).
+- Panel windows got `data-theme="undefined"` and `data-density="undefined"` in
+  the light theme and default density (`layout/popout.ts` assigned `undefined`
+  to the dataset). Absence is now copied as absence.
+- `settings/install.ts` imports the Settings page type from `settings/pages.ts`
+  instead of keeping a copy.
+- Behaviour changes made earlier in this lane and not described before:
+  `X.addToQueue` (export queue) refuses with "Export already running" while
+  `X.busy`, and `X.busy` covers the whole media preparation and queue
+  submission. During that window `PM.Export.snapshot` throws (as it does during
+  any export) and `locateMedia` prompts are suppressed. With the engine off,
+  `projectThumb` schedules a retry for the end of the five-second capture limit
+  instead of dropping a capture requested inside it, so the saved thumbnail
+  follows the last save; previously a save within five seconds of the last
+  capture kept the older thumbnail.
+- Commit `11f75ca00` ("perf(3d): reuse depth prepasses") duplicates the 3D
+  lane's `4fea55d37`; it leaves no tree difference from `feat/native-engine`.
+- `timeline.spec.ts:55` (one failure in six engine-on runs): the spec read
+  the Scale key's position before the timeline's first draw of its fixture,
+  and that draw widens the gutter for the new property labels (measured 224
+  to 266 px in three of three probes). When a draw landed between the read
+  and the press, the press fell 42 px beside the key. The spec now aims after
+  painted frames, once two frames agree; 6 of 6 repeats and the 17-case file
+  pass with the engine on. No product change: the hit test always uses the
+  geometry on screen.
+- The graph editor spec, with the engine on, also checks the composition's
+  centre on the presented viewer canvas (exactly `[96, 123, 255, 255]`), not
+  only a fresh render.
+- The Library card spec checks the overlay the live viewer kept while the
+  Library opened by its outline position before redrawing it, so a stale
+  overlay drawing is caught again; the exact hash still compares two fresh
+  drawings.
+
+### Appendix C test matrix (round 5)
+
+Each row in both themes, with the current viewer, a fork of it, and forks of
+the viewers shipped in desktop v1.1.0 (1.0.8) and v1.2.0 (1.0.18), run with
+the engine on and off (`e2e/helpers/viewer-fork.ts`):
+
+- C1 composition thumbnails, C2 the saved project thumbnail, C17 status bar,
+  performance panel and frame events (`frame:rendered` carries the exact
+  `render.gl.previewViewport`, versions only move forward, `overlay` follows
+  each frame), C21 popout: `e2e/consumer-matrix.spec.ts`.
+- C2 stale captures: an engine-on case holds each project capture and checks
+  that a playhead move, an edit, and a newer save each drop the capture, and
+  that the retry saves the current frame (`consumer-matrix.spec.ts`).
+- C3: `consumer-surfaces.spec.ts` (card geometry, overlay and picture against
+  the live viewer) and `library-card-parity.spec.ts` (card on against off).
+- C6: `mixer.spec.ts` "retune matrix": wav, mp3, m4a, flac, opus, mp4, mov
+  and webm each sound through their strip; layer gain, a video's audio gain
+  and mute, the layer and group switches, a precomp's output level and mute,
+  and a relink change what plays, with gains measured as strip-level ratios
+  with the engine on and no legacy voice allowed. Today's mix has no pan or
+  pitch control (`legacy/core/audio.ts`, `voiceSignature` and
+  `levelSignature`), so there is nothing to retune for them. Observed with the
+  engine off only (not changed here): an agent `replace_media` during
+  playback leaves today's audio stopped while the transport runs, until
+  playback restarts; the matrix relinks while paused, as the Replace dialog
+  does. Owner: agents / media.
+
+Every case of the 1.0.18 fork fails at activation on this branch (above).
 
 ## Required contracts still absent
 
-- C3: all four native current/frozen light/dark card cases pass exact native
-  bitmap and 2D-overlay hashes, unchanged zoom/pan and source-stage geometry.
-  Two current-viewer right-view bitmap checks pass, but visual inspection finds
-  the grid and orange 3D selection outline missing from the card. They are a
-  separate `core/scene3d/overlay.ts` WebGL surface whose drawing buffer clears
-  after presentation, outside the copied native composition bitmap. Complete
-  Library chrome parity needs a capture at that overlay's draw/fence boundary
-  from the 3D owner. Paired live/card evidence is retained externally. Full
-  private-corpus and API 1–3 customized-fork acceptance also remains outstanding;
-  the synthetic frozen fork is from the native base, not the oldest API fork.
+- C3, measured by `e2e/library-card-parity.spec.ts` (each case launches the
+  app with the engine off, then on, and compares the card images exactly; side
+  by sides with a difference mask are under
+  `/tmp/ne-w5/consumers-r5/evidence/`, outside the repository):
+  - Identical: 2D at 200% panned in light and dark with the current viewer, a
+    fork of the current viewer and the fork of shipped viewer 1.0.8; 2D at Fit
+    with the 1.0.8 fork.
+  - 2D at Fit, current viewer and its fork: 566 and 570 pixels differ, at most
+    5 levels, on the two rows where the solid's top and bottom edges fall at a
+    fractional position. The live viewer is exact; the card is not because the
+    engine presentation has already scaled the render-size frame into the
+    stage, and the card scales that region back to today's backing size. Exact
+    cards need the frame itself at render size (the presentation worker would
+    hand the Library the latest frame, or an `ImageBitmap` of it). The engine
+    presentation (bridge / 3D lanes) owns that; escalated.
+  - 3D model through its camera and in the right orthographic view, current
+    viewer and its fork: 240 to 365 pixels differ, at most 2 to 46 levels,
+    along the cube's edges (same double-scaling signature; the maximum varies
+    run to run). The 1.0.8 fork through the camera: 1 pixel, 1 level.
+  - 3D right orthographic view with the fork of shipped viewer 1.0.8: 7,880
+    pixels, up to 227 levels. Engine off, today's compositor draws the
+    kernel's 3D editor view (right orthographic) into the fork's canvas;
+    engine on, the presentation bound to that canvas
+    (`engine-connection/canvas-binding.ts`, `resize`) sends view parameters
+    without the 3D editor view, so the engine draws the scene camera. A user
+    whose old fork has no 3D controls reaches the editor view only through
+    the kernel's 3D keys or an agent, but the difference is real. Owner: the
+    `render.gl.init` binding (extension compatibility / bridge); escalated.
+  - The grid and orange 3D selection outline are missing from the card with
+    the engine on and off alike (`core/scene3d/overlay.ts` renders without
+    `preserveDrawingBuffer`); measured on/off right-view cards differ only as
+    above, so this is not an engine-on regression (3D lane).
+  - The fork of shipped viewer 1.0.18 fails to activate on this branch (see
+    the round 5 notes); its cases fail until `feat/ne-mainmerge` lands.
+  - Private-corpus customized forks remain unqualified by this lane.
+Re-checked after merging `feat/native-engine` (2026-10-22, `49cc9e41d`):
+`pm-protocol`, the renderer engine connection and the generated TypeScript
+have no source-frame, poster, filmstrip or browser-rendition request; neither
+do `feat/ne-mediaclose`, `feat/ne-bridge` or `feat/ne-phase4a`. The rows below
+stay open until their owners land those contracts or the orchestrator
+re-scopes them.
+
 - C4/C19: `pm-media::preview::PreviewReader` and probe filmstrip seeds exist in
   Rust, but the renderer bridge has no asset frame/poster/filmstrip request or
   response. Posters still come from `legacy/core/poster.ts`, Assets inline media
@@ -157,8 +290,11 @@ The viewer is 1.2.7 after merging the 3D lane's presenter fixes.
 
 Panel popout already moves live nodes in the same realm and the bridge presenter
 follows `stage.ownerDocument` (DPR, color capability, resize and drawing backend).
-The existing viewer/timeline/toolbar dock-only rule remains. Both refreshed native
-panel-popout cases pass; broader custom-panel/frozen-fork parity remains a gate.
+The existing viewer/timeline/toolbar dock-only rule remains. `consumer-matrix`
+C21 pops out the Media panel (engine composition thumbnails keep updating in
+the window, through a resize, and after return) and a user's apiVersion 1
+canvas panel drawing `render.renderFrameTo` (its pixels move with it and it
+draws edits there), in both themes with each viewer variant.
 
 ## Validation
 
