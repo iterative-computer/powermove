@@ -23,7 +23,7 @@ const capturedById = new Map(captured.rows.map(row => [row.id, row]));
 const userData = await mkdtemp(path.join(os.tmpdir(), 'pm-video-perf-'));
 let app;
 const report = { endpoint: 'HTMLVideoElement seek or load to WebGL texImage2D, canvas draw, and gl.finish',
-  versions: null, rows: [] };
+  converterPrimedBeforeCold: true, versions: null, rows: [] };
 try {
   const env = { ...process.env, POWERMOVE_USER_DATA: userData, POWERMOVE_BACKGROUND_TEST: '1',
     POWERMOVE_DEVTOOLS: '0', POWERMOVE_NEW_ENGINE: '0', POWERMOVE_FAKE_CHATGPT_STATUS: 'connected',
@@ -117,6 +117,11 @@ try {
       const samples = [];
       const close = video => { video.removeAttribute('src'); video.load(); };
       try {
+        // Match native cold's converter priming. Fresh cold video elements
+        // still create their own source/decoder after this upload completes.
+        const prime = await makeVideo();
+        try { await sample(prime.video, row.times[1 % row.times.length], 'prime', -1, performance.now()); }
+        finally { close(prime.video); }
         for (let i = 0; i < 3; i++) {
           const { video, loadMs, started } = await makeVideo();
           try { samples.push({ ...await sample(video, row.times[i % row.times.length], 'cold', i, started), loadMs }); }
