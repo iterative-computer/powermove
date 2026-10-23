@@ -7,8 +7,10 @@
  * every order in which those posts and the pending disk operations can
  * happen, with one injected fault: a disk operation that fails, a slot write
  * or a journal entry the engine refuses (the window keeps the edit in its
- * document), or the storage worker replaced (its operations abandoned before
- * or after they landed).
+ * document), an entry main refuses for its size before posting it, the
+ * storage worker replaced (its operations abandoned before or after they
+ * landed), an entry lost in flight as the worker stops, or a replacement
+ * worker that fails to read the project once.
  *
  * Every disk state any schedule passes through is a crash point. Each must
  * recover (shared/project-journal.ts recoverProject):
@@ -37,6 +39,8 @@ class ModelDisk {
   /** The visible files after every change, from the start. */
   states: Array<{ slot: string | null; journal: string | null }> = [];
   dead = new Set<number>();
+  /** The next read of a project file by this engine generation fails (a replacement worker's read fault). */
+  failRead = 0;
   constructor(initial: Record<string, string>) {
     for (const [name, data] of Object.entries(initial)) this.files.set(name, data);
     this.record();
@@ -51,10 +55,14 @@ class ModelDisk {
     return {
       mkdir: (() => live(() => undefined)) as any,
       readdir: (() => live(() => [...this.files.keys()].map(file => file.slice(DIR.length + 1)))) as any,
-      readFile: ((file: string) => live(() => { const data = this.files.get(String(file)); if (data === undefined) throw missing(String(file)); return data; })) as any,
+      readFile: ((file: string) => live(() => {
+        if (this.failRead === engine && visible(String(file))) { this.failRead = 0; throw Object.assign(new Error('EIO: i/o error, read'), { code: 'EIO' }); }
+        const data = this.files.get(String(file)); if (data === undefined) throw missing(String(file)); return data;
+      })) as any,
       writeFile: ((file: string, data: any) => live(() => { this.files.set(String(file), typeof data === 'string' ? data : Buffer.from(data).toString('utf8')); })) as any,
       open: ((file: string) => live(() => {
         if (String(file) === DIR) return { sync: async () => {}, close: async () => {} };
+        if (this.failRead === engine && visible(String(file))) { this.failRead = 0; throw Object.assign(new Error('EIO: i/o error, read'), { code: 'EIO' }); }
         const data = this.files.get(String(file));
         if (data === undefined) throw missing(String(file));
         return {
@@ -102,14 +110,18 @@ class ModelChannel implements StoreChannel {
       queueMicrotask(() => this.listener?.(reply));
     });
   }
-  post(request: StoreRequest): void { this.engine.handle(structuredClone(request)); }
+  /** Posts are dropped (a worker that stopped before handling them). */
+  dropping = false;
+  post(request: StoreRequest): void { if (!this.dropping) this.engine.handle(structuredClone(request)); }
   onReply(listener: (reply: StoreReply) => void): void { this.listener = listener; }
   onRestart(listener: () => void): void { this.restartListener = listener; }
   waitSync(): boolean { throw new Error('not modelled'); }
-  restart() {
+  restart(options: { failRead?: boolean } = {}) {
     this.disk.dead.add(this.generation);
     this.disk.gates = this.disk.gates.filter(gate => gate.engine !== this.generation);
+    this.dropping = false;
     this.start();
+    if (options.failRead) this.disk.failRead = this.generation;
     this.restartListener?.();
   }
 }
@@ -138,10 +150,11 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
     const op = posted.get(reply.id);
     if (op) acks.push({ state: disk.states.length - 1, version: op.version });
   });
-  const store = createStore(DIR, { thread: { storeChannel: () => channel }, writeDelayMs: 0 });
+  // A small limit for one entry, so an entry over main's own size check fits the model.
+  const store = createStore(DIR, { thread: { storeChannel: () => channel }, writeDelayMs: 0, journalEntryBytes: 4096 });
   // The engine numbers every request; map them to the renderer's posts.
   const post = channel.post.bind(channel);
-  channel.post = (request: StoreRequest) => { lastPostId = request.id; post(request); };
+  channel.post = (request: StoreRequest) => { if (request.op === 'append' || request.op === 'setSerialized') lastPostId = request.id; post(request); };
   await store.load();
   await settle();
 
@@ -182,17 +195,25 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
       engine,
       // What a replacement engine would be given (only while one can still happen).
       unwritten: budget ? [...internal.unwritten].sort((a: any, b: any) => a[1] - b[1]).map(([name, id]: any) => [name, asVersion(id), internal.committed.get(name)?.toString('utf8') ?? null]) : null,
-      failing: [...internal.failing].map(([name, value]: any) => `${name}:${value.after !== undefined}`).sort(),
+      failing: [...(internal.failing?.keys?.() ?? [])].sort(),
+      // Main's closed journals and replays (request ids: deterministic per path, so equal keys stay sound).
+      closed: [...(internal.closedJournals ?? [])], replayed: [...(internal.replayed ?? [])], appends: [...(internal.appends ?? [])],
+      failRead: disk.failRead === channel.generation,
     }));
   };
   for (let step = 0; ; step++) {
     const here: Choice[] = [];
     if (next < script.length) {
       here.push('post');
+      // The next two posted in one task: the second is on its way before any reply to the first.
+      if (next + 1 < script.length) here.push('post-two');
       if (budget) here.push('refuse');
+      // A refused entry with the next operation already on its way behind it.
+      if (budget && next + 1 < script.length) here.push('refuse-two');
+      if (budget && script[next] === 'P') here.push('oversize', 'lose');
     }
     disk.gates.forEach((_, index) => { here.push(`ok:${index}`); if (budget) here.push(`fail:${index}`); });
-    if (budget && (disk.gates.length || step > 0)) here.push('restart');
+    if (budget && (disk.gates.length || step > 0)) here.push('restart', 'restart-read-fails');
     if (!here.length) break;
     check();
     if (seen && step >= choices.length) {
@@ -203,23 +224,32 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
     options.push(here);
     const choice = choices[step] ?? here[0]!;
     if (!here.includes(choice)) throw new Error(`schedule diverged at ${step}: ${choice} not in ${here}`);
-    if (choice === 'post' || choice === 'refuse') {
+    const posts = choice === 'post-two' || choice === 'refuse-two' ? 2 : 1;
+    if (['post', 'post-two', 'refuse', 'refuse-two', 'oversize', 'lose'].includes(choice)) for (let n = 0; n < posts; n++) {
       const kind = script[next++]!;
-      if (choice === 'refuse') budget--;
+      // In a burst only the first is the faulty one.
+      const fault = n === 0 && choice !== 'post' && choice !== 'post-two' ? (choice === 'refuse-two' ? 'refuse' : choice) : 'post';
+      if (fault !== 'post') budget--;
       if (kind === 'P') {
         version++;
-        const patches = [{ path: ['edits'], exists: true, value: [...doc.edits, version] }, { path: ['f', String(version % 2)], exists: true, value: version }];
-        doc = { ...doc, edits: [...doc.edits, version], f: { ...doc.f, [version % 2]: version } };
+        // An oversize edit carries a value past main's entry limit; the window keeps it in its document.
+        const value = fault === 'oversize' ? 'x'.repeat(5000) : version;
+        const patches = [{ path: ['edits'], exists: true, value: [...doc.edits, version] }, { path: ['f', String(version % 2)], exists: true, value }];
+        doc = { ...doc, edits: [...doc.edits, version], f: { ...doc.f, [version % 2]: value } };
         docs.push(JSON.stringify(doc));
-        void store.appendJournal!('projectJournal.P', choice === 'refuse' ? '{refused' : JSON.stringify({ revision: version, patches })).catch(() => {});
-        if (choice !== 'refuse') posted.set(lastPostId, { kind, version });
+        const before = lastPostId;
+        if (fault === 'lose') channel.dropping = true;
+        void store.appendJournal!('projectJournal.P', fault === 'refuse' ? '{refused' : JSON.stringify({ revision: version, patches })).catch(() => {});
+        if (fault === 'post' && lastPostId !== before) posted.set(lastPostId, { kind, version });
+        // The worker stops with the entry unhandled, and is replaced.
+        if (fault === 'lose') channel.restart();
       } else {
-        void Promise.resolve(store.setSerialized!('project.P', choice === 'refuse' ? '{refused' : JSON.stringify({ v: '1', proj: doc }))).catch(() => {});
-        if (choice !== 'refuse') posted.set(lastPostId, { kind, version });
+        void Promise.resolve(store.setSerialized!('project.P', fault === 'refuse' ? '{refused' : JSON.stringify({ v: '1', proj: doc }))).catch(() => {});
+        if (fault === 'post') posted.set(lastPostId, { kind, version });
       }
-    } else if (choice === 'restart') {
+    } else if (choice === 'restart' || choice === 'restart-read-fails') {
       budget--;
-      channel.restart();
+      channel.restart({ failRead: choice === 'restart-read-fails' });
     } else {
       const [verdict, index] = choice.split(':');
       const gate = disk.gates.splice(Number(index), 1)[0]!;
@@ -246,7 +276,7 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
   check();
   const last = disk.states.at(-1)!;
   const final = last.slot === null ? null : JSON.stringify(recoverProject(JSON.parse(last.slot), last.journal === null ? null : JSON.parse(last.journal)));
-  const failing = (store as any).failingKeys() as string[];
+  const failing = ((store as any).failingKeys?.() ?? []) as string[];
   if (final !== docs.at(-1) && !failing.some(key => key === 'project.P' || key === 'projectJournal.P')) {
     violations.push(`quiescent: disk recovers ${final === null ? 'nothing' : `version ${docs.indexOf(final)}`} of ${docs.length - 1}, and main reports nothing failing`);
   }
@@ -304,8 +334,12 @@ describe('SAVE-1 model check', () => {
      write that shrinks the journal, recovery that ignores sequence numbers,
      a journal shrunk before its slot is on disk, a replacement engine that
      does not read the journal on disk first, an entry accepted after a
-     refused one, a journal reopened by a slot older than the refusal, and a
-     journal write silently skipped (quiescence). */
+     refused one, a journal reopened by a slot older than the refusal, a
+     journal write silently skipped (quiescence), and (SAVE-1b) a journal left
+     open after an entry main refused for its size, one lost as the worker
+     stopped, one the engine refused or could not read the project for (with
+     the next entry already on its way), or a replayed slot judged by its new
+     request id. */
   it('every interleaving of 3 slot writes and 4 patches, with any one fault or worker restart, recovers a real state with every acknowledged patch', { timeout: 1_800_000 }, async () => {
     let schedules = 0;
     for (const script of scripts(3, 4)) {
