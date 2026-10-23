@@ -198,6 +198,24 @@ pub fn library() -> Option<&'static Path> {
     lib().map(|l| l.path.as_path())
 }
 
+/// A notice for a mix whose voices use these codecs when today's decoder is
+/// not in this process (the CLI, a test outside Electron): they decode with
+/// our FFmpeg, about −93 dBFS from the app's samples.
+pub fn fallback_notice<'a>(codecs: impl IntoIterator<Item = &'a str>) -> Option<String> {
+    if lib().is_some() {
+        return None;
+    }
+    let mut used: Vec<&str> = codecs.into_iter().filter(|c| decodes(c)).collect();
+    used.sort_unstable();
+    used.dedup();
+    (!used.is_empty()).then(|| {
+        format!(
+            "audio: {} decoded with Powermove's FFmpeg, not the app's (Electron's libffmpeg is not              loaded in this process; set POWERMOVE_CHROMIUM_FFMPEG to its path): samples differ              from the app's export by about -93 dBFS",
+            used.join(", ")
+        )
+    })
+}
+
 /// Whether today decodes `codec` (FFmpeg's name) with FFmpeg: everything
 /// but what Chromium hands to Symphonia (MP3, FLAC) or decodes as PCM.
 pub fn decodes(codec: &str) -> bool {

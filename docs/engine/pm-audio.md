@@ -351,7 +351,9 @@ its libavcodec/libavformat/libavutil majors equal our bindings' (63/63/61 today)
 our struct layouts describe its objects. Electron's libffmpeg contains Chromium's
 libopus; no separate libopus revision is needed. Outside Electron (the CLI, a test
 without the checkout's Electron) the source falls back to our FFmpeg (−93 dBFS for AAC
-and Opus).
+and Opus), and says so: `pm-cli render` prints a warning naming the codecs and reports
+`"audioDecoder": "powermove-ffmpeg"` with the notice in its JSON (`"today"` when
+`POWERMOVE_CHROMIUM_FFMPEG` points it at Electron's library).
 
 Chromium's rules: the first audio stream; other streams' packets skipped; a custom
 memory I/O; float output requested; FFmpeg's skip side data dropping priming and end
