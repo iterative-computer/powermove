@@ -2064,11 +2064,6 @@ impl Thread {
                 }
             }
             Command::FrameCache { bytes } => {
-                if bytes < self.frame_cache {
-                    for audio in self.audio.values() {
-                        audio.send(AudioCtl::MemoryPressure);
-                    }
-                }
                 self.frame_cache = bytes;
                 self.stats().frame_cache = bytes as u64;
                 if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {

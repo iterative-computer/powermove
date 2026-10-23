@@ -128,6 +128,7 @@ type SourceIdentity = (u64, Option<(u64, Option<std::time::SystemTime>)>);
 struct Entry {
     block: Arc<Block>,
     used: u64,
+    read_at: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -547,14 +548,25 @@ impl SourceCache {
     /// an in-flight render remain pinned until that render releases them.
     /// Sources are weakly indexed: the last mix/read also closes its PCM spool.
     pub fn memory_pressure(&self) {
+        self.trim_pressure(std::time::Duration::ZERO);
+    }
+
+    /// A live playback also protects its current/prerolled input across the
+    /// short gap between readiness checks and the next render. This grace
+    /// does not increase the 128 MiB LRU budget.
+    pub(crate) fn playback_memory_pressure(&self) {
+        self.trim_pressure(std::time::Duration::from_millis(250));
+    }
+
+    fn trim_pressure(&self, hot_for: std::time::Duration) {
         let mut sources = lock(&self.sources);
         sources.retain(|_, source| source.strong_count() > 0);
         lock(&self.source_ids).retain(|key, _| sources.contains_key(key));
         drop(sources);
         let mut blocks = lock(&self.blocks);
-        blocks
-            .map
-            .retain(|_, entry| Arc::strong_count(&entry.block) > 1);
+        blocks.map.retain(|_, entry| {
+            Arc::strong_count(&entry.block) > 1 || entry.read_at.elapsed() < hot_for
+        });
         blocks.bytes = blocks.map.values().map(|entry| entry.block.bytes()).sum();
     }
 
@@ -604,7 +616,14 @@ impl SourceCache {
         blocks.clock += 1;
         let used = blocks.clock;
         blocks.bytes += block.bytes();
-        if let Some(old) = blocks.map.insert(key, Entry { block, used }) {
+        if let Some(old) = blocks.map.insert(
+            key,
+            Entry {
+                block,
+                used,
+                read_at: std::time::Instant::now(),
+            },
+        ) {
             blocks.bytes -= old.block.bytes();
         }
         while blocks.bytes > self.budget && blocks.map.len() > 1 {
@@ -642,6 +661,7 @@ impl SourceCache {
             let now = blocks.clock;
             if let Some(e) = blocks.map.get_mut(&key) {
                 e.used = now;
+                e.read_at = std::time::Instant::now();
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(Some(e.block.clone()));
             }
@@ -760,9 +780,15 @@ impl SourceCache {
         let Some((first, last)) = block_span(source, start, len) else {
             return true;
         };
-        let blocks = lock(&self.blocks);
+        let mut blocks = lock(&self.blocks);
+        let now = std::time::Instant::now();
         (first..=last).all(|i| {
-            blocks.map.contains_key(&(source.id, i)) || blocks.errors.contains_key(&(source.id, i))
+            if let Some(entry) = blocks.map.get_mut(&(source.id, i)) {
+                entry.read_at = now;
+                true
+            } else {
+                blocks.errors.contains_key(&(source.id, i))
+            }
         })
     }
 
@@ -916,5 +942,39 @@ impl Drop for SourceCache {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         self.work.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod pressure_tests {
+    use super::*;
+    #[test]
+    fn playback_pressure_keeps_hot_input_but_reclaims_inactive_blocks() {
+        let cache = SourceCache::new(128 << 20, 0);
+        {
+            let mut blocks = lock(&cache.blocks);
+            for source in [1, 2] {
+                cache.insert(
+                    &mut blocks,
+                    (source, 0),
+                    Arc::new(Block {
+                        channels: vec![vec![0.0; 4]; 2],
+                    }),
+                );
+            }
+            blocks.map.get_mut(&(1, 0)).unwrap().read_at =
+                std::time::Instant::now() - std::time::Duration::from_secs(1);
+        }
+        cache.playback_memory_pressure();
+        {
+            let blocks = lock(&cache.blocks);
+            assert!(!blocks.map.contains_key(&(1, 0)));
+            assert!(
+                blocks.map.contains_key(&(2, 0)),
+                "a ready first buffer stays hot"
+            );
+        }
+        cache.memory_pressure();
+        assert_eq!(cache.stats().bytes, 0);
     }
 }

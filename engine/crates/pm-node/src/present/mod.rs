@@ -799,7 +799,9 @@ impl FramePresenter for BridgePresenter {
     }
 
     fn lease_changed(&mut self, ctx: &mut PresentContext<'_>) {
-        self.send(Command::AudioMemoryPressure);
+        if ctx.lease_reason() == Some(pm_protocol::lease::LeaseReason::MemoryPressure) {
+            self.send(Command::AudioMemoryPressure);
+        }
         self.sync_frame_cache(ctx);
     }
 
@@ -983,11 +985,15 @@ mod tests {
     }
 
     fn grant(budget: &mut LeaseBudget, epoch: u64, bytes: u64) -> bool {
+        grant_reason(budget, epoch, bytes, LeaseReason::MemoryPressure)
+    }
+
+    fn grant_reason(budget: &mut LeaseBudget, epoch: u64, bytes: u64, reason: LeaseReason) -> bool {
         let lease = Lease {
             process: EngineProcess::Interactive,
             epoch: Seq::new(epoch).unwrap(),
             bytes: ByteSize::new(bytes).unwrap(),
-            reason: LeaseReason::MemoryPressure,
+            reason,
             ack_deadline_ms: 500,
         };
         budget
@@ -1026,6 +1032,29 @@ mod tests {
             chrome_selection: None,
             canvas: None,
             surface_epoch: None,
+        }
+    }
+
+    #[test]
+    fn only_explicit_host_memory_pressure_flushes_the_audio_cache() {
+        let (mut p, rx) = presenter();
+        let mut budget = LeaseBudget::new(EngineProcess::Interactive);
+        let mut evict = NoEviction;
+        for (i, reason) in [
+            LeaseReason::Initial,
+            LeaseReason::PlaybackStarted,
+            LeaseReason::PlaybackStopped,
+            LeaseReason::MemoryPressure,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(grant_reason(&mut budget, i as u64 + 1, 4096 * MIB, reason));
+            p.lease_changed(&mut PresentContext::new(&mut budget, &mut evict));
+            let flush = rx
+                .try_iter()
+                .any(|command| matches!(command, Command::AudioMemoryPressure));
+            assert_eq!(flush, reason == LeaseReason::MemoryPressure, "{reason:?}");
         }
     }
 
