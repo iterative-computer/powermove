@@ -670,7 +670,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     setTrace: (on) => {
       renderTransport.trace.enabled = on;
       const barrier = PM.EngineDoc?.barrier;
-      if (barrier) barrier.trace = on ? (stage, began) => renderTransport.trace.record(stage, barrier.revision, ticks(PM.time ?? 0), began) : null;
+      if (barrier) barrier.trace = on ? (stage: string, began: number) => renderTransport.trace.record(stage, barrier.revision, ticks(PM.time ?? 0), began) : null;
       if (on === trace) return;
       trace = on;
       registration.dispose();
