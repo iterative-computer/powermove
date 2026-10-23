@@ -18,7 +18,11 @@
  * - never fewer patches than an earlier crash point in the same schedule;
  * - every patch the engine had acknowledged as written by then.
  * And once every write has settled (quiescence), disk recovers the final
- * document, or main's failing keys name the project.
+ * document, or main's failing keys name the project; then (liveness) one more
+ * fault-free checkpoint and edit must be accepted, recover the final
+ * document, and leave nothing failing. The worker's replies can be held while
+ * later posts go out, and a second window (not the project's owner) can try
+ * to write the project from its stored copy.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -96,6 +100,9 @@ class ModelChannel implements StoreChannel {
   generation = 0;
   private listener?: (reply: StoreReply) => void;
   private restartListener?: () => void;
+  /** Replies held back (a busy port), delivered in order on release. */
+  held: StoreReply[] | null = null;
+  release() { const queue = this.held ?? []; this.held = null; for (const reply of queue) this.listener?.(reply); }
   constructor(private readonly disk: ModelDisk, private readonly observe: (reply: StoreReply) => void) { this.start(); }
   private start() {
     const generation = ++this.generation;
@@ -107,7 +114,8 @@ class ModelChannel implements StoreChannel {
     }, reply => {
       if (generation !== this.generation) return;
       this.observe(reply);
-      queueMicrotask(() => this.listener?.(reply));
+      if (this.held) this.held.push(reply);
+      else queueMicrotask(() => this.listener?.(reply));
     });
   }
   /** Posts are dropped (a worker that stopped before handling them). */
@@ -117,6 +125,8 @@ class ModelChannel implements StoreChannel {
   onRestart(listener: () => void): void { this.restartListener = listener; }
   waitSync(): boolean { throw new Error('not modelled'); }
   restart(options: { failRead?: boolean } = {}) {
+    // A stopped worker's replies that were held never arrive.
+    this.held = this.held ? [] : null;
     this.disk.dead.add(this.generation);
     this.disk.gates = this.disk.gates.filter(gate => gate.engine !== this.generation);
     this.dropping = false;
@@ -135,7 +145,10 @@ type Script = Array<'S' | 'P'>;
 /* Checkpoint ids and temporary names come from per-engine counters; equal states reached by different paths get equal keys. */
 const canonical = (text: string) => { const names = new Map<string, string>(); return text.replace(/g\d+s\d+/g, name => { if (!names.has(name)) names.set(name, `c${names.size}`); return names.get(name)!; }); };
 
-async function run(script: Script, choices: Choice[], faults: number, seen?: Set<string>): Promise<{ options: Choice[][]; violations: string[] }> {
+/** The fault kinds before SAVE-1c's held replies and second window (the long sweep keeps to these). */
+const BASIC = new Set(['refuse', 'refuse-two', 'oversize', 'lose', 'fail', 'restart', 'restart-read-fails']);
+
+async function run(script: Script, choices: Choice[], faults: number, seen?: Set<string>, trace = false, kinds?: Set<string>): Promise<{ options: Choice[][]; violations: string[] }> {
   const docs: string[] = [];
   let doc: any = { id: 'P', name: 'P', f: {}, edits: [] };
   docs.push(JSON.stringify(doc));
@@ -152,6 +165,8 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
   });
   // A small limit for one entry, so an entry over main's own size check fits the model.
   const store = createStore(DIR, { thread: { storeChannel: () => channel }, writeDelayMs: 0, journalEntryBytes: 4096 });
+  // Window A has the project; window B only sees its stored copy (SAVE-1c).
+  store.setOwnership!(() => 'A');
   // The engine numbers every request; map them to the renderer's posts.
   const post = channel.post.bind(channel);
   channel.post = (request: StoreRequest) => { if (request.op === 'append' || request.op === 'setSerialized') lastPostId = request.id; post(request); };
@@ -199,6 +214,7 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
       // Main's closed journals and replays (request ids: deterministic per path, so equal keys stay sound).
       closed: [...(internal.closedJournals ?? [])], replayed: [...(internal.replayed ?? [])], appends: [...(internal.appends ?? [])],
       failRead: disk.failRead === channel.generation,
+      held: channel.held ? JSON.stringify(channel.held) : null,
     }));
   };
   for (let step = 0; ; step++) {
@@ -210,10 +226,21 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
       if (budget) here.push('refuse');
       // A refused entry with the next operation already on its way behind it.
       if (budget && next + 1 < script.length) here.push('refuse-two');
+      // A refused entry whose reply arrives late: replies are held from it on, while later posts go out.
+      if (budget && next + 1 < script.length && !channel.held) here.push('refuse-late');
       if (budget && script[next] === 'P') here.push('oversize', 'lose');
     }
     disk.gates.forEach((_, index) => { here.push(`ok:${index}`); if (budget) here.push(`fail:${index}`); });
     if (budget && (disk.gates.length || step > 0)) here.push('restart', 'restart-read-fails');
+    // Replies held while later posts go out (a fault), and released.
+    if (channel.held) here.push('release'); else if (budget && next < script.length) here.push('hold');
+    // Window B writes the project from its stored copy (a rename there).
+    if (budget && step > 0) here.push('stray');
+    // A narrower sweep leaves some fault kinds out (`fail:<n>` counts as 'fail').
+    if (kinds) for (let index = here.length - 1; index >= 0; index--) {
+      const kind = here[index]!.split(':')[0]!;
+      if (kind !== 'post' && kind !== 'post-two' && kind !== 'ok' && kind !== 'release' && !kinds.has(kind)) here.splice(index, 1);
+    }
     if (!here.length) break;
     check();
     if (seen && step >= choices.length) {
@@ -223,12 +250,14 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
     }
     options.push(here);
     const choice = choices[step] ?? here[0]!;
+    if (trace) console.log('STEP', step, choice, 'of', here.join(' '));
     if (!here.includes(choice)) throw new Error(`schedule diverged at ${step}: ${choice} not in ${here}`);
     const posts = choice === 'post-two' || choice === 'refuse-two' ? 2 : 1;
-    if (['post', 'post-two', 'refuse', 'refuse-two', 'oversize', 'lose'].includes(choice)) for (let n = 0; n < posts; n++) {
+    if (choice === 'refuse-late') channel.held = [];
+    if (['post', 'post-two', 'refuse', 'refuse-two', 'refuse-late', 'oversize', 'lose'].includes(choice)) for (let n = 0; n < posts; n++) {
       const kind = script[next++]!;
       // In a burst only the first is the faulty one.
-      const fault = n === 0 && choice !== 'post' && choice !== 'post-two' ? (choice === 'refuse-two' ? 'refuse' : choice) : 'post';
+      const fault = n === 0 && choice !== 'post' && choice !== 'post-two' ? (choice === 'refuse-two' || choice === 'refuse-late' ? 'refuse' : choice) : 'post';
       if (fault !== 'post') budget--;
       if (kind === 'P') {
         version++;
@@ -239,14 +268,26 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
         docs.push(JSON.stringify(doc));
         const before = lastPostId;
         if (fault === 'lose') channel.dropping = true;
-        void store.appendJournal!('projectJournal.P', fault === 'refuse' ? '{refused' : JSON.stringify({ revision: version, patches })).catch(() => {});
+        void store.appendJournal!('projectJournal.P', fault === 'refuse' ? '{refused' : JSON.stringify({ revision: version, patches }), 'A').catch(() => {});
         if (fault === 'post' && lastPostId !== before) posted.set(lastPostId, { kind, version });
         // The worker stops with the entry unhandled, and is replaced.
         if (fault === 'lose') channel.restart();
       } else {
-        void Promise.resolve(store.setSerialized!('project.P', fault === 'refuse' ? '{refused' : JSON.stringify({ v: '1', proj: doc }))).catch(() => {});
+        void Promise.resolve(store.setSerialized!('project.P', fault === 'refuse' ? '{refused' : JSON.stringify({ v: '1', proj: doc }), 'A')).catch(() => {});
         if (fault === 'post') posted.set(lastPostId, { kind, version });
       }
+    } else if (choice === 'hold') {
+      budget--;
+      channel.held = [];
+    } else if (choice === 'release') {
+      channel.release();
+    } else if (choice === 'stray') {
+      budget--;
+      // B's view: what main had committed (possibly behind replies still on their way).
+      const stored = (store as any).committed.get('project.P')?.toString('utf8');
+      const journal = (store as any).committed.get('projectJournal.P')?.toString('utf8');
+      const copy = stored ? recoverProject(JSON.parse(stored), journal ? JSON.parse(journal) : []) : null;
+      if (copy) void Promise.resolve(store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: { ...copy, name: 'renamed elsewhere' } }), 'B')).catch(() => {});
     } else if (choice === 'restart' || choice === 'restart-read-fails') {
       budget--;
       channel.restart({ failRead: choice === 'restart-read-fails' });
@@ -262,7 +303,8 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
   check();
 
   // Quiescence: every write settles (no more faults); disk then holds the final document, or main says it does not.
-  for (let round = 0; round < 50; round++) {
+  channel.release();
+  const drain = async () => { for (let round = 0; round < 50; round++) {
     let flushed = false;
     void store.flushAll().then(() => { flushed = true; });
     await settle();
@@ -272,26 +314,45 @@ async function run(script: Script, choices: Choice[], faults: number, seen?: Set
       await settle();
     }
     if (flushed && !disk.gates.length) break;
-  }
+  } };
+  await drain();
   check();
+  if (trace) disk.states.forEach((state, index) => console.log('STATE', index, state.slot?.slice(0, 60), state.journal?.slice(0, 300)));
   const last = disk.states.at(-1)!;
   const final = last.slot === null ? null : JSON.stringify(recoverProject(JSON.parse(last.slot), last.journal === null ? null : JSON.parse(last.journal)));
   const failing = ((store as any).failingKeys?.() ?? []) as string[];
   if (final !== docs.at(-1) && !failing.some(key => key === 'project.P' || key === 'projectJournal.P')) {
     violations.push(`quiescent: disk recovers ${final === null ? 'nothing' : `version ${docs.indexOf(final)}`} of ${docs.length - 1}, and main reports nothing failing`);
   }
+
+  // Liveness: a fault-free checkpoint, then an edit. It must be accepted, and disk must recover the final document.
+  disk.failRead = 0; // an injected fault still waiting to fire is not part of the fault-free tail
+  await Promise.resolve(store.setSerialized!('project.P', JSON.stringify({ v: '1', proj: doc }), 'A')).catch(() => {});
+  await drain();
+  version++;
+  doc = { ...doc, edits: [...doc.edits, version] };
+  docs.push(JSON.stringify(doc));
+  const tail = await store.appendJournal!('projectJournal.P', JSON.stringify({ revision: version, patches: [{ path: ['edits'], exists: true, value: doc.edits }] }), 'A').then(() => 'accepted', (error: Error) => error.message);
+  await drain();
+  check();
+  const tailState = disk.states.at(-1)!;
+  const recoveredTail = tailState.slot === null ? null : JSON.stringify(recoverProject(JSON.parse(tailState.slot), tailState.journal === null ? null : JSON.parse(tailState.journal)));
+  const stillFailing = ((store as any).failingKeys?.() ?? []) as string[];
+  if (tail !== 'accepted') violations.push(`liveness: an edit after a fault-free checkpoint was refused (${tail})`);
+  if (recoveredTail !== docs.at(-1)) violations.push(`liveness: after a fault-free checkpoint and edit disk recovers ${recoveredTail === null ? 'nothing' : `version ${docs.indexOf(recoveredTail)}`} of ${docs.length - 1}`);
+  if (stillFailing.length) violations.push(`liveness: still failing after a fault-free checkpoint and edit: ${stillFailing.join(', ')}`);
   return { options, violations };
 }
 
 /** Every schedule of `script` with at most `faults` injected faults. */
-async function explore(script: Script, faults: number, memo = true): Promise<{ schedules: number; violations: string[] }> {
+async function explore(script: Script, faults: number, memo = true, kinds?: Set<string>): Promise<{ schedules: number; violations: string[] }> {
   let schedules = 0;
   const violations: string[] = [];
   const stack: Choice[][] = [[]];
   const seen = memo ? new Set<string>() : undefined;
   while (stack.length) {
     const prefix = stack.pop()!;
-    const result = await run(script, prefix, faults, seen);
+    const result = await run(script, prefix, faults, seen, false, kinds);
     schedules++;
     for (const violation of result.violations) violations.push(`${script.join('')} [${prefix.join(' ')}] ${violation}`);
     if (violations.length > 5) break;
@@ -317,10 +378,17 @@ function scripts(slots: number, patches: number): Script[] {
 }
 
 describe('SAVE-1 model check', () => {
-  it.skipIf(!process.env.PM_MODEL_ONE)('one script', { timeout: 600_000 }, async () => {
+  it.skipIf(!process.env.PM_MODEL_ONE)('one script', { timeout: 3_600_000 }, async () => {
     const began = Date.now();
-    const result = await explore(process.env.PM_MODEL_ONE!.split('') as Script, Number(process.env.PM_MODEL_FAULTS ?? 1), process.env.PM_MODEL_MEMO !== '0');
+    const result = await explore(process.env.PM_MODEL_ONE!.split('') as Script, Number(process.env.PM_MODEL_FAULTS ?? 1), process.env.PM_MODEL_MEMO !== '0', process.env.PM_MODEL_BASIC ? BASIC : undefined);
     console.log(`MODEL ${process.env.PM_MODEL_ONE}: ${result.schedules} schedules in ${Date.now() - began} ms; ${result.violations.slice(0, 3).join(' | ')}`);
+  });
+
+  it.skipIf(!process.env.PM_MODEL_SCHEDULE)('one schedule', async () => {
+    const spec = process.env.PM_MODEL_SCHEDULE!, at = spec.indexOf(':');
+    const script = at < 0 ? spec : spec.slice(0, at), choices = at < 0 ? '' : spec.slice(at + 1);
+    const result = await run(script!.split('') as Script, choices ? choices.split(',') : [], Number(process.env.PM_MODEL_FAULTS ?? 1), undefined, true);
+    console.log('SCHEDULE', JSON.stringify(result.violations, null, 1));
   });
 
   it('a sanity schedule: patches and a slot write, no fault', async () => {
@@ -340,27 +408,38 @@ describe('SAVE-1 model check', () => {
      stopped, one the engine refused or could not read the project for (with
      the next entry already on its way), or a replayed slot judged by its new
      request id. */
-  it('every interleaving of 3 slot writes and 4 patches, with any one fault or worker restart, recovers a real state with every acknowledged patch', { timeout: 1_800_000 }, async () => {
+  it('every interleaving of 3 slot writes and 4 patches, with any one fault of the earlier kinds, recovers a real state with every acknowledged patch', { timeout: 3_600_000 }, async () => {
     let schedules = 0;
     for (const script of scripts(3, 4)) {
+      const result = await explore(script, 1, true, BASIC);
+      schedules += result.schedules;
+      expect(result.violations, script.join('')).toEqual([]);
+    }
+    console.log(`SAVE-1 model check (3 slot writes, 4 patches, 1 fault of the earlier kinds): ${schedules} schedules`);
+    expect(schedules).toBeGreaterThan(100_000);
+  });
+
+  /* Every fault kind: held replies, a refusal whose reply arrives late, a second window writing its stored copy. */
+  it('every interleaving of 2 slot writes and 3 patches, with any one fault, recovers a real state and stays live', { timeout: 3_600_000 }, async () => {
+    let schedules = 0;
+    for (const script of scripts(2, 3)) {
       const result = await explore(script, 1);
       schedules += result.schedules;
       expect(result.violations, script.join('')).toEqual([]);
     }
-    console.log(`SAVE-1 model check (3 slot writes, 4 patches, 1 fault): ${schedules} schedules`);
-    expect(schedules).toBeGreaterThan(100_000);
+    console.log(`SAVE-1 model check (2 slot writes, 3 patches, 1 fault of any kind): ${schedules} schedules`);
+    expect(schedules).toBeGreaterThan(50_000);
   });
 
-  /* Two faults: a refused entry then a worker replacement (which must keep
-     the journal closed), both slot writes failing, and the like. */
-  it('every interleaving of 2 slot writes and 3 patches, with any two faults, recovers a real state with every acknowledged patch', { timeout: 1_800_000 }, async () => {
+  /* Two faults of any kind: a late refusal then main's own refusal (the reviewer's R5a), a hold then a replacement that cannot read, and so on. */
+  it('every interleaving of 2 slot writes and 2 patches, or 1 slot write and 3 patches, with any two faults, recovers a real state and stays live', { timeout: 3_600_000 }, async () => {
     let schedules = 0;
-    for (const script of scripts(2, 3)) {
+    for (const script of [...scripts(2, 2), ...scripts(1, 3)]) {
       const result = await explore(script, 2);
       schedules += result.schedules;
       expect(result.violations, script.join('')).toEqual([]);
     }
-    console.log(`SAVE-1 model check (2 slot writes, 3 patches, 2 faults): ${schedules} schedules`);
-    expect(schedules).toBeGreaterThan(10_000);
+    console.log(`SAVE-1 model check (2 slots x 2 patches and 1 slot x 3 patches, 2 faults of any kind): ${schedules} schedules`);
+    expect(schedules).toBeGreaterThan(50_000);
   });
 });
