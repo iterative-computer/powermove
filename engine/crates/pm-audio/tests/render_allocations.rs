@@ -173,7 +173,7 @@ fn warm_renders_allocate_nothing() {
             *counts.entry(s.as_str()).or_default() += 1;
         }
         let mut v: Vec<_> = counts.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|e| std::cmp::Reverse(e.1));
         for (s, c) in v.iter().take(25) {
             eprintln!("{c:7} {s}");
         }
