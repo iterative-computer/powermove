@@ -27,6 +27,35 @@ mod chrome;
 /// Metal allocates 4 samples, recorded by `tools/three-ref`).
 pub const SAMPLES: u32 = 4;
 
+// Blink's offscreen WebGL DrawingBuffer resolves its four RGBA8 samples
+// through ANGLE Metal's `blitFloatFS`: normalized sample loads, ordered
+// float4 addition, division by four, then an RGBA8 render write. Metal's
+// fixed-function resolve differs by one code at some half-step boundaries.
+const COLOR_RESOLVE_WGSL: &str = r#"
+@group(0) @binding(0) var src: texture_multisampled_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) p: vec4f) -> @location(0) vec4f {
+    let at = vec2i(p.xy);
+    var sum = textureLoad(src, at, 0);
+    sum += textureLoad(src, at, 1);
+    sum += textureLoad(src, at, 2);
+    sum += textureLoad(src, at, 3);
+    return sum / 4.0;
+}
+"#;
+
+struct ColorResolve {
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+}
+
 struct Compiled {
     block_size: u32,
     uniforms: HashMap<String, glsl::UniformSlot>,
@@ -322,6 +351,7 @@ pub struct Scene3dRenderer {
     resolved: Option<(Arc<Scene3d>, Arc<Scene3d>)>,
     warning_scenes: HashMap<usize, (std::sync::Weak<Scene3d>, Vec<String>)>,
     attachments: Option<Attachments>,
+    color_resolve: Option<ColorResolve>,
     shadows: HashMap<usize, ShadowTarget>,
     prepass: Option<PrepassKey>,
     prepass_recordings: u64,
@@ -350,6 +380,7 @@ impl Default for Scene3dRenderer {
             resolved: None,
             warning_scenes: HashMap::new(),
             attachments: None,
+            color_resolve: None,
             shadows: HashMap::new(),
             prepass: None,
             prepass_recordings: 0,
@@ -990,7 +1021,12 @@ impl Scene3dRenderer {
                     sample_count: samples,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    usage: if format == wgpu::TextureFormat::Rgba8Unorm {
+                        wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING
+                    } else {
+                        wgpu::TextureUsages::RENDER_ATTACHMENT
+                    },
                     view_formats: &[],
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default())
@@ -1003,6 +1039,59 @@ impl Scene3dRenderer {
             depth: make(wgpu::TextureFormat::Depth32Float, "3d msaa depth"),
         });
         self.prepass = None;
+    }
+
+    fn color_resolve(&mut self, device: &wgpu::Device) -> &ColorResolve {
+        self.color_resolve.get_or_insert_with(|| {
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("3d WebGL color resolve"),
+                source: wgpu::ShaderSource::Wgsl(COLOR_RESOLVE_WGSL.into()),
+            });
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("3d WebGL color resolve"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: true,
+                    },
+                    count: None,
+                }],
+            });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("3d WebGL color resolve"),
+                bind_group_layouts: &[Some(&layout)],
+                immediate_size: 0,
+            });
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("3d WebGL color resolve"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+            ColorResolve { layout, pipeline }
+        })
     }
 
     fn shadow_target(&mut self, device: &wgpu::Device, light: usize, size: (u32, u32)) {
@@ -1606,6 +1695,9 @@ impl Scene3dRenderer {
             }
             PassDesc::Color { clear, draws } => {
                 let samples = self.samples;
+                if samples > 1 {
+                    self.color_resolve(device);
+                }
                 let mut list = Vec::new();
                 for d in draws {
                     if let Some(prepared) =
@@ -1617,7 +1709,7 @@ impl Scene3dRenderer {
                 let a = self.attachments.as_ref().expect("attachments");
                 let resolve = resolve.expect("a resolve target");
                 let (view, resolve_target, store) = if samples > 1 {
-                    (&a.color, Some(resolve), wgpu::StoreOp::Discard)
+                    (&a.color, None, wgpu::StoreOp::Store)
                 } else {
                     (resolve, None, wgpu::StoreOp::Store)
                 };
@@ -1651,6 +1743,34 @@ impl Scene3dRenderer {
                 });
                 for p in &list {
                     p.draw(&mut rp);
+                }
+                drop(rp);
+                if samples > 1 {
+                    let color_resolve = self.color_resolve.as_ref().expect("created above");
+                    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("3d WebGL color resolve"),
+                        layout: &color_resolve.layout,
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&a.color),
+                        }],
+                    });
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("3d WebGL color resolve"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: resolve,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        ..Default::default()
+                    });
+                    pass.set_pipeline(&color_resolve.pipeline);
+                    pass.set_bind_group(0, &group, &[]);
+                    pass.draw(0..3, 0..1);
                 }
             }
         }
@@ -2349,5 +2469,203 @@ mod prepass_reuse_tests {
             cross_frame_safe: false,
         };
         assert!(!key.reusable(&Arc::new(instanced.as_ref().clone()), &[0], 4, 2, false));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod color_resolve_tests {
+    use super::*;
+    use wgpu::util::DeviceExt;
+
+    /// ANGLE Metal's explicit WebGL resolve, measured with 4× SAMPLE_COVERAGE
+    /// and constant 8-bit reds, has a distinct three-sample half-step law.
+    /// Exercise the production resolve pipeline across all 1,024 samples.
+    #[test]
+    fn webgl_msaa_resolve_codes() {
+        let gpu = pm_gpu::Gpu::new("3d WebGL resolve codes").expect("Metal device");
+        let device = &gpu.device;
+        let red: Vec<u8> = (0..256)
+            .flat_map(|k| ((k as f64 / 255.0) as f32).to_le_bytes())
+            .collect();
+        let values = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("WebGL red codes"),
+            contents: &red,
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("WebGL coverage witness"),
+            source: wgpu::ShaderSource::Wgsl(
+                r#"
+@group(0) @binding(0) var<storage, read> reds: array<f32>;
+struct FragmentOut {
+    @location(0) color: vec4f,
+    @builtin(sample_mask) mask: u32,
+}
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+    let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) p: vec4f) -> FragmentOut {
+    var out: FragmentOut;
+    out.color = vec4f(reds[u32(p.x)], 0.0, 0.0, 1.0);
+    out.mask = (1u << (u32(p.y) + 1u)) - 1u;
+    return out;
+}
+"#
+                .into(),
+            ),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("WebGL coverage witness"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("WebGL coverage witness"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: values.as_entire_binding(),
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("WebGL coverage witness"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("WebGL coverage witness"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: SAMPLES,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let texture = |label, samples, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 256,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: samples,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let samples = texture(
+            "WebGL coverage samples",
+            SAMPLES,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        let result = texture(
+            "WebGL coverage resolve",
+            1,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let view = samples.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("WebGL coverage samples"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        let mut renderer = Scene3dRenderer::default();
+        let resolve = renderer.color_resolve(device);
+        let sample_view = samples.create_view(&Default::default());
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("WebGL coverage resolve"),
+            layout: &resolve.layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&sample_view),
+            }],
+        });
+        {
+            let view = result.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("WebGL coverage resolve"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&resolve.pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        let bytes = pm_gpu::readback::read_raw(device, &gpu.queue, &result).unwrap();
+        // Frozen WebGL2 SAMPLE_COVERAGE oracle: all 256 red codes at each
+        // of the four coverage levels were measured on ANGLE Metal. The
+        // 21 three-sample ties below differ from fixed-function resolve.
+        for covered in 1..=4 {
+            for k in 0..256 {
+                let mut expected = ((covered * k + 2) / 4) as u8;
+                if covered == 3 && k >= 174 && k % 4 == 2 {
+                    expected -= 1;
+                }
+                assert_eq!(
+                    bytes[((covered - 1) * 256 + k) * 4],
+                    expected,
+                    "coverage {covered}, code {k}"
+                );
+            }
+        }
+        assert_eq!(bytes[(2 * 256 + 186) * 4], 139);
+        assert_eq!(bytes[(2 * 256 + 210) * 4], 157);
+        assert_eq!(bytes[(2 * 256 + 174) * 4], 130);
     }
 }
