@@ -13,6 +13,16 @@ pub(super) fn follows_playback(class: PriorityClass) -> bool {
     class == PriorityClass::UserJob
 }
 
+/// The shared host thread serves user exports only while one is running.
+/// Queued user work and every agent/background job leave it at utility.
+pub(super) fn runtime_qos(running_user: bool, playing: bool) -> JobQos {
+    if running_user && !playing {
+        JobQos::Default
+    } else {
+        JobQos::Utility
+    }
+}
+
 pub(super) struct UserExportQos {
     playing: Arc<AtomicBool>,
 }

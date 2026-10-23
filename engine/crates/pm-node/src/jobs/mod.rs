@@ -536,6 +536,35 @@ impl JobEngineService {
 pub struct StatsHandle(Arc<Shared>);
 
 impl StatsHandle {
+    /// QoS for the shared JavaScript/host thread, based on live service state.
+    pub(crate) fn runtime_qos(&self) -> pm_engine::qos::JobQos {
+        let playing = self.0.playback.load(Ordering::Acquire);
+        let running_user = self.0.lock().jobs.values().any(|record| {
+            record.class == PriorityClass::UserJob && record.state == JobState::Running
+        });
+        qos::runtime_qos(running_user, playing)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_job(&self, id: &str, class: PriorityClass, state: JobState) {
+        self.0.lock().jobs.insert(
+            JobId::from(id),
+            JobRecord {
+                class,
+                run: None,
+                host: PortId(1),
+                state,
+                progress: 0.0,
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_playback(&self, playing: bool) {
+        self.0.playback.store(playing, Ordering::Release);
+    }
+
     pub fn json(&self) -> serde_json::Value {
         let gpu_created = self
             .0
