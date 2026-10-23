@@ -216,6 +216,9 @@ pub fn stretches(plan: &VoicePlan, project: u32) -> bool {
 
 /// A mix being left by a retune glide: the state it played with and how far
 /// the glide into the next state has come.
+/// Something the mixer no longer uses, freed off its thread.
+pub type Retired = Box<dyn std::any::Any + Send>;
+
 struct Outgoing {
     doc: Arc<Document>,
     graph: Arc<MixGraph>,
@@ -281,6 +284,9 @@ pub struct Mixer {
     /// The playhead today's audio index was built at, when known
     /// ([`Self::set_today_playhead`]).
     today_playhead: Option<f64>,
+    /// Where a playing mixer sends documents, graphs and voices it replaces,
+    /// to be freed on another thread ([`Self::set_retire`]).
+    retire: Option<std::sync::mpsc::Sender<Retired>>,
     /// Scratch for wide bands.
     wide_out: Vec<Vec<f32>>,
     band_out: Vec<Vec<f32>>,
@@ -879,6 +885,7 @@ impl Mixer {
             bus_lead: None,
             zero_state: vec![],
             today_playhead: None,
+            retire: None,
             wide_out: vec![],
             band_out: vec![],
             band_strips: vec![],
@@ -902,6 +909,24 @@ impl Mixer {
             origin,
             live: false,
         });
+    }
+
+    /// Frees replaced documents, graphs and voices by sending them to
+    /// `retire` instead of on the rendering thread: a long project's document
+    /// takes milliseconds to free, which a Play after an edit (or a glide's
+    /// end while playing) would otherwise wait for.
+    pub fn set_retire(&mut self, retire: std::sync::mpsc::Sender<Retired>) {
+        self.retire = Some(retire);
+    }
+
+    fn retire(&self, value: Retired) {
+        match &self.retire {
+            Some(tx) => {
+                // A closed receiver drops it here, as without one.
+                let _ = tx.send(value);
+            }
+            None => drop(value),
+        }
     }
 
     /// The playhead (seconds) at which today's `audioLayers` built its index:
@@ -1110,7 +1135,8 @@ impl Mixer {
     /// at once: what renders next is the new mix (an export, a seek, a
     /// paused edit). Ends any retune glide.
     pub fn set_graph(&mut self, doc: Arc<Document>, graph: Arc<MixGraph>) {
-        self.outgoing.clear();
+        let outgoing = std::mem::take(&mut self.outgoing);
+        self.retire(Box::new(outgoing));
         self.install(doc, graph);
     }
 
@@ -1128,7 +1154,8 @@ impl Mixer {
         solo_before: Option<HashSet<String>>,
     ) {
         if self.outgoing.len() >= MAX_GLIDES {
-            self.outgoing.remove(0);
+            let oldest = self.outgoing.remove(0);
+            self.retire(Box::new(oldest));
         }
         self.outgoing.push(Outgoing {
             doc: self.doc.clone(),
@@ -1145,7 +1172,8 @@ impl Mixer {
     /// Ends retune glides at once (a seek or a new run starts on the
     /// current mix).
     pub fn end_glides(&mut self) {
-        self.outgoing.clear();
+        let outgoing = std::mem::take(&mut self.outgoing);
+        self.retire(Box::new(outgoing));
     }
 
     /// Forgets every stretch's starved request: the next render after a
@@ -1624,7 +1652,7 @@ impl Mixer {
                     .or_insert_with(|| run.clone());
             }
         }
-        self.voices = graph
+        let voices = graph
             .voices
             .iter()
             .map(|v| {
@@ -1653,6 +1681,7 @@ impl Mixer {
                 }
             })
             .collect();
+        let old_voices = std::mem::replace(&mut self.voices, voices);
         if self.taps.len() != graph.strips.len() {
             self.taps = (0..graph.strips.len())
                 .map(|_| Tap::new(self.format.channels()))
@@ -1661,8 +1690,9 @@ impl Mixer {
         self.master_gain = graph.master as f32;
         self.retime.clear();
         self.reads.clear();
-        self.doc = doc;
-        self.graph = graph;
+        let old_doc = std::mem::replace(&mut self.doc, doc);
+        let old_graph = std::mem::replace(&mut self.graph, graph);
+        self.retire(Box::new((old_doc, old_graph, old_voices)));
         self.standard_content(self.standard_content);
     }
 
@@ -1804,7 +1834,8 @@ impl Mixer {
         }
         // A finished glide leaves the mixes before it unheard.
         if let Some(last) = outgoing.iter().rposition(|g| g.done >= self.glide_len) {
-            outgoing.drain(..=last);
+            let finished: Vec<Outgoing> = outgoing.drain(..=last).collect();
+            self.retire(Box::new(finished));
         }
         self.outgoing = outgoing;
         self.glide_acc = acc;
@@ -3704,6 +3735,44 @@ mod prepared_tests {
                 .zip(slow.iter().flatten())
                 .all(|(a, b)| a.to_bits() == b.to_bits()),
             "prepared tracks equal evP"
+        );
+    }
+
+    /// A playing mixer never frees a replaced document on its own thread:
+    /// project changes, glides and their ends hand them to the retire
+    /// channel.
+    #[test]
+    fn replaced_documents_are_freed_off_the_rendering_thread() {
+        let f = Fixture::new();
+        let mut m = f.mixer(0.5, 1.0, 4.0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        m.set_retire(tx);
+        let first = Arc::downgrade(&m.doc);
+        let (doc, graph) = f.graph(0.4, 1.0, 4.0);
+        m.set_graph(doc, graph);
+        assert!(first.upgrade().is_some(), "held by the retire channel");
+        while let Ok(retired) = rx.try_recv() {
+            drop(retired);
+        }
+        assert!(first.upgrade().is_none(), "freed where it was received");
+        // A glide's outgoing mix, once the glide ends.
+        let second = Arc::downgrade(&m.doc);
+        let (doc, graph) = f.graph(0.3, 1.0, 4.0);
+        m.glide_to(doc, graph, None);
+        let mut out = vec![vec![]; 2];
+        let options = RenderOptions {
+            wait: true,
+            ..Default::default()
+        };
+        m.render(0, 48_000, &mut out, &options).unwrap();
+        assert!(m.outgoing.is_empty(), "the glide ended");
+        assert!(second.upgrade().is_some(), "held by the retire channel");
+        drop(rx);
+        let (doc, graph) = f.graph(0.2, 1.0, 4.0);
+        m.set_graph(doc, graph);
+        assert!(
+            second.upgrade().is_none(),
+            "a closed channel frees in place"
         );
     }
 

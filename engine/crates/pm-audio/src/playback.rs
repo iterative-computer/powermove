@@ -937,6 +937,14 @@ impl Playback {
             cache.clone(),
         );
         mixer.standard_content(true);
+        // Replaced documents, graphs and voices are freed on their own
+        // thread, never on the rendering one; it ends with the mixer.
+        let (retire, retired) = std::sync::mpsc::channel::<crate::mixer::Retired>();
+        std::thread::Builder::new()
+            .name("pm-audio-retire".into())
+            .spawn(move || while retired.recv().is_ok() {})
+            .map_err(|e| AudioError::Device(format!("cannot start the retire thread: {e}")))?;
+        mixer.set_retire(retire);
         let worker = RenderThread {
             rx,
             deferred: None,
