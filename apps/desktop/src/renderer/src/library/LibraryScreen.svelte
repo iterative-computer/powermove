@@ -13,7 +13,7 @@
   import { panelScope } from '../panels/agent/panel-focus';
   import { deletePanel, deletedPanelIds } from './panel-deletion';
   import { panelBelongsInLibrary, panelPreviewSize } from './panel-preview';
-  import { copyClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
+  import { copyClonedCanvasBitmaps, snapshotClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
   import { afterEffectsExtensionIds } from './after-effects-imports';
   import { panelFrameOf } from '../kernel/panel-frame';
   import { placePanel } from '../layout/portal';
@@ -622,7 +622,7 @@
   /* Cloning and measuring nearby panels runs in short batches, leaving time
      between builds for scrolling, typing and navigation. A cover travelling
      back from the editor lands before any replacement is measured. */
-  const buildQueue: Array<() => void> = [];
+  const buildQueue: Array<() => void | Promise<void>> = [];
   let pumping = false;
   /* A hidden or busy window can hold animation frames back; a timer keeps
      the queue moving regardless. Whichever fires first runs the step. */
@@ -638,22 +638,25 @@
     const frame = window.requestAnimationFrame(run);
     const timer = window.setTimeout(run, 64);
   }
-  function scheduleBuild(task: () => void): void {
+  function scheduleBuild(task: () => void | Promise<void>): void {
     buildQueue.push(task);
     if (rootEl) rootEl.dataset.previews = 'pending';
     if (!pumping) { pumping = true; nextFrame(pumpBuilds); }
   }
-  function pumpBuilds(): void {
+  async function pumpBuilds(): Promise<void> {
     if (!flying) {
       const start = performance.now();
-      while (buildQueue.length && performance.now() - start < 4) buildQueue.shift()!();
+      while (buildQueue.length && performance.now() - start < 4) {
+        try { await buildQueue.shift()!(); }
+        catch (error) { console.warn('Library preview capture failed', error); }
+      }
     }
     if (buildQueue.length) { nextFrame(pumpBuilds); return; }
     pumping = false;
     if (rootEl) rootEl.dataset.previews = 'ready';
   }
 
-  function buildPreview(host: HTMLElement, id: string, stamp: string): Preview {
+  async function buildPreview(host: HTMLElement, id: string, stamp: string, current: () => boolean): Promise<Preview | null> {
     const blank: Preview = { stamp, frame: null, width: 0, height: 0, clipped: false };
     /* A sandboxed panel's body is another document: a DOM clone would load
        a second, unconnected copy of it. Its cover is the art instead. */
@@ -670,6 +673,37 @@
     clone.style.flex = 'none';
     const library = PM.PANELS?.[id]?.library;
     copyLiveState(element, clone);
+    const transport = PM.EngineRender;
+    if (transport && element.querySelector('#engine-present')) {
+      const project = PM.proj, time = PM.time;
+      const scene = PM.Kernel.api('library-card').scene3d?.viewport?.state?.();
+      const presentation = PM.Kernel.services.get('viewer')?.enginePresentation;
+      const latest = presentation?.latest;
+      const crop = (latest ? presentation.stateFor(latest.viewSeq)?.canvas?.crop : null) ?? PM.GL?.previewViewport;
+      const cropped = crop && (crop.x !== 0 || crop.y !== 0 || crop.width !== project.w || crop.height !== project.h);
+      const sceneView = (state: any) => JSON.stringify(state && [state.engineCamera, state.shading, state.xray, state.localView]);
+      const view = sceneView(scene);
+      // SnapshotRequest currently renders whole compositions through their
+      // scene camera. Cropped/3D views retain their presented bitmap until
+      // the snapshot contract can carry the view and crop (consumers.md C3).
+      if (!cropped && !scene?.hasScene) {
+        // The clone's overlay describes the presented frame. Wait for that
+        // frame to catch up before combining it with fresh snapshot pixels.
+        if (presentation && (!presentation.presenting || !latest || latest.standIn
+          || latest.revision !== transport.currentRevision()
+          || latest.pts !== Math.max(0, Math.round(time * 705_600_000)))) return null;
+        const captured = await snapshotClonedCanvasBitmaps(element, clone, {
+          transport, time, composition: String(project.compId ?? project.id ?? ''),
+          current: () => current() && PM.EngineRender === transport && PM.proj === project && PM.time === time
+            && PM.panelInst?.[id]?.el === element
+            && PM.Kernel.services.get('viewer')?.enginePresentation === presentation
+            && presentation?.latest?.viewSeq === latest?.viewSeq
+            && sceneView(PM.Kernel.api('library-card').scene3d?.viewport?.state?.()) === view,
+        });
+        if (!captured) return null;
+      }
+    }
+    if (!current()) return null;
     const frame = document.createElement('div');
     frame.className = 'library-live-frame';
     frame.style.width = `${size.width}px`;
@@ -755,11 +789,14 @@
       const id = current.id;
       const stamp = current.stamp;
       queuedStamp = stamp;
-      scheduleBuild(() => {
-        if (queuedStamp === stamp) queuedStamp = null;
-        if (!alive || !nearby || !isOpen() || editingId || current.id !== id || current.stamp !== stamp) return;
+      scheduleBuild(async () => {
+        const valid = () => alive && nearby && isOpen() && !editingId && current.id === id && current.stamp === stamp;
+        if (!valid()) { if (queuedStamp === stamp) queuedStamp = null; return; }
         const previous = shown?.frame;
-        const next = buildPreview(node, id, stamp);
+        let next: Preview | null;
+        try { next = await buildPreview(node, id, stamp, valid); }
+        finally { if (queuedStamp === stamp) queuedStamp = null; }
+        if (!next) { if (valid()) attach(); return; }
         if (previous && previous !== next.frame) previous.remove();
         previews.set(id, next);
         show(next, !previous);

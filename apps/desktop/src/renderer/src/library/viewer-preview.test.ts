@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { copyClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
+import { copyClonedCanvasBitmaps, snapshotClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
+import type { EngineSnapshot } from '../engine-connection/render-transport';
 
 afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); });
 
@@ -82,5 +83,60 @@ describe('Library canvas copy', () => {
     expect(computed).not.toHaveBeenCalled();
     expect(customRender).toHaveBeenCalledOnce();
     expect([copy.width, copy.height, copy.style.width, copy.style.height]).toEqual([320, 180, '160px', '50%']);
+  });
+});
+
+describe('Library engine snapshots', () => {
+  function capture() {
+    const { source, clone } = pair('<canvas id="engine-present" width="320" height="180"></canvas><canvas id="overlay" width="640" height="360"></canvas>');
+    const bitmap = document.createElement('canvas');
+    const result = { width: 320, height: 180, revision: 12 } as EngineSnapshot;
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as never);
+    const transport = {
+      thumbnails: { request: vi.fn().mockResolvedValue(result) },
+      currentRevision: vi.fn(() => 12), toCanvas: vi.fn(() => bitmap),
+    };
+    const current = vi.fn(() => true);
+    return { source, clone, bitmap, drawImage, transport, current, result };
+  }
+
+  it('renders at the cloned backing size and keeps the live overlay untouched', async () => {
+    const f = capture();
+    expect(await snapshotClonedCanvasBitmaps(f.source, f.clone, {
+      ...f, transport: f.transport as never, composition: 'comp', time: .5,
+    })).toBe(true);
+    expect(f.transport.thumbnails.request).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      key: expect.stringMatching(/^library-viewer:/), composition: 'comp', time: .5,
+      width: 320, height: 180, minRevision: 12, pixels: 'opaque', draft3d: true,
+    }));
+    expect(f.drawImage).toHaveBeenCalledExactlyOnceWith(f.bitmap, 0, 0);
+    expect(f.clone.querySelector('#overlay')!.getAttribute('width')).toBe('640');
+  });
+
+  it('uses the original WebGL backing size for a pre-engine fork, before stage presentation scales it', async () => {
+    const f = capture();
+    const original = document.createElement('canvas'); original.width = 160; original.height = 90;
+    f.result.width = 160; f.result.height = 90;
+    f.source.prepend(original);
+    f.clone.prepend(original.cloneNode(true));
+    expect(await snapshotClonedCanvasBitmaps(f.source, f.clone, {
+      ...f, transport: f.transport as never, composition: 'comp', time: .5,
+    })).toBe(true);
+    expect(f.transport.thumbnails.request).toHaveBeenCalledWith(expect.objectContaining({ width: 160, height: 90 }));
+    expect(f.clone.querySelector('#engine-present')).toBeNull();
+    const picture = f.clone.querySelector<HTMLCanvasElement>('[data-library-engine-snapshot]')!;
+    expect([picture.width, picture.height, picture.style.visibility]).toEqual([160, 90, 'visible']);
+  });
+
+  it.each(['revision', 'closed', 'superseded'])('discards a %s capture before it can paint the clone', async reason => {
+    const f = capture();
+    if (reason === 'revision') f.transport.currentRevision.mockReturnValueOnce(12).mockReturnValue(13);
+    if (reason === 'closed') f.current.mockReturnValue(false);
+    if (reason === 'superseded') f.transport.thumbnails.request.mockResolvedValue(null);
+    expect(await snapshotClonedCanvasBitmaps(f.source, f.clone, {
+      ...f, transport: f.transport as never, composition: 'comp', time: .5,
+    })).toBe(false);
+    expect(f.drawImage).not.toHaveBeenCalled();
   });
 });

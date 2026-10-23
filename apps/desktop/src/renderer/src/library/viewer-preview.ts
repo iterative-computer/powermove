@@ -1,3 +1,5 @@
+import type { EngineRenderTransport } from '../engine-connection/render-transport';
+
 const finitePositive = (value: number): boolean => Number.isFinite(value) && value > 0;
 
 /**
@@ -35,7 +37,9 @@ function compositionBox(original: HTMLCanvasElement) {
  * composition's edges would then be filtered inside the bitmap, where today's
  * card shows the edge of its own canvas element. When the viewer tagged where
  * today's canvas sits, the copy is that composition canvas, at today's box
- * and backing size, so the card's edges are today's.
+ * and backing size. Full 2D cards replace that resampled bitmap with an exact
+ * backing-size engine snapshot below. Cropped/3D cards retain presentation
+ * until snapshots can carry their view (docs/engine/consumers.md, C3).
  * The caller invokes any panel-specific library.render after this copy. */
 export function copyClonedCanvasBitmaps(source: Element, target: Element): void {
   const from = source.querySelectorAll<HTMLCanvasElement>('canvas');
@@ -66,6 +70,56 @@ export function copyClonedCanvasBitmaps(source: Element, target: Element): void 
     canvas.height = original.height;
     try { canvas.getContext('2d')?.drawImage(original, 0, 0); } catch { /* tainted or GL-only canvas */ }
   });
+}
+
+let nextCapture = 0;
+
+/** A card needs the composition before presentation scales it into the stage.
+ * Keep its CSS box and overlay, but render its bitmap at today's backing size.
+ * Panel-authored library.render runs after this capture and still owns the card.
+ */
+export async function snapshotClonedCanvasBitmaps(source: Element, target: Element, options: {
+  transport: Pick<EngineRenderTransport, 'thumbnails' | 'currentRevision' | 'toCanvas'>;
+  time: number;
+  composition: string;
+  current(): boolean;
+}): Promise<boolean> {
+  const originals = [...source.querySelectorAll<HTMLCanvasElement>('canvas')];
+  const copies = [...target.querySelectorAll<HTMLCanvasElement>('canvas')];
+  const revision = options.transport.currentRevision();
+  for (let index = 0; index < originals.length; index++) {
+    const original = originals[index]!;
+    const copy = copies[index];
+    if (original.id !== 'engine-present' || !copy?.width || !copy.height) continue;
+    // A pre-engine fork presents over its own WebGL canvas inside stage-inner.
+    // That canvas, immediately before the bound presenter, owns today's
+    // backing size; the presenter's bitmap has already been scaled to CSS×DPR.
+    const bound = original.previousElementSibling as HTMLCanvasElement | null;
+    if (!original.dataset['todaysCanvas'] && bound?.tagName === 'CANVAS' && bound.width && bound.height) {
+      copy.width = bound.width;
+      copy.height = bound.height;
+    }
+    const result = await options.transport.thumbnails.request({
+      key: `library-viewer:${++nextCapture}`,
+      composition: options.composition, time: options.time,
+      width: copy.width, height: copy.height,
+      pixels: 'opaque', draft3d: true,
+      ...(revision !== null ? { minRevision: revision } : {}),
+    });
+    if (!result || !options.current() || options.transport.currentRevision() !== revision) return false;
+    // A snapshot belongs in today's original composition canvas. Keep the
+    // clone's original canvas hierarchy, without a second presentation layer.
+    const originalCanvas = bound?.tagName === 'CANVAS' ? bound : source.querySelector<HTMLCanvasElement>('#gl');
+    const picture = originalCanvas ? copies[originals.indexOf(originalCanvas)] ?? copy : copy;
+    picture.width = result.width;
+    picture.height = result.height;
+    picture.style.visibility = 'visible';
+    picture.dataset['libraryEngineSnapshot'] = '';
+    // Both canvases have exactly the requested backing size: no resampling.
+    picture.getContext('2d')?.drawImage(options.transport.toCanvas(result), 0, 0);
+    if (picture !== copy) copy.remove();
+  }
+  return options.current();
 }
 
 /** Panel-authored Library cards retain control after their live pixels copy. */

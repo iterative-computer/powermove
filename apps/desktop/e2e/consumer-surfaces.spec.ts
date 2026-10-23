@@ -216,7 +216,7 @@ for (const theme of ['light', 'dark']) for (const variant of VIEWER_VARIANTS) {
       const stage = root.querySelector<HTMLElement>('[data-library-source-id="stage"]')!;
       const inner = root.querySelector<HTMLElement>('[data-library-source-id="stage-inner"]')!;
       const overlay = root.querySelector<HTMLCanvasElement>('[data-library-source-id="overlay"]')!;
-      const present = root.querySelector<HTMLCanvasElement>(engine ? 'canvas[data-library-source-id="engine-present"]' : 'canvas[data-library-source-id="gl"]');
+      const present = root.querySelector<HTMLCanvasElement>(engine ? 'canvas[data-library-engine-snapshot]' : 'canvas[data-library-source-id="gl"]');
       const data = overlay.getContext('2d')!.getImageData(0, 0, overlay.width, overlay.height).data;
       let hash = 2166136261;
       for (let index = 0; index < data.length; index++) hash = Math.imul(hash ^ data[index]!, 16777619) >>> 0;
@@ -280,7 +280,7 @@ for (const theme of ['light', 'dark']) for (const variant of VIEWER_VARIANTS) {
     expect(present.visibility).toBe('visible');
     const shown = after.present!;
     expect({ width: present.width, height: present.height, css: present.css, hash: present.hash, parent: present.parent })
-      .toEqual({ width: shown.width, height: shown.height, css: shown.css, hash: shown.hash, parent: shown.parent });
+      .toEqual({ width: shown.width, height: shown.height, css: shown.css, hash: shown.hash, parent: 'stage-inner' });
     // The picture keeps its place in the source stage's CSS box (today's
     // composition canvas box), even though the Library card itself has a
     // different fixed size.

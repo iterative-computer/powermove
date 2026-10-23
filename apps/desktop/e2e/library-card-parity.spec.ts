@@ -17,7 +17,11 @@ import { VIEWER_VARIANTS, useViewer, type ViewerVariant } from './helpers/viewer
 type Scene = '2d' | '2d-fit' | '3d' | '3d-right';
 
 async function card<T = Buffer>(engine: '0' | '1', theme: string, variant: ViewerVariant, scene: Scene, then?: (page: Page, png: Buffer) => Promise<T>): Promise<T> {
-  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: engine } });
+  // Match engine-viewer-canvas's Standard-color gate. A display-profile
+  // diagnostic remains available: Chromium can dither the shelf's CSS ledge
+  // differently across otherwise identical wide-gamut window captures.
+  const args = process.env.PM_LIBRARY_CARD_PROFILE === 'display' ? [] : ['--force-color-profile=srgb'];
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: engine }, args });
   try {
     await session.openEditor();
     const { page } = session;
@@ -53,7 +57,15 @@ async function card<T = Buffer>(engine: '0' | '1', theme: string, variant: Viewe
     await expect(shown.locator('.library-clone')).toBeAttached();
     await expect(page.locator('[data-previews="ready"]')).toBeAttached();
     await page.evaluate(() => document.fonts.ready);
+    // Async native cards and font loading can change the shelf's height.
+    // Align the final card, so both captures use the same device-pixel origin
+    // (including the card's gradient and rounded corners).
+    await shown.evaluate(element => element.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'instant' }));
     await page.mouse.move(1, 1);
+    await shown.evaluate(element => Promise.all(element.getAnimations({ subtree: true })
+      .filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime))
+      .map(animation => animation.finished.catch(() => undefined))));
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     const png = await shown.screenshot({ animations: 'disabled' });
     return then ? await then(page, png) : png as T;
   } finally {
@@ -111,17 +123,35 @@ async function compare(page: Page, a: Buffer, b: Buffer) {
 }
 
 const cases: Array<{ theme: string; variant: ViewerVariant; scene: Scene }> = [
-  ...['light', 'dark'].flatMap(theme => VIEWER_VARIANTS.map(variant => ({ theme, variant, scene: '2d' as Scene }))),
-  ...(['2d-fit', '3d', '3d-right'] as Scene[]).flatMap(scene => VIEWER_VARIANTS.map(variant => ({ theme: 'dark', variant, scene }))),
+  ...['light', 'dark'].flatMap(theme => (['2d', '2d-fit', '3d', '3d-right'] as Scene[])
+    .flatMap(scene => VIEWER_VARIANTS.map(variant => ({ theme, variant, scene })))),
 ];
+
+async function geometry(page: Page) {
+  return page.locator('.library-card[data-panel-id="viewer"]').evaluate(card => {
+    const box = (element: Element) => {
+      const { x, y, width, height } = element.getBoundingClientRect();
+      const css = getComputedStyle(element);
+      return { x, y, width, height, transform: css.transform, mask: css.maskImage, opacity: css.opacity, background: css.backgroundColor };
+    };
+    return [...card.querySelectorAll('.library-live,.library-live-frame,.library-clone,canvas')].map(element => ({
+      id: (element as HTMLElement).dataset.librarySourceId, className: element.className, box: box(element),
+      ...(element instanceof HTMLCanvasElement ? { backing: [element.width, element.height] } : {}),
+    }));
+  });
+}
 
 for (const { theme, variant, scene } of cases) {
   test(`Library card with the engine on is today's card: ${scene} in ${theme}, ${variant.name}`, async ({}, testInfo) => {
     test.setTimeout(120_000);
-    const today = await card('0', theme, variant, scene);
+    const today = await card('0', theme, variant, scene, async (page, png) => {
+      await testInfo.attach('card geometry, engine off', { body: JSON.stringify(await geometry(page)), contentType: 'application/json' });
+      return png;
+    });
     await writeFile(testInfo.outputPath('card-engine-off.png'), today);
     await testInfo.attach('Library card, engine off', { path: testInfo.outputPath('card-engine-off.png'), contentType: 'image/png' });
     const result = await card('1', theme, variant, scene, async (page, engine) => {
+      await testInfo.attach('card geometry, engine on', { body: JSON.stringify(await geometry(page)), contentType: 'application/json' });
       await writeFile(testInfo.outputPath('card-engine-on.png'), engine);
       await testInfo.attach('Library card, engine on', { path: testInfo.outputPath('card-engine-on.png'), contentType: 'image/png' });
       return compare(page, today, engine);
