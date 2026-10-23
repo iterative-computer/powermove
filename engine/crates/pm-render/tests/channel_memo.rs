@@ -3,7 +3,8 @@
 //! renderers, one with the memo (the default) and one without, plan the same
 //! document through a long seeded sequence of times (most frames move only
 //! the time, so the memo answers) and edits of everything a channel's answer
-//! depends on: keyframe values, times, and eases (linear, Bezier handles,
+//! depends on: group membership and nested groups (the layers' kept group
+//! ancestry), keyframe values, times, and eases (linear, Bezier handles,
 //! hold, temporal eases, springs), keys added and removed, the layer's
 //! `from`, expressions switched on and off, falsy and missing channels,
 //! malformed tracks (a `null` key, a non-object key, string values), layers
@@ -129,11 +130,13 @@ fn document(rng: &mut Rng) -> Value {
     let mut layers = vec![
         "{\"id\":\"n1\",\"type\":\"null\",\"name\":\"n1\",\"from\":0,\"dur\":12,\"on\":true,\"d\":{},\"p\":{\"position.x\":{\"v\":300,\"kf\":[{\"t\":0,\"v\":300},{\"t\":4,\"v\":700}]},\"position.y\":{\"v\":200}}}".to_owned(),
         "{\"id\":\"g1\",\"type\":\"group\",\"name\":\"g1\",\"from\":0,\"dur\":12,\"on\":true,\"d\":{},\"p\":{\"opacity\":{\"v\":80,\"kf\":[{\"t\":0,\"v\":100},{\"t\":6,\"v\":40}]}}}".to_owned(),
+        "{\"id\":\"g2\",\"type\":\"group\",\"name\":\"g2\",\"group\":\"g1\",\"from\":0,\"dur\":12,\"on\":true,\"d\":{},\"p\":{\"position.x\":{\"v\":40,\"kf\":[{\"t\":0,\"v\":0},{\"t\":5,\"v\":200}]}}}".to_owned(),
     ];
     for i in 0..36 {
-        let extra = match i % 5 {
+        let extra = match i % 6 {
             0 => ",\"parent\":\"n1\"",
             1 => ",\"group\":\"g1\"",
+            2 => ",\"group\":\"g2\"",
             _ => "",
         };
         layers.push(layer(rng, &format!("s{i}"), extra));
@@ -184,7 +187,7 @@ fn edit(doc: &mut Document, rng: &mut Rng) -> String {
         p.extend(rest.iter().map(|k| key(k)));
         p
     };
-    match rng.below(9) {
+    match rng.below(11) {
         0 => {
             let v = parse(&channel(rng, 100.0, 200.0)).unwrap();
             set(doc, at(&["p", ch]), v);
@@ -237,6 +240,18 @@ fn edit(doc: &mut Document, rng: &mut Rng) -> String {
             );
             set(doc, layers_path(comp), Value::Array(layers));
             format!("move, delete, insert in {comp}")
+        }
+        9 => {
+            // Group membership: what the layer's ancestry reads.
+            let g = ["\"g1\"", "\"g2\"", "null", "\"s3\"", "\"missing\""][rng.below(5)];
+            set(doc, at(&["group"]), parse(g).unwrap());
+            format!("group {comp}[{i}] = {g}")
+        }
+        10 => {
+            // A group that stops (or starts) being one.
+            let ty = ["\"group\"", "\"solid\""][rng.below(2)];
+            set(doc, at(&["type"]), parse(ty).unwrap());
+            format!("type {comp}[{i}] = {ty}")
         }
         7 => {
             let v = doc.to_value().unwrap();

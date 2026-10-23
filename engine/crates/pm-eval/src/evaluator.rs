@@ -1035,8 +1035,16 @@ impl Evaluator {
         cx: &Comp<'d>,
         layer: &'d Node,
     ) -> JsResult<Vec<&'d Node>> {
+        // Kept across the frames of an unchanged document, as channels are
+        // (`crate::channel_memo`): the answer reads only the composition's
+        // layers.
+        if let Some(found) = self.channel_memo.ancestors(cx, layer) {
+            return found;
+        }
         let index = self.layer_index(cx);
-        group_ancestors(layer, cx.layers(), &index)
+        let found = group_ancestors(layer, cx.layers(), &index);
+        self.channel_memo.keep_ancestors(cx, layer, &found);
+        found
     }
 
     /// `isProperty(x.on) ? evP(x, x.on, T, 'l.on') : x.on`, truthy.

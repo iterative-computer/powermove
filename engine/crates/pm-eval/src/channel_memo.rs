@@ -15,6 +15,10 @@
 //! - no `expr` and a temporal track: the answer is the prepared track at
 //!   `T - L.from`, for a finite local time.
 //!
+//! It also keeps each layer's group ancestry (`PM.groupAncestors(L)`, read
+//! for every member's activity and transform), which reads only the
+//! composition's layers.
+//!
 //! Anything else (an expression, a discrete or throwing track, a read that
 //! throws, a non-finite time) takes the ordinary path, which this mirrors
 //! read for read, so every answer is the one the ordinary path gives.
@@ -73,6 +77,9 @@ pub(crate) struct ChannelMemo {
     /// The entries' keys, end to end (cleared with them; no allocation per
     /// entry).
     keys: Vec<u8>,
+    /// `PM.groupAncestors(L)` by layer address, as positions in the
+    /// composition's `layers` (`Evaluator::group_ancestors`).
+    ancestors: HashMap<usize, crate::JsResult<Box<[u32]>>, crate::scope::BuildAddressHasher>,
     pub(crate) hits: u64,
     pub(crate) misses: u64,
 }
@@ -94,6 +101,7 @@ impl ChannelMemo {
         if self.edition != Some(edition) {
             self.entries.clear();
             self.keys.clear();
+            self.ancestors.clear();
             self.edition = Some(edition);
             // The first plan at an edition only notes it (see above).
             self.open = None;
@@ -114,6 +122,7 @@ impl ChannelMemo {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.keys.clear();
+        self.ancestors.clear();
         self.edition = None;
     }
 
@@ -161,6 +170,68 @@ impl ChannelMemo {
             slot.insert((at, len, found));
         }
     }
+}
+
+impl ChannelMemo {
+    /// Whether the memo answers for compositions of `cx`'s document.
+    fn answers(&self, cx: &crate::Comp<'_>) -> bool {
+        self.open == Some((address(cx.root()), cx.revision()))
+    }
+
+    /// The group ancestors kept for `layer`, an element of `cx`'s layers.
+    pub(crate) fn ancestors<'d>(
+        &mut self,
+        cx: &crate::Comp<'d>,
+        layer: &Node,
+    ) -> Option<crate::JsResult<Vec<&'d Node>>> {
+        if !self.answers(cx) || !is_element(cx.layers(), layer) {
+            return None;
+        }
+        let found = self.ancestors.get(&address(layer))?;
+        self.hits += 1;
+        let layers = cx.layers();
+        Some(match found {
+            Ok(at) => Ok(at.iter().map(|&i| &layers[i as usize]).collect()),
+            Err(e) => Err(e.clone()),
+        })
+    }
+
+    /// Keeps `layer`'s group ancestors (each an element of `cx`'s layers).
+    pub(crate) fn keep_ancestors(
+        &mut self,
+        cx: &crate::Comp<'_>,
+        layer: &Node,
+        found: &crate::JsResult<Vec<&Node>>,
+    ) {
+        let layers = cx.layers();
+        if !self.answers(cx) || !is_element(layers, layer) {
+            return;
+        }
+        let kept = match found {
+            Ok(groups) => {
+                let mut at = Vec::with_capacity(groups.len());
+                for g in groups {
+                    let Some(i) = position(layers, g) else {
+                        return;
+                    };
+                    at.push(i);
+                }
+                Ok(at.into_boxed_slice())
+            }
+            Err(e) => Err(e.clone()),
+        };
+        self.misses += 1;
+        self.ancestors.insert(address(layer), kept);
+    }
+}
+
+/// `node`'s position in `layers`, when it is one of its elements.
+fn position(layers: &[Node], node: &Node) -> Option<u32> {
+    if !is_element(layers, node) {
+        return None;
+    }
+    let i = (address(node) - layers.as_ptr() as usize) / std::mem::size_of::<Node>();
+    u32::try_from(i).ok()
 }
 
 fn address(node: &Node) -> usize {
