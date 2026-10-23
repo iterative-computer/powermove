@@ -877,7 +877,9 @@ what the previous code did. Two tests prove it:
   journal, the barrier), seeds 22 to 26 at 2fff8632d gave 75 more (50 off,
   25 on, 10 settled), 30 recovering the document, all clean: 390 in all. With SAVE-1b, seeds 27 to 31 at 378c574bc
   gave 75 more (50 off, 25 on, 10 settled), 34 recovering the document,
-  all clean: 465 in all.
+  all clean: 465 in all. With SAVE-1c, seeds 32 to 36 at 4a42a7bfb gave
+  75 more (50 off, 25 on, 10 settled), 43 recovering the document, all
+  clean: 540 in all.
   The e2e kills the whole app with no
   slot write failing, so the failure cases are the model check's and the
   crash tests'. Opening now
