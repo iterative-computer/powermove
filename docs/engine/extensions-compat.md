@@ -222,12 +222,15 @@ the wrapper completes, its pixels and geometry are retained for the exact
 composition, layer, time, density, crop and revision. The presentation answer
 consumes that result without running another synchronous native snapshot.
 
-Wrapper continuations yield through a background scheduler task so frame
-presentation and input can run between preparations. Their canvases are
-captured as premultiplied ImageBitmaps without color conversion and sent to
-a dedicated worker. That worker uses the same WebGL upload/readback function
-as synchronous callers and transfers the pixel buffer back. GPU readback no
-longer waits on the renderer thread. Geometry is captured before the async
+Playback and speculative wrapper continuations yield through a background
+scheduler task so frame presentation and input can run between preparations.
+A required paused edit starts immediately and prepares the current frame only;
+warming future frames at an obsolete revision adds work to every next edit.
+The initial paused warm-up and playback horizon remain bounded as above.
+Their canvases are captured as premultiplied ImageBitmaps without color
+conversion and sent to a dedicated worker. That worker uses the same WebGL
+upload/readback function as synchronous callers and transfers the pixel buffer
+back. GPU readback no longer waits on the renderer thread. Geometry is captured before the async
 readback, so a wrapper reusing its surface object cannot change an earlier
 frame's quad. The worker closes each bitmap, reports errors to the request,
 and terminates on disposal.
@@ -240,6 +243,14 @@ animators and styles, font anchoring and captions are never cached because
 they can change with time beyond their resolved content. A genuinely changed
 base is prepared afresh; the changing-base cadence gates assert asynchronous
 loads throughout playback and zero synchronous loads during the measured span.
+Base surfaces expire at each document revision; the large-document edit gate
+also requires fresh off-thread native raster work throughout the drag.
+
+A required paused viewer answer remains available until presentation, so a
+native need emitted before the proactive upload can repost those same pixels
+without a second wrapper evaluation and readback. Presentation ends this sharing
+window. Explicit captures and redraws evaluate the wrapper afresh, including
+when its own state changed without a document edit.
 
 Reset, revision, layer identity, chain changes, fonts and disposal invalidate
 prepared answers. Public synchronous APIs, synchronous snapshots and exports
@@ -253,6 +264,69 @@ middle of playback; one of thirty loaded runs caught it.
 synchronous loads, and the gates print them on failure. Nested or retimed
 layers retain the open composition's preparation step and ask for missing
 times.
+
+### Paused-edit performance gate and attribution
+
+Build the native addons, wasm and app before acquiring the Electron lock.
+Run the opt-in gate from the repository root:
+
+```sh
+CARGO_BUILD_JOBS=4 bun run --cwd apps/desktop build:engine
+CARGO_BUILD_JOBS=4 bun run --cwd apps/desktop build:wasm
+bun run --cwd apps/desktop build
+python3 apps/desktop/scripts/extension-perf.py --out /tmp/powermove-extension-perf
+```
+
+The launcher checks the native protocol, acquires `pm-electron-lock` for only
+the prebuilt Playwright command with `--workers=1`, and starts two SHA256 load
+workers after acquisition. It runs engine/today/today/engine in fresh profiles,
+with 60 paused edits per run on a public synthetic document with 2500 inactive
+keyframed layers. Each engine run also measures without the override. The
+endpoint is `frame:rendered`, requiring the current revision on engine frames.
+It saves every sample, traces, load averages, quantiles and comparison outside
+the repository, then asserts engine-with-override p50, p95 and maximum are each
+no greater than today's. This is a separate opt-in latency gate; the existing
+38 compatibility gates retain their assertions. Profiles, temporary IPC files
+and owned load workers are cleaned up on completion and interruption.
+
+`EngineConnection.setTrace(true)` enables the bounded page-clock trace at
+`EngineRender.trace.take()`: document diff/encoding/apply/dispatch, wrapper
+scheduling/CPU, base snapshot native wait/render, main service and round-trip,
+bitmap capture, readback worker compute/round-trip, answer upload, viewer
+submission and the frame event. Pair it with the viewer's presentation trace
+and native `turnTrace` /
+`presentTrace` (enabled by `POWERMOVE_BRIDGE_TRACE=1`). Native layer raster
+queue time, worker execution and completion delivery are separate; a delayed
+completion no longer looks like expensive worker execution. `render wake late`
+identifies time beyond the render thread's requested wake deadline, and
+`command drain` records a burst's duration and count. Existing compatibility
+waits, late skips, CPU/GPU completion and presentation timestamps distinguish
+producer, scheduling, upload, GPU and presentation gaps. These bounded stage
+traces contain timing and revision tags, not document content.
+For snapshot wait/render/main events, `count` is the measured microseconds;
+subtract main service time from round-trip time to locate renderer/main IPC
+delay separately from native work.
+
+A session announces its compatibility producers as soon as its id is bound,
+before the initial resync. Main-owned snapshot sessions receive the producer
+declarations and compatibility pixel bands through preload too, with byte
+payloads preserved as typed arrays. Dropping those fields while copying a
+request let an early capture render without its override; the first capture
+must ask the producer just as later captures do.
+
+An explicit compatibility-context read reserves the deferred compositor's
+WebGL context before its canvas can become a 2D mirror. Replacing a viewer's
+bound canvas while paused retains the selected completed engine surface,
+instead of trying to recover pixels from an already cleared WebGPU swapchain.
+Surface preservation also continues while the compatibility WebGL context is
+lost. Recovering that context while paused then reads the current engine frame
+even when no further frame is due; `active` still describes GL availability,
+while `capturesFrames` describes this preservation requirement.
+
+The `pm-perfbench` row `paused_edit_with_override_2500` ratchets native work
+for 60 edits with a fresh 640×360 premultiplied canvas answer on each revision.
+It includes the patch, upload, composite and GPU completion; window wrapper
+preparation, IPC and display remain the Electron gate's responsibility.
 
 Timed worker commits retain the earliest queued refresh deadline. When a later
 BeginFrame overtakes an overdue timer, it fulfils that turn immediately. The
