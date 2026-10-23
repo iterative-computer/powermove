@@ -23,7 +23,7 @@ try {
   await cp(source, join(profile, 'store'), { recursive: true });
   await writeFile(join(profile, 'store/restoreWindows.json'), 'false');
   await writeFile(join(profile, 'store/openWindows.json'), '[]');
-  const env = { ...process.env, POWERMOVE_USER_DATA: profile, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1',
+  const env = { ...process.env, POWERMOVE_USER_DATA: profile, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
     CODEX_BINARY: join(resolve(root), 'src/main/codex/__fixtures__/fake-codex-app-server.sh'), POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' };
   delete env.ELECTRON_RUN_AS_NODE;
   const samples = [];

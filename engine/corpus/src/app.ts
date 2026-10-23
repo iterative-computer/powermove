@@ -102,6 +102,8 @@ export async function launchLegacyApp(options: LaunchOptions = {}): Promise<Lega
     POWERMOVE_USER_DATA: userData,
     POWERMOVE_DEVTOOLS: '0',
     POWERMOVE_BACKGROUND_TEST: '1',
+    // Corpus launches are long-lived and killed: never start a runtime download.
+    POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
   };
   delete env.ELECTRON_RUN_AS_NODE;
   let closed = false, electronPid: number | undefined;
