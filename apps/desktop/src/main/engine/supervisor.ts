@@ -134,16 +134,18 @@ export class EngineSupervisor {
   start(): void {
     if (this.child || this.stateValue === 'starting') return;
     this.stopping = false;
-    this.spawn();
+    this.spawn(false);
   }
 
-  private spawn(): void {
+  /** `restarting`: after a crash (an asked-for start after a stop, such as
+   *  a job utility started again on demand, reports `starting`). */
+  private spawn(restarting: boolean): void {
     this.pendingRestart = null;
     this.generation++;
     const generation = this.generation;
     const process = this.options.process;
     this.lastInFlight = [];
-    this.setState(this.generation === 1 ? 'starting' : 'restarting');
+    this.setState(restarting ? 'restarting' : 'starting');
     let child: ChildLike;
     try {
       child = this.options.spawn(process);
@@ -320,7 +322,7 @@ export class EngineSupervisor {
     this.setState('restarting');
     const schedule = this.options.schedule ?? defaultSchedule;
     this.pendingRestart = schedule(() => {
-      if (!this.stopping) this.spawn();
+      if (!this.stopping) this.spawn(true);
     }, delayMs);
   }
 

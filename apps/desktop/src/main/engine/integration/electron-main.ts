@@ -65,7 +65,8 @@ const fromHex = (hex: string): Uint8Array => new Uint8Array(Buffer.from(hex, 'he
 async function main(): Promise<void> {
   const enginePath = process.env['PM_IT_ENGINE_PROCESS'];
   const addon = process.env['POWERMOVE_ENGINE_ADDON'];
-  check(enginePath && addon, 'PM_IT_ENGINE_PROCESS and POWERMOVE_ENGINE_ADDON are set');
+  const mediaFixture = process.env['PM_IT_MEDIA_FIXTURE'];
+  check(enginePath && addon && mediaFixture, 'PM_IT_ENGINE_PROCESS, POWERMOVE_ENGINE_ADDON and PM_IT_MEDIA_FIXTURE are set');
   const clock = mainHostClock();
   step('main reads the engines\' host clock through pm-bridge', { libuvMinusEngineUs: clock.libuvMinusEngineUs });
   const dir = await mkdtemp(path.join(os.tmpdir(), 'pm-engine-it-'));
@@ -77,7 +78,7 @@ async function main(): Promise<void> {
       const child = utilityProcess.fork(enginePath, [], {
         serviceName: `Powermove ${kind} engine (test)`,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, POWERMOVE_ENGINE_PROCESS: kind, POWERMOVE_ENGINE_ADDON: addon }
+        env: { ...process.env, POWERMOVE_ENGINE_PROCESS: kind, POWERMOVE_ENGINE_ADDON: addon, POWERMOVE_ENGINE_RUNTIME_MEMORY: '1' }
       });
       child.on('spawn', () => { if (child.pid) pids[kind].push(child.pid); });
       child.stderr?.on('data', (chunk: Buffer) => logs.push(`[${kind} stderr] ${chunk.toString().trim()}`));
@@ -88,6 +89,7 @@ async function main(): Promise<void> {
     automaticOutputDirectory: path.join(dir, 'Powermove'),
     physicalMemory: os.totalmem(),
     hostNow: clock.now,
+    resolveAsset: async (asset) => asset === 'integration-video' ? { path: mediaFixture, contentHash: null } : null,
     log: (level, message) => logs.push(`${level}: ${message}`)
   });
 
@@ -98,6 +100,15 @@ async function main(): Promise<void> {
 
   try {
     await engine.start();
+    await waitFor('interactive engine ready', () => engine.status().interactive.state === 'ready');
+    check(engine.status().job.state === 'stopped', 'the job utility has not started');
+    const probeStarted = performance.now();
+    const facts = await engine.probeMedia('integration-video', null);
+    const probeMs = Math.round((performance.now() - probeStarted) * 100) / 100;
+    check(facts.kind === 'video', 'the interactive utility answered a media probe');
+    check(engine.status().job.state === 'stopped' && pids.job.length === 0, 'a media probe did not launch the job utility');
+    step('interactive media probe answered without a job utility', { probeMs });
+    await engine.ensureReady('job');
     await waitFor('both engines ready', () => engine.status().interactive.state === 'ready' && engine.status().job.state === 'ready');
     step('both engines started and negotiated with main', engine.status());
     for (const kind of ['interactive', 'job'] as const) {
@@ -112,6 +123,11 @@ async function main(): Promise<void> {
     });
     await waitFor('leases acknowledged', () => engine.memory.isAcknowledged('interactive') && engine.memory.isAcknowledged('job'));
     step('initial leases granted and acknowledged', { interactive: engine.memory.current('interactive'), job: engine.memory.current('job') });
+    for (const kind of ['interactive', 'job'] as const) {
+      const report = await engine.report(kind) as { runtimeMemory?: { rss: number; heapUsed: number; v8Physical: number } } | null;
+      check(!!report?.runtimeMemory && report.runtimeMemory.rss > 0 && report.runtimeMemory.heapUsed > 0 && report.runtimeMemory.v8Physical > 0,
+        `${kind} reports Node/V8 memory when the measurement flag is enabled`);
+    }
 
     engine.addClient(1, (info: ClientPortInfo, port: PortLike) => clients.push(new TestClient(info.process, info.generation, port)));
     await waitFor('client ports', () => latest('interactive') && latest('job'));
@@ -216,6 +232,7 @@ async function main(): Promise<void> {
       // Stopping while an engine is crashing: the crash's cleanup must not
       // reach the other engine, which is shutting down.
       await engine.start();
+      await engine.ensureReady('job');
       await waitFor('both engines ready again', () => engine.status().interactive.state === 'ready' && engine.status().job.state === 'ready');
       process.kill(engine.supervisor('interactive').current!.pid!, 'SIGKILL');
       engine.removeClient(1);

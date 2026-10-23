@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PowermoveAPI } from 'powermove';
-import { ENGINE_VIEWER_SERVICE, type EngineViewerHandlers, type EngineViewerService } from './engine-present/presentation';
+import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, type EngineViewerHandlers, type EngineViewerService } from './engine-present/presentation';
 import type { FrameDescriptor } from './engine-present/protocol';
 import { createViewerRuntime } from './viewer';
 
@@ -62,6 +62,49 @@ function mount(runtime: any, size = { width: 1000, height: 700 }): { stage: HTML
 }
 
 describe('viewer engine presentation hook', () => {
+  it('suspends and resumes an opted-in service without replacing its viewer canvas', async () => {
+    gpu.fake = true;
+    try {
+      const services = new Map<string, unknown>();
+      let eligible = true;
+      const channels: { closed: boolean; states: unknown[] }[] = [];
+      const service: EngineViewerService = {
+        source: { videoFrame: () => null, onSurface: () => () => {}, retire: () => 0 },
+        composition: () => 'comp-1',
+        offMainThread: false,
+        mayPresent: () => eligible,
+        open: () => {
+          const channel = { closed: false, states: [] as unknown[] };
+          channels.push(channel);
+          return { sendViewerState(state) { channel.states.push(state); }, release() {}, close() { channel.closed = true; } };
+        },
+        onReady: () => () => {}
+      };
+      services.set(ENGINE_VIEWER_SERVICE, service);
+      const runtime = createViewerRuntime(viewerApi(services, () => {})) as any;
+      mount(runtime);
+      runtime.layout();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const presentation = runtime.enginePresentation;
+      const canvas = presentation.canvas;
+      expect(channels).toHaveLength(1);
+      eligible = false;
+      window.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(channels[0]!.closed).toBe(true);
+      expect(runtime.enginePresentation).toBe(presentation);
+      expect(canvas.style.visibility).toBe('hidden');
+      eligible = true;
+      window.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(runtime.enginePresentation.canvas).toBe(canvas);
+      expect(channels).toHaveLength(2);
+      expect(channels[1]!.states[0]).toMatchObject({ surfaceEpoch: 1 });
+      runtime.dispose();
+    } finally {
+      gpu.fake = false;
+    }
+  });
   it('does nothing without the engine.viewer service', () => {
     const services = new Map<string, unknown>();
     const runtime = createViewerRuntime(viewerApi(services, () => {})) as any;

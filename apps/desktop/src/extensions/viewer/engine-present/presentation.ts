@@ -8,7 +8,7 @@ import { ChromeLeases } from './chrome-leases';
  * finds it, it attaches a `ViewerPresentation` to its stage:
  *
  * - a canvas over the stage (below the DOM and Canvas2D overlay), drawn
- *   with WebGPU from the engine's shared surfaces (`EnginePresenter`);
+ *   with WebGL2 from the engine's shared surfaces (`EnginePresenter`);
  * - a viewer session on the interactive engine (`open`): the viewer state
  *   (size in device pixels, DPR, zoom, pan, resolution, media preference,
  *   canvas color space, EDR, the view override, Play Every Frame), numbered
@@ -31,12 +31,13 @@ import { ChromeLeases } from './chrome-leases';
  * session; until then (and whenever the engine restarts) the current
  * engine's canvas underneath is what the viewer shows.
  */
-import type { FramePainter } from './gpu';
+import type { FramePainter, FramePainterMemory } from './gpu';
 import { createFramePainter } from './painter';
-import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type Presenter, type PresenterStats, type TraceRecord } from './presenter';
+import { EnginePresenter, type FrameLink, type FrameSource, type PresentedFrame, type Presenter, type PresenterMemory, type PresenterStats, type TraceRecord } from './presenter';
 import { PresentWorker, type WorkerLike } from './worker-presenter';
+import type { WorkerMemoryStats } from './present-worker';
 import type { PresentationWarmup } from './prewarm';
-import type { EngineFrameMessage, EngineRouteMessage, OverlayGeometry, PathCommand, Quad, ViewerState, VsyncHint } from './protocol';
+import type { EngineFrameMessage, EngineRouteMessage, OverlayGeometry, PathCommand, Quad, SurfacePool, ViewerState, VsyncHint } from './protocol';
 import { canvasColorSpace, displayIsEdr, ViewSequencer, type ViewInput } from './view-state';
 
 /** The service name the kernel's engine connection registers. */
@@ -56,8 +57,13 @@ export const ENGINE_VIEWER_CHANGED = 'powermove:engine-viewer-changed';
 
 /** One viewer session on the interactive engine. */
 export interface EngineViewerChannel extends FrameLink {
-  /** Ends the session (the engine retires its pool). */
-  close(): void;
+  /** Detaches this viewer. `keepsDrawing`: the caller keeps its claimed
+   *  drawing for its own next session (the final-tab suspension), so the
+   *  connection need not prepare another for a later viewer. */
+  close(options?: { keepsDrawing?: boolean }): void;
+  /** The built-in channel may retire this viewer's imports after GPU and
+   * chrome readers drain. Custom channels can omit this capability. */
+  retireClosedPool?(generation: number): number;
 }
 
 export type EngineViewerHandlers = {
@@ -95,6 +101,11 @@ export interface EngineViewerService {
   readonly offMainThread?: boolean;
   /** One detached drawing prepared by the native connection before mount. */
   readonly drawingWarmup?: PresentationWarmup;
+  /** The built-in connection may pause presentation after the final real
+   * project tab closes. Custom services normally omit this. */
+  mayPresent?(): boolean;
+  /** Built-in bridge counters, read only for an explicit memory snapshot. */
+  importStats?(): { launch: number; held: number; received: number; released: number; videoFrames: number };
   /**
    * "Use New Engine" is on (the kernel's connection): engine frames are the
    * only frames this viewer shows. Until the first frame, while the engine
@@ -190,6 +201,21 @@ export type PresentationOptions = {
   createWorker?: () => WorkerLike;
 };
 
+export type PresentationMemory = {
+  suspended: boolean;
+  channelOpen: boolean;
+  workerPresent: boolean;
+  canvas: { width: number; height: number; visible: boolean };
+  /** Pools announced by the native engine, not measured physical GPU charge. */
+  announcedPools: { generation: number; role: string; surfaces: number; nominalBytes: number; width: number; height: number; format: string }[];
+  announcedNominalBytes: number;
+  pagePresenter: PresenterMemory | null;
+  worker: WorkerMemoryStats | null;
+  painter: FramePainterMemory | null;
+  pendingDrains: number;
+  imports: ReturnType<NonNullable<EngineViewerService['importStats']>> | null;
+};
+
 /** Recent viewer states by sequence, so overlay geometry converts with the
  *  DPR of the state its frame shows. */
 const STATE_HISTORY = 32;
@@ -217,11 +243,17 @@ export class ViewerPresentation {
   private painterFailed = false;
   private drawingPending: { token: number; promise: Promise<boolean> } | null = null;
   private worker: PresentWorker | null = null;
-  /** The worker could not present (no WebGPU in workers): stay on this thread. */
+  /** The worker could not present: stay on this thread. */
   private workerUnavailable = false;
   private presenter: Presenter | null = null;
   private channel: EngineViewerChannel | null = null;
   private chromeLeases: ChromeLeases | null = null;
+  /** Imports survive presenter replacement, but no longer than this viewer.
+   * Keep each generation's lease through a reconnect: chrome reads of the
+   * retained last frame can outlive its old channel. */
+  private readonly poolLeases = new Map<number, Set<ChromeLeases | null>>();
+  private readonly announcedPools = new Map<string, SurfacePool>();
+  private readonly draining = new Set<Promise<void>>();
   private readonly sequencer = new ViewSequencer();
   private readonly states: ViewerState[] = [];
   private params: ViewParams | null = null;
@@ -254,6 +286,8 @@ export class ViewerPresentation {
   private readonly offReady: () => void;
   private sessions = 0;
   private disposed = false;
+  private suspended = false;
+  private suspendToken = 0;
   /** Pools and clock samples that came while no presenter existed. */
   private held: { message: EngineFrameMessage; arrivedMs: number }[] = [];
   /** Bumped whenever the canvas and its drawing are replaced. */
@@ -285,6 +319,42 @@ export class ViewerPresentation {
     if ((options.role ?? 'viewer') === 'viewer') options.stage.dispatchEvent(new Event(ENGINE_STAGE_EVENT, { bubbles: true }));
     if (options.service.exclusive) this.setStatus(PRESENTATION_STATUS.starting);
     this.offReady = options.service.onReady(() => void this.open());
+    void this.open();
+  }
+
+  /** Deliberately leave the editor for Projects after closing its last tab.
+   * Keep the claimed worker and graphics context ready for the next project,
+   * but post headless, release its pool, and hide the old project's pixels.
+   * Engine crashes use `closed()` instead so their last frame remains. */
+  suspend(): void {
+    if (this.disposed || this.suspended) return;
+    this.suspended = true;
+    const token = ++this.suspendToken;
+    this.hide(this.canvasElement, false);
+    this.latestFrame = null;
+    this.setStatus(null);
+    this.closeChannel({ keepsDrawing: true });
+    const drained = Promise.all(this.draining);
+    void drained.then(() => {
+      if (this.disposed || !this.suspended || token !== this.suspendToken) return;
+      this.worker?.trim();
+      this.painter?.trim?.();
+    });
+  }
+
+  /** Reuse the prepared drawing and request a fresh pool after the old
+   * generation was retired from preload. The sequencer's new surface epoch
+   * forces a paused project to deliver a real first frame. */
+  resume(): void {
+    if (this.disposed || !this.suspended) return;
+    this.suspended = false;
+    this.suspendToken++;
+    const state = this.sequencer.renewSurfaces();
+    if (state) {
+      this.states.push(state);
+      if (this.states.length > STATE_HISTORY) this.states.shift();
+    }
+    if (this.exclusive) this.setStatus(PRESENTATION_STATUS.starting);
     void this.open();
   }
 
@@ -380,6 +450,37 @@ export class ViewerPresentation {
   stats(): (PresenterStats & { sessions: number; viewSeq: number; offMainThread: boolean }) | null {
     const stats = this.presenter?.stats;
     return stats ? { ...stats, sessions: this.sessions, viewSeq: this.sequencer.current?.viewSeq ?? 0, offMainThread: this.offMainThread } : null;
+  }
+
+  /** Read allocations only when a measurement asks. Chrome's compositor
+   * copies/backbuffers are opaque, so byte counts here are nominal. */
+  async memoryStats(): Promise<PresentationMemory> {
+    const worker = this.worker ? await this.worker.memoryStats() : null;
+    const pools = [...this.announcedPools.values()].map(pool => {
+      const first = pool.surfaces[0];
+      return {
+        generation: pool.generation,
+        role: pool.role ?? 'color',
+        surfaces: pool.surfaces.length,
+        nominalBytes: pool.surfaces.reduce((sum, surface) => sum + surface.size.width * surface.size.height * (surface.format === 'rgba16Float' ? 8 : 4), 0),
+        width: first?.size.width ?? 0,
+        height: first?.size.height ?? 0,
+        format: first?.format ?? 'none'
+      };
+    });
+    return {
+      suspended: this.suspended,
+      channelOpen: this.channel !== null,
+      workerPresent: this.worker !== null,
+      canvas: { width: this.canvasElement.width, height: this.canvasElement.height, visible: this.canvasElement.style.visibility === 'visible' },
+      announcedPools: pools,
+      announcedNominalBytes: pools.reduce((sum, pool) => sum + pool.nominalBytes, 0),
+      pagePresenter: this.presenter?.memoryStats?.() ?? null,
+      worker,
+      painter: worker?.painter ?? this.painter?.memoryStats?.() ?? null,
+      pendingDrains: this.draining.size,
+      imports: this.options.service.importStats?.() ?? null
+    };
   }
 
   onPresented(listener: (frame: PresentedFrame) => void): () => void {
@@ -632,7 +733,7 @@ export class ViewerPresentation {
 
   /**
    * Makes the canvas's drawing: a presentation worker when the viewer can
-   * start one and the canvas can hand its drawing over, otherwise a WebGPU
+   * start one and the canvas can hand its drawing over, otherwise a WebGL2
    * painter on this thread. False when neither works.
    */
   private makeDrawing(): Promise<boolean> {
@@ -798,7 +899,7 @@ export class ViewerPresentation {
     const token = ++this.backendToken;
     const generation = this.presenter?.stats.generation ?? 0;
     this.chromeLeases?.clear();
-    this.presenter?.dispose();
+    this.stopPresenter(this.presenter);
     this.presenter = null;
     this.latestFrame = null;
     this.worker?.dispose();
@@ -806,6 +907,10 @@ export class ViewerPresentation {
     this.painter?.dispose();
     this.painter = null;
     this.replaceCanvas();
+    // A context can fail while the final-tab home screen is holding a
+    // hidden drawing. Leave a fresh canvas, but create its replacement only
+    // when a project resumes; a dead worker cannot be reopened.
+    if (this.suspended) return;
     if (!(await this.makeDrawing()) || token !== this.backendToken || this.disposed) return;
     const channel = this.channel;
     if (!channel) return;
@@ -879,14 +984,25 @@ export class ViewerPresentation {
   }
 
   private async open(): Promise<void> {
-    if (this.disposed || this.channel) return;
+    if (this.disposed || this.suspended || this.channel) return;
     const token = this.backendToken;
     if (!(await this.makeDrawing())) return;
-    if (this.disposed || this.channel || token !== this.backendToken) return;
+    if (this.disposed || this.suspended || this.channel || token !== this.backendToken) return;
     let opened: EngineViewerChannel | null = null;
     const channel = this.options.service.open({
       message: (message, arrivedMs) => {
         if (this.channel !== opened) return;
+        if (message.type === 'surfacePool') {
+          const pool = message.pool;
+          const role = pool.role ?? 'color';
+          // Replacement generations supersede the same role; depth and
+          // color can coexist and have independent generations.
+          for (const key of this.announcedPools.keys()) if (key.startsWith(`${role}:`)) this.announcedPools.delete(key);
+          this.announcedPools.set(`${role}:${pool.generation}`, pool);
+          let leases = this.poolLeases.get(message.pool.generation);
+          if (!leases) { leases = new Set(); this.poolLeases.set(message.pool.generation, leases); }
+          leases.add(this.chromeLeases);
+        }
         if (message.type === 'routed') {
           // The engine cannot draw this composition at this revision: its
           // frames (older ones still in flight too) leave the stage.
@@ -949,7 +1065,7 @@ export class ViewerPresentation {
     this.chromeLeases?.clear();
     this.chromeLeases = null;
     this.held = [];
-    this.presenter?.dispose();
+    this.stopPresenter(this.presenter);
     this.presenter = null;
     if (this.exclusive) {
       // The engine restarts (section 19): the last frame stays on screen,
@@ -973,17 +1089,17 @@ export class ViewerPresentation {
 
   dispose(): void {
     if (this.disposed) return;
+    // A suspended viewer closed its channel keeping its drawing; that
+    // drawing goes now, so the connection prepares one for the next viewer.
+    const keptDrawing = this.suspended;
     this.disposed = true;
-    this.chromeLeases?.clear();
+    this.suspendToken++;
     this.backendToken++;
     if (this.settleTimer && this.host) this.clearTimer(this.host, this.settleTimer);
     this.settleTimer = 0;
     this.offReady();
     for (const off of this.mediaOffs.splice(0)) off();
-    this.presenter?.dispose();
-    this.presenter = null;
-    this.channel?.close();
-    this.channel = null;
+    this.closeChannel();
     this.worker?.dispose();
     this.worker = null;
     this.painter?.dispose();
@@ -993,6 +1109,47 @@ export class ViewerPresentation {
     this.canvasElement.remove();
     this.setStatus(null);
     if (this.options.stage.dataset['engineStage'] === (this.options.role ?? 'viewer')) delete this.options.stage.dataset['engineStage'];
+    if (keptDrawing) this.options.service.drawingWarmup?.warm();
+  }
+
+  private closeChannel(options?: { keepsDrawing: true }): void {
+    this.chromeLeases?.clear();
+    this.chromeLeases = null;
+    this.held = [];
+    this.stopPresenter(this.presenter);
+    this.presenter = null;
+    const channel = this.channel;
+    channel?.close(options);
+    this.channel = null;
+    const pools = [...this.poolLeases];
+    this.poolLeases.clear();
+    this.announcedPools.clear();
+    // The preload's imports are otherwise retained until a replacement
+    // pool or pagehide. A worker acknowledges `closed` only after its GPU
+    // work and page-side VideoFrame references have drained; chrome reads
+    // can defer retirement further through their leases.
+    if (channel?.retireClosedPool) void Promise.all(this.draining).then(() => {
+      for (const [generation, holders] of pools) {
+        let remaining = holders.size;
+        const oneDrained = (): number => {
+          if (--remaining === 0) return channel.retireClosedPool?.(generation) ?? 0;
+          return 0;
+        };
+        for (const poolLeases of holders) {
+          if (poolLeases) poolLeases.retire(generation, oneDrained);
+          else oneDrained();
+        }
+      }
+    });
+  }
+
+  private stopPresenter(presenter: Presenter | null): void {
+    if (!presenter) return;
+    presenter.dispose();
+    const drained = presenter.drained?.();
+    if (!drained) return;
+    this.draining.add(drained);
+    void drained.then(() => this.draining.delete(drained), () => this.draining.delete(drained));
   }
 }
 

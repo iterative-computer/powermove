@@ -81,9 +81,9 @@ pub struct TextGpu {
     coverage: Coverage,
     item_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
-    paint: [wgpu::RenderPipeline; 2],
-    paint_n32: wgpu::RenderPipeline,
-    paint_bgra: wgpu::RenderPipeline,
+    paint: [crate::pipelines::LazyRenderPipeline; 2],
+    paint_n32: crate::pipelines::LazyRenderPipeline,
+    paint_bgra: crate::pipelines::LazyRenderPipeline,
     filter: crate::composite::path_masks::PathMaskPipelines,
     sampler: wgpu::Sampler,
     images: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
@@ -172,38 +172,43 @@ impl TextGpu {
             },
         };
         let pipeline = |layout: &wgpu::PipelineLayout,
-                        vs: &str,
-                        fs: &str,
+                        vs: &'static str,
+                        fs: &'static str,
                         format: wgpu::TextureFormat,
                         blend: Option<wgpu::BlendState>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(fs),
-                layout: Some(layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some(vs),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
+            let device = device.clone();
+            let module = module.clone();
+            let layout = layout.clone();
+            crate::pipelines::LazyRenderPipeline::new(move || {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(fs),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(vs),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(fs),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         };
         let formats = [Precision::Float16, Precision::Float32].map(working_format);
@@ -249,6 +254,34 @@ impl TextGpu {
             tick: 0,
             stats: TextStats::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn built_count(&self) -> usize {
+        self.paint
+            .iter()
+            .filter(|pipeline| pipeline.is_built())
+            .count()
+            + usize::from(self.paint_n32.is_built())
+            + usize::from(self.paint_bgra.is_built())
+            + self.filter.built_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_all(&self) -> Vec<(String, std::time::Duration)> {
+        let mut times = Vec::new();
+        for (name, pipeline) in [
+            ("paint f16", &self.paint[0]),
+            ("paint f32", &self.paint[1]),
+            ("paint n32", &self.paint_n32),
+            ("paint bgra", &self.paint_bgra),
+        ] {
+            let start = std::time::Instant::now();
+            pipeline.get();
+            times.push((format!("text {name}"), start.elapsed()));
+        }
+        times.extend(self.filter.probe_all());
+        times
     }
 
     pub fn set_coverage(&mut self, coverage: Coverage) {
@@ -790,9 +823,9 @@ impl TextGpu {
         });
         *cleared = true;
         pass.set_pipeline(match target.format() {
-            wgpu::TextureFormat::Rgba8Unorm => &self.paint_n32,
-            wgpu::TextureFormat::Bgra8Unorm => &self.paint_bgra,
-            _ => &self.paint[format_index(precision)],
+            wgpu::TextureFormat::Rgba8Unorm => self.paint_n32.get(),
+            wgpu::TextureFormat::Bgra8Unorm => self.paint_bgra.get(),
+            _ => self.paint[format_index(precision)].get(),
         });
         for (k, d) in draws.iter().enumerate() {
             let bind = match (d.page, d.image) {

@@ -65,11 +65,11 @@ pub(crate) struct PathMaskPipelines {
     items: std::sync::Mutex<ItemCache>,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    rescale: wgpu::RenderPipeline,
-    blur1d: wgpu::RenderPipeline,
-    blur2d: wgpu::RenderPipeline,
-    over: wgpu::RenderPipeline,
-    out: wgpu::RenderPipeline,
+    rescale: crate::pipelines::LazyRenderPipeline,
+    blur1d: crate::pipelines::LazyRenderPipeline,
+    blur2d: crate::pipelines::LazyRenderPipeline,
+    over: crate::pipelines::LazyRenderPipeline,
+    out: crate::pipelines::LazyRenderPipeline,
 }
 
 impl PathMaskPipelines {
@@ -120,34 +120,39 @@ impl PathMaskPipelines {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = |entry: &str, blend: Option<wgpu::BlendState>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(entry),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
+        let pipeline = |entry: &'static str, blend: Option<wgpu::BlendState>| {
+            let device = device.clone();
+            let module = module.clone();
+            let pipeline_layout = pipeline_layout.clone();
+            crate::pipelines::LazyRenderPipeline::new(move || {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         };
         let blend = |src: wgpu::BlendFactor| wgpu::BlendState {
@@ -179,6 +184,41 @@ impl PathMaskPipelines {
             layout,
             sampler,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn built_count(&self) -> usize {
+        [
+            &self.rescale,
+            &self.blur1d,
+            &self.blur2d,
+            &self.over,
+            &self.out,
+        ]
+        .into_iter()
+        .filter(|pipeline| pipeline.is_built())
+        .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_all(&self) -> Vec<(String, std::time::Duration)> {
+        [
+            ("rescale", &self.rescale),
+            ("blur1d", &self.blur1d),
+            ("blur2d", &self.blur2d),
+            ("over", &self.over),
+            ("out", &self.out),
+        ]
+        .into_iter()
+        .map(|(name, pipeline)| {
+            let start = std::time::Instant::now();
+            pipeline.get();
+            (
+                format!("path mask {name} {:?}", self.format),
+                start.elapsed(),
+            )
+        })
+        .collect()
     }
 }
 
@@ -428,8 +468,8 @@ impl PathMaskPipelines {
                 ..Default::default()
             };
             let pipeline = match Composite::from(m.mode) {
-                Composite::SourceOver => &self.over,
-                Composite::DestinationOut => &self.out,
+                Composite::SourceOver => self.over.get(),
+                Composite::DestinationOut => self.out.get(),
             };
             self.pass(
                 device,
@@ -514,7 +554,7 @@ impl PathMaskPipelines {
             device,
             queue,
             encoder,
-            &self.over,
+            self.over.get(),
             &u,
             &img,
             &view,
@@ -549,7 +589,7 @@ impl PathMaskPipelines {
             Pass::Rescale { sample, .. } => {
                 u.map_s = sample.scale;
                 u.map_t = sample.translate;
-                &self.rescale
+                self.rescale.get()
             }
             Pass::Blur1d { dir, taps, .. } => {
                 u.dir = *dir;
@@ -557,7 +597,7 @@ impl PathMaskPipelines {
                 for (i, pair) in taps.chunks(2).enumerate() {
                     u.o[i] = [pair[0].0, pair[0].1, pair[1].0, pair[1].1];
                 }
-                &self.blur1d
+                self.blur1d.get()
             }
             Pass::Blur2d {
                 weights, offsets, ..
@@ -569,7 +609,7 @@ impl PathMaskPipelines {
                 for (i, o) in offsets.chunks(2).enumerate() {
                     u.o[i] = [o[0][0], o[0][1], o[1][0], o[1][1]];
                 }
-                &self.blur2d
+                self.blur2d.get()
             }
         };
         let view = out.texture.create_view(&Default::default());
