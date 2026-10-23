@@ -392,7 +392,8 @@ spool; the source block cache retains decoded samples under today's **128 MiB**
 `audio` budget, evicting least-recently-used blocks which no render has pinned.
 In-flight blocks may briefly exceed the budget, as today's active voices can.
 The host lease's explicit memory-pressure hook releases inactive sample blocks;
-live playback protects pinned blocks and the last 250 ms of input reads.
+live playback protects pinned blocks and blocks read, checked, or asked for
+again (look-ahead and prepared starts) within the last 1.5 s (round 11).
 
 Opening a restored source only probes metadata. Its sequential decode begins
 on the first sample read, with at most two background decodes unless a reader
@@ -1281,6 +1282,45 @@ failure's attribution stays unconfirmed until a failure records both counters.
 The time-mapped tests are real-time tests (40 ms device, `underruns == 0`), so a
 heavily loaded machine can still fail them; such a failure now names the ring.
 
+## Review round 11 (2026-10-23)
+
+The round-10 review found one blocker; round 11 also fixes two of its
+non-blocking notes. Code revisions `f5fc6053c`, `857d7c357` and `bdee98f31`; e2e
+regression `e3830de02`.
+
+| Item | Defect | Fix | Regression evidence |
+|---|---|---|---|
+| PLAY-1 open-on-Play (blocker) | A Play or PlayAround that the ingress forwarded before the warm-up opened the device opened a fresh transport at 0. The seeks before it had only moved `paused_at`, so the audio and the picture following its clock started at 0. | When `AudioCtl::Transport(Play/PlayAround)` opens the playback, it sends `SetLoop`, `Seek{paused_at}` and the start as one batch, like the other opening paths. The device opener is injectable (headless in tests). | `forwarded_play_that_opens_the_device_starts_at_the_playhead` (clock and heard samples, Play and PlayAround) fails without the fix at `media_time: 0`. The e2e test `a Play forwarded before the warm-up opened the device starts at the playhead` failed in the app without the fix (clock started at 0.000 s) and passes with it. |
+| PLAY-1 deferred replay | A forwarded Play that the render thread deferred because the edit's route was pending was replayed with `audio_forwarded=None`. That sent `AudioCtl::Play` a second time and restarted what was being heard. | The view keeps the forwarded marker with the deferred command and replays with it. The route-pending stop clears the marker, because it pauses the audio itself; an explicit Pause clears it too. The audio run keeps going, and the picture joins its clock once the route is decided. | `deferred_forwarded_play_replays_without_restarting_the_audio`: zero `AudioCtl::Play` for a forwarded deferral and one for a non-forwarded deferral. It fails without the fix. |
+| Memory pressure while playing | Playback pressure kept only blocks read within 250 ms. Blocks the look-ahead had decoded but the render had not yet read were evicted, so the render starved when it reached them. This happened in 3 of 3 runs (`starved_renders: 1`). | `prefetch` marks a decoded block it asks for again as wanted (`read_at`; the LRU order is unchanged). Playback pressure keeps blocks read, checked or wanted within 1.5 s. That covers the look-ahead cadence (a quarter second of media at J/K/L rates of 1x or more) and the 1 s paused refresh. Today never evicts active voices' assets. | `memory_pressure_during_playback_keeps_it_whole` sends a grant while paused on a prepared start and then every 3 callbacks for 150 callbacks. The output is bit-identical to offline with zero underruns and zero starved renders, in 3 plain and 3 stressed runs. The new unit test `playback_pressure_keeps_blocks_the_look_ahead_still_wants` also passes. |
+
+Validation on the final code (load average 17 to 24 on the shared Mac):
+
+- pm-node presenter tests: 105 of 105. pm-audio lib: 139 passed, 1 ignored.
+  `tests/chromium.rs`: 5 of 5. `tests/sources.rs`: 7 of 7. Clippy is clean for
+  pm-audio and for pm-node (test-hooks), with all targets.
+- Playback suite, release, single-threaded: 44 of 45, plain and stressed. In both
+  modes the one failure is AUDIO-2,
+  `cold_starts_of_sixteen_distinct_voices_are_complete_and_simultaneous`:
+  - plain: 10.92, 10.97 and 11.51 ms
+  - stressed: 11.35, 11.58 and 12.23 ms
+  - bound: 10.67 ms
+  - all failing trials: 0 omitted prefix, 0 start spread, startup arm `Armed`
+
+  With `--test-threads=4` the suite also fails the 16-voice scheduling asserts
+  with idle-lease `Conflict`. That happens when concurrent in-process Playbacks
+  have different callback periods; one app device has a single period. This is
+  a test-parallelism artifact, not a regression.
+- Electron, `e2e/native-engine-transport.spec.ts` under the lock with
+  `--workers=1`: 5 of 5.
+
+Not rerun in round 11: the paired A8 campaign and the 60 s A7 loop rows. Round 11
+does not change the warm-start path the campaign measures. A Play on an
+already-open device sends the same `[SetLoop, Play]` batch as before. The
+pressure change affects only explicit host memory-pressure grants. The A8 and
+AUDIO-2 qualification remains with the orchestrator's quiet window, as listed
+under Gaps.
+
 ## Current status (review round 10, 2026-10-23)
 
 The round-9 review found three blockers: unbounded resident sequential decodes,
@@ -1301,8 +1341,9 @@ missed, including the keyed cold seek (43.40 vs 33.41 ms max); the keyed edit re
 
 The memory-pressure hook follows explicit host memory-pressure grants. Ordinary
 playback leases and surface-pool replans do not flush audio. Live pressure preserves
-pinned blocks and inputs read within 250 ms, covering the gap between readiness and
-render; the ordinary LRU budget remains 128 MiB. Exact PCM spools trade resident
+pinned blocks and inputs read, checked, or asked for again within 1.5 s (round 11
+widened this from 250 ms reads only; see below); the ordinary LRU budget remains
+128 MiB. Exact PCM spools trade resident
 whole-file memory for temporary disk space (about 115 MB for five minutes of stereo
 AAC), released with their final reader.
 
