@@ -342,9 +342,11 @@ mod tests {
     use pm_protocol::common::Bytes;
     use pm_protocol::snapshot::CompatFrame;
 
+    type Answer = Box<dyn Fn(&CompatFrameRequest) -> Result<Response, String> + Send + Sync>;
+
     struct Host {
         calls: Mutex<Vec<CompatFrameRequest>>,
-        answer: Box<dyn Fn(&CompatFrameRequest) -> Result<Response, String> + Send + Sync>,
+        answer: Answer,
     }
 
     impl CompatHost for Host {

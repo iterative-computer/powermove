@@ -383,6 +383,9 @@ pub enum Command {
     /// The layer raster worker answered a layer snapshot
     /// ([`super::rasters`]).
     RasterDone(Box<super::rasters::RasterDone>),
+    /// A layer raster the worker could not draw from its mirror (none, or
+    /// at another revision): seed it again ([`super::rasters`]).
+    RasterReseed(Box<super::rasters::RasterJob>),
     Shutdown,
 }
 
@@ -630,6 +633,14 @@ pub struct Stats {
     pub compat_waits: u64,
     /// Layer rasters the worker drew off this thread ([`super::rasters`]).
     pub layer_rasters_off_thread: u64,
+    /// Times the worker's document mirror was seeded (a session's first
+    /// raster, or after its mirror was dropped), and jobs it sent back for
+    /// a seed.
+    pub layer_raster_seeds: u64,
+    pub layer_raster_reseeds: u64,
+    /// Document updates on this thread that copied the document because
+    /// the raster worker had not yet taken its own copy of a seed.
+    pub document_copies: u64,
     /// Plays that waited in the native preroll for the window's answers,
     /// those that started at the bound instead, and the longest wait (µs).
     pub prerolls: u64,
@@ -1075,9 +1086,9 @@ struct Thread {
     /// ([`super::rasters`]); `None` when it could not start (they are drawn
     /// here then).
     rasters: Option<super::rasters::RasterWorker>,
-    /// Each session's document as the raster worker reads it, shared once
-    /// per revision (dropped by every document update).
-    shared_docs: BTreeMap<Key, Arc<pm_model::Document>>,
+    /// Sessions whose document the raster worker mirrors: their updates
+    /// go to it too ([`super::rasters`]).
+    raster_mirrors: BTreeSet<Key>,
     /// Devices made so far ([`Gpu::epoch`]).
     gpu_epoch: u64,
 }
@@ -1201,7 +1212,7 @@ pub fn run(
         completer,
         svg: super::svg::SvgState::default(),
         rasters,
-        shared_docs: BTreeMap::new(),
+        raster_mirrors: BTreeSet::new(),
         gpu_epoch: 0,
     };
     thread.check_in();
@@ -1276,6 +1287,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::SnapshotPollFailed { .. } => "snapshot poll failed",
         Command::Compat { .. } => "compat",
         Command::RasterDone(_) => "layer raster done",
+        Command::RasterReseed(_) => "layer raster reseed",
         Command::LoseDevice => "lose device",
         Command::FontsChanged => "fonts",
         #[allow(unreachable_patterns)]
@@ -2025,8 +2037,9 @@ impl Thread {
                 update,
                 posted,
             } => {
-                self.shared_docs.remove(&key);
+                let mirrored = self.raster_mirrors.contains(&key).then(|| update.clone());
                 self.document(key, update, posted);
+                self.mirror_update(key, mirrored);
             }
             Command::FrameSent {
                 key,
@@ -2142,6 +2155,7 @@ impl Thread {
                 }
             }
             Command::RasterDone(done) => self.raster_done(*done),
+            Command::RasterReseed(job) => self.raster_reseed(*job),
             Command::Snapshot(job) => {
                 if let Err(refused) = self.snapshots.push(*job) {
                     let (job, refused) = *refused;
@@ -2556,7 +2570,11 @@ impl Thread {
         fallback.retry_at.remove(&key);
         self.svg.forget_session(key);
         self.docs.remove(&key);
-        self.shared_docs.remove(&key);
+        if self.raster_mirrors.remove(&key)
+            && let Some(rasters) = &self.rasters
+        {
+            rasters.forget(key);
+        }
         self.audio.remove(&key);
         self.audio_prefs.remove(&key);
         if let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
@@ -2572,7 +2590,13 @@ impl Thread {
     fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64) {
         let traced = i64::try_from(update.revision().get()).unwrap_or(i64::MAX);
         let doc = self.docs.entry(key).or_default();
-        if let Err(error) = doc.update(&update) {
+        let copies = doc.copies();
+        let updated = doc.update(&update);
+        if doc.copies() > copies {
+            self.stats().document_copies += 1;
+        }
+        let doc = self.docs.entry(key).or_default();
+        if let Err(error) = updated {
             // The engine applied this batch to its own mirror; this one could
             // not. Ask the renderer for a resync rather than draw a wrong frame.
             let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
@@ -5718,6 +5742,40 @@ impl Thread {
         }
     }
 
+    /// Hands the raster worker an update its mirror of session `key` needs
+    /// (`update`: the one just applied, when it mirrors the session). A
+    /// document that could not take it waits for a resync: the mirror is
+    /// dropped and the next raster seeds a new one.
+    fn mirror_update(&mut self, key: Key, update: Option<DocumentUpdate>) {
+        let Some(update) = update else {
+            return;
+        };
+        let Some(rasters) = &self.rasters else {
+            return;
+        };
+        let applied = self
+            .docs
+            .get(&key)
+            .is_some_and(|d| d.revision() == update.revision().get() && !d.is_broken());
+        if applied {
+            rasters.update(key, update);
+        } else {
+            rasters.forget(key);
+            self.raster_mirrors.remove(&key);
+        }
+    }
+
+    /// A layer raster the worker sent back to be seeded
+    /// ([`Command::RasterReseed`]).
+    fn raster_reseed(&mut self, job: super::rasters::RasterJob) {
+        if let Some(rasters) = self.rasters.as_mut() {
+            rasters.finished();
+        }
+        self.raster_mirrors.remove(&job.job.key);
+        self.stats().layer_raster_reseeds += 1;
+        self.run_layer_snapshot(job.job, now());
+    }
+
     /// The layer raster worker answered a job ([`Command::RasterDone`]).
     fn raster_done(&mut self, done: super::rasters::RasterDone) {
         if let Some(rasters) = self.rasters.as_mut() {
@@ -6278,19 +6336,18 @@ impl Thread {
             return;
         };
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
-        // One copy of the document per revision, shared by every raster of
-        // it (a document update drops it).
-        let document = match self.shared_docs.get(&job.key) {
-            Some(shared) if shared.revision() == doc.revision() => shared.clone(),
-            _ => {
-                let shared = Arc::new(doc.document().clone());
-                self.shared_docs.insert(job.key, shared.clone());
-                shared
-            }
-        };
+        let key = job.key;
+        // The worker draws from its mirror of the document, which the
+        // session's updates keep at this revision; the first raster seeds
+        // it with this thread's document, which the worker copies itself.
+        let mirrored = self.raster_mirrors.contains(&key);
         let raster_job = super::rasters::RasterJob {
             job,
-            document,
+            document: if mirrored {
+                super::rasters::RasterDocument::Mirror
+            } else {
+                super::rasters::RasterDocument::Seed(doc.shared_document())
+            },
             revision,
             device,
             queue,
@@ -6298,24 +6355,33 @@ impl Thread {
         };
         let raster_job = match self.rasters.as_mut() {
             Some(worker) => match worker.submit(raster_job) {
-                Ok(()) => return,
+                Ok(()) => {
+                    if !mirrored {
+                        self.raster_mirrors.insert(key);
+                        self.stats().layer_raster_seeds += 1;
+                    }
+                    return;
+                }
                 Err(job) => *job,
             },
             None => raster_job,
         };
-        // Without the worker: drawn here, as before.
+        // Without the worker: drawn here from the document itself, as
+        // before the worker.
+        let super::rasters::RasterJob { job, .. } = &raster_job;
         let fonts = self.config.fonts.clone();
-        let Some(gpu) = self.gpu.as_mut() else {
+        let (Some(gpu), Some(doc)) = (self.gpu.as_mut(), self.docs.get(&key)) else {
             return;
         };
         let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let _ = composer.use_definitions(key, doc.definitions(), &[]);
         let outcome = super::rasters::layer_snapshot(
             composer.renderer(),
             fonts.as_ref(),
+            doc.document(),
             &raster_job,
             started,
         );
-        let job = &raster_job.job;
         match outcome {
             Ok((envelope, published)) => {
                 self.send(job.host, envelope);
@@ -6577,6 +6643,28 @@ fn fallback_inputs(
     out
 }
 
+/// The renderer's view of session `key`'s compatibility producers for one
+/// render at `revision`; `None` without a producer.
+fn compat_view(
+    store: &std::sync::Arc<std::sync::Mutex<super::compat::CompatStore>>,
+    key: Key,
+    revision: Revision,
+    consulted: Option<Arc<Mutex<Vec<pm_protocol::snapshot::CompatNeed>>>>,
+) -> Option<std::sync::Arc<dyn pm_render::compat::CompatRasters>> {
+    let has = store
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .has_producers(key);
+    has.then(|| {
+        std::sync::Arc::new(super::compat::CompatView {
+            store: store.clone(),
+            key,
+            revision,
+            consulted,
+        }) as std::sync::Arc<dyn pm_render::compat::CompatRasters>
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6666,7 +6754,7 @@ mod tests {
             completer: None,
             svg: super::super::svg::SvgState::default(),
             rasters: None,
-            shared_docs: BTreeMap::new(),
+            raster_mirrors: BTreeSet::new(),
             gpu_epoch: 0,
         };
         (thread, statuses)
@@ -7092,26 +7180,4 @@ mod tests {
         assert_eq!(wrap.next(), u32::MAX);
         assert_eq!(wrap.next(), 1);
     }
-}
-
-/// The renderer's view of session `key`'s compatibility producers for one
-/// render at `revision`; `None` without a producer.
-fn compat_view(
-    store: &std::sync::Arc<std::sync::Mutex<super::compat::CompatStore>>,
-    key: Key,
-    revision: Revision,
-    consulted: Option<Arc<Mutex<Vec<pm_protocol::snapshot::CompatNeed>>>>,
-) -> Option<std::sync::Arc<dyn pm_render::compat::CompatRasters>> {
-    let has = store
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .has_producers(key);
-    has.then(|| {
-        std::sync::Arc::new(super::compat::CompatView {
-            store: store.clone(),
-            key,
-            revision,
-            consulted,
-        }) as std::sync::Arc<dyn pm_render::compat::CompatRasters>
-    })
 }

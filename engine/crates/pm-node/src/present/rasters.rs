@@ -18,14 +18,23 @@
 //! are the same function's (`Renderer::layer_raster`) over the same document
 //! revision, so a raster is identical to the one the render thread drew.
 //!
-//! The document is shared as an `Arc` made once per revision. A renderer is
-//! made per GPU device: after a device loss the next job builds one on the
-//! new device.
+//! The worker keeps a mirror of each session's document it drew for, kept
+//! current by the same updates the render thread applies (as the audio
+//! thread's mirror is): an edit never copies the document on the render
+//! thread. The first raster of a session seeds the mirror with the render
+//! thread's document (`Arc`, no copy there); the worker takes its own copy
+//! and lets go, after which the render thread's updates apply in place
+//! again. A job names the revision it is for; a mirror at another revision
+//! (or none) sends the job back to be seeded afresh
+//! ([`super::render::Command::RasterReseed`]). A renderer is made per GPU
+//! device: after a device loss the next job builds one on the new device.
 
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use pm_engine::document::DocumentUpdate;
 use pm_engine::{Action, LogLevel};
 use pm_protocol::codec;
 use pm_protocol::common::Revision;
@@ -46,10 +55,20 @@ use super::snapshot::SnapshotJob;
 /// requests leave the snapshot queue's memory bound.
 pub const MAX_IN_FLIGHT: usize = 8;
 
+/// The document a [`RasterJob`] is drawn from on the worker.
+pub enum RasterDocument {
+    /// The session's mirror, which the worker keeps at the job's revision.
+    Mirror,
+    /// The render thread's document at the job's revision: the worker
+    /// copies it into the session's mirror (its first raster, or after the
+    /// mirror was dropped).
+    Seed(Arc<pm_model::Document>),
+}
+
 /// One layer raster for the worker.
 pub struct RasterJob {
     pub job: SnapshotJob,
-    pub document: Arc<pm_model::Document>,
+    pub document: RasterDocument,
     pub revision: Revision,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -80,6 +99,10 @@ enum Work {
         device_epoch: u64,
     },
     Job(Box<RasterJob>, i64),
+    /// An update the render thread applied to a session's document.
+    Update(Key, DocumentUpdate),
+    /// The session is gone, or its mirror can no longer follow.
+    Forget(Key),
 }
 
 /// The worker thread and the jobs it holds.
@@ -149,8 +172,23 @@ impl RasterWorker {
             }
             Err(error) => match error.0 {
                 Work::Job(job, _) => Err(job),
-                Work::Warm { .. } => unreachable!("sent a job"),
+                _ => unreachable!("sent a job"),
             },
+        }
+    }
+
+    /// Hands the worker an update the render thread applied to the
+    /// document of session `key` (whose mirror the worker keeps).
+    pub fn update(&self, key: Key, update: DocumentUpdate) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Work::Update(key, update));
+        }
+    }
+
+    /// Drops the worker's mirror of session `key`.
+    pub fn forget(&self, key: Key) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Work::Forget(key));
         }
     }
 
@@ -185,6 +223,7 @@ fn run(
     fonts: Option<crate::fonts::render::RenderFonts>,
 ) {
     let mut painter: Option<Painter> = None;
+    let mut mirrors = Mirrors::default();
     let make = |device: wgpu::Device, queue: wgpu::Queue, device_epoch: u64| Painter {
         device_epoch,
         renderer: Renderer::new(device, queue),
@@ -204,7 +243,17 @@ fn run(
                     painter = Some(make(device, queue, device_epoch));
                 }
             }
-            Work::Job(job, dispatched) => {
+            Work::Update(key, update) => mirrors.update(key, &update),
+            Work::Forget(key) => mirrors.forget(key),
+            Work::Job(mut job, dispatched) => {
+                let key = job.job.key;
+                let source = std::mem::replace(&mut job.document, RasterDocument::Mirror);
+                let Some(document) = mirrors.for_job(key, source, job.revision) else {
+                    if back.send(Command::RasterReseed(job)).is_err() {
+                        return;
+                    }
+                    continue;
+                };
                 let started = now_us();
                 if painter
                     .as_ref()
@@ -220,8 +269,8 @@ fn run(
                 if let Some(fonts) = &fonts {
                     fonts.sync(&mut p.renderer, &mut p.fonts_installed);
                 }
-                let outcome = layer_snapshot(&mut p.renderer, fonts.as_ref(), &job, started);
-                let key = job.job.key;
+                let outcome =
+                    layer_snapshot(&mut p.renderer, fonts.as_ref(), document, &job, started);
                 let time = job.job.request.time.get();
                 let done = match outcome {
                     Ok((envelope, published)) => {
@@ -277,6 +326,50 @@ fn run(
     }
 }
 
+/// The worker's mirrors of the documents it draws from, one per session.
+#[derive(Default)]
+struct Mirrors(HashMap<Key, pm_model::Document>);
+
+impl Mirrors {
+    /// An update the render thread applied. A mirror that cannot take it
+    /// is dropped (the next job is seeded again).
+    fn update(&mut self, key: Key, update: &DocumentUpdate) {
+        if let Some(mirror) = self.0.get_mut(&key)
+            && update.apply_to(mirror).is_err()
+        {
+            self.0.remove(&key);
+        }
+    }
+
+    fn forget(&mut self, key: Key) {
+        self.0.remove(&key);
+    }
+
+    /// The document a job at `revision` draws from: a seed becomes the
+    /// session's mirror (copied here, off the render thread, which then
+    /// holds its document alone again). `None`: no mirror at that revision;
+    /// it is dropped and the job goes back for a seed.
+    fn for_job(
+        &mut self,
+        key: Key,
+        source: RasterDocument,
+        revision: Revision,
+    ) -> Option<&pm_model::Document> {
+        if let RasterDocument::Seed(document) = source {
+            self.0.insert(key, Arc::unwrap_or_clone(document));
+        }
+        if self
+            .0
+            .get(&key)
+            .is_none_or(|m| m.revision() != revision.get())
+        {
+            self.0.remove(&key);
+            return None;
+        }
+        self.0.get(&key)
+    }
+}
+
 fn send(sink: &Sink, port: pm_protocol::host::PortId, envelope: Envelope) {
     match codec::encode(&envelope) {
         Ok(bytes) => sink(vec![Action::Send { port, bytes }]),
@@ -297,12 +390,12 @@ type Failure = (ErrorCode, String);
 pub fn layer_snapshot(
     renderer: &mut Renderer,
     fonts: Option<&crate::fonts::render::RenderFonts>,
+    document: &pm_model::Document,
     raster_job: &RasterJob,
     started: i64,
 ) -> Result<(Envelope, Option<(String, u64)>), Failure> {
     let job = &raster_job.job;
     let revision = raster_job.revision;
-    let document = &*raster_job.document;
     let SnapshotTarget::Layer {
         layer,
         scale,
@@ -478,4 +571,121 @@ pub fn layer_snapshot(
         render_us: render_us.clamp(0, i64::from(u32::MAX)) as u32,
     };
     Ok((reply(SnapshotOutcome::Rendered(result)), published))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pm_model::json::Value;
+    use pm_protocol::common::SessionId;
+    use pm_protocol::host::PortId;
+
+    fn key(session: u64) -> Key {
+        (PortId(1), SessionId::new(session).unwrap())
+    }
+
+    fn doc(revision: u64, title: &str) -> pm_model::Document {
+        let value =
+            pm_model::json::parse_bytes(format!(r#"{{"title":"{title}"}}"#).as_bytes()).unwrap();
+        pm_model::Document::new(Some(value), revision)
+    }
+
+    fn replace(revision: u64, title: &str) -> DocumentUpdate {
+        DocumentUpdate::Replace {
+            root: doc(revision, title).to_value().map(Arc::new),
+            revision: Revision::new(revision).unwrap(),
+        }
+    }
+
+    fn title(document: &pm_model::Document) -> Option<Value> {
+        document
+            .root()
+            .and_then(|r| r.get("title"))
+            .map(|n| n.to_value())
+    }
+
+    #[test]
+    fn a_seed_becomes_the_mirror_and_updates_keep_it_at_the_render_threads_revision() {
+        let mut mirrors = Mirrors::default();
+        let seed = Arc::new(doc(3, "a"));
+        let held = seed.clone();
+        let rev = |r| Revision::new(r).unwrap();
+        let mirror = mirrors
+            .for_job(key(1), RasterDocument::Seed(seed), rev(3))
+            .unwrap();
+        assert_eq!(title(mirror), title(&held));
+        // The worker let go of the seed: the render thread holds it alone.
+        assert_eq!(Arc::strong_count(&held), 1);
+        mirrors.update(key(1), &replace(4, "b"));
+        let mirror = mirrors
+            .for_job(key(1), RasterDocument::Mirror, rev(4))
+            .unwrap();
+        assert_eq!(mirror.revision(), 4);
+        assert_eq!(title(mirror), title(&doc(4, "b")));
+        // Another session has no mirror until seeded.
+        assert!(
+            mirrors
+                .for_job(key(2), RasterDocument::Mirror, rev(4))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_mirror_at_another_revision_sends_the_job_back_and_is_dropped() {
+        let mut mirrors = Mirrors::default();
+        let rev = |r| Revision::new(r).unwrap();
+        assert!(
+            mirrors
+                .for_job(key(1), RasterDocument::Seed(Arc::new(doc(3, "a"))), rev(3))
+                .is_some()
+        );
+        // An update the render thread applied but the worker never saw.
+        assert!(
+            mirrors
+                .for_job(key(1), RasterDocument::Mirror, rev(5))
+                .is_none()
+        );
+        // Dropped: even the old revision is no longer served from it.
+        assert!(
+            mirrors
+                .for_job(key(1), RasterDocument::Mirror, rev(3))
+                .is_none()
+        );
+        // A forgotten session is seeded again too.
+        mirrors
+            .for_job(key(1), RasterDocument::Seed(Arc::new(doc(6, "c"))), rev(6))
+            .unwrap();
+        mirrors.forget(key(1));
+        assert!(
+            mirrors
+                .for_job(key(1), RasterDocument::Mirror, rev(6))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_update_the_mirror_cannot_take_drops_it() {
+        let mut mirrors = Mirrors::default();
+        let rev = |r| Revision::new(r).unwrap();
+        mirrors
+            .for_job(key(1), RasterDocument::Seed(Arc::new(doc(3, "a"))), rev(3))
+            .unwrap();
+        let bad = DocumentUpdate::Patches {
+            // A property on a string: JavaScript's strict mode rejects it.
+            patches: Arc::from(vec![pm_model::patch::Patch::set(
+                vec![
+                    pm_model::patch::PathPart::Key("title".into()),
+                    pm_model::patch::PathPart::Key("x".into()),
+                ],
+                Value::Number(1.0),
+            )]),
+            revision: rev(4),
+        };
+        mirrors.update(key(1), &bad);
+        assert!(
+            mirrors
+                .for_job(key(1), RasterDocument::Mirror, rev(3))
+                .is_none()
+        );
+    }
 }
