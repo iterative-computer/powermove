@@ -110,34 +110,6 @@ struct Measured {
 enum Ceiling {
     /// The whole mix.
     Mix(f64),
-    /// Ours with a document edit that reproduces today's behavior where an
-    /// allowed difference changes it.
-    Adjusted(f64, fn(&mut Value) -> bool),
-}
-
-/// Today's bus while a 5.1 source plays: the mono layer folds at √½.
-fn mono_at_center_fold(doc: &mut Value) -> bool {
-    let Value::Object(root) = doc else {
-        return false;
-    };
-    let Some(Value::Array(layers)) = root.get_mut("layers") else {
-        return false;
-    };
-    let mut changed = false;
-    for layer in layers {
-        let Value::Object(l) = layer else { continue };
-        if !matches!(l.get("name"), Some(Value::String(n)) if n.to_string_lossy() == "mono22k.wav")
-        {
-            continue;
-        }
-        if let Some(Value::Object(d)) = l.get_mut("d")
-            && let Some(Value::Number(gain)) = d.get_mut("gain")
-        {
-            *gain *= std::f64::consts::FRAC_1_SQRT_2;
-            changed = true;
-        }
-    }
-    changed
 }
 
 /// Each project's residual ceiling (dBFS). Today's export model
@@ -151,9 +123,12 @@ fn ceiling(name: &str) -> Ceiling {
         "corpus-media-audio" => Ceiling::Mix(-90.0),
         "embedded" => Ceiling::Mix(-105.0),
         "mono" => Ceiling::Mix(-150.0),
-        // A 5.1 source widens today's bus, so mono folds at −3 dB through
-        // the center (difference 12; docs/engine/pm-audio.md).
-        "layouts" => Ceiling::Adjusted(-145.0, mono_at_center_fold),
+        // Today's bus sums its clips in the order of a pointer hash set
+        // (`AudioSummingJunction::outputs_`), so where three or more clips
+        // feed one bus channel at once its own captures differ by an ulp
+        // from run to run (−149 dBFS between two captures of
+        // `corpus-media-audio`): that spread is the ceiling there.
+        "wide-quad" | "wide-71" => Ceiling::Mix(-145.0),
         n if n.starts_with("real-") => Ceiling::Mix(-90.0),
         _ => Ceiling::Mix(-240.0),
     }
@@ -338,16 +313,6 @@ fn offline_mixes_match_todays_export_audio() {
         // (docs/engine/pm-audio.md) are accounted for, as regression guards.
         let (residual, ceiling) = match ceiling(&name) {
             Ceiling::Mix(db) => (m.rms_diff_db, db),
-            Ceiling::Adjusted(db, edit) => {
-                let mut adjusted =
-                    parse(&std::fs::read_to_string(pdir.join("loaded.json")).unwrap()).unwrap();
-                assert!(
-                    edit(&mut adjusted),
-                    "{name}: the adjustment found nothing to edit"
-                );
-                let (adj, _) = render(adjusted, &comp, &media, rate, expected_len);
-                (residual_db(&adj, &legacy, n, |_| true), db)
-            }
         };
         m.guarded_db = residual;
         if residual > ceiling {
@@ -379,26 +344,6 @@ fn offline_mixes_match_todays_export_audio() {
         );
     }
     assert!(failures.is_empty(), "{failures:#?}");
-}
-
-/// The rms residual (dBFS) of the stereo mix over samples `[0, n)` where
-/// `keep` holds (a mono legacy capture counts for both channels).
-fn residual_db(
-    ours: &[Vec<f32>],
-    legacy: &[Vec<f32>],
-    n: usize,
-    keep: impl Fn(usize) -> bool,
-) -> f64 {
-    let lc = legacy.len();
-    let (mut e, mut k) = (0f64, 0usize);
-    for c in 0..2 {
-        let l = &legacy[c.min(lc - 1)];
-        for i in (0..n).filter(|&i| keep(i)) {
-            e += (ours[c][i] as f64 - l[i] as f64).powi(2);
-            k += 1;
-        }
-    }
-    db((e / k.max(1) as f64).sqrt())
 }
 
 /// Media the graph could not open: (layer, asset, reason).

@@ -134,6 +134,12 @@ function generateMedia(dir: string): Record<string, string> {
     files[`noise${rate}.wav`] = wav(rate, [noise(rate, 1.2, 0.4, rate), noise(rate, 1.2, 0.4, rate + 1)], STEREO);
   }
   files['noise48.wav'] = wav(48000, [noise(48000, 3, 0.4, 7), noise(48000, 3, 0.4, 8)], STEREO);
+  // Wide buses: today's master takes the widest connected clip's channel
+  // count, up-mixes every clip to it and folds it to stereo at the end.
+  files['mono48-long.wav'] = wavPlain(48000, [tone(48000, 4, 440, 0.5)]);
+  files['wide51.wav'] = wav(48000, [300, 400, 500, 60, 700, 800].map(hz => tone(48000, 1.2, hz, 0.1)), SIDE51);
+  files['wide-quad.wav'] = wav(48000, [300, 400, 700, 800].map(hz => tone(48000, 1.2, hz, 0.1)), 0x33);
+  files['wide71.wav'] = wav(48000, [300, 400, 500, 60, 700, 800, 900, 1000].map(hz => tone(48000, 1.2, hz, 0.1)), 0x63F);
   files['mono22k.wav'] = wav(22050, [tone(22050, 3, 330, 0.6)], MONO);
   files['surround.wav'] = wav(48000, [300, 400, 500, 60, 700, 800].map(hz => tone(48000, 3, hz, 0.2)), SIDE51);
   // Mono in the ways files carry it: plain, with a center mask, with no mask, at 22.05 kHz.
@@ -260,6 +266,15 @@ function projects(): AudioProject[] {
   b = newProject('audio/rates', { name: 'Sample rates', fps: 30, dur: 3.2 });
   [22050, 32000, 44100, 88200, 96000].forEach((rate, i) => b.add(audioLayer(b, `noise${rate}.wav`, { trim: 0.05, gain: 0.8 }, { from: i * 0.6, dur: 0.9 })));
   out.push({ name: 'rates', doc: b.root, notes: 'Full-band noise at 22.05, 32, 44.1, 88.2 and 96 kHz, overlapping.' });
+
+  // A mono and a stereo clip throughout; a wide clip from 1 s to 2 s.
+  for (const [name, media] of [['wide-51', 'wide51.wav'], ['wide-quad', 'wide-quad.wav'], ['wide-71', 'wide71.wav']] as const) {
+    b = newProject(`audio/${name}`, { name: `Wide bus ${name}`, fps: 30, dur: 3.5 });
+    b.add(audioLayer(b, 'mono48-long.wav', { gain: 0.8 }, { from: 0, dur: 3.5 }));
+    b.add(audioLayer(b, 'tone660.wav', { gain: 0.5 }, { from: 0, dur: 3.5 }));
+    b.add(audioLayer(b, media, { gain: 0.9 }, { from: 1, dur: 1 }));
+    out.push({ name, doc: b.root, notes: `A mono and a stereo clip throughout, ${media} from 1 s to 2 s.` });
+  }
 
   b = newProject('audio/embedded', { name: 'Embedded audio', fps: 30, dur: 2 });
   b.add(b.layer('video', { name: 'MOV soundtrack', from: 0.2, dur: 1.6, d: { asset: ref('h264-aac.mov'), fit: 'contain', w: 320, h: 180, trim: 0.3, embeddedAudio: true, audioGain: 0.8 } }));

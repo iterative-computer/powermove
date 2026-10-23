@@ -2895,8 +2895,7 @@ impl RenderThread {
                 // Today schedules every clip and its gain envelope when
                 // playback starts, seeks or wraps (`sync(time, true)`), from
                 // the playhead: a run starts today's model there.
-                let p = f64::from(self.transport.rate());
-                self.mixer.set_today_range(lo as f64 / p, f64::INFINITY, lo);
+                self.mixer.set_today_playback(lo);
             }
             let rendering = std::time::Instant::now();
             let mut result = {

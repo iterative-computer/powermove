@@ -179,6 +179,8 @@ struct Voice {
     prefill: Option<Prefill>,
     /// Today's export model of a linear voice ([`crate::today`]).
     today: Today,
+    /// The up-mix into the current wide band's bus ([`crate::today::up_mix`]).
+    bus_matrix: Vec<Vec<f32>>,
 }
 
 /// Whether a voice plays through today's export model.
@@ -269,6 +271,13 @@ pub struct Mixer {
     today_range: crate::today::Range,
     /// Scratch: source frames a converted voice reads.
     today_src: Vec<Vec<f32>>,
+    /// The bus width of the band being rendered when today's bus is wider
+    /// than stereo (0 otherwise; [`Self::render_current`]).
+    bus: usize,
+    /// Scratch for wide bands.
+    wide_out: Vec<Vec<f32>>,
+    band_out: Vec<Vec<f32>>,
+    band_strips: Vec<Vec<Vec<f32>>>,
 }
 
 // A normal ring's worth of complete PCM covers independent priming.
@@ -859,6 +868,10 @@ impl Mixer {
             standard_content: false,
             today_range: crate::today::Range::default(),
             today_src: vec![],
+            bus: 0,
+            wide_out: vec![],
+            band_out: vec![],
+            band_strips: vec![],
         };
         m.glide_len = (m.format.sample_rate as usize * RETUNE_GLIDE_MS as usize / 1000).max(1);
         m.set_graph(m.doc.clone(), graph);
@@ -873,7 +886,26 @@ impl Mixer {
     /// ([`crate::today`]): context frame 0 is project sample `origin`.
     /// Exports set their range; the default is the project from its start.
     pub fn set_today_range(&mut self, t0: f64, t1: f64, origin: i64) {
-        let range = crate::today::Range { t0, t1, origin };
+        self.set_range(crate::today::Range {
+            t0,
+            t1,
+            origin,
+            live: false,
+        });
+    }
+
+    /// Today's playback from project sample `start` (a run of the player).
+    pub fn set_today_playback(&mut self, start: i64) {
+        let p = self.format.sample_rate as f64;
+        self.set_range(crate::today::Range {
+            t0: start as f64 / p,
+            t1: f64::INFINITY,
+            origin: start,
+            live: true,
+        });
+    }
+
+    fn set_range(&mut self, range: crate::today::Range) {
         if range == self.today_range {
             return;
         }
@@ -1577,6 +1609,7 @@ impl Mixer {
                     fixed: None,
                     prefill: prefills.get(&(v.id.clone(), v.map_key)).cloned(),
                     today: Today::Unbuilt,
+                    bus_matrix: vec![],
                 }
             })
             .collect();
@@ -1746,7 +1779,54 @@ impl Mixer {
         std::mem::swap(&mut self.retime, &mut g.retime);
     }
 
-    /// Mixes the current state (no glides, no meters).
+    /// The project samples `[a, b)` over which a clip wider than stereo is
+    /// connected to today's bus, with its channel count: from the range's
+    /// start (export) or a second before the clip (playback) until its
+    /// source node is disconnected ([`crate::today::SourceRead::disconnected`]).
+    fn wide_spans(&mut self, comps: &[pm_eval::Comp<'_>]) -> Result<Vec<(i64, i64, usize)>> {
+        let graph = self.graph.clone();
+        let p = self.format.sample_rate as f64;
+        let range = self.today_range;
+        let mut spans = Vec::new();
+        for (vi, plan) in graph.voices.iter().enumerate() {
+            let channels = plan.source.channels();
+            if channels <= 2 {
+                continue;
+            }
+            self.ensure_today(vi, plan, comps)?;
+            match &self.voices[vi].today {
+                Today::On(t) => {
+                    let Some(clip) = &t.clip else { continue };
+                    let first = clip.read.start_frame + range.origin;
+                    let from = if range.live {
+                        range
+                            .origin
+                            .max(first - (crate::today::LIVE_LOOKAHEAD * p) as i64)
+                    } else {
+                        range.origin
+                    };
+                    spans.push((from, range.origin + clip.read.disconnected(), channels));
+                }
+                _ => {
+                    // Time-mapped clips: connected while their window lasts.
+                    let (a, b) = voice_bounds(&self.voices[vi].reader, plan, p);
+                    spans.push((
+                        range
+                            .origin
+                            .max(a.saturating_sub((p * crate::today::LIVE_LOOKAHEAD) as i64)),
+                        b.saturating_add(128),
+                        channels,
+                    ));
+                }
+            }
+        }
+        Ok(spans)
+    }
+
+    /// Mixes the current state (no glides, no meters). Where today's bus is
+    /// wider than stereo (a 4, 6, or more channel clip connected), every
+    /// clip is up-mixed into that bus, the master applies there, and the bus
+    /// folds to stereo last, as Web Audio's graph does.
     fn render_current(
         &mut self,
         start: i64,
@@ -1755,8 +1835,161 @@ impl Mixer {
         options: &RenderOptions,
         monitor_solo: Option<&HashSet<String>>,
     ) -> Result<RenderReport> {
+        let end = start + frames as i64;
+        let doc = self.doc.clone();
+        let graph = self.graph.clone();
+        let spans = if self.format.channels() == 2 && frames > 0 {
+            let comps = graph.resolve(&doc)?;
+            self.wide_spans(&comps)?
+        } else {
+            vec![]
+        };
+        let spans: Vec<_> = spans
+            .into_iter()
+            .filter(|&(a, b, _)| a < end && b > start)
+            .collect();
+        if spans.is_empty() {
+            return self.render_band(start, frames, out, options, monitor_solo, 0);
+        }
+        let mut cuts = vec![start, end];
+        for &(a, b, _) in &spans {
+            cuts.extend([a, b].into_iter().filter(|&x| x > start && x < end));
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
         let channels = self.format.channels();
-        assert_eq!(out.len(), channels, "one output vector per bus channel");
+        for c in out.iter_mut() {
+            c.clear();
+            c.resize(frames, 0.0);
+        }
+        let mut band_out = std::mem::take(&mut self.band_out);
+        band_out.resize_with(channels, Vec::new);
+        let mut band_strips = std::mem::take(&mut self.band_strips);
+        band_strips.resize_with(graph.strips.len(), Vec::new);
+        for s in band_strips.iter_mut() {
+            s.resize_with(channels, Vec::new);
+            for c in s.iter_mut() {
+                c.clear();
+                c.resize(frames, 0.0);
+            }
+        }
+        let mut report = RenderReport::default();
+        for w in cuts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let bus = spans
+                .iter()
+                .filter(|&&(x, y, _)| x <= a && y > a)
+                .map(|&(_, _, c)| c)
+                .max()
+                .unwrap_or(0);
+            let r = self.render_band(
+                a,
+                (b - a) as usize,
+                &mut band_out,
+                options,
+                monitor_solo,
+                bus,
+            )?;
+            let at = (a - start) as usize;
+            for (o, c) in out.iter_mut().zip(&band_out) {
+                o[at..at + c.len()].copy_from_slice(c);
+            }
+            for (full, s) in band_strips.iter_mut().zip(&self.strips) {
+                for (f, c) in full.iter_mut().zip(s) {
+                    f[at..at + c.len()].copy_from_slice(c);
+                }
+            }
+            report.voices = report.voices.max(r.voices);
+            report.starved = report.starved.max(r.starved);
+            report.dropped_voice_frames += r.dropped_voice_frames;
+            for (id, n) in r.dropped_by_voice {
+                match report.dropped_by_voice.iter_mut().find(|(i, _)| *i == id) {
+                    Some(e) => e.1 += n,
+                    None => report.dropped_by_voice.push((id, n)),
+                }
+            }
+            for (list, from) in [
+                (&mut report.waiting_voices, r.waiting_voices),
+                (&mut report.starved_voices, r.starved_voices),
+                (&mut report.heard_whole, r.heard_whole),
+            ] {
+                for id in from {
+                    if !list.contains(&id) {
+                        list.push(id);
+                    }
+                }
+            }
+            report.errors.extend(r.errors);
+        }
+        // A voice is heard whole only if no band starved it.
+        let starved = report.starved_voices.clone();
+        report.heard_whole.retain(|id| !starved.contains(id));
+        std::mem::swap(&mut self.strips, &mut band_strips);
+        self.band_strips = band_strips;
+        self.band_out = band_out;
+        Ok(report)
+    }
+
+    /// Mixes `[start, start + frames)` on a bus of `bus` channels (0: the
+    /// mix format's), folded to the mix format.
+    #[allow(clippy::too_many_arguments)]
+    fn render_band(
+        &mut self,
+        start: i64,
+        frames: usize,
+        out: &mut [Vec<f32>],
+        options: &RenderOptions,
+        monitor_solo: Option<&HashSet<String>>,
+        bus: usize,
+    ) -> Result<RenderReport> {
+        let format_channels = self.format.channels();
+        assert_eq!(
+            out.len(),
+            format_channels,
+            "one output vector per bus channel"
+        );
+        self.bus = bus;
+        if bus > 2 {
+            for (voice, plan) in self.voices.iter_mut().zip(&self.graph.voices) {
+                voice.bus_matrix = crate::today::up_mix(plan.source.channels(), bus);
+            }
+        }
+        let mut wide_out = std::mem::take(&mut self.wide_out);
+        let channels = if bus > 2 { bus } else { format_channels };
+        if bus > 2 {
+            wide_out.resize_with(bus, Vec::new);
+            wide_out.truncate(bus);
+        }
+        let out_ref: &mut [Vec<f32>] = if bus > 2 { &mut wide_out } else { out };
+        let result = self.render_into(start, frames, out_ref, options, monitor_solo, channels);
+        self.bus = 0;
+        if bus > 2 {
+            for c in out.iter_mut() {
+                c.clear();
+                c.resize(frames, 0.0);
+            }
+            crate::today::down_mix(&wide_out, out, 0, frames);
+            // The meters read each strip as a stereo tap does (a 2-channel
+            // speakers node: the same fold).
+            for strip in self.strips.iter_mut() {
+                let mut folded = vec![vec![0f32; frames]; 2];
+                crate::today::down_mix(strip, &mut folded, 0, frames);
+                *strip = folded;
+            }
+        }
+        self.wide_out = wide_out;
+        result
+    }
+
+    fn render_into(
+        &mut self,
+        start: i64,
+        frames: usize,
+        out: &mut [Vec<f32>],
+        options: &RenderOptions,
+        monitor_solo: Option<&HashSet<String>>,
+        channels: usize,
+    ) -> Result<RenderReport> {
         for c in out.iter_mut() {
             c.clear();
             c.resize(frames, 0.0);
@@ -2135,7 +2368,11 @@ impl Mixer {
         // Fold into the strip with the per-sample gain.
         fold(
             &mut self.strips[voice.strip],
-            &voice.matrix,
+            if self.bus > 2 {
+                &voice.bus_matrix
+            } else {
+                &voice.matrix
+            },
             &self.voice_out,
             &self.gains,
             offset,
@@ -2296,7 +2533,11 @@ impl Mixer {
         let voice = &self.voices[vi];
         fold(
             &mut self.strips[voice.strip],
-            &voice.matrix,
+            if self.bus > 2 {
+                &voice.bus_matrix
+            } else {
+                &voice.matrix
+            },
             &self.voice_out,
             &self.gains,
             offset,
@@ -2397,19 +2638,18 @@ impl Mixer {
             complete
         };
         let voice = &self.voices[vi];
-        let strip = &mut self.strips[voice.strip];
-        for (bus, row) in strip.iter_mut().zip(&voice.matrix) {
-            for (c, &m) in row.iter().enumerate() {
-                if m == 0.0 {
-                    continue;
-                }
-                let src = &self.voice_out[c];
-                let dst = &mut bus[offset..offset + n];
-                for i in 0..n {
-                    dst[i] += src[i] * (m * self.gains[i]);
-                }
-            }
-        }
+        fold(
+            &mut self.strips[voice.strip],
+            if self.bus > 2 {
+                &voice.bus_matrix
+            } else {
+                &voice.matrix
+            },
+            &self.voice_out,
+            &self.gains,
+            offset,
+            n,
+        );
         Ok(!complete)
     }
 

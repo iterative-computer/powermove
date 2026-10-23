@@ -292,6 +292,8 @@ pub struct SourceRead {
     /// between frames).
     pub read: f64,
     pub len: u64,
+    /// The buffer's end stopped it (rather than the duration).
+    pub buffer_end: bool,
 }
 
 impl SourceRead {
@@ -360,13 +362,30 @@ impl SourceRead {
             }
             k
         };
+        let buffer_end = to_end <= total;
         let total = total.min(to_end);
         SourceRead {
             start_frame,
             frames: total,
             read,
             len,
+            buffer_end,
         }
+    }
+
+    /// The first context frame after the source node's output is
+    /// disconnected from the graph: it finishes in the render quantum where
+    /// it stops (a duration that ends on a quantum's end stops in the next
+    /// one), and the context disables a finished node's output after that
+    /// quantum. Until then its channel count widens the bus it feeds.
+    pub fn disconnected(&self) -> i64 {
+        let end = self.start_frame + self.frames;
+        let finish = if self.buffer_end {
+            (end - 1).max(self.start_frame).div_euclid(QUANTUM)
+        } else {
+            end.div_euclid(QUANTUM)
+        };
+        (finish + 1) * QUANTUM
     }
 
     /// The read position of output `k`.
@@ -413,6 +432,63 @@ pub struct Range {
     pub t0: f64,
     pub t1: f64,
     pub origin: i64,
+    /// Playback: today connects a clip when it comes within a second of the
+    /// playhead (`LIVE_LOOKAHEAD`); an export connects every clip first.
+    pub live: bool,
+}
+
+/// Today's playback lookahead (`LIVE_LOOKAHEAD` in `legacy/core/audio.ts`).
+pub const LIVE_LOOKAHEAD: f64 = 1.0;
+
+/// Web Audio's up-mix of `from` channels into a bus of `to` (Chromium's
+/// `AudioBus::SumFromByUpMixing`, speakers interpretation): one row per bus
+/// channel, each a copy of at most one source channel.
+pub fn up_mix(from: usize, to: usize) -> Vec<Vec<f32>> {
+    let mut m = vec![vec![0f32; from]; to];
+    let mut copy = |dst: usize, src: usize| m[dst][src] = 1.0;
+    match (from, to) {
+        (f, t) if f == t => (0..f).for_each(|c| copy(c, c)),
+        (1, 2) | (1, 4) => {
+            copy(0, 0);
+            copy(1, 0);
+        }
+        (1, 6) => copy(2, 0),
+        (2, 4) | (2, 6) => {
+            copy(0, 0);
+            copy(1, 1);
+        }
+        (4, 6) => {
+            copy(0, 0);
+            copy(1, 1);
+            copy(4, 2);
+            copy(5, 3);
+        }
+        (f, t) => (0..f.min(t)).for_each(|c| copy(c, c)),
+    }
+    m
+}
+
+/// Folds a bus of `bus.len()` channels to stereo as the destination does
+/// (`AudioBus::SumFromByDownMixing`, in its operation order), adding into
+/// `out` frames `[at, at + n)` from bus frames `[0, n)`.
+pub fn down_mix(bus: &[Vec<f32>], out: &mut [Vec<f32>], at: usize, n: usize) {
+    let half_sqrt = 0.5f32.sqrt();
+    for i in 0..n {
+        let (l, r) = match bus.len() {
+            1 => (bus[0][i], bus[0][i]),
+            4 => (
+                bus[2][i].mul_add(0.5, bus[0][i].mul_add(0.5, 0.0)),
+                bus[3][i].mul_add(0.5, bus[1][i].mul_add(0.5, 0.0)),
+            ),
+            6 => (
+                bus[4][i].mul_add(half_sqrt, bus[2][i].mul_add(half_sqrt, 0.0 + bus[0][i])),
+                bus[5][i].mul_add(half_sqrt, bus[2][i].mul_add(half_sqrt, 0.0 + bus[1][i])),
+            ),
+            _ => (bus[0][i], bus.get(1).map_or(0.0, |c| c[i])),
+        };
+        out[0][at + i] += l;
+        out[1][at + i] += r;
+    }
 }
 
 impl Default for Range {
@@ -421,6 +497,7 @@ impl Default for Range {
             t0: 0.0,
             t1: f64::INFINITY,
             origin: 0,
+            live: false,
         }
     }
 }
@@ -772,7 +849,9 @@ impl Clip {
         }
         let local_start = start - layer_start;
         let source_offset = shape.trim + local_start;
-        if !(source_duration > 0.0) || source_offset >= source_duration - 1e-4 {
+        if source_duration.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater)
+            || source_offset >= source_duration - 1e-4
+        {
             return Ok(None);
         }
         let duration = (end - start).min(source_duration - source_offset);
