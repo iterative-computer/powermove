@@ -49,6 +49,16 @@ const MAX_PENDING_COMMANDS: usize = 64;
 
 /// Where the levels of what is heard go (the renderer's port).
 pub type LevelsSink = Box<dyn Fn(AudioLevels) + Send>;
+
+/// Opens a viewer's playback: the default output device in the app, a
+/// headless device side in tests.
+type DeviceOpener = Box<
+    dyn FnMut(MixFormat, Arc<SourceCache>, PlaybackConfig) -> pm_audio::Result<Playback> + Send,
+>;
+
+fn default_device_opener() -> DeviceOpener {
+    Box::new(Playback::start)
+}
 /// How long the controls must rest before a warmed thread checks whether
 /// the composition is audible and opens the device.
 pub const WARM_IDLE: Duration = Duration::from_millis(100);
@@ -331,6 +341,7 @@ impl AudioLink {
                     warm_due: None,
                     paused_at: 0,
                     transport_running: false,
+                    open_device: default_device_opener(),
                 }
                 .run()
             },
@@ -342,6 +353,19 @@ impl AudioLink {
             status,
             thread: Some(thread),
         })
+    }
+
+    /// A link without a control thread: the test reads what it is sent.
+    #[cfg(test)]
+    pub(super) fn test_link() -> (AudioLink, Receiver<AudioCtl>) {
+        let (tx, rx) = channel();
+        let link = AudioLink {
+            tx,
+            clock: Arc::default(),
+            status: Arc::default(),
+            thread: None,
+        };
+        (link, rx)
     }
 
     pub fn send(&self, ctl: AudioCtl) {
@@ -432,6 +456,7 @@ struct Control {
     /// Latest paused playhead, including seeks before the device opens.
     paused_at: i64,
     transport_running: bool,
+    open_device: DeviceOpener,
 }
 
 impl Control {
@@ -584,7 +609,8 @@ impl Control {
             AudioCtl::Transport(command) => {
                 match command {
                     TransportCommand::Play { .. } | TransportCommand::PlayAround { .. } => {
-                        if self.playback.is_none() && !self.open() {
+                        let opening = self.playback.is_none();
+                        if opening && !self.open() {
                             return true;
                         }
                         if self.dirty {
@@ -593,13 +619,26 @@ impl Control {
                         // Seek/pause/loop controls have already reached the
                         // producer through this same FIFO. Play its own current
                         // playhead rather than a delayed render-thread estimate.
+                        // A playback this Play opened starts at 0 and never got
+                        // the seeks before it (they only moved `paused_at`
+                        // while no device was open): seek it to the playhead
+                        // first, as the other opening paths do.
                         self.transport_running = true;
-                        self.commands(&[
-                            TransportCommand::SetLoop {
-                                range: self.loop_range,
-                            },
-                            command,
-                        ]);
+                        let set_loop = TransportCommand::SetLoop {
+                            range: self.loop_range,
+                        };
+                        if opening {
+                            self.commands(&[
+                                set_loop,
+                                TransportCommand::Seek {
+                                    time: Ticks::new(self.paused_at).unwrap_or(Ticks::ZERO),
+                                    mode: SeekMode::Exact,
+                                },
+                                command,
+                            ]);
+                        } else {
+                            self.commands(&[set_loop, command]);
+                        }
                     }
                     TransportCommand::Seek {
                         time,
@@ -858,7 +897,7 @@ impl Control {
     fn open(&mut self) -> bool {
         let rate = pm_audio::mixer::project_sample_rate(&self.doc);
         let cache = SourceCache::new(SOURCE_BUDGET, DECODE_WORKERS);
-        match Playback::start(MixFormat::stereo(rate), cache, PlaybackConfig::default()) {
+        match (self.open_device)(MixFormat::stereo(rate), cache, PlaybackConfig::default()) {
             Ok(playback) => {
                 playback.set_standard_evaluator(|| {
                     pm_eval::Evaluator::new()
@@ -1091,6 +1130,7 @@ mod tests {
             warm_due: None,
             paused_at: 0,
             transport_running: false,
+            open_device: default_device_opener(),
         };
         let invalid_loop = TransportCommand::SetLoop {
             range: Some(TickRange {
@@ -1144,6 +1184,128 @@ mod tests {
         let problems = status.lock().unwrap().problems.clone();
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].contains("loop range must be non-empty"));
+    }
+
+    /// A Play or a play around forwarded before the device opened (the
+    /// warm-up waits for the controls to rest) plays from the playhead the
+    /// seeks before it set, not from the fresh transport's 0: in the
+    /// clock the picture follows and in what is heard.
+    #[test]
+    fn forwarded_play_that_opens_the_device_starts_at_the_playhead() {
+        use pm_audio::playback::DeviceSide;
+
+        let rate = 48_000u32;
+        let directory = tempfile::Builder::new()
+            .prefix("pm-node-audio-open-play-")
+            .tempdir()
+            .unwrap();
+        // Silence for 2 s, then a 0.5 tone: only a start at the playhead
+        // hears the tone at once.
+        let file = directory.path().join("steps.wav");
+        let left: Vec<f32> = (0..rate as usize * 4)
+            .map(|i| if i < rate as usize * 2 { 0.0 } else { 0.5 })
+            .collect();
+        write_wav(&file, rate, &[left, vec![0.0; rate as usize * 4]]);
+        let text = format!(
+            r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":30,"dur":4,"layers":[{}],"comps":{{}},"assets":{{}},"params":{{}}}}"#,
+            clip("steps", "a").replace(r#""dur":1"#, r#""dur":4"#),
+        );
+        let playhead = Ticks::from_whole_seconds(2);
+        for start in [
+            TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            },
+            TransportCommand::PlayAround {
+                pre_roll: Ticks::ZERO,
+                post_roll: Ticks::from_whole_seconds(1),
+            },
+        ] {
+            let sides: Arc<Mutex<Vec<DeviceSide>>> = Arc::default();
+            let caches: Arc<Mutex<Vec<Arc<SourceCache>>>> = Arc::default();
+            let (opened_sides, opened_caches) = (sides.clone(), caches.clone());
+            let (_tx, rx) = channel();
+            let media = MediaMap(Arc::new(BTreeMap::from([(
+                "a".to_string(),
+                Some(file.clone()),
+            )])));
+            let mut control = Control {
+                rx,
+                clock: Arc::new(Mutex::new(None)),
+                status: Arc::new(Mutex::new(AudioStatus::default())),
+                doc: Arc::new(pm_model::Document::new(Some(parse(&text).unwrap()), 1)),
+                composition: "C".into(),
+                media,
+                playback: None,
+                pending_commands: VecDeque::new(),
+                dirty: true,
+                broken: false,
+                loop_range: None,
+                last_project: None,
+                audio_scrub: false,
+                solo: None,
+                levels: Box::new(|_| {}),
+                last_levels: None,
+                levels_running: false,
+                watch_until: None,
+                warm: true,
+                warm_due: None,
+                paused_at: 0,
+                transport_running: false,
+                open_device: Box::new(move |format, cache, config| {
+                    opened_caches.lock().unwrap().push(cache.clone());
+                    let (playback, side) =
+                        Playback::start_headless(format, cache, config, rate, 2, 5_000)?;
+                    opened_sides.lock().unwrap().push(side);
+                    Ok(playback)
+                }),
+            };
+            // The app's `seek exact` then `play`, both forwarded while the
+            // warm-up has not opened the device yet.
+            assert!(control.apply(
+                AudioCtl::Transport(TransportCommand::Seek {
+                    time: playhead,
+                    mode: SeekMode::Exact,
+                }),
+                None,
+            ));
+            assert!(control.playback.is_none(), "the seek alone opens nothing");
+            assert_eq!(control.paused_at, playhead.get());
+            assert!(control.apply(AudioCtl::Transport(start), None));
+            assert!(control.playback.is_some(), "{start:?} opens the device");
+            let problems = control.status.lock().unwrap().problems.clone();
+            assert!(problems.is_empty(), "{start:?}: {problems:?}");
+            let clock = control.playback.as_ref().unwrap().clock().unwrap();
+            assert_eq!(clock.media_time, playhead, "{start:?}: {clock:?}");
+
+            let mut side = sides.lock().unwrap().pop().unwrap();
+            let host_start = pm_audio::clock::host_now_us();
+            let mut out = vec![0.0; 256 * 2];
+            let (mut frame, mut first_heard) = (0u64, None);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            // Up to half a second of device time, paced like a device: the
+            // start waits for its voices (pre-roll), then the tone is the
+            // first thing heard. From 0 it would be 2 s of silence.
+            while frame < rate as u64 / 2 && Instant::now() < deadline {
+                side.callback(&mut out, 2, host_start + frame * 1_000_000 / rate as u64);
+                if let Some(sample) = out.chunks_exact(2).map(|p| p[0]).find(|s| *s != 0.0) {
+                    first_heard = Some(sample);
+                    break;
+                }
+                frame += 256;
+                std::thread::sleep(Duration::from_micros(256 * 1_000_000 / rate as u64));
+            }
+            let clock = control.playback.as_ref().unwrap().clock().unwrap();
+            assert!(clock.media_time >= playhead, "{start:?}: {clock:?}");
+            assert!(
+                first_heard.is_some_and(|s| (s - 0.5).abs() < 1e-3),
+                "{start:?}: first heard {first_heard:?} at frame {frame}"
+            );
+            control.shutdown();
+            drop(side);
+            for cache in caches.lock().unwrap().drain(..) {
+                cache.shutdown();
+            }
+        }
     }
 
     /// The status polls every 33 ms while a bad block fails each segment
