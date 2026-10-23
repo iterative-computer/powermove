@@ -610,6 +610,10 @@ struct View {
     /// The farthest frame whose raster-override needs were asked ahead
     /// (`keep_compat_asked`), at which revision and clock epoch.
     compat_asked_ahead: Option<(Revision, u32, i64)>,
+    /// The last playing frame drawn, and what planning one frame ahead
+    /// costs (µs, weighted toward the newest).
+    last_drawn_k: Option<i64>,
+    plan_ahead_cost_us: Option<f64>,
     /// Level 1 SVG buckets the latest frame drew without (the window could
     /// not draw them): asked for again while it shows them.
     svg_without: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
@@ -731,11 +735,13 @@ const COMPAT_ASK_AHEAD_BUDGET: std::time::Duration = std::time::Duration::from_m
 /// frame, long before the schedule draws them, so a frame does not wait a
 /// turn of the window's main thread for its own.
 const COMPAT_KEEP_AHEAD: i64 = 8;
-/// Planning time spent keeping them asked after a frame: about one frame's
-/// plan on a large project, so the frontier moves a frame per frame drawn
-/// (the first turn of a run, which asks the whole span, gets
-/// [`COMPAT_ASK_AHEAD_BUDGET`]).
-const COMPAT_KEEP_AHEAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
+/// The planning is done only in the render thread's slack (the schedule
+/// waits for the next frame's slot) and only when the slack holds the
+/// plan's measured cost and this margin: planning ahead on a frame's own
+/// turn cost PMV3 15 to 80 ms a frame and made it skip frames.
+const PLAN_AHEAD_MARGIN_US: f64 = 2_000.0;
+/// A plan's cost before one was measured (µs).
+const PLAN_AHEAD_COST_US: f64 = 8_000.0;
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -2260,6 +2266,8 @@ impl Thread {
             external_wait: None,
             compat_waiting: None,
             compat_asked_ahead: None,
+            last_drawn_k: None,
+            plan_ahead_cost_us: None,
             svg_without: Vec::new(),
             requests: VecDeque::new(),
             retry: None,
@@ -3449,8 +3457,8 @@ impl Thread {
                             self.event(key, Event::Frame(descriptor), Some(revision));
                         }
                     }
-                    if drew {
-                        self.keep_compat_asked(key, k);
+                    if drew && let Some(view) = self.views.get_mut(&key) {
+                        view.last_drawn_k = Some(k);
                     }
                 }
                 Next::Skip { .. } => {
@@ -3459,7 +3467,23 @@ impl Thread {
                     }
                     self.stats().late_skipped += 1;
                 }
-                Next::WaitUntil(_) | Next::Idle => break,
+                Next::WaitUntil(at) => {
+                    // The render thread's slack before the next frame: the
+                    // next frames are planned in it (their raster-override
+                    // needs asked, their rasters drawn ahead).
+                    if let Some(view) = self.views.get(&key)
+                        && view.clock.is_playing()
+                        && let Some(k) = view.last_drawn_k
+                    {
+                        let slack = at - now() as f64;
+                        let cost = view.plan_ahead_cost_us.unwrap_or(PLAN_AHEAD_COST_US);
+                        if slack > cost + PLAN_AHEAD_MARGIN_US {
+                            self.keep_compat_asked(key, k, slack - PLAN_AHEAD_MARGIN_US);
+                        }
+                    }
+                    break;
+                }
+                Next::Idle => break,
             }
         }
         self.send_stats(key);
@@ -3560,7 +3584,7 @@ impl Thread {
     /// needs are asked of the window now (those not answered or asked), and
     /// their level 1 shape and path rasters are drawn ahead on threads of
     /// their own, so the frames find both ready when they come.
-    fn keep_compat_asked(&mut self, key: Key, k: i64) {
+    fn keep_compat_asked(&mut self, key: Key, k: i64, slack_us: f64) {
         if !self.config.document {
             return;
         }
@@ -3582,26 +3606,30 @@ impl Thread {
         let dir = if view.clock.rate().num < 0 { -1 } else { 1 };
         let step = dir;
         let target = k + COMPAT_KEEP_AHEAD * step;
-        let (mut at, budget) = match view.compat_asked_ahead {
-            Some((r, e, j)) if r == revision && e == epoch && (j - k) * dir > 0 => {
-                (j, COMPAT_KEEP_AHEAD_BUDGET)
-            }
+        let mut at = match view.compat_asked_ahead {
+            Some((r, e, j)) if r == revision && e == epoch && (j - k) * dir > 0 => j,
             previous => {
                 // A seek, a new run or an edit: what was drawn ahead for
                 // the old line will not be drawn.
                 if previous.is_some_and(|(_, e, _)| e != epoch) {
                     composer.renderer().forget_ahead();
                 }
-                (k, COMPAT_ASK_AHEAD_BUDGET)
+                k
             }
         };
+        let cost_estimate = view.plan_ahead_cost_us.unwrap_or(PLAN_AHEAD_COST_US);
         let composition = view.state.composition.as_str().to_owned();
         let f = view.clock.frame_ticks();
         let mut fresh = Vec::new();
         composer
             .renderer()
             .set_compat_rasters(self::compat_view(&self.compat, key, revision));
-        while (target - at) * dir > 0 && started.elapsed() < budget {
+        let mut planned = 0u32;
+        // Another plan only while the slack still holds one.
+        while (target - at) * dir > 0
+            && started.elapsed().as_micros() as f64 + cost_estimate <= slack_us
+        {
+            let one = std::time::Instant::now();
             at += step;
             let time = view.clock.wrap(at * f);
             let needs = composer.plan_ahead_at(
@@ -3617,8 +3645,14 @@ impl Thread {
                 needs,
                 std::time::Instant::now(),
             ));
+            let us = one.elapsed().as_micros() as f64;
+            view.plan_ahead_cost_us = Some(view.plan_ahead_cost_us.map_or(us, |c| c + 0.25 * (us - c)));
+            planned += 1;
         }
         composer.renderer().set_compat_rasters(None);
+        if planned == 0 {
+            return;
+        }
         let ahead = composer.renderer().vector_ahead_stats();
         view.compat_asked_ahead = Some((revision, epoch, at));
         for chunk in fresh.chunks(pm_protocol::snapshot::MAX_COMPAT_NEEDS) {
