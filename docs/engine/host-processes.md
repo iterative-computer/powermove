@@ -554,11 +554,22 @@ After those batches (not yet re-measured on the private projects):
   message to the worker, and the worker's stats ride on its presented
   frames.
 
-The 120 Hz rig (perfbench, merged) on its 500-layer synthetic project, on
-this branch before the last item (load 38 to 50): paused seeks cost the
-page 23 main-thread tasks per step (p50) against today's 8, with 6
-messages posted and 6 received; playing presented 165 of 360 frames
-against today's 282 (the engine rendered 171). The engine path needs a
+The 120 Hz rig (perfbench, merged) on its 500-layer synthetic project
+(`perfbench-measurements/rig-bigrender-20261023.jsonl`). Before (load
+20): paused seeks cost the page 21 main-thread tasks per step (p50)
+against today's 8, with 6 messages posted and 6 received; playing
+presented 154 of 360 frames against today's 342 (the engine rendered
+157). The rig's per-step counts of the engine path (`enginePathPerStep`)
+showed every frame still handed back through the page: the viewer's
+presentation wraps the session's link for the chrome planes' leases and
+dropped the release port. After passing it through (frames paired with
+chrome planes still go back through the page), and the items above (load
+10): paused seeks 19 tasks per step against today's 9, 3 messages posted
+(a frame and a clock sample to the worker, a seek to the engine) and 4
+received (the frame, the seek's clock sample, the worker's presented
+frame, the rig's own completion listener); playing presented 306 of 360
+against today's 359 (the engine rendered 324: its render thread takes 9.6
+ms a frame, more than 8.33). The engine path needs a
 message from the engine for each frame and one back from the
 presentation worker: a fresh `VideoFrame` of a shared surface is made only
 on the page's main thread, and the page and the worker share no memory
