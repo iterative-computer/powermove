@@ -110,6 +110,7 @@ fn matrix_10_probe_and_gpu_decode_match_bt2020_table_4() {
     // Isolate Y'cC'bcC'rc decoding from wide-gamut conversion, which still
     // has its own legacy parity gate on an un-interpreted level-1 asset.
     doc["assets"]["clip"]["interpret"] = json!({"primaries":"bt709"});
+    doc["colorDepth"] = json!(32);
     let mut resolver = MapResolver::default();
     resolver.paths.insert("clip".into(), path);
     let mut renderer = Renderer::headless().unwrap();
@@ -123,6 +124,7 @@ fn matrix_10_probe_and_gpu_decode_match_bt2020_table_4() {
         )
         .unwrap();
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba32Float);
     let pixels = renderer.read_rgba(&frame).unwrap();
     for (i, codes) in patches.into_iter().enumerate() {
         let ycc = [

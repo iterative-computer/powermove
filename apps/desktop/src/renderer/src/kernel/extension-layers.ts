@@ -4,7 +4,6 @@ const ID = /^[a-z][a-z0-9._-]{0,79}$/;
 const PARAM = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
 const COLOR = /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i;
 const MAX_FRAGMENT_BYTES = 96_000;
-const MAX_PARAMS = 48;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
 
 function validateJson(value: unknown, path: string, seen: WeakSet<object>, budget: { nodes: number }, depth = 0): void {
@@ -62,8 +61,8 @@ export function validateExtensionLayerDefinition(definition: ExtensionLayerDefin
       throw new Error(`extension layer "${definition.id}" ${key} must be between 1 and 16384`);
     }
   }
-  if (!Array.isArray(definition.params) || definition.params.length > MAX_PARAMS) {
-    throw new Error(`extension layer "${definition.id}" supports at most ${MAX_PARAMS} parameters`);
+  if (!Array.isArray(definition.params)) {
+    throw new Error(`extension layer "${definition.id}" "params" must be an array`);
   }
   const seen = new Set<string>();
   for (const param of definition.params) validateParam(param, seen);

@@ -6,6 +6,8 @@ export function installFile(source: string, destination: string): Promise<boolea
 export function fullSync(fd: number): Promise<boolean>;
 
 export function fontFamilies(): string[] | null;
+/** Changes when Core Text registers or unregisters fonts; null without native notifications. */
+export function fontRegistryVersion(): number | null;
 
 /** Per pid, whether its sandbox denies a mach-lookup of `name`; null without the addon. */
 export function sandboxDeniesLookup(pids: readonly number[], name: string): boolean[] | null;

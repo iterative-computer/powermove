@@ -1,4 +1,5 @@
 <script lang="ts">
+  import VisualReply from './VisualReply.svelte';
   import ErrorNotice from '../../errors/ErrorNotice.svelte';
 
   import { onMount } from 'svelte';
@@ -81,7 +82,7 @@
         type="button" class="agent-inline-attachment is-sent"
         aria-label={segment.attachment.dataUrl ? `View ${segment.attachment.name}` : `Reveal ${segment.attachment.name} in Finder`}
         title={segment.attachment.name}
-        onclick={() => void activatePromptAttachment(PM, segment.attachment)}
+        onclick={(event) => void activatePromptAttachment(PM, segment.attachment, event.currentTarget)}
       >{#if segment.attachment.dataUrl}<img src={segment.attachment.dataUrl} alt="" />{:else}<span class="agent-inline-attachment-type" aria-hidden="true">{(segment.attachment.name.split('.').pop() || 'file').slice(0, 5).toUpperCase()}</span>{/if}<span>{segment.attachment.name.replace(/\.[^.]+$/, '') || segment.attachment.name}</span></button>{/if}{/each}{:else}<Markdown text={displayPromptText(message.text || '') || (message.attachments?.length ? `Attached ${message.attachments.length} file${message.attachments.length === 1 ? '' : 's'}` : '')} />{/if}</div>
     </div>
   </div>
@@ -111,6 +112,11 @@
           onclick={() => PM.AgentUI?.continueWithProject?.(messageIndex)}>Continue with project tools</button>
       {/if}
     {/if}
+    {#if message.visualReplies?.length}
+      <div class="agent-visual-attachments" aria-label="Visual attachments">
+        {#each message.visualReplies as artifact (artifact.id)}<VisualReply {PM} {artifact} />{/each}
+      </div>
+    {/if}
     {#if message.attachments?.length}
       <div class="agent-msg-files"><AttachmentChips {PM} items={message.attachments} /></div>
     {/if}
@@ -118,6 +124,7 @@
 {/if}
 
 <style>
+  .agent-visual-attachments{display:flex;gap:10px;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;padding:6px 0 4px;margin-top:6px}
   .agent-prompt-segment { display: contents; }
   .agent-prompt-segment :global(.agent-md-p:only-child) { display: inline; }
   .agent-prompt-signal{position:absolute;inset:-8px;overflow:hidden;border-radius:22px 22px 12px 22px;pointer-events:none;z-index:0}

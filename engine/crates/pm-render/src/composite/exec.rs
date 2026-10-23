@@ -20,7 +20,7 @@ use pm_protocol::color::{BlendMode, Precision, WorkingEncoding};
 use super::effects::{Covered, EffectContext, Padding, PreparedEffects, PreparedTransition};
 use super::gpu::{
     FLAG_BLEND_IN_E, FLAG_HALF, FLAG_HALF_NEAREST, FLAG_LINEAR, FLAG_MASKS, FLAG_MATTE,
-    FLAG_MATTE_INVERTED, FLAG_MATTE_LUMA, FLAG_PATH_MASKS, Op, OpUniform,
+    FLAG_MATTE_INVERTED, FLAG_MATTE_LUMA, FLAG_PATH_MASKS, FLAG_UNORM8, Op, OpUniform,
 };
 use super::region::Region;
 use super::{AdjustmentNode, LayerNode, Masks, Matte, Node};
@@ -58,6 +58,9 @@ impl Exec<'_> {
             if self.pipelines.ops.half_nearest(self.device, self.queue) {
                 flags |= FLAG_HALF_NEAREST;
             }
+        }
+        if self.precision == Precision::Unorm8 {
+            flags |= FLAG_UNORM8;
         }
         OpUniform {
             m: full_quad(full),

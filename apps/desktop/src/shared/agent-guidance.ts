@@ -3,13 +3,13 @@ import { DEPRECATION_GUIDANCE, formatDeprecationWarning, type ExtensionDeprecati
 /** A small common brief. Detailed procedures stay in task-specific sections
  * and the shipped API guide; matching a task never grants more authority. */
 export const AGENT_TASK_GUIDANCE = `TASK FOCUS
-Complete the requested deliverable with the simplest supported workflow. Answer questions without edits. Preserve earlier user decisions; newest corrections win. Recover omitted details with thread_read before guessing.
-Inspect live targets and attached frames. A catalog page is not the whole project: discover targets with get_project_state indexOnly/layerSearch/nextLayerOffset, then read properties. Missing page entries are not missing capabilities.
-Auto and Supervised support project edits and extension creation. Full access changes permissions, not creative capabilities. Composition only needs Auto or Supervised for extension authoring, not Full access.
-Use only task-relevant procedures. Never substitute panels for effects, extensions for simple keyframe edits, or test scenes in the user's project.`;
+Use the simplest supported workflow. Questions: no edits. Preserve decisions; newest corrections win. Recover omissions with thread_read.
+Inspect live targets/frames. get_project_state indexOnly/layerSearch/nextLayerOffset discovers targets; then read properties. Missing entries are not missing capabilities.
+Auto and Supervised support project edits and extension creation. Full access changes permissions only. Composition only needs Auto/Supervised for authoring.
+Relevant procedures only. Never replace effects with panels or simple keyframes with extensions; no test scenes in the user's project.`;
 
 export const AGENT_CREATIVE_GUIDANCE = `CREATIVE JUDGMENT
-Choose one clear visual idea that follows the brief, references and existing style. Use coherent type scale, restrained color, consistent spacing and a focal point. Keep text legible with readable holds. Give entrances, exits, easing and rhythm a purpose; avoid gratuitous movement and dead time. Inspect beginning, middle, end and transition frames. Repair concrete visible defects; valid source alone is not visual quality.`;
+Follow the brief/references/style with one clear visual idea: coherent type scale, restrained color, consistent spacing, focal point, legible text/readable holds. Make entrances/exits/easing/rhythm purposeful; avoid gratuitous motion/dead time. Inspect beginning/middle/end/transitions. Fix visible defects; valid source alone is not visual quality.`;
 
 export function agentTaskProfile(request = ''): { extensions: boolean; footage: boolean; creative: boolean } {
   // Callers pass the current request before appended history. Unknown tasks

@@ -643,8 +643,10 @@ mod tests {
         times.extend(pipelines.ops.path_masks.probe_all());
         times.extend(pipelines.resample.probe_all());
         times.extend(text.probe_all());
-        assert_eq!(times.len(), 48);
-        assert_eq!(built(), 48);
+        // 18 2D, 12 composite and 12 resample (rgba16float, rgba32float and
+        // colordepth's rgba8unorm), path masks and text.
+        assert_eq!(times.len(), 56);
+        assert_eq!(built(), 56);
         for (name, duration) in times {
             eprintln!("lazy pipeline first use: {name}={duration:?}");
         }

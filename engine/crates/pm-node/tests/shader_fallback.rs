@@ -347,6 +347,7 @@ fn child_engine() {
     let band = |from: u32, rows: u32, v: u16| {
         event(Event::ShaderFallback(ShaderFallbackMessage::Pixels(
             ShaderFallbackPixels {
+                rgba32f: None,
                 key: r.key.clone(),
                 width: r.width,
                 height: r.height,
@@ -551,6 +552,7 @@ fn child_engine() {
     let answer = |from: u32, rows: u32| {
         event(Event::ShaderFallback(ShaderFallbackMessage::Pixels(
             ShaderFallbackPixels {
+                rgba32f: None,
                 key: effect.key.clone(),
                 width: effect.width,
                 height: effect.height,
@@ -570,6 +572,96 @@ fn child_engine() {
         frame(m).filter(|d| d.revision.get() == 3)
     });
     release(&mut host, &shown);
+
+    // Switch only the project's working depth. The same effect must send
+    // RGBA32F input bands and accept exact binary32 result bands on the
+    // interactive port, including values binary16 would round away.
+    let mut doc4 = doc3.clone();
+    doc4["colorDepth"] = json!(32);
+    let ops = pm_model::ops::diff_ops(Some(&model(&doc3)), Some(&model(&doc4)));
+    send(
+        &mut host,
+        event(Event::ApplyPatches(PatchBatch {
+            document: "Ptracer".into(),
+            base_revision: Revision::new(3).unwrap(),
+            revision: Revision::new(4).unwrap(),
+            origin: PatchOrigin::Edit,
+            encoding: PatchEncoding::CanonicalV1,
+            patch_count: ops.len() as u32,
+            body: Bytes(pm_model::binary::encode(&ops).unwrap()),
+        })),
+    );
+    let full = inbox.wait(Duration::from_secs(20), |m| match &m.message {
+        Message::Event {
+            body: Event::ShaderFallback(ShaderFallbackMessage::Requests { requests }),
+        } if requests.iter().any(|r| r.color_depth == 32) => {
+            requests.iter().find(|r| r.color_depth == 32).cloned()
+        }
+        Message::Event {
+            body: Event::Failure(f),
+        } if f.error.code == ErrorCode::Unsupported => {
+            panic!("depth-32 effect routed: {:?}", f.error)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        (full.layer.as_str(), full.textures, full.color_depth),
+        ("box", 2, 32)
+    );
+    let mut received_rows = [0u32; 2];
+    let mut non_half_value = false;
+    while received_rows.iter().any(|rows| *rows < full.height) {
+        let input = inbox.wait(Duration::from_secs(20), |m| match &m.message {
+            Message::Event {
+                body: Event::ShaderFallback(ShaderFallbackMessage::Input(i)),
+            } if i.key == full.key => Some(i.clone()),
+            _ => None,
+        });
+        assert!(input.rgba16f.0.is_empty());
+        let bytes = &input.rgba32f.as_ref().expect("binary32 input band").0;
+        assert_eq!(bytes.len(), input.width as usize * input.rows as usize * 16);
+        for raw in bytes.chunks_exact(4) {
+            let bits = u32::from_le_bytes(raw.try_into().unwrap());
+            let value = f32::from_bits(bits);
+            if value.is_finite()
+                && pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(value)).to_bits()
+                    != bits
+            {
+                non_half_value = true;
+            }
+        }
+        received_rows[input.texture as usize] += input.rows;
+    }
+    assert_eq!(received_rows, [full.height, full.height]);
+    assert!(
+        non_half_value,
+        "depth-32 input carried only binary16-representable values"
+    );
+    let codes = [0x3f80_0008u32, 0x3eaa_aaab, 0x8000_0000, 0x3f80_0000];
+    let answer32 = |from: u32, rows: u32| {
+        let bytes = (0..rows * full.width)
+            .flat_map(|_| codes)
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        event(Event::ShaderFallback(ShaderFallbackMessage::Pixels(
+            ShaderFallbackPixels {
+                key: full.key.clone(),
+                width: full.width,
+                height: full.height,
+                row: from,
+                rows,
+                rgba16f: Bytes(Vec::new()),
+                rgba32f: Some(Bytes(bytes)),
+            },
+        )))
+    };
+    let middle = full.height / 2;
+    send(&mut host, answer32(middle, full.height - middle));
+    send(&mut host, answer32(0, middle));
+    let full_frame = inbox.wait(Duration::from_secs(20), |m| {
+        frame(m).filter(|d| d.revision.get() == 4)
+    });
+    release(&mut host, &full_frame);
     println!("CHILD-OK");
 }
 

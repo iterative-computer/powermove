@@ -10,10 +10,14 @@
 
 use std::sync::Arc;
 
-use pm_model::{JsString, Node};
+use pm_model::{JsString, Node, NodeKind};
 
+use crate::address;
 use crate::comp::Comp;
-use crate::js_sem::{JsResult, JsValue};
+use crate::easing::SpringTables;
+use crate::js_sem::{self, JsResult, JsValue};
+use crate::keyframes;
+use crate::motion_path::PathTiming;
 use crate::node::{self, Got};
 
 /// Compiles expression source text.
@@ -151,6 +155,159 @@ impl ExprContext<'_> {
             Got::Node(n) => node::get(n, b"value").to_js(),
             _ => JsValue::Undefined,
         })
+    }
+}
+
+impl<'a> ExprContext<'a> {
+    /// `comp.layers?.find(item => item.id === layerId)`.
+    fn find_layer(&self, layer_id: &JsString) -> Result<Option<&'a Node>, String> {
+        let layers = match self.comp.get(b"layers") {
+            Got::Node(n) => n,
+            _ => return Ok(None),
+        };
+        let NodeKind::Array(items) = layers.kind() else {
+            return Err("comp.layers?.find is not a function".into());
+        };
+        let id = JsValue::String(layer_id.clone());
+        for item in items {
+            if node::is_nullish(Some(item)) {
+                let base = if matches!(item.kind(), NodeKind::Null) {
+                    "null"
+                } else {
+                    "undefined"
+                };
+                return Err(format!("Cannot read properties of {base} (reading 'id')"));
+            }
+            if js_sem::strict_eq(&node::get(item, b"id").to_js(), &id) {
+                return Ok(Some(item));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The expression helper `sample(layerId, channel, localTime)` (`anim.ts`):
+    /// the layer's raw channel (`PM.findProp`) at a local time, its keys
+    /// evaluated without expressions (`evalKfs`), or its static value. `Err`
+    /// is the thrown `Error`'s message.
+    pub fn sample(
+        &self,
+        layer_id: &JsString,
+        channel: &JsString,
+        local_time: f64,
+    ) -> Result<Got<'a>, String> {
+        if !local_time.is_finite() {
+            return Err("Sample time must be finite".into());
+        }
+        let source = match self.find_layer(layer_id)? {
+            Some(layer) => address::find_prop(layer, channel).map_err(|e| e.message)?,
+            None => Got::Undefined,
+        };
+        if !source.truthy() {
+            return Err("Sampled channel is unavailable".into());
+        }
+        let Some(prop) = source.node() else {
+            // A computed value (a string's character): `kf` and `v` are absent.
+            return Ok(Got::Undefined);
+        };
+        let kf = node::get(prop, b"kf");
+        let keyed = match kf.node() {
+            Some(k) => node::get(k, b"length").truthy(),
+            None => false,
+        };
+        if keyed {
+            let mut springs = SpringTables::new();
+            return keyframes::evaluate(kf.node(), local_time, false, &mut springs)
+                .map(Got::Value)
+                .map_err(|e| e.message);
+        }
+        Ok(node::get(prop, b"v"))
+    }
+
+    /// The expression helper `motionPath(layerId, channel, progress, start,
+    /// end)` (`anim.ts` `motionPathValue`): the position axis `channel` at the
+    /// arc-length fraction `progress` of the layer's original position curves
+    /// between the local times `start` and `end` ([`PathTiming`]).
+    pub fn motion_path(
+        &self,
+        layer_id: &JsString,
+        channel: &JsString,
+        progress: f64,
+        start: f64,
+        end: f64,
+    ) -> Result<f64, String> {
+        const AXES: [&[u8]; 3] = [b"position.x", b"position.y", b"position.z"];
+        if !AXES.contains(&channel.as_bytes())
+            || ![progress, start, end].iter().all(|v| v.is_finite())
+            // `!(end > start)`; both are finite here.
+            || end <= start
+        {
+            return Err("Invalid motion path request".into());
+        }
+        let layer = self
+            .find_layer(layer_id)?
+            .ok_or_else(|| "Motion path layer is unavailable".to_owned())?;
+        // `layer.p?.[axis]`, kept when truthy.
+        let p = node::member(Some(layer), "p");
+        let axes: Vec<(&[u8], &Node)> = AXES
+            .iter()
+            .filter_map(|axis| match p.map(|p| node::get(p, axis)) {
+                Some(Got::Node(n)) if node::truthy(Some(n)) => Some((*axis, n)),
+                _ => None,
+            })
+            .collect();
+        let index = axes
+            .iter()
+            .position(|(axis, _)| *axis == channel.as_bytes())
+            .ok_or_else(|| "Motion path axis is unavailable".to_owned())?;
+        // `channels.flatMap(prop => prop.kf.map(k => k.t))`.
+        let mut knots = Vec::new();
+        for (_, prop) in &axes {
+            let kf = node::get(prop, b"kf");
+            let items = match kf.node().map(Node::kind) {
+                Some(NodeKind::Array(items)) => items,
+                _ if kf.is_nullish() => {
+                    return Err("Cannot read properties of undefined (reading 'map')".into());
+                }
+                _ => return Err("prop.kf.map is not a function".into()),
+            };
+            for k in items {
+                if node::is_nullish(Some(k)) {
+                    return Err("Cannot read properties of null (reading 't')".into());
+                }
+                if let NodeKind::Number(t) = node::get(k, b"t")
+                    .node()
+                    .map_or(&NodeKind::Null, Node::kind)
+                {
+                    knots.push(*t);
+                }
+            }
+        }
+        // Each track is prepared once: the timing table samples it often.
+        let mut springs = SpringTables::new();
+        let tracks: Vec<(Option<&Node>, Option<keyframes::PreparedTrack>, JsValue)> = axes
+            .iter()
+            .map(|(_, prop)| {
+                let kf = node::get(prop, b"kf").node();
+                let keyed = kf.is_some_and(|k| node::get(k, b"length").truthy());
+                let track = keyed.then(|| keyframes::PreparedTrack::prepare(kf, &mut springs));
+                (kf, track, node::get(prop, b"v").to_js())
+            })
+            .collect();
+        let mut sample = |time: f64| -> Result<Vec<f64>, String> {
+            let mut out = Vec::with_capacity(tracks.len());
+            for (kf, track, v) in &tracks {
+                let value = match track {
+                    Some(track) => track
+                        .value(*kf, time, false, &mut springs)
+                        .map_err(|e| e.message)?,
+                    None => v.clone(),
+                };
+                out.push(value.to_number());
+            }
+            Ok(out)
+        };
+        let timing = PathTiming::new(&mut sample, &knots, start, end)?;
+        Ok(timing.position(&mut sample, progress)?[index])
     }
 }
 

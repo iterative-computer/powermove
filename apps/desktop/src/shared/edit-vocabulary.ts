@@ -1,7 +1,7 @@
 export const EDIT_COMMAND_TYPES = [
   'set_property',
   'replace_keyframes',
-  'offset_property',
+  'simplify_keyframes',
   'set_easing',
   'set_expression',
   'set_content',
@@ -19,6 +19,7 @@ export const EDIT_COMMAND_TYPES = [
   'set_transition',
   'set_scene_parameter',
   'add_marker',
+  'remove_marker',
   'create_section',
   'update_section',
   'transform_layers',
@@ -34,7 +35,7 @@ export const EDIT_COMMAND_TYPES = [
 export const AGENT_COMMAND_TYPES = [
   'set_property',
   'replace_keyframes',
-  'offset_property',
+  'simplify_keyframes',
   'set_easing',
   'set_expression',
   'set_content',
@@ -52,6 +53,7 @@ export const AGENT_COMMAND_TYPES = [
   'set_transition',
   'set_scene_parameter',
   'add_marker',
+  'remove_marker',
   'create_section',
   'update_section',
   'transform_layers',

@@ -4,8 +4,8 @@
 //! run by the host in a window's runner.
 //!
 //! For each request the backend writes the textures the program samples
-//! into the session's scratch cache area (`fallback-<key>-<i>.rgba16f`:
-//! binary16 RGBA, little-endian, rows in GL order), sends
+//! into the session's scratch cache area (`.rgba16f` at depth 8/16 or
+//! `.rgba32f` at depth 32, little-endian, rows in GL order), sends
 //! `shaderFallback` naming them and the output file, waits for the host's
 //! answer, and reads the output back. The host answers `ack` once the
 //! output is written, or an error: `shaderCompile` (WebGL refuses the
@@ -106,9 +106,12 @@ impl<P: HostPort + ?Sized> HostFallback<P> {
     }
 }
 
-/// Raw binary16 bytes of pixels (the file format).
+/// Raw pixels in the requested wire format (the file format).
 fn bytes(pixels: &FallbackPixels) -> Vec<u8> {
-    pm_render::shader_layers::fallback::half_bytes(&pixels.rgba16f)
+    match &pixels.rgba32f {
+        Some(bits) => pm_render::shader_layers::fallback::float_bytes(bits),
+        None => pm_render::shader_layers::fallback::half_bytes(&pixels.rgba16f),
+    }
 }
 
 /// The host's error as a runner failure.
@@ -129,10 +132,15 @@ impl<P: HostPort + ?Sized> FallbackHost for HostFallback<P> {
     fn run(&self, job: &FallbackJob) -> Result<FallbackPixels, FallbackFailure> {
         let (dir, handle) = self.area()?;
         let r = &job.request;
+        let extension = if r.color_depth == 32 {
+            "rgba32f"
+        } else {
+            "rgba16f"
+        };
         let textures: Vec<String> = (0..job.textures.len())
-            .map(|i| format!("fallback-{}-{i}.rgba16f", r.key))
+            .map(|i| format!("fallback-{}-{i}.{extension}", r.key))
             .collect();
-        let output = format!("fallback-{}-out.rgba16f", r.key);
+        let output = format!("fallback-{}-out.{extension}", r.key);
         let cleanup = || {
             for name in textures.iter().chain(std::iter::once(&output)) {
                 let _ = std::fs::remove_file(dir.join(name));
@@ -167,11 +175,22 @@ impl<P: HostPort + ?Sized> FallbackHost for HostFallback<P> {
             ))),
             Some(Err(e)) => Err(failure_of(e.code, e.message)),
             Some(Ok(Response::Ack)) => match std::fs::read(dir.join(&output)) {
-                Ok(data) if data.len() as u64 == u64::from(r.width) * u64::from(r.height) * 8 => {
+                Ok(data)
+                    if data.len() as u64
+                        == u64::from(r.width)
+                            * u64::from(r.height)
+                            * if r.color_depth == 32 { 16 } else { 8 } =>
+                {
                     Ok(FallbackPixels {
                         width: r.width,
                         height: r.height,
-                        rgba16f: pm_render::shader_layers::fallback::halves(&data),
+                        rgba16f: if r.color_depth == 32 {
+                            Vec::new()
+                        } else {
+                            pm_render::shader_layers::fallback::halves(&data)
+                        },
+                        rgba32f: (r.color_depth == 32)
+                            .then(|| pm_render::shader_layers::fallback::float_bits(&data)),
                     })
                 }
                 Ok(data) => Err(FallbackFailure {
@@ -200,12 +219,35 @@ mod tests {
     use pm_protocol::common::JobId;
     use pm_protocol::error::{EngineError, ErrorScope};
     use pm_protocol::host::HandleResolved;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A host that runs requests by echoing the first texture (halved).
     struct Echo {
         dir: PathBuf,
         answer: Mutex<Option<EngineError>>,
         seen: Mutex<Vec<HostShaderFallback>>,
+        output_bytes: Mutex<Option<usize>>,
+    }
+
+    struct TempArea(PathBuf);
+
+    impl TempArea {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "pm-fallback-host-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempArea {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     impl HostPort for Echo {
@@ -245,7 +287,8 @@ mod tests {
                 return Some(Err(e));
             }
             let input = std::fs::read(self.dir.join(&f.textures[0])).unwrap();
-            std::fs::write(self.dir.join(&f.output), input).unwrap();
+            let length = self.output_bytes.lock().unwrap().unwrap_or(input.len());
+            std::fs::write(self.dir.join(&f.output), &input[..length.min(input.len())]).unwrap();
             Some(Ok(Response::Ack))
         }
 
@@ -258,6 +301,7 @@ mod tests {
 
     fn job() -> FallbackJob {
         let pixels = FallbackPixels {
+            rgba32f: None,
             width: 2,
             height: 1,
             rgba16f: vec![0x3c00, 0, 0, 0x3c00, 0, 0x3c00, 0, 0x3c00],
@@ -269,6 +313,7 @@ mod tests {
             fragment: "#version 300 es\nvoid main(){}".into(),
             width: 2,
             height: 1,
+            color_depth: 16,
             calls: vec![],
             stage: "bind".into(),
             message: "sampler `u` (Cube)".into(),
@@ -288,12 +333,13 @@ mod tests {
 
     #[test]
     fn requests_travel_as_files_in_the_scratch_area_and_are_cleaned_up() {
-        let dir = std::env::temp_dir().join(format!("pm-fallback-host-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let area = TempArea::new();
+        let dir = &area.0;
         let echo = Arc::new(Echo {
-            dir: dir.clone(),
+            dir: dir.to_path_buf(),
             answer: Mutex::new(None),
             seen: Mutex::new(vec![]),
+            output_bytes: Mutex::new(None),
         });
         let host = HostFallback::new(
             echo.clone(),
@@ -330,6 +376,68 @@ mod tests {
             assert_eq!(f.message, "why");
         }
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn float32_job_files_keep_exact_bits_and_reject_short_output() {
+        let area = TempArea::new();
+        let dir = &area.0;
+        let echo = Arc::new(Echo {
+            dir: dir.to_path_buf(),
+            answer: Mutex::new(None),
+            seen: Mutex::new(vec![]),
+            output_bytes: Mutex::new(None),
+        });
+        let host = HostFallback::new(
+            echo.clone(),
+            SessionId::new(4).unwrap(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let mut job = job();
+        let bits = vec![
+            0x3f80_0008,
+            0x8000_0000,
+            0x3eaa_aaab,
+            0x3f80_0000,
+            0x7f80_0000,
+            0x3f00_0001,
+            0x0000_0000,
+            0x3f80_0000,
+        ];
+        job.request.color_depth = 32;
+        job.textures = vec![Arc::new(FallbackPixels {
+            width: 2,
+            height: 1,
+            rgba16f: Vec::new(),
+            rgba32f: Some(bits.clone()),
+        })];
+        let result = host.run(&job).unwrap();
+        assert_eq!(result.rgba16f, Vec::<u16>::new());
+        assert_eq!(result.rgba32f, Some(bits));
+        let seen = echo.seen.lock().unwrap();
+        assert_eq!(
+            seen[0].textures,
+            vec![format!("fallback-{}-0.rgba32f", job.request.key)]
+        );
+        assert_eq!(
+            seen[0].output,
+            format!("fallback-{}-out.rgba32f", job.request.key)
+        );
+        drop(seen);
+        assert_eq!(
+            std::fs::read_dir(dir).unwrap().count(),
+            0,
+            "scratch files removed"
+        );
+
+        *echo.output_bytes.lock().unwrap() = Some(31);
+        let failure = host.run(&job).unwrap_err();
+        assert_eq!(failure.reason, "size");
+        assert!(failure.message.contains("31 bytes"), "{}", failure.message);
+        assert_eq!(
+            std::fs::read_dir(dir).unwrap().count(),
+            0,
+            "short result removed"
+        );
     }
 }

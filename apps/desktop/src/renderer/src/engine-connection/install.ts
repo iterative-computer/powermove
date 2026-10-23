@@ -34,7 +34,8 @@ import { EngineRenderTransport, EngineSnapshotError } from './render-transport';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
 import { resolveFrameRate, TICKS_PER_SECOND } from '../../../shared/frame-rate';
-import { installAppCaptures, usesBlender } from './app-captures';
+import { installAppCaptures } from './app-captures';
+import { viewportEngineCamera } from '../core/scene3d/viewport';
 // The presentation is platform code hosted in the viewer's folder; the
 // kernel's `render.gl.init` binding uses it for viewers that do not present
 // by themselves (old forks of the viewer).
@@ -46,7 +47,6 @@ import { BlenderPngs } from './blender-png';
 import { EngineTransport, ticks } from './transport';
 import { EnginePreview, documentWake } from './preview';
 import { EngineSceneMetadata } from './scene-metadata';
-import { previewEngine } from '../core/scene3d/rendering';
 import { followOpenComposition } from './composition-follow';
 
 /** Mirrors engine-present/presentation.ts (the renderer does not import extension values). */
@@ -160,8 +160,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   let fallbackRunner: ShaderFallbackRunner | null = null;
   // The job engine's fallback requests (exports, agent stills) run in this
   // window's runner too: one WebGL2 context for the window (decision 19).
-  const offShaderFallback = native.onShaderFallback?.(async ({ request, textures }) =>
-    (await (fallbackRunner ??= new ShaderFallbackRunner()).render(request as ShaderFallbackRequest, textures)).rgba16f) ?? (() => {});
+  const offShaderFallback = native.onShaderFallback?.(async ({ request, textures }) => {
+    const { rgba16f, rgba32f } = await (fallbackRunner ??= new ShaderFallbackRunner()).render(request as ShaderFallbackRequest, textures);
+    return { rgba16f, ...(rgba32f ? { rgba32f } : {}) };
+  }) ?? (() => {});
   // One session owns this window's clock. A viewer attaches to it; closing
   // that channel retires presentation only, leaving pm-audio and time alive.
   let viewerHandlers: EngineViewerHandlers | null = null;
@@ -183,7 +185,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       connection?.sendPatches();
       return barrier?.revision ?? current?.applied ?? 0;
     },
-    () => previewEngine(PM) === 'eevee' ? 'material' : 'rendered',
+    // Main retired the Eevee preview setting; every preview uses the shot's rendered mode.
+    () => 'rendered',
     // `wakeStandby` is declared below; read it when the preview wakes.
     documentWake(() => wakeStandby(), () => current)
   );
@@ -422,7 +425,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         }
       };
     },
-    usesBlender: () => usesBlender(PM.proj),
     // A `raster` override that throws fails the frame, reported as today's
     // frame loop reports a compositor throw (legacy/core/engine.ts).
     playing: () => !!PM.playing,
@@ -568,6 +570,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     },
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     hostOffsetUs: () => hostClock.offsetUs(),
+    editorCamera: () => viewportEngineCamera(PM),
     revision: () => {
       const barrier = PM.EngineDoc?.barrier;
       if (!barrier) return null;

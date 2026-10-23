@@ -117,6 +117,11 @@ fn snapshots_render_the_session_document_at_its_revision() {
 }
 
 #[test]
+fn snapshots_render_actual_eight_bit_project_targets() {
+    run_child("child_eight_bit_snapshots");
+}
+
+#[test]
 fn headless_snapshots_are_scheduled_around_audio_only_playback() {
     run_child("child_headless_scheduling");
 }
@@ -473,6 +478,43 @@ fn rendered(outcome: Result<SnapshotOutcome, ErrorCode>) -> SnapshotResult {
 
 const BOX: [u8; 4] = [0xE8, 0xE2, 0xCF, 255];
 const BACKGROUND: [u8; 4] = [0x20, 0x20, 0x20, 255];
+
+#[test]
+#[ignore = "run by snapshots_render_actual_eight_bit_project_targets"]
+fn child_eight_bit_snapshots() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    let session = c.session;
+    let mut document = project(100.0);
+    document["colorDepth"] = json!(8);
+    c.resync(2, 1, &document);
+    let small = Size::new(320, 180);
+    c.snapshot(
+        30,
+        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+        Some(1),
+        WINDOW,
+        session,
+    );
+    let output = rendered(c.inbox.wait(Duration::from_secs(20), answer(30)));
+    let pixels = pixels_of(&output);
+    assert_eq!(at(&pixels, 320, 120, 70), BOX);
+    assert_eq!(at(&pixels, 320, 10, 10), BACKGROUND);
+
+    let mut clear = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Straight, 5_000);
+    clear.target = SnapshotTarget::Frame {
+        motion_blur_samples: 0,
+        background: false,
+        draft_3d: false,
+    };
+    c.snapshot(31, clear, None, WINDOW, session);
+    let pixels = pixels_of(&rendered(c.inbox.wait(Duration::from_secs(20), answer(31))));
+    assert_eq!(at(&pixels, 320, 120, 70), BOX);
+    assert_eq!(at(&pixels, 320, 10, 10), [0, 0, 0, 0]);
+    println!("CHILD-OK");
+}
 
 #[test]
 #[ignore = "run by snapshots_render_the_session_document_at_its_revision"]
@@ -1104,6 +1146,7 @@ fn bands(request: &pm_protocol::shader_fallback::ShaderFallbackRequest, value: u
         .into_iter()
         .map(|(from, rows)| {
             Event::ShaderFallback(ShaderFallbackMessage::Pixels(ShaderFallbackPixels {
+                rgba32f: None,
                 key: request.key.clone(),
                 width: request.width,
                 height: request.height,
@@ -1746,6 +1789,8 @@ fn child_blender() {
     if std::env::var(CHILD_ENV).is_err() {
         return;
     }
+    // Blender is retired in the app; this child runs its stage.
+    pm_render::blender::enable_for_tests();
     let mut c = Child::start();
     let session = c.session;
     let mut host = StandInHost::new();

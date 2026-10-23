@@ -34,17 +34,6 @@ describe('compositions', () => {
     expect(PM.Comps.openTabs()).toEqual([mainId, id]);
   });
 
-  it('keeps render engines per composition and retains them when precomposing',()=>{
-    const PM=composer(),main=PM.proj.compId;
-    PM.proj.render3d={enabled:true,engine:'cycles',samples:32};
-    const id=PM.Comps.create({name:'Native'},{open:false});
-    PM.Comps.open(id);expect(PM.proj.render3d).toBeUndefined();
-    PM.Comps.open(main);expect(PM.proj.render3d.engine).toBe('cycles');
-    const model=PM.mkLayer('solid');PM.addLayer(model);
-    const nested=PM.Comps.precompose([model.id]);
-    expect(PM.proj.comps[nested].render3d).toEqual(PM.proj.render3d);
-    expect(PM.proj.comps[nested].render3d).not.toBe(PM.proj.render3d);
-  });
   it('keeps undo attached to the composition an edit was made in', () => {
     const PM = composer();
     const mainId = PM.proj.compId;
@@ -113,44 +102,60 @@ describe('compositions', () => {
     expect(layer).toMatchObject({ type: 'precomp', from: 2, dur: 5, d: { comp: id } });
     const comp = PM.proj.comps[id];
     expect(comp).toMatchObject({ name: 'Cards', w: 1920, h: 1080, dur: 5 });
-    expect(comp.layers.map((item: any) => [item.name, item.from])).toEqual([['A', 0], ['B', 1]]);
-    expect(b.parent).toBeNull(); // parent stayed behind in the outer comp
+    expect(comp.layers.map((item: any) => [item.name, item.from])).toEqual([['A', 0], ['B', 1], ['Keep', -2]]);
+    expect(comp.layers[2]).toMatchObject({ type: 'null', parent: null });
+    expect(b.parent).toBe(comp.layers[2].id); // the outer parent remains as an independent rig copy
+    expect(b.parent).not.toBe(keep.id);
 
     PM.hist.undo();
     expect(names(PM)).toEqual(['A', 'B', 'Keep']);
     expect(PM.Comps.exists(id)).toBe(false);
   });
 
-  it('keeps a pre-composed child on its outside rig by parenting the precomp layer', () => {
+  it('keeps a pre-composed child on its outside rig through an independent rig copy', () => {
     const PM = composer();
     const rig = PM.mkLayer('null', { name: 'Rig' }, PM.proj);
     const arm = PM.mkLayer('shape', { name: 'Arm' }, PM.proj);
     const hand = PM.mkLayer('shape', { name: 'Hand' }, PM.proj);
     arm.parent = rig.id; hand.parent = arm.id;
+    rig.p['position.x'].kf = [PM.KF(0, 100), PM.KF(1, 400)];
     PM.proj.layers.push(arm, hand, rig);
 
     const id = PM.Comps.precompose([arm.id, hand.id], { name: 'Limb' });
     const layer = PM.proj.layers[0];
-    expect(layer).toMatchObject({ type: 'precomp', parent: rig.id, d: { comp: id } });
-    // The precomp layer's own transform is the identity: anchor on position.
-    expect([layer.p['position.x'].v, layer.p['position.y'].v]).toEqual([layer.p['anchor.x'].v, layer.p['anchor.y'].v]);
-    expect([arm.parent, hand.parent]).toEqual([null, arm.id]);
+    // The rig stays outside; the precomp layer itself is not parented to it.
+    expect(layer).toMatchObject({ type: 'precomp', d: { comp: id } });
+    expect(layer.parent ?? null).toBeNull();
+    expect(names(PM)).toEqual(['Limb', 'Rig']);
+    const comp = PM.proj.comps[id];
+    expect(comp.layers.map((item: any) => item.name)).toEqual(['Arm', 'Hand', 'Rig']);
+    const copy = comp.layers[2];
+    expect(copy).toMatchObject({ type: 'null', parent: null });
+    expect(copy.id).not.toBe(rig.id);
+    // The copy keeps the rig's animation as its own keys.
+    expect(copy.p['position.x'].kf.map((key: any) => key.v)).toEqual([100, 400]);
+    expect(copy.p['position.x'].kf).not.toBe(rig.p['position.x'].kf);
+    expect([arm.parent, hand.parent]).toEqual([copy.id, arm.id]);
 
     PM.hist.undo();
     expect(names(PM)).toEqual(['Arm', 'Hand', 'Rig']);
     expect(PM.proj.layers.map((item: any) => item.parent ?? null)).toEqual([rig.id, arm.id, null]);
   });
 
-  it('leaves the precomp layer unparented when moved roots hang from different layers', () => {
+  it('copies each outside parent when moved roots hang from different layers', () => {
     const PM = composer();
     const left = PM.mkLayer('null', { name: 'Left' }, PM.proj);
     const right = PM.mkLayer('null', { name: 'Right' }, PM.proj);
     const a = PM.mkLayer('shape', { name: 'A' }, PM.proj); a.parent = left.id;
     const b = PM.mkLayer('shape', { name: 'B' }, PM.proj); b.parent = right.id;
     PM.proj.layers.push(a, b, left, right);
-    PM.Comps.precompose([a.id, b.id], { name: 'Pair' });
+    const id = PM.Comps.precompose([a.id, b.id], { name: 'Pair' });
     expect(PM.proj.layers[0].parent ?? null).toBeNull();
-    expect([a.parent, b.parent]).toEqual([null, null]);
+    const copies = PM.proj.comps[id].layers.filter((item: any) => item.type === 'null');
+    expect(copies.map((item: any) => item.name)).toEqual(['Left', 'Right']);
+    expect([a.parent, b.parent]).toEqual(copies.map((item: any) => item.id));
+    expect(copies.map((item: any) => item.id)).not.toContain(left.id);
+    expect(copies.map((item: any) => item.id)).not.toContain(right.id);
   });
 
   it('pre-composes one layer leaving its attributes in place', () => {

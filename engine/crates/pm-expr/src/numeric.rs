@@ -272,6 +272,11 @@ impl Numeric {
                 if let Node::Identifier(name) = &**callee
                     && let Some(helper) = Helper::from_name(name)
                 {
+                    // `sample` and `motionPath` ask the host; only the
+                    // complete evaluator has it.
+                    if helper == Helper::Sample || helper == Helper::MotionPath {
+                        return None;
+                    }
                     if helper == Helper::Param {
                         let [Node::Literal(Literal::String(key))] = args.as_slice() else {
                             return None;

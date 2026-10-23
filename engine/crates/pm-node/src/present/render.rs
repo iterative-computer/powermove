@@ -5360,6 +5360,14 @@ impl Thread {
                                     pixels,
                                     pm_protocol::shader_fallback::MAX_BAND_BYTES,
                                 ) {
+                                    let (rgba16f, rgba32f) = if pixels.rgba32f.is_some() {
+                                        (
+                                            pm_protocol::common::Bytes(Vec::new()),
+                                            Some(pm_protocol::common::Bytes(bytes)),
+                                        )
+                                    } else {
+                                        (pm_protocol::common::Bytes(bytes), None)
+                                    };
                                     let body = Event::ShaderFallback(
                                         pm_protocol::shader_fallback::ShaderFallbackMessage::Input(
                                             pm_protocol::shader_fallback::ShaderFallbackInput {
@@ -5369,7 +5377,8 @@ impl Thread {
                                                 height: pixels.height,
                                                 row,
                                                 rows,
-                                                rgba16f: pm_protocol::common::Bytes(bytes),
+                                                rgba16f,
+                                                rgba32f,
                                             },
                                         ),
                                     );
@@ -6448,7 +6457,7 @@ impl Thread {
         // The session's compatibility producers (the `raster` override).
         renderer.set_compat_rasters(compat_view(&self.compat, job.key, revision, None));
         let size = request.target_size();
-        let format = pm_render::Renderer::target_format(doc.document(), &request);
+        let format = renderer.device_target_format(doc.document(), &request);
         let target = snapshot_output_target(
             snapshot_target,
             renderer.device(),
@@ -7032,6 +7041,14 @@ fn fallback_inputs(
                 pixels,
                 pm_protocol::shader_fallback::MAX_BAND_BYTES,
             ) {
+                let (rgba16f, rgba32f) = if pixels.rgba32f.is_some() {
+                    (
+                        pm_protocol::common::Bytes(Vec::new()),
+                        Some(pm_protocol::common::Bytes(bytes)),
+                    )
+                } else {
+                    (pm_protocol::common::Bytes(bytes), None)
+                };
                 let body =
                     Event::ShaderFallback(ShaderFallbackMessage::Input(ShaderFallbackInput {
                         key: r.key.clone(),
@@ -7040,7 +7057,8 @@ fn fallback_inputs(
                         height: pixels.height,
                         row,
                         rows,
-                        rgba16f: pm_protocol::common::Bytes(bytes),
+                        rgba16f,
+                        rgba32f,
                     }));
                 out.push(Envelope::new(Message::Event { body }).with_session(session));
             }

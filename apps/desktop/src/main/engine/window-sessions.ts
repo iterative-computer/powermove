@@ -56,7 +56,7 @@ export type WindowDocument = {
   json?: Uint8Array | null;
 };
 
-export type FallbackPixels = { key: string; width: number; height: number; rgba16f: Uint8Array };
+export type FallbackPixels = { key: string; width: number; height: number; rgba16f: Uint8Array; rgba32f?: Uint8Array };
 /** A level 1 SVG raster: premultiplied RGBA8, top-down (decision S1). */
 export type SvgPixels = { key: SvgRasterKey; data: Uint8Array };
 /** Largest SVG band posted in one event (the renderer's band size,
@@ -208,15 +208,18 @@ export class WindowSnapshotSessions {
 
   /** Posts a fallback program's pixels to the session in bands. */
   private postFallback(session: number, pixels: FallbackPixels): void {
-    const rowBytes = pixels.width * 8;
-    if (rowBytes <= 0 || pixels.rgba16f.byteLength !== rowBytes * pixels.height) {
+    const float32 = pixels.rgba32f !== undefined;
+    const rowBytes = pixels.width * (float32 ? 16 : 8);
+    const bytes = float32 ? pixels.rgba32f! : pixels.rgba16f;
+    if (rowBytes <= 0 || bytes.byteLength !== rowBytes * pixels.height || (float32 && pixels.rgba16f.byteLength !== 0)) {
       this.log('warn', `fallback pixels for ${pixels.key.slice(0, 12)} do not match their size; dropped`);
       return;
     }
     const rowsPerBand = Math.max(1, Math.floor(MAX_FALLBACK_BAND_BYTES / rowBytes));
     for (let row = 0; row < pixels.height; row += rowsPerBand) {
       const rows = Math.min(rowsPerBand, pixels.height - row);
-      this.engine.event('interactive', { type: 'shaderFallback', fallback: 'pixels', key: pixels.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: pixels.rgba16f.slice(row * rowBytes, (row + rows) * rowBytes) } as unknown as Event, session);
+      const band = bytes.slice(row * rowBytes, (row + rows) * rowBytes);
+      this.engine.event('interactive', { type: 'shaderFallback', fallback: 'pixels', key: pixels.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: float32 ? new Uint8Array(0) : band, ...(float32 ? { rgba32f: band } : {}) } as unknown as Event, session);
     }
   }
 

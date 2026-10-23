@@ -14,9 +14,20 @@ it('retains the original project for Undo without touching saved Takes or copyin
   const checkpoint = createAgentCheckpoint(PM, 'Before the run');
   proj.layers[0]!.value = 99;
   expect(JSON.parse(checkpoint.json).layers[0].value).toBe(42);
-  expect(JSON.stringify(checkpoint)).toBe('{"id":"checkpoint","label":"Before the run"}');
+  expect(JSON.stringify(checkpoint)).toBe('{"id":"checkpoint","projectId":"project","label":"Before the run"}');
   expect(PM.AgentHarness.rollback(checkpoint)).toBe(true);
   expect(PM.hist.restoreSnapshot).toHaveBeenCalledWith(checkpoint.json, 'Undo agent run');
   expect(PM.takes.save).not.toHaveBeenCalled();
   expect(PM.takes.all).not.toHaveBeenCalled();
+});
+
+it('does not restore a checkpoint over another project or across a library boundary', () => {
+  const PM: any = { proj: { id: 'before', layers: [] }, uid: () => 'checkpoint', hist: { restoreSnapshot: vi.fn(() => true) } };
+  install(PM);
+  const checkpoint = createAgentCheckpoint(PM, 'Before');
+  PM.proj = { id: 'after', layers: [] };
+  expect(PM.AgentHarness.rollback(checkpoint)).toBe(false);
+  PM.proj.id = 'before'; PM.agentProjectBoundary = 1;
+  expect(PM.AgentHarness.rollback(checkpoint)).toBe(false);
+  expect(PM.hist.restoreSnapshot).not.toHaveBeenCalled();
 });

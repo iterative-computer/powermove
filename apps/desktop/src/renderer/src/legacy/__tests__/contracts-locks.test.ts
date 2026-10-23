@@ -46,11 +46,11 @@ const lockedCases = {
     type: 'set_property', target: layer.id, path: 'position.x', value: 100,
     mode: 'static', preserveHandEdits: false,
   }),
-  offset_property: ({ layer }) => ({type:'offset_property',target:layer.id,path:'position.x',delta:1,preserveHandEdits:false}),
   replace_keyframes: ({ layer }) => ({
     type: 'replace_keyframes', target: layer.id, path: 'opacity',
     keyframes: [{ time: 0, value: 10 }, { time: 1, value: 90 }], preserveHandEdits: false,
   }),
+  simplify_keyframes: ({ layer }) => ({ type: 'simplify_keyframes', scope: 'layers', targets: [layer.id] }),
   set_easing: ({ layer }) => ({
     type: 'set_easing', keyframes: layer.p.opacity.kf.map(key => key.i), curve: [.2, .1, .8, .9],
   }),
@@ -69,6 +69,7 @@ const lockedCases = {
   add_layer: () => ({ type: 'add_layer', id: 'allowed-layer', layerType: 'solid', name: 'Allowed layer', select: false }),
   set_scene_parameter: () => ({ type: 'set_scene_parameter', name: 'Allowed parameter', value: 42 }),
   add_marker: () => ({ type: 'add_marker', id: 'allowed-marker', time: 2, name: 'Allowed marker' }),
+  remove_marker: ({ PM }) => { PM.proj.markers = [{ t: 2, name: 'Remove me' }]; return { type: 'remove_marker', index: 0 }; },
   create_section: ({ layer }) => ({
     type: 'create_section',
     section: { id: 'allowed-section', layers: [JSON.parse(JSON.stringify(layer))], versions: [] },
@@ -91,12 +92,12 @@ const lockedCases = {
   edit_captions: ({ layer }) => ({ type: 'edit_captions', target: layer.id, op: 'delete', ids: [] }),
 };
 
-it('the locked-layer operation matrix is frozen for all 25 operations', () => {
+it('the locked-layer operation matrix is frozen for all 27 operations', () => {
   const outcomes = {
     group_layers: 'blocked', ungroup_layers: 'blocked', move_to_group: 'blocked',
     set_property: 'blocked',
     replace_keyframes: 'blocked',
-    offset_property: 'blocked',
+    simplify_keyframes: 'allowed', // The command succeeds while retaining locked tracks.
     set_easing: 'blocked',
     set_expression: 'blocked',
     set_content: 'blocked',
@@ -111,6 +112,7 @@ it('the locked-layer operation matrix is frozen for all 25 operations', () => {
     set_transition: 'blocked',
     set_scene_parameter: 'allowed',
     add_marker: 'allowed',
+    remove_marker: 'allowed',
     create_section: 'allowed',
     update_section: 'allowed',
     transform_layers: 'blocked',
@@ -128,6 +130,7 @@ it('the locked-layer operation matrix is frozen for all 25 operations', () => {
       assert.match(result.message, /Locked title/, operation);
     } else {
       assert.equal(result.ok, true, `${operation}: ${result.message}`);
+      if (operation === 'simplify_keyframes') assert.equal(result.data.results[0].data.propertiesChanged, 0);
     }
   }
 });

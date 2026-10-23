@@ -350,8 +350,8 @@ fn fs_missing(in: Quad) -> @location(0) vec4<f32> {
 "#;
 
 struct Pipelines {
-    mesh: wgpu::RenderPipeline,
-    missing: wgpu::RenderPipeline,
+    mesh: [wgpu::RenderPipeline; 3],
+    missing: [wgpu::RenderPipeline; 3],
     layout: wgpu::BindGroupLayout,
 }
 
@@ -430,72 +430,86 @@ impl MeshRenderer {
                 stencil: Default::default(),
                 bias: Default::default(),
             };
-            let target = [Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba16Float,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })];
-            let mesh = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("legacy mesh"),
-                layout: Some(&pl),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[
-                        Some(wgpu::VertexBufferLayout {
-                            array_stride: 12,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &a0,
-                        }),
-                        Some(wgpu::VertexBufferLayout {
-                            array_stride: 12,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &a1,
-                        }),
-                    ],
-                },
-                // No culling (the compositor never enables CULL_FACE).
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: Some(depth.clone()),
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("fs"),
-                    compilation_options: Default::default(),
-                    targets: &target,
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
-            let missing = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("legacy mesh missing"),
-                layout: Some(&pl),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("vs_quad"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Always),
-                    ..depth
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("fs_missing"),
-                    compilation_options: Default::default(),
-                    targets: &target,
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let make_mesh = |format| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("legacy mesh"),
+                    layout: Some(&pl),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[
+                            Some(wgpu::VertexBufferLayout {
+                                array_stride: 12,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &a0,
+                            }),
+                            Some(wgpu::VertexBufferLayout {
+                                array_stride: 12,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &a1,
+                            }),
+                        ],
+                    },
+                    // No culling (the compositor never enables CULL_FACE).
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: Some(depth.clone()),
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+            let make_missing = |format| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("legacy mesh missing"),
+                    layout: Some(&pl),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs_quad"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(wgpu::CompareFunction::Always),
+                        ..depth.clone()
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs_missing"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+            let formats = [
+                wgpu::TextureFormat::Rgba8Unorm,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureFormat::Rgba32Float,
+            ];
+            let mesh = formats.map(make_mesh);
+            let missing = formats.map(make_missing);
             Pipelines {
                 mesh,
                 missing,
@@ -504,7 +518,7 @@ impl MeshRenderer {
         })
     }
 
-    /// Renders a mesh layer into a half-float target in GL row order.
+    /// Renders a mesh layer into the composition's working target in GL row order.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -513,6 +527,7 @@ impl MeshRenderer {
         pool: &mut TargetPool,
         plan: &ObjMeshPlan,
         _samples: u32,
+        precision: pm_protocol::color::Precision,
     ) -> Result<Target, String> {
         let (w, h) = (plan.width.max(1), plan.height.max(1));
         let mut data: Vec<f32> = vec![w as f32, h as f32];
@@ -569,11 +584,17 @@ impl MeshRenderer {
                 resource: ubuf.as_entire_binding(),
             }],
         });
+        let format = pm_gpu::working_format(precision);
+        let format_index = match precision {
+            pm_protocol::color::Precision::Unorm8 => 0,
+            pm_protocol::color::Precision::Float16 => 1,
+            pm_protocol::color::Precision::Float32 => 2,
+        };
         let target = pool.take(
             device,
             w,
             h,
-            wgpu::TextureFormat::Rgba16Float,
+            format,
             wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
@@ -621,13 +642,13 @@ impl MeshRenderer {
             pass.set_bind_group(0, &bind, &[]);
             match &buffers {
                 Some((positions, normals, count)) => {
-                    pass.set_pipeline(&p.mesh);
+                    pass.set_pipeline(&p.mesh[format_index]);
                     pass.set_vertex_buffer(0, positions.slice(..));
                     pass.set_vertex_buffer(1, normals.slice(..));
                     pass.draw(0..*count, 0..1);
                 }
                 None => {
-                    pass.set_pipeline(&p.missing);
+                    pass.set_pipeline(&p.missing[format_index]);
                     pass.draw(0..4, 0..1);
                 }
             }

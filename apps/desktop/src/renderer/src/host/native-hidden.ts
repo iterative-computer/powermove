@@ -10,9 +10,15 @@ function base64(data: Uint8Array): string {
 }
 export async function runShader(request: any, inputs: string[]) {
   try {
-    const textures = inputs.map(input => new Uint16Array(bytes(input).buffer));
+    const float32 = request.colorDepth === 32;
+    const textures = inputs.map(input => {
+      const data = bytes(input);
+      return float32 ? new Float32Array(data.buffer) : new Uint16Array(data.buffer);
+    });
     const rendered = await runner.render(request, textures);
-    return { ok: true as const, pixels: base64(new Uint8Array(rendered.rgba16f.buffer, rendered.rgba16f.byteOffset, rendered.rgba16f.byteLength)) };
+    const pixels = float32 ? rendered.rgba32f : rendered.rgba16f;
+    if (!pixels) throw new Error('The ANGLE runner omitted float32 pixels');
+    return { ok: true as const, pixels: base64(new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength)) };
   } catch (error) { return { ok: false as const, reason: String((error as any).reason ?? 'unavailable'), message: String((error as Error).message ?? error) }; }
 }
 

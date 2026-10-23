@@ -26,4 +26,8 @@ describe('visual parameter layout',()=>{
     expect(layout.primary.map(p=>p.k)).toEqual(['p0','p1','p2','p3','p4','important','amount']);
     expect(layout.more.map(p=>p.k)).toEqual(['p5','p6','p7','seed']);
   });
+  it('uses a key as the point label when a legacy definition omitted its label',()=>{
+    const layout=parameterLayout([number('centerX',{label:undefined}),number('centerY')]);
+    expect(layout.widgets).toEqual([{kind:'point',x:'centerX',y:'centerY',label:'center',advanced:undefined}]);
+  });
 });

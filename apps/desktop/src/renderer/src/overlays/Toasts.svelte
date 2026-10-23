@@ -18,10 +18,11 @@
     source?: string;
     sticky: boolean;
     dismissible: boolean;
+    dismissLabel?: string;
     timeout: number;
     key?: string;
     corner?: 'top-right' | 'bottom-right';
-    action?: { label: string; run: () => void };
+    action?: { label: string; run: () => void; dismiss?: boolean };
     onDismiss?: () => void;
     onClose?: () => void;
   };
@@ -56,6 +57,7 @@
       error: kind === 'error',
       source: kind === 'alert' ? options.source?.name : undefined,
       sticky: options.sticky ?? kind !== 'status',
+      dismissLabel: options.dismissLabel,
       dismissible: options.dismissible ?? kind !== 'status',
       timeout: 0,
       key: options.key,
@@ -182,11 +184,11 @@
         </div>
       {:else}<span>{item.message}</span>{/if}
     {/if}
+    {#if item.action}
+      <button type="button" class="toast-action" onclick={() => { const action = item.action; action?.run(); if (action?.dismiss !== false) dismiss(item.id); }}>{item.action.label}</button>
+    {/if}
     {#if item.dismissible}
-      {#if item.action}
-        <button type="button" class="toast-action" onclick={() => { item.action?.run(); dismiss(item.id); }}>{item.action.label}</button>
-      {/if}
-      <button type="button" class="toast-dismiss" aria-label="Dismiss notification" title="Dismiss notification" onclick={() => dismiss(item.id, true)}><Icon {PM} name="x" /></button>
+      <button type="button" class={item.dismissLabel ? "toast-action" : "toast-dismiss"} aria-label={item.dismissLabel || "Dismiss notification"} title={item.dismissLabel || "Dismiss notification"} onclick={() => dismiss(item.id, true)}>{#if item.dismissLabel}{item.dismissLabel}{:else}<Icon {PM} name="x" />{/if}</button>
     {/if}
   </div>
 {/snippet}

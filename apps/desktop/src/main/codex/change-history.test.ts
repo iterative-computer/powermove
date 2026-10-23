@@ -99,7 +99,7 @@ describe('agent extension isolation and recovery', () => {
     await writeFile(path.join(conflict.stagingDirectory, 'safe-change', 'index.ts'), 'export default "agent";');
     await writeFile(path.join(live, 'safe-change', 'index.ts'), 'export default "user";');
     await expect(publishExtensionChanges(conflict, [{ id: 'safe-change', action: 'updated' }]))
-      .rejects.toThrow(/Nothing was overwritten/i);
+      .rejects.toThrow(/No extension files were overwritten/i);
     expect(await readFile(path.join(live, 'safe-change', 'index.ts'), 'utf8')).toContain('user');
   });
 

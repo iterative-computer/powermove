@@ -9,7 +9,13 @@
  * encoded before main publishes it; the disk write follows after the debounce,
  * through the same atomic sequence as before: write a sibling temporary file,
  * fsync it, close it, then rename it over the destination.
+ *
+ * Heavy keys (projects, histories, sessions, journals, agent threads and
+ * attachments) are not read at load: load lists them, and main asks for one
+ * with `read` when something needs it. A corrupt heavy file is quarantined on
+ * that first read, not at startup.
  */
+import * as nodeSyncFs from 'node:fs';
 import path from 'node:path';
 
 import { isRecord } from '../shared/guards';
@@ -22,6 +28,9 @@ import type { StoreFileSystem } from './storage';
 // can exceed the ordinary settings limit without being corrupt.
 const MAX_TAKES_BYTES = 24 * LIMITS.storeValueBytes;
 
+/** Keys load lists by name only; main reads them on demand (storage.ts). */
+export const HEAVY_KEY = /^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./;
+
 /** Main to engine. `id` orders replies; it increases for the store's lifetime. */
 export type StoreRequest =
   | { op: 'init'; id: number; directory: string; writeDelayMs: number }
@@ -31,12 +40,19 @@ export type StoreRequest =
   | { op: 'delete'; id: number; key: string }
   /** Re-persist bytes main already published, after a replacement engine starts. */
   | { op: 'restore'; id: number; key: string; bytes: Uint8Array | null }
+  /** Read a stored key: `sync` blocks this thread on the disk (main is waiting). */
+  | { op: 'read'; id: number; key: string; sync: boolean }
+  /** Main dropped a clean key from its cache; forget any copy kept here too. */
+  | { op: 'evict'; key: string }
   | { op: 'flush'; id: number };
 
 /** Engine to main. */
 export type StoreReply =
   | { type: 'ready'; id: number }
-  | { type: 'loaded'; id: number; entries: Array<[string, Uint8Array]> }
+  /** `lazy`: heavy keys present on disk, listed without reading them. */
+  | { type: 'loaded'; id: number; entries: Array<[string, Uint8Array]>; lazy: string[] }
+  /** A `read`: its encoded JSON, or why there is none ('missing': absent or quarantined). */
+  | { type: 'read'; id: number; key: string; state: 'ok' | 'missing' | 'failed'; bytes: Uint8Array | null }
   /** The value is valid and is the key's newest value; bytes are its encoded JSON (null: deleted). */
   | { type: 'committed'; id: number; key: string; bytes: Uint8Array | null }
   | { type: 'rejected'; id: number; key: string; channel: string; detail: string }
@@ -48,6 +64,8 @@ export type StoreReply =
 
 export interface StoreEngineOptions {
   fs: StoreFileSystem;
+  /** Synchronous reads answer main while it waits, and quarantine without a gap. */
+  syncFs?: Pick<typeof nodeSyncFs, 'readFileSync' | 'renameSync'>;
   now: () => number;
   randomSuffix: () => string;
 }
@@ -79,20 +97,21 @@ export class StoreEngine {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly queues = new Map<string, Promise<void>>();
   /* The newest encoded session per projectState key (null: none), so a
-     metadata-only update keeps the stored undo history. Load fills it from
-     disk; afterwards every key is either here or has no file. Only an engine
-     that has not loaded (a replacement after a worker fault) reads a session
-     back from disk, asynchronously. */
+     metadata-only update keeps the stored undo history. Sessions are heavy,
+     so load reads none: a key missing here is unknown, not empty, and a
+     metadata-only update reads its stored history from disk first. */
   private readonly sessions = new Map<string, string | null>();
-  private loaded = false;
-  /** projectState keys whose file existed at load but could not be read. */
-  private readonly unread = new Set<string>();
+  /** Bumped by every set, delete and restore, so an older disk read cannot win. */
+  private readonly generations = new Map<string, number>();
+  private readonly syncFs: Pick<typeof nodeSyncFs, 'readFileSync' | 'renameSync'>;
   private readonly backlog: StoreRequest[] = [];
   private busy = false;
   private directory = '';
   private writeDelayMs = 150;
 
-  constructor(private readonly options: StoreEngineOptions, private readonly reply: (message: StoreReply, transfer?: ArrayBuffer[]) => void) {}
+  constructor(private readonly options: StoreEngineOptions, private readonly reply: (message: StoreReply, transfer?: ArrayBuffer[]) => void) {
+    this.syncFs = options.syncFs ?? nodeSyncFs;
+  }
 
   /** Requests run in arrival order; most finish synchronously inside this call. */
   handle(request: StoreRequest): void {
@@ -115,7 +134,7 @@ export class StoreEngine {
         return undefined;
       case 'load':
         return this.load().then(
-          entries => this.reply({ type: 'loaded', id: request.id, entries }, entries.map(([, bytes]) => bytes.buffer as ArrayBuffer)),
+          ({ entries, lazy }) => this.reply({ type: 'loaded', id: request.id, entries, lazy }, entries.map(([, bytes]) => bytes.buffer as ArrayBuffer)),
           error => this.reply({ type: 'failed', id: request.id, error: errorText(error) })
         );
       case 'set':
@@ -123,13 +142,24 @@ export class StoreEngine {
       case 'setSerialized':
         return this.encode(request.id, request.key, () => this.encodeSerialized(request.key, request.serialized));
       case 'delete':
+        this.bump(request.key);
         if (request.key.startsWith('projectState.')) this.sessions.set(request.key, null);
         this.reply({ type: 'committed', id: request.id, key: request.key, bytes: null });
         this.schedule(request.key, { id: request.id, kind: 'delete' });
         return undefined;
       case 'restore':
+        this.bump(request.key);
         if (request.key.startsWith('projectState.')) this.sessions.set(request.key, request.bytes && Buffer.from(request.bytes).toString('utf8'));
         this.schedule(request.key, request.bytes ? { id: request.id, kind: 'set', data: request.bytes } : { id: request.id, kind: 'delete' });
+        return undefined;
+      case 'read':
+        // An asynchronous read does not hold up later requests; a set or
+        // delete that overtakes it bumps the generation and wins.
+        if (request.sync) this.readNow(request.id, request.key);
+        else void this.readLater(request.id, request.key);
+        return undefined;
+      case 'evict':
+        if (request.key.startsWith('projectState.')) this.sessions.delete(request.key);
         return undefined;
       case 'flush':
         // Later requests keep encoding while earlier writes finish.
@@ -138,9 +168,10 @@ export class StoreEngine {
     }
   }
 
-  /** Encodes synchronously unless a legacy session needs its stored history read first. */
+  /** Encodes synchronously; a metadata-only session update reads its stored history synchronously first. */
   private encode(id: number, key: string, produce: () => string | Promise<string>): Promise<void> | undefined {
     const publish = (serialized: string) => {
+      this.bump(key);
       if (key.startsWith('projectState.')) this.sessions.set(key, serialized);
       const bytes = encoder.encode(serialized);
       this.reply({ type: 'committed', id, key, bytes }, [bytes.buffer as ArrayBuffer]);
@@ -167,8 +198,9 @@ export class StoreEngine {
     if (key.startsWith('projectState.') && isRecord(value) && !Object.hasOwn(value, 'history')) {
       const known = this.sessions.get(key);
       if (known !== undefined) return this.pack(key, withHistory(value, known));
-      if (this.loaded && !this.unread.has(key)) return this.pack(key, value);
-      return this.readStored(key).then(stored => this.pack(key, withHistory(value, stored)));
+      // Not read yet (or evicted): its stored history comes from disk first.
+      // A file that cannot be read refuses the write rather than drop history.
+      return this.pack(key, withHistory(value, this.readStoredSync(key)));
     }
     return this.pack(key, value);
   }
@@ -197,27 +229,100 @@ export class StoreEngine {
     return packed === value ? serialized : JSON.stringify(packed);
   }
 
-  private async readStored(key: string): Promise<string | null> {
+  private readStoredSync(key: string): string | null {
     try {
-      return await this.options.fs.readFile(path.join(this.directory, this.fileNameFor(key)), 'utf8');
+      return this.syncFs.readFileSync(path.join(this.directory, this.fileNameFor(key)), 'utf8');
     } catch (error) {
       if (isErrorCode(error, 'ENOENT')) return null;
-      throw error;
+      throw new Rejection(IPC.storeSet, `store file could not be read: ${errorText(error)}`);
     }
   }
 
-  private async load(): Promise<Array<[string, Uint8Array]>> {
+  private bump(key: string): void { this.generations.set(key, (this.generations.get(key) ?? 0) + 1); }
+
+  private readNow(id: number, key: string): void {
+    const generation = this.generations.get(key);
+    let serialized: string;
+    try { serialized = this.syncFs.readFileSync(path.join(this.directory, this.fileNameFor(key)), 'utf8'); }
+    catch (error) { this.readFailed(id, key, error); return; }
+    this.accept(id, key, serialized, generation);
+  }
+
+  private async readLater(id: number, key: string): Promise<void> {
+    const generation = this.generations.get(key);
+    let serialized: string;
+    try { serialized = await this.options.fs.readFile(path.join(this.directory, this.fileNameFor(key)), 'utf8'); }
+    catch (error) {
+      if (this.generations.get(key) !== generation) this.reply({ type: 'read', id, key, state: 'failed', bytes: null });
+      else this.readFailed(id, key, error);
+      return;
+    }
+    this.accept(id, key, serialized, generation);
+  }
+
+  private readFailed(id: number, key: string, error: unknown): void {
+    if (isErrorCode(error, 'ENOENT')) { this.reply({ type: 'read', id, key, state: 'missing', bytes: null }); return; }
+    if (!(error instanceof Rejection)) this.emitError(key, `store file could not be read: ${errorText(error)}`);
+    this.reply({ type: 'read', id, key, state: 'failed', bytes: null });
+  }
+
+  /** Publishes a value read from disk unless a newer set, delete or restore overtook it. */
+  private accept(id: number, key: string, serialized: string, generation: number | undefined): void {
+    // Main ignores a superseded read too; here it must not touch the session or the file.
+    if (this.generations.get(key) !== generation) { this.reply({ type: 'read', id, key, state: 'failed', bytes: null }); return; }
+    let encoded: string;
+    try {
+      encoded = this.migrate(key, serialized);
+    } catch (error) {
+      this.quarantineNow(key, error);
+      this.reply({ type: 'read', id, key, state: 'missing', bytes: null });
+      return;
+    }
+    if (key.startsWith('projectState.')) this.sessions.set(key, encoded);
+    const bytes = encoder.encode(encoded);
+    this.reply({ type: 'read', id, key, state: 'ok', bytes }, [bytes.buffer as ArrayBuffer]);
+  }
+
+  /** Parses a stored value; a legacy history is packed and rewritten through the atomic writer. */
+  private migrate(key: string, serialized: string): string {
+    const value: unknown = JSON.parse(serialized);
+    const packed = packStored(key, value);
+    const before = key.startsWith('projectState.') && isRecord(value) ? value.history : value;
+    const after = key.startsWith('projectState.') && isRecord(packed) ? packed.history : packed;
+    // Finish lossless migration through the normal atomic writer. Otherwise
+    // inactive legacy histories re-create the same huge parse peak each boot.
+    if (isHistoryDictionary(after) && !isHistoryDictionary(before)) {
+      const migrated = JSON.stringify(packed);
+      this.schedule(key, { id: 0, kind: 'set', data: migrated });
+      return migrated;
+    }
+    return serialized;
+  }
+
+  /** No await between finding the corruption and moving the file: a new write cannot slip in and be quarantined instead. */
+  private quarantineNow(key: string, cause: unknown): void {
+    this.bump(key);
+    if (key.startsWith('projectState.')) this.sessions.set(key, null);
+    const name = this.fileNameFor(key);
+    const destination = `${name}.corrupt-${this.options.now()}`;
+    let detail = `invalid store file quarantined as ${destination}: ${errorText(cause)}`;
+    try { this.syncFs.renameSync(path.join(this.directory, name), path.join(this.directory, destination)); }
+    catch (error) { detail = `invalid store file could not be quarantined: ${errorText(cause)}; ${errorText(error)}`; }
+    this.emitError(key, detail);
+  }
+
+  private async load(): Promise<{ entries: Array<[string, Uint8Array]>; lazy: string[] }> {
     const { fs } = this.options;
     await fs.mkdir(this.directory, { recursive: true });
     await this.removeStaleTemporaryFiles();
 
     const names = await fs.readdir(this.directory);
     const entries: Array<[string, Uint8Array]> = [];
+    const lazy: string[] = [];
     const loadedProjectIds = new Set<string>();
     let registry: unknown;
     // Mirrors main, which replaces everything it held with what is on disk.
     this.sessions.clear();
-    this.unread.clear();
 
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
@@ -227,39 +332,28 @@ export class StoreEngine {
       // Reconstructing the name prevents aliases and unchecked filenames from
       // ever reaching a filesystem path.
       if (parsedKey === null || storeFileName(parsedKey) !== name) continue;
+      if (parsedKey.kind === 'dynamic' && parsedKey.prefix === 'project') loadedProjectIds.add(parsedKey.id);
+      if (HEAVY_KEY.test(candidateKey)) { lazy.push(candidateKey); continue; }
 
       let serialized: string;
       try {
         serialized = await fs.readFile(path.join(this.directory, name), 'utf8');
       } catch (error) {
         this.emitError(candidateKey, `store file could not be read: ${errorText(error)}`);
-        if (candidateKey.startsWith('projectState.')) this.unread.add(candidateKey);
         continue;
       }
 
       try {
-        const value: unknown = JSON.parse(serialized);
-        const packed = packStored(candidateKey, value);
-        const before = candidateKey.startsWith('projectState.') && isRecord(value) ? value.history : value;
-        const after = candidateKey.startsWith('projectState.') && isRecord(packed) ? packed.history : packed;
-        // Finish lossless migration through the normal atomic writer. Otherwise
-        // inactive legacy histories re-create the same huge parse peak each boot.
-        if (isHistoryDictionary(after) && !isHistoryDictionary(before)) {
-          serialized = JSON.stringify(packed);
-          this.schedule(candidateKey, { id: 0, kind: 'set', data: serialized });
-        }
-        if (candidateKey.startsWith('projectState.')) this.sessions.set(candidateKey, serialized);
+        serialized = this.migrate(candidateKey, serialized);
         entries.push([candidateKey, encoder.encode(serialized)]);
-        if (candidateKey === 'projects') registry = value;
-        if (parsedKey.kind === 'dynamic' && parsedKey.prefix === 'project') loadedProjectIds.add(parsedKey.id);
+        if (candidateKey === 'projects') registry = JSON.parse(serialized);
       } catch (error) {
         await this.quarantine(name, candidateKey, error);
       }
     }
 
     this.reportProjectReconciliation(registry, loadedProjectIds);
-    this.loaded = true;
-    return entries;
+    return { entries, lazy };
   }
 
   async flushAll(): Promise<void> {

@@ -945,6 +945,14 @@ impl Renderer {
                         self.put_fallback_pixels(key.clone(), pixels);
                         break None;
                     }
+                    Ok(pixels) if let Some(code) = pixels.invalid_rgba8_code(&job.request) => {
+                        crate::shader_layers::FallbackFailure {
+                            reason: "pixelCode".into(),
+                            message: format!(
+                                "the runner returned invalid RGBA8 channel code {code} (expected 0..=255)"
+                            ),
+                        }
+                    }
                     Ok(pixels) => crate::shader_layers::FallbackFailure {
                         reason: "size".into(),
                         message: format!(
@@ -1303,21 +1311,40 @@ impl Renderer {
     }
 
     fn supports_precision(&self, precision: Precision) -> bool {
-        precision == Precision::Float16
+        precision != Precision::Float32
             || self
                 .device
                 .features()
                 .contains(wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE)
     }
 
-    /// The output format a fresh [`Self::render`] frame would use. Callers
-    /// rendering into their own target must make the same precision choice.
+    /// The project's requested output format on a device supporting its depth.
+    /// Callers rendering into their own target use [`Self::device_target_format`]
+    /// to include the shipped compositor's hardware fallback.
     pub fn target_format(document: &Document, request: &RenderRequest) -> wgpu::TextureFormat {
         let precision = match document.root().map(project_settings) {
             Some(Ok(c)) => effective_precision(request.precision, c.precision),
             _ => request.precision,
         };
         working_format(precision)
+    }
+
+    /// The actual output format on this device. Main's compositor falls
+    /// back from 32 to 16 when float32 filtering/blending is unavailable.
+    /// Viewers, snapshots and caller-owned targets must use this choice.
+    pub fn device_target_format(
+        &self,
+        document: &Document,
+        request: &RenderRequest,
+    ) -> wgpu::TextureFormat {
+        let format = Self::target_format(document, request);
+        if format == wgpu::TextureFormat::Rgba32Float
+            && !self.supports_precision(Precision::Float32)
+        {
+            working_format(Precision::Float16)
+        } else {
+            format
+        }
     }
 
     /// Renders `composition` at `time` into a new texture.
@@ -1330,7 +1357,7 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let format = Self::target_format(document, request);
+        let format = self.device_target_format(document, request);
         // A target a finished frame gave back (`recycle`), when it fits.
         let target = match self.frame_reuse.target.take() {
             Some(t)
@@ -1640,7 +1667,10 @@ impl Renderer {
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
         debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
-        let precision = effective_precision(request.precision, color.precision);
+        let precision = available_precision(
+            effective_precision(request.precision, color.precision),
+            self.supports_precision(Precision::Float32),
+        );
         if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
                 "32-bit precision on a device without rgba32float filtering and blending",
@@ -2361,14 +2391,42 @@ fn project_settings(root: &pm_model::Node) -> Result<ColorSettings, RenderError>
         })
 }
 
-/// The precision intermediates use: the request's, raised to the project's
-/// (Settings › Project › Color › Precision is a floor for every render of
-/// the project; exports raise it further by amendment 8).
-pub fn effective_precision(request: Precision, project: Precision) -> Precision {
-    if request == Precision::Float32 || project == Precision::Float32 {
-        Precision::Float32
-    } else {
-        Precision::Float16
+/// The project Color depth is authoritative for preview, snapshots and export.
+/// Request precision is retained in the protocol for older callers, but cannot
+/// change the rounding boundaries of an existing project (DEPTH-1).
+pub fn effective_precision(_request: Precision, project: Precision) -> Precision {
+    project
+}
+
+/// The shipped compositor's hardware fallback: 32 → 16 on devices without
+/// float32 filtering and blending. The saved project depth is unchanged.
+fn available_precision(precision: Precision, float32: bool) -> Precision {
+    match (precision, float32) {
+        (Precision::Float32, false) => Precision::Float16,
+        _ => precision,
+    }
+}
+
+#[cfg(test)]
+mod depth_device_tests {
+    use super::*;
+    #[test]
+    fn float32_hardware_fallback_matches_main_without_promoting_other_depths() {
+        assert_eq!(
+            available_precision(Precision::Float32, false),
+            Precision::Float16
+        );
+        for depth in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
+            assert_eq!(available_precision(depth, true), depth);
+        }
+        assert_eq!(
+            available_precision(Precision::Unorm8, false),
+            Precision::Unorm8
+        );
+        assert_eq!(
+            available_precision(Precision::Float16, false),
+            Precision::Float16
+        );
     }
 }
 

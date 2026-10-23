@@ -2,14 +2,12 @@ import {describe,expect,it,vi} from 'vitest';
 import activate from './index';
 import {addPrimitive,addLight,addCamera,importModelIntoScene,duplicateItems,removeItems} from './scene-actions';
 import {createObject,createLight,createScene} from '../../renderer/src/core/scene3d/schema';
-import {MODEL_RECIPES} from '../../renderer/src/core/scene3d/modeling';
 import {MATERIAL_FIELDS,lightFields,cameraFields} from './scene-model';
-import {tabsFor} from './property-tabs';
 function harness(){
   const definitions:any[]=[],commands:any[]=[],sections:any[]=[],menus:any[]=[],layers:any[]=[];
   let selected:string[]=[];
   const api:any={
-    scene3d:{modelRecipes:MODEL_RECIPES,createObject,createLight,createScene,prepareImport:vi.fn(async(files:File[])=>files[0]),convert:vi.fn(),edit:vi.fn(()=>({ok:true,message:'',data:{result:{id:'created'}}}))},
+    scene3d:{createObject,createLight,createScene,prepareImport:vi.fn(async(files:File[])=>files[0]),convert:vi.fn(),edit:vi.fn(()=>({ok:true,message:'',data:{result:{id:'created'}}}))},
     layers:{register:(d:any)=>definitions.push(d)},commands:{register:(c:any)=>commands.push(c),run:vi.fn()},
     inspector:{registerSection:(s:any)=>sections.push(s)},palette:{registerProvider:vi.fn()},menus:{contribute:(location:any,items:any)=>menus.push({location,items})},
     project:{apply:vi.fn(),get:()=>({assets:{}})},model:{layer:(id:string)=>layers.find(l=>l.id===id),curComp:()=>({layers})},
@@ -56,12 +54,5 @@ describe('3D layer UI and commands',()=>{
     expect(MATERIAL_FIELDS.map(f=>f.key)).toContain('roughness');expect(MATERIAL_FIELDS.map(f=>f.key)).toContain('emissive');
     expect(lightFields('spot').map(f=>f.key)).toContain('angle');expect(lightFields('point').map(f=>f.key)).not.toContain('angle');
     expect(cameraFields('perspective').map(f=>f.key)).toContain('fov');expect(cameraFields('orthographic').map(f=>f.key)).toContain('zoom');
-  });
-  it('offers Blender Properties tabs that fit each kind of 3D layer',()=>{
-    expect(tabsFor({object:true,light:false,camera:false,model:false})).toEqual(['render','world','object','material']);
-    expect(tabsFor({object:true,light:false,camera:false,model:true})).toEqual(['render','world','object','modifiers','material']);
-    expect(tabsFor({object:false,light:false,camera:false,model:true})).toEqual(['render','world','modifiers']);
-    expect(tabsFor({object:false,light:true,camera:false,model:false})).toEqual(['render','world','data']);
-    expect(tabsFor({object:false,light:false,camera:true,model:false})).toEqual(['render','world','data']);
   });
 });

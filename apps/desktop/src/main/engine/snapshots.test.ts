@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { EngineSnapshotRequest } from '../../shared/engine-ipc';
 import type { Request, Response } from '../../shared/engine-protocol';
 import { RemoteError } from './protocol';
-import { MAX_BLENDER_WAIT_MS, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, validSnapshotRequest, type SnapshotEngine } from './snapshots';
+import { MAX_BLENDER_WAIT_MS, MAX_FALLBACK_BYTES, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, fallbackBudgetBytes, validSnapshotRequest, type SnapshotEngine } from './snapshots';
 import { FallbackInputs } from './fallback-inputs';
 import { decode, encode } from './msgpack';
 
@@ -66,6 +66,11 @@ describe('snapshot requests', () => {
     expect(() => encode({ scale: Number.MAX_VALUE })).toThrow(/safe range/);
   });
 
+  it('budgets RGBA32F fallback pixels at the same pixel capacity with a 2× physical cap', () => {
+    expect(fallbackBudgetBytes(MAX_FALLBACK_BYTES * 2, 32)).toBe(MAX_FALLBACK_BYTES);
+    expect(fallbackBudgetBytes(MAX_FALLBACK_BYTES * 2 + 16, 32)).toBeGreaterThan(MAX_FALLBACK_BYTES);
+    expect(fallbackBudgetBytes(MAX_FALLBACK_BYTES + 8, 16)).toBeGreaterThan(MAX_FALLBACK_BYTES);
+  });
   it('accept the shapes the renderer sends and refuse the rest', () => {
     expect(validSnapshotRequest(request())).toBe(true);
     expect(validSnapshotRequest(request({ captionsHidden: true }))).toBe(true);
@@ -270,6 +275,13 @@ describe('sync snapshots served by main’s session for the window', () => {
     expect(validSnapshotRequest(request({}, { fallbackPixels: [] }))).toBe(false);
     expect(validSnapshotRequest(request({}, { session: null, document: doc, fallbackPixels: [{ key: 'k', width: 1, height: 1, rgba16f: new Uint8Array(8) }] }))).toBe(true);
     expect(validSnapshotRequest(request({}, { session: null, document: doc, fallbackPixels: [{ key: 'k', width: 1, height: 1, rgba16f: new Uint8Array(4) }] }))).toBe(false);
+    const floatBits = new Uint32Array([0x3f800008, 0x3eaaaaab, 0x80000000, 0x3f800000]);
+    const full = { key: 'f', width: 1, height: 1, rgba16f: new Uint8Array(0), rgba32f: new Uint8Array(floatBits.buffer) };
+    const detached = (fallbackPixels: unknown[]) => request({}, { session: null, document: doc, fallbackPixels: fallbackPixels as EngineSnapshotRequest['fallbackPixels'] });
+    expect(validSnapshotRequest(detached([full]))).toBe(true);
+    expect(validSnapshotRequest(detached([{ ...full, rgba32f: new Uint8Array(15) }]))).toBe(false);
+    expect(validSnapshotRequest(detached([{ ...full, rgba16f: new Uint8Array(8) }]))).toBe(false);
+    expect(validSnapshotRequest(detached([{ ...full, rgba32f: undefined }]))).toBe(false);
     const svgKey = { content: 'c'.repeat(64), width: 2, height: 1 };
     expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: svgKey, data: new Uint8Array(8) }] }))).toBe(true);
     expect(validSnapshotRequest(request({}, { svgPixels: [{ key: svgKey, data: new Uint8Array(8) }] }))).toBe(false);

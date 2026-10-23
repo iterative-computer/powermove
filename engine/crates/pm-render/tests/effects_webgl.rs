@@ -541,6 +541,7 @@ impl pm_render::shader_layers::FallbackHost for CorpusRunner {
         let r = &job.request;
         if let Some(rgba16f) = read_f16(&self.dir.join("pixels").join(format!("{}.f16", r.key))) {
             return Ok(pm_render::shader_layers::FallbackPixels {
+                rgba32f: None,
                 width: r.width,
                 height: r.height,
                 rgba16f,
@@ -559,6 +560,7 @@ impl pm_render::shader_layers::FallbackHost for CorpusRunner {
         .unwrap();
         *self.missing.lock().unwrap() += 1;
         Ok(pm_render::shader_layers::FallbackPixels {
+            rgba32f: None,
             width: r.width,
             height: r.height,
             rgba16f: vec![0; r.width as usize * r.height as usize * 4],

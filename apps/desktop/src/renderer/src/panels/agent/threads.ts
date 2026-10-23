@@ -40,7 +40,7 @@ function stepTranscript(step: TraceStep): string {
 export function threadMessageText(message: AgentMessage): string {
   return message.role === 'trace'
     ? (message.steps || []).map(step => step.kind === 'tool' ? `${step.label}\n${typeof step.output === 'string' ? step.output : ''}` : stepTranscript(step)).filter(Boolean).join('\n\n')
-    : message.text || '';
+    : [message.text || '', ...(message.visualReplies || []).map(v => `[Visual reply: ${v.title}; artifact ${v.id}]`)].filter(Boolean).join('\n');
 }
 
 /** Keep user decisions separately from verbose assistant replies. This is a
@@ -52,7 +52,7 @@ export function conversationForAgent(messages: AgentMessage[]): Array<{ role: st
     decision: message.role === 'user' || message.role === 'trace' && (message.steps || []).some(step => step.kind === 'question'),
     text: message.role === 'trace'
       ? (message.steps || []).map(stepTranscript).filter(Boolean).join('\n').trim()
-      : message.text || '',
+      : threadMessageText(message),
   })).filter(message => message.text);
   const selected = new Map<number, { role: string; text: string; position: number; truncated: boolean }>();
   const retain = (turn: typeof turns[number], limit: number) => {

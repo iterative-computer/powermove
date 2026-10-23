@@ -92,9 +92,16 @@ test('a store extension’s Svelte panel renders in its own view iframe with hos
   // Only the extension's own bindings cross from its view; a field keeps its own keys.
   const keyProofCount = () => page.evaluate(() => ((window as any).PM?.Kernel?.effects?.list?.() ?? [])
     .filter((effect: { id: string }) => effect.id.startsWith('sandboxed-ext.key-')).length);
-  const box = (await frame.boundingBox())!;
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height - 8); // empty panel area
-  await expect.poll(() => page.evaluate(() => document.activeElement?.className)).toBe('ext-panel-frame');
+  const clickFrame = async (offset?: number) => {
+    // A moved panel can sit below the left dock's clipped scroll boundary.
+    await frame.scrollIntoViewIfNeeded();
+    const box = (await frame.boundingBox())!;
+    const point = { x: offset == null ? box.x + box.width / 2 : box.x + 40, y: offset == null ? box.y + box.height - 8 : box.y + offset };
+    await expect.poll(() => frame.evaluate((element, point) => document.elementFromPoint(point.x, point.y) === element, point)).toBe(true);
+    await page.mouse.click(point.x, point.y);
+  };
+  await clickFrame(); // empty panel area
+  await expect.poll(() => frame.evaluate(element => document.activeElement === element)).toBe(true);
   await page.evaluate(() => {
     const PM = (window as any).PM;
     (window as any).__sandboxUndoCount = 0;
@@ -114,11 +121,15 @@ test('a store extension’s Svelte panel renders in its own view iframe with hos
   await expect.poll(() => page.evaluate(() => (window as any).__sandboxUndoCount)).toBe(1);
   await page.waitForTimeout(300);
   expect(await page.evaluate(() => (window as any).__sandboxUndoCount)).toBe(1); // exactly once: no echo through the page listener
+  // The host command can bring its own UI forward. Return by a real press
+  // before asking the view to route its extension's own shortcuts.
+  await clickFrame();
+  await expect.poll(() => frame.evaluate(element => document.activeElement === element)).toBe(true);
   await page.keyboard.press('Meta+Shift+9');
   await page.keyboard.press('Alt+Shift+F10');
   await expect.poll(keyProofCount).toBe(2);
   // Click the Note field (third row of the fixture) and type: the chord is ignored in the field.
-  await page.mouse.click(box.x + 40, box.y + 12 + 26 * 2 + 12 + 14);
+  await clickFrame(12 + 26 * 2 + 12 + 14);
   await page.keyboard.press('Alt+Shift+F10');
   await page.keyboard.press('Meta+Shift+9');
   await page.waitForTimeout(200);

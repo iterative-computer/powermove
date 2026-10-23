@@ -87,12 +87,12 @@ export class MeterLoop {
    *  rendered document when it was read) keeps the previous one, since a
    *  gradient stop of '' throws. */
   setPalette(palette: MeterPalette): void {
-    const next = { ...this.palette };
-    for (const key of Object.keys(next) as (keyof MeterPalette)[]) {
-      const value = palette[key];
-      if (typeof value === 'string' && value.trim()) next[key] = value;
+    // Restoring a workspace can briefly detach the theme's CSS variables.
+    // Preserve the last resolved colours until that theme is mounted again.
+    for (const key of Object.keys(this.palette) as Array<keyof MeterPalette>) {
+      const color = palette[key]?.trim();
+      if (color) this.palette[key] = color;
     }
-    this.palette = next;
     for (const view of this.views.values()) { view.gradient = null; view.drawn = ''; this.draw(view); }
   }
 

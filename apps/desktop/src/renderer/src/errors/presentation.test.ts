@@ -63,3 +63,17 @@ it('explains a missing Node.js runtime', () => {
   expect(presentError('Codex App Server stopped: env: node: No such file or directory'))
     .toMatchObject({ title: 'Codex needs Node.js to start', update: 'codex', updateLabel: 'Fix it for me' });
 });
+
+it('keeps video decode failures out of the agent timeout explanation', () => {
+  const details = 'Export failed: Video frame decode timed out';
+  expect(presentError(details)).toMatchObject({ title: 'Couldn’t decode the video', details });
+  expect(presentError(details).message).not.toContain('agent');
+});
+
+it('explains cloud restore errors without an agent timeout or IPC wrapper', () => {
+  const raw = "Could not restore “Interview.mp4” · Error invoking remote method 'cloud:download': Error: The file is still in the cloud. Try downloading it in Finder.";
+  expect(presentError(raw)).toMatchObject({ title: 'Couldn’t download cloud media', details: raw });
+  expect(presentError(raw).message).toContain('Interview.mp4');
+  expect(presentError(raw).message).not.toContain('remote method');
+  expect(presentError('Cloud download timed out. Check your connection and try again.').title).toBe('Couldn’t download cloud media');
+});

@@ -14,7 +14,9 @@ concurrency:
 jobs:
   release:
     runs-on: macos-26
-    timeout-minutes: 60
+    # A cold FFmpeg build plus thin-LTO release builds of the engine addons and
+    # the wasm module (docs/engine/release-build.md) take well over an hour.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       # Node stays available for electron-builder, the desktop release script,
@@ -85,8 +87,29 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
           rm -f "$RUNNER_TEMP/certificate.p12"
           security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "Developer ID Application"
+      # The native engine ships in the release (--with-engine below): its
+      # addons and pm_wasm.wasm build with the toolchain engine/rust-toolchain.toml
+      # pins (wasm32 target included), and pm-media links Powermove's LGPL
+      # FFmpeg, which the app also bundles (engine/third_party/ffmpeg).
+      - name: Rust toolchain
+        working-directory: engine
+        run: rustup toolchain install
+      - name: Restore the FFmpeg build
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/powermove-engine/ffmpeg/out
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('engine/third_party/ffmpeg/build.sh', 'engine/third_party/ffmpeg/sources.lock', 'engine/third_party/ffmpeg/required-components.tsv') }}
+      - name: Build FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: |
+          brew install cmake ninja pkg-config autoconf automake libtool xz
+          PM_FFMPEG_OUT="$HOME/Library/Caches/powermove-engine/ffmpeg/out" engine/third_party/ffmpeg/build.sh
       - name: Build, sign, notarize, and verify
-        run: bun run dist:release
+        # --with-engine builds pm_wasm.wasm, both engine addons and stages FFmpeg,
+        # then checks the packaged addons export napi_register_module_v1 and
+        # app.asar carries the module just built (scripts/release-mac.mjs).
+        run: bun run dist:release --with-engine
         env:
           CSC_NAME: Developer ID Application
           CSC_KEYCHAIN: ${{ runner.temp }}/signing.keychain-db

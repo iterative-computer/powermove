@@ -1,8 +1,10 @@
 import { isFieldTarget, selectableTextRoot } from '../../kernel/keychord';
 import type { PMRegistry } from '../registry';
+import { pasteFigma } from './figma/paste';
 
 /** Fields (including the agent composer) own their paste events. */
 export function pasteMedia(PM: PMRegistry, event: ClipboardEvent): boolean {
+  if (pasteFigma(PM, event)) return true;
   if (event.defaultPrevented || event.composedPath().some(target => isFieldTarget(target)
     || selectableTextRoot(target as EventTarget))) return false;
   const transfer = event.clipboardData;

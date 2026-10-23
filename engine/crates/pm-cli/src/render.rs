@@ -287,6 +287,22 @@ pub(crate) fn load_project(
     })
 }
 
+// The explicit CLI flag edits only this render's in-memory project. Ordinary
+// requests use the saved project depth, with no automatic export promotion.
+fn apply_precision_override(project: &mut Value, depth: Option<u32>) -> Result<(), Failure> {
+    let Some(depth) = depth else {
+        return Ok(());
+    };
+    if !matches!(depth, 8 | 16 | 32) {
+        return Err(usage(format!("precision {depth} (8, 16 or 32)")));
+    }
+    let Value::Object(map) = project else {
+        return Err(usage("the project is not an object"));
+    };
+    map.insert("colorDepth", Value::Number(f64::from(depth)));
+    Ok(())
+}
+
 fn load(options: &Options) -> Result<Loaded, Failure> {
     let bytes = std::fs::read(&options.input)
         .map_err(|e| usage(format!("{}: {e}", options.input.display())))?;
@@ -297,6 +313,7 @@ fn load(options: &Options) -> Result<Loaded, Failure> {
     .map_err(|e| Failure::Failed(format!("{}: {e}", options.input.display())))?;
     let mut project = container.project().clone();
     crate::parameters::apply(&mut project, &options.parameters).map_err(usage)?;
+    apply_precision_override(&mut project, options.precision)?;
     let composition = match &options.composition {
         Some(c) => c.clone(),
         None => pm_model::canonical::open_comp_id(&project)
@@ -351,7 +368,7 @@ fn load(options: &Options) -> Result<Loaded, Failure> {
 
 /// Export settings from the options and the composition, with today's
 /// defaults: the composition's rate, whole range, scale 1 rounded to even
-/// sizes, audio on, "Rec.709 (QuickTime and Safari)" tags, 32-bit precision,
+/// sizes, audio on, "Rec.709 (QuickTime and Safari)" tags, project Color depth,
 /// dither on for 8-bit outputs.
 fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failure> {
     let doc = &*loaded.document;
@@ -513,11 +530,11 @@ fn settings(options: &Options, loaded: &Loaded) -> Result<ExportSettings, Failur
             | ExportFormat::PngSequence { sixteen_bit: false }
             | ExportFormat::PngStill { sixteen_bit: false }
     );
-    let precision = match options.precision.unwrap_or(32) {
-        16 => Precision::Float16,
-        32 => Precision::Float32,
-        other => return Err(usage(format!("precision {other} (16 or 32)"))),
-    };
+    let precision = pm_render::composite::project_color(
+        doc.root().ok_or_else(|| usage("the project is empty"))?,
+    )
+    .map_err(usage)?
+    .precision;
     Ok(ExportSettings {
         format,
         alpha,
@@ -882,4 +899,33 @@ fn absolute(p: &Path) -> Result<PathBuf, Failure> {
     std::env::current_dir()
         .map(|d| d.join(p))
         .map_err(|e| Failure::Failed(e.to_string()))
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::*;
+    #[test]
+    fn precision_flag_changes_only_the_render_copy() {
+        let original =
+            pm_model::json::parse(r#"{"colorDepth":8,"color":{"precision":"float32"}}"#).unwrap();
+        for depth in [8, 16, 32] {
+            let mut project = original.clone();
+            assert!(apply_precision_override(&mut project, Some(depth)).is_ok());
+            let doc = Document::new(Some(project), 1);
+            let color = pm_render::composite::project_color(doc.root().unwrap()).unwrap();
+            assert_eq!(
+                color.precision,
+                match depth {
+                    8 => Precision::Unorm8,
+                    16 => Precision::Float16,
+                    _ => Precision::Float32,
+                }
+            );
+        }
+        let mut unchanged = original.clone();
+        assert!(apply_precision_override(&mut unchanged, None).is_ok());
+        assert_eq!(unchanged, original);
+        assert!(apply_precision_override(&mut unchanged, Some(64)).is_err());
+        assert_eq!(unchanged, original);
+    }
 }

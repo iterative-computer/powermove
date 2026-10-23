@@ -35,7 +35,9 @@ function entryFile(entry: FileSystemFileEntry): Promise<File> {
 /** Read a dropped folder. `path` is the folder's location on disk; a file the
  * host cannot map back to disk is given its path explicitly, because media
  * conversion (image sequences, proxies) works from the original file. */
-export async function readDroppedFolder(entry: FileSystemDirectoryEntry, path: string): Promise<ImportFolderNode> {
+export async function readDroppedFolder(entry: FileSystemDirectoryEntry, path: string,
+  beforeFile?: (path: string, name: string) => Promise<void>,
+  onFileError?: (name: string, error: unknown) => void): Promise<ImportFolderNode> {
   const root = path && path.endsWith(entry.name) ? path.slice(0, path.length - entry.name.length) : '';
   const read = async (directory: FileSystemDirectoryEntry): Promise<ImportFolderNode> => {
     const reader = directory.createReader();
@@ -47,9 +49,18 @@ export async function readDroppedFolder(entry: FileSystemDirectoryEntry, path: s
       if (hiddenName(child.name)) continue;
       if (child.isDirectory) node.folders.push(await read(child as FileSystemDirectoryEntry));
       else {
-        const file = await entryFile(child as FileSystemFileEntry);
-        if (!hostPath(file) && root) cloudSourcePaths.set(file, root + child.fullPath.replace(/^\/+/, ''));
-        node.files.push(file);
+        const sourcePath = root ? root + child.fullPath.replace(/^\/+/, '') : '';
+        // File Provider changes a file's metadata while downloading it. Acquire
+        // Chromium's File snapshot only after that download has finished.
+        try {
+          if (sourcePath) await beforeFile?.(sourcePath, child.name);
+          const file = await entryFile(child as FileSystemFileEntry);
+          if (!hostPath(file) && sourcePath) cloudSourcePaths.set(file, sourcePath);
+          node.files.push(file);
+        } catch (error) {
+          if (!onFileError) throw error;
+          onFileError(child.name, error);
+        }
       }
     }
     return node;

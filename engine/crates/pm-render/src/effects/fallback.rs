@@ -7,8 +7,8 @@
 //!
 //! 1. The frame's commands so far are submitted and the step's textures
 //!    (an effect's input and backdrop, a transition's two frames, E-encoded
-//!    as every legacy program reads them) are read back as binary16 RGBA in
-//!    GL row order.
+//!    as every legacy program reads them) are read back in GL row order at
+//!    project depth: exact byte codes, binary16, or binary32 RGBA.
 //! 2. The request (`shader_layers::fallback::request_with_textures`: the
 //!    wrapped program, the compositor's calls for every pass, which unit
 //!    samples which texture) is keyed by everything that decides its

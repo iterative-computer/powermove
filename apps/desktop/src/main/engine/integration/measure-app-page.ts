@@ -407,7 +407,7 @@ const api = {
     if (m === 'orbit') {
       // The editor view (a user view of the composition's 3D scene).
       const scene3d = PM().Kernel.api('measure-app').scene3d;
-      if (!scene3d?.viewport?.state?.().hasScene) return { error: 'no 3D scene to orbit' };
+      if (!scene3d?.describe?.()) return { error: 'no 3D scene to orbit' };
       scene3d.setView('editor');
       // Each engine view update: the view sequence it sent and the pose it showed.
       const presentation = v.enginePresentation;

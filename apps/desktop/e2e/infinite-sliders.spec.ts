@@ -23,11 +23,20 @@ test('numeric scrubbing handles relative motion beyond display bounds and undoes
   const field = page.getByRole('spinbutton', { name: 'Position X', exact: true });
   await expect(field).toBeVisible();
   const before = await field.inputValue();
-  const box = (await field.boundingBox())!;
-  const x = box.x + box.width / 2, y = box.y + box.height / 2;
-  await page.mouse.move(x, y);
-  await page.mouse.down();
-  await page.mouse.move(x + 10, y);
+  const beginScrub = async () => {
+    // A visible field can still be clipped by the inspector's scroll area.
+    await field.scrollIntoViewIfNeeded();
+    await expect.poll(() => field.evaluate(input => {
+      const box = input.getBoundingClientRect();
+      return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === input;
+    })).toBe(true);
+    const box = (await field.boundingBox())!;
+    const x = box.x + box.width / 2, y = box.y + box.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 10, y);
+  };
+  await beginScrub();
   await expect.poll(() => page.evaluate(() => document.pointerLockElement === document.body)).toBe(true);
   const initial = Number(await field.getAttribute('aria-valuenow'));
   // Relative motion keeps working while the screen coordinates stay fixed.
@@ -45,9 +54,7 @@ test('numeric scrubbing handles relative motion beyond display bounds and undoes
   await expect(field).toHaveValue(before);
 
   // Losing lock (including Escape in Chromium) cancels the entire edit.
-  await page.mouse.move(x, y);
-  await page.mouse.down();
-  await page.mouse.move(x + 10, y);
+  await beginScrub();
   await page.evaluate(() => {
     window.dispatchEvent(new MouseEvent('mousemove', { movementX: 5000, buttons: 1 }));
     document.exitPointerLock();
