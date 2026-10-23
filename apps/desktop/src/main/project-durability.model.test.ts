@@ -442,4 +442,20 @@ describe('SAVE-1 model check', () => {
     console.log(`SAVE-1 model check (2 slots x 2 patches and 1 slot x 3 patches, 2 faults of any kind): ${schedules} schedules`);
     expect(schedules).toBeGreaterThan(50_000);
   });
+
+  /* The two-fault sweep before SAVE-1c, kept: every arrangement of 2 slot
+     writes and 3 patches with any two faults of the earlier kinds (about
+     100,000 schedules, 0 violations at review recheck 6). It is slow, so it
+     runs only with PM_MODEL_SLOW=1, beside the file's other PM_MODEL_ runs. */
+  it.skipIf(!process.env.PM_MODEL_SLOW)('every interleaving of 2 slot writes and 3 patches, with any two faults of the earlier kinds, recovers a real state and stays live', { timeout: 7_200_000 }, async () => {
+    let schedules = 0;
+    for (const script of scripts(2, 3)) {
+      const result = await explore(script, 2, true, BASIC);
+      schedules += result.schedules;
+      expect(result.violations, script.join('')).toEqual([]);
+    }
+    // Written directly: the slow sweep's count is what its run reports.
+    process.stdout.write(`SAVE-1 model check (2 slot writes, 3 patches, 2 faults of the earlier kinds): ${schedules} schedules\n`);
+    expect(schedules).toBeGreaterThan(90_000);
+  });
 });
