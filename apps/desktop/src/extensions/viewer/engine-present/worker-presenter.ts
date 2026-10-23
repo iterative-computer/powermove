@@ -306,8 +306,9 @@ export class WorkerPresenter implements Presenter {
     if (this.disposed) return;
     const session = this.options.session;
     if (message.type === 'clock') {
-      this.options.host.post({ type: 'clock', session, sample: message.sample, arrivedMs });
-      if (this.options.hostOffsetUs) this.options.host.post({ type: 'hostOffset', session, us: this.options.hostOffsetUs() });
+      // The host clock offset goes with the sample (one message).
+      const hostOffsetUs = this.options.hostOffsetUs ? this.options.hostOffsetUs() : undefined;
+      this.options.host.post({ type: 'clock', session, sample: message.sample, arrivedMs, ...(hostOffsetUs !== undefined ? { hostOffsetUs } : {}) });
     } else if (message.type === 'surfacePool') {
       const pool = message.pool;
       if (pool.role === 'depthId') {

@@ -72,12 +72,53 @@ function main(): void {
     process.exit(70);
   }
 
+  /**
+   * Messages for a window's port leave together: everything the engine
+   * sends a renderer within one turn of this process's event loop (a
+   * frame's descriptor, its clock sample, its stats, the needs it asks
+   * for) goes as one message, an array of envelopes, so the window runs one
+   * task for them instead of one each (`EngineConnection.receive`). Other
+   * peers (main, fonts, the job engine) get each envelope as before.
+   */
+  const renderers = new Set<number>();
+  const outbox = new Map<number, Uint8Array[]>();
+  let flushing = false;
+  function flushRenderers(): void {
+    flushing = false;
+    const held = [...outbox];
+    outbox.clear();
+    for (const [id, list] of held) {
+      const port = ports.get(id);
+      if (!port || !list.length) continue;
+      port.postMessage(list.length === 1 ? list[0] : list);
+    }
+  }
+  function flushPort(id: number): void {
+    const list = outbox.get(id);
+    if (!list) return;
+    outbox.delete(id);
+    const port = ports.get(id);
+    if (port && list.length) port.postMessage(list.length === 1 ? list[0] : list);
+  }
+
   function run(actions: EngineAction[]): void {
     for (const action of actions) {
       if (action.kind === 'send') {
         const port = ports.get(action.port);
-        if (port && action.bytes) port.postMessage(action.bytes);
+        if (!port || !action.bytes) continue;
+        if (!renderers.has(action.port)) {
+          port.postMessage(action.bytes);
+          continue;
+        }
+        let list = outbox.get(action.port);
+        if (!list) outbox.set(action.port, (list = []));
+        list.push(action.bytes);
+        if (!flushing) {
+          flushing = true;
+          setImmediate(flushRenderers);
+        }
       } else if (action.kind === 'close') {
+        flushPort(action.port);
         const port = ports.get(action.port);
         ports.delete(action.port);
         port?.close();
@@ -130,9 +171,12 @@ function main(): void {
     if (message?.type === 'connect') {
       const port = event.ports[0];
       if (!port || !Number.isSafeInteger(message.port)) return;
+      flushPort(message.port);
       ports.get(message.port)?.close();
       closeReleasePorts(message.port);
       ports.set(message.port, port);
+      if (message.peer === 'renderer') renderers.add(message.port);
+      else renderers.delete(message.port);
       port.on('message', (incoming) => {
         const data = incoming.data as unknown;
         if (data instanceof Uint8Array) run(engine.receive(message.port, data));

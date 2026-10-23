@@ -47,7 +47,8 @@ export type ToWorker =
    *  reads it as the window's port; `engineSession` is the engine's id of
    *  the session) instead of through the page. */
   | { type: 'releasePort'; session: number; port: MessagePort; engineSession: number }
-  | { type: 'clock'; session: number; sample: ClockSample; arrivedMs: number }
+  /** A clock sample, with the host clock offset when the page measured it. */
+  | { type: 'clock'; session: number; sample: ClockSample; arrivedMs: number; hostOffsetUs?: number | null }
   | { type: 'pool'; session: number; pool: SurfacePool }
   | { type: 'frame'; session: number; desc: FrameDescriptor; frame: VideoFrame; arrivedMs: number }
   | { type: 'hostOffset'; session: number; us: number | null }
@@ -313,6 +314,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
         return;
       }
       case 'clock':
+        if (s && message.hostOffsetUs !== undefined) s.hostOffsetUs = message.hostOffsetUs;
         s?.presenter.receive({ type: 'clock', sample: message.sample }, message.arrivedMs);
         return;
       case 'pool':
@@ -324,8 +326,8 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
           return;
         }
         s.outstanding.set(`${message.desc.poolIndex}:${message.desc.seq}`, { poolIndex: message.desc.poolIndex, seq: message.desc.seq });
+        // Stats go to the page with the frame's `presented` message.
         s.presenter.present(message.desc, message.frame, message.arrivedMs);
-        sendStats(s);
         return;
       case 'hostOffset':
         if (s) s.hostOffsetUs = message.us;

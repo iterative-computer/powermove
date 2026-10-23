@@ -175,6 +175,12 @@ export class EngineConnection {
   }
 
   private receive(data: unknown): void {
+    // The engine's utility process sends what it has for this window in one
+    // turn as one message (an array of envelopes): one task for all of them.
+    if (Array.isArray(data)) {
+      for (const one of data) this.receive(one);
+      return;
+    }
     if (this.closed) return;
     const arrived = this.now();
     const bytes = data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : null;

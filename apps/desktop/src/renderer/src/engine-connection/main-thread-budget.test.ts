@@ -41,8 +41,11 @@ class Port implements PortLike {
   }
   start(): void {}
   close(): void {}
-  deliver(m: Envelope): void {
-    for (const l of this.listeners) l({ data: encodeEnvelope(m) });
+  deliver(m: Envelope | Envelope[]): void {
+    // An array: what the engine's process sends this window in one turn of
+    // its event loop, as one message (engine-process.ts).
+    const data = Array.isArray(m) ? m.map((e) => encodeEnvelope(e)) : encodeEnvelope(m);
+    for (const l of this.listeners) l({ data });
   }
 }
 
@@ -79,7 +82,8 @@ async function playback(layers: number, frames: number): Promise<Record<string, 
   });
   const names = Array.from({ length: layers }, (_, i) => `layer-${i}`);
   const needs = (k: number): CompatNeed[] => names.map((layer) => ({ composition: 'root', layer, time: k * FRAME, source: 'rasterOverride', scale: 1 }));
-  const event = (body: unknown) => port.deliver({ ...envelope({ kind: 'event', body } as never, SESSION), revision: 3 });
+  const envelopeOf = (body: unknown): Envelope => ({ ...envelope({ kind: 'event', body } as never, SESSION), revision: 3 });
+  const event = (body: unknown) => port.deliver(envelopeOf(body));
   const warmup = counters.snapshot();
   // The run's first frame: everything up to the engine's ask-ahead.
   event({ type: 'compat', compat: 'needs', revision: 3, needs: [0, 1, 2, 3, 4, 5, 6, 7, 8].flatMap(needs) });
@@ -90,10 +94,13 @@ async function playback(layers: number, frames: number): Promise<Record<string, 
     state.time = k * FRAME;
     // The engine keeps the frame eight ahead asked (what it has no answer
     // for), then sends this frame.
+    // What the engine's turn for the frame sends, in one message.
+    const turn: Envelope[] = [];
     const missing = needs(k + 8).filter((n) => !answered.has(`${n.layer}@${n.time}`));
-    if (missing.length) event({ type: 'compat', compat: 'needs', revision: 3, needs: missing });
-    event({ type: 'frame', frame: { poolIndex: k % 8, poolGeneration: 1, seq: k + 1, pts: k * FRAME, revision: 3, colorSpace: 'srgb', format: 'bgra8Unorm', quality: { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false }, overlay: null, depthId: null, viewSeq: 1, duration: FRAME } });
-    if (k % 6 === 0) event({ type: 'clock', sample: { seq: k + 1, epoch: 1, state: 'playing', hostTime: k * 41_667, mediaTime: k * FRAME, rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48_000, loopRange: null } });
+    if (missing.length) turn.push(envelopeOf({ type: 'compat', compat: 'needs', revision: 3, needs: missing }));
+    turn.push(envelopeOf({ type: 'frame', frame: { poolIndex: k % 8, poolGeneration: 1, seq: k + 1, pts: k * FRAME, revision: 3, colorSpace: 'srgb', format: 'bgra8Unorm', quality: { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false }, overlay: null, depthId: null, viewSeq: 1, duration: FRAME } }));
+    if (k % 6 === 0) turn.push(envelopeOf({ type: 'clock', sample: { seq: k + 1, epoch: 1, state: 'playing', hostTime: k * 41_667, mediaTime: k * FRAME, rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48_000, loopRange: null } }));
+    port.deliver(turn);
     for (const fn of rafs.splice(0)) fn();
   }
   transport.dispose();
@@ -119,6 +126,8 @@ describe('the engine path\'s main-thread budget', () => {
       if (process.env['BUDGET_DEBUG']) console.log('main-thread budget', JSON.stringify(measured));
       expect(counts['turns']).toBeLessThanOrEqual(1);
       expect(counts['posted']).toBeLessThanOrEqual(1);
+      // One task for what the engine sent in its turn for the frame.
+      expect(counts['portEntries']).toBeLessThanOrEqual(1);
       const over = Object.entries(counts).filter(([k, v]) => held[k] !== undefined && v > held[k]!);
       if (process.env['RATCHET_UPDATE'] === '1') {
         const lowered = { ...held };

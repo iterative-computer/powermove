@@ -3,8 +3,8 @@
   "note": "Per presented frame, exact counts (main-thread-budget.test.ts). Lower with RATCHET_UPDATE=1; never raise by hand. To move into the perfbench ratchet once it lands.",
   "benches": {
     "playback-300-passthrough-layers": {
-      "entries": 2.167,
-      "portEntries": 1.167,
+      "entries": 2,
+      "portEntries": 1,
       "turns": 1,
       "posted": 0.979,
       "postedBytes": 24369.5,
