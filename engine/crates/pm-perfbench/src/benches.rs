@@ -225,10 +225,18 @@ impl<'a> Viewer<'a> {
     }
 }
 
+/// The counts of a measured span, taken as soon as it ends (before the
+/// report's own allocations).
+struct Measured(pm_perf::Counters, pm_perf::Counters);
+
+fn measured(scope: Scope) -> Measured {
+    Measured(scope.finish(), scope.finish_global())
+}
+
 fn report(
     name: &str,
     unit: &'static str,
-    scope: &Scope,
+    m: Measured,
     wall_ms: Vec<f64>,
     notes: Value,
 ) -> BenchReport {
@@ -236,8 +244,8 @@ fn report(
         name: name.to_owned(),
         units: wall_ms.len() as u32,
         unit,
-        counters: scope.finish(),
-        global: scope.finish_global(),
+        counters: m.0,
+        global: m.1,
         wall_ms,
         notes,
     }
@@ -286,7 +294,8 @@ pub fn playback(ctx: &Ctx, name: &str, layers: usize, frames: u32) -> BenchRepor
     let wall = (2..2 + frames)
         .map(|k| v.frame(ticks(f64::from(k) / fps)))
         .collect();
-    report(name, "frames", &scope, wall, f.summary.clone())
+    let m = measured(scope);
+    report(name, "frames", m, wall, f.summary.clone())
 }
 
 /// A layer drag, paused: 60 moves of one solid, each a new revision drawn
@@ -324,10 +333,11 @@ pub fn drag(ctx: &Ctx, name: &str, layers: usize, moves: u32, reuse: bool) -> Be
             v.frame(at)
         })
         .collect();
+    let m = measured(scope);
     report(
         name,
         "moves",
-        &scope,
+        m,
         wall,
         json!({ "fixture": f.summary, "layer": layer, "reuse": reuse }),
     )
@@ -354,10 +364,11 @@ pub fn edit_playback_500(ctx: &Ctx) -> BenchReport {
             v.frame(ticks(f64::from(k) / fps))
         })
         .collect();
+    let m = measured(scope);
     report(
         "edit_playback_500",
         "frames",
-        &scope,
+        m,
         wall,
         json!({ "fixture": f.summary, "layer": layer }),
     )
@@ -375,10 +386,11 @@ pub fn scrub_24(ctx: &Ctx) -> BenchReport {
     let wall = (0..24)
         .map(|k| v.frame(ticks(f64::from((k * 7) % 24) * 1.9 / 24.0 + 1.0 / 60.0)))
         .collect();
+    let m = measured(scope);
     report(
         "scrub_24",
         "seeks",
-        &scope,
+        m,
         wall,
         json!({ "media": "h264-aac.mp4 (320x180, 30 fps)" }),
     )
@@ -542,10 +554,11 @@ pub fn typing_60(ctx: &Ctx) -> BenchReport {
     }
     let scope = Scope::begin();
     let wall = (3..63).map(|i| key(&mut v, &mut typed, i)).collect();
+    let m = measured(scope);
     report(
         "typing_60",
         "keys",
-        &scope,
+        m,
         wall,
         json!({ "font": "SF Pro Display 600, 96 px" }),
     )
@@ -574,11 +587,12 @@ pub fn open_large_2000(ctx: &Ctx) -> BenchReport {
     let root = pm_model::json::parse(&text).expect("parse");
     v.replace_parsed(root);
     let draw = v.frame(ticks(0.0));
+    let m = measured(scope);
     let total = start.elapsed().as_secs_f64() * 1e3;
     let mut r = report(
         "open_large_2000",
         "opens",
-        &scope,
+        m,
         vec![total],
         json!({
             "fixture": f.summary, "bytes": text.len(), "first_frame_ms": draw
@@ -607,10 +621,11 @@ pub fn import_3d(ctx: &Ctx, name: &str, vertices: usize) -> BenchReport {
     let wall = (0..11)
         .map(|k| v.frame(ticks(f64::from(k) / 30.0)))
         .collect();
+    let m = measured(scope);
     report(
         name,
         "frames",
-        &scope,
+        m,
         wall,
         json!({ "vertices": vertices, "first": "import" }),
     )
