@@ -1,6 +1,6 @@
 // @ts-nocheck -- faithful behavioral transplant of unique project-registry oracle cases.
 import assert from 'node:assert/strict';
-import { it } from 'vitest';
+import { it, vi } from 'vitest';
 
 import { makePM } from './make-pm';
 
@@ -325,4 +325,45 @@ it('checkpoints shortly after main refuses an entry, without waiting for autosav
   assert.equal(slotWrites, 1);
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal(slotWrites, 2, 'a slot holding the refused edit is posted');
+});
+
+it('keeps one checkpoint in flight during a burst of refused edits, backs off, and still lands one after the last (review recheck 6)', async () => {
+  vi.useFakeTimers();
+  try {
+    const { PM, refuse } = mainJournalModel();
+    // Main's view: the journal reopens when a slot posted after the last refused edit lands.
+    let clock = 0, closedAt = 0, postedAt = 0, slotWrites = 0, flushes = 0, reopened = 0;
+    const set = PM.store.set;
+    PM.store.set = (key, value) => { if (key === 'project.K2') { slotWrites++; postedAt = ++clock; } return set(key, value); };
+    const append = PM.store.appendJournal;
+    PM.store.appendJournal = (key, entry) => {
+      const sent = append(key, entry);
+      sent.catch(() => { closedAt = ++clock; });
+      return sent;
+    };
+    // A flush waits for the slot to reach disk (1 s for a large project).
+    PM.store.flush = () => { flushes++; return new Promise(resolve => setTimeout(() => {
+      if (postedAt > closedAt) { reopened++; refuse(false); PM.bus.emit('storage:saved', 'projectJournal.K2'); }
+      resolve(undefined);
+    }, 1_000)); };
+    PM.proj = { id: 'K2', name: 'Large', revision: 0, layers: [] };
+    PM.Projects.put(PM.proj);
+    refuse(true);
+    // Twenty refused edits, 300 ms apart: each pause used to post a whole-project slot.
+    for (let revision = 1; revision <= 20; revision++) {
+      PM.bus.emit('history:project-patch', { projectId: 'K2', revision, patches: [{ path: ['name'], exists: true, value: `Edit ${revision}` }] });
+      await vi.advanceTimersByTimeAsync(300);
+    }
+    const duringBurst = slotWrites - 1;
+    assert.ok(duringBurst <= 3, `at most a few checkpoints during the burst (posted ${duringBurst})`);
+    // After the burst: one slot posted after the last refused edit lands, and the journal reopens.
+    await vi.advanceTimersByTimeAsync(20_000);
+    assert.equal(reopened, 1, 'the closed journal converges to a landed slot');
+    assert.ok(postedAt > closedAt);
+    const settled = slotWrites;
+    await vi.advanceTimersByTimeAsync(120_000);
+    assert.equal(slotWrites, settled, 'nothing more once the journal reopened');
+    assert.ok(slotWrites - 1 <= 4, `in all, ${slotWrites - 1} checkpoints for 20 refused edits`);
+    assert.ok(flushes <= slotWrites);
+  } finally { vi.useRealTimers(); }
 });

@@ -103,17 +103,51 @@ const journalFull = new Set<string>();
 /* A closed journal reopens only when a slot posted after the last refused
    edit has landed. Waiting for autosave (its debounce grows to a large
    project's last write time, up to 60 s) kept "not saved" up for minutes; the
-   project is checkpointed shortly after the last refused edit instead. */
+   project is checkpointed shortly after the last refused edit instead.
+   A checkpoint of a large project costs about a second of serialization on
+   this thread and its whole size in IPC, and every refused edit after it was
+   posted moves main's close point past it. So one is in flight at a time
+   (posted, then a flush until it is on disk); refused edits meanwhile are
+   covered by the next one (trailing), whose timer each refused edit
+   restarts. While the journal stays closed after one landed, the wait grows
+   (doubling, and at least four times the last checkpoint's own cost): up to
+   CLOSED_CHECKPOINT_MAX_MS while edits keep being refused, and up to
+   autosave's own ceiling when none was and the slot write itself failed (a
+   full disk). It starts again at CLOSED_CHECKPOINT_MS once the journal
+   reopens. It ends only when the journal reopens or the project
+   leaves the screen (its switch checkpoints it), so a closed journal still
+   converges to a landed slot. */
 const CLOSED_CHECKPOINT_MS = 250;
-const closedCheckpoints = new Map<string, ReturnType<typeof setTimeout>>();
+const CLOSED_CHECKPOINT_MAX_MS = 8_000, CLOSED_RETRY_MAX_MS = 60_000;
+/** `refused`: an edit was refused since the checkpoint in flight (or the last one) was posted. */
+type ClosedCheckpoint = { timer?: ReturnType<typeof setTimeout>; running: boolean; refused: boolean; delay: number };
+const closedCheckpoints = new Map<string, ClosedCheckpoint>();
 function checkpointSoon(id: string) {
-  const pending = closedCheckpoints.get(id);
-  if (pending !== undefined) clearTimeout(pending);
-  closedCheckpoints.set(id, setTimeout(() => {
-    closedCheckpoints.delete(id);
-    if (PM.proj?.id !== id || !journalFull.has(id)) return;
-    try { R.put(PM.proj); } catch (error) { console.warn('Project checkpoint failed', error); }
-  }, CLOSED_CHECKPOINT_MS));
+  let pending = closedCheckpoints.get(id);
+  if (!pending) closedCheckpoints.set(id, pending = { running: false, refused: false, delay: CLOSED_CHECKPOINT_MS });
+  pending.refused = true; pending.delay = Math.min(pending.delay, CLOSED_CHECKPOINT_MAX_MS);
+  // One in flight: the next, after it lands, covers this edit too.
+  if (pending.running) return;
+  if (pending.timer !== undefined) clearTimeout(pending.timer);
+  const scheduled = pending;
+  pending.timer = setTimeout(() => { void closedCheckpoint(id, scheduled); }, pending.delay);
+}
+async function closedCheckpoint(id: string, pending: ClosedCheckpoint) {
+  pending.timer = undefined;
+  if (closedCheckpoints.get(id) !== pending) return;
+  if (PM.proj?.id !== id || !journalFull.has(id)) { closedCheckpoints.delete(id); return; }
+  pending.running = true; pending.refused = false;
+  const began = Date.now();
+  try { R.put(PM.proj); } catch (error) { console.warn('Project checkpoint failed', error); }
+  const cost = Date.now() - began;
+  // On disk, or failed: a flush answers which keys are still failing (storage:saved reopens).
+  if (typeof PM.store.flush === 'function') { try { await PM.store.flush(); } catch { /* reported by the store */ } }
+  pending.running = false;
+  if (closedCheckpoints.get(id) !== pending) return;
+  if (PM.proj?.id !== id || !journalFull.has(id) || typeof PM.store.flush !== 'function') { closedCheckpoints.delete(id); return; }
+  // Still closed: an edit refused after it was posted, or its write failed. Back off, then once more.
+  pending.delay = Math.min(pending.refused ? CLOSED_CHECKPOINT_MAX_MS : CLOSED_RETRY_MAX_MS, Math.max(pending.delay * 2, cost * 4));
+  pending.timer = setTimeout(() => { void closedCheckpoint(id, pending); }, pending.delay);
 }
 PM.bus?.on?.('storage:saved', (key: any) => {
   if (typeof key === 'string' && key.startsWith(R.JOURNAL)) journalFull.delete(key.slice(R.JOURNAL.length));

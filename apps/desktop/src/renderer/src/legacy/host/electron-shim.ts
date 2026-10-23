@@ -357,13 +357,16 @@ export function install(PM: PMRegistry): void {
      journal write (about one per edit) and every other key it writes. An
      episode lasts while errors keep arriving: a flush with none since the
      last one ends it, so an old error that never clears (nothing writes that
-     key again) does not hide a later project's failure. */
+     key again) does not hide a later project's failure. A key main still
+     reports failing (it has not been on disk since) stays quiet even after
+     such a flush: a project's background checkpoint retried while its
+     journal is closed is the same failure, not a new one. */
   let episode = false, fresh = false;
   /* Save errors for writes main accepted but could not put on disk (and
      journal entries it refused): a flush learns from main which keys are still
      failing, and drops the others (a later write reached disk). */
   const persistErrors = new Set<string>();
-  const reportStoreError = (event: { key: string; error: string }) => {
+  const reportStoreError = (event: { key: string; error: string }, stillFailing = false) => {
     saveErrors.set(event.key, String(event.error));
     /* The digest describes text that may not be on disk: a project's next
        checkpoint must write rather than find it unchanged (the registry
@@ -374,7 +377,7 @@ export function install(PM: PMRegistry): void {
       cached.delete(legacyKey(event.key));
     }
     fresh = true;
-    if (episode) return;
+    if (episode || stillFailing) return;
     episode = true;
     PM.toast(`Could not save ${event.key}: ${event.error}`);
   };
@@ -546,12 +549,17 @@ export function install(PM: PMRegistry): void {
            entry would be accepted over the gap. A malformed entry is refused
            there, which closes the journal (SAVE-1b). */
         void Promise.resolve(bridge.store.appendJournal(service, '{"unserializable"')).catch(() => undefined);
+        const known = persistErrors.has(service);
         persistErrors.add(service);
-        reportStoreError({ key: service, error: errorText(error, 'Save failed') });
+        reportStoreError({ key: service, error: errorText(error, 'Save failed') }, known);
         return Promise.reject(error);
       }
       const sent = (async () => { await bridge.store.appendJournal(service, text); })();
-      const write = sent.catch((error: unknown) => { persistErrors.add(service); reportStoreError({ key: service, error: errorText(error, 'Save failed') }); });
+      const write = sent.catch((error: unknown) => {
+        const known = persistErrors.has(service);
+        persistErrors.add(service);
+        reportStoreError({ key: service, error: errorText(error, 'Save failed') }, known);
+      });
       const slot = `append:${++tracks}:${service}`;
       asyncWrites.set(slot, write);
       void write.finally(() => asyncWrites.delete(slot));
@@ -644,8 +652,9 @@ export function install(PM: PMRegistry): void {
   });
 
   bridge.store.onError((event: any) => {
+    const known = typeof event?.key === 'string' && persistErrors.has(event.key);
     if (event?.unsaved && typeof event.key === 'string') persistErrors.add(event.key);
-    reportStoreError(event);
+    reportStoreError(event, known);
   });
 
   let fontRefresh: Promise<boolean> | undefined;
