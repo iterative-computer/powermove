@@ -122,8 +122,11 @@ native engines and one document worker per project. Chromium starts on demand
 for workspace/panel tools and pinned or unverified user shaders. Missing
 Chromium returns `chromium-unavailable` when first needed. The native runtime
 must match the bundled protocol; missing addons are `native-runtime-unavailable`.
-`render` and direct bundled `pm-cli` use the desktop profile’s shader pins and
-the same on-demand Chromium service for ANGLE and level 1 SVG images. Set `POWERMOVE_USER_DATA` to select another
+`render` and direct bundled `pm-cli` (`render` and `scope`) use the desktop
+profile’s shader pins and the same on-demand Chromium service for ANGLE and
+level 1 SVG images. `pm-cli scope` measures the same pixels `render` writes: it
+takes `--definitions`, and without a helper a pinned or unverified user program
+fails as not headless-renderable (exit 4) instead of drawing natively. Set `POWERMOVE_USER_DATA` to select another
 profile. See [native hidden-host integration](../../docs/engine/hidden-host.md)
 for compatibility and validation status.
 

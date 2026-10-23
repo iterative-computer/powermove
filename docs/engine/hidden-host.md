@@ -104,6 +104,16 @@ The desktop and hidden host also atomically persist their winning definitions in
 `Engine Cache/definitions.json`. `powermove render` uses that set unless the
 caller provides `--definitions`; direct `pm-cli` accepts the same snapshot.
 
+`pm-cli render` and `pm-cli scope` share one renderer setup
+(`pm-cli/src/render.rs` `headless_renderer`): the read-only probe store,
+`require_shader_reference`, the helper's Chromium as the fallback host, the
+Chromium SVG source and the `--definitions` snapshot (else the built-in set with
+the same warning). Before this, scope set up only the SVG source, so with no
+`POWERMOVE_ENGINE_PARITY_ENV` every user program counted as natively verified
+and a desktop-pinned program was measured from native pixels. Without a helper,
+both commands report a pinned, unverified or untranslatable user program as not
+headless-renderable (exit 4) and write nothing.
+
 Missing native addons are `native-runtime-unavailable`; missing Chromium is
 `chromium-unavailable` at the first browser-dependent call. Corrupt persisted
 probe data is `shader-probe-store-unreadable`. The enabled host has no blanket
@@ -162,7 +172,16 @@ native verification must lose to the persisted runner pin; removing only that
 pin must produce different native pixels. With every desktop decision removed,
 first probes by both CLI entry points and by a hidden host on a fresh profile
 copy must match the desktop's pixels and leave `angle-parity` empty. A missing
-browser must fail by name. `cargo test -p pm-cli --test definitions`
+browser must fail by name. `pm-cli scope` runs on the same pinned project
+with the forged native verification in place: its channel statistics must match
+`pm-cli scope --frame` of the desktop's frame 0 within one 8-bit step (the PNG
+holds bytes, scope measures the 32-bit render). With only the pin removed, the
+native scope must deviate by more than that step. Without a helper it must exit
+4 naming the effect, and with a missing browser it must fail with
+`chromium-unavailable`; neither writes `scope.json`. The `scope_*` tests in
+`cargo test -p pm-cli --test definitions` cover a shader layer and a runner-only
+definition without a helper, and a shader layer through the production helper.
+`cargo test -p pm-cli --test definitions`
 (`a_cli_first_probe_leaves_no_decision_in_the_desktop_namespace`) covers an
 exactly matching program, which a writable store would have recorded as
 `.native`, and pm-render's `effects_fallback` and `effects::parity` tests cover
