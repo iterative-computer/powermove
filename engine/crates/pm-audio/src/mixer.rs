@@ -1982,7 +1982,7 @@ impl Mixer {
             // file's center), so they fold by their layout instead
             // (decision LAYOUT-1, `today::stereo_fold`).
             let fold = (!matches!(bus, 1 | 2 | 4 | 6))
-                .then(|| self.bus_lead)
+                .then_some(self.bus_lead)
                 .flatten()
                 .and_then(|vi| self.graph.voices.get(vi))
                 .map(|plan| crate::today::stereo_fold(&plan.source.info.speakers, bus));
