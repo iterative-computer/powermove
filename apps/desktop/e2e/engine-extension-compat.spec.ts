@@ -750,6 +750,86 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.bases.syncLoads - engine.basesBefore.syncLoads, `synchronous base loads from ${JSON.stringify(engine.bases.syncLoadSites)}`).toBe(0);
   });
 
+  test('a paused redraw announces the frame once, and redraws an override whose own state changed, as today', async ({ session }) => {
+    test.setTimeout(240_000);
+    // A wrapper whose tint follows its own state (a panel setting), then
+    // `transport.invalidate()`: today's frame loop calls every wrapper again
+    // on that redraw. Also a redraw with nothing changed (a selection
+    // change redraws today): one `frame:rendered`, as today.
+    const probe = (page: Page) => page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const api = PM.Kernel.api('redraw-probe');
+      const state = { color: '#E8202A' };
+      const original = api.services.get('raster');
+      const registration = api.services.register('raster', (layer: any, scale = 1, time = api.transport.time(), uploaded?: unknown, crop?: unknown) => {
+        const base = original(layer, scale, time, uploaded, crop);
+        if (layer.id !== 'tinted' || !base?.cv) return base;
+        const cv = document.createElement('canvas'); cv.width = base.cv.width; cv.height = base.cv.height;
+        const ctx = cv.getContext('2d')!;
+        ctx.drawImage(base.cv, 0, 0); ctx.globalCompositeOperation = 'source-in'; ctx.fillStyle = state.color; ctx.fillRect(0, 0, cv.width, cv.height);
+        return { ...base, cv, key: `redraw-probe:${state.color}:${layer.id}:${scale}:${time}:${api.anim.version()}` };
+      });
+      const count = async (act: () => void) => {
+        let n = 0;
+        const off: any = api.events.on('frame:rendered', () => { n++; });
+        act();
+        await new Promise((r) => setTimeout(r, 700));
+        if (typeof off === 'function') off(); else off?.dispose?.();
+        return n;
+      };
+      // The frame's pixel at the ellipse's centre (a capture of the time on screen).
+      const pixel = async () => {
+        const url: string = await api.render.snapshotAsync(PM.time, 320);
+        const image = new Image();
+        await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; image.src = url; });
+        const cv = document.createElement('canvas'); cv.width = image.width; cv.height = image.height;
+        const ctx = cv.getContext('2d')!;
+        ctx.drawImage(image, 0, 0);
+        const d = ctx.getImageData(Math.round(100 * image.width / 320), Math.round(90 * image.height / 180), 1, 1).data;
+        return [d[0], d[1], d[2]];
+      };
+      try {
+        api.transport.invalidate();
+        PM.setTime(1);
+        await new Promise((r) => setTimeout(r, 1200));
+        const unchanged = await count(() => PM.invalidate());
+        const before = await pixel();
+        state.color = '#2050F0';
+        const changed = await count(() => api.transport.invalidate());
+        const after = await pixel();
+        return { unchanged, changed, before, after, redraws: PM.EnginePresentedEvents?.redraws ?? null };
+      } finally { registration.dispose(); }
+    });
+    await session.openEditor();
+    await shapeTintProject(session.page);
+    await expect.poll(() => session.page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    await expect.poll(() => session.page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
+    const engine = await probe(session.page);
+    const replaced = await session.app.evaluate(async () => {
+      const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
+      return report?.presenter?.compatReplaced ?? null;
+    });
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    await session.close();
+    const off = await flagOffApp(null);
+    let today: Awaited<ReturnType<typeof probe>>;
+    try {
+      await off.openEditor();
+      await shapeTintProject(off.page);
+      await off.page.waitForTimeout(800);
+      today = await probe(off.page);
+    } finally {
+      await off.close();
+      await rm(off.userData, { recursive: true, force: true });
+    }
+    console.log(JSON.stringify({ pausedRedraw: { engine, today, replaced } }));
+    expect(engine.unchanged).toBe(today.unchanged);
+    expect(engine.changed).toBe(today.changed);
+    expect(engine.after).toEqual(today.after);
+    expect(engine.after).not.toEqual(engine.before);
+    expect(replaced).toBeGreaterThan(0);
+  });
+
   test('editing a large document with a raster override that reads its base copies the document only to seed the raster worker', async ({ session }) => {
     test.setTimeout(360_000);
     // Drags the overridden ellipse in a document of megabytes of JSON, one
@@ -759,24 +839,29 @@ test.describe('Use New Engine: existing extensions', () => {
     const drag = (page: Page) => page.evaluate(async () => {
       const PM = (window as any).PM;
       const api = PM.Kernel.api('drag-probe');
-      const layer = PM.proj.layers.find((l: any) => l.id === 'tinted');
       let presented: (() => void) | null = null;
       const off: any = api.events.on('frame:rendered', () => { presented?.(); presented = null; });
-      const latencies: number[] = [], missed: number[] = [];
+      const latencies: number[] = [], missed: number[] = [], diagnostics: unknown[] = [];
       try {
         for (let i = 0; i < 60; i++) {
           const began = performance.now();
           const shown = new Promise<boolean>((resolve) => { presented = () => resolve(true); setTimeout(() => resolve(false), 2000); });
-          layer.p['position.x'].v = 200 + i * 4;
+          const before = PM.EngineDoc?.barrier?.revision ?? null;
+          PM.proj.layers.find((l: any) => l.id === 'tinted').p['position.x'].v = 200 + i * 4;
           // As the app's own edits do (anim.ts): the edit, then a redraw.
           PM.touch();
           PM.invalidate();
-          if (await shown) latencies.push(performance.now() - began); else missed.push(i);
+          if (await shown) latencies.push(performance.now() - began);
+          else {
+            missed.push(i);
+            const status = PM.EngineConnection?.status?.() ?? null;
+            diagnostics.push({ move: i, before, revision: PM.EngineDoc?.barrier?.revision ?? null, applied: status?.revision ?? null, route: status?.route ?? null, failures: status?.failures ?? null, compat: PM.EngineRender ? { ...PM.EngineRender.compatStats } : null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats, recent: undefined, recentAnswers: undefined } : null });
+          }
         }
       } finally { if (typeof off === 'function') off(); else off?.dispose?.(); }
       const sorted = [...latencies].sort((a, b) => a - b);
       const q = (p: number) => Math.round(sorted[Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1)] ?? 0);
-      return { moves: 60, shown: latencies.length, missed, p50: q(0.5), p95: q(0.95), max: q(1) };
+      return { moves: 60, shown: latencies.length, missed, diagnostics, p50: q(0.5), p95: q(0.95), max: q(1) };
     });
     await cp(path.join(__dirname, FIXTURE['shape-tint']!), path.join(session.userData, 'extensions', 'shape-tint'), { recursive: true });
     await session.relaunch();
