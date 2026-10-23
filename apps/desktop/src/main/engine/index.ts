@@ -8,6 +8,7 @@
  * sandbox frames), tells windows about crashes and restarts, and serves
  * the engines' host requests (native-engine.ts).
  */
+import { appendFile } from 'node:fs/promises';
 import { existsSync, statSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -126,6 +127,7 @@ export type InstallNativeEngineOptions = {
 
 export type InstalledNativeEngine = {
   engine: NativeEngine | null;
+  exportEncoders?: ExportEncoders;
   /** Agent exports and frames through the job engine (agent-jobs.ts). */
   agentJobs: AgentJobs | null;
   /** The render queue (render-queue.ts). */
@@ -327,16 +329,29 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     openWindow: () => openEncoderWindow({
       preload: path.join(options.mainDirectory, '../preload/exportEncoder.js'),
       url: `${rendererUrl ?? 'app://powermove'}/export-encoder.html`,
+      receiverGone: (owner) => exportFrameBridge?.receiverGone(owner),
       log
     }),
-    writeOutput: (file, bytes) => writeFile(file, bytes)
+    writeOutput: (file, bytes) => writeFile(file, bytes),
+    ...(env['POWERMOVE_BACKGROUND_TEST'] === '1' && env['PM_EXPORT_INPUT_CAPTURE_DIR'] ? {
+      capture: (rgba: Uint8Array) => appendFile(path.join(env['PM_EXPORT_INPUT_CAPTURE_DIR']!, 'native.rgba'), rgba)
+    } : {})
+  });
+  // Separate authenticated Mach connection for job encoders. Viewer and
+  // export pools have independent generations, receivers and lifetimes.
+  const exportFrameBridge = bridgeAddon ? new FrameBridge({
+    addon: bridgeAddon, sharedTexture: sharedTexture as unknown as SharedTextureLike,
+    allowUnsignedDev: !options.isPackaged, resolve: () => exportEncoders.receiver(), log,
+  }) : null;
+  exportFrameBridge?.listen((event) => {
+    if (event.kind === 'retire' && event.generation != null) exportEncoders.retireSurface(event.generation);
   });
   engine = new NativeEngine({
     compatFrame: (request) => compatFrames.serve(request),
     exportEncoders,
     takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null,
     spawn: (process) => {
-      const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
+      const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : (exportFrameBridge?.prepareLaunch() ?? null);
       const child = utilityProcess.fork(script, [], {
         serviceName: process === 'interactive' ? 'Powermove Interactive Engine' : 'Powermove Job Engine',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -346,7 +361,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
         env: {
           POWERMOVE_ENGINE_FRAME_SOURCE: 'document',
           ...env,
-          ...(launch?.env ?? {}),
+          ...(process === 'interactive' ? (launch?.env ?? {}) : launch ? { POWERMOVE_EXPORT_BRIDGE: launch.env['POWERMOVE_FRAME_BRIDGE'] } : {}),
           POWERMOVE_ENGINE_PROCESS: process,
           POWERMOVE_ENGINE_ADDON: addon,
           // Invalidate first-use parity on every engine/browser/OS update.
@@ -689,11 +704,13 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     engine,
     agentJobs,
     renderQueue,
+    exportEncoders,
     frameBridge,
     snapshots,
     attachWindow,
     dispose: async () => {
       exportEncoders.dispose();
+      exportFrameBridge?.dispose();
       removeSnapshotIpc();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
       windowSessions.dispose();

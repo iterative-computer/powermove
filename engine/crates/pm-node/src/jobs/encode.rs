@@ -45,6 +45,9 @@ pub(crate) struct HostEncoder<P: HostPort + ?Sized> {
     cancel: Arc<AtomicBool>,
     output: CapabilityHandle,
     channels: usize,
+    gpu: Option<super::encode_gpu::GpuEncoder>,
+    gpu_ns: u128,
+    host_video_ns: u128,
 }
 
 impl<P: HostPort + ?Sized> HostEncoder<P> {
@@ -62,7 +65,27 @@ impl<P: HostPort + ?Sized> HostEncoder<P> {
             cancel,
             output,
             channels: 2,
+            gpu: None,
+            gpu_ns: 0,
+            host_video_ns: 0,
         }
+    }
+
+    pub(crate) fn with_gpu(
+        mut self,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        gate: Arc<dyn pm_export::render::GpuGate>,
+        pass: u64,
+    ) -> Self {
+        if std::env::var_os(super::encode_gpu::ENV).is_some() {
+            self.gpu = Some(super::encode_gpu::GpuEncoder::new(device, queue).with_gate(
+                gate,
+                self.cancel.clone(),
+                pass,
+            ));
+        }
+        self
     }
 
     fn step(&self, step: EncodeStep, timeout: Duration) -> Result<(), Error> {
@@ -135,6 +158,31 @@ impl<P: HostPort + ?Sized + 'static> EncodeHost for HostEncoder<P> {
         )
     }
 
+    fn gpu_frames(&self) -> bool {
+        self.gpu.is_some()
+    }
+
+    fn video_gpu(&mut self, index: u64, texture: &wgpu::Texture) -> Result<(), Error> {
+        let gpu = self
+            .gpu
+            .as_mut()
+            .ok_or_else(|| Error::Encode("GPU transport unavailable".into()))?;
+        let started = Instant::now();
+        let (generation, pool_index) = gpu.frame(index, texture)?;
+        self.gpu_ns += started.elapsed().as_nanos();
+        let started = Instant::now();
+        let result = self.step(
+            EncodeStep::VideoSurface {
+                index: count(index)?,
+                generation,
+                pool_index,
+            },
+            STEP_TIMEOUT,
+        );
+        self.host_video_ns += started.elapsed().as_nanos();
+        result
+    }
+
     fn video(&mut self, index: u64, rgba: Vec<u8>) -> Result<(), Error> {
         let index = count(index)?;
         if rgba.len() <= INLINE_PIXEL_BYTES {
@@ -180,6 +228,13 @@ impl<P: HostPort + ?Sized + 'static> EncodeHost for HostEncoder<P> {
     }
 
     fn finish(&mut self) -> Result<(), Error> {
+        if std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1") {
+            eprintln!(
+                "[export timing] gpu_conversion_ms={:.3} host_video_ms={:.3}",
+                self.gpu_ns as f64 / 1e6,
+                self.host_video_ns as f64 / 1e6
+            );
+        }
         self.step(EncodeStep::Finish, FINISH_TIMEOUT)
     }
 
@@ -305,6 +360,11 @@ mod tests {
                     index.get(),
                     matches!(pixels, PixelPayload::SharedMemory { .. })
                 ),
+                EncodeStep::VideoSurface {
+                    index,
+                    generation,
+                    pool_index,
+                } => format!("surface {} {generation}:{pool_index}", index.get()),
                 EncodeStep::Audio { samples } => format!("audio {}", samples.0.len()),
                 EncodeStep::Finish => "finish".into(),
                 EncodeStep::Abort => "abort".into(),

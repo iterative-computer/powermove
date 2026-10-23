@@ -46,6 +46,15 @@ pub trait EncodeHost: Send {
     /// Frame `index`: top-down RGBA8, premultiplied (over black where
     /// transparent), `width × height × 4` bytes.
     fn video(&mut self, index: u64, rgba: Vec<u8>) -> Result<(), Error>;
+    /// GPU transport is negotiated by the desktop host at launch.
+    fn gpu_frames(&self) -> bool {
+        false
+    }
+    fn video_gpu(&mut self, _index: u64, _texture: &wgpu::Texture) -> Result<(), Error> {
+        Err(Error::Encode(
+            "the host has no GPU encoder transport".into(),
+        ))
+    }
     /// Interleaved samples of the mix, in order.
     fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error>;
     /// Flushes the encoders and writes the muxed file to the destination.
@@ -166,6 +175,30 @@ impl Drop for WebCodecsSink {
 impl Sink for WebCodecsSink {
     type Output = Delivered;
 
+    fn gpu_frames(&self) -> bool {
+        self.host.gpu_frames()
+    }
+
+    fn video_gpu(
+        &mut self,
+        index: u64,
+        texture: &wgpu::Texture,
+        frame: Option<&WorkingFrame>,
+    ) -> Result<(), Error> {
+        if self.sampled.contains(&index) {
+            let frame =
+                frame.ok_or_else(|| Error::InvalidFrame("missing verification sample".into()))?;
+            let rgba = canvas_bytes(frame);
+            let input = crate::webm::canvas_rgba_to_i420(&rgba, frame.width, frame.height, false)?;
+            self.blocks.extend(verify::block_means(&input, index));
+        }
+        // The GPU input capture is read from Chromium's actual encoder canvas,
+        // not a parallel CPU conversion of the working frame.
+        self.host
+            .video_gpu(index, texture)
+            .inspect_err(|_| self.close())
+    }
+
     fn video_rgba(&mut self, index: u64, frame: &WorkingFrame) -> Result<bool, Error> {
         let rgba = canvas_bytes(frame);
         if let Some(capture) = self.capture.as_mut() {
@@ -213,7 +246,10 @@ impl Sink for WebCodecsSink {
 
     fn finish(mut self) -> Result<Delivered, Error> {
         self.closed = true;
+        let started = std::time::Instant::now();
         self.host.finish()?;
+        let host_ms = started.elapsed().as_secs_f64() * 1e3;
+        let started = std::time::Instant::now();
         let path = self.spec.destination.clone();
         let mut report = crate::webm::verify_webm(
             &path,
@@ -221,6 +257,12 @@ impl Sink for WebCodecsSink {
             &std::mem::take(&mut self.blocks),
             self.audio_pushed,
         )?;
+        if std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1") {
+            eprintln!(
+                "[export timing] host_finish_ms={host_ms:.3} verify_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        }
         report.bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         Ok(Delivered { path, report })
     }
@@ -325,7 +367,9 @@ mod tests {
 
     #[test]
     fn canvas_bytes_are_the_unorm_writes() {
-        let rgba: Vec<f32> = (0..64 * 4).map(|i| (i as f32 / 255.0) * 0.999 - 0.01).collect();
+        let rgba: Vec<f32> = (0..64 * 4)
+            .map(|i| (i as f32 / 255.0) * 0.999 - 0.01)
+            .collect();
         let frame = WorkingFrame {
             rgba: &rgba,
             width: 8,

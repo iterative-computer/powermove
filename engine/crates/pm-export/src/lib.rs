@@ -28,6 +28,7 @@ pub(crate) mod par;
 pub mod pipeline;
 pub mod png;
 mod png_compat;
+mod readback;
 pub mod render;
 pub mod settings;
 pub mod timescale;
@@ -128,6 +129,24 @@ impl OutputSink {
 
 impl Sink for OutputSink {
     type Output = Delivered;
+
+    fn gpu_frames(&self) -> bool {
+        matches!(self, Self::WebCodecs(s) if s.gpu_frames())
+    }
+
+    fn video_gpu(
+        &mut self,
+        index: u64,
+        texture: &wgpu::Texture,
+        frame: Option<&convert::WorkingFrame>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::WebCodecs(s) => s.video_gpu(index, texture, frame),
+            _ => Err(Error::InvalidFrame(
+                "this encoder does not accept GPU frames".into(),
+            )),
+        }
+    }
 
     fn video_rgba(&mut self, index: u64, frame: &WorkingFrame) -> Result<bool, Error> {
         match self {

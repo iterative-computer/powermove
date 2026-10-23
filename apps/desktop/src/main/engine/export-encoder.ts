@@ -23,10 +23,13 @@
 import type { CapabilityHandle, HostEncode } from '../../shared/engine-protocol';
 import type { EncoderCommand, EncoderReply } from '../../shared/export-encoder';
 import { ProtocolError } from './protocol';
+import type { Receiver } from './bridge';
 
 /** The encoder window as main drives it. */
 export interface EncoderWindow {
   post(command: EncoderCommand): void;
+  readonly receiver?: Receiver;
+  retire?(generation: number): void;
   onReply(listener: (reply: EncoderReply) => void): void;
   /** The window crashed or closed. */
   onGone(listener: (reason: string) => void): void;
@@ -37,6 +40,8 @@ export type ExportEncodersOptions = {
   openWindow(): Promise<EncoderWindow>;
   /** Writes the muxed file over the export's temporary output. */
   writeOutput(path: string, bytes: Uint8Array): Promise<void>;
+  /** Test-only capture read from the actual Chromium encoder canvas. */
+  capture?: (rgba: Uint8Array) => Promise<void>;
   closeMs?: number;
   idleMs?: number;
   schedule?: (fn: () => void, ms: number) => { cancel(): void };
@@ -60,6 +65,7 @@ type Session = {
   inFlight: Promise<void>[];
   /** The first failure of an unanswered step, thrown at the next step. */
   failure: Error | null;
+  capture: Promise<void>;
 };
 
 /** Frame and audio steps answered before the window answers them, so the
@@ -77,7 +83,11 @@ let nextId = 0;
 
 export class ExportEncoders {
   private readonly sessions = new Map<string, Session>();
+  private cpuFrames = 0;
+  private gpuFrames = 0;
+  get frames(): { cpu: number; gpu: number } { return { cpu: this.cpuFrames, gpu: this.gpuFrames }; }
   private live: Promise<Live> | null = null;
+  private receiverWindow: EncoderWindow | null = null;
   private closeTimer: Timer | null = null;
   private readonly schedule: (fn: () => void, ms: number) => Timer;
   private readonly closeMs: number;
@@ -88,6 +98,10 @@ export class ExportEncoders {
     this.closeMs = options.closeMs ?? 15_000;
     this.idleMs = options.idleMs ?? 300_000;
   }
+
+  receiver(): Receiver | null { return this.receiverWindow?.receiver ?? null; }
+
+  retireSurface(generation: number): void { this.receiverWindow?.retire?.(generation); }
 
   /** Encodes in flight (tests and diagnostics). */
   get active(): number {
@@ -101,7 +115,7 @@ export class ExportEncoders {
       if (this.sessions.has(key)) throw new ProtocolError('invalidMessage', 'This export is already encoding.');
       const output = context.resolveOutput(body.output, body.job);
       const session: Session = {
-        key, id: `e${++nextId}`, output, frameBytes: body.width * body.height * 4, busy: 0, idle: null, inFlight: [], failure: null
+        key, id: `e${++nextId}`, output, frameBytes: body.width * body.height * 4, busy: 0, idle: null, inFlight: [], failure: null, capture: Promise.resolve()
       };
       this.sessions.set(key, session);
       this.closeTimer?.cancel();
@@ -110,7 +124,8 @@ export class ExportEncoders {
         await this.command(session, {
           type: 'open', seq: 0, id: session.id, codec: body.codec, width: body.width, height: body.height,
           fps: { num: body.frameRate.num, den: body.frameRate.den }, bitrate: body.bitrate, frames: body.frames,
-          audio: body.audio ? { sampleRate: body.audio.sampleRate, channels: body.audio.channels } : null
+          audio: body.audio ? { sampleRate: body.audio.sampleRate, channels: body.audio.channels } : null,
+          capture: !!this.options.capture
         });
       } catch (error) {
         this.end(session);
@@ -127,8 +142,14 @@ export class ExportEncoders {
     try {
       switch (body.step) {
         case 'video': {
+          this.cpuFrames++;
           const rgba = this.pixels(body.pixels, session.frameBytes, context);
           await this.pipelined(session, { type: 'video', seq: 0, id: session.id, index: body.index, rgba });
+          return;
+        }
+        case 'videoSurface': {
+          this.gpuFrames++;
+          await this.pipelined(session, { type: 'videoSurface', seq: 0, id: session.id, index: body.index, generation: body.generation, poolIndex: body.poolIndex });
           return;
         }
         case 'audio': {
@@ -234,6 +255,11 @@ export class ExportEncoders {
       if (this.sessions.get(session.key) !== session) throw new ProtocolError('cancelled', 'The export encode was abandoned.');
       const reply = await this.send(live, command);
       if (reply.type === 'error') throw new ProtocolError('exportFailed', `The export encoder failed: ${reply.message}`);
+      if (reply.type === 'ack' && reply.rgba && this.options.capture) {
+        const rgba = reply.rgba;
+        session.capture = session.capture.then(() => this.options.capture!(rgba));
+        await session.capture;
+      }
       return reply;
     } finally {
       session.busy--;
@@ -260,6 +286,7 @@ export class ExportEncoders {
   private window(): Promise<Live> {
     if (!this.live) {
       const opening = this.options.openWindow().then((window) => {
+        this.receiverWindow = window;
         const live: Live = { window, seq: 0, waiting: new Map(), gone: false };
         window.onReply((reply) => {
           if (reply.type === 'ready') return;
@@ -283,6 +310,7 @@ export class ExportEncoders {
   }
 
   private retire(live: Live, reason: string): void {
+    if (this.receiverWindow === live.window) this.receiverWindow = null;
     if (!live.gone) {
       live.gone = true;
       live.window.close();

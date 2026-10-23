@@ -22,6 +22,21 @@ pub trait Sink {
     fn video_rgba(&mut self, _index: u64, _frame: &WorkingFrame) -> Result<bool, Error> {
         Ok(false)
     }
+    /// Whether this sink accepts GPU-resident working frames.
+    fn gpu_frames(&self) -> bool {
+        false
+    }
+    /// A working texture and optional diagnostic/verification readback.
+    fn video_gpu(
+        &mut self,
+        _index: u64,
+        _texture: &wgpu::Texture,
+        _frame: Option<&WorkingFrame>,
+    ) -> Result<(), Error> {
+        Err(Error::InvalidFrame(
+            "this encoder does not accept GPU frames".into(),
+        ))
+    }
     /// Frame `index` (0-based, in order).
     fn video(&mut self, index: u64, input: &EncoderInput) -> Result<(), Error>;
     /// Interleaved f32 PCM at the spec's sample rate.
@@ -113,6 +128,23 @@ impl<S: Sink> Pipeline<S> {
         };
         let input = convert(frame, self.spec.input_format(), &params)?;
         self.sink.video(index, &input)?;
+        self.next += 1;
+        Ok(())
+    }
+
+    /// Delivers a GPU working frame without a CPU pixel conversion.
+    pub fn push_gpu(
+        &mut self,
+        texture: &wgpu::Texture,
+        frame: Option<&WorkingFrame>,
+    ) -> Result<(), Error> {
+        let index = self.admit()?;
+        if texture.width() != self.spec.width || texture.height() != self.spec.height {
+            return Err(Error::InvalidFrame(
+                "GPU frame size does not match the export".into(),
+            ));
+        }
+        self.sink.video_gpu(index, texture, frame)?;
         self.next += 1;
         Ok(())
     }

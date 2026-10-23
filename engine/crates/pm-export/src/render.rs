@@ -70,7 +70,16 @@ pub enum JobError {
     #[error("{0}")]
     Blender(pm_blender::BlenderError),
     #[error(transparent)]
-    Export(#[from] Error),
+    Export(Error),
+}
+
+impl From<Error> for JobError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Cancelled => Self::Cancelled,
+            error => Self::Export(error),
+        }
+    }
 }
 
 impl From<RenderError> for JobError {
@@ -147,6 +156,12 @@ pub fn asset_records(document: &Document) -> Vec<(String, [u8; 32])> {
 /// The job engine's submission gate (contract 13). The export and still
 /// renderers ask it before every GPU submission and report what each took.
 pub trait GpuGate: Send + Sync {
+    /// Refreshes this worker's QoS at a render or encode work boundary.
+    fn sync_worker_qos(&self) {}
+    /// A refresh callback for CPU row workers spawned by the encoder thread.
+    fn worker_qos_refresh(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        None
+    }
     /// Blocks until GPU work may be submitted and returns how many of the
     /// `units` remaining units of `pass` to submit now (1 to `units`). Returns
     /// `None` when `cancel` is set while waiting.
@@ -175,6 +190,12 @@ pub trait GpuGate: Send + Sync {
     fn measures(&self) -> bool {
         true
     }
+}
+
+/// Refreshes export QoS while an encoder waits for a host reply. Callers
+/// outside a playback-aware export have no installed callback.
+pub fn refresh_current_worker_qos() {
+    crate::par::refresh_current_qos();
 }
 
 thread_local! {
@@ -260,6 +281,8 @@ pub fn pass_key(seed: u64, size: Size) -> u64 {
 pub struct ReadFrame {
     /// Premultiplied working values, top-down, `width × height × 4`.
     pub rgba: Vec<f32>,
+    /// Owned GPU frame for a GPU-capable sink.
+    pub gpu: Option<wgpu::Texture>,
     pub width: u32,
     pub height: u32,
     /// Layers that failed and drew nothing (section 8 isolation).
@@ -286,6 +309,37 @@ pub fn render_frame(
     pass: u64,
     cancel: &AtomicBool,
 ) -> Result<ReadFrame, JobError> {
+    render_frame_output(
+        renderer,
+        document,
+        composition,
+        time,
+        request,
+        media,
+        gate,
+        pass,
+        cancel,
+        false,
+        true,
+        &mut crate::readback::ExportReadback::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_frame_output(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &dyn GpuGate,
+    pass: u64,
+    cancel: &AtomicBool,
+    gpu: bool,
+    readback: bool,
+    staging: &mut crate::readback::ExportReadback,
+) -> Result<ReadFrame, JobError> {
     let span = if gate.measures() {
         gpu_span(renderer)
     } else {
@@ -306,6 +360,9 @@ pub fn render_frame(
         pass,
         cancel,
         span.as_deref(),
+        gpu,
+        readback,
+        staging,
     );
     renderer.set_bracket(None);
     result
@@ -324,11 +381,19 @@ fn render_bands(
     pass: u64,
     cancel: &AtomicBool,
     span: Option<&crate::gpu_time::GpuSpan>,
+    gpu: bool,
+    readback: bool,
+    staging: &mut crate::readback::ExportReadback,
 ) -> Result<ReadFrame, JobError> {
     let size = request.output_size;
     let (w, h) = (size.width, size.height);
     let total_units = h.div_ceil(BAND_ROWS);
-    let mut rgba = vec![0f32; w as usize * h as usize * 4];
+    let mut rgba = if readback {
+        vec![0f32; w as usize * h as usize * 4]
+    } else {
+        Vec::new()
+    };
+    let mut gpu_frame: Option<wgpu::Texture> = None;
     let mut failures = Vec::new();
     let mut y = 0u32;
     while y < h {
@@ -340,6 +405,7 @@ fn render_bands(
             .admit(pass, remaining, cancel)
             .ok_or(JobError::Cancelled)?
             .clamp(1, remaining);
+        gate.sync_worker_qos();
         let admission = Admitted {
             gate,
             pass,
@@ -366,6 +432,47 @@ fn render_bands(
                 return Err(e.into());
             }
         };
+        if gpu && whole {
+            // The returned color target belongs to this frame; retaining it
+            // avoids a full float-texture copy while the encoder consumes it.
+            gpu_frame = Some(frame.color.texture.clone());
+        } else if gpu {
+            let target = gpu_frame.get_or_insert_with(|| {
+                renderer.device().create_texture(&wgpu::TextureDescriptor {
+                    label: Some("export GPU working frame"),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: frame.color.texture.format(),
+                    usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+            });
+            let mut copy =
+                renderer
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("export GPU band"),
+                    });
+            copy.copy_texture_to_texture(
+                frame.color.texture.as_image_copy(),
+                wgpu::TexelCopyTextureInfo {
+                    origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                    ..target.as_image_copy()
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: band,
+                    depth_or_array_layers: 1,
+                },
+            );
+            renderer.queue().submit([copy.finish()]);
+        }
         let submitted = Instant::now();
         wait_idle(renderer);
         // A program ran away in this frame: its pixels are not delivered.
@@ -382,15 +489,24 @@ fn render_bands(
             .and_then(|s| s.read_us(renderer.device(), renderer.queue()));
         let units = if whole { total_units } else { admitted };
         admission.finish(units, gpu_us.unwrap_or(wall_us), gpu_us.is_some());
-        let pixels = renderer.read_rgba(&frame)?;
-        let row = w as usize * 4;
-        let at = y as usize * row;
-        rgba[at..at + pixels.len()].copy_from_slice(&pixels);
+        if readback {
+            let row = w as usize * 4;
+            let at = y as usize * row;
+            staging
+                .read_into(
+                    renderer.device(),
+                    renderer.queue(),
+                    &frame.color.texture,
+                    &mut rgba[at..at + band as usize * row],
+                )
+                .map_err(|e| JobError::Render(e.to_string()))?;
+        }
         failures.extend(frame.failures);
         y += band;
     }
     Ok(ReadFrame {
         rgba,
+        gpu: gpu_frame,
         width: w,
         height: h,
         failures,
@@ -1004,7 +1120,7 @@ impl Progress {
 }
 
 enum Rendered {
-    Frame(u64, Vec<f32>),
+    Frame(u64, Vec<f32>, Option<wgpu::Texture>),
     Failed(JobError),
 }
 
@@ -1052,6 +1168,8 @@ where
         ..
     } = plan;
     let frames = spec.frames;
+    let gpu_frames = sink.gpu_frames();
+    let sampled = crate::verify::sampled_frames(frames);
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
     pipeline.set_legacy_png(crate::png_compat::has_level1_content(&document));
@@ -1073,23 +1191,33 @@ where
     let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
     let qos = crate::par::current_qos();
     std::thread::scope(|scope| {
+        let encoder_gate = gate;
         let encoder = scope.spawn(move || -> Result<S::Output, JobError> {
             crate::par::apply_qos(qos);
+            let _qos_refresh = crate::par::install_qos_refresh(encoder_gate.worker_qos_refresh());
+            encoder_gate.sync_worker_qos();
             let mut last_preview: Option<Instant> = None;
             for expected in 0..frames {
-                let (n, rgba) = match rx.recv() {
-                    Ok(Rendered::Frame(n, rgba)) => (n, rgba),
+                let (n, rgba, texture) = match rx.recv() {
+                    Ok(Rendered::Frame(n, rgba, texture)) => (n, rgba, texture),
                     Ok(Rendered::Failed(e)) => return Err(e),
                     Err(_) => return Err(JobError::Cancelled),
                 };
+                encoder_gate.sync_worker_qos();
                 debug_assert_eq!(n, expected);
                 let (w, h) = (request.output_size.width, request.output_size.height);
-                pipeline.push_frame(&WorkingFrame {
+                let frame = WorkingFrame {
                     width: w,
                     height: h,
                     rgba: &rgba,
-                })?;
+                };
+                if let Some(texture) = texture {
+                    pipeline.push_gpu(&texture, (!rgba.is_empty()).then_some(&frame))?;
+                } else {
+                    pipeline.push_frame(&frame)?;
+                }
                 let due = wants_preview
+                    && !rgba.is_empty()
                     && (n + 1 == frames
                         || last_preview.is_none_or(|t| t.elapsed() >= PREVIEW_EVERY));
                 let preview = if due {
@@ -1133,6 +1261,7 @@ where
                     preview,
                 });
             }
+            encoder_gate.sync_worker_qos();
             pipeline
                 .finish_with_cancel(cancel)
                 .map_err(|error| match error {
@@ -1141,7 +1270,13 @@ where
                 })
         });
         let mut render_error = None;
+        let _qos_refresh = crate::par::install_qos_refresh(gate.worker_qos_refresh());
+        let mut staging = crate::readback::ExportReadback::default();
+        let mut render_ns = 0u128;
+        let render_started = Instant::now();
+        let mut last_gpu_preview = Instant::now() - PREVIEW_EVERY;
         for n in 0..frames {
+            gate.sync_worker_qos();
             if cancel.load(Ordering::Relaxed) {
                 render_error = Some(JobError::Cancelled);
                 break;
@@ -1161,9 +1296,14 @@ where
                     )
                     .map(|surfaces| crate::blender::with_surfaces(&request, surfaces)),
             };
+            let preview_due = wants_preview && last_gpu_preview.elapsed() >= PREVIEW_EVERY;
+            if preview_due {
+                last_gpu_preview = Instant::now();
+            }
+            let frame_started = Instant::now();
             let rendered = frame_request
                 .and_then(|frame_request| {
-                    render_frame(
+                    render_frame_output(
                         renderer,
                         &document,
                         &job.composition,
@@ -1173,6 +1313,9 @@ where
                         gate,
                         pass,
                         cancel,
+                        gpu_frames,
+                        !gpu_frames || sampled.contains(&n) || preview_due,
+                        &mut staging,
                     )
                 })
                 .and_then(|f| {
@@ -1199,9 +1342,10 @@ where
                         ))
                     }
                 });
+            render_ns += frame_started.elapsed().as_nanos();
             match rendered {
                 Ok(f) => {
-                    if tx.send(Rendered::Frame(n, f.rgba)).is_err() {
+                    if tx.send(Rendered::Frame(n, f.rgba, f.gpu)).is_err() {
                         break;
                     }
                 }
@@ -1210,6 +1354,14 @@ where
                     break;
                 }
             }
+        }
+        if std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1") {
+            eprintln!(
+                "[export timing] render_ms={:.3} render_pipeline_ms={:.3} qos={:?}",
+                render_ns as f64 / 1e6,
+                render_started.elapsed().as_secs_f64() * 1e3,
+                crate::par::current_qos()
+            );
         }
         if let Some(e) = render_error {
             // The encoder side stops at the failure (or sees the channel
@@ -1434,6 +1586,18 @@ pub fn render_still(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoder_cancellation_remains_cancelled_at_the_job_boundary() {
+        assert!(matches!(
+            JobError::from(Error::Cancelled),
+            JobError::Cancelled
+        ));
+        assert!(matches!(
+            JobError::from(Error::Encode("failed".into())),
+            JobError::Export(_)
+        ));
+    }
 
     #[test]
     fn timeline_counts_frames_like_todays_exporter_and_lands_on_the_grid() {

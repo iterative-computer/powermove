@@ -18,6 +18,7 @@ class FakeWindow implements EncoderWindow {
   }
   onReply(listener: (reply: EncoderReply) => void): void { this.replies.push(listener); }
   onGone(listener: (reason: string) => void): void { this.gone.push(listener); }
+  reply(reply: EncoderReply): void { for (const listener of this.replies) listener(reply); }
   crash(): void { for (const listener of this.gone) listener('the encoder process crashed'); }
   close(): void { this.closed = true; }
 }
@@ -108,6 +109,26 @@ describe('ExportEncoders', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(windows[0]!.commands.filter((c) => c.type === 'video')).toHaveLength(MAX_IN_FLIGHT + 1);
     expect(fifth).toBe(false);
+  });
+
+  it('passes GPU descriptors without taking CPU pixels and waits before a slot can be reused', async () => {
+    const { encoders, context, windows, taken } = harness(command => command.type === 'videoSurface' ? null : ack(command));
+    await encoders.serve(open(), context);
+    const frame = (index: number) => encoders.serve({ job: 'job-1', step: 'videoSurface', index, generation: 17, poolIndex: index % 5 }, context);
+    for (let i = 0; i < MAX_IN_FLIGHT; i++) await frame(i);
+    let fifthDone = false;
+    const fifth = frame(MAX_IN_FLIGHT).then(() => { fifthDone = true; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(fifthDone).toBe(false);
+    expect(taken).toEqual([]);
+    const commands = windows[0]!.commands.filter(c => c.type === 'videoSurface');
+    expect(commands).toHaveLength(5);
+    expect(commands[0]).toMatchObject({ generation: 17, poolIndex: 0, index: 0 });
+    windows[0]!.reply({ type: 'ack', seq: commands[0]!.seq });
+    await fifth;
+    expect(fifthDone).toBe(true);
+    // Once the first GPU copy completed, the engine may overwrite slot 0.
+    encoders.dispose();
   });
 
   it('fails every waiting step when the window goes, and opens a new one for the next encode', async () => {
