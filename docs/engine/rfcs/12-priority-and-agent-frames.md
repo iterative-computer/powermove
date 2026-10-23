@@ -55,8 +55,10 @@ video, and audio content must match the current converter. Both jobs use
 the existing job scheduler, output capabilities, terminal status events,
 and cancellation. Converter cancellation terminates the child process.
 
-Source frame jobs retain a bounded, sender-owned frozen session: at most
-four sources per window, sixteen overall, with a 90-second idle expiry.
+Source frame jobs retain a bounded, sender-owned frozen-session cache: at
+most four cached sources per window, sixteen overall, with a 90-second idle
+expiry. Retired in-flight bindings live until their requests release them;
+they are no longer cache entries.
 Its document contains only the requested asset, preserving all metadata
 except the generated poster flag. Main pins the selected media before a cold
 engine wait. Unrelated project edits and poster persistence can advance the
