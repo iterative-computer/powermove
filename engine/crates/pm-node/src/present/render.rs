@@ -148,6 +148,62 @@ impl Generations {
 /// the view waits for its next viewer state.
 pub const POOL_RETRY_US: [i64; 4] = [50_000, 250_000, 1_000_000, 4_000_000];
 
+/// When a paused frame that failed with an error drawing it again may fix
+/// (the GPU, a readback, media, the shader fallback runner, an SVG raster)
+/// is drawn again on its own, after the failure: then it waits for the next
+/// edit, view or transport change, as a deterministic failure does at once.
+pub const RENDER_RETRY_US: [i64; 3] = [100_000, 500_000, 2_000_000];
+
+/// Whether drawing the same frame again can succeed: errors of the GPU,
+/// its readbacks, media, the fallback runner and SVG rasters are of the
+/// moment; an invalid request, a missing composition and a stopped job
+/// watchdog are not (they wait for a change).
+pub fn transient_render_error(error: &pm_render::RenderError) -> bool {
+    use pm_render::RenderError as E;
+    match error {
+        E::Device(_)
+        | E::Readback(_)
+        | E::Gpu(_)
+        | E::Media(_)
+        | E::Fallback(_)
+        | E::SvgRaster(_) => true,
+        E::Unsupported(_)
+        | E::Composition(_)
+        | E::Request(_)
+        | E::Watchdog(_)
+        | E::ShaderFallbackPending(_)
+        | E::WatchdogPending
+        | E::SvgRastersPending(_) => false,
+    }
+}
+
+/// A paused frame's redraw after a transient failure (`RENDER_RETRY_US`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderRetry {
+    /// When it is drawn again; `None` once the retries ran out.
+    pub at: Option<i64>,
+    /// Retries scheduled for this frame so far.
+    pub attempts: usize,
+    /// The frame: document revision and view sequence. A failure of
+    /// another frame starts over.
+    pub frame: (u64, u64),
+}
+
+impl RenderRetry {
+    /// The retry after a transient failure of `frame` at `now`, following
+    /// `previous` (a retry of the same frame counts on).
+    pub fn after(previous: Option<RenderRetry>, frame: (u64, u64), now: i64) -> RenderRetry {
+        let attempts = previous
+            .filter(|r| r.frame == frame)
+            .map_or(0, |r| r.attempts);
+        RenderRetry {
+            at: RENDER_RETRY_US.get(attempts).map(|delay| now + delay),
+            attempts: attempts + 1,
+            frame,
+        }
+    }
+}
+
 /// A pool to make again: the spec the JavaScript side charged, and when.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoolRetry {
@@ -783,11 +839,15 @@ struct View {
     /// The GPU watchdog held the last frame (`RenderError::WatchdogPending`):
     /// it is drawn again once the watchdog has judged the suspect frame.
     watchdog_held: bool,
-    /// The last frame failed with an error that drawing it again cannot
-    /// fix (an over-budget scene, an invalid document). As today's viewer
-    /// does, the failure is logged once and the paused frame is drawn again
-    /// at the next edit, view or transport change, not at every turn.
+    /// The last frame failed. As today's viewer does, the failure is
+    /// logged once and the paused frame is drawn again at the next edit,
+    /// view or transport change, not at every turn; a failure drawing it
+    /// again may fix (`transient_render_error`) is also retried on its own
+    /// a few times first (`render_retry`).
     render_failed: bool,
+    /// After a transient failure (`transient_render_error`), when the
+    /// paused frame is drawn again on its own (`RENDER_RETRY_US`).
+    render_retry: Option<RenderRetry>,
     /// What presenting this session costs (`RenderStats`).
     costs: super::stats::ViewStats,
     /// The depth and object-id pool, while the viewer asks for it.
@@ -2882,6 +2942,7 @@ impl Thread {
             stand_in: None,
             watchdog_held: false,
             render_failed: false,
+            render_retry: None,
             costs: Default::default(),
             depth: None,
             #[cfg(feature = "remote-layer")]
@@ -3417,6 +3478,11 @@ impl Thread {
         }
         for view in self.views.values() {
             if let Some(at) = view.retry.and_then(|r| r.at) {
+                wake = wake.min(at);
+            }
+            if view.render_failed
+                && let Some(at) = view.render_retry.and_then(|r| r.at)
+            {
                 wake = wake.min(at);
             }
             let external_waiting = view.external_wait.as_ref().is_some_and(|w| w.until > now);
@@ -3990,6 +4056,16 @@ impl Thread {
                 self.stats().stand_in_redraws += 1;
             }
         }
+        // A paused frame that failed for the moment is drawn again on its own.
+        if let Some(view) = self.views.get_mut(&key)
+            && view.render_failed
+            && !view.clock.is_playing()
+            && let Some(retry) = view.render_retry.as_mut()
+            && retry.at.is_some_and(|at| at <= now())
+        {
+            retry.at = None;
+            view.dirty = true;
+        }
         // A paused frame after a view or transport change.
         let paused_dirty = self
             .views
@@ -4012,6 +4088,7 @@ impl Thread {
                 self.queue_auto_preview(key, seq);
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = false;
+                    view.render_retry = None;
                 }
                 if !deferred {
                     let revision = descriptor.revision;
@@ -4605,6 +4682,13 @@ impl Thread {
                 }
                 Err(error) => {
                     view.render_failed = true;
+                    view.render_retry = transient_render_error(&error).then(|| {
+                        RenderRetry::after(
+                            view.render_retry,
+                            (doc.revision(), view.state.view_seq.get()),
+                            now(),
+                        )
+                    });
                     if preview.is_some() {
                         let why = preview_failure.take().unwrap_or_else(|| {
                             format!("The Blender preview could not be prepared: {error}")
@@ -6662,6 +6746,37 @@ mod tests {
             format: SurfaceFormat::Bgra8Unorm,
             count: 8,
         }
+    }
+
+    /// A paused frame that failed for the moment is drawn again after
+    /// 100 ms, 500 ms and 2 s, then waits for a change; a deterministic
+    /// failure (an over-budget scene reports an invalid request) waits at
+    /// once. A failure of another frame starts the retries over.
+    #[test]
+    fn transient_render_failures_retry_with_backoff_then_wait_for_a_change() {
+        use pm_render::RenderError as E;
+        assert!(transient_render_error(&E::Gpu("lost".into())));
+        assert!(transient_render_error(&E::Media("decode".into())));
+        assert!(transient_render_error(&E::Fallback("runner".into())));
+        assert!(transient_render_error(&E::SvgRaster("window".into())));
+        assert!(!transient_render_error(&E::Request(
+            "viewport geometry: an imported scene over two million vertices".into()
+        )));
+        assert!(!transient_render_error(&E::Composition("main".into())));
+        assert!(!transient_render_error(&E::Watchdog("runaway".into())));
+
+        let frame = (7, 3);
+        let mut retry = None;
+        let mut at = Vec::new();
+        for now in [0, 1_000_000, 2_000_000, 3_000_000] {
+            let next = RenderRetry::after(retry, frame, now);
+            at.push(next.at.map(|t| t - now));
+            retry = Some(next);
+        }
+        assert_eq!(at, [Some(100_000), Some(500_000), Some(2_000_000), None]);
+        // Another frame (an edit) starts over.
+        let edited = RenderRetry::after(retry, (8, 3), 5_000_000);
+        assert_eq!((edited.at, edited.attempts), (Some(5_100_000), 1));
     }
 
     #[test]

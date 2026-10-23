@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod doc;
+pub mod reference_substitutions;
 pub mod text;
 pub mod text_residuals;
 
@@ -98,6 +99,8 @@ pub struct Sample {
     pub width: u32,
     pub height: u32,
     pub png: PathBuf,
+    /// Owner-authorized reference metadata; `png` always retains the original.
+    pub reference_substitution: Option<pm_model::Value>,
     pub float: Option<PathBuf>,
     /// Transparent float frames at other motion-blur sample counts
     /// (`blurSamples` cases): (samples, file).
@@ -171,6 +174,7 @@ pub fn load_project(capture: &Path, dir: &Path) -> Project {
                 width: number(member(s, "width")).unwrap() as u32,
                 height: number(member(s, "height")).unwrap() as u32,
                 png: capture.join(png),
+                reference_substitution: member(s, "referenceSubstitution").cloned(),
                 float: string(
                     member(s, "float")
                         .and_then(|p| member(p, "data"))

@@ -139,6 +139,105 @@ test.describe('Use New Engine: engine presentation recovery', () => {
     expect(session.diagnostics.pageErrors).toEqual([]);
   });
 
+  /*
+   * No resize, no other view change: after the GPU process restarts, the
+   * imports of the pool the viewer held cannot be read (every VideoFrame of
+   * them fails to upload). The presentation asks the engine for new
+   * surfaces (ViewerState.surfaceEpoch), so the viewer comes back by
+   * itself, as today's WebGL viewer does on 'Context Restored'.
+   */
+  test('a GPU process crash while paused recovers by itself, with no view change, and an edit reaches the screen', async ({ session }) => {
+    const { page } = session;
+    await openEngineViewer(session);
+    const stateBefore = await viewerState(page);
+    const seqBefore = await latestSeq(page);
+    const pid = await killGpuProcess(session);
+    await expect.poll(() => session.app.evaluate(({ app }) => app.getAppMetrics().find((m) => m.type === 'GPU')?.pid ?? 0), { timeout: 20_000 }).not.toBe(pid);
+    // Without any edit or view change, a new frame of the same view draws.
+    try {
+      await expect.poll(() => latestSeq(page), { timeout: 20_000 }).toBeGreaterThan(seqBefore);
+      await expect.poll(() => presenting(page), { timeout: 20_000 }).toBe(true);
+    } catch (error) {
+      console.log('GPU RECOVERY DIAGNOSTIC', JSON.stringify(await recoveryDiagnostic(session)));
+      throw error;
+    }
+    const stateAfter = await viewerState(page);
+    // The same view: only the surface epoch moved.
+    expect(stateAfter.surfaceEpoch).toBeGreaterThanOrEqual(1);
+    expect({ ...stateAfter, viewSeq: 0, surfaceEpoch: 0, vsync: null }).toEqual({ ...stateBefore, viewSeq: 0, surfaceEpoch: 0, vsync: null });
+    const center = await boxCenter(page);
+    await expect.poll(async () => {
+      const [r, g, b] = await stagePixel(session, center.x, center.y);
+      return Math.max(Math.abs(r! - 0xff), Math.abs(g! - 0x33), Math.abs(b! - 0x00));
+    }, { timeout: 10_000 }).toBeLessThanOrEqual(4);
+    const before = await latestSeq(page);
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'opacity', value: 50 }, { label: 'Opacity', origin: 'inspector' });
+    });
+    await expect.poll(() => latestSeq(page), { timeout: 20_000 }).toBeGreaterThan(before);
+    await expect.poll(async () => {
+      const [r, g, b] = await stagePixel(session, center.x, center.y);
+      return Math.max(Math.abs(r! - 0x90), Math.abs(g! - 0x32), Math.abs(b! - 0x20));
+    }, { timeout: 10_000 }).toBeLessThanOrEqual(4);
+    const status = await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.status ?? null);
+    expect(status).toBe(null);
+    await expect.poll(async () => {
+      const bridge = await bridgeStatus(session);
+      return bridge.allReleased === bridge.retired;
+    }, { timeout: 10_000 }).toBe(true);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
+  test('a GPU process crash during playback recovers by itself, with no view change', async ({ session }) => {
+    const { page } = session;
+    await openEngineViewer(session);
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.setTime(0);
+      PM.play();
+    });
+    const playing = await latestSeq(page);
+    await expect.poll(() => latestSeq(page), { timeout: 20_000 }).toBeGreaterThan(playing);
+    const pid = await killGpuProcess(session);
+    await expect.poll(() => session.app.evaluate(({ app }) => app.getAppMetrics().find((m) => m.type === 'GPU')?.pid ?? 0), { timeout: 20_000 }).not.toBe(pid);
+    // Keep playing (the 4 s composition ends and stops): frames of the new
+    // surfaces keep reaching the screen.
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      if (!PM.playing) { PM.setTime(0); PM.play(); }
+    });
+    const after = await latestSeq(page);
+    try {
+      await expect.poll(() => latestSeq(page), { timeout: 20_000 }).toBeGreaterThan(after);
+      await expect.poll(() => presenting(page), { timeout: 20_000 }).toBe(true);
+    } catch (error) {
+      console.log('GPU RECOVERY DIAGNOSTIC', JSON.stringify(await recoveryDiagnostic(session)));
+      throw error;
+    }
+    const drawnBefore = (await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').enginePresentation.stats())).drawn as number;
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      if (!PM.playing) { PM.setTime(0); PM.play(); }
+    });
+    await expect.poll(async () => (await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').enginePresentation.stats())).drawn as number, { timeout: 10_000 }).toBeGreaterThan(drawnBefore + 10);
+    expect((await viewerState(page)).surfaceEpoch).toBeGreaterThanOrEqual(1);
+    await page.evaluate(() => (window as any).PM.pause());
+    await expect.poll(() => page.evaluate(() => (window as any).PM.playing), { timeout: 10_000 }).toBe(false);
+    const before = await latestSeq(page);
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.Edit.apply({ type: 'set_property', target: PM.proj.layers[0].id, path: 'opacity', value: 50 }, { label: 'Opacity', origin: 'inspector' });
+    });
+    await expect.poll(() => latestSeq(page), { timeout: 20_000 }).toBeGreaterThan(before);
+    const center = await boxCenter(page);
+    await expect.poll(async () => {
+      const [r, g, b] = await stagePixel(session, center.x, center.y);
+      return Math.max(Math.abs(r! - 0x90), Math.abs(g! - 0x32), Math.abs(b! - 0x20));
+    }, { timeout: 10_000 }).toBeLessThanOrEqual(4);
+    expect(session.diagnostics.pageErrors).toEqual([]);
+  });
+
   test('surface transfers that time out on main and land late are released once, without page errors (D3)', async ({ session }) => {
     const { page } = session;
     await openEngineViewer(session);
@@ -187,7 +286,9 @@ test.describe('Use New Engine: engine presentation recovery', () => {
  * WebGpuSharedImageWrapperCache; once the shared raster context was lost
  * and recreated, the next import dereferenced a cached wrapper's null
  * shared image (SIGSEGV at 0x1c in the presentation worker). Every reset
- * here lands during playback, so imports race the loss.
+ * here lands during playback, so imports race the loss. Nothing changes
+ * the view or the window between resets: each recovery is the
+ * presentation's own (a new drawing on new surfaces).
  * PM_GPU_RESET_ITERATIONS sets the count (stress runs use 200). Chromium's
  * fallback to software compositing after three GPU crashes, and its
  * blocking of WebGL/WebGPU for the app's origin after repeated resets
@@ -227,8 +328,7 @@ test.describe('Use New Engine: repeated GPU resets during playback', () => {
       resets.push(Date.now());
       const pid = await killGpuProcess(session);
       await expect.poll(() => session.app.evaluate(({ app }) => app.getAppMetrics().find((m) => m.type === 'GPU')?.pid ?? 0), { timeout: 20_000 }).not.toBe(pid);
-      // A new pool after the loss, as a window change makes one.
-      await resizeViewer(session, iteration % 2 ? 1180 : 1240);
+      // No window or view change: the presentation renews its surfaces itself.
       await play();
       const after = await latestSeq(page);
       try {
@@ -281,6 +381,22 @@ test.describe('Use New Engine: repeated GPU resets during playback', () => {
 });
 
 type BridgeStatus = { sendFailures: number; retired: number; allReleased: number };
+
+/** The viewer state the presentation last sent. */
+const viewerState = (page: Page): Promise<Record<string, unknown> & { surfaceEpoch?: number }> =>
+  page.evaluate(() => JSON.parse(JSON.stringify((window as any).PM.Kernel.services.get('viewer').enginePresentation.state)));
+
+async function recoveryDiagnostic(session: LaunchedApp): Promise<unknown> {
+  return {
+    page: await session.page.evaluate(() => {
+      const PM = (window as any).PM, presentation = PM.Kernel.services.get('viewer')?.enginePresentation;
+      return { playing: PM.playing, connection: PM.EngineConnection?.status?.(), presenting: presentation?.presenting, status: presentation?.status,
+        stats: presentation?.stats?.(), state: presentation?.state, receiver: (window as any).__powermoveTestBridge?.frameBridge?.stats?.() };
+    }).catch((e: unknown) => ({ error: String(e) })),
+    bridge: await bridgeStatus(session).catch((e: unknown) => String(e)),
+    console: session.diagnostics.console.filter((r) => /presentation|painter|graphics|WebGL|surfaces/.test(r.text)).map((r) => r.text.slice(0, 300))
+  };
+}
 
 const bridgeStatus = (session: LaunchedApp): Promise<BridgeStatus> =>
   session.app.evaluate(() => (globalThis as any).__powermoveNativeEngine.frameBridge.launch.status());

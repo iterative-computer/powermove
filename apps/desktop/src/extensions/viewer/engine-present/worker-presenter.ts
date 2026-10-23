@@ -168,6 +168,8 @@ export type WorkerPresenterOptions = {
   generation?: number;
   hostOffsetUs?: () => number | null;
   onVsync?: (hint: VsyncHint) => void;
+  /** The worker could not read a frame of pool `generation` (`PresenterOptions.onUnusable`). */
+  onUnusable?: (generation: number, message: string) => void;
   parkTimeoutMs?: number;
   now?: () => number;
   timers?: Timers;
@@ -407,6 +409,9 @@ export class WorkerPresenter implements Presenter {
         return;
       case 'stats':
         this.remote = message.stats;
+        return;
+      case 'unusable':
+        if (!this.disposed) this.options.onUnusable?.(message.generation, message.message);
         return;
       case 'trace': {
         const resolve = this.traces.get(message.id);

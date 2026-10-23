@@ -63,6 +63,8 @@ function sameState(a: ViewerState, b: ViewerState): boolean {
 export class ViewSequencer {
   private last: ViewerState | null = null;
   private seq = 0;
+  /** The surface epoch (`ViewerState.surfaceEpoch`): 0 until `renewSurfaces`. */
+  private epoch = 0;
 
   /** The state for `input`, and whether it changed since the last call. */
   next(input: ViewInput): { state: ViewerState; changed: boolean } {
@@ -94,13 +96,28 @@ export class ViewSequencer {
       viewSeq: this.seq,
       ...(input.depthId ? { depthId: true } : {}),
       ...(input.chromeSelection ? { chromeSelection: input.chromeSelection } : {}),
-      ...(validCanvas(input.canvas) ? { canvas: { width: input.canvas.width, height: input.canvas.height, crop: { ...input.canvas.crop }, css: { ...input.canvas.css } } } : {})
+      ...(validCanvas(input.canvas) ? { canvas: { width: input.canvas.width, height: input.canvas.height, crop: { ...input.canvas.crop }, css: { ...input.canvas.css } } } : {}),
+      ...(this.epoch ? { surfaceEpoch: this.epoch } : {})
     };
     if (this.last && sameState(this.last, candidate)) return { state: this.last, changed: false };
     this.seq += 1;
     candidate.viewSeq = this.seq;
     this.last = candidate;
     return { state: candidate, changed: true };
+  }
+
+  /**
+   * The current state with the next surface epoch and sequence: the
+   * engine replaces the view's surface pools with new surfaces (the ones
+   * the viewer imported can no longer be read). Later states keep the
+   * epoch. Null before the first state.
+   */
+  renewSurfaces(): ViewerState | null {
+    if (!this.last) return null;
+    this.epoch += 1;
+    this.seq += 1;
+    this.last = { ...this.last, surfaceEpoch: this.epoch, viewSeq: this.seq };
+    return this.last;
   }
 
   get current(): ViewerState | null {

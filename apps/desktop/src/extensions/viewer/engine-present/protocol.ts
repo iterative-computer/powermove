@@ -121,6 +121,9 @@ export type ViewerState = {
   chromeSelection?: ChromeSelection;
   /** Today's viewer canvas (decision V1): the engine renders at its size. */
   canvas?: ViewerCanvas | null;
+  /** The surface epoch: a change makes the engine replace this view's
+   *  surface pools (the imports cannot be read after a GPU restart). */
+  surfaceEpoch?: number;
 };
 
 /** The WebGL canvas today's viewer draws a view into: its backing size, the

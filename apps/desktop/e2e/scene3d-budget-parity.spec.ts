@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
+import os from 'node:os';
 import { expect, launchApp, test, type LaunchedApp } from './helpers/app';
 import { ffmpegBinary } from './helpers/ffmpeg';
 import {
@@ -9,6 +10,45 @@ import {
 
 const denseModes = process.env.PM_SCENE3D_BUDGET_DENSE === undefined
   ? [false, true] : [process.env.PM_SCENE3D_BUDGET_DENSE === '1'];
+/** Where measurements go; `--repeat-each` runs get their own `run-N`. */
+const outputRoot = process.env.PM_SCENE3D_BUDGET_OUT ?? '/tmp/ne-w5/scene3d-r8-budget';
+/** Opt-in: the native engine's resource inventory and the page's WASM/JS
+ * heap at each memory sample (POWERMOVE_ENGINE_ALLOCATION_INVENTORY). */
+const inventory = process.env.PM_SCENE3D_BUDGET_INVENTORY === '1';
+/** PM_SCENE3D_BUDGET_RUN numbers runs that separate invocations interleave. */
+const outputDir = (dense: boolean) => {
+  const run = process.env.PM_SCENE3D_BUDGET_RUN ?? String(test.info().repeatEachIndex);
+  return run !== '0' || process.env.PM_SCENE3D_BUDGET_OUT
+    ? `${outputRoot}/run-${run}/${dense ? 'dense' : 'sparse'}`
+    : `${outputRoot}/${dense ? 'dense' : 'sparse'}`;
+};
+
+/** Both routes are sampled with the viewer showing the current document:
+ * the native viewer presents asynchronously (its first pool is made after
+ * the editor opens), the current viewer on its next animation frames. */
+async function settled(session: LaunchedApp, engine: boolean) {
+  if (engine) await expect.poll(() => session.page.evaluate(() => {
+    const PM = (window as any).PM;
+    const p = PM.Kernel.services.get('viewer')?.enginePresentation;
+    return !!p?.presenting && p.latest?.revision >= PM.EngineDoc.barrier.revision;
+  }), { timeout: 30_000 }).toBe(true);
+  await session.page.evaluate(() => new Promise<void>(resolve =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+}
+
+async function inventorySample(session: LaunchedApp, engine: boolean) {
+  if (!inventory) return null;
+  const host = engine ? await session.app.evaluate(async () => {
+    const e = (globalThis as any).__powermoveNativeEngine?.engine;
+    return { engines: e?.status?.() ?? null, interactive: await e?.report?.('interactive').catch((error: unknown) => String(error)) ?? null };
+  }) : null;
+  const page = await session.page.evaluate(() => {
+    const PM = (window as any).PM;
+    return { wasm: PM.EngineDoc?.stats?.().wasm ?? null, jsHeapBytes: (performance as any).memory?.usedJSHeapSize ?? null,
+      jsHeapTotalBytes: (performance as any).memory?.totalJSHeapSize ?? null };
+  });
+  return { host, page };
+}
 
 async function captureStage(session: LaunchedApp, file: string) {
   await session.page.evaluate(() => new Promise<void>(resolve =>
@@ -38,9 +78,12 @@ async function captureStage(session: LaunchedApp, file: string) {
 async function lane(engine: boolean, dense: boolean) {
   let session: LaunchedApp | undefined;
   try {
-    session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: engine ? '1' : '0' } });
+    session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: engine ? '1' : '0',
+      ...(inventory ? { POWERMOVE_ENGINE_ALLOCATION_INVENTORY: '1' } : {}) } });
     await session.openEditor();
+    await settled(session, engine);
     const baseline = await budgetMemorySample(session.app);
+    const inventories: Record<string, unknown> = { baseline: await inventorySample(session, engine) };
     const samples: { phase: string; atMs: number; processes: Awaited<ReturnType<typeof budgetMemorySample>> }[] = [];
     let phase = 'import';
     let pending: Promise<void> | null = null;
@@ -53,10 +96,12 @@ async function lane(engine: boolean, dense: boolean) {
     const timer = setInterval(poll, 50);
     try {
       const model = await installBudgetScene(session.page, 3, dense);
+      await settled(session, engine);
       phase = 'accepted frames';
       const imported = await budgetMemorySample(session.app);
+      inventories.imported = await inventorySample(session, engine);
       const accepted = await measureBudgetFrame(session.page, engine);
-      const out = `/tmp/ne-w5/scene3d-r8-budget/${dense ? 'dense' : 'sparse'}`;
+      const out = outputDir(dense);
       await mkdir(out, { recursive: true });
       if (engine) await expect.poll(() => session!.page.evaluate(() => {
         const PM = (window as any).PM;
@@ -70,10 +115,15 @@ async function lane(engine: boolean, dense: boolean) {
       const stageRefusal = await captureStage(session, `${out}/${engine ? 'native' : 'legacy'}-stage-refusal.png`);
       phase = 'steady';
       const steady = await budgetMemorySample(session.app);
+      inventories.steady = await inventorySample(session, engine);
+      // A refused scene is reported once per change, never redrawn at every
+      // presenter turn (each failed attempt also held GPU allocations).
+      const renderErrors = engine ? await session.app.evaluate(async () =>
+        ((await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive')) as any)?.presenter?.renderErrors ?? null) : null;
       const jsHeapBytes = await session.page.evaluate(() =>
         (performance as any).memory?.usedJSHeapSize ?? null);
       return { engine, model, accepted, stageBefore, stageRefusal, refusal: { added, frame: refused },
-        memory: { baseline, imported, steady, samples, jsHeapBytes },
+        memory: { baseline, imported, steady, samples, jsHeapBytes, inventories }, renderErrors,
         rendererPageErrors: [...session.diagnostics.pageErrors],
         rendererErrors: session.diagnostics.console.filter(record => record.type === 'error'),
       };
@@ -105,8 +155,9 @@ function memoryTotals(processes: Awaited<ReturnType<typeof budgetMemorySample>>)
 }
 
 for (const dense of denseModes) test(`600k-vertex glTF placements draw until the legacy 2M limit (${dense ? 'dense' : 'sparse'})`, async () => {
-  const OUT = `/tmp/ne-w5/scene3d-r8-budget/${dense ? 'dense' : 'sparse'}`;
+  const OUT = outputDir(dense);
   test.setTimeout(dense ? 480_000 : 300_000);
+  const loadBefore = os.loadavg();
   const legacy = await lane(false, dense);
   const native = await lane(true, dense);
   await mkdir(OUT, { recursive: true });
@@ -154,6 +205,7 @@ for (const dense of denseModes) test(`600k-vertex glTF placements draw until the
       frame: result.refusal.frame && { ...result.refusal.frame, pixels: undefined, png: undefined } },
   });
   await writeFile(`${OUT}/measure.json`, JSON.stringify({
+    loadBefore, loadAfter: os.loadavg(),
     modelVertices: BUDGET_VERTICES, dense, width: BUDGET_WIDTH, height: BUDGET_HEIGHT,
     fractionWithin2CV, maximumCV: maximum, refusalFractionWithin2CV,
     legacy: summarize(legacy), native: summarize(native),
@@ -167,6 +219,8 @@ for (const dense of denseModes) test(`600k-vertex glTF placements draw until the
   expect(native.model.geometryTriangles).toBe(200_000);
   expect(legacy.model.totalPlacedVertices).toBe(1_800_000);
   expect(native.model.totalPlacedVertices).toBe(1_800_000);
+  expect(native.renderErrors).not.toBeNull();
+  expect(native.renderErrors!).toBeLessThanOrEqual(8);
   expect(legacy.accepted.ok).toBe(true);
   expect(native.accepted.ok).toBe(true);
   expect(legacy.accepted.webglContextLost).toBe(false);

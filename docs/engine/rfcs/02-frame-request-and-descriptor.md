@@ -329,3 +329,32 @@ null: the composition at zoom × DPR × the preview resolution, as before.
 replaces the `svgScale` field this branch first added, so the branch moves
 the build id once (`protocol-8433dea27e348b5a`); addons and TypeScript are
 rebuilt together.
+
+### Version note: chrome selection and viewer canvas together (3D merge, 2026-10-22)
+
+`ViewerState` carries both optional fields above: `chromeSelection` (3D
+chrome) and `canvas` (decision V1). Each keeps its own meaning; neither
+depends on the other. The combined contract built as
+`protocol-50a5c6ee43a404de`.
+
+### Version note: `ViewerState.surfaceEpoch` (3D round 11, 2026-10-22)
+
+`ViewerState.surfaceEpoch?: number` (Rust `surface_epoch: Option<u32>`,
+`#[serde(default, skip_serializing_if = "Option::is_none")]`; absent is 0)
+is the viewer's surface epoch. A change replaces the view's color pool and,
+when the view asks for one, its depth/ID pool with new surfaces and new
+generations, even when size, count and format stay the same; the lease is
+charged once because the old pools are released first. A change of it is a
+new view (`viewSeq`), so a paused view draws its frame again into the new
+pool. The viewer moves it when the surfaces it imported can no longer be
+read: after a GPU process restart every `VideoFrame` of an earlier import
+fails to upload (docs/engine/scene3d.md, round 11). The same epoch in a
+later view, and transport replans, keep the pools. Absent on the wire when
+unset, so existing fixtures are unchanged. Builds as
+`protocol-7a0a3449f03f321a`.
+
+### Version note: consumers lane merge (2026-10-22)
+
+The consumers lane's additive stats and audio-peak fields
+(docs/engine/consumer-audio.md) together with `surfaceEpoch` build as
+`protocol-07ccbe7fd7aec876`. No field changed meaning.

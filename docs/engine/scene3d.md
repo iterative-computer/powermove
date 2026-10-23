@@ -291,6 +291,140 @@ tests and tools named above are its own files. Everything else it touched:
 - `docs/engine/pm-render.md`: its 3D section points here.
 - `engine/Cargo.lock`: `pm-geom3d` in `pm-render`'s dependencies.
 
+### Phase 3c rounds 1-11 (every file outside the lane's own paths)
+
+Phase 3c changed these files outside `pm-geom3d`, `pm-render/src/scene3d/`,
+`core/scene3d/`, `layers-3d/`, `viewer/viewport3d/` and the three lane
+notes. Owners of hot files: `kernel/api.ts` (extcompat), `preload/` and
+`main/engine/` (bridge), `legacy/gl/raster.ts` (mediaclose), and the
+viewer presentation (`extensions/viewer/engine-present/`, bridge).
+
+Viewer presentation and frame bridge (bridge-owned):
+
+- `extensions/viewer/engine-present/webgl-painter.ts` (new, round 10: the
+  WebGL2 F16 painter), `painter.ts` (round 10: `createFramePainter` is the
+  WebGL2 painter), `gpu.ts` (`FrameUnusableError`, painter contract),
+  `presenter.ts` (unusable frames are dropped and reported, `onUnusable`;
+  frames stay open through GPU completion), `present-worker.ts` and
+  `worker-presenter.ts` (the same through the worker, `unusable` message),
+  `presentation.ts` (chrome leases, depth/coverage frames, surface
+  renewal on a lost drawing or unusable pool, round 11), `view-state.ts`
+  (`renewSurfaces`, `surfaceEpoch`), `view-params.ts` (depth/ID request,
+  chrome selection, editor camera, Local View), `protocol.ts`,
+  `chrome-leases.ts` (new), `prewarm.ts`; tests `presenter.test.ts`,
+  `presentation.test.ts`, `worker-presenter.test.ts`,
+  `chrome-leases.test.ts`, `view-params.test.ts`.
+- `extensions/viewer/viewer.ts` (scene3d view input, chrome selection),
+  `extensions/viewer/manifest.json` (version), `viewer-engine.test.ts`.
+- `preload/frame-bridge.ts` (depth/coverage surfaces held per generation)
+  and `frame-bridge.test.ts`; `shared/frame-bridge.ts`.
+- `main/engine/integration/bridge-page.ts` (round 10: the integration page
+  uses the WebGL2 painter).
+
+Engine presenter and transport:
+
+- `pm-node/src/present/render.rs` (surface pools for depth/ID and coverage,
+  the asynchronous snapshot readback ring, Blender preview control and
+  status, scene metadata, `render_failed` and, round 11, the bounded retry
+  of transient failures), `present/mod.rs` (pool planning by transport
+  state, the depth pool, round 11 `surface_epoch` renewal),
+  `present/compose.rs` (viewport chrome planes), `present/snapshot.rs`
+  (asynchronous captures), `present/blender.rs`,
+  `present/preview_control.rs` (new), `present/document.rs`,
+  `present/svg.rs`, `present/view.rs`, `present/wait.rs`;
+  `pm-node/src/jobs/blender.rs`, `jobs/blender_png.rs` (new),
+  `jobs/mod.rs`, `jobs/svg.rs`; `pm-node/src/lib.rs`,
+  `pm-node/src/fonts/mod.rs` (allocation counters), `pm-node/Cargo.toml`,
+  `pm-node/examples/compose_bench.rs`; tests `pm-node/tests/compose.rs`,
+  `document.rs`, `layer_reports.rs`, `present.rs`, `scrub.rs`,
+  `shader_fallback.rs`, `snapshot.rs`.
+- `pm-gpu/src/readback.rs` (the reusable staging ring and completion
+  thread), `pm-gpu/src/bridge_out/pool.rs` (paired depth/coverage
+  surfaces).
+- `pm-engine/src/engine.rs`, `pm-engine/src/present.rs`,
+  `pm-engine/tests/present.rs`.
+- `pm-bridge/src/wire.rs` (pool roles), `pm-bridge/src/shm.rs` (SVG map
+  pixels).
+- `pm-protocol/src/frame.rs` (`ChromeSelection`, `DepthIdSurface`
+  encoding, `Scene3dMeta`, round 11 `ViewerState.surface_epoch`),
+  `preview.rs` (new), `blender.rs`, `snapshot.rs`, `svg_raster.rs`,
+  `envelope.rs`, `interop.rs`, `lib.rs`, `samples.rs`; wire fixtures
+  `event-frame`, `event-previewControl`, `event-previewStatus`,
+  `request-blenderRender`, `response-frame`; the generated
+  `shared/engine-protocol/` files (`BlenderJobRequest`,
+  `BlenderPngRequest`, `ChromeGlyph`, `ChromeSelection`, `CompatFormat`,
+  `CompatFrameRequest`, `CompatSource`, `DepthIdSurface`, `Event`,
+  `FrameDescriptor`, `PreviewAction`, `PreviewControl`, `PreviewPhase`,
+  `PreviewStatus`, `Scene3dMeta`, `SvgRasterKey`, `SvgRasterPixels`,
+  `ViewerState`, `index.ts`).
+- RFCs: `rfcs/02-frame-request-and-descriptor.md`, `03-gpu-interop.md`,
+  `11-blender-jobs.md`, `16-render-transport.md`.
+
+Renderer outside `scene3d/`:
+
+- `pm-render/src/renderer.rs`, `renderer/chrome.rs` (new: viewport chrome
+  planes), `plan.rs`, `exec.rs`, `capability.rs` (Scene3d refusals
+  removed), `media.rs` and `assets.rs` (level 1 map bitmaps),
+  `shader_layers/plan.rs`, `vector/svg_rasters.rs`, `lib.rs`,
+  `blender/mod.rs`, `blender/snapshot.rs`, `blender/snapshot_gltf.rs`
+  (new); `pm-export/src/blender.rs`.
+- `pm-media/src/image/compat.rs`, `image/compat_tiff.rs` (round 8: TIFF
+  rendition depth and alpha for Blender maps); `docs/engine/media.md`.
+- `pm-text/src/registry/coretext.rs`, `registry/mod.rs` (allocation
+  counters, round 9).
+- `pm-edit/src/groups.rs` (model-group bounds), `pm-eval/src/query3d.rs`
+  (new), `bounds.rs`, `recipe.rs`, `scene3d.rs`, `lib.rs`, `Cargo.toml`,
+  `tests/layers_unit.rs` (the lane's pm-eval hooks).
+- `pm-wasm/src/abi.rs`, `edit.rs`, `engine.rs`, `geometry.rs`,
+  `imported_model.rs` (new), `queries.rs`, `lib.rs`, `Cargo.toml`,
+  `examples/import_compat.rs`, `tests/geometry.rs` (the lane's pm-wasm
+  hooks).
+- Tests and tools: `pm-render/tests/blender_composite.rs`,
+  `blender_snapshots.rs`, `headless.rs`, `png_gamma.rs`,
+  `scene3d_capture_pair.rs`, `scene3d_document.rs`, `scene3d_gltf.rs`,
+  `scene3d_metadata.rs`, `scene3d_resources.rs`, `svg_level1.rs`,
+  `threed_maps.rs`, `viewport_chrome.rs`, `support/mod.rs`; fixtures
+  `scene3d-cases.json`, `short-normal-programs.json`,
+  `stills2/three-maps.json`; `pm-render/tools/blender-png/{page,run}.ts`,
+  `tools/svg-rasters/{page,run}.ts`, `tools/three-ref/cases.ts`;
+  `engine/corpus/src/media.ts`, `corpus/src/projects/space.ts`;
+  `engine/Cargo.lock`.
+
+App outside the lane's folders:
+
+- `renderer/src/kernel/api.ts` (extcompat's hot file: `assets.get`
+  object3d views and the viewer's camera hook), `kernel/install.ts`.
+- `renderer/src/legacy/gl/raster.ts` (mediaclose's hot file: the model
+  importer switch, taken only with the engine on).
+- `renderer/src/engine-doc/native.ts`, `wasm.ts`, `edits.ts`,
+  `model-transfer.ts` (new); tests `scene3d-geometry.test.ts`,
+  `model-transfer.test.ts`, `model-transfer-wasm.test.ts`,
+  `native-scene-limits.test.ts`.
+- `renderer/src/engine-connection/install.ts`, `session.ts`,
+  `preview.ts` (new: Blender preview API), `blender-png.ts` (new),
+  `scene-metadata.ts` (new), `svg-rasters.ts`, `render-transport.ts`;
+  tests `preview.test.ts`, `blender-png.test.ts`,
+  `scene-metadata.test.ts`, `svg-rasters.test.ts`,
+  `engine-connection.test.ts`.
+- `main/engine/blender.ts`, `compat-frames.ts`, `native-engine.ts`,
+  `snapshots.ts` and their tests; `main/media-store/service.ts` (round 8:
+  a new asset's read waits at most 1 s for its window's binding) and
+  `service.test.ts`; `engine/document-host/hosts.test.ts`.
+- e2e: `helpers/app.ts` (test-only `chromiumSwitches`),
+  `helpers/chrome-reference.ts`, `gltf-short-attributes.ts`,
+  `scene3d-budget-parity.ts`, `short-normal-matrix.ts`;
+  `tools/frame-painter-probe.ts`, `tools/real-frame-painter-probe.ts`,
+  `tools/threed-maps-capture.ts`; specs `blender-motion`,
+  `engine-blender-png-transport`, `engine-blender-preview-api`,
+  `engine-frame-painter`, `engine-present-recovery`,
+  `engine-scene3d-cancel-model`, `engine-scene3d-chrome`,
+  `engine-svg-maps`, `scene3d-budget-parity`, `scene3d-compat-parity`,
+  `scene3d-gltf-round7-parity`, `scene3d-import-parity`,
+  `scene3d-normal-matrix`, `scene3d-short-attributes`,
+  `scene3d-warnings`, `scene3d`; `playwright.threed-maps.config.ts`;
+  `scripts/gpu-reset-painter-repro/{main.js,page.html,worker.js}`.
+- Measurements: `docs/engine/phase3c-measurements/p3c-orbit-*-r1.json`.
+
 
 ## Hydration follow-up (K1 and R3b, 2026-10-18)
 
@@ -1310,14 +1444,188 @@ Queued, undrawn frames still close and release immediately. These lifetime
 corrections are independent of resolving the Chromium crash below.
 
 The round 9 renderer crash is symbolized against Electron 44.0.0 arm64's
-matching Breakpad module UUID. Its top frames are
-`WebGpuSharedImageWrapperCache::AcquireCachedWrapper`, wrapper leasing,
-`CreateExternalTexture`, and `GPUExternalTexture::FromVideoFrame` in the
-WebGPU presentation worker. In that Chromium source, a cached wrapper's
-`GetSharedImage()` returns null after its graphics context is lost, and
-`AcquireCachedWrapper` dereferences it without checking. The faulting read
-is at address 0x1c. This identifies the external-texture wrapper-cache
-failure, rather than a WASM worker or the frame transport worker; it does
-not establish which event lost that graphics context or prove a native
-IOSurface use-after-free. GPU-reset recovery remains a required stress
-gate; ordinary successful reruns do not resolve it.
+matching Breakpad module (UUID 4C4C448B-5555-3144-A179-5775D5EF8BF6). Its
+top frames are `WebGpuSharedImageWrapperCache::AcquireCachedWrapper`,
+`LeaseWebGpuSharedImageWrapper`, `CreateExternalTexture` and
+`GPUExternalTexture::FromVideoFrame`, called from
+`GPUDevice.importExternalTexture` in the presentation worker.
+
+Root cause (Chromium, not engine memory): `importExternalTexture` copies
+an RGBA VideoFrame into a `WebGpuSharedImageWrapper` leased from the
+device's wrapper cache. `WebGpuSharedImageWrapper::GetSharedImage()`
+returns null once that wrapper's raster context is lost, which happens
+on a GPU process restart (crash, kill, watchdog) or any loss of the
+worker's shared raster context. The cache dereferences the result without
+a check in two places:
+
+- `AcquireCachedWrapper`, at the next import. This is the round 9 and
+  round 10 app crash: a read at 0x1c.
+- `ReturnWebGpuSharedImageWrapper`, when `VideoFrame.close()` expires an
+  external texture. This is a read at 0x14.
+
+The loss is observable in JavaScript only asynchronously
+(`device.lost`), so no presenter can avoid importing in that window. No
+IOSurface, VideoFrame or engine-side release ordering is involved.
+
+Reproduction: a standalone Electron 44 page with a worker that imports
+F16 VideoFrames with `importExternalTexture`, killed every 2.5 s
+(`--disable-gpu-process-crash-limit`, domain blocking off). It crashed
+the renderer 10 times in 20 resets, every time with the
+`ReturnWebGpuSharedImageWrapper` signature above.
+
+Fix: the presentation draws through WebGL2 (`webgl-painter.ts`). It
+uploads the VideoFrame into an RGBA16F texture with `texImage2D` and
+draws it 1:1 into an RGBA16F drawing buffer in the canvas's display
+space. That path never touches the WebGPU wrapper cache. A frame whose
+upload fails with INVALID_VALUE or INVALID_OPERATION (a VideoFrame naming a
+shared image the restarted GPU process does not have) is dropped as
+unusable and goes back to the engine; the painter keeps drawing, and a
+real context loss still replaces it (e6de5ba67). Round 11 below makes
+unusable frames renew the pool's surfaces.
+`engine-frame-painter.spec.ts` proves that the drawing-buffer values equal
+the WebGPU painter's for 14 F16 cases in sRGB and P3, including values
+above 1.0, negative values, alpha and orientation. The same standalone
+loop on WebGL2 ran 200 resets with 0 crashes, 0 errors and draws resuming
+after every reset. The app loop (`engine-present-recovery.spec.ts`,
+`PM_GPU_RESET_ITERATIONS=200`) kills the GPU process during playback. It
+is paced so at most three losses land in 30 s, because beyond that the
+presentation deliberately stops. It runs with Chromium's 3D-API domain
+blocking off: after repeated resets that blocking also disables today's
+engine canvas ("WebGL unavailable"), whichever painter is used.
+
+On-screen tone mapping: the WebGPU canvas was configured with `extended`
+tone mapping for `rgbaf16` pools. Chromium 152 exposes no tone-mapping
+control for an OffscreenCanvas WebGL drawing buffer. Drawing-buffer values
+above 1.0 are kept exactly, and today's (8-bit WebGL) viewer never showed
+them. Whether the compositor shows them as EDR is not measured here:
+capturePage returns 8-bit.
+
+Frames that fail to render: a refused scene (over the two million
+vertex budget) used to leave the paused view dirty. The presenter then
+re-rendered and logged the same failure at every turn. Round 9's build did
+this too: 794 attempts in one paired run. In a run with the allocation
+inventory enabled, 1543 attempts came with +900 MiB in the interactive
+engine within seconds. The failure is now logged once, and the frame is
+drawn again at the next edit, view or transport change, as today.
+`scene3d-budget-parity.spec.ts` asserts at most 8 render errors after the
+refusal. The snapshot completion thread
+now runs at the presenter's user-interactive QoS.
+
+Paired measurement, round 10: five interleaved fresh-app pairs per cell
+(`scene3d-budget-parity.spec.ts`, 600k vertices x3, no cap). Both routes
+are sampled once the viewer shows the document. "Before" is round 9's
+engine and WASM; "after" is this branch. Both use the same app build. Load
+average was 12–14. Native import deltas (settled baseline) were 192.9 MiB
+sparse and 192.8 MiB dense, against legacy 118.7/132.4 MiB (ratios
+1.63/1.46). Round 9's engine measured 198.2/210.1 MiB.
+
+Import delta by process (native vs legacy, MiB):
+
+| Process | Native | Legacy |
+|---|---|---|
+| Interactive engine | +56–60 | none |
+| Main | +29 | +9 |
+| Renderer | +101–105 | +72–86 |
+| GPU process | +3.5 | +38 |
+
+The engine's share is the depth/ID and coverage pool the 3D chrome asks
+for at import (8 RGBA16F stage-size surfaces, 76 MB nominal) and the
+9.6 MB mesh. The renderer's extra is mainly WASM linear memory: about
+48 MB that never shrinks, against 15.5 MB live (the import and picker
+build peak at 44 MB). Legacy's GPU buffers sit in the GPU process as
+unmapped graphics memory, which working sets do not count.
+
+Capture p50 was 3.3/3.1 ms against legacy 1.3/1.1 ms; p95 was 3.4/3.9 ms
+against 5.3/7.0 ms. Of the native p50, the engine's render and readback is
+2.2–2.3 ms and main's answer 2.7 ms. Round 9's synchronous readback
+measured 3.1/2.7 ms in the same interleaved runs. The asynchronous ring
+frees the presenter during the GPU wait, but a single synchronous capture
+pays its thread hand-off (about 0.2 ms).
+
+## Phase 3c round 11: recovery without a view change, merge with the canvas lanes
+
+The round 10 recovery tests resized the window after every GPU reset, and
+a resize makes a new pool. Without one, the viewer stayed blank after a
+single GPU process restart: every `VideoFrame` of a surface imported
+before the restart fails `texImage2D` (GL INVALID_VALUE/OPERATION), the
+presenter dropped each frame as unusable, and nothing asked for new
+surfaces. The round 10 figures ("200 resets recovered", "6/6") therefore
+did not prove recovery on their own.
+
+Fix (contract 2 version note in RFC 02, `protocol-7a0a3449f03f321a`):
+
+- `ViewerState.surfaceEpoch` (optional, absent on the wire when unset). A
+  new epoch makes `BridgePresenter` replace the view's color pool and
+  depth/ID pool at the same size, count and format, with new generations.
+  The old pools are released before the lease is charged. It is a new view,
+  so a paused frame is drawn again. The same epoch in later views and
+  transport replans keep the pools (`present::tests::a_new_surface_epoch_replaces_both_pools_at_the_same_size`).
+- The presentation renews surfaces (`ViewSequencer.renewSurfaces`) when it
+  replaces a drawing whose graphics context was lost, and when a frame of a
+  pool is unusable (`PresenterOptions.onUnusable`, sent from the worker as
+  an `unusable` message). Renewal happens once per pool generation, and
+  frames of the pool being replaced do not ask again. At most
+  `MAX_SURFACE_RENEWALS` (6, two per tolerated loss) happen in 30 s. Beyond
+  that the stage says "The viewer cannot read the engine’s frames. Restart
+  Powermove." and an error is logged, until the window passes or a frame
+  draws. A new session (a restarted engine) starts the count over.
+
+In the reviewer's no-resize probe (one SIGKILL of the GPU process, paused,
+then an opacity edit), the viewer recovered by itself. Two renewals ran:
+one when the drawing was replaced, and one when the first renewed pool,
+imported while the GPU process was still coming back, failed with GL
+0x502. The third generation drew. The final stats were
+`{received:4, drawn:2, dropped:{unusable:2}}` with status null and the
+edit on screen. `engine-present-recovery.spec.ts` gained a paused case and
+a playback case, neither with a view or window change. The paused case
+checks that the view is unchanged except for the epoch, that the box
+pixel comes back, and that the edit's pixel shows. The reset loop no
+longer resizes.
+
+Painters on the real surface path (`engine-frame-painter.spec.ts`,
+`tools/real-frame-painter-probe.ts`): the WebGL2 F16 painter and the WebGPU
+external-texture painter run on the viewer's own IOSurface imports. The
+project has a translucent background and a 50% layer. The display's F16
+pool (rgba16Float, P3) and an SDR display's bgra8 pool (`(dynamic-range:
+high)` not matching) were each tested on 4 slots of 1496×904 pixels.
+Every pixel was equal (8-bit compared for bgra8), and the frames held only
+alpha 0 (around the composition) or 1. The viewer placement writes alpha
+1 (`compose.rs`), so `UNPACK_PREMULTIPLY_ALPHA_WEBGL` cannot change a
+production pixel.
+
+Transient render failures: `render_failed` (round 10) still makes a
+deterministic failure (an invalid request such as the scene budget
+refusal, a missing composition, a stopped job watchdog) wait for the next
+change. Device, readback, GPU, media, fallback-runner and SVG-raster
+errors now redraw the paused frame after 100 ms, 500 ms and 2 s first
+(`RENDER_RETRY_US`), counted per frame (revision and view sequence).
+
+Merge with feat/native-engine (svgbucket V1 canvas, level 2 text): the
+`ViewerState` now carries `chromeSelection`, `canvas` and `surfaceEpoch`.
+Model-group bounds keep their Models re-ask ahead of the font checks, and
+JS throws are deferred after the font checks, as the text lane does.
+Chrome planes keep today's fractional CSS composition frame, while color
+uses the V1 canvas. `pm-node/tests/document.rs` now expects round 10's
+transport pools: four generations and four retirements.
+
+Verification after the merge (Electron lock, one worker, flag on): the 3D
+suites (`blender-motion`, `comp-thumbnails`, `engine-blender`,
+`engine-scene3d-chrome`, `scene3d-compat-parity`, `scene3d-import-parity`,
+`scene3d`, `viewport3d`) passed 21/21, recovery 5/5, and painters 3/3.
+`engine-viewer-canvas.spec.ts` passed on its second run. Its first run
+failed only because the known "25% Auto" video-copy case matched today
+(max 1 CV). Today's viewer had not yet switched to the video's editing
+copy, a timing dependence in the reference rather than an engine change.
+The second run reproduced the known max of 49 CV. Rust: pm-geom3d,
+pm-wasm, pm-eval, pm-protocol, pm-node and pm-engine pass; pm-render
+`scene3d_resources` 13, `scene3d_gltf` 5, `scene3d_document` 9,
+`threed_maps` 3, `viewport_chrome` 2, `scene3d_metadata` 3,
+`blender_snapshots` 2 and `headless` 12 pass. Vitest with
+`PM_WASM_REQUIRED=1` over the 3D, engine-doc, viewer, engine-connection
+and Blender areas: 601 passed, 2 skipped.
+
+200-reset stress without resizes (`PM_GPU_RESET_ITERATIONS=200`, the
+GPU process is killed during playback, paced at three losses per 31 s,
+with no view or window change between resets): 200/200 recovered, with 0
+renderer crashes, 0 page errors, and the final edit's pixel on screen
+(34.3 min, one worker, under the Electron lock).

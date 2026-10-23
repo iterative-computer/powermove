@@ -125,6 +125,13 @@ export type PresenterOptions = {
    */
   generation?: number;
   /**
+   * A frame could not be read (`FrameUnusableError`): it went back to the
+   * engine undrawn. `generation` is its pool's. The presentation renews
+   * the surfaces when a pool's imports stopped being readable (a GPU
+   * process restart), since no later frame of that pool will draw.
+   */
+  onUnusable?: (generation: number, message: string) => void;
+  /**
    * Draw frames shown at the next refresh (paused, scrub, gesture) as soon
    * as they arrive instead of at the next animation frame. Only for a
    * canvas whose frames go to the compositor on their own (a worker's
@@ -542,6 +549,7 @@ export class EnginePresenter implements Presenter {
       // This frame only: the next one (or the next pool's) draws.
       if (error instanceof FrameUnusableError) {
         this.releaseDesc(desc, 'unusable');
+        this.options.onUnusable?.(desc.poolGeneration, error.message);
         return;
       }
       this.releaseDesc(desc, 'draw-failed');
