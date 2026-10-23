@@ -110,6 +110,9 @@ export class NativeHiddenHost {
     })(role);
     this.engine = new NativeEngine({ spawn: role => role === 'interactive'
       ? this.snapshotBridge.spawn(env => spawn(role, env)) : spawn(role), channel: transport.channel,
+      // Headless renders are this host's work: keep the job engine resident
+      // (the desktop starts it on demand to hold its idle footprint).
+      eagerJobs: true,
       cacheDirectory: path.join(userData, 'Engine Cache'), automaticOutputDirectory: options.exportsDir,
       physicalMemory: os.totalmem(), hostNow: this.nowUs,
       log: (level, message) => log(`[native:${level}] ${message}`), resolveAsset: (id, context) => context?.process === 'interactive' && this.interactiveProjects.has(context.session)

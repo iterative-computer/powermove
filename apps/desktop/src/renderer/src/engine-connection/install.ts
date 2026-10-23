@@ -85,6 +85,9 @@ export interface EngineConnectionHandle {
    * viewer opens a new presentation with it.
    */
   setTrace(on: boolean): void;
+  /** Experimental renderer memory gate. Only the actual final-tab
+   * transition can pause native presentation; measurements can disable it. */
+  setHomeSuspendForDiagnostics(on: boolean): void;
   /** The engine's audio for the mixer panel and waveforms. */
   audio: EngineAudio;
   /** Every clock sample of every session (the measurements). */
@@ -433,8 +436,31 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   /** Whether a first engine frame arrived (the cold start mark). */
   let firstFrame = false;
   let trace = false;
+  let homeSuspendEnabled = true;
+  let visitedRealProject = false;
+  let mayPresent = true;
+  const reconcileHomePresentation = (): void => {
+    // The home placeholder is present at initial startup too; keep that
+    // eager path. A confirmed project tab must first have been on screen.
+    if (PM.Tabs?.active) visitedRealProject = true;
+    const closedLastTab = visitedRealProject && PM.isHomeProject?.() === true && PM.Tabs?.list?.().length === 0;
+    const next = !(homeSuspendEnabled && closedLastTab);
+    if (next === mayPresent) return;
+    mayPresent = next;
+    target.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
+  };
+  const offHomeProject = PM.bus?.on?.('project', reconcileHomePresentation) ?? (() => {});
+  const offHomeTabs = PM.bus?.on?.('projects:open', reconcileHomePresentation) ?? (() => {});
+  // A restored project may precede connection installation; remember it so
+  // its later final close still qualifies without changing startup home.
+  reconcileHomePresentation();
   const makeService = (): EngineViewerService & { trace?: boolean } => ({
     trace,
+    mayPresent: () => mayPresent,
+    importStats: () => {
+      const { launch, held, received, released, videoFrames } = source.stats();
+      return { launch, held, received, released, videoFrames };
+    },
     source,
     exclusive: true,
     drawingWarmup,
@@ -466,6 +492,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const opened = openSession();
       if (!opened) return null;
       const lease = ++viewerLease;
+      let retirementLaunch: number | null = null;
+      let authorizedRetirement = false;
       const previous = viewerHandlers;
       viewerHandlers = handlers;
       previous?.closed('another viewer attached to the engine session');
@@ -486,13 +514,34 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
           if (lease === viewerLease) opened.sendViewerState({ ...state, headless: false } as never);
         },
         release: (release) => opened.release(release),
-        close: () => {
-          if (lease !== viewerLease || opened.closed) return;
+        close: (options) => {
+          if (lease !== viewerLease || viewerHandlers !== handlers || opened.closed) return;
+          // `sendViewerState` can merely queue headless while the document
+          // has no session id or its first resync is pending. A new viewer
+          // could overwrite that queued state and keep using this pool, so
+          // only a posted headless state grants import-retirement ownership.
+          const postedHeadless = opened.id !== null && !(opened.resyncPending && opened.applied === 0) && c.ready && !c.closed;
+          const launch = postedHeadless ? source.stats().launch : null;
           viewerHandlers = null;
           opened.sendHeadless(openComposition());
+          retirementLaunch = launch;
+          authorizedRetirement = launch !== null && source.stats().launch === launch && c.ready && !c.closed;
           transport.refresh();
-          drawingWarmup.warm();
-        }
+          // A viewer that goes away (extension reload or update, service
+          // replacement, a fork binding its own canvas) leaves a prepared
+          // drawing for the next one, as at startup. The final-tab
+          // suspension keeps its own drawing: a second one would only hold
+          // memory on the home screen.
+          if (!options?.keepsDrawing) drawingWarmup.warm();
+        },
+        retireClosedPool: (generation) => {
+          // A replacement viewer may claim the same pool before an old GPU
+          // fence drains. A new launch also reuses generation numbers after
+          // preload has cleared its old imports. Both revoke this channel's
+          // right to retire the generation.
+          if (!authorizedRetirement || lease !== viewerLease || viewerHandlers !== null || source.stats().launch !== retirementLaunch) return 0;
+          return source.retire(generation);
+        },
       };
     }
   });
@@ -516,6 +565,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     audio,
     render: renderTransport,
     session: () => current,
+    setHomeSuspendForDiagnostics: (on) => {
+      homeSuspendEnabled = on === true;
+      reconcileHomePresentation();
+    },
     setTrace: (on) => {
       if (on === trace) return;
       trace = on;
@@ -551,6 +604,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offShaderFallback();
       offPending();
       offEager();
+      offHomeProject();
+      offHomeTabs();
       offAssets();
       follower.dispose();
       unprovideSvg();

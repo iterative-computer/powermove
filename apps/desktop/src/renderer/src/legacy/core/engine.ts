@@ -615,7 +615,7 @@ function frame(now: any) {
   }
   const interactive = !PM.playing && now < interactionUntil;
   if (refinePending && !interactive && !PM.playing) { needsDraw = true; refinePending = false; }
-  if (!needsDraw || !PM.GL.gl) return;
+  if (!needsDraw || PM.EngineConnection || !PM.GL.gl) return;
   // During a paused zoom gesture the viewer can transform valid presented
   // pixels immediately. Keep the redraw pending until refinement is needed;
   // playback and content/time changes always bypass this navigation-only path.

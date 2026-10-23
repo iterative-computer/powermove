@@ -449,6 +449,7 @@ fn engine_error(job: &JobId, e: &JobError) -> EngineError {
 pub struct JobEngineService {
     shared: Arc<Shared>,
     threads: Vec<JoinHandle<()>>,
+    probes_only: bool,
 }
 
 impl JobEngineService {
@@ -504,7 +505,31 @@ impl JobEngineService {
             })
             .map_err(|e| format!("could not start the pm-job-compile worker: {e}"))?;
         threads.push(handle);
-        Ok(JobEngineService { shared, threads })
+        Ok(JobEngineService {
+            shared,
+            threads,
+            probes_only: false,
+        })
+    }
+
+    /// Interactive engines need media facts without paying for a second
+    /// utility process or the job engine's GPU/render lanes. The probe
+    /// worker itself starts on the first request.
+    pub fn start_probes_only(wake: Wake) -> JobEngineService {
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            work: Condvar::new(),
+            answers: Condvar::new(),
+            gate: Arc::new(Gate::new()),
+            wake,
+            gpu: Mutex::new(None),
+            fonts: None,
+        });
+        JobEngineService {
+            shared,
+            threads: Vec::new(),
+            probes_only: true,
+        }
     }
 
     pub fn stats(&self) -> ServiceStats {
@@ -527,23 +552,38 @@ pub struct StatsHandle(Arc<Shared>);
 
 impl StatsHandle {
     pub fn json(&self) -> serde_json::Value {
-        let gpu_created = self
-            .0
-            .gpu
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
+        let gpu = self.0.gpu.lock().unwrap_or_else(|e| e.into_inner());
+        let gpu_created = gpu.is_some();
+        let metal_device = gpu
+            .as_ref()
+            .and_then(|(device, _)| pm_gpu::device::metal_device_allocation(device))
+            .map(|allocation| {
+                serde_json::json!({
+                    "currentAllocatedBytes": allocation.current_allocated_bytes,
+                    "recommendedMaxWorkingSetBytes": allocation.recommended_max_working_set_bytes,
+                    "unifiedMemory": allocation.unified_memory,
+                    "maxTransferBytesPerSecond": allocation.max_transfer_bytes_per_second,
+                })
+            });
+        drop(gpu);
         let st = self.0.lock();
         serde_json::json!({
             "service": st.stats,
             "gate": self.0.gate.stats(),
             "gpuCreated": gpu_created,
+            "metalDevice": metal_device,
             "queued": {
                 "snapshots": st.snapshots.len(),
                 "agentExports": st.agent_exports.len(),
                 "user": st.user.as_ref().map_or(0, |s| s.len()),
             },
             "jobs": st.jobs.len(),
+            // Work that still needs this process: main retires an idle job
+            // utility only when all of these are zero and it has no session.
+            "active": st.jobs.values().filter(|r| !r.state.is_terminal()).count(),
+            "probes": st.probes.len(),
+            "frameRuns": st.frame_runs.len(),
+            "compiles": st.compiles.0.len(),
         })
     }
 }
@@ -577,6 +617,13 @@ impl JobService for JobEngineService {
         document: Option<JobDocument>,
     ) -> Result<JobAccepted, Box<EngineError>> {
         let job = submit.job.clone();
+        if self.probes_only {
+            return Err(Box::new(job_error(
+                &job,
+                ErrorCode::Unsupported,
+                "This engine only probes media.",
+            )));
+        }
         let JobSpec::Export { .. } = &submit.spec else {
             return Err(Box::new(job_error(
                 &job,
@@ -715,6 +762,13 @@ impl JobService for JobEngineService {
         document: JobDocument,
         request: AgentFrameRequest,
     ) -> Result<(), Box<EngineError>> {
+        if self.probes_only {
+            return Err(Box::new(EngineError::new(
+                ErrorCode::Unsupported,
+                ErrorScope::Request { id },
+                "This engine only probes media.",
+            )));
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         let mut st = self.shared.lock();
         st.frame_runs.push((request.run.clone(), cancel.clone()));
@@ -739,6 +793,22 @@ impl JobService for JobEngineService {
     ) -> Result<(), Box<EngineError>> {
         // Probing opens and indexes the file: off the engine thread, on the
         // probe lane.
+        if self.probes_only && self.threads.is_empty() {
+            let shared = self.shared.clone();
+            let handle = pm_engine::qos::spawn_engine_thread(
+                EngineProcess::Interactive,
+                "pm-media-probes",
+                move || run_probes(&shared),
+            )
+            .map_err(|e| {
+                Box::new(EngineError::new(
+                    ErrorCode::Internal,
+                    ErrorScope::Request { id },
+                    format!("Could not start media probing: {e}"),
+                ))
+            })?;
+            self.threads.push(handle);
+        }
         self.shared.lock().probes.push_back((port, id, probe));
         self.shared.work.notify_all();
         Ok(())
@@ -816,6 +886,9 @@ impl JobService for JobEngineService {
         session: SessionId,
         update: &pm_protocol::definitions::DefinitionsUpdate,
     ) -> bool {
+        if self.probes_only {
+            return false;
+        }
         self.shared.lock().compiles.0.push_back(compile::Pending {
             port,
             id,
@@ -1144,18 +1217,20 @@ fn run_frames(
             ));
             continue;
         }
-        let rendered = render_still(
-            renderer,
-            &document.document,
-            frame.composition.as_str(),
-            frame.time,
-            request.max_dimension,
-            &media,
-            &mut routing,
-            gate,
-            still_seed(frame.composition.as_str()),
-            cancel,
-        );
+        let rendered = objc2::rc::autoreleasepool(|_| {
+            render_still(
+                renderer,
+                &document.document,
+                frame.composition.as_str(),
+                frame.time,
+                request.max_dimension,
+                &media,
+                &mut routing,
+                gate,
+                still_seed(frame.composition.as_str()),
+                cancel,
+            )
+        });
         let outcome = match rendered {
             Ok(f) => {
                 let rgba = to_rgba8(&f.rgba);
@@ -1676,7 +1751,7 @@ fn run_probes(shared: &Shared) {
             }
         };
         let (port, id, probe) = next;
-        probe_media(shared, port, id, probe);
+        objc2::rc::autoreleasepool(|_| probe_media(shared, port, id, probe));
     }
 }
 
@@ -1802,6 +1877,67 @@ fn wait_for_media(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_probe_starts_without_render_lanes_or_gpu() {
+        let mut service = JobEngineService::start_probes_only(Arc::new(|| {}));
+        assert!(service.threads.is_empty());
+        assert!(service.shared.gpu.lock().unwrap().is_none());
+        let id = RequestId::new(1).unwrap();
+        service
+            .probe_media(
+                PortId(1),
+                id,
+                pm_protocol::media::ProbeMedia {
+                    handle: CapabilityHandle::from_random_bytes([1; 16]),
+                    interpret: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(service.threads.len(), 1);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let call = loop {
+            if let Some(call) = service.drain().host_requests.into_iter().next() {
+                break call;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "probe did not ask to resolve its handle"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert!(matches!(
+            call.request,
+            Request::ResolveHandle(ResolveHandle {
+                session: SessionId::ZERO,
+                ..
+            })
+        ));
+        assert_eq!(call.session, None);
+        service.host_answer(
+            call.token,
+            Err(EngineError::new(
+                ErrorCode::CapabilityRejected,
+                ErrorScope::Request { id },
+                "invalid handle",
+            )),
+        );
+        loop {
+            if let Some((port, answer)) = service.drain().messages.into_iter().next() {
+                assert_eq!(port, PortId(1));
+                assert!(
+                    matches!(answer.message, Message::Error { id: error_id, error } if error_id == id && error.code == ErrorCode::CapabilityRejected)
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "probe did not relay the rejection"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(service.shared.gpu.lock().unwrap().is_none());
+    }
 
     #[test]
     fn offline_messages_name_the_clips() {

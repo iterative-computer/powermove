@@ -77,6 +77,10 @@ export interface AgentJobsEngine {
   stageDocument(process: EngineProcess, session: number, bytes: Uint8Array): Promise<{ handle: string; length: number }>;
   listen(listener: { jobStatus?(status: JobStatus): void; status?(status: unknown): void }): () => void;
   isReady(process: EngineProcess): boolean;
+  canRequest?(process: EngineProcess): boolean;
+  ensureReady?(process: EngineProcess): Promise<void>;
+  holdJobRun?(run: string): void;
+  releaseJobRun?(run: string): void;
   /** A user-chosen destination as a write handle for `job` on `session`,
    *  placed under `overwrite` (the engine's default for chosen files is replace). */
   chooseOutput?(file: string, job: string, session: number, overwrite?: 'uniqueName' | 'replace' | 'fail'): string;
@@ -378,6 +382,12 @@ export class AgentJobs {
   private readonly finished: string[] = [];
   /** One live-following job session per window for its agent frames. */
   private readonly frameSessions = new Map<number, Promise<FrameSession>>();
+  /** Owners whose frame sessions a run has used. A shared owner stays open
+   *  until its last run finishes. */
+  private readonly runOwners = new Map<string, Set<number>>();
+  private readonly finishedRuns = new Set<string>();
+  private readonly preparingRuns = new Map<string, Promise<void>>();
+  private readonly heldRuns = new Set<string>();
   /** The window each agent frame session works for (by job engine session). */
   private readonly frameOwners = new Map<number, number>();
 
@@ -407,11 +417,46 @@ export class AgentJobs {
 
   dispose(): void {
     this.unlisten();
+    for (const run of this.heldRuns) this.options.engine.releaseJobRun?.(run);
+    this.heldRuns.clear();
   }
 
   /** Whether the job engine can take work now. */
   get available(): boolean {
-    return this.options.engine.isReady('job');
+    return this.options.engine.canRequest?.('job') ?? this.options.engine.isReady('job');
+  }
+
+  /** Begin the separate render utility while an agent is setting up its
+   *  project run. The caller does not wait: the first render still awaits
+   *  readiness and receives a startup failure through the normal path. */
+  async prepareRun(run: string): Promise<void> {
+    this.heldRuns.add(run);
+    this.options.engine.holdJobRun?.(run);
+    const pending = this.preparingRuns.get(run);
+    if (pending) return pending;
+    const start = this.options.engine.ensureReady?.('job') ?? Promise.resolve();
+    this.preparingRuns.set(run, start);
+    try {
+      await start;
+    } catch (error) {
+      this.releaseRunHold(run);
+      throw error;
+    } finally {
+      if (this.preparingRuns.get(run) === start) this.preparingRuns.delete(run);
+    }
+  }
+
+  private releaseRunHold(run: string): void {
+    if (!this.heldRuns.delete(run)) return;
+    this.options.engine.releaseJobRun?.(run);
+  }
+
+  /** End a committed run's warm hold and close its idle frame sessions.
+   *  Accepted async exports retain their own job sessions. */
+  async finishRun(run: string): Promise<void> {
+    this.releaseRunHold(run);
+    this.finishedRuns.add(run);
+    await this.closeRunFrames(run);
   }
 
   private nextSaveSession = -1;
@@ -515,8 +560,11 @@ export class AgentJobs {
     const live = [...this.jobs.values()].some((r) => r.run === run && !terminal(r.status.state));
     // Frame batches carry their own wire run (one per batch), so a batch can
     // be cancelled alone; the agent run's cancel reaches every one of them.
+    // No live work means no request: a retired job utility is not restarted
+    // just to cancel nothing.
     const wires = [...(live ? [run] : []), ...(this.frameRuns.get(run) ?? [])];
     const counts = await Promise.all(wires.map((wire) => this.cancelWireRun(wire, run)));
+    await this.finishRun(run);
     return counts.reduce((sum, count) => sum + count, 0);
   }
 
@@ -676,6 +724,8 @@ export class AgentJobs {
 
   /** Agent run -> the wire runs of its frame batches in flight. */
   private readonly frameRuns = new Map<string, Set<string>>();
+  /** Agent run -> its renderFrames calls in progress (startup included). */
+  private readonly frameCalls = new Map<string, number>();
   private frameBatch = 0;
 
   /** Renders agent frames at the agent's revision in the agent snapshot
@@ -683,10 +733,30 @@ export class AgentJobs {
   async renderFrames(owner: number, run: string, plan: FramesPlan, options: FramesOptions = {}): Promise<AgentFramesResult> {
     const project = asProject(plan.project);
     if (!plan.times.length) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
+    const owners = this.runOwners.get(run) ?? new Set<number>();
+    owners.add(owner);
+    this.runOwners.set(run, owners);
+    // Count the whole call, including startup and session creation: a run
+    // finishing during either must not close the session underneath it.
+    this.frameCalls.set(run, (this.frameCalls.get(run) ?? 0) + 1);
+    try {
+      return await this.renderFrameBatch(owner, run, project, plan, options);
+    } finally {
+      const left = (this.frameCalls.get(run) ?? 1) - 1;
+      if (left) this.frameCalls.set(run, left); else this.frameCalls.delete(run);
+      if (!left && this.finishedRuns.has(run)) await this.closeRunFrames(run);
+    }
+  }
+
+  private async renderFrameBatch(owner: number, run: string, project: Project, plan: FramesPlan, options: FramesOptions): Promise<AgentFramesResult> {
+    const { signal } = options;
+    if (signal?.aborted) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
+    // Startup announces its generation and invalidates old frame sessions.
+    // Wait before installing the first cached session, so it is not discarded.
+    await this.options.engine.ensureReady?.('job');
     const w = Number(project['w']), h = Number(project['h']);
     // `width` is today's output width; the engine takes the longest edge.
     const maxDimension = Math.max(1, Math.min(8192, Math.round(h > w && w > 0 ? plan.width * h / w : plan.width)));
-    const { signal } = options;
     if (signal?.aborted) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
     const frameSession = await this.frameSession(owner, project);
     const wire = `${run}#frames-${++this.frameBatch}`;
@@ -723,6 +793,17 @@ export class AgentJobs {
     }
     if (response.type !== 'agentFrames') throw new AgentJobError('The job engine answered agent frames with something else.');
     return this.frameImages(plan.times, response.outcomes, response.queuedMs, frameSession.revision, aborted, plan.imageFormat === 'png' ? 'image/png' : 'image/jpeg');
+  }
+
+  private async closeRunFrames(run: string): Promise<void> {
+    if (this.frameCalls.has(run)) return;
+    const owners = this.runOwners.get(run);
+    this.runOwners.delete(run);
+    this.finishedRuns.delete(run);
+    for (const owner of owners ?? []) {
+      if ([...this.runOwners.values()].some((other) => other.has(owner))) continue;
+      await this.forgetOwner(owner);
+    }
   }
 
   /** The batch's images in request order. A batch cancelled through its
@@ -840,7 +921,10 @@ export class AgentJobs {
     const pending = this.frameSessions.get(owner);
     this.frameSessions.delete(owner);
     const current = await pending?.catch(() => null);
-    if (current && current.generation === this.generation) await this.closeSession(current.session);
+    if (current) {
+      this.frameOwners.delete(current.session);
+      if (current.generation === this.generation) await this.closeSession(current.session);
+    }
   }
 
   /* ── sessions ──────────────────────────────────────────────────────── */
@@ -866,6 +950,9 @@ export class AgentJobs {
   }
 
   private async openSession(document: string, role: 'job' | 'jobSnapshot', owner: number | null): Promise<number> {
+    // A retired job utility starts on demand; a fatal startup or a crash
+    // still down at the bound is the named error below.
+    await this.options.engine.ensureReady?.('job').catch(() => undefined);
     await this.whenAvailable();
     const opened = await this.options.engine.request('job', { type: 'openSession', document, role, process: 'job', color: STANDARD_COLOR });
     if (opened.type !== 'sessionOpened') throw new AgentJobError('The job engine did not open a session.');
@@ -935,8 +1022,11 @@ export class AgentJobs {
   private async closeSession(session: number): Promise<void> {
     this.frameOwners.delete(session);
     void this.sessionOwner(session, null);
-    await this.options.bindMediaSession?.(session, null);
-    await this.options.engine.request('job', { type: 'closeSession' }, session).catch(() => undefined);
+    try {
+      await this.options.bindMediaSession?.(session, null);
+    } finally {
+      await this.options.engine.request('job', { type: 'closeSession' }, session).catch(() => undefined);
+    }
   }
 }
 

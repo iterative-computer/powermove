@@ -583,6 +583,7 @@ const bridge: PowermoveBridge = {
     agentFrames: (request) => ipcRenderer.invoke(ENGINE_IPC.agentFrames, {
       project: String(request.project), revision: request.revision, width: request.width, times: [...request.times]
     }),
+    exportSheet: (sheet, open) => ipcRenderer.send(ENGINE_IPC.exportSheet, sheet, open === true),
     exportVideo: (request) => ipcRenderer.invoke(ENGINE_IPC.exportVideo, {
       project: String(request.project),
       name: String(request.name),

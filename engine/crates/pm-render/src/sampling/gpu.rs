@@ -96,9 +96,9 @@ pub(crate) struct Resampler {
     mip_layout: wgpu::BindGroupLayout,
     trilinear: wgpu::Sampler,
     /// `[format][blend]`: rgba16float, rgba32float × over, additive.
-    draw: [[wgpu::RenderPipeline; 2]; 2],
-    copy: [wgpu::RenderPipeline; 2],
-    down: [wgpu::RenderPipeline; 2],
+    draw: [[crate::pipelines::LazyRenderPipeline; 2]; 2],
+    copy: [crate::pipelines::LazyRenderPipeline; 2],
+    down: [crate::pipelines::LazyRenderPipeline; 2],
 }
 
 const FORMATS: [wgpu::TextureFormat; 2] = [
@@ -199,38 +199,43 @@ impl Resampler {
         };
         let pipeline = |layout: &wgpu::PipelineLayout,
                         module: &wgpu::ShaderModule,
-                        vs: &str,
-                        fs: &str,
+                        vs: &'static str,
+                        fs: &'static str,
                         format: wgpu::TextureFormat,
                         blend: Option<wgpu::BlendState>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(fs),
-                layout: Some(layout),
-                vertex: wgpu::VertexState {
-                    module,
-                    entry_point: Some(vs),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
+            let device = device.clone();
+            let module = module.clone();
+            let layout = layout.clone();
+            crate::pipelines::LazyRenderPipeline::new(move || {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(fs),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(vs),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(fs),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         };
         let draw = FORMATS.map(|f| {
@@ -327,9 +332,9 @@ impl Resampler {
                 multiview_mask: None,
             });
             pass.set_pipeline(if level == 0 {
-                &self.copy[i]
+                self.copy[i].get()
             } else {
-                &self.down[i]
+                self.down[i].get()
             });
             pass.set_bind_group(0, &bind, &[]);
             pass.draw(0..4, 0..1);
@@ -350,10 +355,40 @@ impl Resampler {
     }
 
     pub fn pipeline(&self, format: wgpu::TextureFormat, blend: PassBlend) -> &wgpu::RenderPipeline {
-        &self.draw[format_index(format)][match blend {
+        self.draw[format_index(format)][match blend {
             PassBlend::Over => 0,
             PassBlend::Additive => 1,
         }]
+        .get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn built_count(&self) -> usize {
+        self.draw
+            .iter()
+            .flat_map(|variants| variants.iter())
+            .chain(self.copy.iter())
+            .chain(self.down.iter())
+            .filter(|pipeline| pipeline.is_built())
+            .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_all(&self) -> Vec<(String, std::time::Duration)> {
+        let mut times = Vec::new();
+        for (i, format) in FORMATS.into_iter().enumerate() {
+            for (name, pipeline) in [
+                ("draw over", &self.draw[i][0]),
+                ("draw additive", &self.draw[i][1]),
+                ("copy", &self.copy[i]),
+                ("down", &self.down[i]),
+            ] {
+                let start = std::time::Instant::now();
+                pipeline.get();
+                times.push((format!("resample {name} {format:?}"), start.elapsed()));
+            }
+        }
+        times
     }
 
     /// The bind group of one draw (its pyramid and uniform).

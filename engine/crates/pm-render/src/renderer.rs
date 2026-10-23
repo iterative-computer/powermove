@@ -717,6 +717,7 @@ impl Renderer {
     pub fn swap_effects(&mut self, effects: &mut Effects) {
         std::mem::swap(&mut self.effects, effects);
         self.effects.fallback.runner = self.shaders.fallback_runner;
+        self.refresh_meshes();
     }
 
     /// Runs `f` with an effect context over the renderer's own definitions,
@@ -1217,6 +1218,16 @@ impl Renderer {
         self.vector
             .trim(bytes.saturating_sub(self.pool.bytes() + self.pyramids.bytes()));
         self.text_gpu.trim(bytes);
+    }
+
+    /// Frees every idle intermediate target (a viewer at rest) and returns
+    /// the bytes freed. Targets in use, such as the kept bottom of the last
+    /// frame (`crate::frame_prefix`), and every content cache stay; the
+    /// next frame takes fresh targets from the device.
+    pub fn release_idle_targets(&mut self) -> u64 {
+        let before = self.pool.bytes();
+        self.pool.trim(0);
+        before - self.pool.bytes()
     }
 
     /// The vector cache's standing bound, enforced while frames render
