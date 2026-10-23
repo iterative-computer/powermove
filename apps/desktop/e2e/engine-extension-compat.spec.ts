@@ -619,7 +619,10 @@ test.describe('Use New Engine: existing extensions', () => {
     }
     const engine: Awaited<ReturnType<typeof play>> & { nativeAfter?: Awaited<ReturnType<typeof nativeReport>> } = await play(page, traced);
     if (traced) (engine as any).trace.native = await nativeReport();
-    if (run.wrapFrames) engine.nativeAfter = await nativeReport();
+    // End-of-run status is sampled after the measured span, including on a
+    // non-traced cadence run. The window's last periodic stats can precede
+    // a late-frame burst and omit the native turn that caused it.
+    engine.nativeAfter = await nativeReport();
     if (profiler && profileDirectory) {
       const { profile } = await profiler.send('Profiler.stop');
       await mkdir(profileDirectory, { recursive: true });

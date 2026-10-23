@@ -207,6 +207,31 @@ describe('the raster override producer', () => {
     expect(compat.answer(need('title'), 4, { prepared: true })).toMatchObject({ size: [48, 24], anchor: [4, 18], uv: [0, 0, 1, 1] });
   });
 
+  it('includes awaited readback delays in complete preparation timings', async () => {
+    let clock = 0, finishReadback!: (pixels: any) => void, started!: () => void;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const readback = vi.fn(() => new Promise<any>(resolve => { finishReadback = resolve; started(); }));
+    const { services, compat, need } = setup(true, undefined, readback);
+    services.register('raster', () => ({ cv: { width: 96, height: 48 }, w: 48, h: 24, key: 'timed' }));
+    const prepare = async (time: number, start: number, finish: number) => {
+      const entered = new Promise<void>(resolve => { started = resolve; });
+      clock = start;
+      const pending = compat.prepare(need('box', time), 4);
+      await entered;
+      clock = finish;
+      finishReadback({ width: 96, height: 48, format: 'rgba8Premultiplied', data: new Uint8Array(96 * 48 * 4) });
+      await pending;
+    };
+    try {
+      await prepare(0.5, 100, 145);
+      await prepare(1, 200, 275);
+      expect(compat.stats).toMatchObject({ readbacks: 2, readbackMs: 120, readbackMsMax: 75,
+        preparations: 2, prepareMs: 120, prepareMsMax: 75, prepareCpuMs: 0, asyncLoads: 0,
+        bitmapCaptures: 0, workerReplies: 0 });
+      expect(compat.answer(need('box', 1), 4, { prepared: true })).toMatchObject({ kind: 'raster', key: 'timed' });
+    } finally { compat.dispose(); now.mockRestore(); }
+  });
+
   it('keeps a synchronous caller on the current base after preparation', async () => {
     const { services, compat, engineRaster, need } = setup(true);
     const original = services.get<any>('raster');

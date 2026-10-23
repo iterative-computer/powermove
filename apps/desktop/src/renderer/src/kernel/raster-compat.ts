@@ -41,7 +41,7 @@ import type { CompatAnswerOptions, CompatAnswerResult, EngineRenderTransport } f
 import { COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT } from '../engine-connection/render-transport';
 import type { Disposable } from './api';
 import { compositorPixels } from './raster-pixels';
-import { createRasterReadback } from './raster-readback';
+import { createRasterReadback, type RasterReadbackStats } from './raster-readback';
 export { compositorPixels } from './raster-pixels';
 
 type LegacyPM = Record<string, any>;
@@ -104,7 +104,7 @@ export interface RasterCompatHandle {
   dispose(): void;
 }
 
-export interface RasterCompatStats {
+export interface RasterCompatStats extends RasterReadbackStats {
   /** Base reads answered from this preparation's asynchronous dependencies. */
   prepared: number;
   /** Base reads that waited on the engine synchronously. */
@@ -114,11 +114,19 @@ export interface RasterCompatStats {
   cacheHits: number;
   /** Completed pass-through answers: no base pixels were needed. */
   passThroughSkips: number;
-  /** Wall time of the asynchronous preparations (ms). */
+  /** Wall time spent awaiting engine base rasters (ms). */
   asyncMs: number;
   asyncMsMax: number;
   prepareCpuMs: number;
   prepareCpuMsMax: number;
+  /** Complete readback wall time, including bitmap capture and worker reply. */
+  readbacks: number;
+  readbackMs: number;
+  readbackMsMax: number;
+  /** Complete preparation wall time, including dependencies and yielded turns. */
+  preparations: number;
+  prepareMs: number;
+  prepareMsMax: number;
   slowPreparations: { time: number; ms: number }[];
   /** Where the most recent synchronous base loads were called from. */
   syncLoadSites: string[];
@@ -278,10 +286,13 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   let baseBytes = 0;
   let pending = 0, generation = 0, readyRevision: number | null = null;
   let serial = 0;
-  const stats: RasterCompatStats = { prepared: 0, syncLoads: 0, asyncLoads: 0, cacheHits: 0, passThroughSkips: 0, asyncMs: 0, asyncMsMax: 0, prepareCpuMs: 0, prepareCpuMsMax: 0, slowPreparations: [], syncLoadSites: [] };
+  const stats: RasterCompatStats = { prepared: 0, syncLoads: 0, asyncLoads: 0, cacheHits: 0, passThroughSkips: 0, asyncMs: 0, asyncMsMax: 0, prepareCpuMs: 0, prepareCpuMsMax: 0,
+    readbacks: 0, readbackMs: 0, readbackMsMax: 0, preparations: 0, prepareMs: 0, prepareMsMax: 0,
+    bitmapCaptures: 0, bitmapMs: 0, bitmapMsMax: 0, workerReplies: 0, workerMs: 0, workerMsMax: 0, workerComputeMs: 0, workerComputeMsMax: 0,
+    slowPreparations: [], syncLoadSites: [] };
   const log = options.log ?? ((message: string) => console.warn(`[raster-compat] ${message}`));
   const readPixels = options.readPixels ?? compositorPixels;
-  const readback = createRasterReadback();
+  const readback = createRasterReadback(stats);
   const readPixelsAsync = options.readPixelsAsync ?? (options.readPixels ? async (source: Parameters<typeof compositorPixels>[0]) => options.readPixels!(source) : readback.read);
 
   const cropKey = (crop: RasterWindowLike | undefined) => crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : '';
@@ -472,6 +483,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       }
       const epoch = generation;
       pending++;
+      const beganPreparation = performance.now();
+      stats.preparations++;
       const valid = () => generation === epoch && findLayer(PM, String(need.composition), String(need.layer)) === layer && wrapped();
       const promise = Promise.resolve().then(async () => {
         const samples = new Map<string, any>();
@@ -498,7 +511,15 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
             }
             const missing = attempt.missing;
             if (!missing) {
-              if (attempt.readback) answer = await attempt.readback();
+              if (attempt.readback) {
+                const beganReadback = performance.now();
+                stats.readbacks++;
+                try { answer = await attempt.readback(); }
+                finally {
+                  const ms = performance.now() - beganReadback;
+                  stats.readbackMs += ms; stats.readbackMsMax = Math.max(stats.readbackMsMax, ms);
+                }
+              }
               if (!valid()) return;
               if (answer?.kind === 'native') stats.passThroughSkips++;
               ready.set(key, { layer, answer, bytes: answer?.kind === 'raster' ? answer.data.byteLength : 0 });
@@ -520,7 +541,11 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
           log(`asynchronous raster preparation failed: ${error instanceof Error ? error.message : String(error)}`);
           throw error;
         }
-        finally { pending--; running.delete(promise); if (preparing.get(key)?.promise === promise) preparing.delete(key); }
+        finally {
+          const ms = performance.now() - beganPreparation;
+          stats.prepareMs += ms; stats.prepareMsMax = Math.max(stats.prepareMsMax, ms);
+          pending--; running.delete(promise); if (preparing.get(key)?.promise === promise) preparing.delete(key);
+        }
       });
       preparing.set(key, { layer, promise });
       running.add(promise);

@@ -22,6 +22,28 @@ function setup() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('asynchronous compositor readback', () => {
+  it('separates delayed bitmap capture, worker reply and worker compute timings', async () => {
+    const { capture, bitmap, workers, source, readback } = setup();
+    let clock = 0, finishCapture!: (bitmap: any) => void;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    capture.mockImplementation(() => new Promise(resolve => { finishCapture = resolve; }));
+    const read = async (start: number, captured: number, replied: number, computeMs: number, id: number) => {
+      clock = start;
+      const pending = readback.read(source);
+      clock = captured; finishCapture(bitmap);
+      await Promise.resolve();
+      clock = replied;
+      workers[0]!.onmessage!({ data: { id, pixels: null, computeMs } });
+      await expect(pending).resolves.toBeNull();
+    };
+    try {
+      await read(100, 125, 205, 50, 1);
+      await read(300, 305, 325, 4, 2);
+      expect(readback.stats).toEqual({ bitmapCaptures: 2, bitmapMs: 30, bitmapMsMax: 25,
+        workerReplies: 2, workerMs: 100, workerMsMax: 80, workerComputeMs: 54, workerComputeMsMax: 50 });
+    } finally { readback.dispose(); now.mockRestore(); }
+  });
+
   it('captures each source immediately and matches out-of-order replies by id', async () => {
     const { capture, bitmap, workers, source, readback } = setup();
     const first = readback.read(source), second = readback.read(source);
