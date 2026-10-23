@@ -1194,6 +1194,36 @@ describe('store IPC and quit integration', () => {
     failing = false;
   });
 
+  it('tells the owner, not a window whose write was refused, when the owner\'s slot write does not reach disk (review recheck 6, R6h)', async () => {
+    const directory = await temporaryDirectory();
+    const held: Array<() => void> = [];
+    let gated = true;
+    const store = createStore(directory, { writeDelayMs: 0, fs: { ...fs, rename: async (from: any, to: any) => {
+      if (gated && path.basename(String(to)) === 'project.P.json') {
+        await new Promise<void>(resolve => held.push(resolve));
+        throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+      }
+      return fs.rename(from, to);
+    } } });
+    await store.load();
+    const handlers = new Map<string, (...args: any[]) => unknown>();
+    const ipcMain = { handle: (channel: string, handler: (...args: any[]) => unknown) => handlers.set(channel, handler), on: (channel: string, handler: (...args: any[]) => unknown) => handlers.set(channel, handler) };
+    registerStoreIpc(ipcMain as unknown as Pick<IpcMain, 'handle' | 'on'>, store, { isTrustedSender: () => true, ownerOf: () => 1 });
+    const owner = { id: 1, send: vi.fn(), isDestroyed: () => false }, other = { id: 2, send: vi.fn(), isDestroyed: () => false };
+    // The owner's checkpoint is accepted; its rename waits.
+    await handlers.get(IPC.storeSetSerialized)?.({ sender: owner }, { key: 'project.P', serialized: JSON.stringify({ v: '1', proj: { id: 'P', name: 'A' } }) });
+    // Another window's write of the project is refused.
+    await expect(handlers.get(IPC.storeSetSerialized)?.({ sender: other }, { key: 'project.P', serialized: JSON.stringify({ v: '1', proj: { id: 'P', name: 'B' } }) })).rejects.toThrow(/open in another window/);
+    await vi.waitFor(() => expect(held.length).toBe(1));
+    held.splice(0).forEach(release => release());
+    gated = false;
+    await store.flushAll().catch(() => undefined);
+    await nextTurn();
+    expect(owner.send).toHaveBeenCalledWith(IPC.storeError, { key: 'project.P', error: expect.stringContaining('ENOSPC'), unsaved: true });
+    expect(other.send).not.toHaveBeenCalled();
+    expect(store.getSerialized!('project.P')).toContain('"name":"A"');
+  });
+
   it('prevents the first quit until flushing completes, then quits once more', async () => {
     const emitter = new EventEmitter();
     const quit = vi.fn();

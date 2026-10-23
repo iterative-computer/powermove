@@ -44,6 +44,8 @@ export interface Store {
   appendJournal?(key: string, serialized: string, writer?: unknown): Promise<void>;
   /** Which writer holds a project (null: none), from main's window registry (SAVE-1c). */
   setOwnership?(ownerOf: (projectId: string) => unknown): void;
+  /** Whether a write of `key` by `writer` is refused now: a project another window has (SAVE-1c). */
+  refuses?(key: string, writer: unknown): boolean;
   /** Keys whose newest write did not reach disk (a persist failure, or a refused journal entry) and none has since. */
   failingKeys?(): string[];
   delete(key: string): void | Promise<void>;
@@ -223,13 +225,13 @@ class FileStore implements Store {
 
   set(key: string, value: unknown, writer?: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeSet);
-    if (this.foreign(key, writer)) return this.refused(IPC.storeSet, 'the project is open in another window');
+    if (this.refuses(key, writer)) return this.refused(IPC.storeSet, 'the project is open in another window');
     return this.mutate(key, true, IPC.storeSet, id => ({ op: 'set', id, key, value }), writer);
   }
 
   setSerialized(key: string, serialized: string, writer?: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeSetSerialized);
-    if (this.foreign(key, writer)) return this.refused(IPC.storeSetSerialized, 'the project is open in another window');
+    if (this.refuses(key, writer)) return this.refused(IPC.storeSetSerialized, 'the project is open in another window');
     // A string has at least as many UTF-8 bytes as characters; the engine checks
     // the exact byte length without scanning the string on this thread.
     if (typeof serialized !== 'string' || serialized.length > storeByteLimit(key)) throw new IpcValidationError(IPC.storeSetSerialized, 'serialized value exceeds its size limit');
@@ -246,9 +248,10 @@ class FileStore implements Store {
    * prune entries it does not hold and reopen a closed journal under a
    * document the owner never had. The window renames through the owner
    * instead (window:rename-project); this refusal is the backstop. A project
-   * no window has is written by anyone, as before.
+   * no window has is written by anyone, as before. A main-internal write (no
+   * writer) is never refused.
    */
-  private foreign(key: string, writer: unknown): boolean {
+  refuses(key: string, writer: unknown): boolean {
     if (!key.startsWith('project.') || writer === undefined || !this.ownerOf) return false;
     const owner = this.ownerOf(key.slice('project.'.length));
     return owner !== null && owner !== undefined && owner !== writer;
@@ -523,7 +526,16 @@ export function registerStoreIpc(
   const writerOf = (event: StoreIpcEvent): unknown => (event.sender as { id?: unknown }).id;
   if (ctx.ownerOf) store.setOwnership?.(ctx.ownerOf);
   const writers = new Map<string, Writer>();
-  const wrote = (event: StoreIpcEvent, key: string): void => { writers.set(key, event.sender as unknown as Writer); };
+  /* Only a write main accepts makes its window the key's writer: a refused
+     one (another window's project, SAVE-1c) must not take over where the
+     owner's later persist failures are sent (review recheck 6, R6h). It is
+     recorded before the write is posted, so a failure reported while posting
+     reaches it too. */
+  const wrote = (event: StoreIpcEvent, key: string): boolean => {
+    if (store.refuses?.(key, writerOf(event))) return false;
+    writers.set(key, event.sender as unknown as Writer);
+    return true;
+  };
   store.onError(event => {
     if (!event.unsaved) return;
     const writer = writers.get(event.key);
