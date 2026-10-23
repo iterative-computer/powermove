@@ -208,35 +208,34 @@ Device/renderer setup is excluded. Cold samples use fresh video elements or
 fresh native source aliases after shader priming. Native aliases use RAII;
 the browser profile and video/GPU resources use `finally` cleanup.
 
-Two final-code native runs cover 21 dataset rows, with six fresh cold and
-36 alternating warm samples per row, plus separately labeled prepared-first
-samples. There are zero row errors or PTS mismatches. The earlier browser
-set has the same counts, media and selected timestamps. All native warm
-p50 values are lower (0.66–1.41 ms versus 2.15–6.45 ms), and 20 of 21 warm
-p95 values are lower. Native cold p50 is lower on 18 of 21 rows (4.03–17.89
-ms versus 5.95–18.15 ms); cold p95 is lower on 13 of 21 rows. These results
-do not close the wall-clock no-regression gate.
+The final consecutive browser/native pair covers 21 dataset rows, each with
+six fresh cold and 36 alternating warm samples, plus separately labeled
+native prepared-first samples. All 882 ordinary samples on each side have
+valid matching PTS and source hashes. Native is faster on every row at both
+p50 and p95, cold and warm. Cold p50 spans 2.73–10.04 ms natively versus
+4.30–14.10 ms in Chromium; warm p50 spans 0.64–0.83 ms versus 1.70–5.75 ms.
 
-The seven previously slower cold rows now measure on the final code:
+Representative final paired measurements, in milliseconds:
 
-| Source | Native cold p50 | Earlier Chromium cold p50 |
-| --- | ---: | ---: |
-| H.264 BT.709 limited | 4.15 | 6.85 |
-| H.264 SD matrix only | 6.77 | 6.40 |
-| H.264 HD matrix only | 17.89 | 16.75 |
-| H.264 BT.709 full | 4.98 | 5.95 |
-| H.264 BT.2020 limited | 5.15 | 9.85 |
-| AV1 BT.709 limited | 11.72 | 9.15 |
-| H.264 midtone witness | 5.29 | 8.45 |
+| Source | Native cold p50 | Chromium cold p50 | Native cold p95 | Chromium cold p95 |
+| --- | ---: | ---: | ---: | ---: |
+| H.264 BT.709 limited | 2.82 | 4.90 | 3.06 | 5.75 |
+| H.264 HD matrix only | 10.04 | 13.60 | 12.55 | 14.23 |
+| AV1 BT.709 limited | 3.52 | 6.95 | 4.49 | 7.35 |
+
+The earlier corrected pair is also retained. Pooling both pairs gives 12
+cold and 72 warm samples per row: every cold and warm median is lower
+natively. Pooled cold p95 is lower on 10 of 21 rows and warm p95 on 20 of 21.
+The first pair had substantially higher native host load; its tails remain
+part of the evidence, so these results do not establish tail parity under
+all host contention. No samples are discarded from the pooled result.
 
 Warm samples prime every seek position first, then alternate timestamps;
 each measured sample still has a media conversion miss, so converted source
 textures are not reused. Cold primes the source converter before opening a
 fresh source/decoder. The browser harness now explicitly primes its video
-conversion too; earlier browser cold samples did not do that, so their first
-conversion could inflate tails. No corrected browser measurement is reported.
-Earlier native runs beat all browser rows, but they do not supersede the
-final run or close the corrected comparison.
+conversion too. Both reported Round 4 pairs use this corrected endpoint;
+earlier unprimed browser measurements do not establish the current gate.
 
 Opt-in current-thread stage timing separates probe input, index, fingerprint,
 decoder creation, packet reader and first frame decode. The probe's FFmpeg
@@ -252,10 +251,11 @@ backend policy is unchanged. Chromium-compatible Main 8-bit 4:2:0 AV1 through
 visible plane comparisons at 256×144 and 320×180 were identical between the
 two decoders. Larger and high-depth AV1 retain the native backend order.
 
-Final H.264 BT.709 limited cold medians are 1.196 ms probe, 0.110 ms
-index, 0.103 ms decoder creation, 1.456 ms first decode and 0.595 ms GPU wait.
-AV1 medians are 0.628 ms probe, 0.049 ms index, 2.840 ms decoder creation,
-5.705 ms first decode and 0.717 ms GPU wait. Independent demuxer opening can
+Final H.264 BT.709 limited cold medians are 0.783 ms probe, 0.058 ms
+index, 0.080 ms decoder creation and 0.788 ms first decode. HD H.264 records
+3.024 ms probe, 0.082 ms index, 0.075 ms creation and 5.477 ms first decode.
+AV1 records 0.466 ms probe, 0.035 ms index, 0.078 ms creation and 1.825 ms
+first decode. Independent demuxer opening can
 overlap index preparation. Actual decoder creation still uses the completed
 container configuration/index; the optimization does not claim otherwise.
 
@@ -287,6 +287,8 @@ diagnostics distinguish VideoToolbox configuration and session creation, and
 record overlapping durations without treating their sum as wall-clock time.
 Prepared-first-frame, preparation time and preparation-plus-frame time are
 reported separately; fresh cold remains the ordinary regression gate.
+Across the final pair's row medians, preparation costs 1.77–6.82 ms, the
+prepared first render 1.01–1.38 ms, and their combined cost 2.78–8.20 ms.
 
 The native harness records every pm-perf counter with local/all-thread scopes
 and the counting allocator. H.264/AV1 keep one compute pass, one conversion
