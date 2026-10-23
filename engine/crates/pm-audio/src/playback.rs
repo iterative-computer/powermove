@@ -3357,11 +3357,22 @@ mod tests {
             5 // Pause, exact Seek, and the final Play each advance the epoch.
         );
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        // Chunks the first run queued before the Pause (an older epoch) can
+        // fill the ring; only device callbacks drop them, so drain them as
+        // a device would until the final run's frames are queued.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while side.queued_frames() < 512 && std::time::Instant::now() < deadline {
+            if side.queued_frames() == 0 && side.queued_chunks() > 0 {
+                side.callback(&mut [0.0; 256], 2, host_now_us());
+            }
             std::thread::sleep(Duration::from_millis(1));
         }
-        assert!(side.queued_frames() >= 512);
+        assert!(
+            side.queued_frames() >= 512,
+            "queued {} frames of the final run, {} chunks",
+            side.queued_frames(),
+            side.queued_chunks()
+        );
         side.callback(&mut [0.0; 1_024], 2, host_now_us());
         let clock = playback.clock().expect("first queued callback");
         assert_eq!(clock.epoch, 5);
