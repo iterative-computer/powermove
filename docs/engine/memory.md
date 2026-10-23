@@ -1,373 +1,331 @@
-# Engine startup memory
+# Engine memory
 
-This note covers process lifetime, fixed GPU pipelines, idle GPU resources,
-font-registry storage, and allocation attribution. Frame/raster/geometry/plan
-caches and document/shadow/check memory have separate owners. Memory cuts must
-preserve existing projects, extensions, shaders, and render tolerances.
+P7 remains open. In the current five-pair campaign, combined engine-on physical
+footprint exceeds today by 128.3 MiB at initial home, 110.9 MiB with an empty
+project, and 139.0 MiB with the generated text corpus. Last-tab cleanup saves
+104.6 MiB against its same-build control, but does not close the project-open
+gap. Frame/raster/geometry/plan caches and document/shadow/check memory have
+separate owners; no project, shader, extension, or render tolerance was removed.
 
 ## Process and request lifetime
 
-`NativeEngine.start()` starts the interactive utility. It installs leases,
-slicing policy, playback state, font replay, renderer ports, and the direct
-peer channel. `ensureReady` coalesces starts and waits for negotiation;
-fatal-load and crash recovery remain supervised. Normal app startup does not
-start the job utility. Exports, validations, and agent frames start it on
-demand. Its render, export, user job, probe, and compile lanes stay isolated
-from the interactive presenter.
+`NativeEngine.start()` eagerly starts the interactive utility and negotiates
+leases, slicing policy, playback state, fonts, renderer ports and the direct
+peer channel. Normal startup does not start the job utility. Exports,
+validations and agent frames start it on demand. Exports retain process crash
+isolation. Moving exports into interactive worker threads would lose that
+boundary, and there is no resting job process to remove from the memory gates.
+Export QoS policy is unchanged here.
 
-Media facts run on the already-running interactive utility. Its probe-only
-service has no job render lanes or GPU device, and starts one CPU worker on
-first use. Main resolves the asset and mints a short-lived `mediaRead`
-capability for the interactive host port and session 0; the same host resolves
-that handle. Concurrent requests for one asset keep the newest pending
-interpretation. Agent frames still use the separate job utility and GPU gate.
+Media facts run on the already-ready interactive utility. Its probe-only
+service starts one CPU worker on first use and creates no job GPU device.
+Main resolves the asset and mints a short-lived `mediaRead` capability for
+that host and session 0. Five earlier real-host runs answered their first
+probe in 30.98–45.91 ms, median 43.31 ms, without starting a job process.
+These timings exclude interactive-utility startup.
 
-An unused job utility has a 60 s quiet timer. Before retirement, main checks
-its status for zero sessions, in-flight requests, active jobs, probes, frame
-runs, compiles, and queued work. Requests arriving during the status check
-cancel retirement or wait for a completed stop before starting a new
-utility. A busy or failed check retries after another quiet interval.
-Active project agent runs hold the started utility through model-thinking
-pauses: the bridge begins startup when a run opens, tool calls renew a
-bounded 30 min hold, and finish, cancellation, owner loss, or shutdown
-releases it. The ordinary 60 s countdown then resumes. Accepted async
-exports retain their own sessions until completion. Agent frame sessions
-close after their last in-flight batch when the run ends; window closure
-also closes sessions. A direct cold job call still pays utility startup;
-early run preparation overlaps it with agent preparation.
+Agent frames retain their separate job host, frozen document revisions,
+JPEG behavior and job-slicer playback progress. They do not borrow the
+interactive preview as a snapshot shortcut. Opening an agent run begins job
+startup early; tools renew a bounded 30 min hold through model-thinking
+pauses. Finish, cancellation, owner loss and shutdown release the hold.
+An unused job host exits after 60 s quiet, only after checking zero sessions,
+in-flight requests, active jobs, probes, frames, compiles and queued work.
+Requests racing retirement cancel it or await stop before restarting.
+Accepted exports retain their sessions through completion. Cold launch is
+still measurable; prewarming overlaps it with agent preparation.
 
-Five real utility-host integration runs answered a first media probe in
-30.98–45.91 ms (median 43.31 ms), with no job utility started. These timings
-start after the eagerly launched interactive utility is ready; they do not
-include app startup or claim that direct cold utility launch became faster.
+## Viewer lifecycle
 
-## Viewer lifecycle and compatibility
+Initial home presentation and drawing prewarm remain eager. Full initial
+home deferral was rejected after a five-pair +240.7 ms first-presented-frame
+penalty; code-only warming added 221.5 ms. Warming a headless document reduced
+the median penalty to 44.0 ms, but its maximum 51.7 ms failed the limit.
 
-The native viewer keeps its original initial drawing prewarm and eager home
-presentation. Closing a viewer no longer starts an unclaimed replacement
-drawing. The unused legacy WebGL context is allocated synchronously on first
-compatibility access; repeated access returns the same real context and
-keeps the first requested canvas attributes. Native frame/status/boot paths
-avoid touching that compatibility getter merely to test readiness.
+The selected policy suspends only after a real project has been visited and
+the final tab actually closes. A Projects overlay with an open tab does not
+qualify. The presentation object, worker, WebGL context and program remain
+warm. Suspension hides stale pixels and closes the native channel. GPU drain
+precedes shrinking the hidden painter's upload texture and drawing buffer to
+1 × 1. Import release and native pool retirement separately wait for chrome
+readers to release their leases. A token prevents a late trim from racing a resumed presentation.
+Reopen renews the surface epoch and channel on the warm worker and painter.
+Crash handling remains separate and preserves the last frame.
 
-Final import cleanup belongs to the built-in native channel. An optional
-`retireClosedPool` capability authorizes retirement only after a current
-channel actually posts headless state; it also checks the connection, lease,
-and preload launch when cleanup runs. Presentation waits for submitted GPU
-work and chrome readers before invoking it. A replacement drawing keeps its
-pool; a restart keeps the last frame; a delayed cleanup cannot retire a new
-launch's reused generation. Custom providers retain their existing `close`
-and frame-source contracts and ownership.
+`retireClosedPool` is an optional built-in-channel capability: it checks the
+connection, lease and preload launch after real channel headlessness. A
+replacement drawing keeps its pool; delayed cleanup cannot retire a new
+launch's reused generation. Custom providers retain their close and frame
+ownership contracts. The unused legacy compatibility WebGL context remains
+lazy, synchronous and stable on first API access. Native readiness checks do
+not allocate it. No compatibility API is stubbed.
 
-Full home-viewer deferral increased first presented-frame latency by a
-paired median 240.7 ms over five runs. Loading only worker code still added
-221.5 ms. Keeping the drawing and headless document warm reduced that
-penalty to 44.0 ms, but one of five pairs was 51.7 ms slower. Native frame
-arrival alone was within 19.6 ms; that does not substitute for presentation.
-The option was rejected. Its five reopen penalties after a 2.5 s home pause
-were −4.5, −13.3, +3.1, +11.5, and +18.9 ms. Those narrow teardown results
-do not clear the failing first-open gate or establish a home-memory saving
-for the selected eager policy.
+After 2 s without frames, snapshots or playback, and with pending GPU work
+drained, the native presenter drops scratch targets, cached snapshot targets
+and staging buffers. When every view is headless and paused, or no sessions
+remain, it also releases the composer and device. CPU definition and policy
+state survive. The selected last-tab suspension reaches this existing native
+release path. A headless document session can remain for captures and clock
+state; session count alone is not evidence of GPU retention.
 
-## Fixed pipelines and GPU at rest
+The active renderer presenter is WebGL2 (`painter.ts`), not the dormant
+WebGPU backend. At 1496 × 904, its F16 upload texture and F16 drawing buffer
+each contain 10,819,072 nominal bytes (10.318 MiB). Unused depth and stencil
+attachments are disabled; alpha, premultiplication, F16 format, resolution,
+pool count and antialias policy are preserved. Chromium compositor buffers
+and driver alignment are additional, unknown allocations. Native four-surface
+BGRA storage is 21,753,856 bytes (20.746 MiB), including padded rows; announced
+logical pixel storage is 20.636 MiB. These overlapping ownership counters
+must not be added to OS physical footprint.
 
-The constructors defer 47 render pipelines: 18 2D format/blend variants,
-8 compositing operations, 8 resampling variants, 10 mask/filter pipelines,
-and 3 text paint variants. `LazyRenderPipeline` uses `OnceLock` and a
-protected one-shot factory. Compilation releases captured shader, layout,
-and device handles; repeated calls reuse the result. The renderer releases
-unused factories and compiled variants when dropped. Pipeline descriptors,
-shader sources, render targets, and binding layouts retain their values.
-ID/source-compute pipelines, shader modules, and the decode importer remain
-eager. Presenter and job-service devices are created lazily.
+All five candidate homeClosed captures observed no native device/composer,
+zero color/depth/working/snapshot/readback storage, zero held imports and
+pending drains/fences, and 1 × 1 F16 drawing/upload storage (8 bytes each).
+The worker and context survived. Open-state captures held four imported
+surface leases and zero local VideoFrames after settling; their allocated
+surface pool and painter storage remained live. This rules out a retained queue of live VideoFrames
+at those capture instants, not Chromium's internal buffer retention.
 
-Session definition updates translate and validate GLSL on the presenter
-thread even before a device exists. The first composer adopts those
-prepared effect sets, including per-owner watchdog state and translation
-failures, without translating them again. Shader-cache keys, parity
-configuration, custom mesh definitions, and GPU program creation keep their
-existing behavior. Staging ownership ends on transfer or the last pre-GPU
-session close; it does not retain another cache after the composer drops.
+## Pipelines and counters
 
-After 2 s without a frame, snapshot, or playback, and when no readback or
-view work is pending, the presenter drops idle intermediate targets, viewer
-scratch textures, its cached snapshot attachment, and staging buffers.
-Exported surface pools remain live. With no sessions, or with every view
-headless and paused, it also drops the device and composer after all preview,
-snapshot, readback, completion, and shader-watchdog work has drained. CPU
-definition state and policy survive; device-bound programs and query objects
-do not. A native reattachment diagnostic took 19.025 ms, and pixel tests
-verified a fresh pool generation with identical output. A native test with a 1496 × 904
-viewer measured Metal allocated bytes at 113,213,440 before rest,
-101,744,640 after rest, and 113,213,440 after resuming: exactly 11,468,800
-bytes reclaimed and recreated for the scratch texture. The exported
-IOSurfaces, pool generation, and resumed pixels were identical. Resuming
-took 8.575 ms in that diagnostic. Resource counts and Metal allocation
-counters remain distinct from macOS process footprint.
+The merged renderer defers 48 render pipelines: 18 2D format/blend variants,
+8 compositing, 8 resampling, 10 mask/filter and 4 text paint variants,
+including the newly merged BGRA paint variant. `LazyRenderPipeline` uses a
+`OnceLock` and one-shot factory; compilation releases captured handles.
+Descriptors, shaders, formats and binding layouts are unchanged. ID/source
+compute pipelines, shader modules and decode importing remain eager.
+Definitions still translate and validate GLSL on the presenter thread before
+device creation; the first composer adopts prepared effects without another
+translation. Cache keys and shader watchdog policy remain intact.
 
-The measurement harness's `closed` state replaces a corpus project with an
-empty project through `replaceProject`; its viewer session remains open.
-It measures what corpus content leaves behind, not actual session closure.
-The optional `homeClosed` state actually closes the generated tabs after
-replacement and waits at home. The transport can retain a headless document
-session for captures and clock state, so closing the last tab does not prove
-the native session count is zero. The allocation inventory separately shows
-whether the viewer pool, device, and composer were released. Keep these
-transitions distinct in tables.
+Opt-in `POWERMOVE_ENGINE_ALLOCATION_INVENTORY=1` reports process-wide
+`malloc_zone_statistics(NULL)` blocks, in-use bytes, high-water bytes and
+reserved bytes. It covers libmalloc zones, not just Rust, and does not cover
+all direct VM, GPU or Chromium allocator-shim allocations. Native Metal
+reports include public `MTLDevice.currentAllocatedSize`, recommended working
+set and unified-memory information where available. Known textures expose
+`MTLResource.allocatedSize` and whether they belong to a Metal heap. The API
+does not enumerate all heaps or expose actual resource residency; neither is
+inferred. Renderer diagnostics inventory painter sizes, announced pools,
+leases, VideoFrames and fences without creating a legacy context.
 
-With the selected eager policy, Projects home can keep the viewer mounted.
-Last-tab close therefore does not automatically trigger final import
-retirement or headless device retirement. These changes reclaim resources
-when that presentation really detaches; they do not claim that every visit
-to Projects clears the native device.
+## Five-pair memory gate
 
-The separate cold pipeline probe compiled all 47 variants once; its slowest
-variant took 2.858 ms and all variants together took 25.453 ms on the shared
-machine. Those are CPU-side compilation durations, not app first-frame
-times. The cold/warm Float16 and Float32 composite comparison and existing
-headless, path-mask, sampling, and GPU-text checks cover render parity.
+The frozen release addon and prebuilt app were measured in five alternating
+rounds of engine-off, same-build cleanup-disabled control (`homeControl`),
+and the selected candidate (`after`): 15 launches and 75 states. A one-sample
+candidate dry run preceded the batch. Profiles were isolated and removed on
+success and failure; hashes stayed fixed. Renderer GC and a 3 s settling
+series matched across variants. Electron access was exclusive; CPU load was
+not (one-minute load 11.2–16.5, median 12.6). The asset-free generated corpus
+has six text layers. This is not a large-project cache benchmark.
 
-## Attribution and remaining boundaries
-
-A five-run standalone Electron utility ablation measured these medians with
-default V8 flags. `plain` is a no-op utility, `addon` loads the native addon,
-and the final rows construct their idle hosts.
-
-| Utility | Physical footprint MiB | Ready ms |
-|---|---:|---:|
-| Plain Electron utility | 14.814 | 108.15 |
-| Addon loaded | 16.564 | 115.82 |
-| Interactive host | 16.658 | 101.65 |
-| Job host | 16.783 | 109.12 |
-
-The plain utility's V8 physical heap was 3.750 MiB, with 2.542 MiB used.
-The addon and idle-host increments are much smaller than the entire utility.
-The no-op launch floor exceeds the 50 ms first-use target on this loaded
-machine, so moving native initialization cannot clear a direct cold job
-call. Testing `--initial-old-space-size=4` alone and with
-`--optimize-for-size --max-semi-space-size=1` reduced used heap to about
-2.47 MiB but increased physical footprint by about 0.2–0.3 MiB across
-utility variants; some ready times also rose. Production keeps default V8
-flags. No arbitrary heap limit was applied to user projects. Optional
-`POWERMOVE_ENGINE_RUNTIME_MEMORY=1` adds Node `process.memoryUsage()` and V8
-heap statistics to status reports for attribution; ordinary reports do not
-sample them. These counters do not measure native Metal allocations.
-
-An earlier five-pair app ablation attributed about 17.0 MiB of macOS
-physical footprint and 73.6 MiB of summed working set at idle to the
-previously resident job utility. That component cut does not establish
-app-level parity. The final comparisons below use the selected eager viewer
-and the same on-demand job policy on both native-addon variants.
-
-One 1496 × 904 inventory contained four BGRA IOSurfaces totaling 21,753,856
-bytes and 10,819,072 nominal scratch bytes. Of 49,774,592 Metal allocated
-bytes, 17,201,664 were not assigned to individual objects by that inventory.
-Texture alignment makes actual scratch allocation differ from its nominal
-pixel length. None of these counters alone identifies the process's system
-graphics charge or its complete physical footprint.
-
-macOS `footprint` charges owned/unmapped graphics allocations to processes,
-including the GPU process. This charge can vary sharply after GPU activity
-and dominate combined physical footprint while working set changes little.
-It is not identified as Rust heap, V8 heap, or a font cache. Keep OS
-combined-process physical footprint separate from summed per-process
-working sets. `footprint --swapped` combines compressed and swapped bytes;
-zero means both are zero, while a nonzero value cannot be split without
-further evidence. A fixed settling delay alone does not prove quiescence.
-
-The standalone DHAT example (which does not change the shipping allocator)
-found 1,899 live Rust bytes for an interactive host without a viewer, 5,444
-for a job host with idle lanes, 89,682 for a Metal device, and 1,397,028 for
-an empty renderer. Peak live Rust allocation was 1,450,040 bytes. DHAT does
-not include Node/V8, Metal/CoreText allocations, mapped fonts, or GPU
-surfaces, and cannot explain app footprint alone. An Instruments
-Allocations/VM Tracker attempt failed to attach to the standalone native
-probe; that remains an attribution gap.
-
-System fonts under `/System/` use immutable file mappings. Other installed
-fonts remain owned bytes so truncating a mutable font file cannot fault a
-running app. Registry `files`, `blobs`, and face records share `FontBytes`
-through `Arc`; the larger retained split-face TTC pool belongs to the text
-lane. Further deduplication must preserve original collection-index identity
-and avoid holding both split and source representations. Renderer WebAssembly
-heap, bridge backing storage, document/shadow state, and frame caches have
-separate owners and remain visible in app-level status; this lane's host and
-pipeline cuts do not claim to eliminate them. No experimental renderer
-variant is counted as shipped here.
-
-`CoreTextRegistry` also retains installed-font files, face records, blobs,
-subsets, and fallback manifests for its generation. `clear_project_fonts`
-clears project faces and sources; it does not invalidate the face IDs and
-blob keys already handed to layout and render clients. A reset therefore
-needs coordinated font-generation invalidation and replay across those
-clients, rather than removing a map while its stable IDs remain in use.
-
-## Validation
-
-The native library's 141 tests and seven watchdog tests passed; clippy passed
-with warnings denied for the native and render libraries. Renderer lifecycle
-and compatibility checks passed 75 focused tests. Svelte check reported no
-errors and one existing warning. Broader TypeScript checks still encounter
-unrelated existing project-configuration and application errors.
-
-The export E2E passed solid and text H.264 MP4s and alpha ProRes, each with
-24 frames and one save dialog. MP4 encoder metadata confirmed native export
-for text as well as solids; temporary outputs were removed. The same test
-verified that first compatibility access creates a real, stable WebGL
-context in 3.6 ms, below the 50 ms limit. This is one first-use observation,
-not a five-pair launch gate.
-
-## Reproduction
-
-`scripts/measure-engine-memory.mjs` runs prebuilt app trees under the
-Electron lock with isolated profiles, alternating order, matching renderer
-GC, and idle/empty/generated-corpus states. Set `PM_MEMORY_PROJECT` at
-runtime for an asset-free captured project, `PM_MEMORY_OUTPUT` to a directory
-outside the checkout, and `PM_MEMORY_BASELINE_ADDON` when comparing the
-original addon. `PM_MEMORY_CLOSED=1` enables the empty replacement capture;
-`PM_MEMORY_HOME_CLOSED=1` additionally closes generated tabs for the home
-capture. The runner removes profiles in `finally`; raw vmmap, footprint,
-process counts, thread counts, and latency artifacts stay outside Git.
-
-## Final five-pair gate: P7 remains open
-
-The frozen app used the eager home viewer, initial drawing prewarm, default
-V8 flags, and on-demand jobs. Twenty launches covered five alternating rounds
-of engine-off, baseline addon/current renderer, forced compatibility GL,
-and the selected addon/current renderer. Each captured all five states.
-Profiles were isolated and removed; matching renderer GC preceded a fixed
-3 s capture series. Artifact hashes stayed unchanged. Electron was reserved
-exclusively; machine CPU load was not exclusive (one-minute load 8.7–19.1,
-median 11.8). The generated corpus has six text layers and no media assets.
-It does not establish large-project cache or document-memory behavior.
-
-All memory figures below are MiB. Each variant column is its observed
-median; each delta is the median of five per-round differences, so it need
-not equal the difference of the two displayed medians. Combined physical
-footprint accounts for shared regions across the app's PIDs. Working set is
-a sum and is not an interchangeable measure. All three required footprint
-gates fail.
+`closed` replaces the corpus with an empty project while keeping its viewer.
+`homeClosed` actually closes all generated tabs. The latter waits for channel
+suspension, import drain and painter trim before capture and asserts native
+GPU/pool release. All memory figures below are MiB; variant columns are
+medians and deltas are medians of per-round differences, which need not equal
+the difference of displayed medians. Combined physical footprint accounts
+for shared regions across app PIDs; summed working set is a different measure.
+All three required combined-footprint gates fail. The job host is absent in
+every resting capture.
 
 | State | Footprint off | Footprint on | Paired Δ | Working set off | Working set on | Paired Δ |
-|---|---|---|---|---|---|---|
-| idle | 509.4 | 1041.4 | +513.5 | 688.6 | 867.7 | +177.4 |
-| empty | 714.1 | 825.0 | +116.1 | 713.2 | 886.9 | +171.8 |
-| corpus | 723.4 | 869.4 | +151.3 | 720.4 | 1014.4 | +294.0 |
-| closed | 711.3 | 874.9 | +167.8 | 722.0 | 1019.2 | +297.2 |
-| homeClosed | 526.1 | 751.6 | +222.2 | 725.7 | 1094.7 | +369.0 |
+|---|---:|---:|---:|---:|---:|---:|
+| idle | 505.1 | 632.6 | +128.3 | 688.9 | 870.2 | +181.0 |
+| empty | 714.4 | 820.4 | +110.9 | 716.4 | 889.8 | +173.7 |
+| corpus | 725.2 | 864.9 | +139.0 | 724.0 | 1018.2 | +294.4 |
+| closed | 713.7 | 865.6 | +151.8 | 726.1 | 1023.3 | +298.1 |
+| homeClosed | 532.2 | 633.1 | +102.1 | 723.0 | 1092.0 | +370.7 |
 
-The idle combined delta is dominated by variable GPU graphics charges.
-Even the diagnostic sum of per-process minima over the settling series stays
-above engine-off: +128.8 MiB idle, +110.3 empty, +146.5 corpus, +163.1 after
-replacement, and +204.2 after last-tab close. Those minima can come from
-different instants and are not a simultaneous or shared-accounted app total;
-they cannot replace the failing combined-footprint gate.
+Compared with cleanup disabled on the identical addon/app, homeClosed saves
+104.6 MiB combined physical footprint (paired changes −100.1, −104.6, −105.9,
+−101.3 and −106.3 MiB) and 6.9 MiB summed working set. Per-process dirty
+savings are 31.9 MiB interactive, 56.3 MiB GPU and 1.4 MiB page. GPU-category
+medians include 39.4 MiB IOSurface, 10.9 MiB IOAccelerator and 6.3 MiB owned
+unmapped graphics; interactive owned unmapped graphics falls 22.4 MiB and
+Tag 14 falls 5.0 MiB. Category medians overlap totals and are not additive.
+This cut applies after final-tab close, not to the empty/corpus open states.
+The control also uses depth/stencil disabled, so that change has no isolated
+physical-saving claim in this campaign.
 
-Per-process dirty, graphics dirty, compressed-plus-swapped, and thread
-medians follow. Graphics is already included in dirty. Zero contribution
-for a missing process is distinct from a resident process of that size.
-The job utility was absent from every memory capture.
+Per-process dirty, graphics dirty, compressed-plus-swapped and thread medians
+follow. Graphics is already included in dirty; absent-process zero is an
+observed absence. `footprint --swapped` combines compression and swap; every
+capture below reported zero for that combined field.
 
 | State | Process | Dirty off / on | Graphics off / on | Compressed + swapped off / on | Threads off / on |
 |---|---|---|---|---|---|
-| idle | Browser | 137.5 / 93.7 | 0.0 / 0.0 | 0.0 / 0.0 | 45 / 47 |
-| idle | GPU | 243.4 / 689.9 | 75.7 / 490.2 | 0.0 / 0.0 | 22 / 22 |
-| idle | Network | 7.7 / 7.7 | 0.0 / 0.0 | 0.0 / 0.0 | 13 / 13 |
-| idle | Page | 118.8 / 146.7 | 0.0 / 0.0 | 0.0 / 0.0 | 25 / 25 |
-| idle | Interactive utility | 0.0 / 96.0 | 0.0 / 17.9 | 0.0 / 0.0 | 0 / 27 |
+| idle | Browser | 138.0 / 93.3 | 0.0 / 0.0 | 0.0 / 0.0 | 45 / 46 |
+| idle | GPU | 239.8 / 279.3 | 75.7 / 76.6 | 0.0 / 0.0 | 21 / 22 |
+| idle | Network | 7.6 / 7.7 | 0.0 / 0.0 | 0.0 / 0.0 | 13 / 13 |
+| idle | Page | 119.3 / 148.1 | 0.0 / 0.0 | 0.0 / 0.0 | 24 / 25 |
+| idle | Interactive utility | 0.0 / 96.1 | 0.0 / 17.9 | 0.0 / 0.0 | 0 / 27 |
 | idle | Job utility | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 | 0 / 0 |
-| empty | Browser | 137.8 / 95.7 | 0.0 / 0.0 | 0.0 / 0.0 | 43 / 45 |
-| empty | GPU | 439.7 / 458.0 | 131.3 / 133.3 | 0.0 / 0.0 | 22 / 21 |
-| empty | Network | 7.7 / 7.7 | 0.0 / 0.0 | 0.0 / 0.0 | 13 / 12 |
-| empty | Page | 122.2 / 149.6 | 0.0 / 0.0 | 0.0 / 0.0 | 25 / 25 |
-| empty | Interactive utility | 0.0 / 96.9 | 0.0 / 17.9 | 0.0 / 0.0 | 0 / 25 |
+| empty | Browser | 138.3 / 95.2 | 0.0 / 0.0 | 0.0 / 0.0 | 42 / 43 |
+| empty | GPU | 437.9 / 452.7 | 131.0 / 125.6 | 0.0 / 0.0 | 22 / 22 |
+| empty | Network | 7.6 / 7.7 | 0.0 / 0.0 | 0.0 / 0.0 | 13 / 13 |
+| empty | Page | 124.3 / 151.0 | 0.0 / 0.0 | 0.0 / 0.0 | 24 / 25 |
+| empty | Interactive utility | 0.0 / 97.0 | 0.0 / 17.9 | 0.0 / 0.0 | 0 / 25 |
 | empty | Job utility | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 | 0 / 0 |
-| corpus | Browser | 138.4 / 101.3 | 0.0 / 0.0 | 0.0 / 0.0 | 43 / 44 |
-| corpus | GPU | 444.3 / 453.3 | 140.4 / 135.1 | 0.0 / 0.0 | 21 / 21 |
+| corpus | Browser | 138.9 / 101.6 | 0.0 / 0.0 | 0.0 / 0.0 | 42 / 43 |
+| corpus | GPU | 444.5 / 442.7 | 140.5 / 127.4 | 0.0 / 0.0 | 22 / 21 |
 | corpus | Network | 7.6 / 7.7 | 0.0 / 0.0 | 0.0 / 0.0 | 12 / 13 |
-| corpus | Page | 126.2 / 165.1 | 0.0 / 0.0 | 0.0 / 0.0 | 29 / 26 |
-| corpus | Interactive utility | 0.0 / 127.0 | 0.0 / 25.8 | 0.0 / 0.0 | 0 / 28 |
+| corpus | Page | 127.8 / 165.8 | 0.0 / 0.0 | 0.0 / 0.0 | 28 / 25 |
+| corpus | Interactive utility | 0.0 / 126.9 | 0.0 / 24.8 | 0.0 / 0.0 | 0 / 28 |
 | corpus | Job utility | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 | 0 / 0 |
 
-### Measured component cuts
+macOS GPU charges varied sharply after recent activity: candidate idle GPU
+dirty differed from control by roughly −409 to +411 MiB in individual pairs.
+No outlier was discarded. The diagnostic sum of per-process minima over the
+settling series is not a shared-accounted or necessarily simultaneous app
+total and does not replace the failing combined-footprint gate. First-round
+vmmap showed only 0.75–0.80 MiB resident utility thread stacks despite
+133.5 MiB virtual reservations; virtual reservation is not physical memory.
 
-The addon control uses the baseline addon with the same current renderer
-and on-demand jobs. The GL control uses the selected addon and forces the
-real legacy compatibility context without changing native rendering.
-Every captured state asserted the expected GL allocation state. Negative
-values below indicate savings; these diagnostic cuts do not clear the
-engine-off target and should not be added to each other.
+## Retention and attribution
 
-| State | Addon footprint Δ | Addon working-set Δ | GL footprint Δ | GL working-set Δ |
-|---|---|---|---|---|
-| idle | -9.0 | -1.8 | -11.1 | -2.3 |
-| empty | -15.0 | -2.1 | -12.1 | -5.1 |
-| corpus | -16.7 | -3.0 | -12.8 | -4.9 |
-| closed | -17.1 | -2.6 | -12.8 | -4.7 |
-| homeClosed | -17.0 | -5.3 | -5.2 | -6.0 |
-
-The native cut consistently removes about 10.94 MiB of interactive owned
-unmapped graphics, matching the scratch-allocation release; its interactive
-total dirty cut is about 12.5–13.2 MiB. Deferred compatibility GL removes
-about 11–13 MiB of total footprint in the first four states, mostly in the
-GPU process. It does not remove the remaining page or GPU overhead.
-Paired page dirty overhead is +27.8 MiB idle, +27.3 empty, and +38.7 corpus;
-paired GPU dirty overhead is +23.6 MiB empty and +9.7 corpus. Idle GPU dirty
-adds +427.9 MiB in the combined captures, including the variable OS graphics
-charge. Page JS heap adds only +0.41, +0.68, and +0.48 MiB respectively;
-that counter does not explain the rest of page dirty memory.
-
-### Retention and allocation counters
-
-| Counter (on) | idle | empty | corpus | closed | homeClosed |
-|---|---|---|---|---|---|
-| Interactive Node heap used | 2.58 | 2.63 | 2.67 | 2.72 | 2.75 |
+| Candidate counter, MiB | idle | empty | corpus | closed | homeClosed |
+|---|---:|---:|---:|---:|---:|
+| Interactive Node heap used | 2.58 | 2.63 | 2.67 | 2.73 | 2.77 |
 | Interactive V8 physical | 3.75 | 3.75 | 3.75 | 4.00 | 4.00 |
-| Page JS heap used | 16.25 | 16.82 | 17.32 | 17.48 | 17.72 |
-| Page backing storage | 9.53 | 9.54 | 9.54 | 9.54 | 9.54 |
+| Page JS heap used | 16.27 | 16.85 | 17.34 | 17.50 | 17.74 |
+| Page backing storage | 9.55 | 9.55 | 9.55 | 9.55 | 9.55 |
 | Page Wasm live | 0.01 | 0.02 | 5.18 | 5.09 | 5.09 |
 | Page Wasm memory | 1.88 | 1.88 | 7.19 | 7.19 | 7.19 |
 | Unique font payload | 0.00 | 0.00 | 10.41 | 10.41 | 10.41 |
-| Metal allocated | 36.53 | 36.53 | 42.56 | 42.56 | 42.56 |
-| Color IOSurfaces | 20.75 | 20.75 | 20.75 | 20.75 | 20.75 |
-| Working targets | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| libmalloc in use | 0.24 | 0.24 | 0.24 | 0.24 | 0.24 |
+| libmalloc reserved | 24.00 | 24.00 | 24.00 | 24.00 | 24.00 |
+| Metal allocated | 36.53 | 36.53 | 45.48 | 45.48 | no device |
+| Native color surfaces | 20.75 | 20.75 | 20.75 | 20.75 | 0.00 |
+| Painter drawing buffer | 10.32 | 10.32 | 10.32 | 10.32 | 8 bytes |
+| Painter upload texture | 10.32 | 10.32 | 10.32 | 10.32 | 8 bytes |
 
-All selected captures reported a live device and the same 20.75 MiB color
-surface pool. Rest-release counts advanced from one at idle to five after
-last-tab close; working targets, snapshot targets and readback buffers were
-zero at each capture. This proves those idle targets retired, not that the
-device or exported imports were freed at home.
+Corpus-to-empty replacement retains +30.88 MiB interactive dirty: +19.05 MiB
+Tag 14, +6.08 MiB owned unmapped graphics, +2.88 MiB owned unmapped
+non-graphics and +1.55 MiB Tag 16 among its category medians. After true
+last-tab close the device is gone, but Tag 14 remains +14.23 MiB above initial
+home, alongside retained 10.41 MiB unique font payload. Those measurements
+overlap and do not identify an allocation site's exact physical cost.
+`CoreTextRegistry` preserves installed-font files, faces, blobs, subsets and
+fallback manifests for stable IDs. `clear_project_fonts` cannot reset IDs
+already handed to layout/render clients. Any further release needs coordinated
+font-generation invalidation and replay, not an uncoordinated map clear.
 
-Corpus-to-empty replacement retains a paired +31.17 MiB of interactive
-dirty memory and +12.61 MiB of page dirty memory. Interactive category deltas
-include +18.45 MiB in App-Specific Tag 14, +7.52 MiB in owned unmapped
-graphics, +2.88 MiB in owned unmapped non-graphics, and +1.53 MiB in Tag 16.
-The OS tags do not identify the underlying allocator. The font inventory
-retains 10.41 MiB of unique payload and page Wasm retains about 5.09 MiB live;
-these counters can overlap dirty categories and must not be added to them.
-A coordinated font-generation reset and the document/renderer owners are
-still needed to close this retention gap. First-round vmmap stack estimates
-were 0.75–0.78 MiB resident despite 133.5 MiB reserved virtual
-ranges; virtual stack reservations are not equivalent to resident memory.
+Chromium's [page allocator tag definitions](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/base/allocator/partition_allocator/src/partition_alloc/page_allocator.h)
+assign 253 to PartitionAlloc and 255 to V8, corresponding to macOS
+App-Specific Tags 14 and 16. Tag 14 identifies the allocator family here,
+not a Rust, font or GPU call site. The libmalloc counter stays about 0.243 MiB
+while this region grows, so trimming libmalloc alone does not account for it.
+A standalone DHAT probe previously found only 1.40 MiB live Rust allocation
+for an empty renderer; DHAT excludes Node/V8, mapped fonts, Metal/CoreText and
+GPU surfaces. Instruments failed to attach to that probe.
 
-### First use and agent readiness
+Page dirty overhead versus today is +29.13 MiB idle, +26.70 MiB empty and
++38.72 MiB corpus, while page JS heap adds just +0.73, +0.69 and +0.49 MiB.
+GPU dirty overhead is +42.11 MiB idle, +16.59 MiB empty and −1.72 MiB corpus
+in this batch; the earlier +28 MiB estimate is not a stable universal offset.
+After last-tab cleanup, page overhead remains +37.08 MiB even though imports
+are drained and hidden painter storage is tiny. Page Wasm retains 5.09 MiB
+live in 7.19 MiB linear memory, outside this lane's document/cache ownership.
+The remaining page/native PartitionAlloc and Chromium compositor/driver
+storage are not fully attributed. No claim is made that F16 nominal storage
+alone explains OS page/GPU deltas.
 
-| Selected timing | Median ms | Maximum ms | Paired median / maximum change from baseline addon ms |
-|---|---:|---:|---:|
-| First empty snapshot | 4.00 | 4.40 | 0.00 / +0.20 |
-| First corpus snapshot | 7.30 | 14.50 | +0.60 / +1.20 |
-| Snapshot after fixed capture delay | 24.40 | 25.50 | −2.10 / +3.90 |
-| Job utility preparation | 79.89 | 86.75 | +1.27 / +20.56 |
-| Job readiness after completed preparation | 0.0044 | 0.0055 | +0.0005 / +0.0007 |
-| First agent frame after preparation | 300.12 | 353.28 | −17.28 / +66.78 |
-| Warm agent frame | 6.01 | 10.12 | −0.22 / +3.32 |
+A separate tracing launch requested four successful detailed memory dumps
+and sampled native heaps at empty, corpus, replacement and homeClosed. The
+immediate GUID events contain only four sampled allocator paths per process;
+they are not full resident/category measurements. Later rich dumps for the
+first two GUIDs arrived 1.6–4.9 s late and crossed subsequent transitions,
+so they cannot provide state-specific retention subtraction. The trace is
+useful allocation evidence, but does not close the call-site attribution gap.
 
-Five forced compatibility first accesses took 5.2–6.6 ms (median 6.0 ms).
-Snapshots and first compatibility access remain within the measured 50 ms
-regression limit. Direct cold job startup still takes about 80 ms;
-preparation moves that wait before use rather than reducing launch cost.
-First agent-frame rendering also includes fresh renderer/font/pipeline work.
-Although its paired median improved, one pair regressed by 66.78 ms, so this
-batch does not clear an unrestricted first-use latency gate. CPU load alone
-is not evidence that this pair may be discarded. Neither the memory target
-nor the complete latency target is claimed as passed.
+## Cost of the isolated job renderer
+
+Five matched treatment/control pairs used a ready interactive viewer. Phase
+A had no job; B prepared a held, device-less job; C rendered a first 320 px
+agent frame; D waited 3 s; E finished and observed job retirement. Controls
+waited matching intervals without starting jobs. Differences below subtract
+the matching control's phase change. A development-only 3 s idle timeout
+bounded retirement; production remains 60 s.
+
+| Increment | Combined physical MiB | Job physical MiB | Job graphics dirty MiB | Summed working set MiB |
+|---|---:|---:|---:|---:|
+| Ready host, B − A | +17.38 | +17.03 | 0.00 | +74.02 |
+| First frame/device/renderer, C − B | +503.58 | +498.02 | +419.23 | +146.47 |
+| Rested device/renderer, D − B | +90.19 | +85.19 | +6.25 | +146.80 |
+| After retirement, E − A | +6.72 | 0.00 | 0.00 | +4.20 |
+
+The first/rested contrasts include renderer, font, frame and driver work,
+not a pure second-device ablation. The job's absolute Metal allocation is
+6.64 MiB after rendering; a missing device at B is null rather than zero in
+native reports, so a raw numeric Metal subtraction is unavailable. The
+job's Tag 14 rises about 71 MiB and remains after settling, whereas Node heap
+used grows only 0.04–0.06 MiB and libmalloc in-use grows about 0.01 MiB. The
+runtime baseline is much smaller than the transient GPU charge. Retirement
+eliminates the job PID and its device. Sharing a device across threads would
+require redesigning cross-process export isolation, and removing the absent
+job at rest cannot clear P7. Exports therefore remain separate. Further
+agent-device sharing needs a measured design preserving frozen revisions,
+JPEG output, slicing progress and fault boundaries.
+
+An earlier five-run utility ablation measured 14.814 MiB physical for a plain
+Electron utility, 16.564 MiB with addon, 16.658 MiB for an idle interactive
+host and 16.783 MiB for an idle job host. V8 physical heap was 3.750 MiB.
+Small-heap flags reduced used heap slightly but increased physical footprint
+by 0.2–0.3 MiB and sometimes latency; production retains default flags.
+System font files use immutable mappings; mutable installed files retain
+owned bytes to avoid faults if files truncate. Registry tables share `Arc`
+backing. No unsafe allocator purge or arbitrary project heap limit was added.
+
+## Latency and validation
+
+Five alternating control/candidate pairs measured reopening after actual
+last-tab close and a 3.5 s pause. Completion means the new view sequence was
+drawn, its GPU completion callback fired and a subsequent page animation
+frame ran; it is not native arrival or physical display scanout. Candidate
+absolute reopen times were 128.9, 120.7, 113.0, 116.1 and 105.1 ms (median
+116.1 ms); paired regressions were 41.4, 42.0, 45.4, 29.5 and 25.1 ms:
+median +41.4, maximum +45.4. This passes the 50 ms regression bound, not an
+absolute 50 ms response bound. Initial-open paired regression was +3.6 ms
+median, maximum +12.2 ms; eager initial home remains in place.
+
+In the memory matrix, first empty/corpus snapshots took median 4.0/7.7 ms,
+with maximum paired regressions against homeControl of 0.7/4.0 ms. A snapshot
+after rest took median 22.1 ms, maximum paired regression 4.5 ms. Job startup
+preparation took median 72.64 ms, maximum 77.55 ms; it still exceeds 50 ms if
+requested synchronously. After completed preparation, readiness took median
+0.0042 ms. First agent frame took median 296.65 ms (maximum 301.19 ms), paired
+median −5.41 ms and maximum +30.46 ms against homeControl. Warm frames took
+median 5.81 ms, maximum paired regression +0.49 ms. These observations do not
+make unprepared cold launch fast or establish all agent-first-use paths.
+
+The release addon/app build passed. Native library tests passed 142/142,
+Metal inventory 1/1, pipeline probe 48/48, and clippy denied warnings for
+pm-node/pm-gpu. Renderer focused checks passed 164 tests across 17 files,
+plus a directly rerun last-tab eligibility test. Svelte check reported zero
+errors and one existing warning. Export E2E passed H.264 solid and text plus
+alpha ProRes, each 24 frames/one save dialog. Text exports use the native job
+engine; the earlier legacy-routing expectation was corrected. Temporary
+outputs and profiles were removed. No QoS implementation was changed.
+
+## Reproduction and next work
+
+`scripts/measure-engine-memory.mjs` measures prebuilt app trees. Set
+`PM_MEMORY_PROJECT` to an asset-free runtime corpus document and
+`PM_MEMORY_OUTPUT` outside the checkout. `PM_MEMORY_SAMPLES=5`,
+`PM_MEMORY_VARIANTS=off,homeControl,after`, `PM_MEMORY_CLOSED=1`,
+`PM_MEMORY_HOME_CLOSED=1` and `PM_MEMORY_HOME_SUSPEND_GATE=1` reproduce the
+current matrix. The homeControl override is diagnostic; production suspension
+is enabled by default. Wrap only the actual Electron command with the shared
+`pm-electron-lock`; build outside the lock, source `engine/env.sh`, use
+`nice -n 15`, and use one Playwright worker. Raw profiles, traces, footprint,
+vmmap and operational reports stay outside Git.
+
+The remaining project-open physical gaps are release blockers for P7. Next
+work needs symbolized PartitionAlloc call-site attribution, coordinated font
+registry generation release, and page/compositor allocation attribution with
+matching engine-off trace controls. Actual Metal heap residency remains
+unavailable through these public counters. Document and frame-cache cuts
+belong with their owning lanes. Existing shaders, formats, compatibility
+contracts, crash isolation and initial viewer latency remain requirements.
