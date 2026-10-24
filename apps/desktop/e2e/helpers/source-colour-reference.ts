@@ -15,7 +15,7 @@ import { inflateSync } from 'node:zlib';
 
 export type ColourTriple = readonly [number, number, number];
 /** The colour reading of one decoded frame: tags, or the section 9 defaults. */
-export type VideoTags = { matrix: 'bt601' | 'bt709'; fullRange: boolean; primaries: 'smpte170m' | 'bt709' };
+export type VideoTags = { matrix: 'bt601' | 'bt709' | 'bt2020'; fullRange: boolean; primaries: 'smpte170m' | 'bt470bg' | 'bt709' | 'bt2020' };
 type Matrix3 = readonly [ColourTriple, ColourTriple, ColourTriple];
 type ToneCurve = { readonly decode: (code: number) => number; readonly encode: (linear: number) => number };
 export type MatrixTrcProfile = {
@@ -34,11 +34,14 @@ const BRADFORD: Matrix3 = [
 type Chromaticities = readonly [readonly [number, number], readonly [number, number], readonly [number, number]];
 const PRIMARIES: Record<VideoTags['primaries'], Chromaticities> = {
   bt709: [[0.640, 0.330], [0.300, 0.600], [0.150, 0.060]],
-  smpte170m: [[0.630, 0.340], [0.310, 0.595], [0.155, 0.070]]
+  smpte170m: [[0.630, 0.340], [0.310, 0.595], [0.155, 0.070]],
+  bt470bg: [[0.640, 0.330], [0.290, 0.600], [0.150, 0.060]],
+  bt2020: [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]]
 };
 const MATRIX: Record<VideoTags['matrix'], { kr: number; kb: number }> = {
   bt709: { kr: 0.2126, kb: 0.0722 },
-  bt601: { kr: 0.299, kb: 0.114 }
+  bt601: { kr: 0.299, kb: 0.114 },
+  bt2020: { kr: 0.2627, kb: 0.0593 }
 };
 const MAX_ICC_BYTES = 8 * 1024 * 1024;
 

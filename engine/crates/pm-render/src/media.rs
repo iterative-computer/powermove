@@ -1394,14 +1394,23 @@ impl MediaCache {
 
     /// The original decoded code planes for the source monitor's video
     /// presenter, from the exact Export worker shared with RGBA source
-    /// frames. Composition decode is unaffected.
+    /// frames. Composition decode is unaffected. `None` when the source needs
+    /// the engine's own conversion instead (`presentable` refuses it, or it
+    /// needs more than a matrix and tags: rotation, fields, pixel aspect,
+    /// cropping, HDR or wide gamut).
     pub(crate) fn source_exact_decoded(
         &mut self,
         path: &Path,
         time: Ticks,
-    ) -> Result<(Arc<MediaSource>, DecodedFrame), MediaFailure> {
+        presentable: impl FnOnce(&MediaSource) -> bool,
+    ) -> Result<Option<(Arc<MediaSource>, DecodedFrame)>, MediaFailure> {
         let source = self.source(path)?;
-        video_supported(&source).map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
+        // What the engine cannot draw at all fails as composition would.
+        video_drawable(&source, &Interpretation::default())
+            .map_err(|m| MediaFailure::Unsupported(Feature::Media(m)))?;
+        if video_supported(&source).is_err() || !presentable(&source) {
+            return Ok(None);
+        }
         let frame = source
             .select(time.get())
             .ok_or_else(|| MediaFailure::Failed("No source frame at this time".into()))?;
@@ -1414,7 +1423,7 @@ impl MediaCache {
                 "The source decoder returned a non-exact frame".into(),
             ));
         }
-        Ok((source, fetched.frame))
+        Ok(Some((source, fetched.frame)))
     }
 
     #[allow(clippy::too_many_arguments)]

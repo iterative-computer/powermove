@@ -9,7 +9,8 @@ import type { SourceVideoFrame } from "./SourceVideoFrame";
 
 /**
  * A rendered snapshot. `video` is present only for SourceColor::Compositor:
- * packed native YUV planes for a source-only VideoFrame.
+ * packed native YUV planes, or engine-converted RGBA, for a source-only
+ * VideoFrame.
  */
 export type SnapshotResult = { 
 /**

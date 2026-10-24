@@ -175,7 +175,7 @@ describe('SnapshotService', () => {
   });
 
   it('preserves native I420A planes for an alpha video frame without an RGB surface', async () => {
-    const video = { format: 'i420a', primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', range: 'limited' };
+    const video = { format: 'i420a', primaries: 'smpte170m', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' };
     const planes = new Uint8Array(10);
     const response = { ...rendered({ kind: 'inline', bytes: planes }, 2, 2), pixels: 'straight', video } as Response;
     const present = vi.fn(async () => { throw new Error('Alpha must not enter the opaque IOSurface path'); });
@@ -185,9 +185,11 @@ describe('SnapshotService', () => {
     expect(present).not.toHaveBeenCalled();
   });
 
-  it('sends normal NV12 planes without a GPU import and preserves unspecified tags', async () => {
-    const video = { format: 'nv12', primaries: 'unspecified', transfer: 'unspecified', matrix: 'unspecified', range: 'limited' };
-    const planes = new Uint8Array(6);
+  it.each([
+    [{ format: 'nv12', primaries: 'bt470bg', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' }, 6],
+    [{ format: 'rgba', primaries: 'bt709', transfer: 'srgb', matrix: 'rgb', range: 'full' }, 16]
+  ])('sends %o frames without a GPU import', async (video, bytes) => {
+    const planes = new Uint8Array(bytes);
     const response = { ...rendered({ kind: 'inline', bytes: planes }, 2, 2), pixels: 'straight', video } as Response;
     const present = vi.fn();
     const service = new SnapshotService({ engine: engine(async () => response), takePixels: null, sourceSurface: present, log: () => {} });

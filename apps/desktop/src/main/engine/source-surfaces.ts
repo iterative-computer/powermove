@@ -56,14 +56,18 @@ type Entry = {
   reclaim: unknown | null;
 };
 
-const PRIMARIES = new Set(['unspecified', 'bt709', 'bt470m', 'bt470bg', 'smpte170m', 'smpte240m', 'film', 'bt2020', 'smptest428-1', 'smptest431-2', 'p3']);
-const TRANSFER = new Set(['unspecified', 'bt709', 'gamma18', 'gamma22', 'gamma24', 'gamma28', 'smpte170m', 'smpte240m', 'linear', 'srgb', 'pq', 'hlg']);
-const MATRIX = new Set(['unspecified', 'bt709', 'fcc', 'bt470bg', 'smpte170m', 'smpte240m', 'ycocg', 'bt2020-ncl']);
+// pm-protocol's SourceVideoFrame tags: those WebCodecs and Chromium apply
+// exactly as the engine reads them. Other readings arrive as sRGB RGBA.
+const PRIMARIES = new Set(['bt709', 'bt470bg', 'smpte170m']);
+const TRANSFER = new Set(['bt709', 'linear']);
+const MATRIX = new Set(['bt709', 'smpte170m', 'bt2020-ncl']);
 
-/** Match pm-protocol's tightly packed Y + interleaved UV length, including odd sizes. */
+/** Match pm-protocol's tightly packed Y + interleaved UV (or RGBA) length, including odd sizes. */
 export function sourceVideoByteLength(width: number, height: number, video: SourceVideoFrame): number {
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width > 16384 || height > 16384)
     throw new Error('Invalid source surface dimensions');
+  if (video?.format === 'rgba' && video.primaries === 'bt709' && video.transfer === 'srgb' && video.matrix === 'rgb'
+      && video.range === 'full' && video.visibleWidth === undefined) return width * height * 4;
   if (!video || typeof video !== 'object' || !['nv12', 'nv16', 'p010le', 'i420a'].includes(video.format)
       || !PRIMARIES.has(video.primaries) || !TRANSFER.has(video.transfer)
       || !MATRIX.has(video.matrix) || !['limited', 'full'].includes(video.range))

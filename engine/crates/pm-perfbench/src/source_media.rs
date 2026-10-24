@@ -126,8 +126,9 @@ pub fn source_compositor_scrub_24() -> BenchReport {
     assert!(path.is_file(), "public H.264 fixture is present");
     let mut renderer = Renderer::headless().expect("source compositor renderer");
     renderer
-        .source_video_planes(&path, Ticks::ZERO)
-        .expect("warm coded source frame");
+        .source_video_planes(&path, Ticks::ZERO, false)
+        .expect("warm coded source frame")
+        .expect("the fixture's reading is presented as coded planes");
     let scope = Scope::begin();
     let mut wall_ms = Vec::with_capacity(FRAMES);
     let mut fingerprint = 0u64;
@@ -136,8 +137,9 @@ pub fn source_compositor_scrub_24() -> BenchReport {
     for k in 0..FRAMES {
         let began = Instant::now();
         let (size, bytes, tags) = renderer
-            .source_video_planes(&path, time(k, true))
-            .expect("source compositor scrub frame");
+            .source_video_planes(&path, time(k, true), false)
+            .expect("source compositor scrub frame")
+            .expect("the fixture's reading is presented as coded planes");
         wall_ms.push(began.elapsed().as_secs_f64() * 1_000.0);
         assert_eq!(
             bytes.len() as u64,

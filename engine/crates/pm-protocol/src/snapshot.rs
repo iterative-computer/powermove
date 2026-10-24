@@ -515,13 +515,29 @@ pub struct SourceVideoFrame {
 }
 
 impl SourceVideoFrame {
-    /// Packed Y plus interleaved UV, or planar Y,U,V,A for i420a; no padding.
+    /// Straight sRGB RGBA8 the engine converted itself (a reading Chromium
+    /// cannot apply exactly).
+    pub fn srgb_rgba() -> Self {
+        Self {
+            format: "rgba".into(),
+            primaries: "bt709".into(),
+            transfer: "srgb".into(),
+            matrix: "rgb".into(),
+            range: "full".into(),
+            visible_width: None,
+        }
+    }
+
+    /// Packed Y plus interleaved UV, planar Y,U,V,A for i420a, or RGBA8; no padding.
     pub fn byte_len(&self, width: u32, height: u32) -> Option<u64> {
         if self.visible_width.is_some_and(|w| w == 0 || w > width) {
             return None;
         }
         let w = u64::from(width);
         let h = u64::from(height);
+        if self.format == "rgba" {
+            return (w * h).checked_mul(4);
+        }
         let chroma_h = if self.format == "nv16" {
             h
         } else {
@@ -537,51 +553,21 @@ impl SourceVideoFrame {
 
 impl Validate for SourceVideoFrame {
     fn validate(&self) -> Result<(), Violation> {
+        // Only tags Chromium applies exactly as the engine reads them
+        // (`pm_render` chooses them); everything else arrives as RGBA.
+        let rgba = self.format == "rgba";
         let ok = self
             .visible_width
             .is_none_or(|w| w > 0 && w <= MAX_OUTPUT_DIMENSION)
-            && matches!(self.format.as_str(), "nv12" | "nv16" | "p010le" | "i420a")
-            && matches!(
-                self.primaries.as_str(),
-                "unspecified"
-                    | "bt709"
-                    | "bt470m"
-                    | "bt470bg"
-                    | "smpte170m"
-                    | "smpte240m"
-                    | "film"
-                    | "bt2020"
-                    | "smptest428-1"
-                    | "smptest431-2"
-                    | "p3"
-            )
-            && matches!(
-                self.transfer.as_str(),
-                "unspecified"
-                    | "bt709"
-                    | "gamma18"
-                    | "gamma22"
-                    | "gamma24"
-                    | "gamma28"
-                    | "smpte170m"
-                    | "smpte240m"
-                    | "linear"
-                    | "srgb"
-                    | "pq"
-                    | "hlg"
-            )
-            && matches!(
-                self.matrix.as_str(),
-                "unspecified"
-                    | "bt709"
-                    | "fcc"
-                    | "bt470bg"
-                    | "smpte170m"
-                    | "smpte240m"
-                    | "ycocg"
-                    | "bt2020-ncl"
-            )
-            && matches!(self.range.as_str(), "limited" | "full");
+            && if rgba {
+                *self == Self::srgb_rgba()
+            } else {
+                matches!(self.format.as_str(), "nv12" | "nv16" | "p010le" | "i420a")
+                    && matches!(self.primaries.as_str(), "bt709" | "smpte170m" | "bt470bg")
+                    && matches!(self.transfer.as_str(), "bt709" | "linear")
+                    && matches!(self.matrix.as_str(), "bt709" | "smpte170m" | "bt2020-ncl")
+                    && matches!(self.range.as_str(), "limited" | "full")
+            };
         ensure(ok, ContractId::Frame, || {
             "invalid source video format or colour tags".into()
         })
@@ -589,7 +575,8 @@ impl Validate for SourceVideoFrame {
 }
 
 /// A rendered snapshot. `video` is present only for SourceColor::Compositor:
-/// packed native YUV planes for a source-only VideoFrame.
+/// packed native YUV planes, or engine-converted RGBA, for a source-only
+/// VideoFrame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -1411,9 +1398,23 @@ mod tests {
         assert_eq!(video.byte_len(159, 90), None);
         video.visible_width = None;
         video.primaries = "unspecified".into();
-        video.transfer = "unspecified".into();
-        video.matrix = "unspecified".into();
+        assert!(video.validate().is_err(), "the reading is always complete");
+        video.primaries = "bt470bg".into();
+        video.transfer = "pq".into();
+        assert!(video.validate().is_err(), "HDR converts in the engine");
+        video.transfer = "linear".into();
         assert!(video.validate().is_ok());
+        let rgba = SourceVideoFrame::srgb_rgba();
+        assert!(rgba.validate().is_ok());
+        assert_eq!(rgba.byte_len(160, 90), Some(57600));
+        assert!(
+            SourceVideoFrame {
+                range: "limited".into(),
+                ..rgba
+            }
+            .validate()
+            .is_err()
+        );
         video.format = "i420a".into();
         assert_eq!(video.byte_len(160, 90), Some(36000));
         assert_eq!(video.byte_len(3, 3), Some(26));

@@ -10,7 +10,10 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
     let mut renderer = Renderer::headless().unwrap();
-    let (size, bytes, tags) = renderer.source_video_planes(&fixture, Ticks::ZERO).unwrap();
+    let (size, bytes, tags) = renderer
+        .source_video_planes(&fixture, Ticks::ZERO, false)
+        .unwrap()
+        .expect("coded planes");
     assert_eq!((size.width, size.height), (160, 90));
     assert_eq!(tags.format, "nv12");
     assert_eq!(
@@ -19,7 +22,7 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
     );
     // pm_media::probe::color::video_reading for untagged 160x90 video.
     assert_eq!(tags.range, "limited");
-    assert_eq!(tags.primaries, "bt709");
+    assert_eq!(tags.primaries, "smpte170m");
     assert_eq!(tags.matrix, "smpte170m");
     assert_eq!(tags.transfer, "bt709");
     // A still cannot silently become a P3/Canvas RGBA compositor payload.
@@ -30,7 +33,11 @@ fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
         include_bytes!("../../../../apps/desktop/e2e/fixtures/still-red.png"),
     )
     .unwrap();
-    assert!(renderer.source_video_planes(&still, Ticks::ZERO).is_err());
+    assert!(
+        renderer
+            .source_video_planes(&still, Ticks::ZERO, false)
+            .is_err()
+    );
 }
 
 #[test]
@@ -257,7 +264,10 @@ fn untagged_vp9_browser_rendition_uses_chromiums_i420_bitmap() {
     for seconds in [1.5, 0.5, 1.5, 0.5, 0.5, 1.5, 0.5, 1.5] {
         let time =
             Ticks::new((seconds * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap();
-        let (_, planes, _) = renderer.source_video_planes(&proxy, time).unwrap();
+        let (_, planes, _) = renderer
+            .source_video_planes(&proxy, time, false)
+            .unwrap()
+            .expect("coded planes");
         let luma = planes[0];
         let red = seconds < 1.0;
         assert!(

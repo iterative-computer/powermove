@@ -432,7 +432,7 @@ export class SnapshotService {
       return failed('internal', error instanceof Error ? error.message : String(error));
     }
     let videoSurface: { token: string; width: number; height: number } | undefined;
-    if (video && !['nv12', 'i420a'].includes(video.format)) {
+    if (video && !['nv12', 'i420a', 'rgba'].includes(video.format)) {
       if (!this.options.sourceSurface) return failed('unavailable', 'Native source video presentation is unavailable.');
       if (signal.aborted) return failed('cancelled', 'The source request was cancelled.');
       try { videoSurface = await this.options.sourceSurface(windowId, outcome.width, outcome.height, video, data); }

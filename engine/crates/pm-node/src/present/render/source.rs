@@ -496,14 +496,41 @@ impl Thread {
                 interpretation.as_ref(),
             )
         } else if color == SourceColor::Compositor {
+            let sequence = record.is_some_and(|r| {
+                pm_eval::node::truthy(pm_eval::node::member(Some(r), "imageSequence"))
+            });
             match composer
                 .renderer()
-                .source_video_planes(&path, job.request.time)
+                .source_video_planes(&path, job.request.time, sequence)
             {
-                Ok((size, pixels, video)) => {
+                Ok(Some((size, pixels, video))) => {
                     coded_video = Some((size, video));
                     Ok(Some(pixels))
                 }
+                // A reading Chromium cannot apply exactly (wide gamut, HDR,
+                // other curves, or geometry such as rotation): the engine
+                // draws the source as interpreted (its default reading), and
+                // the presenter shows these sRGB pixels as an RGBA frame.
+                Ok(None) => composer
+                    .renderer()
+                    .source_rgba8(
+                        &path,
+                        job.request.time,
+                        job.request.output_size,
+                        fit,
+                        Some(&pm_media::interpret::Interpretation::default()),
+                    )
+                    .map(|pixels| {
+                        let pixels = super::super::snapshot::encode_rgba8_unorm(
+                            &pixels,
+                            pm_protocol::snapshot::SnapshotPixels::Straight,
+                        );
+                        coded_video = Some((
+                            job.request.output_size,
+                            pm_protocol::snapshot::SourceVideoFrame::srgb_rgba(),
+                        ));
+                        Some(pixels)
+                    }),
                 Err(error) => Err(error),
             }
         } else {

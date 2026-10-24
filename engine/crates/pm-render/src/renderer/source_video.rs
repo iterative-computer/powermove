@@ -1,14 +1,16 @@
-//! Coded source planes for Chromium's source-only video presenter. No GPU
-//! colour conversion or project interpretation happens on this path.
+//! Coded source planes for the source monitor's video presenter. Chromium's
+//! compositor scales them and applies the colour tags given here, which are
+//! the shared reading (`pm_media::probe::color::frame_reading`) composition
+//! and export use. A reading Chromium cannot reproduce exactly is converted
+//! by the engine instead (`None`).
 
 use std::path::Path;
 
 use pm_media::frame::{DecodedFrame, Layout, PixelFormat, PlaneFormat, PlaneView};
-use pm_media::probe::{
-    VideoProbe,
-    color::{TaggedColor, video_reading},
+use pm_media::probe::color::frame_reading;
+use pm_protocol::color::{
+    ColorDescription, MatrixCoefficients, Primaries, Range, SampleAlignment, Transfer,
 };
-use pm_protocol::color::{Range, SampleAlignment};
 use pm_protocol::common::{Size, Ticks};
 use pm_protocol::frame::MAX_OUTPUT_DIMENSION;
 use pm_protocol::snapshot::SourceVideoFrame;
@@ -22,24 +24,37 @@ const MAX_PACKED_SOURCE_VIDEO_BYTES: usize = 128 << 20;
 impl Renderer {
     /// Return the actual coded dimensions, tight YUV(A) planes, and the
     /// frame's colour tags. `outputSize`/fit are presentation geometry and
-    /// deliberately do not resample these samples.
+    /// deliberately do not resample these samples. `Ok(None)`: Chromium cannot
+    /// apply this frame's reading exactly; draw it with `source_rgba8`.
     pub fn source_video_planes(
         &mut self,
         path: &Path,
         time: Ticks,
-    ) -> Result<(Size, Vec<u8>, SourceVideoFrame), String> {
-        let (source, frame) = self
+        sequence: bool,
+    ) -> Result<Option<(Size, Vec<u8>, SourceVideoFrame)>, String> {
+        let tags = |source: &pm_media::decode::service::MediaSource| {
+            source
+                .probe
+                .video
+                .as_ref()
+                .and_then(|video| chromium_tags(&frame_reading(&video.color, sequence)))
+        };
+        let Some((source, frame)) = self
             .media
-            .source_exact_decoded(path, time)
+            .source_exact_decoded(path, time, |source| tags(source).is_some())
             .map_err(|e| match e {
                 crate::media::MediaFailure::Unsupported(feature) => feature.to_string(),
                 crate::media::MediaFailure::Failed(message) => message,
-            })?;
+            })?
+        else {
+            return Ok(None);
+        };
         let video = source
             .probe
             .video
             .as_ref()
             .ok_or("The source has no video stream")?;
+        let (primaries, transfer, matrix) = tags(&source).ok_or("The source reading changed")?;
         let visible_width =
             u32::try_from(frame.format.width).map_err(|_| "The visible width is too large")?;
         let coded_width = if video.codec.codec == "vp9" {
@@ -70,14 +85,24 @@ impl Renderer {
                     .map(|bytes| (format, bytes))
             })
             .map_err(|e| e.to_string())??;
-        let mut tags = source_video_color(&frame, video, format)?;
-        if coded_width != visible_width {
-            tags.visible_width = Some(visible_width);
-        }
+        let tags = SourceVideoFrame {
+            format: format.into(),
+            primaries: primaries.into(),
+            transfer: transfer.into(),
+            matrix: matrix.into(),
+            // The decoded planes' own range: what these bytes mean.
+            range: if frame.format.range == Range::Full {
+                "full"
+            } else {
+                "limited"
+            }
+            .into(),
+            visible_width: (coded_width != visible_width).then_some(visible_width),
+        };
         if Some(bytes.len() as u64) != tags.byte_len(size.width, size.height) {
             return Err("The decoded source planes have an unexpected length".into());
         }
-        Ok((size, bytes, tags))
+        Ok(Some((size, bytes, tags)))
     }
 }
 
@@ -323,45 +348,34 @@ fn visible_row<'a>(plane: &'a PlaneView<'_>, row: usize, bytes: usize) -> Result
     Ok(unsafe { std::slice::from_raw_parts(plane.ptr.add(row * plane.stride), bytes) })
 }
 
-fn source_video_color(
-    frame: &DecodedFrame,
-    video: &VideoProbe,
-    format: &str,
-) -> Result<SourceVideoFrame, String> {
-    source_video_color_codes(
-        &video.color.tagged,
-        video.width,
-        video.height,
-        format,
-        frame.format.range,
-    )
-}
-
-/// Tags for the monitor's VideoFrame from the shared colour table
-/// (`pm_media::probe::color::video_reading`), so Chromium converts the planes
-/// as composition and export read them. The range describes the decoded
-/// planes themselves.
-fn source_video_color_codes(
-    tagged: &TaggedColor,
-    width: u32,
-    height: u32,
-    format: &str,
-    decoded_range: Range,
-) -> Result<SourceVideoFrame, String> {
-    let reading = video_reading(tagged, width, height);
-    Ok(SourceVideoFrame {
-        format: format.into(),
-        primaries: primaries(i32::from(reading.primaries))?.into(),
-        transfer: transfer(i32::from(reading.transfer))?.into(),
-        matrix: matrix(i32::from(reading.matrix))?.into(),
-        range: if decoded_range == Range::Full {
-            "full"
-        } else {
-            "limited"
-        }
-        .into(),
-        visible_width: None,
-    })
+/// The WebCodecs/gfx tags under which Chromium computes exactly what the
+/// engine does for `desc`, or `None`. SDR video transfers the engine reads
+/// as the display encoding E are what Chromium renders for `bt709`. Wide
+/// gamut, HDR and other curves convert in the engine like composition, so
+/// the monitor clips and tone-maps as the project does.
+fn chromium_tags(desc: &ColorDescription) -> Option<(&'static str, &'static str, &'static str)> {
+    let primaries = match desc.primaries {
+        Primaries::Bt709 => "bt709",
+        Primaries::Bt601_525 => "smpte170m",
+        Primaries::Bt601_625 => "bt470bg",
+        Primaries::Bt2020 | Primaries::DisplayP3 | Primaries::Unspecified => return None,
+    };
+    let transfer = match desc.transfer {
+        Transfer::DisplayE => "bt709",
+        Transfer::Linear => "linear",
+        Transfer::Bt1886
+        | Transfer::SceneReferredBt709
+        | Transfer::Gamma22
+        | Transfer::Pq
+        | Transfer::Hlg => return None,
+    };
+    let matrix = match desc.matrix {
+        MatrixCoefficients::Bt709 => "bt709",
+        MatrixCoefficients::Bt601 => "smpte170m",
+        MatrixCoefficients::Bt2020Ncl => "bt2020-ncl",
+        MatrixCoefficients::Identity | MatrixCoefficients::Bt2020Cl => return None,
+    };
+    Some((primaries, transfer, matrix))
 }
 
 #[cfg(test)]
@@ -393,30 +407,37 @@ mod tests {
     }
 
     #[test]
-    fn monitor_tags_follow_the_shared_table_for_every_codec() {
-        let untagged = TaggedColor::default();
-        let sd = source_video_color_codes(&untagged, 160, 90, "nv12", Range::Limited).unwrap();
-        assert_eq!(
-            (&*sd.primaries, &*sd.transfer, &*sd.matrix, &*sd.range),
-            ("bt709", "bt709", "smpte170m", "limited")
-        );
-        let hd = source_video_color_codes(&untagged, 480, 720, "i420a", Range::Limited).unwrap();
-        assert_eq!(&*hd.matrix, "bt709");
-        let full = TaggedColor {
-            matrix: Some(1),
-            full_range: Some(true),
-            ..TaggedColor::default()
+    fn chromium_presents_only_readings_it_reproduces_exactly() {
+        let desc = |primaries, transfer, matrix| ColorDescription {
+            primaries,
+            transfer,
+            matrix,
+            range: Range::Limited,
+            subsampling: pm_protocol::color::Subsampling::S420,
+            siting: pm_protocol::color::ChromaSiting::Left,
+            alpha: pm_protocol::color::AlphaMode::Opaque,
+            bit_depth: 8,
         };
-        let partial = source_video_color_codes(&full, 320, 180, "nv12", Range::Full).unwrap();
+        use MatrixCoefficients as M;
+        use Primaries as P;
+        use Transfer as T;
         assert_eq!(
-            (
-                &*partial.primaries,
-                &*partial.transfer,
-                &*partial.matrix,
-                &*partial.range
-            ),
-            ("bt709", "bt709", "bt709", "full")
+            chromium_tags(&desc(P::Bt601_525, T::DisplayE, M::Bt601)),
+            Some(("smpte170m", "bt709", "smpte170m"))
         );
+        assert_eq!(
+            chromium_tags(&desc(P::Bt601_625, T::DisplayE, M::Bt601)),
+            Some(("bt470bg", "bt709", "smpte170m"))
+        );
+        for (p, t, m) in [
+            (P::Bt2020, T::DisplayE, M::Bt2020Ncl),
+            (P::Bt709, T::Pq, M::Bt709),
+            (P::Bt709, T::Hlg, M::Bt709),
+            (P::Bt709, T::Gamma22, M::Bt709),
+            (P::DisplayP3, T::DisplayE, M::Bt709),
+        ] {
+            assert_eq!(chromium_tags(&desc(p, t, m)), None, "{p:?} {t:?} {m:?}");
+        }
     }
 
     #[test]
@@ -695,55 +716,5 @@ mod tests {
         ];
         let error = pack_planes(&source, &planes, "p010le", source.width).unwrap_err();
         assert!(error.contains("byte limit"), "{error}");
-    }
-}
-
-fn primaries(code: i32) -> Result<&'static str, String> {
-    match code {
-        1 => Ok("bt709"),
-        4 => Ok("bt470m"),
-        5 => Ok("bt470bg"),
-        6 => Ok("smpte170m"),
-        7 => Ok("smpte240m"),
-        8 => Ok("film"),
-        9 => Ok("bt2020"),
-        10 => Ok("smptest428-1"),
-        11 => Ok("smptest431-2"),
-        12 => Ok("p3"),
-        _ => Err(format!(
-            "Chromium source video does not support primaries code {code}"
-        )),
-    }
-}
-
-fn transfer(code: i32) -> Result<&'static str, String> {
-    match code {
-        1 => Ok("bt709"),
-        4 => Ok("gamma22"),
-        5 => Ok("gamma28"),
-        6 => Ok("smpte170m"),
-        7 => Ok("smpte240m"),
-        8 => Ok("linear"),
-        13 => Ok("srgb"),
-        16 => Ok("pq"),
-        18 => Ok("hlg"),
-        _ => Err(format!(
-            "Chromium source video does not support transfer code {code}"
-        )),
-    }
-}
-
-fn matrix(code: i32) -> Result<&'static str, String> {
-    match code {
-        1 => Ok("bt709"),
-        4 => Ok("fcc"),
-        5 => Ok("bt470bg"),
-        6 => Ok("smpte170m"),
-        7 => Ok("smpte240m"),
-        8 => Ok("ycocg"),
-        9 => Ok("bt2020-ncl"),
-        _ => Err(format!(
-            "Chromium source video does not support matrix code {code}"
-        )),
     }
 }
