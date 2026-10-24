@@ -886,6 +886,95 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.after).not.toEqual(engine.before);
   });
 
+  test('a paused edit is presented only whole: an unscoped write, or its override, changing another layer never shows half of it', async ({ session }) => {
+    test.setTimeout(180_000);
+    // A write without paths sends the layers it most likely wrote first, as
+    // a provisional revision the engine draws but does not present until the
+    // rest of the document is compared. Here the comparison finds more: the
+    // same write moved another layer, and then the raster override itself
+    // moves another layer and calls touch() while it draws the edit.
+    await cp(path.join(__dirname, FIXTURE['shape-tint']!), path.join(session.userData, 'extensions', 'shape-tint'), { recursive: true });
+    await session.relaunch();
+    await session.openEditor();
+    const { page } = session;
+    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint') && Boolean((window as any).PM?.EngineRender));
+    await shapeTintProject(page);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
+    await page.evaluate(() => (window as any).PM.EngineConnection.setTrace(true));
+    await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.());
+    const result = await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const api = PM.Kernel.api('provisional-proof');
+      const presentation = PM.Kernel.services.get('viewer').enginePresentation;
+      const items: { revision: number; provisional: boolean; confirmed: boolean }[] = [];
+      const off = PM.EngineDoc.subscribe((b: any) => items.push({ revision: b.revision, provisional: !!b.provisional, confirmed: !!b.confirmed }));
+      const layer = (id: string) => PM.proj.layers.find((l: any) => l.id === id);
+      const settled = async () => {
+        const barrier = PM.EngineDoc.barrier;
+        for (let i = 0; i < 300; i++) {
+          await new Promise((r) => requestAnimationFrame(r));
+          if (barrier.provisionalRevision === null && (presentation.latest?.revision ?? 0) >= barrier.revision) break;
+        }
+        await new Promise((r) => setTimeout(r, 200));
+      };
+      const edit = async (fn: () => void) => { fn(); PM.touch(); PM.invalidate(); await settled(); };
+      const drag = async (from: number) => { for (let i = 0; i < 4; i++) await edit(() => { layer('tinted').p['position.x'].v = from + i * 3; }); };
+      let registration: any = null;
+      try {
+        await drag(100);
+        // 1. One unscoped write that also moved a layer it never moved before.
+        await edit(() => { layer('tinted').p['position.x'].v = 120; layer('plain').p['position.y'].v = 50; });
+        // 2. The override moves another layer and calls touch() while it draws the edit.
+        const original = api.services.get('raster');
+        let armed = false;
+        registration = api.services.register('raster', (l: any, ...rest: any[]) => {
+          if (armed && l?.id === 'tinted') { armed = false; layer('plain').p['position.x'].v = 200; PM.touch(); }
+          return original(l, ...rest);
+        });
+        await drag(100);
+        await edit(() => { armed = true; layer('tinted').p['position.x'].v = 130; });
+      } finally {
+        registration?.dispose?.();
+        if (typeof off === 'function') off();
+      }
+      const trace = await presentation.takeTrace();
+      const confirmed = new Set(items.filter((i) => i.confirmed).map((i) => i.revision));
+      const provisional = items.filter((i) => i.provisional).map((i) => i.revision);
+      const superseded = provisional.filter((r) => !confirmed.has(r));
+      const drawn = (trace?.draws ?? []).map((d: any[]) => d[2] as number);
+      // The frame on screen at the end: both layers where the writes put them.
+      const url: string = await api.render.snapshotAsync(PM.time, 320);
+      const image = new Image();
+      await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; image.src = url; });
+      const cv = document.createElement('canvas'); cv.width = image.width; cv.height = image.height;
+      const ctx = cv.getContext('2d')!; ctx.drawImage(image, 0, 0);
+      const at = (x: number, y: number) => Array.from(ctx.getImageData(Math.round(x * image.width / 320), Math.round(y * image.height / 180), 1, 1).data.slice(0, 3));
+      return { provisional, confirmed: [...confirmed], superseded, drawn, plain: [layer('plain').p['position.x'].v, layer('plain').p['position.y'].v], plainPixel: at(200, 50), oldPlainPixel: at(230, 90), revision: PM.EngineDoc.barrier.revision, shown: presentation.latest?.revision ?? null };
+    });
+    const native = await session.app.evaluate(async () => {
+      const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
+      const p = report?.presenter ?? {};
+      return { parked: p.provisionalParked ?? null, confirmed: p.provisionalConfirmed ?? null, dropped: p.provisionalDropped ?? null };
+    });
+    console.log(JSON.stringify({ provisionalProof: { ...result, native } }));
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    // The provisional path ran, was confirmed for the plain drag moves, and
+    // the comparison superseded it in both adversarial edits.
+    expect(result.confirmed.length).toBeGreaterThan(0);
+    expect(native.confirmed).toBeGreaterThan(0);
+    expect(result.superseded.length).toBeGreaterThanOrEqual(2);
+    // No frame of a superseded revision was ever drawn.
+    expect(result.drawn.filter((r: number) => result.superseded.includes(r))).toEqual([]);
+    expect(result.drawn.length).toBeGreaterThan(0);
+    // The last frame shows the whole of both writes.
+    expect(result.plain).toEqual([200, 50]);
+    expect(result.shown).toBe(result.revision);
+    const blue = (rgb: number[]) => rgb.every((v, i) => Math.abs(v - [51, 102, 204][i]!) <= 1);
+    expect(blue(result.plainPixel), JSON.stringify(result.plainPixel)).toBe(true);
+    expect(blue(result.oldPlainPixel), JSON.stringify(result.oldPlainPixel)).toBe(false);
+  });
+
   test('editing a large document with a raster override that reads its base copies the document only to seed the raster worker', async ({ session }) => {
     test.setTimeout(360_000);
     // Drags and resizes the overridden ellipse in a document of megabytes
