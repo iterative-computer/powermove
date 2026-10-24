@@ -353,123 +353,27 @@ draws edits there), in both themes with each viewer variant.
 
 ## Validation
 
-Round 6 serial qualification (2026-10-23) used production app and release
-native modules at `6dc7ed62e`: 797 cases per run, one worker, no quarantine
-or retries. ON: 647 passed, 91 failed, 59 skipped (3,918.0 seconds), plus
-one separate global worker teardown timeout. OFF: 685 passed, 53 failed,
-59 skipped (3,116.6 seconds), no global errors. Every failed result is owned
-in the [e2e ledger](e2e-ledger.md). Later changes are test fixtures and
-these notes; production code is unchanged from that build.
+Current results (2026-10-24, after merging `feat/native-engine` 84bcb32f8
+with main's 3D editor and kernel API). Full ON/OFF runs, owners and load
+conditions are in the [e2e ledger](e2e-ledger.md).
 
-The final C3 matrix compares the complete card, including overlay, shelf
-and corners, with zero tolerance and no acceptance mask. All twelve
-rendered 2D cases pass exactly: Fit and 200%, both themes, current viewer,
-frozen-current fork and shipped 1.0.8 fork. The eight current/frozen-current
-cases also pass 24/24 across three repeats (149.0 seconds) under the
-display's normal profile.
-Each case launches engine OFF and ON explicitly and asserts the active
-engine. The standard-color gate matches `engine-viewer-canvas`;
-`PM_LIBRARY_CARD_PROFILE=display` retains the normal-profile path.
-
-The C3 fixture now uses the existing “Search panels” UI to show Viewer
-alone before capture. Unrelated live previews had changed the surrounding
-Library grid height and scroll-raster coordinates: two failing pairs had
-legacy/native grid heights 1,779/1,555 and 1,779/1,406 CSS pixels. Their card
-screen boxes and composition pixels were identical, but shelf/corner pixels
-differed by up to two levels. Three consecutive captures within each launch
-were stable (48 exact comparisons); waiting for ancestor animations or
-changing the CSS raster backend did not fix the mismatched context.
-Filtering makes the entire recorded layout equal, with grid height 338,
-scroll offset zero, the same 358×311 card and unchanged 0.56 frame scale.
-This uses normal UI actions and preserves the default Fit view, canonical
-size, DOM/CSS and every whole-card assertion. The unfiltered Library
-workflows also pass, nine cases in each full run. Historical failed full-run
-results remain recorded; no visible difference is approved.
-
-The final 32-case C3 matrix has 12 passes and 20 failures, without skips.
-Eight fail because viewer 1.0.18 cannot activate pending mainmerge. All
-twelve rendered 3D cases still fail. Current camera light/dark differs by
-1,315/1,370 pixels, maximum 45 levels; current right view by 360/377,
-maximum 5. Frozen-current camera light/dark is 319/328, maximum 4; right
-view is 248/239, maximum 2. Shipped 1.0.8 camera is five pixels / one level;
-its right view is 7,881 / 227 in each theme. These are blockers requiring
-the view/crop snapshot and retained overlay bitmap contracts above. The
-full ON run also recorded missing WebGL navigation chrome (8,012 / 255),
-so the earlier edge-only description does not cover every capture failure.
-Final paired images and amplified differences remain outside Git under
-`/tmp/ne-w5/consumers-r6/evidence/round6-c3-matrix-final-*.png`; all full-run
-and diagnostic artifacts remain under `/tmp/ne-w5/consumers-r6/`.
-
-Opening the Library while playing passes with each engine setting:
-playback continues and cards become ready within two seconds. Focused
-units pass 25/25 (snapshots, queue preparation, composition thumbnails and
-test-process cleanup). The release native modules and production app build
-pass; desktop typecheck has zero errors and the existing IconCropper
-warning; `check:builtins` passes. Protocol regeneration changes no generated
-files (`protocol-07ccbe7fd7aec876`). Final changed E2E files pass strict
-TypeScript checking with zero diagnostics.
-
-The test harness bounds stalled Electron shutdown before removing its own
-temporary profile, including failed startup. Forced shutdown still fails
-the test. Two raw onboarding launches now have their own resource fixture
-and independent teardown budget, retry profile removal and close their
-owned download server even after setup failure. Their unchanged flows pass
-2/2 ON and 2/2 OFF (6.8/6.9 seconds), all with `forced:false`. These targeted
-harness follow-ups do not change the full-run counts. Preview-fit
-screenshots belong to Playwright's output directory.
-
-Round 5 serial runs (2026-10-22/23, 775 cases each, one worker, no
-quarantine; details in the [e2e ledger](e2e-ledger.md)): engine on 638
-passed, 88 failed, 49 skipped; engine off 682 passed, 43 failed, 50 skipped.
-Every failure is owned: the 1.0.18 fork (17 in each, pending
-`feat/ne-mainmerge`), the Library card on/off differences escalated above
-(8 in each), teardown-only results that pass when rerun (7 on, 4 off), and
-the previous rows of other lanes. Targeted engine-on and engine-off reruns of
-the Library, matrix, mixer, timeline and graph specs are listed with the
-round 5 notes. Lane-area unit tests: 134 files, 1,159 passed, 1 skipped.
-`cargo check --workspace --all-targets` and `cargo clippy --workspace
---all-targets -- -D warnings` pass at the merge; `cargo test -p pm-node --lib`
-140 passed; `pm-protocol` 98 passed; desktop typecheck 0 errors;
-`check:builtins` passes.
-
-Earlier rounds:
-
-Final-HEAD serial runs (2026-10-22, 698 cases each, one worker, no
-quarantine): engine on 588 passed, 60 failed, 50 skipped; engine off 631
-passed, 17 failed, 50 skipped. No consumer-owned failure remained with the
-engine off; the engine-on run included four C18 RAM-preview failures,
-historical results now owned by Phase 4a (done on `feat/ne-phase4a`, not
-claimed merged here). Every failed result is owned in the
-[e2e ledger](e2e-ledger.md). The history below records earlier runs.
-
-The complete first default-on suite ran 691 cases: 529 passed, 112 failed and
-50 existing optional-fixture cases skipped, with no quarantine exclusions. It
-used the earlier app build; it is not final-HEAD acceptance. The refreshed native
-consumer gate ran 99 cases: 78 passed and 21 failed. After correcting test
-fixtures and active-evaluator probes, the four native Library cases and six
-focused native ports passed. This is targeted follow-up evidence, not a second
-complete native-suite claim. The complete default-off suite is recorded in the
-consumer section of [e2e-ledger.md](e2e-ledger.md).
-
-The refreshed native transport gate passed 4/4, including the 150-bucket waveform,
-engine mixer levels, scrub grains and J/K/L audio-clock presentation. Worst
-measured J/K/L frame-clock error was 3.701 ms, with zero frames outside 10 ms.
-All three mixer cases passed; retune, master, mute and solo use fresh native
-levels and require zero legacy voices. Restored-project audio remains positive
-through quality changes after the meter's stale interval, while the separate
-native-pressure and composed RAM-preview gaps remained asserted in that
-historical run; C18 qualification now belongs to Phase 4a.
-
-The 1,000-layer native profile presented 72 playback frames over 2.4 seconds;
-95th-percentile presentation gap was 35.7 ms. Engine rolling mean frame costs
-warmed from 40.293 ms to 9.291 ms. These are separate measurements, not per-frame
-render-duration percentiles. Graph sampling observed 1,086 cold and 2 warm
-native evaluator calls. The project, quality and inspector assertions passed.
-
-Final app build and root typecheck pass (one existing IconCropper accessibility
-warning). All 22 changed E2E files typecheck independently. Focus regression
-units pass 92/92; presented-card/render transport units pass 37/37. Protocol
-unit, interop and wire gates pass 111 cases, with the existing generator
-benchmark ignored, and the native all-target clippy gate passes with warnings
-denied. The rebuilt WASM packed-model path passes its six focused tests.
-Screenshots, logs, traces and raw JSON remain outside Git.
+- C3 matrix, 32 cases (2D Fit and 200%, 3D camera and Editor view, both
+  themes; current, frozen-current, shipped 1.0.8 and shipped 1.0.18
+  viewers). The 1.0.18 fork now activates. With the WebGL resolve emulation
+  (before its revert), all 32 matched exactly, and the 16 rendered 3D cases
+  passed 48/48 across three repeats with the gizmo excluded. With Metal's
+  hardware resolve, 2D cards and camera-view 3D cards pass (3D under the
+  reference rule above). All eight Editor-view cards fail the reference
+  rule at 4–5 one-level edge pixels (quality ledger C3-Q2, 3D lane).
+- Raw 3D frame, all viewers: 16 one-code MSAA edge pixels and the C3-Q1
+  midpoint tie at `(799, 448)`. No other interior pixel differs.
+- Engine-off card captures are identical across eight launches after the
+  fresh raster.
+- Rust: `pm-protocol` 105 tests, `pm-node` snapshot contract 17 tests
+  (including the pinned F16 display format of a Float32 project);
+  protocol regeneration is current. Desktop typecheck has 0 errors.
+- Desktop units: 7,623 passed, 17 failed in one loaded run. Seven persist
+  in isolation and are integration-owned, since the lane changes none of
+  their inputs: six scene3d geometry schema rejections (fixed by prune1, not
+  yet on integration) and one media-path-cache test. The lane's own
+  failures, picker focus and the generated writer inventory, are fixed.
