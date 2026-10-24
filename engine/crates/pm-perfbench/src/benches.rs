@@ -877,6 +877,9 @@ pub fn import_3d(ctx: &Ctx, name: &str, vertices: usize) -> BenchReport {
     let doc = fixtures::model_doc();
     let media = std::collections::BTreeMap::from([("model".to_owned(), path)]);
     let mut v = Viewer::new(ctx, &doc, &media);
+    // The project was open and the viewer at rest before the import: the
+    // presenter compiled its frame pipelines then (`Renderer::prewarm`).
+    v.composer.renderer().prewarm(v.view.document());
     let scope = Scope::begin();
     let wall = (0..11)
         .map(|k| v.frame(ticks(f64::from(k) / 30.0)))

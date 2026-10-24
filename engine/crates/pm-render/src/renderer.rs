@@ -1373,6 +1373,17 @@ impl Renderer {
         }
     }
 
+    /// Compiles the pipelines every frame of `document` draws with at its
+    /// working format ([`Pipelines::prewarm`]). They are built on first use;
+    /// the presenter calls this when the viewer rests after an open, so the
+    /// next import, or the first layer of an empty project, does not.
+    pub fn prewarm(&self, document: &Document) {
+        let request =
+            RenderRequest::sized(pm_protocol::common::Size::new(1, 1), Precision::Float16);
+        self.pipelines
+            .prewarm(self.device_target_format(document, &request));
+    }
+
     /// Renders `composition` at `time` into a new texture.
     pub fn render(
         &mut self,

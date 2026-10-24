@@ -1211,6 +1211,8 @@ struct Rest {
     since: i64,
     /// Idle memory was released since then.
     released: bool,
+    /// The open documents' frame pipelines were compiled since then.
+    prewarmed: bool,
 }
 
 /// Definition sets prepared on the presenter thread before a GPU device exists.
@@ -1282,6 +1284,10 @@ impl PreparedDefinitions {
 /// textures, the cached snapshot attachment and staging buffers. They are
 /// recreated by the next frame (docs/engine/memory.md, "At rest").
 pub const REST_RELEASE_US: i64 = 2_000_000;
+
+/// How long the viewer rests before the open documents' frame pipelines
+/// are compiled ([`Thread::prewarm_at_rest`]).
+pub const PREWARM_REST_US: i64 = 250_000;
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -1520,6 +1526,41 @@ fn command_name(command: &Command) -> &'static str {
 }
 
 impl Thread {
+    /// Whether any frame, snapshot or request is in progress or waiting.
+    fn busy(&self) -> bool {
+        !self.pending_snapshots.is_empty()
+            || self.snapshots.waiting()
+            || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
+            || self.views.values().any(|v| {
+                v.clock.is_playing()
+                    || (v.dirty && v.state.headless != Some(true))
+                    || v.awaiting.is_some()
+                    || !v.requests.is_empty()
+            })
+    }
+
+    /// Compiles the frame pipelines of every viewed document once nothing
+    /// was drawn for [`PREWARM_REST_US`] ([`pm_render::Renderer::prewarm`]).
+    /// Pipelines are built on first use, so without this an import or the
+    /// first layer of an empty project pays for them in its frame. Once per
+    /// rest, never while anything is drawing.
+    fn prewarm_at_rest(&mut self) {
+        if self.busy() {
+            return;
+        }
+        self.rest.prewarmed = true;
+        let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) else {
+            return;
+        };
+        for (key, view) in &self.views {
+            if view.state.headless != Some(true)
+                && let Some(doc) = self.docs.get(key)
+            {
+                composer.renderer().prewarm(doc.document());
+            }
+        }
+    }
+
     /// Frees idle GPU memory once nothing was drawn for [`REST_RELEASE_US`]:
     /// the renderer's idle intermediate targets, viewer scratch textures,
     /// the cached snapshot attachment and staging buffers. Exported surface
@@ -1535,22 +1576,17 @@ impl Thread {
             self.rest = Rest {
                 seen,
                 since: now_us,
-                released: false,
+                ..Rest::default()
             };
             return;
+        }
+        if !self.rest.prewarmed && now_us - self.rest.since >= PREWARM_REST_US {
+            self.prewarm_at_rest();
         }
         if self.rest.released || now_us - self.rest.since < REST_RELEASE_US {
             return;
         }
-        let busy = !self.pending_snapshots.is_empty()
-            || self.snapshots.waiting()
-            || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
-            || self.views.values().any(|v| {
-                v.clock.is_playing()
-                    || (v.dirty && v.state.headless != Some(true))
-                    || v.awaiting.is_some()
-                    || !v.requests.is_empty()
-            });
+        let busy = self.busy();
         let Some(gpu) = self.gpu.as_mut() else {
             self.rest.released = true;
             return;
@@ -7370,6 +7406,23 @@ mod tests {
                 .source_key(valid.kind, valid.id.as_str())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn frame_pipelines_compile_once_per_rest_after_the_viewer_settles() {
+        let (mut thread, _) = preview_thread();
+        let t0 = 1_000_000;
+        thread.release_at_rest(t0);
+        thread.release_at_rest(t0 + PREWARM_REST_US - 1);
+        assert!(!thread.rest.prewarmed, "too early");
+        thread.release_at_rest(t0 + PREWARM_REST_US);
+        assert!(thread.rest.prewarmed);
+        // A frame starts a new rest, which compiles again once it settles.
+        thread.stats().frames += 1;
+        thread.release_at_rest(t0 + PREWARM_REST_US + 1);
+        assert!(!thread.rest.prewarmed);
+        thread.release_at_rest(t0 + 2 * PREWARM_REST_US + 1);
+        assert!(thread.rest.prewarmed);
     }
 
     #[test]

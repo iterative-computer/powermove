@@ -529,6 +529,21 @@ impl Pipelines {
         self.flip[format_index(format)].get()
     }
 
+    /// Compiles the deferred 2D pipelines every drawn frame at `format`
+    /// uses (quads, solids, the row flip, the background), ahead of the
+    /// frame that would otherwise compile them.
+    pub fn prewarm(&self, format: wgpu::TextureFormat) {
+        let i = format_index(format);
+        for pipeline in [
+            &self.draw[i],
+            &self.solid[i],
+            &self.flip[i],
+            &self.background[i],
+        ] {
+            pipeline.get();
+        }
+    }
+
     pub fn source(&self, format: wgpu::TextureFormat) -> &wgpu::ComputePipeline {
         &self.source[format_index(format)]
     }
@@ -598,6 +613,23 @@ mod tests {
             "the finished factory kept its captures"
         );
         assert!(std::ptr::eq(cached, one_shot.get()));
+    }
+
+    #[test]
+    fn prewarm_compiles_one_formats_frame_pipelines_only() {
+        let gpu = pm_gpu::Gpu::new("lazy pipeline prewarm").unwrap();
+        let pipelines = Pipelines::new(&gpu.device);
+        pipelines.prewarm(wgpu::TextureFormat::Rgba16Float);
+        assert_eq!(pipelines.initialized_2d_pipelines(), 4);
+        pipelines.draw(wgpu::TextureFormat::Rgba16Float);
+        pipelines.flip(wgpu::TextureFormat::Rgba16Float);
+        assert_eq!(
+            pipelines.initialized_2d_pipelines(),
+            4,
+            "a frame recompiled them"
+        );
+        pipelines.prewarm(wgpu::TextureFormat::Rgba16Float);
+        assert_eq!(pipelines.initialized_2d_pipelines(), 4);
     }
 
     #[test]
