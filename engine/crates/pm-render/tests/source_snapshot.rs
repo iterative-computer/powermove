@@ -1,9 +1,14 @@
 //! Source frames through the same decoder and source pass as layers.
 #![cfg(target_os = "macos")]
 
+mod support;
+
+use pm_protocol::color::Precision;
 use pm_protocol::common::{Size, Ticks};
 use pm_protocol::snapshot::SourceFit;
-use pm_render::Renderer;
+use pm_render::{MapResolver, RenderRequest, Renderer};
+use serde_json::json;
+use support::doc::*;
 
 #[test]
 fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
@@ -442,5 +447,87 @@ fn source_batch_matches_individual_video_frames_in_order() {
     assert_eq!(
         counters.get(pm_perf::Counter::DrawCalls),
         times.len() as u64
+    );
+}
+
+/// The source monitor shows Interpret Footage's reading exactly as the
+/// composition draws the same source: no coded planes (Chromium would apply
+/// the probe's tags), and the engine's composed frame equals a full-frame
+/// layer of that asset within one code.
+#[test]
+fn monitor_reads_interpret_footage_as_composition_does() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
+    let (w, h) = (160u32, 90u32);
+    let interpret = json!({ "matrix": "bt709", "range": "full" });
+    let (interpretation, issues) = pm_media::interpret::Interpretation::from_json(&interpret);
+    assert!(
+        issues.is_empty() && !interpretation.is_empty(),
+        "{issues:?}"
+    );
+    let mut doc = project(
+        w,
+        h,
+        2.0,
+        no_fill(),
+        vec![layer(
+            "v",
+            "video",
+            json!({ "asset": "clip", "fit": "stretch", "w": w, "h": h, "trim": 0, "speed": 1 }),
+            f64::from(w) / 2.0,
+            f64::from(h) / 2.0,
+            2.0,
+        )],
+    );
+    asset(&mut doc, "clip", "video", "mp4", w, h, 2.0);
+    doc["assets"]["clip"]["interpret"] = interpret;
+    let mut resolver = MapResolver::default();
+    resolver.paths.insert("clip".into(), fixture.clone());
+
+    let mut renderer = Renderer::headless().unwrap();
+    let time = support::ticks(0.5);
+    let request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float16);
+    let frame = renderer
+        .render(&load(&doc), "Ptest-root", time, &request, &resolver)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let composed: Vec<u8> = renderer
+        .read_rgba(&frame)
+        .unwrap()
+        .iter()
+        .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect();
+    let monitor = renderer
+        .source_rgba8_composed(
+            &fixture,
+            time,
+            Size::new(w, h),
+            SourceFit::Stretch,
+            &interpretation,
+            false,
+        )
+        .unwrap();
+    let probe = renderer
+        .source_rgba8_composed(
+            &fixture,
+            time,
+            Size::new(w, h),
+            SourceFit::Stretch,
+            &Default::default(),
+            false,
+        )
+        .unwrap();
+    let max = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+    assert_eq!(monitor.len(), composed.len());
+    assert!(
+        max(&monitor, &composed) <= 1,
+        "monitor vs composition: {}",
+        max(&monitor, &composed)
+    );
+    // The override is visible: full-range BT.709 is not the file's reading.
+    assert!(
+        max(&probe, &monitor) > 8,
+        "interpretation not applied: {}",
+        max(&probe, &monitor)
     );
 }

@@ -37,6 +37,12 @@ export move from Rec.709 to the same primaries when the videoparity lane
 adopts `frame_reading`; that change is its row. Tagged SMPTE 170M SD video is
 byte-exact with today (max 0.49 from the reference for both).
 
+Interpret Footage on the monitor: today's CSS monitor ignores it, so an
+interpreted asset looked different in the monitor and in the viewer. The
+native monitor draws interpreted footage as composition does (within one
+code of a full-frame layer of it: `pm-render` test
+`monitor_reads_interpret_footage_as_composition_does`).
+
 Fully tagged 8-bit video that Chromium software-decodes already reads the
 shared way and stays byte-exact with today (max 0.45–0.50 from the
 reference for both).

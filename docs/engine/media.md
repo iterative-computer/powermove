@@ -52,9 +52,10 @@ transfer; BT.709, 601 and BT.2020 NCL matrices) the monitor sends tags.
 Otherwise (BT.2020 or other primaries, PQ, HLG, other curves, and sources
 composition draws only as interpreted: rotation, fields, pixel aspect,
 cropping) the engine draws the source and sends sRGB RGBA, so the monitor
-never fails on a tag. The monitor ignores Interpret Footage overrides,
-as today's monitor does (RFC 16 `display`): for an interpreted asset the
-monitor and the composition differ by that interpretation.
+never fails on a tag. Interpret Footage (any member, and the renderer's
+per-file colour override) takes the same engine route on the original file,
+so the monitor shows the reading composition draws; an interpreted still
+asks for the `interpreted` reading. SVG rasters carry no interpretation.
 
 Posters, filmstrips and the monitor share a 64 MiB renderer cache (40 MiB
 frames, 16 MiB filmstrips, 8 MiB posters). Import commits without waiting for
@@ -63,10 +64,9 @@ editing preview's publication wait for media to be quiet for 500 ms and an
 idle callback, at most 2 s (`media/activity.ts`); nothing the user or an agent
 awaits (import, replace, restore) waits on that publication.
 
-Limits: the colour reference clips the signal to [0, 1] before the EOTF,
-which equals composition for Rec.709-gamut sources but not for wide-gamut
-sources that composition linearises unclipped. Heard-PCM equality is gated
-on decoded mixes, not device output.
+Superwhites and sub-blacks survive the engine's float reading; the 8-bit
+monitor clips them only at the display encode, and the gate's reference does
+the same. Heard-PCM equality is gated on decoded mixes, not device output.
 
 ## Building
 

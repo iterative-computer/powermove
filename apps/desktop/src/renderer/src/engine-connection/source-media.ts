@@ -474,7 +474,12 @@ export class SourceMonitor extends EventTarget {
       const width = Math.max(1, Math.round((this.cssWidth || meta?.w || 1) * dpr));
       const height = Math.max(1, Math.round((this.cssHeight || meta?.h || 1) * dpr));
       const video = meta?.kind === 'video';
-      const snapshot = await this.source.frame(this.asset, this.currentTime, width, height, { fit: 'contain', color: video ? 'compositor' : 'display', signal });
+      // Interpret Footage overrides how composition reads a still; show that
+      // reading. (Video: the engine applies them on the compositor request.
+      // SVG rasters carry no source interpretation.)
+      const interpreted = !video && meta?.format !== 'svg' && !!meta?.interpret && Object.keys(meta.interpret).length > 0;
+      const color = video ? 'compositor' : interpreted ? 'interpreted' : 'display';
+      const snapshot = await this.source.frame(this.asset, this.currentTime, width, height, { fit: 'contain', color, signal });
       if (this.disposed || this.requested !== generation) {
         if (snapshot.videoSurface) this.host.frameBridge?.discardSource(snapshot.videoSurface.token);
         return;

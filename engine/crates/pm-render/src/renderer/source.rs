@@ -64,7 +64,32 @@ impl Renderer {
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
     ) -> Result<Vec<u8>, String> {
-        self.source_rgba8_with_decode(path, time, output, fit, interpretation, true)
+        self.source_rgba8_with_decode(path, time, output, fit, interpretation, true, false)
+    }
+
+    /// The source as composition reads it: Interpret Footage's
+    /// `interpretation` (empty for the file's own reading), the renderer's
+    /// per-file override and the image-sequence rule, from the exact worker.
+    /// The source monitor draws footage this way whenever Chromium cannot
+    /// present the coded planes with the same reading.
+    pub fn source_rgba8_composed(
+        &mut self,
+        path: &Path,
+        time: Ticks,
+        output: Size,
+        fit: SourceFit,
+        interpretation: &Interpretation,
+        sequence: bool,
+    ) -> Result<Vec<u8>, String> {
+        self.source_rgba8_with_decode(
+            path,
+            time,
+            output,
+            fit,
+            Some(interpretation),
+            true,
+            sequence,
+        )
     }
 
     /// Single-frame job path: preserve the batch job's direct Export decode.
@@ -76,7 +101,7 @@ impl Renderer {
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
     ) -> Result<Vec<u8>, String> {
-        self.source_rgba8_with_decode(path, time, output, fit, interpretation, false)
+        self.source_rgba8_with_decode(path, time, output, fit, interpretation, false, false)
     }
 
     fn source_rgba8_with_decode(
@@ -87,6 +112,7 @@ impl Renderer {
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
         exact_worker: bool,
+        sequence: bool,
     ) -> Result<Vec<u8>, String> {
         let mut head = [0u8; 512];
         let n = std::fs::File::open(path)
@@ -103,8 +129,15 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("pm source snapshot"),
             });
-        let source =
-            self.source_texture(path, time, interpretation, kind, &mut encoder, exact_worker)?;
+        let source = self.source_texture(
+            path,
+            time,
+            interpretation,
+            kind,
+            &mut encoder,
+            exact_worker,
+            sequence,
+        )?;
         self.draw_source_target(source, output, fit, encoder)
     }
 
@@ -116,6 +149,7 @@ impl Renderer {
         kind: pm_media::image::ImageFormat,
         encoder: &mut wgpu::CommandEncoder,
         exact_worker: bool,
+        sequence: bool,
     ) -> Result<Target, String> {
         if kind != pm_media::image::ImageFormat::Other {
             self.media
@@ -145,7 +179,7 @@ impl Renderer {
                     Precision::Float16,
                     interpretation,
                     pm_time::Rate::new(30, 1).expect("30 fps"),
-                    false,
+                    sequence,
                     interpretation.is_none(),
                     true,
                 )
@@ -163,7 +197,7 @@ impl Renderer {
                     Precision::Float16,
                     interpretation,
                     pm_time::Rate::new(30, 1).expect("30 fps"),
-                    false,
+                    sequence,
                     interpretation.is_none(),
                     true,
                 )
@@ -244,7 +278,7 @@ impl Renderer {
             });
         for (index, &time) in times.iter().enumerate() {
             let source =
-                self.source_texture(path, time, interpretation, kind, &mut encoder, false)?;
+                self.source_texture(path, time, interpretation, kind, &mut encoder, false, false)?;
             self.record_source_draw(&source, output, fit, &target, &mut encoder);
             encoder.copy_texture_to_buffer(
                 target.texture.as_image_copy(),

@@ -1747,6 +1747,11 @@ impl MediaCache {
     /// Reads `path` with `color` instead of the probe's interpretation (or
     /// restores the probe's with `None`). Converted frames of the file are
     /// dropped.
+    /// Whether a per-file colour override ([`Self::interpret`]) reads `path`.
+    pub(crate) fn overrides_color(&self, path: &Path) -> bool {
+        self.interpretations.contains_key(path)
+    }
+
     pub fn interpret(&mut self, path: &Path, color: Option<ColorDescription>) {
         match color {
             Some(c) => {

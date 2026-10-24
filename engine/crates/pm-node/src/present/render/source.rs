@@ -412,10 +412,17 @@ impl Thread {
         };
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         let original = doc.media().path(asset.as_str());
-        let path = if color != SourceColor::Interpreted {
-            doc.source_media(asset.as_str()).flatten()
-        } else {
+        let record = pm_eval::node::member(doc.document().root(), "assets")
+            .and_then(|assets| pm_eval::node::member(Some(assets), asset.as_str()));
+        // Interpret Footage says how composition reads the original. The
+        // monitor shows that reading of that file, drawn by the engine.
+        let footage = record.and_then(pm_render::footage::interpretation);
+        let reads_original = color == SourceColor::Interpreted
+            || (color == SourceColor::Compositor && footage.is_some());
+        let path = if reads_original {
             original.clone()
+        } else {
+            doc.source_media(asset.as_str()).flatten()
         };
         let Some(path) = path else {
             self.stats().snapshot_failures += 1;
@@ -426,8 +433,6 @@ impl Thread {
             );
             return;
         };
-        let record = pm_eval::node::member(doc.document().root(), "assets")
-            .and_then(|assets| pm_eval::node::member(Some(assets), asset.as_str()));
         if color == SourceColor::Compositor
             && !pm_eval::node::is_str(pm_eval::node::member(record, "kind"), "video")
         {
@@ -439,7 +444,7 @@ impl Thread {
             );
             return;
         }
-        if color != SourceColor::Interpreted
+        if !reads_original
             && record
                 .is_some_and(|r| pm_eval::node::truthy(pm_eval::node::member(Some(r), "rendition")))
             && original.as_ref() == Some(&path)
@@ -453,7 +458,7 @@ impl Thread {
             return;
         }
         let interpretation = if color == SourceColor::Interpreted {
-            record.and_then(pm_render::footage::interpretation)
+            footage.clone()
         } else {
             None
         };
@@ -499,26 +504,30 @@ impl Thread {
             let sequence = record.is_some_and(|r| {
                 pm_eval::node::truthy(pm_eval::node::member(Some(r), "imageSequence"))
             });
-            match composer
-                .renderer()
-                .source_video_planes(&path, job.request.time, sequence)
-            {
+            let planes = match footage {
+                Some(_) => Ok(None),
+                None => composer
+                    .renderer()
+                    .source_video_planes(&path, job.request.time, sequence),
+            };
+            match planes {
                 Ok(Some((size, pixels, video))) => {
                     coded_video = Some((size, video));
                     Ok(Some(pixels))
                 }
-                // A reading Chromium cannot apply exactly (wide gamut, HDR,
-                // other curves, or geometry such as rotation): the engine
-                // draws the source as interpreted (its default reading), and
-                // the presenter shows these sRGB pixels as an RGBA frame.
+                // Interpret Footage, or a reading Chromium cannot apply
+                // exactly (wide gamut, HDR, other curves, or geometry such as
+                // rotation): the engine draws the source as composition reads
+                // it, and the presenter shows these sRGB pixels as an RGBA frame.
                 Ok(None) => composer
                     .renderer()
-                    .source_rgba8(
+                    .source_rgba8_composed(
                         &path,
                         job.request.time,
                         job.request.output_size,
                         fit,
-                        Some(&pm_media::interpret::Interpretation::default()),
+                        footage.as_ref().unwrap_or(&Default::default()),
+                        sequence,
                     )
                     .map(|pixels| {
                         let pixels = super::super::snapshot::encode_rgba8_unorm(

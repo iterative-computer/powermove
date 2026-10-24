@@ -317,6 +317,22 @@ describe('engine source consumers', () => {
     } finally { f.source.dispose(); vi.unstubAllGlobals(); }
   });
 
+  it.each([
+    [{ alpha: 'premultiplied' }, 'png', 'interpreted'],
+    [undefined, 'png', 'display'],
+    [{ alpha: 'premultiplied' }, 'svg', 'display']
+  ] as const)('reads a still with interpret %j (%s) through the %s reading', async (interpret, format, color) => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const f = fixture();
+    Object.assign(f.project.assets.clip, { kind: 'image', format, interpret });
+    try {
+      const monitor = f.source.monitor('clip');
+      document.body.append(monitor.surface);
+      await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledWith(
+        expect.objectContaining({ source: expect.objectContaining({ color }) }), 'async'));
+    } finally { f.source.dispose(); vi.unstubAllGlobals(); }
+  });
+
   it('preserves image-element compositing for native stills', () => {
     const f = fixture(); f.project.assets.clip.kind = 'image';
     const monitor = f.source.monitor('clip');

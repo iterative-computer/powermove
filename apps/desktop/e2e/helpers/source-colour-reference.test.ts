@@ -125,8 +125,9 @@ describe('independent PNG ICC and video colour reference', () => {
     const red = [81, 90, 240] as const;
     const tagged = referenceDisplayCodes(p3, red, { matrix: 'bt601', fullRange: false, primaries: 'smpte170m' });
     const compat = referenceDisplayCodes(p3, red, { matrix: 'bt601', fullRange: false, primaries: 'bt709' });
-    // Today's CSS video showed 228,62,34 and the composition path 233,51,35.
-    expect(tagged.map(Math.round)).toEqual([228, 62, 34]);
+    // Its B' is just below 0. Kept until the display (not clipped first), it
+    // reads 33.4; today's CSS video, which clips the signal, showed 228,62,34.
+    expect(tagged.map(Math.round)).toEqual([228, 62, 33]);
     expect(compat.map(Math.round)).toEqual([233, 51, 35]);
   });
 
@@ -141,6 +142,18 @@ describe('independent PNG ICC and video colour reference', () => {
     for (let channel = 0; channel < 3; channel++) expect(ten[channel]).toBeCloseTo(eight[channel]!, 6);
     expect(srgbEotf(-0.5)).toBe(-srgbEotf(0.5));
     expect(srgbEotf(0.04045)).toBeCloseTo(0.04045 / 12.92, 12);
+  });
+
+  it('keeps signal excursions until the display encode clips them', () => {
+    const p3 = readPngMatrixTrcProfile(syntheticPng(syntheticIcc(DISPLAY_P3_D50)));
+    const sd = { matrix: 'bt601', fullRange: false, primaries: 'smpte170m' } as const;
+    // Neutral superwhite and sub-black reach the display, which clips them.
+    expect(referenceDisplayCodes(p3, [250, 128, 128], sd)).toEqual([255, 255, 255]);
+    expect(referenceDisplayCodes(p3, [4, 128, 128], sd)).toEqual([0, 0, 0]);
+    // A superwhite red past R' = 1 still changes the other display channels.
+    const [r, g] = referenceDisplayCodes(p3, [200, 100, 240], sd);
+    expect(r).toBe(255);
+    expect(g).toBeCloseTo(161.70, 1);
   });
 
   it('decodes and numerically inverts gamma and sampled ICC TRCs', () => {

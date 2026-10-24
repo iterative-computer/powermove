@@ -25,7 +25,7 @@ impl Renderer {
     /// Return the actual coded dimensions, tight YUV(A) planes, and the
     /// frame's colour tags. `outputSize`/fit are presentation geometry and
     /// deliberately do not resample these samples. `Ok(None)`: Chromium cannot
-    /// apply this frame's reading exactly; draw it with `source_rgba8`.
+    /// apply this frame's reading exactly; draw it with `source_rgba8_composed`.
     pub fn source_video_planes(
         &mut self,
         path: &Path,
@@ -39,6 +39,10 @@ impl Renderer {
                 .as_ref()
                 .and_then(|video| chromium_tags(&frame_reading(&video.color, sequence)))
         };
+        // A per-file colour override is composition's reading, not the probe's.
+        if self.media.overrides_color(path) {
+            return Ok(None);
+        }
         let Some((source, frame)) = self
             .media
             .source_exact_decoded(path, time, |source| tags(source).is_some())
