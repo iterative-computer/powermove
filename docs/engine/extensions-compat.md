@@ -230,10 +230,12 @@ The initial paused warm-up and playback horizon remain bounded as above.
 Their canvases are captured as premultiplied ImageBitmaps without color
 conversion and sent to a dedicated worker. That worker uses the same WebGL
 upload/readback function as synchronous callers and transfers the pixel buffer
-back. GPU readback no longer waits on the renderer thread. Geometry is captured before the async
-readback, so a wrapper reusing its surface object cannot change an earlier
-frame's quad. The worker closes each bitmap, reports errors to the request,
-and terminates on disposal.
+back, so playback's GPU readback never waits on the renderer thread. A paused
+edit's own answer is the exception: its frame waits for those pixels, so it is
+read back on the renderer thread with that same function, without the worker's
+two message hops. Geometry is captured before the async readback, so a wrapper
+reusing its surface object cannot change an earlier frame's quad. The worker
+closes each bitmap, reports errors to the request, and terminates on disposal.
 
 The base cache follows today's raster cache (`legacy/gl/raster.ts`): plain
 text and plain shapes key by native-evaluated content, density and crop,
@@ -243,8 +245,11 @@ animators and styles, font anchoring and captions are never cached because
 they can change with time beyond their resolved content. A genuinely changed
 base is prepared afresh; the changing-base cadence gates assert asynchronous
 loads throughout playback and zero synchronous loads during the measured span.
-Base surfaces expire at each document revision; the large-document edit gate
-also requires fresh off-thread native raster work throughout the drag.
+A plain shape's raster is a function of its resolved content and density
+only, so its base survives document revisions (moving it needs no new
+raster, as in today's cache); text bases expire at each revision (fonts). The
+large-document edit gate resizes the shape on every move, so each move still
+needs fresh off-thread native raster work from the worker's mirror.
 
 A required paused viewer answer remains available until presentation, so a
 native need emitted before the proactive upload can repost those same pixels
@@ -266,6 +271,14 @@ layers retain the open composition's preparation step and ask for missing
 times.
 
 ### Paused-edit performance gate and attribution
+
+A paused edit with an override goes: the window's barrier diffs the document
+(an unscoped `touch()` compares every layer of the open composition; see
+`write-path.md`), sends the batch, and prepares the frame on screen at the new
+revision at once (`prepareShown`): the wrapper over the cached base, the
+readback, the answer. The engine applies the batch, plans the frame, waits for
+the answer (`CompatPending`), draws it, and the viewer's worker draws it on
+arrival. `frame:rendered` follows in the window's next animation frame.
 
 Build the native addons, wasm and app before acquiring the Electron lock.
 Run the opt-in gate from the repository root:
@@ -292,20 +305,24 @@ and owned load workers are cleaned up on completion and interruption.
 `EngineConnection.setTrace(true)` enables the bounded page-clock trace at
 `EngineRender.trace.take()`: document diff/encoding/apply/dispatch, wrapper
 scheduling/CPU, base snapshot native wait/render, main service and round-trip,
-bitmap capture, readback worker compute/round-trip, answer upload, viewer
-submission and the frame event. Pair it with the viewer's presentation trace
-and native `turnTrace` /
-`presentTrace` (enabled by `POWERMOVE_BRIDGE_TRACE=1`). Native layer raster
-queue time, worker execution and completion delivery are separate; a delayed
-completion no longer looks like expensive worker execution. `render wake late`
-identifies time beyond the render thread's requested wake deadline, and
-`command drain` records a burst's duration and count. Existing compatibility
-waits, late skips, CPU/GPU completion and presentation timestamps distinguish
-producer, scheduling, upload, GPU and presentation gaps. These bounded stage
-traces contain timing and revision tags, not document content.
-For snapshot wait/render/main events, `count` is the measured microseconds;
+bitmap capture, readback, answer upload, viewer submission and the frame
+event. Pair it with the viewer's presentation trace and the native
+`turnTrace` / `presentTrace` (`POWERMOVE_BRIDGE_TRACE=1`): per frame, when
+its revision arrived and was applied, render start, CPU, GPU completion and
+send. Native layer raster queue time, worker execution and completion
+delivery are separate; `render wake late` is time beyond the render thread's
+requested wake, and `command drain` a burst's duration and count. For
+snapshot wait/render/main events, `count` is the measured microseconds;
 subtract main service time from round-trip time to locate renderer/main IPC
-delay separately from native work.
+delay. The traces hold timing and revision tags, not document content.
+
+The playback cadence gates run with all of these traces on. For the run's
+longest gap between presented frames, `stallAttribution` lists what each
+trace recorded inside it: native renders (start, CPU, GPU done, sent, timed
+or not), render-thread turns, the viewer's arrivals, drops with their reason
+and draws, the longest wait between animation frames, renderer stages and
+long tasks. A failing cadence assertion prints it; the full traces are
+attached to the test result.
 
 A session announces its compatibility producers as soon as its id is bound,
 before the initial resync. Main-owned snapshot sessions receive the producer
@@ -433,7 +450,7 @@ all three (below).
 ### Round seven: rasters off the presentation thread (2026-10-22)
 
 **Why size frames 67 to 73 were lost.** A traced campaign of the animated
-size gate (`PM_COMPAT_TRACE=1`, `POWERMOVE_BRIDGE_TRACE=1`) showed the
+size gate (with its traces) showed the
 native render thread starting timed frames 58 ms apart, instead of 33 ms,
 for k 59 to 70, and nowhere else. During those frames the lookahead, 18 to
 24 frames ahead, asked for the bases of frames 80 to 113: the largest
