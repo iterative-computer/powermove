@@ -22,6 +22,9 @@ test('saving an inactive tab preserves live edits after a local recovery write f
     // The native engine branch writes the journal off the edit's task (setAsync).
     const setAsync = PM.store.setAsync;
     if (setAsync) PM.store.setAsync = (key: string, value: any) => key === `projectJournal.${second}` ? Promise.resolve(false) : setAsync(key, value);
+    // With main keeping the journal (SAVE-1), entries are appended there instead.
+    const appendJournal = PM.store.appendJournal;
+    if (appendJournal) PM.store.appendJournal = (key: string, value: any) => key === `projectJournal.${second}` ? Promise.reject(new Error('The recovery store is full')) : appendJournal(key, value);
     PM.hist.do('Rename second', () => { PM.proj.name = 'Latest second document'; });
     const live = PM.proj;
     const recover = PM.Projects.recoverAsync;
@@ -38,7 +41,7 @@ test('saving an inactive tab preserves live edits after a local recovery write f
       const liveName = PM.proj.name;
       const undo = PM.hist.undo(), restoredName = PM.proj.name;
       return { started, recoveryName, saved, dirty, activeStayed, sameDocument, liveName, undo, restoredName };
-    } finally { PM.store.set = set; if (setAsync) PM.store.setAsync = setAsync; PM.Projects.recoverAsync = recover; release(); }
+    } finally { PM.store.set = set; if (setAsync) PM.store.setAsync = setAsync; if (appendJournal) PM.store.appendJournal = appendJournal; PM.Projects.recoverAsync = recover; release(); }
   });
   expect(result).toEqual({ started: true, recoveryName: 'Second document', saved: true, dirty: false,
     activeStayed: true, sameDocument: true, liveName: 'Latest second document', undo: true, restoredName: 'Second document' });
