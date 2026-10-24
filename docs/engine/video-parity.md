@@ -22,18 +22,20 @@ departs from the standard, the standard wins. Cleanups against today are rows in
 3. **Reading.** `pm_media::probe::color::video_reading` is the one table
    for untagged and partly tagged video, shared with the source monitor:
    tags win field by field; matrix BT.601 for at most 576 lines and under
-   1280 wide, else BT.709; transfer the sRGB curve; primaries SMPTE 170M
-   at the same SD sizes, else Rec.709 (owner decision VIDEO-SD-1); range
-   limited. Interpret Footage overrides, then the host's per-file
+   1280 wide, else BT.709; transfer the sRGB curve; primaries at those SD
+   sizes by line count, 576 lines BT.470BG and others SMPTE 170M, else
+   Rec.709 (owner decision VIDEO-SD-1, mpv's rule); range limited. Interpret Footage overrides, then the host's per-file
    override, replace it. Image-sequence renditions keep their authored
-   BT.601 matrix.
+   BT.601 matrix and Rec.709 primaries (`frame_reading`).
 4. **Convert.** The source pass (`shaders/source.wgsl`) reconstructs chroma
-   at its siting (`pm_color::chroma`: Catmull-Rom across, linear down for
-   4:2:0; linear for 4:2:2), applies the matrix, and in float converts
-   primaries (BT.601, BT.2020, Display P3) to Rec.709 in linear light.
-   Premultiplied sources convert straight colour. A reading that changes colour (a gamut
-   conversion, a tone map) clips the signal to 0..1 before linearising it,
-   as a display does.
+   at its siting (`pm_color::chroma`: Catmull-Rom across, the closest of
+   the candidates to 4:4:4 truth, `tests/chroma_truth.rs`; linear down for
+   4:2:0, which keeps the 4:2:0 export round trip exact), applies the
+   matrix, and in float converts primaries (BT.601, BT.2020, Display P3) to
+   Rec.709 in linear light. Premultiplied sources convert straight colour.
+   SDR transfers are extended, so superwhites and sub-blacks survive for
+   every reading; only 8-bit storage or display clips them. PQ and HLG
+   are clipped to their 0..1 domain before the tone map.
 5. **HDR** (owner decision HDR-1). PQ and HLG are decoded per BT.2100
    (HLG through the OOTF for a 1000 cd/m² display, BT.2408's route to PQ
    light) and tone mapped with the BT.2390 EETF, per component in the PQ
@@ -53,6 +55,9 @@ departs from the standard, the standard wins. Cleanups against today are rows in
   values when playing, paused and exported (`tests/video_reading.rs`).
 - Depth is honoured: storage follows the project, deep sources never pass
   through 8 bits.
+- One decoder kind per stream. ProRes 422 decodes to 10-bit `x422` for
+  display and 16-bit `v216` for export (amendment 6); for 10-bit ProRes the
+  two carry the same codes, and preview = export holds.
 - Opening a project never reads a whole video: the probe/index cache keys a
   file by its stamp (device, inode, size, modification and change time)
   and its sampled fingerprint (`pm_media::probe::cache`).
@@ -64,7 +69,12 @@ departs from the standard, the standard wins. Cleanups against today are rows in
 gamut SDR, PQ/HLG, ProRes) at 8, 16 and 32 bits, and compares it with an
 f64 conversion of the decoded Y′CbCr and with today's paused and playing
 captures. The engine must be within its stated bound at each depth and
-at least as close as both captures, overall and on flat-chroma pixels.
+at least as close as both captures, on average and on flat-chroma pixels.
+The reference shares no colour code with the engine
+(`tests/support/standards.rs`): readings are written by hand in
+`cases.json`, and a cross-check ties pm-color's matrices, EETF and range
+constants to the standards. `tests/video_compositing.rs` proves video
+reaches effects, blend modes and masks exactly as a still does.
 The shift from today's paused composition is reported for the ledger.
 
 ## Performance

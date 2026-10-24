@@ -167,9 +167,10 @@ through; clipping happens only at output.
 - `pm_color::linear`: linear-light helpers for linear blending (Phase 3a): E
   conversions of premultiplied values, the nine blend modes in both domains,
   HDR-safe screen, overlay, and soft light.
-- `pm_color::chroma`: siting origins, the section 9 upsamplers (horizontal
-  linear for 4:2:2; Catmull-Rom horizontally and linear vertically for 4:2:0;
-  co-sited samples exact), decimation, and pass-through.
+- `pm_color::chroma`: siting origins, the section 9 upsamplers (Catmull-Rom
+  horizontally for every subsampling, linear vertically for 4:2:0, chosen
+  against 4:4:4 ground truth by `tests/chroma_truth.rs`; co-sited samples
+  exact), decimation, and pass-through.
   **Declared 4:2:0 filter.** Section 9 leaves the 4:2:0 encoder-input filter
   to a declaration. A two-row average blurred chroma by `[1, 6, 1] / 8`
   against the linear upsampler (35 CV on an H.264 round trip, failing
