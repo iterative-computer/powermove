@@ -300,6 +300,71 @@ describe('save IPC', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('starts reader idle expiry only after a read completes and suspends it during reads', async () => {
+    const { EventEmitter } = await import('node:events');
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
+    electronMocks.dialogShowOpen.mockResolvedValue({ canceled: false, filePaths: ['/chosen.pmv'] });
+    let finishRead!: (bytes: Uint8Array) => void;
+    const projects = {
+      open: vi.fn(async () => ({ token: 'slow-reader', document: {}, media: [], size: 4 })),
+      read: vi.fn()
+        .mockResolvedValueOnce(new Uint8Array([1, 2]))
+        .mockImplementationOnce(() => new Promise<Uint8Array>((resolve) => { finishRead = resolve; })),
+      close: vi.fn(async () => undefined)
+    };
+    const { ipcMain, invokes } = fakeIpcMain();
+    registerSaveIpc(ipcMain, { isTrustedSender: () => true, projects: projects as any });
+    const call = (channel: string, payload?: unknown) => invokes.get(channel)!(invokeEvent(sender), payload);
+    vi.useFakeTimers();
+    try {
+      expect(await call(IPC.projectOpen)).toMatchObject({ ok: true, token: 'slow-reader' });
+      await vi.advanceTimersByTimeAsync(121_000);
+      expect(projects.close).not.toHaveBeenCalled();
+      expect(await call(IPC.projectRead, { token: 'slow-reader', offset: 0, length: 2 })).toEqual(new Uint8Array([1, 2]));
+      await vi.advanceTimersByTimeAsync(119_000);
+      const pending = call(IPC.projectRead, { token: 'slow-reader', offset: 2, length: 2 });
+      await vi.advanceTimersByTimeAsync(121_000);
+      expect(projects.close).not.toHaveBeenCalled();
+      finishRead(new Uint8Array([3, 4]));
+      expect(await pending).toEqual(new Uint8Array([3, 4]));
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(projects.close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(projects.close).toHaveBeenCalledExactlyOnceWith('slow-reader', false);
+      await expect(call(IPC.projectRead, { token: 'slow-reader', offset: 0, length: 1 })).rejects.toThrow('token');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds unopened readers per window and closes only that window’s tokens on destruction', async () => {
+    const { EventEmitter } = await import('node:events');
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    const other = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
+    electronMocks.dialogShowOpen.mockResolvedValue({ canceled: false, filePaths: ['/chosen.pmv'] });
+    let nextToken = 0;
+    const projects = {
+      open: vi.fn(async () => ({ token: `reader-${++nextToken}`, document: {}, media: [], size: 4 })),
+      read: vi.fn(async () => new Uint8Array([1])),
+      close: vi.fn(async () => undefined)
+    };
+    const { ipcMain, invokes } = fakeIpcMain();
+    registerSaveIpc(ipcMain, { isTrustedSender: () => true, projects: projects as any });
+    const call = (channel: string, payload?: unknown, owner = sender) => invokes.get(channel)!(invokeEvent(owner), payload);
+    for (let i = 0; i < 32; i++) expect(await call(IPC.projectOpen)).toMatchObject({ ok: true, token: `reader-${i + 1}` });
+    expect(await call(IPC.projectOpen, undefined, other)).toMatchObject({ ok: true, token: 'reader-33' });
+    expect(await call(IPC.projectOpen)).toMatchObject({ ok: false, error: 'Too many open project readers for this window.' });
+    expect(projects.close).toHaveBeenCalledExactlyOnceWith('reader-34', false);
+    await expect(call(IPC.projectRead, { token: 'reader-1', offset: 0, length: 1 }, other)).rejects.toThrow('token');
+    sender.emit('destroyed');
+    expect(projects.close).toHaveBeenCalledTimes(33);
+    expect(await call(IPC.projectRead, { token: 'reader-33', offset: 0, length: 1 }, other)).toEqual(new Uint8Array([1]));
+    await call(IPC.projectReadClose, 'reader-33', other);
+    expect(projects.close).toHaveBeenLastCalledWith('reader-33', true);
+  });
+
   it('opens a picked project by path and refuses anything else', async () => {
     const { EventEmitter } = await import('node:events');
     const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });

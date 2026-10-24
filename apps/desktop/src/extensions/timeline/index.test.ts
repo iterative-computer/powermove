@@ -310,6 +310,24 @@ describe('timeline extension', () => {
     expect(body.querySelector('button[title="Graph editor (Shift+F3)"]')?.classList.contains('on')).toBe(true);
   });
 
+  it('changes the timecode text in place on time ticks (no node replaced: no :has() recheck)', () => {
+    const value = activate();
+    vi.mocked(value.api.util.tc).mockImplementation((time, fps) => `${time}:${fps}`);
+    const body = build(value);
+    const time = body.querySelector('#tl-time')!;
+    const node = time.firstChild;
+    expect(node?.nodeType).toBe(Node.TEXT_NODE);
+    const replaced = vi.fn();
+    new MutationObserver((records) => { if (records.some((r) => r.type === 'childList')) replaced(); }).observe(time, { childList: true });
+    for (const t of [1, 2, 3]) {
+      value.state.time = t;
+      value.emit('time', t);
+      expect(time.textContent).toBe(`${t}:30`);
+      expect(time.firstChild).toBe(node);
+    }
+    return Promise.resolve().then(() => expect(replaced).not.toHaveBeenCalled());
+  });
+
   it('scrubs time from the initial position instead of accumulating pointer offsets', () => {
     const value = activate();
     let move: (dx: number) => void = () => {};

@@ -1522,19 +1522,13 @@ fn run_job(
             h.finish()
         },
     };
-    // Offline media (section 14.8): agent exports go to the current exporter
-    // (`mediaOffline`), draft renders fail when even proxies are missing, and
-    // queued user jobs wait for the media.
+    // Queued user jobs wait for relinking. An interactive export has already
+    // obtained the user's "Export Without Missing Media" choice in main;
+    // agent exports are unattended. Both use pm-export's missing-layer
+    // appearance and report the clips to their caller.
     let offline = offline_media(&document.document, composition.as_str(), &export.media);
     if !offline.is_empty() {
         let message = offline_message(&offline);
-        if submit.class == PriorityClass::AgentExport {
-            return finish(
-                JobState::Failed,
-                None,
-                Some(job_error(job, ErrorCode::MediaOffline, message)),
-            );
-        }
         if settings.draft_from_proxies {
             return finish(
                 JobState::Failed,
@@ -1546,19 +1540,21 @@ fn run_job(
                 )),
             );
         }
-        match wait_for_media(
-            shared,
-            host,
-            job,
-            document,
-            composition.as_str(),
-            cancel,
-            &message,
-        ) {
-            Some(media) => export.media = Arc::new(media),
-            None => return finish(JobState::Cancelled, None, None),
+        if submit.class == PriorityClass::UserJob && job.as_str().starts_with("queue-export-") {
+            match wait_for_media(
+                shared,
+                host,
+                job,
+                document,
+                composition.as_str(),
+                cancel,
+                &message,
+            ) {
+                Some(media) => export.media = Arc::new(media),
+                None => return finish(JobState::Cancelled, None, None),
+            }
+            shared.status(host, job, |r| r.state = JobState::Running);
         }
-        shared.status(host, job, |r| r.state = JobState::Running);
     }
     // Blender compositions (contract 11): the lane's Blender stage, when
     // host services run Blender; a host without Blender routes them.

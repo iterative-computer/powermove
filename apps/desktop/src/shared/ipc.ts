@@ -43,6 +43,7 @@ export const IPC = {
   projectReadClose: 'project:read-close',
   projectConfirmClose: 'project:confirm-close',
   dialogConfirm: 'dialog:confirm',
+  dialogOfflineExport: 'dialog:offline-export',
   clipboardWriteText: 'clipboard:write-text',
   mediaPaste: 'media:paste',
 
@@ -121,6 +122,8 @@ export const IPC = {
   storeSnapshotSync: 'store:snapshot-sync', // ipcRenderer.sendSync from preload, boot barrier only
   storeSet: 'store:set',
   storeSetSerialized: 'store:set-serialized',
+  /** One entry for a project's journal; main numbers and keeps it (SAVE-1). */
+  storeAppendJournal: 'store:append-journal',
   storeDelete: 'store:delete',
   storeFlush: 'store:flush',
   storeError: 'store:error', // main → renderer
@@ -135,6 +138,9 @@ export const IPC = {
   windowPlaceTab: 'window:place-tab',
   windowAdoptTab: 'window:adopt-tab', // main → renderer, a tab dropped on this window's strip
   windowOpenProject: 'window:open-project',
+  /** Renames a project through the window that has it open (SAVE-1c); main → owner: windowRenameRequest. */
+  windowRenameProject: 'window:rename-project',
+  windowRenameRequest: 'window:rename-request', // main → renderer
   windowNew: 'window:new',
   windowClose: 'window:close',
 
@@ -292,8 +298,13 @@ export type ProjectSaveBeginResult = { ok: true; token: string; required: string
 export type ProjectOpenResult = ({
   ok: true; path: string; projectId: string; token: string; size: number;
   media: import('./project-container').ProjectMediaRange[];
-} & ({ document: any; documentRange?: import('./project-incremental').ProjectRecord }
-  | { document?: never; documentRange: import('./project-incremental').ProjectRecord }))
+} & ({
+  /** The document as JSON text (main's reader); `documentMember` names the
+   *  member holding it (a PMV3 container's header). Text crosses the context
+   *  bridge in one copy; a parsed document would be copied object by object. */
+  documentJSON: string; documentMember?: 'document'; documentRange?: import('./project-incremental').ProjectRecord }
+  /** A large PMV4 document stays in the file, read through the bounded reader. */
+  | { documentJSON?: never; documentRange: import('./project-incremental').ProjectRecord }))
   | { ok: true; path: string; projectId: string; data: Uint8Array }
   | { ok: false; cancelled: boolean; error?: string };
 export type CloseDecision = 'save' | 'discard' | 'cancel';
@@ -606,6 +617,8 @@ export interface StoreDeleteRequest {
 export interface StoreErrorEvent {
   key: string;
   error: string;
+  /** A write main accepted did not reach disk (main forwards these to the window that wrote the key). */
+  unsaved?: true;
 }
 
 /* ── misc ────────────────────────────────────────────────── */
@@ -764,6 +777,8 @@ export interface PowermoveBridge {
   confirmProjectClose(name: string): Promise<CloseDecision>;
   /** Native NSAlert-style confirmation sheet. Resolves true when the primary button is chosen. */
   confirm(request: ConfirmRequest): Promise<boolean>;
+  /** Native Locate / Export Without Missing Media / Cancel decision. */
+  offlineExport(clips: import('./offline-clips').OfflineClip[]): Promise<'locate' | 'without' | 'cancel'>;
   /** Writes plain text to the system clipboard while the window has focus; nothing is ever read back. */
   clipboardWriteText?(text: string): Promise<void>;
   /** Native user-initiated media paste. Returns false when there is no media; exposes no clipboard data. */
@@ -876,8 +891,11 @@ export interface PowermoveBridge {
     snapshot(): Promise<StoreSnapshot>;
     set(key: string, value: unknown): void;
     setSerialized?(key: string, serialized: string): Promise<void>;
+    /** Appends one entry (JSON) to `projectJournal.<id>`; rejects if it is refused. */
+    appendJournal?(key: string, serialized: string): Promise<void>;
     delete(key: string): void;
-    flush(): Promise<void>;
+    /** Resolves once queued writes settle, naming the keys still not on disk (main's store). */
+    flush(): Promise<void | { failing?: string[] }>;
     onError(cb: (e: StoreErrorEvent) => void): () => void;
     /** Re-reads one key another window wrote. Null when the key is unset. */
     getSync?(key: string): string | null;
@@ -902,6 +920,9 @@ export interface PowermoveBridge {
     placeTab?(projectId: string, point: { x: number; y: number }): Promise<WindowPlaceTabResult>;
     onAdoptTab?(cb: (tab: WindowAdoptTab) => void): () => void;
     openProject(projectId: string): Promise<WindowOpenResult>;
+    /** Asks the window that has a project open to rename it; false when no other window has it. */
+    renameProject?(projectId: string, name: string): Promise<boolean>;
+    onRenameRequest?(cb: (request: { projectId: string; name: string }) => void): () => void;
     create(): Promise<void>;
     close(): void;
   };

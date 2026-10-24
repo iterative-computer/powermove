@@ -194,10 +194,9 @@ export async function readProjectFileDocument(range: ProjectRecord, size: number
 
 /** Stage native ranges on disk, then commit file-backed Blobs to the media store. */
 /** Runs `work` (restoring a project streamed by main's project reader), then
- *  closes the reader. Closing is cleanup: main closes a reader left idle for
- *  120 s itself (every byte can be read by then while the media store is still
- *  writing), so a failed close neither fails an open that read every byte nor
- *  hides the restore's own error. */
+ *  closes the reader. Closing is cleanup: main expires a reader 120 s after
+ *  its last completed read if it remains idle, so a failed close neither
+ *  fails an open that read every byte nor hides the restore's own error. */
 export async function withProjectReader<T>(work: () => Promise<T>, close: () => Promise<unknown>): Promise<T> {
   try { return await work(); } finally { await close().catch(() => undefined); }
 }

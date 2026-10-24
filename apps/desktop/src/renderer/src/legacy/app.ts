@@ -17,21 +17,28 @@ import type { PMRegistry } from './registry';
 import { SCENE3D_DEFINITION, sceneProperties } from '../core/scene3d/schema';
 import { temporalKeys } from './core/temporal-bridge';
 import { packProjectFileBlob, readProjectFileDocument, saveIncrementalProject, restoreProjectFileMedia, restoreProjectFileStream, unpackProjectFileBlob, unpackProjectFile, withProjectReader } from './core/project-file';
-import { projectFingerprint } from './core/project-fingerprint';
+import { fingerprintJSON, projectFingerprint } from './core/project-fingerprint';
 import { stringifyAsync } from './core/serialize-async';
 import { yieldTask } from './core/yield-task';
 import { createNewProjectForm } from './ui/project-settings';
 import { inspectorService, shaderHooks, timelineService, viewerService } from './core/services';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { CURRENT_READER_VERSION, NEWER_PROJECT_MESSAGE, needsNewerReader, requiredReaderVersion } from '../../../shared/reader-version';
-import { touchedDocument, writeDocument } from '../engine-doc/write';
+import { notifyDocument, touchedDocument, writeDocument } from '../engine-doc/write';
 import { documentPending, waitForDocumentReady } from '../engine-doc/readiness';
 import { REQUIRES_NATIVE_MESSAGE, refusesProject } from '../../../shared/engine-stamp';
 import { migrateProjectColorDepth } from '../../../shared/project-color';
+import { derivedId } from './core/derived-id';
 
 export function install(PM: PMRegistry): void {
 const h = PM.h;
 const APP: any = { fileHandle: null, dirty: false, saveTimer: 0, importQueue: Promise.resolve() };
+let openGeneration = 0;
+const beginOpen = () => ++openGeneration;
+const isCurrentOpen = (generation: number) => generation === openGeneration;
+async function closeUnopenedReader(result: any): Promise<void> {
+  if (result?.token) await Promise.resolve(hostBridge()?.projectRead?.close(result.token)).catch(() => {});
+}
 const document = window.document;
 type FileState = { path?: string; savedHash?: string; baselineHash?: string; baselineReady?: Promise<void>; dirty: boolean; handle?: any };
 const fileStates = new Map<string, FileState>();
@@ -97,7 +104,8 @@ function fileState(id = PM.proj.id): FileState {
       ? (id === PM.proj?.id ? PM.proj : PM.Projects.get(id)) : null;
     if (project) {
       const initialState = state;
-      initialState.baselineReady = projectFingerprint(JSON.stringify(project)).then(hash => {
+      // The baseline is this moment's document: serialized now, digested later.
+      initialState.baselineReady = projectFingerprint(PM.Projects.writtenJSON?.(project) ?? JSON.stringify(project)).then(hash => {
         initialState.baselineHash = hash;
         rememberFile(id, initialState);
       });
@@ -112,16 +120,19 @@ function fileUI() {
 }
 async function refreshFileDirty(project = PM.proj, isCurrent?: () => boolean): Promise<boolean> {
   const state = fileState(project.id);
-  const json = await stringifyAsync(project);
+  // Fingerprints, not the JSON, are held across the awaits: a large
+  // project's JSON is hundreds of megabytes of string (C1), and holding one
+  // while building another pushed the window past V8's heap limit.
+  const hash = await fingerprintJSON(project);
   const version = (comparisonVersions.get(project.id) || 0) + 1;
   comparisonVersions.set(project.id, version);
   await state.baselineReady;
-  const hash = await projectFingerprint(json);
   // A newer edit wins over an in-flight comparison.
-  // Autosave already owns an edit-generation guard. Use it to avoid walking
-  // the whole document twice. Close and explicit comparisons retain the full
-  // equality check, including callers that changed data without an edit event.
-  if (isCurrent ? !isCurrent() : await stringifyAsync(project) !== json) return true;
+  // Autosave already owns an edit-generation guard. Use it to avoid
+  // fingerprinting the whole document twice. Close and explicit comparisons
+  // retain the full check, including callers that changed data without an
+  // edit event.
+  if (isCurrent ? !isCurrent() : await fingerprintJSON(project) !== hash) return true;
   const baseline = state.savedHash || state.baselineHash;
   const dirty = !baseline || baseline !== hash;
   // Concurrent comparisons of the same content are not edits. Only the
@@ -294,9 +305,13 @@ function* hydrateSteps(p: any): Generator<void, any> {
       return value !== undefined && value !== null;
     };
     prop.v = valid(prop.v) ? prop.v : fallback;
-    prop.kf = PM.normalizeKeyframes(prop.kf, fallback, base.fps, minTime);
+    prop.kf = PM.normalizeKeyframes(prop.kf, fallback, base.fps, minTime, { stable: true });
+    /* A repeated id gets a new one derived from it and its place in the
+       document, never a random one: every open of the same file gives the
+       same document, so its checkpoint can be checked rather than rewritten
+       and its fingerprint is stable. */
     prop.kf.forEach((key: any) => {
-      if (keyIds.has(key.i)) key.i = PM.uid('k');
+      if (keyIds.has(key.i)) key.i = derivedId(key.i, keyIds);
       keyIds.add(key.i);
     });
     prop.expr = typeof prop.expr === 'string' && prop.expr.trim() ? prop.expr : null;
@@ -795,7 +810,9 @@ function captureProjectSession(persist = true) {
 async function captureProjectSessionAsync(isCurrent: () => boolean) {
   const project = PM.proj;
   // A read-only project keeps the copy stored when it opened (Projects.put).
-  if (!PM.store.setSnapshotAsync || isReadOnlyProject(project)) return captureProjectSession();
+  // When main keeps the journal (SAVE-1) the slot goes in order with its
+  // entries and main shrinks the journal itself (Projects.recoverAsync).
+  if (!PM.store.setSnapshotAsync || isReadOnlyProject(project) || typeof PM.store.appendJournal === 'function') return captureProjectSession();
   if (!project?.id || project.id === homeProjectId || discardedProjects.has(project.id)) return true;
   PM.bus.emit('project:flush-edits');
   if (!await PM.store.setSnapshotAsync(`project.${project.id}`, { v: PM.version, proj: project }, isCurrent)) return false;
@@ -821,6 +838,13 @@ function closeProjectTransients() {
   PM.closeMenus?.();
   if (PM.WS.editing) PM.WS.cancelEdit();
 }
+/** How long the last autosave's write took: the next one waits at least
+ *  that long for quiet (up to a minute), so a project whose write takes
+ *  tens of seconds (C1: about 50 s for a 180 MB project) is not written
+ *  again after every half-second pause. Small projects keep 550 ms. */
+let lastAutosaveMs = 0;
+/** An autosave failed and nothing has saved since: the failure is shown once, not once per edit. */
+let autosaveFailing = false;
 PM.autosave = () => {
   if (PM.proj.id === homeProjectId || discardedProjects.has(PM.proj.id)) return;
   APP.dirty = true;
@@ -836,12 +860,18 @@ PM.autosave = () => {
       // A read-only project only tracks whether it differs from its file.
       const readOnly = isReadOnlyProject(project);
       if (!readOnly) {
-        PM.EngineDoc?.beforeSave?.('autosave');
+        const began = performance.now();
+        await PM.EngineDoc?.beforeSave?.('autosave');
+        // Persist the current live document even when an edit arrived during
+        // the diagnostic check; that edit also scheduled its own later save.
+        if (discardedProjects.has(projectId) || PM.proj !== project) return;
         if (PM.Projects.recoverAsync) {
           if (!await PM.Projects.recoverAsync(project, projectThumb(), isCurrent) || !isCurrent()) return;
         } else if (!persistCurrent(true)) throw new Error('Project storage is unavailable or full');
         PM.Projects.putState(PM.proj.id, { ...PM.Projects.getState(PM.proj.id, { history: false }), history: PM.hist.export?.({ copy: false }) });
+        lastAutosaveMs = performance.now() - began;
         await PM.store.flush?.();
+        autosaveFailing = false;
       }
       if (!isCurrent()) return;
       // Local recovery is not the user's .pmv file and must never mark it saved.
@@ -852,16 +882,22 @@ PM.autosave = () => {
       if (!readOnly) PM.bus.emit('project:recovered');
     } catch (error) {
       APP.dirty = true;
-      PM.toast('Could not save this project. Your edits are still open; try Save again.', 6000);
+      if (!autosaveFailing) PM.toast('Could not save this project. Your edits are still open; try Save again.', 6000);
+      autosaveFailing = true;
       console.warn('Project save failed', error);
     }
     PM.invalidate('status'); PM.bus.emit('projects:open');
-  }, 550);
+  }, Math.max(550, Math.min(60_000, lastAutosaveMs)));
 };
 PM.bus.on('storage:error', () => { APP.dirty = true; PM.invalidate('status'); });
 ['layers','project','library'].forEach(ev => PM.bus.on(ev, PM.autosave));
-// Disposable decoder previews change runtime readiness, not saved project data.
-PM.bus.on('assets', (change: any) => { if (!change?.runtimeOnly) PM.autosave(); });
+// Disposable decoder previews change runtime readiness, not saved project
+// data. Asset metadata a restore writes (posters, durations) arrives one
+// asset at a time; with media read through main those came further apart
+// than the debounce and each wrote the whole project again (C1: a 50 s write
+// each for a 180 MB project). The restore compares the project when it ends
+// and autosaves only if it changed (restoreProjectAssets).
+PM.bus.on('assets', (change: any) => { if (!change?.runtimeOnly && !PM.assetsRestoring) PM.autosave(); });
 
 async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {}): Promise<boolean> {
   // A live background tab may be ahead of its recovery checkpoint.
@@ -885,7 +921,7 @@ async function saveProject({ saveAs = false, projectId = PM.proj.id }: any = {})
     PM.bus.emit('project:flush-edits');
     await APP.importQueue;
     // The native engine's consistency check (docs/rust-engine.md, section 6).
-    PM.EngineDoc?.beforeSave?.('save');
+    await PM.EngineDoc?.beforeSave?.('save');
     progress(0.05);
     const project = currentProject();
     if (!project) throw new Error('This project is no longer available.');
@@ -1000,28 +1036,41 @@ PM.saveProject = (options: any = {}) => {
   return save;
 };
 PM.openProject = async () => {
+  const generation = beginOpen();
   if (hostBridge()?.openProjectFile) {
     const result = await hostBridge()!.openProjectFile();
-    if (result.ok) await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
+    if (!isCurrentOpen(generation)) { await closeUnopenedReader(result); return; }
+    if (result.ok) await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result, generation);
     else if (!result.cancelled) PM.toast('Could not open project: ' + result.error, 6000);
     return;
   }
   const inp = h('input', { type: 'file', accept: '.pmv,.json,application/json' });
-  inp.onchange = async () => { const f = inp.files[0]; if (f) await openProjectFile(f); };
+  inp.onchange = async () => { const f = inp.files[0]; if (f && isCurrentOpen(generation)) await openProjectFile(f, undefined, generation); };
   inp.click();
 };
 hostBridge()?.onProjectOpenExternal?.(async result => {
+  const generation = beginOpen();
   if (result.ok) {
-    await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
+    await openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result, generation);
   } else {
     PM.toast('Could not open project: ' + result.error, 6000);
   }
 });
-async function openProjectFile(file: any, association?: { path: string; projectId: string }) {
+/** The document main read for an open, parsed here (see ProjectOpenResult). */
+function openedDocument(native: any): any {
+  if (typeof native.documentJSON !== 'string') return native.document;
+  const parsed = JSON.parse(native.documentJSON);
+  // The text is as large as the document; nothing else reads it.
+  native.documentJSON = undefined;
+  return native.documentMember === 'document' ? parsed?.document : parsed;
+}
+async function openProjectFile(file: any, association?: { path: string; projectId: string }, generation = beginOpen()) {
+  if (!isCurrentOpen(generation)) { await closeUnopenedReader(file.native); return false; }
   const opening = createImportProgress('Opening project', PM);
   opening.update({ label: file.name });
-  const generation = beginProjectLoading(association?.projectId || null, file.name || 'project');
-  const current = () => loadGeneration === generation;
+  const loading = beginProjectLoading(association?.projectId || null, file.name || 'project');
+  // A newer open (picked, dropped, or from Projects) or a newer load wins.
+  const current = () => loadGeneration === loading && isCurrentOpen(generation);
   try {
     await yieldLoad();
     let o: any, mediaRestored = false;
@@ -1029,11 +1078,14 @@ async function openProjectFile(file: any, association?: { path: string; projectI
       const bridge = hostBridge()!.projectRead!;
       const { token, media, documentRange } = file.native;
       await withProjectReader(async () => {
-        const documentBytes = 'document' in file.native ? 0 : documentRange?.length || 0;
+        // A large PMV4 document stays in the file; others arrive as JSON text.
+        const ranged = typeof file.native.documentJSON !== 'string';
+        const documentBytes = ranged ? documentRange?.length || 0 : 0;
         const total = documentBytes + media.reduce((sum: number, source: any) => sum + source.length, 0);
-        const document = 'document' in file.native ? file.native.document
-          : await readProjectFileDocument(documentRange, file.native.size, (offset, length) => bridge.read(token, offset, length),
-            completed => opening.update({ label: file.name, completed, total }));
+        const document = ranged
+          ? await readProjectFileDocument(documentRange, file.native.size, (offset, length) => bridge.read(token, offset, length),
+            completed => opening.update({ label: file.name, completed, total }))
+          : openedDocument(file.native);
         if (refusedByEngine(document)) throw new Error(REQUIRES_NATIVE_MESSAGE);
         await settleAssetRestores();
         await restoreProjectFileStream(document, media, PM.MediaStore, (offset, length) => bridge.read(token, offset, length),
@@ -1092,10 +1144,12 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (PM.Projects.recoverAsync) await PM.Projects.recoverAsync(project, undefined, current);
     else PM.Projects.put(project);
     if (!current()) { opening.close(); return false; }
+    await PM.EngineDoc?.prepare?.(project);
+    if (!current()) { PM.EngineDoc?.discardPrepared?.(project); opening.close(); return false; }
     switchProject(project, o.history || { version: 1, index: -1, entries: [] }, undefined, { session: null, captured: true, stored: true, historyToken });
     const state = fileState(project.id);
     state.path = association?.path;
-    state.savedHash = association ? await projectFingerprint(await stringifyAsync(project)) : undefined;
+    state.savedHash = association ? await projectFingerprint(PM.Projects.writtenJSON?.(project) ?? await stringifyAsync(project)) : undefined;
     if (!current()) { opening.close(); return false; }
     rememberFile(project.id, state);
     await refreshFileDirty(project, current);
@@ -1113,7 +1167,7 @@ async function openProjectFile(file: any, association?: { path: string; projectI
     if (current()) PM.toast('Could not open project: ' + e.message, 4500);
     return false;
   } finally {
-    finishProjectLoading(generation);
+    finishProjectLoading(loading);
   }
 }
 const PROJECT_FILE = /\.(pmv|json)$/i;
@@ -1129,18 +1183,19 @@ PM.openFiles = () => {
   inp.onchange = () => {
     const files: File[] = [...inp.files];
     cleanup();
-    if (files.length) void openFiles(files);
+    if (files.length) void openFiles(files, beginOpen());
   };
   inp.addEventListener('cancel', cleanup, { once: true });
   window.document.body.appendChild(inp);
   inp.click();
 };
-async function openFiles(files: File[]) {
+async function openFiles(files: File[], generation: number) {
   if (documentPending(PM)) await waitForDocumentReady(PM);
+  if (!isCurrentOpen(generation)) return;
   const projectFile = files.find(f => PROJECT_FILE.test(f.name));
   const media = files.filter(f => !PROJECT_FILE.test(f.name));
   if (projectFile) {
-    if (!await openPickedProject(projectFile)) return;
+    if (!await openPickedProject(projectFile, generation) || !isCurrentOpen(generation)) return;
   } else {
     switchProject(PM.mkProject({
       name: media[0]!.name.replace(/\.[^.]+$/, '') || 'Untitled',
@@ -1149,12 +1204,13 @@ async function openFiles(files: File[]) {
     }));
     PM.ProjectsScreen?.hide?.();
   }
-  if (media.length) await PM.importFiles(media, projectFile ? {} : { matchSource: true, placement: { at: 0 } });
+  if (media.length && isCurrentOpen(generation)) await PM.importFiles(media, projectFile ? {} : { matchSource: true, placement: { at: 0 } });
 }
-async function openPickedProject(file: File) {
+async function openPickedProject(file: File, generation: number) {
   const result = await hostBridge()?.openProjectFromFile?.(file);
-  if (!result) return openProjectFile(file);
-  if (result.ok) return openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result);
+  if (!isCurrentOpen(generation)) { await closeUnopenedReader(result); return false; }
+  if (!result) return openProjectFile(file, undefined, generation);
+  if (result.ok) return openProjectFile({ name: result.path.split(/[\\/]/).pop(), native: result }, result, generation);
   if (!result.cancelled) PM.toast('Could not open project: ' + result.error, 6000);
   return false;
 }
@@ -1169,7 +1225,9 @@ PM.newProject = () => {
   PM.modal({ title: 'New project', body: form.element, width: 420, actions: [
     { label: 'Cancel' },
     { label: 'Create', pri: true, run: async () => {
+      const generation = beginOpen();
       if (documentPending(PM)) await waitForDocumentReady(PM);
+      if (!isCurrentOpen(generation)) return;
       const values = form.values();
       switchProject(PM.mkProject({
         ...values,
@@ -1182,11 +1240,12 @@ PM.newProject = () => {
 };
 /** A default-format project without the New project dialog. Onboarding opens
  * one so an imported workspace is arranged around a real composition. */
-PM.newBlankProject = (options: any = {}) => {
+PM.newBlankProject = (options: any = {}, generation = beginOpen()) => {
   if (documentPending(PM)) {
-    void waitForDocumentReady(PM).then(() => PM.newBlankProject(options)).catch(() => {});
+    void waitForDocumentReady(PM).then(() => { if (isCurrentOpen(generation)) PM.newBlankProject(options, generation); }).catch(() => {});
     return;
   }
+  if (!isCurrentOpen(generation)) return;
   switchProject(PM.mkProject(options));
   PM.ProjectsScreen?.hide?.();
 };
@@ -1198,13 +1257,13 @@ PM.newBlankProject = (options: any = {}) => {
  * running a second editor over one storage slot.
  */
 function claimForThisWindow(id: string | null): void {
+  const generation = openGeneration;
   void Promise.resolve(PM.windows?.claimProject?.(id) ?? { claimed: true }).then((claim: any) => {
-    if (claim?.claimed || !id) return;
+    if (claim?.claimed || !id || !isCurrentOpen(generation) || PM.proj?.id !== id) return;
     tabIds = tabIds.filter(tab => tab !== id);
     PM.bus.emit('projects:open');
-    if (PM.proj?.id !== id) return;
     PM.toast('That project is already open in another window.');
-    showNeighbourOf(-1);
+    void showNeighbourOf(-1, generation).catch((error: unknown) => PM.toast('Could not open project: ' + String(error), 4500));
   });
 }
 
@@ -1215,6 +1274,13 @@ const WARM_MEDIA_TABS = 3;
 type ParkedTab = { project: any; history: any; media: any; registryName?: string };
 const parkedTabs = new Map<string, ParkedTab>();
 PM.parkedHistories = () => [...parkedTabs.values()].map(tab => tab.history);
+/** A background tab's live document, for edits that must reach it (a rename; SAVE-1c). */
+PM.liveProject = (id: string) => parkedTabs.get(id)?.project ?? null;
+/* Another window's Projects screen renames a project this window has open:
+   the live document is renamed here and checkpointed (SAVE-1c). */
+PM.windows?.onRenameRequest?.(({ projectId, name }: { projectId: string; name: string }) => {
+  if (typeof projectId === 'string' && typeof name === 'string') PM.Projects.rename(projectId, name);
+});
 function discardParked(id: string) {
   const tab = parkedTabs.get(id);
   if (!tab) return;
@@ -1233,16 +1299,29 @@ function park(project: any) {
   PM.Memory?.maintain?.('history');
 }
 /** Brings a tab to the front, resumed from memory while it is still live. */
-function showTab(id: string): boolean {
+async function showTab(id: string, generation: number): Promise<boolean> {
   const live = parkedTabs.get(id);
   if (live) {
-    parkedTabs.delete(id);
+    await PM.EngineDoc?.prepare?.(live.project);
+    if (!isCurrentOpen(generation) || parkedTabs.get(id) !== live || !tabIds.includes(id)) {
+      PM.EngineDoc?.discardPrepared?.(live.project);
+      return false;
+    }
     switchProject(live.project, undefined, live);
     return true;
   }
   const project = PM.Projects.get(id);
   if (!project || refusedByEngine(project)) return false;
-  switchProject(project);
+  const wasTab = tabIds.includes(id);
+  const hydrated = hydrate(project);
+  await PM.EngineDoc?.prepare?.(hydrated);
+  // Projects.get rebuilds a fresh object on each read; presence and the tab
+  // membership captured before preparation are the stable checks here.
+  if (!isCurrentOpen(generation) || !PM.Projects.get(id) || (wasTab && !tabIds.includes(id))) {
+    PM.EngineDoc?.discardPrepared?.(hydrated);
+    return false;
+  }
+  switchProject(hydrated, undefined, undefined, true);
   return true;
 }
 
@@ -1251,22 +1330,29 @@ function showTab(id: string): boolean {
  * its own live state as `live`. Anything else — a file just opened, a new
  * composition — is authoritative, so a parked copy of the same id is dropped.
  */
-function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: { session: any; captured: boolean; stored: boolean; historyToken?: object }) {
-  if (PM.projectLoading && !prepared) { finishProjectLoading(loadGeneration); loadGeneration++; }
+/** `prepared`: the project is hydrated (and natively prepared); `true` from
+ *  callers that did only that, or the open's captured session, stored slot
+ *  and imported history. */
+function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: true | { session: any; captured: boolean; stored: boolean; historyToken?: object }) {
+  const ready = prepared === true ? undefined : prepared;
+  if (PM.projectLoading && !ready) { finishProjectLoading(loadGeneration); loadGeneration++; }
   const previous = PM.proj;
   PM.pause();
   const leaving = !!previous?.id && previous.id !== p.id;
   const trashed = leaving && PM.Projects.trashList?.().some((item: any) => item.id === previous.id);
   const saveInBackground = live && PM.store.setSnapshotAsync && leaving && !trashed;
-  if (leaving && !trashed && !prepared?.captured) captureProjectSession(!saveInBackground);
+  if (leaving && !trashed && !ready?.captured) captureProjectSession(!saveInBackground);
   closeProjectTransients();
-  if (!live) discardParked(p.id);
   // A tab still in the strip keeps running in the background; a closed or
   // trashed one, or the placeholder, is let go as before.
   const parkable = leaving && !trashed && previous.id !== homeProjectId && tabIds.includes(previous.id)
     && typeof PM.hist.suspend === 'function' && typeof PM.assets.suspend === 'function';
-  if (parkable) park(previous);
+  // The prepared native activation can refuse a stale receipt. Publish first:
+  // parked history/media and eviction are irreversible until this succeeds.
   PM.proj = live ? live.project : prepared ? p : hydrate(p);
+  if (live) parkedTabs.delete(p.id);
+  else discardParked(p.id);
+  if (parkable) park(previous);
   if (live) {
     // Renamed from Projects while in the background: the library has the name.
     const name = PM.Projects.list().find((meta: any) => meta.id === PM.proj.id)?.name;
@@ -1276,7 +1362,7 @@ function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: { ses
   // Opening something new adds it after the other tabs; an existing tab keeps its place.
   if (isTab && !tabIds.includes(PM.proj.id)) tabIds.push(PM.proj.id);
   claimForThisWindow(isTab ? PM.proj.id : null);
-  const session = prepared ? prepared.session : PM.Projects.getState(PM.proj.id, live ? { history: false } : {});
+  const session = ready ? ready.session : PM.Projects.getState(PM.proj.id, live ? { history: false } : {});
   const { history: savedHistory, ...metadata } = session || {};
   PM.Projects.putState(PM.proj.id, { ...metadata, lastActiveAt: Date.now() });
   const projectWorkspace = PM.store.get(`projectWorkspace.${PM.proj.id}`, null) || session?.workspace;
@@ -1288,8 +1374,8 @@ function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: { ses
     PM.WS.activate(PM.WS.get(preferred) ? preferred : 'design', true);
   }
   if (live) PM.hist.resume(live.history);
-  else PM.hist.import?.(history ?? session?.history, prepared?.historyToken);
-  if (!live && !prepared?.stored) persistCurrent(false);
+  else PM.hist.import?.(history ?? session?.history, ready?.historyToken);
+  if (!live && !ready?.stored) persistCurrent(false);
   PM.bus.emit('projects:open');
   PM.time = Number.isFinite(session?.time) ? PM.clamp(session.time, 0, PM.proj.dur) : 0;
   PM.sel.layers = (session?.selection?.layers || []).filter((id: any) => PM.L(id));
@@ -1311,10 +1397,10 @@ function switchProject(p: any, history?: any, live?: ParkedTab, prepared?: { ses
   else if (!parkable) PM.assets.clear();
   APP.fileHandle = null;
   APP.dirty = fileState().dirty;
-  PM.bus.emit('project');
-  PM.bus.emit('layers');
+  notifyDocument(PM, 'project');
+  notifyDocument(PM, 'layers');
   PM.bus.emit('sel');
-  PM.bus.emit('assets');
+  notifyDocument(PM, 'assets');
   inspectorService(PM)?.refresh();
   viewerService(PM)?.layout();
   PM.invalidate('all');
@@ -1400,10 +1486,15 @@ function liveTabs(): string[] {
 }
 /** After the tab at `index` goes away, shows the tab that slid into its place,
  *  else the one before it, else Projects over the placeholder composition. */
-function showNeighbourOf(index: number) {
+async function showNeighbourOf(index: number, generation: number) {
   const tabs = liveTabs().filter(id => id !== PM.proj?.id);
   const next = tabs[Math.max(0, Math.min(index, tabs.length - 1))];
-  if (next && showTab(next)) return;
+  try {
+    if (next && await showTab(next, generation)) return;
+  } catch (error: any) {
+    if (isCurrentOpen(generation)) PM.toast('Could not open project: ' + (error?.message || String(error)), 4500);
+  }
+  if (!isCurrentOpen(generation)) return;
   switchProject(emptyHomeProject());
   PM.ProjectsScreen?.show?.('recents');
 }
@@ -1413,13 +1504,23 @@ async function dropTab(id: string) {
   const index = liveTabs().indexOf(id);
   if (index < 0 && !tabIds.includes(id)) return false;
   const active = id === PM.proj?.id;
+  const generation = active ? beginOpen() : openGeneration;
   tabIds = tabIds.filter(tab => tab !== id);
   discardUnsavedProject(id);
   discardParked(id);
-  if (active) showNeighbourOf(index);
-  await PM.windows?.releaseProject?.(id);
-  PM.bus.emit('projects:open');
-  return true;
+  try {
+    if (active) await showNeighbourOf(index, generation);
+    return true;
+  } finally {
+    // A newer open can supersede the neighbour while it prepares. Do not
+    // leave a closed project on screen if that newer open also fails.
+    try {
+      if (active && PM.proj?.id === id) switchProject(emptyHomeProject());
+    } finally {
+      try { await PM.windows?.releaseProject?.(id); }
+      finally { PM.bus.emit('projects:open'); }
+    }
+  }
 }
 const closingTabs = new Set<string>();
 PM.Tabs = {
@@ -1833,9 +1934,19 @@ window.addEventListener('beforeunload', () => {
 window.addEventListener('pm-open-project', (e: any) => {
   const p = e.detail;
   if (p && typeof p === 'object' && !refusedByEngine(p)) {
-    if (documentPending(PM)) {
-      void waitForDocumentReady(PM).then(() => switchProject(p)).catch(() => {});
-    } else switchProject(p);
+    const generation = beginOpen();
+    const open = () => {
+      if (!isCurrentOpen(generation)) return;
+      const project = hydrate(p);
+      const prepared = PM.EngineDoc?.prepare?.(project);
+      if (prepared) void prepared.then(() => {
+        if (isCurrentOpen(generation)) switchProject(project, undefined, undefined, true);
+        else PM.EngineDoc?.discardPrepared?.(project);
+      }).catch((error: unknown) => { if (isCurrentOpen(generation)) PM.toast('Could not open project: ' + String(error), 4500); });
+      else switchProject(project, undefined, undefined, true);
+    };
+    if (documentPending(PM)) void waitForDocumentReady(PM).then(open).catch(() => {});
+    else open();
   }
   else if (p && typeof p === 'object') PM.toast(REQUIRES_NATIVE_MESSAGE, 6000, { key: 'project-engine', error: true });
 });
@@ -1846,12 +1957,15 @@ window.addEventListener('pm-open-project', (e: any) => {
  * has been brought forward; this window keeps what it had.
  */
 PM.openProjectHere = async (id: string) => {
+  if (!id) return true;
   if (PM.projectLoading && (parkedTabs.has(id) || id === PM.proj.id)) {
     finishProjectLoading(loadGeneration); loadGeneration++;
   }
-  if (id && documentPending(PM)) {
+  const generation = beginOpen();
+  if (documentPending(PM)) {
     try { await waitForDocumentReady(PM); }
     catch { return false; } // EngineDoc has already reported the named load failure.
+    if (!isCurrentOpen(generation)) return false;
   }
   if (PM.store.getAsync && !parkedTabs.has(id)) return openStoredProject(id);
   if (!id || id === PM.proj.id) return true;
@@ -1863,16 +1977,33 @@ PM.openProjectHere = async (id: string) => {
     PM.toast(REQUIRES_NATIVE_MESSAGE, 6000, { key: 'project-engine', error: true });
     return false;
   }
-  const claim = await (PM.windows?.claimProject?.(id) ?? Promise.resolve({ claimed: true, focused: false }));
-  if (!claim.claimed) {
-    if (!claim.focused) PM.toast('That project is already open in another window.');
+  const wasTab = tabIds.includes(id);
+  let claimed = false, opened = false;
+  try {
+    const claim = await (PM.windows?.claimProject?.(id) ?? Promise.resolve({ claimed: true, focused: false }));
+    claimed = !!claim.claimed;
+    if (!isCurrentOpen(generation)) return false;
+    if (!claimed) {
+      if (!claim.focused) PM.toast('That project is already open in another window.');
+      return false;
+    }
+    const shown = await showTab(id, generation);
+    if (!isCurrentOpen(generation)) return false;
+    if (!shown) {
+      PM.toast('Could not open this project because its local data is missing.');
+      return false;
+    }
+    opened = true;
+    return true;
+  } catch (error: any) {
+    if (isCurrentOpen(generation)) PM.toast('Could not open project: ' + (error?.message || String(error)), 4500);
     return false;
+  } finally {
+    if (claimed && !opened && !wasTab && PM.proj.id !== id && !tabIds.includes(id)) {
+      try { await PM.windows?.releaseProject?.(id); }
+      catch (error) { console.warn('Could not release unopened project claim', error); }
+    }
   }
-  if (!showTab(id)) {
-    PM.toast('Could not open this project because its local data is missing.');
-    return false;
-  }
-  return true;
 };
 
 /** Prepare an owned document while the old editor is safely inert, then
@@ -1917,6 +2048,9 @@ async function performStoredOpen(id: string) {
     claimed = claim.claimed;
     if (!current()) return false;
     if (!claimed) { if (!claim.focused) PM.toast('That project is already open in another window.'); return false; }
+    // The native kernel takes the document before the window publishes it.
+    await PM.EngineDoc?.prepare?.(project);
+    if (!current()) { PM.EngineDoc?.discardPrepared?.(project); return false; }
     switchProject(project, undefined, undefined, { session, captured: true, stored: true, historyToken });
     PM.ProjectsScreen?.hide?.();
     await paintProject();

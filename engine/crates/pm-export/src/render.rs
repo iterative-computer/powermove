@@ -800,6 +800,9 @@ pub struct ExportPlan {
     /// The document rendered: the job's, or a copy without captions when they
     /// are delivered as a file instead of burned in.
     pub document: Arc<Document>,
+    /// Known offline clips: their video/image frames draw nothing and their
+    /// audio contributes silence, matching the current exporter.
+    pub offline: Vec<OfflineClip>,
     /// PNG sequences: the name frame files start with.
     pub sequence_name: Option<String>,
     /// Encoded-frame previews for the progress sheet.
@@ -1024,6 +1027,7 @@ fn plan_export_checked(
     } else {
         job.document.clone()
     };
+    let offline = offline_media(&document, &job.composition, &job.media);
     let doc = &*document;
     let (codec, container) = codec_of(s)?;
     let tags = tags_of(s.color)?;
@@ -1052,7 +1056,12 @@ fn plan_export_checked(
             pm_audio::MixGraph::build(doc, &job.composition, &mut evaluator(), &cache, &*job.media)
                 .map_err(|e| JobError::Audio(e.to_string()))?;
         for (name, asset, why) in &graph.problems {
-            problems.push(format!("audio of {name} ({asset}): {why}"));
+            if !offline
+                .iter()
+                .any(|clip| clip.asset.as_str() == asset.as_str())
+            {
+                problems.push(format!("audio of {name} ({asset}): {why}"));
+            }
         }
         if graph.voices.is_empty() {
             None
@@ -1136,6 +1145,7 @@ fn plan_export_checked(
         request,
         audio,
         document,
+        offline,
         sequence_name: s.delivery.sequence_name.clone(),
         preview: s.delivery.preview,
         frame_post: None,
@@ -1288,6 +1298,7 @@ where
         request,
         audio,
         document,
+        offline,
         preview: wants_preview,
         frame_post,
         ..
@@ -1500,7 +1511,16 @@ where
                         },
                     )
                 })
-                .and_then(|f| {
+                .and_then(|mut f| {
+                    f.failures.retain(|failure| {
+                        let asset = failure
+                            .message
+                            .strip_prefix("media for asset ")
+                            .and_then(|rest| rest.strip_suffix(" is offline"));
+                        !offline
+                            .iter()
+                            .any(|clip| asset == Some(clip.asset.as_str()))
+                    });
                     if f.failures.is_empty() {
                         Ok(f)
                     } else if let Some(l) = f

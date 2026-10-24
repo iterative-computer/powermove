@@ -301,6 +301,8 @@ pub struct Renderer {
     /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
     reuse: crate::reuse::DrawReuse,
     reuse_enabled: bool,
+    /// [`Renderer::set_channel_memo`].
+    channel_memo: bool,
     /// The bottom of the last reusing frame kept on the GPU
     /// (`crate::frame_prefix`).
     prefix: crate::frame_prefix::FramePrefix,
@@ -415,6 +417,7 @@ impl Renderer {
             compat: None,
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
+            channel_memo: true,
             prefix: Default::default(),
             svg_wait: false,
             svg_skip_failed: false,
@@ -442,10 +445,33 @@ impl Renderer {
         self.reuse_enabled = enabled;
     }
 
+    /// Whether frames plan with the channels found in the same unchanged
+    /// document on earlier frames (`pm_eval` `channel_memo`; on by default).
+    /// Every plan is the one planned without it; tests turn it off to
+    /// compare.
+    pub fn set_channel_memo(&mut self, enabled: bool) {
+        self.channel_memo = enabled;
+        if !enabled {
+            self.evaluator.clear_channel_memo();
+        }
+    }
+
+    /// Opens the channel memo for a plan of `document` when it is on.
+    fn open_channel_memo(&mut self, document: &Document) {
+        if self.channel_memo {
+            self.evaluator.open_channel_memo(document);
+        }
+    }
+
     /// Drops the kept layer draws and the kept bottom of the last frame.
     pub fn clear_draw_reuse(&mut self) {
         self.reuse.clear();
         self.prefix.clear(&mut self.pool);
+    }
+
+    /// The channel memo's hits and misses so far (`pm_eval` `channel_memo`).
+    pub fn channel_memo_stats(&self) -> (u64, u64) {
+        self.evaluator.channel_memo_stats()
     }
 
     /// The draw reuse's counters (with the frames drawn from a kept bottom
@@ -1711,6 +1737,9 @@ impl Renderer {
         }
         let options3d = self.options3d.for_request(request);
         let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        // Channels found in this document are kept across its frames while
+        // it is unchanged (`pm_eval` `channel_memo`).
+        self.open_channel_memo(document);
         let (mut plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
@@ -1728,6 +1757,7 @@ impl Renderer {
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
+        self.evaluator.close_channel_memo();
         if !request.background {
             plan.background = Background::Transparent;
         }
@@ -1818,6 +1848,8 @@ impl Renderer {
                 pyramids: &mut self.pyramids,
                 failures: Vec::new(),
                 unsupported: Vec::new(),
+                twins: crate::exec::comp_twins(&plan),
+                comps: Vec::new(),
             };
             // Generic renders flip GL rows into the caller's top-down target.
             // Standard snapshots draw directly into their readback target.
@@ -2345,6 +2377,7 @@ impl Renderer {
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         let options3d = self.options3d.for_request(request);
         let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        self.open_channel_memo(document);
         let (plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
@@ -2362,6 +2395,7 @@ impl Renderer {
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
+        self.evaluator.close_channel_memo();
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
         }

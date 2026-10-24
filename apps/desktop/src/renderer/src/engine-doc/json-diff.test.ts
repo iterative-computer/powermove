@@ -52,6 +52,47 @@ describe('diffJsonOps', () => {
     expect(sameJson({ a: 1, toString: 1 }, { a: 1 })).toBe(false);
     expect(sameJson({ constructor: 1 }, { valueOf: 1 })).toBe(false);
   });
+
+  it('applies toJSON once at its location, including self-returning hooks', () => {
+    const calls: string[] = [];
+    const self: any = { value: 1, nested: { toJSON(key: string) { calls.push(`nested:${key}`); return 'saved'; } } };
+    Object.defineProperty(self, 'toJSON', { value(key: string) { calls.push(`self:${key}`); return this; } });
+    const live = { channel: self };
+    const shadow = JSON.parse(JSON.stringify(live));
+    calls.length = 0;
+    expect(sameJson(shadow, live)).toBe(true);
+    expect(calls).toEqual(['self:channel', 'nested:nested']);
+    self.value = 2;
+    expect(sameJson(shadow, live)).toBe(false);
+
+    let returnedHookCalls = 0;
+    const returned = { value: 3, toJSON() { returnedHookCalls++; return { value: 4 }; } };
+    const outer = { toJSON() { return returned; } };
+    const output = JSON.parse(JSON.stringify({ channel: outer }));
+    expect(output).toEqual({ channel: { value: 3 } });
+    expect(sameJson(output, { channel: outer })).toBe(true);
+    expect(returnedHookCalls).toBe(0);
+
+    const arrayKeys: string[] = [];
+    const arrayLive = [0, 1, 2, { toJSON(key: string) { arrayKeys.push(key); return undefined; } }];
+    expect(sameJson(JSON.parse(JSON.stringify(arrayLive)), arrayLive)).toBe(true);
+    expect(arrayKeys).toEqual(['3', '3']); // Once for JSON.stringify, once for sameJson.
+
+    let prototypeCalls = 0;
+    const prototypeLive = Object.assign(Object.create({ custom: true }), {
+      omitted: undefined,
+      channel: { toJSON(key: string) { return { value: ++prototypeCalls, key }; } }
+    });
+    const prototypeShadow = JSON.parse(JSON.stringify(prototypeLive));
+    prototypeCalls = 0;
+    expect(sameJson(prototypeShadow, prototypeLive)).toBe(true);
+    expect(prototypeCalls).toBe(1);
+
+    const cycle: any = { value: 1 };
+    cycle.self = cycle;
+    Object.defineProperty(cycle, 'toJSON', { value() { return this; } });
+    expect(() => sameJson({ channel: { value: 1, self: {} } }, { channel: cycle })).toThrow(/circular/i);
+  });
 });
 
 describe('sameJson fast path', () => {

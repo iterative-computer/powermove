@@ -39,6 +39,7 @@
 import type { CompatNeed } from '../../../shared/engine-protocol';
 import type { CompatAnswerOptions, CompatAnswerResult, EngineRenderTransport } from '../engine-connection/render-transport';
 import { COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT } from '../engine-connection/render-transport';
+import { compatKey } from '../../../shared/protocol-strings';
 import type { Disposable } from './api';
 import { compositorPixels } from './raster-pixels';
 import { createRasterReadback, type RasterReadbackStats } from './raster-readback';
@@ -437,7 +438,9 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       if (mark && mark.layer === layer && mark.scale === scale && mark.crop === crop && !mark.touched) return { kind: 'native' };
       if (result == null) return TRANSPARENT;
       const tag = `${String(need.composition)}\u0000${String(need.layer)}\u0000${need.time}\u0000${scale}\u0000${crop ? `${crop.x},${crop.y},${crop.width},${crop.height}` : ''}`;
-      const ownKey = typeof result.key === 'string' && result.key ? result.key : '';
+      // The engine holds the key in at most MAX_COMPAT_KEY_BYTES of UTF-8; a
+      // longer or broken one becomes its digest (a cut would merge keys).
+      const ownKey = typeof result.key === 'string' && result.key ? compatKey(result.key) : '';
       if (ownKey && !answerOptions?.fresh && posted.get(tag) === ownKey) return { kind: 'reuse', key: ownKey };
       const source = canvasOf(result);
       if (!source) return TRANSPARENT;
@@ -449,7 +452,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       const anchor: [number, number] = centered ? [w / 2, h / 2] : [Number(result.anchorX) || 0, Number(result.anchorY) || 0];
       const window = resultUv(result, source.width, source.height);
       const uv = window ? [...window] as [number, number, number, number] : undefined;
-      const key = (ownKey || `powermove:${++serial}:${revision}`).slice(0, 512);
+      const key = ownKey || `powermove:${++serial}:${revision}`;
       const finish = (pixels: ReturnType<typeof compositorPixels>): CompatAnswerResult => {
         if (!pixels) return TRANSPARENT;
         if (!answerOptions?.fresh && !preparation) posted.set(tag, key);

@@ -17,6 +17,7 @@
 
 pub mod binary;
 pub mod canonical;
+pub mod consistency;
 pub mod container;
 pub mod doc;
 pub mod hash;

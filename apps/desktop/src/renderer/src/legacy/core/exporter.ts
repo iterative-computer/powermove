@@ -52,6 +52,7 @@ import { mountSquircles, SQUIRCLE_SELECTOR } from '../../settings/squircle';
 import { deliveryEngineOn, row as settingsRow, select as settingsSelect, numberInput as settingsNumberInput, type SettingsRow } from '../ui/project-settings';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { captionSidecars } from '../../captions/sidecar';
+import { referencedClips } from '../../../../shared/offline-clips';
 
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
@@ -67,6 +68,8 @@ const prepareExportFrame: typeof prepareFrame = (pm, time, project, options) =>
   prepareFrame(pm, time, project, { ...options, recoveryDecoders });
 const X: any = { busy: false, cancel: false };
 PM.Export = X;
+/** How long an export waits for referenced media that is still loading (OFFLINE-1). */
+X.mediaWaitMs = 30_000;
 X.buildWeb = () => buildWebExport(PM);
 
 /* The project owns its delivery settings; the legacy global store only seeds
@@ -514,20 +517,56 @@ async function run(opts: any) {
   if (PM.agentFrameCapture) return PM.toast('Wait for the current frame capture to finish.');
   // Today's ids (`prores`, `mp4`, `webm`, `rec`) are the new formats' names now.
   opts = { ...opts, format: migrateFormat(opts?.format), delivery: normalizeDelivery(opts?.delivery) };
-  // The native engine's consistency check (docs/rust-engine.md, section 6).
-  PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
+  const requestedProject = PM.proj;
   X.busy = true;
   X.cancel = false;
   const bridge = (hostBridge() as any);
   const releaseJob = isRenderFormat(opts.format) && !opts.reportPath ? holdExportJob() : () => {};
   try {
-    const p = PM.proj;
+    // The native engine's consistency check (docs/rust-engine.md, section 6).
+    await PM.EngineDoc?.beforeExport?.(opts?.reportPath ? 'agent-export' : 'export');
+    if (PM.proj !== requestedProject) return { cancelled: true };
+    const p = requestedProject;
     // With Use New Engine on, every render format runs in the job engine; a
     // project it cannot render yet comes back here and the current exporter
     // writes the file the user already chose (agent exports route in main).
     if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.nativeEngine?.exportVideo) {
       const engine = await exportThroughEngine(opts);
       if (engine) return engine;
+    }
+    if (isRenderFormat(opts.format) && !opts.reportPath && bridge?.offlineExport) {
+      const referenced = referencedClips(p);
+      /* Media still loading is not offline. The export waits for the
+         project's media restore and for referenced media still loading, 30 s
+         in all, showing the export sheet ("Waiting for media…", Cancel), and
+         then goes on as it always has: it is never refused for it. Media that
+         finishes in time is in the export; only media the restore found
+         missing is asked about. */
+      let restored = false;
+      void Promise.resolve(PM.projectAssetsReady).then(() => { restored = true; }, () => { restored = true; });
+      await Promise.resolve();
+      const loading = () => referenced.filter((clip) => PM.assets?.loading?.has(clip.asset));
+      let sheet: any = null;
+      try {
+        for (const deadline = Date.now() + X.mediaWaitMs; (!restored || loading().length) && Date.now() < deadline;) {
+          if (!sheet) { sheet = progressUI(1); sheet.waiting('Waiting for media…'); }
+          await new Promise(resolve => setTimeout(resolve, 100));
+          if (X.cancel || PM.proj !== p) return { cancelled: true };
+        }
+      } finally {
+        // Closing the sheet marks a running export cancelled; keep the outcome.
+        const cancelled = X.cancel;
+        sheet?.mod.close();
+        X.cancel = cancelled;
+      }
+      const pending = new Set(loading().map((clip) => clip.asset));
+      // A restore still running at the deadline has not found anything missing yet: as today, no question.
+      const clips = restored ? referenced.filter((clip) => !pending.has(clip.asset) && !PM.assets?.get(clip.asset)) : [];
+      if (clips.length) {
+        const choice = await bridge.offlineExport(clips);
+        if (choice === 'locate') locateMedia(clips.map((clip) => clip.asset));
+        if (choice !== 'without') return { cancelled: true };
+      }
     }
     const legacy = legacyFormatId(opts.format);
     if (!legacy) {

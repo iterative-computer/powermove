@@ -431,6 +431,8 @@ fn edit(doc: &mut Document, rng: &mut Rng, paths: &Paths, serial: &mut u32) -> S
 fn plans_match(seed: u64, steps: usize) -> (u64, usize) {
     let mut with = Renderer::headless().expect("a Metal device");
     let mut without = Renderer::headless().expect("a Metal device");
+    // The reference reads every channel (no channel memo either).
+    without.set_channel_memo(false);
     with.set_draw_reuse(true);
     let paths = Paths::new(vec!["/media/a.png".into(), "/media/b.png".into()]);
     let mut doc = Document::new(Some(document()), 1);
@@ -537,6 +539,8 @@ fn corpus_plans_with_reused_draws_match() {
     }
     let mut with = Renderer::headless().expect("a Metal device");
     let mut without = Renderer::headless().expect("a Metal device");
+    // The reference reads every channel (no channel memo either).
+    without.set_channel_memo(false);
     with.set_draw_reuse(true);
     let mut projects = 0;
     let mut frames = 0;
@@ -689,6 +693,8 @@ fn frames_drawn_with_reuse_are_identical() {
     ] {
         let mut with = Renderer::headless().expect("a Metal device");
         let mut without = Renderer::headless().expect("a Metal device");
+        // The reference reads every channel (no channel memo either).
+        without.set_channel_memo(false);
         with.set_draw_reuse(true);
         let paths = Paths::new(files.clone());
         let mut doc = Document::new(Some(document()), 1);
@@ -763,6 +769,8 @@ fn a_still_changed_on_disk_is_not_kept() {
     let paths = Paths::new(vec![still.clone()]);
     let mut with = Renderer::headless().expect("a Metal device");
     let mut without = Renderer::headless().expect("a Metal device");
+    // The reference reads every channel (no channel memo either).
+    without.set_channel_memo(false);
     with.set_draw_reuse(true);
     let mut doc = Document::new(Some(document()), 1);
     let request = RenderRequest::at_scale(Size::new(1280, 720), 0.5, Precision::Float16);

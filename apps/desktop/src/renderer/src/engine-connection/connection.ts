@@ -12,6 +12,7 @@ import { PROTOCOL_BUILD, type Envelope, type Event, type Request, type Response 
 import { MAX_MESSAGE_BYTES } from '../../../main/engine/msgpack';
 import { completeWelcome, decodeEnvelope, encodeEnvelope, engineRole, envelope, eventMessage, localRanges, Outstanding, requestMessage } from '../../../main/engine/protocol';
 import { coalesce, type ApplyPatches } from './patch-coalesce';
+import { retryResync } from '../../../shared/resync-retry';
 
 /** The part of a `MessagePort` the connection uses (a fake in tests). */
 export interface PortLike {
@@ -29,6 +30,7 @@ export type Log = (level: 'info' | 'warn' | 'error', message: string) => void;
 
 export class EngineConnection {
   private readonly outstanding = new Outstanding();
+  private readonly ended = new AbortController();
   private welcome: ((ok: boolean, reason?: string) => void) | null = null;
   private readonly sessions = new Map<number, SessionListener>();
   private readonly closers = new Set<(reason: string) => void>();
@@ -65,9 +67,13 @@ export class EngineConnection {
 
   request(body: Request, session: number | null = null, revision: number | null = null): Promise<Response> {
     if (this.closed) return Promise.reject(new Error('the engine connection closed'));
-    const { id, answer } = this.outstanding.open(body);
-    this.post(envelope(requestMessage(id, body), session, revision));
-    return answer;
+    const send = () => {
+      if (this.closed) return Promise.reject(new Error('the engine connection closed'));
+      const { id, answer } = this.outstanding.open(body);
+      this.post(envelope(requestMessage(id, body), session, revision));
+      return answer;
+    };
+    return body.type === 'resync' ? retryResync(send, this.ended.signal) : send();
   }
 
   event(body: Event, session: number, revision: number | null = null): void {
@@ -122,6 +128,7 @@ export class EngineConnection {
   close(reason: string): void {
     if (this.closed) return;
     this.closed = true;
+    this.ended.abort();
     this.ready = false;
     this.heldPatches = [];
     try {

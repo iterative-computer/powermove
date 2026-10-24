@@ -13,7 +13,7 @@ export const NATIVE_PANEL_INSTRUCTIONS = '"Native panel design" in EXTENSIONS.md
 
 /** Footage understanding and captions: watch and listen before cutting. */
 export const AGENT_WATCH_AND_LISTEN_INSTRUCTIONS = `FOOTAGE AND CAPTIONS
-Cuts: probe_media → media_contact_sheet/sample_media_frames auto:true → transcribe_media (layerId: composition seconds) → media_waveform → edit_video → render_frames → check_project. Captions: add_captions/edit_captions in composition seconds; generate_captions transcribes; export_captions: SRT/WebVTT. Missing model: request the offered download; no retry loop.`;
+Cuts: probe_media -> media_contact_sheet/sample_media_frames auto:true -> transcribe_media (layerId: composition seconds) -> media_waveform -> edit_video -> render_frames -> check_project. Captions: add_captions/edit_captions in composition seconds; generate_captions transcribes; export_captions: SRT/WebVTT. Missing model: request the offered download; no retry loop.`;
 
 export const THEME_LIFECYCLE_INSTRUCTIONS = 'Themes: "Reversible themes" in EXTENSIONS.md. Unapply on disable/removal/reload: owned appearance APIs/api.onDispose; preserve later edits. Verify off/on/reload/restart in both workspaces.';
 
@@ -43,11 +43,10 @@ export function agentInstructions({
 ${EFFECT_AUTHORING_INSTRUCTIONS}
 Effects: powermove-api/samples/gradient-tint/README.md; validate_effect (full definition); verify registration/rendering.
 
-Stage only in ${extensionsDir}; atomic validation/promotion. Never edit the app bundle, live user-extension folder, or source checkout. The folder name must equal the extension manifest id. Credentials: manifest \`vars\`/\`api.vars\`, never source. Vars: optional, no required flags; offer missing-value alternatives; explain values in Set Up.
+Stage only in ${extensionsDir}; atomic validation/promotion. Never edit the app bundle, live user-extension folder, or source checkout. The folder name must equal the extension manifest id. Credentials: manifest \`vars\`/\`api.vars\`, never source. Vars: no required flags; offer missing-value alternatives; explain values in Set Up.
 
 Extensions: apiVersion 3, minimum permissions ([] valid), sandbox-safe APIs. Prefix ids: manifest id + dot ("hello-world.panel"); no bare ids. Test in Sandbox before publishing; compilation cannot prove compatibility. Overrides/trusted-only APIs need full-access; never bypass compatibility errors with it.
-Read powermove-api/EXTENSIONS.md and types. In order: contribute; override an existing id; fork with \`fork_builtin_extension\`. Return changed id/action/summary in the result's extensions array; otherwise extensions: [].
-EXTENSIONS.md: reactive Svelte 5 panels/import defaults/inspector recipes; check before claiming unsupported.
+Read powermove-api/EXTENSIONS.md (reactive Svelte 5 panels/import defaults/inspector recipes). In order: contribute; override an existing id; fork with \`fork_builtin_extension\`. Return changed id/action/summary in the result's extensions array; otherwise extensions: [].
 ${NATIVE_PANEL_INSTRUCTIONS}
 ${THEME_LIFECYCLE_INSTRUCTIONS}` : `EXTENSIONS
 When existing project tools cannot complete the deliverable, read powermove-api/EXTENSIONS.md and API types before authoring. Stage only in ${extensionsDir}; never edit the app bundle or live extension folder. Return changed ids in extensions for loading and verification. New effects belong in Effects & Presets with editable parameters, not substitute panels or rigs. ${DEPRECATION_GUIDANCE}`;
@@ -73,15 +72,15 @@ DELIVERY
 Project runs have tools; never ask to configure MCP. Verify frames/audio, then export_video/save_project (.pmv). Verified paths (desktop: ~/Powermove), no picker. Use the current blank project; never switch.
 
 VERIFICATION
-Check API pack/get_workspace_state before claiming unavailable. Panel targets: select_layers. Reproduce failures; inspect output, not just builds/clicks. Tracking/rotoscoping: source-colored moving cutouts at start/middle/end; white mattes/outlines fail. After failures inspect errors/capture_panel.
+Check API pack/get_workspace_state before claiming unavailable. Panel targets: select_layers. Reproduce failures; inspect output, errors and capture_panel, not just builds/clicks. Tracking/rotoscoping: source-colored moving cutouts at start/middle/end; white mattes/outlines fail.
 
 ANIMATION-FIRST VALUES
 Treat every user-editable project value as keyframeable by default: each effect, layer type, generated control, or extension. Use the real editable property/keyframe model, normal animation controls and set_property or replace_keyframes. Never flatten adjustable values or duplicate state. Only structural metadata may be non-keyframeable.
 
-Commands: ${AGENT_COMMAND_TYPES.join(', ')}. Return each command as one JSON-encoded string.
+Commands: ${AGENT_COMMAND_TYPES.join(',')}. Return each command as one JSON-encoded string.
 
 GROUPS AND PARENTING
-group_layers {targets,name}, ungroup_layers {targets}, move_to_group {targets,group:ID|null}; animate with set_property. move_to_group preserves world pose at the playhead, rebasing local transforms; rigs affect other times. Join before animating the rig, or set local transforms afterward. reorder_layer uses composition-wide indices and may change groups; siblings: edit_layer_strips {operation:"reorder",layerIds,anchorId,placement:"before"|"after"}. Parent: set_layer {target,patch:{parent:ID|null}} preserves pose/rejects cycles. Never group precomps.
+group_layers {targets,name}, ungroup_layers {targets}, move_to_group {targets,group:ID|null}. move_to_group preserves world pose at the playhead, rebasing local transforms; rigs affect other times. Join before animating the rig, or set local transforms afterward. reorder_layer uses composition-wide indices and may change groups; siblings: edit_layer_strips {operation:"reorder",layerIds,anchorId,placement:"before"|"after"}. Parent: set_layer {target,patch:{parent:ID|null}} preserves pose/rejects cycles. Never group precomps.
 
 ${extensionGuidance}
 
@@ -91,7 +90,7 @@ summary is one to three sentences on changes/verification limits. Each note is o
 DELIVERABLES AND SIDE EFFECTS
 Deliverables: ${artifactPath}. Media artifacts: importToTimeline=true, workspace-relative paths; after import use layer IDs for placement/grouping/render verification.
 
-Record uploads/messages/publications/remote changes/app launches in externalActions with tool evidence. Authority: ${access}. Project writes: workspace/isolated staging. Computer authority permits requested outside operations; Powermove source changes belong in staging.
+Record uploads/messages/publications/remote changes/app launches in externalActions with tool evidence. Authority: ${access}. Project writes, Powermove source changes included, go to workspace/isolated staging; computer authority permits requested outside operations.
 
 Project: ${projectName}`;
 }

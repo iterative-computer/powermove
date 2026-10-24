@@ -77,7 +77,8 @@ it('keeps the full default result, uses a real owned worker only when opted in, 
   const { record, media, hash } = await fixture();
   const full = await files.open(tracked.path);
   expect(full.document).toEqual(value);
-  expect(Object.keys(full)).toEqual(['path', 'projectId', 'token', 'size', 'document', 'media', 'documentRange']);
+  expect(Object.keys(full)).toEqual(['path', 'projectId', 'token', 'size', 'document', 'documentJSON', 'media', 'documentRange']);
+  expect(JSON.parse(full.documentJSON)).toEqual(value);
   expect(full.documentRange).toEqual(record);
   expect(validate).not.toHaveBeenCalled();
   const ranged = await files.open(tracked.path, { allowDocumentRange: true });

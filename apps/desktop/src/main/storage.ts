@@ -48,9 +48,18 @@ export interface Store {
   bootstrapSerialized?(): Record<string, string>;
   snapshotSerialized?(): Record<string, string>;
   /** Throws for an unknown key; the promise rejects if the value is refused. */
-  set(key: string, value: unknown): void | Promise<void>;
-  setSerialized?(key: string, serialized: string): void | Promise<void>;
-  delete(key: string): void | Promise<void>;
+  /** `writer`: who asked (a window's webContents id; SAVE-1c), so a project is written only by the window that has it. */
+  set(key: string, value: unknown, writer?: unknown): void | Promise<void>;
+  setSerialized?(key: string, serialized: string, writer?: unknown): void | Promise<void>;
+  /** One journal entry for a project (SAVE-1, project-durability.ts). */
+  appendJournal?(key: string, serialized: string, writer?: unknown): Promise<void>;
+  /** Which writer holds a project (null: none), from main's window registry (SAVE-1c). */
+  setOwnership?(ownerOf: (projectId: string) => unknown): void;
+  /** Whether a write or delete of `key` by `writer` is refused now: a project another window has (SAVE-1c). */
+  refuses?(key: string, writer: unknown): boolean;
+  /** Keys whose newest write did not reach disk (a persist failure, or a refused journal entry) and none has since. */
+  failingKeys?(): string[];
+  delete(key: string, writer?: unknown): void | Promise<void>;
   flushAll(): Promise<void>;
   onError(cb: (event: StoreErrorEvent) => void): () => void;
 }
@@ -82,6 +91,10 @@ export interface StoreOptions {
   syncFs?: Pick<typeof nodeSyncFs, 'readFileSync' | 'renameSync'>;
   now?: () => number;
   randomSuffix?: () => string;
+  /** A project journal's byte limit (tests). */
+  journalLimitBytes?: number;
+  /** One journal entry's byte limit, checked on this thread (tests; default the store's). */
+  journalEntryBytes?: number;
 }
 
 /**
@@ -155,6 +168,28 @@ class FileStore implements Store {
   private readonly unsettled = new Map<string, { id: number; present: boolean; settled: Promise<unknown> }>();
   /** Keys whose newest committed value has not reached disk yet. */
   private readonly unwritten = new Map<string, number>();
+  /** Keys whose last write failed to reach disk, until one of them reaches it. */
+  private readonly failing = new Map<string, string>();
+  /*
+   * SAVE-1b: the one place that decides whether a project journal takes
+   * entries. Any append that does not end in an acknowledged write (refused
+   * here for its size, refused by the engine, not readable in a replacement
+   * engine, lost when the worker stopped, or its journal write failing) leaves
+   * an edit missing from the journal; a later entry accepted over it recovers
+   * a document that never existed. So the journal is closed, at the request
+   * id of the latest such edit, and every later entry is refused here (moving
+   * that point), until a slot write posted after it has landed: its snapshot
+   * holds every one of those edits. The engine is told in order (`journal`),
+   * and a replacement engine is told before anything is replayed to it.
+   */
+  private readonly closedJournals = new Map<string, number>();
+  /** Restore request id → the id of the write it replays (a replayed slot reopens by the original). */
+  private readonly replayed = new Map<number, number>();
+  /** Appends the engine has not answered (a refusal of one closes its journal; a refused set or delete does not). */
+  private readonly appends = new Set<number>();
+  /** Slot writes by (original) request id → who posted them, until they land. */
+  private readonly slotWriters = new Map<number, unknown>();
+  private ownerOf?: (projectId: string) => unknown;
   private readonly waiters = new Map<number, Waiter>();
   private readonly reads = new Map<number, (reply: ReadReply | null) => void>();
   private readonly loading = new Map<string, Promise<Buffer | null>>();
@@ -172,7 +207,8 @@ class FileStore implements Store {
     private readonly directory: string,
     private readonly channel: StoreChannel,
     private readonly writeDelayMs: number,
-    private readonly heavyCacheBytes: number
+    private readonly heavyCacheBytes: number,
+    private readonly limits: { journalEntryBytes?: number } = {}
   ) {
     channel.onReply(reply => this.receive(reply));
     channel.onRestart?.(() => this.restarted());
@@ -255,42 +291,115 @@ class FileStore implements Store {
     };
   }
 
-  set(key: string, value: unknown): Promise<void> {
+  set(key: string, value: unknown, writer?: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeSet);
-    return this.mutate(key, true, IPC.storeSet, id => ({ op: 'set', id, key, value }), () => value);
+    if (this.refuses(key, writer)) return this.refused(IPC.storeSet, 'the project is open in another window');
+    return this.mutate(key, true, IPC.storeSet, id => ({ op: 'set', id, key, value }), () => value, writer);
   }
 
-  setSerialized(key: string, serialized: string): Promise<void> {
+  setSerialized(key: string, serialized: string, writer?: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeSetSerialized);
+    if (this.refuses(key, writer)) return this.refused(IPC.storeSetSerialized, 'the project is open in another window');
     // A string has at least as many UTF-8 bytes as characters; the engine checks
     // the exact byte length without scanning the string on this thread.
     if (typeof serialized !== 'string' || serialized.length > storeByteLimit(key)) throw new IpcValidationError(IPC.storeSetSerialized, 'serialized value exceeds its size limit');
-    return this.mutate(key, true, IPC.storeSetSerialized, id => ({ op: 'setSerialized', id, key, serialized }), () => parseOrUndefined(serialized));
+    return this.mutate(key, true, IPC.storeSetSerialized, id => ({ op: 'setSerialized', id, key, serialized }), () => parseOrUndefined(serialized), writer);
   }
 
-  delete(key: string): Promise<void> {
+  setOwnership(ownerOf: (projectId: string) => unknown): void { this.ownerOf = ownerOf; }
+
+  /*
+   * SAVE-1c: a project is written only by the window that has it. A slot from
+   * another window (Rename… on the Projects screen of a project open
+   * elsewhere) is that window's stored copy: it lacks the owner's newest
+   * edits, among them any the journal refused, and landing it would both
+   * prune entries it does not hold and reopen a closed journal under a
+   * document the owner never had. The window renames through the owner
+   * instead (window:rename-project); this refusal is the backstop. A delete
+   * is refused the same way: another window's Delete Forever would remove the
+   * owner's slot and journal while it keeps editing, and a crash before its
+   * next slot would lose the project. A project no window has is written and
+   * deleted by anyone, as before. A main-internal write (no writer) is never
+   * refused.
+   */
+  refuses(key: string, writer: unknown): boolean {
+    if (!key.startsWith('project.') || writer === undefined || !this.ownerOf) return false;
+    const owner = this.ownerOf(key.slice('project.'.length));
+    return owner !== null && owner !== undefined && owner !== writer;
+  }
+
+  private refused(channel: string, detail: string): Promise<void> {
+    const refused = Promise.reject(new IpcValidationError(channel, detail));
+    refused.catch(() => undefined);
+    return refused;
+  }
+
+  appendJournal(key: string, serialized: string, _writer?: unknown): Promise<void> {
+    this.fileNameFor(key, IPC.storeAppendJournal);
+    const refuse = (detail: string): Promise<void> => {
+      // This edit is not in the journal: the close point moves past it.
+      this.closeJournal(key, this.nextId++);
+      const refused = Promise.reject(new IpcValidationError(IPC.storeAppendJournal, detail));
+      refused.catch(() => undefined);
+      return refused;
+    };
+    if (this.closedJournals.has(key)) return refuse('the project journal is closed after an entry that was not saved, until the project is saved');
+    if (typeof serialized !== 'string' || serialized.length > this.entryLimit(key)) return refuse('journal entry exceeds its size limit');
+    const written = this.mutate(key, true, IPC.storeAppendJournal, id => { this.appends.add(id); return { op: 'append', id, key, serialized }; }, () => undefined);
+    return written;
+  }
+
+  private entryLimit(key: string): number { return this.limits.journalEntryBytes ?? storeByteLimit(key); }
+
+  private closeJournal(key: string, after: number, post = true): void {
+    const was = this.closedJournals.get(key);
+    this.closedJournals.set(key, Math.max(was ?? 0, after));
+    if (was !== undefined || !post) return;
+    try { this.channel.post({ op: 'journal', id: this.nextId++, key, open: false }); } catch { /* the worker is gone; its replacement is told */ }
+  }
+
+  /** A slot write landed: a journal closed before it was posted holds nothing it lacks. */
+  private slotLanded(slotKey: string, id: number, writer: unknown): void {
+    const key = `projectJournal.${slotKey.slice('project.'.length)}`;
+    const after = this.closedJournals.get(key);
+    if (after === undefined || id <= after) return;
+    // Only the window that has the project holds the edits the journal lacks.
+    if (writer !== undefined && this.ownerOf) {
+      const owner = this.ownerOf(slotKey.slice('project.'.length));
+      if (owner !== null && owner !== undefined && owner !== writer) return;
+    }
+    this.closedJournals.delete(key);
+    try { this.channel.post({ op: 'journal', id: this.nextId++, key, open: true }); } catch { /* reopened when the replacement starts */ }
+  }
+
+  delete(key: string, writer?: unknown): Promise<void> {
     this.fileNameFor(key, IPC.storeDelete);
-    return this.mutate(key, false, IPC.storeDelete, id => ({ op: 'delete', id, key }), () => undefined);
+    if (this.refuses(key, writer)) return this.refused(IPC.storeDelete, 'the project is open in another window');
+    return this.mutate(key, false, IPC.storeDelete, id => ({ op: 'delete', id, key }), () => undefined, writer);
   }
 
   async flushAll(): Promise<void> {
     await this.request(id => ({ op: 'flush', id }));
   }
 
+  failingKeys(): string[] { return [...new Set([...this.failing.keys(), ...this.closedJournals.keys()])]; }
+
   onError(cb: (event: StoreErrorEvent) => void): () => void {
     this.listeners.add(cb);
     return () => this.listeners.delete(cb);
   }
 
-  private mutate(key: string, present: boolean, channel: string, build: (id: number) => StoreRequest, pinValue: () => unknown): Promise<void> {
+  private mutate(key: string, present: boolean, channel: string, build: (id: number) => StoreRequest, pinValue: () => unknown, writer?: unknown): Promise<void> {
     let posted: { id: number; settled: Promise<unknown> };
     try {
       posted = this.post(build);
+      if (key.startsWith('project.')) this.slotWriters.set(posted.id, writer);
     } catch (error) {
       // Values reach the engine as a structured clone, which refuses what
       // JSON cannot represent either (functions, symbols, host objects).
       if (error instanceof Error && error.name === 'DataCloneError') throw new IpcValidationError(channel, `value is not JSON-serialisable: ${error.message}`);
       // The storage worker is gone for good; report it like a failed write.
+      if (key.startsWith('projectJournal.')) this.closeJournal(key, this.nextId++, false);
       this.emitError(key, errorText(error));
       const failed = Promise.reject(error);
       failed.catch(() => undefined);
@@ -339,12 +448,18 @@ class FileStore implements Store {
   }
 
   private receive(reply: StoreReply): void {
-    if (reply.type === 'error') { this.emitError(reply.key, reply.error); return; }
+    if (reply.type === 'error') { this.emitError(reply.key, reply.error, reply.unsaved === true); return; }
     if (reply.type === 'written') {
       if (this.unwritten.get(reply.key) === reply.id) {
         this.unwritten.delete(reply.key);
         this.evict();
       }
+      this.failing.delete(reply.key);
+      const original = this.replayed.get(reply.id) ?? reply.id;
+      this.replayed.delete(reply.id);
+      const writer = this.slotWriters.get(original);
+      this.slotWriters.delete(original);
+      if (reply.key.startsWith('project.') && original) this.slotLanded(reply.key, original, writer);
       return;
     }
     if (reply.type === 'read') {
@@ -372,6 +487,7 @@ class FileStore implements Store {
         waiter?.resolve(undefined);
         return;
       case 'committed':
+        this.appends.delete(reply.id);
         this.unwritten.set(reply.key, reply.id);
         if (this.unsettled.get(reply.key)?.id === reply.id) this.unsettled.delete(reply.key);
         if (reply.bytes) this.publish(reply.key, asBuffer(reply.bytes));
@@ -388,6 +504,7 @@ class FileStore implements Store {
             else this.pinMetadata.delete(reply.key);
           }
         }
+        if (this.appends.delete(reply.id)) this.closeJournal(reply.key, reply.id);
         const error = new IpcValidationError(reply.channel, reply.detail);
         this.emitError(reply.key, error.message);
         waiter?.reject(error);
@@ -427,6 +544,9 @@ class FileStore implements Store {
   /** A replacement engine: everything not yet on disk is written again. */
   private restarted(): void {
     const stopped = new Error('The storage worker stopped before this change was saved.');
+    // Entries the stopped worker never answered are lost: their journals close at them.
+    for (const [key, { id }] of this.unsettled) if (key.startsWith('projectJournal.')) this.closeJournal(key, id, false);
+    this.appends.clear();
     for (const [key] of this.unsettled) this.emitError(key, stopped.message);
     for (const waiter of this.waiters.values()) waiter.reject(stopped);
     this.waiters.clear();
@@ -436,14 +556,22 @@ class FileStore implements Store {
     for (const done of reads) done(null);
     try {
       void this.request(id => ({ op: 'init', id, directory: this.directory, writeDelayMs: this.writeDelayMs })).catch(() => undefined);
-      for (const key of [...this.unwritten.keys()]) {
+      // Closed journals first: nothing replayed reopens one unless it was posted after the close point.
+      for (const key of this.closedJournals.keys()) this.channel.post({ op: 'journal', id: this.nextId++, key, open: false });
+      // In the order they were first made (their ids), not the map's: a project's
+      // slot and journal are replayed as they happened (project-durability.ts).
+      for (const [key, latest] of [...this.unwritten].sort(([, a], [, b]) => a - b)) {
         const id = this.nextId++;
         const bytes = this.committed.get(key);
+        // Replayed before (an earlier replacement): still the write it first was.
+        const original = this.replayed.get(latest) ?? latest;
+        this.replayed.delete(latest);
         this.channel.post({ op: 'restore', id, key, bytes: bytes ? new Uint8Array(bytes) : null });
         this.unwritten.set(key, id);
+        this.replayed.set(id, original);
       }
     } catch (error) {
-      for (const key of this.unwritten.keys()) this.emitError(key, `not saved: ${errorText(error)}`);
+      for (const key of this.unwritten.keys()) this.emitError(key, `not saved: ${errorText(error)}`, true);
     }
   }
 
@@ -603,8 +731,13 @@ class FileStore implements Store {
     return storeFileName(parsed);
   }
 
-  private emitError(key: string, error: string): void {
-    const event: StoreErrorEvent = { key, error };
+  private emitError(key: string, error: string, unsaved = false): void {
+    if (unsaved) {
+      this.failing.set(key, error);
+      // A journal write that failed, or a replay that could not be applied: entries may be missing.
+      if (key.startsWith('projectJournal.')) this.closeJournal(key, this.nextId - 1);
+    }
+    const event: StoreErrorEvent = unsaved ? { key, error, unsaved } : { key, error };
     for (const listener of this.listeners) {
       try {
         listener(event);
@@ -616,16 +749,18 @@ class FileStore implements Store {
 }
 
 export function createStore(dir: string, options: StoreOptions = {}): Store {
-  if (options.thread && (options.fs || options.syncFs || options.now || options.randomSuffix)) {
+  if (options.thread && (options.fs || options.syncFs || options.now || options.randomSuffix || options.journalLimitBytes)) {
     throw new Error('Filesystem seams apply only to a store engine on this thread.');
   }
   const channel = options.thread?.storeChannel() ?? new InlineStoreChannel({
     fs: options.fs ?? nodeFs,
     syncFs: options.syncFs ?? nodeSyncFs,
     now: options.now ?? Date.now,
-    randomSuffix: options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`)
+    randomSuffix: options.randomSuffix ?? (() => `${process.pid}-${randomBytes(8).toString('hex')}`),
+    ...(options.journalLimitBytes ? { journalLimitBytes: options.journalLimitBytes } : {})
   });
-  return new FileStore(path.resolve(dir), channel, options.writeDelayMs ?? WRITE_DELAY_MS, options.heavyCacheBytes ?? HEAVY_CACHE_BYTES);
+  return new FileStore(path.resolve(dir), channel, options.writeDelayMs ?? WRITE_DELAY_MS, options.heavyCacheBytes ?? HEAVY_CACHE_BYTES,
+    options.journalEntryBytes ? { journalEntryBytes: options.journalEntryBytes } : {});
 }
 
 function parseOrUndefined(serialized: string): unknown {
@@ -668,6 +803,8 @@ export interface StoreIpcContext {
    * them on its next write.
    */
   broadcastChange?(keys: string[], sender: unknown): void;
+  /** The writer id (webContents id) of the window that has a project, or null (SAVE-1c). */
+  ownerOf?(projectId: string): unknown;
 }
 
 export function registerStoreIpc(
@@ -678,6 +815,31 @@ export function registerStoreIpc(
   const requireTrusted = (event: StoreIpcEvent, channel: string): void => {
     if (!ctx.isTrustedSender(event)) throw new IpcValidationError(channel, 'untrusted sender');
   };
+  /* A write main accepted can still fail to reach disk (ENOSPC, EIO, a
+     storage worker that stopped). Its writer is told, as it is of a refused
+     value: without this a window kept treating such a project checkpoint as
+     written, never wrote it again, and kept throwing nothing. */
+  type Writer = { send(channel: string, payload: unknown): void; isDestroyed?(): boolean };
+  /** A window's identity as a writer (its webContents id), for main's ownership rule (SAVE-1c). */
+  const writerOf = (event: StoreIpcEvent): unknown => (event.sender as { id?: unknown }).id;
+  if (ctx.ownerOf) store.setOwnership?.(ctx.ownerOf);
+  const writers = new Map<string, Writer>();
+  /* Only a write main accepts makes its window the key's writer: a refused
+     one (another window's project, SAVE-1c) must not take over where the
+     owner's later persist failures are sent (review recheck 6, R6h). It is
+     recorded before the write is posted, so a failure reported while posting
+     reaches it too. */
+  const wrote = (event: StoreIpcEvent, key: string): boolean => {
+    if (store.refuses?.(key, writerOf(event))) return false;
+    writers.set(key, event.sender as unknown as Writer);
+    return true;
+  };
+  store.onError(event => {
+    if (!event.unsaved) return;
+    const writer = writers.get(event.key);
+    if (!writer || writer.isDestroyed?.()) return;
+    try { writer.send(IPC.storeError, { key: event.key, error: event.error, unsaved: true } satisfies StoreErrorEvent); } catch { /* the window is closing */ }
+  });
   /* Writes arrive in bursts (a rename touches the registry and the slot), so
      the keys are coalesced into one message per turn of the event loop. A key
      is announced once its value is encoded, so a sibling's refill reads it
@@ -714,8 +876,9 @@ export function registerStoreIpc(
   ipcMain.handle(IPC.storeSetSerialized, async (event, payload: unknown) => {
     requireTrusted(event, IPC.storeSetSerialized);
     if (!isRecord(payload) || typeof payload.key !== 'string' || typeof payload.serialized !== 'string') throw new IpcValidationError(IPC.storeSetSerialized, 'expected key and serialized JSON');
-    if (store.setSerialized) await store.setSerialized(payload.key, payload.serialized);
-    else await store.set(payload.key, JSON.parse(payload.serialized));
+    wrote(event, payload.key);
+    if (store.setSerialized) await store.setSerialized(payload.key, payload.serialized, writerOf(event));
+    else await store.set(payload.key, JSON.parse(payload.serialized), writerOf(event));
     announce(payload.key, event.sender);
   });
 
@@ -765,7 +928,8 @@ export function registerStoreIpc(
         throw new IpcValidationError(IPC.storeSet, 'expected { key, value }');
       }
       const request = payload as unknown as StoreSetRequest;
-      settleWrite(event, payload, request.key, store.set(request.key, request.value));
+      wrote(event, request.key);
+      settleWrite(event, payload, request.key, store.set(request.key, request.value, writerOf(event)));
     } catch (error) {
       if (error instanceof IpcValidationError) {
         sendValidationError(event, payload, error);
@@ -782,7 +946,13 @@ export function registerStoreIpc(
         throw new IpcValidationError(IPC.storeDelete, 'expected { key }');
       }
       const request = payload as unknown as StoreDeleteRequest;
-      settleWrite(event, payload, request.key, store.delete(request.key));
+      /* Another window has the project (Delete Forever from Trash, or the
+         boot prune, while it is open there): its slot and journal stay, and
+         the owner's next checkpoint puts the project back in the library, as
+         it did after the delete before. Dropped quietly, so this window sees
+         what it saw before (SAVE-1c). */
+      if (!wrote(event, request.key)) return;
+      settleWrite(event, payload, request.key, store.delete(request.key, writerOf(event)));
     } catch (error) {
       if (error instanceof IpcValidationError) {
         sendValidationError(event, payload, error);
@@ -806,9 +976,19 @@ export function registerStoreIpc(
     }
   });
 
+  ipcMain.handle(IPC.storeAppendJournal, async (event, payload: unknown) => {
+    requireTrusted(event, IPC.storeAppendJournal);
+    if (!isRecord(payload) || typeof payload.key !== 'string' || typeof payload.serialized !== 'string') throw new IpcValidationError(IPC.storeAppendJournal, 'expected key and serialized JSON');
+    if (!store.appendJournal) throw new IpcValidationError(IPC.storeAppendJournal, 'this store keeps no project journals');
+    wrote(event, payload.key);
+    await store.appendJournal(payload.key, payload.serialized, writerOf(event));
+    announce(payload.key, event.sender);
+  });
+
   ipcMain.handle(IPC.storeFlush, async (event) => {
     requireTrusted(event, IPC.storeFlush);
     await store.flushAll();
+    return { failing: store.failingKeys?.() ?? [] };
   });
 }
 

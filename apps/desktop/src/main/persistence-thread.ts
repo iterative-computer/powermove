@@ -22,8 +22,8 @@ export type PersistenceReply =
   | { from: 'store'; reply: StoreReply }
   | { from: 'project'; id: number; error?: string };
 
-/** Store requests answered by exactly one reply; `restore` is answered only by `written`, `evict` not at all. */
-const ANSWERED = new Set<StoreRequest['op']>(['init', 'load', 'set', 'setSerialized', 'delete', 'read', 'flush']);
+/** Store requests answered by exactly one reply; `restore` is answered only by `written`, `evict` and `journal` not at all. */
+const ANSWERED = new Set<StoreRequest['op']>(['init', 'load', 'set', 'setSerialized', 'delete', 'append', 'read', 'flush']);
 const FINAL = new Set<StoreReply['type']>(['ready', 'loaded', 'committed', 'rejected', 'read', 'flushed', 'failed']);
 const MAX_RESTARTS = 5;
 

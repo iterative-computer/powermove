@@ -2,6 +2,7 @@ import { persistShaderEnvironment } from './shader-environment';
 import { packAgentProject } from '../agent-tools/project-packer';
 import { ProfileDefinitionsWriter, profileDefinitionsPath } from './profile-definitions';
 import { installAgentFramesIpc } from './agent-frames';
+import { installDocumentKernelIpc } from './document-kernel';
 /*
  * Wires the native engine into the Electron app behind "Use New Engine".
  *
@@ -32,7 +33,7 @@ import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
-import { askAboutOfflineMedia, offlineClips } from './offline-media';
+import { askAboutOfflineMedia, offlineClips, offlineExportOptions } from './offline-media';
 import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
 import { SnapshotService } from './snapshots';
@@ -158,8 +159,12 @@ function statusMessage(enabled: boolean, status: NativeEngineStatus | null): Eng
   return { enabled, processes: { interactive: one('interactive'), job: one('job') } };
 }
 
-/** Largest staged resync document (the largest corpus history is 60 MB). */
-const MAX_STAGED_BYTES = 256 * 1024 ** 2;
+/** Largest staged resync document: the same bound as a document sent with
+ *  a synchronous snapshot (snapshots.ts MAX_DOCUMENT_BYTES). The renderer
+ *  now hands over pm-wasm's bytes, not a JavaScript string, so V8's string
+ *  ceiling (about 512 MiB, which bounds today's own save) no longer stops
+ *  it first; a real project's document is 180 MB (C1). */
+const MAX_STAGED_BYTES = 512 * 1024 ** 2;
 
 function validStageRequest(value: unknown): value is StageDocumentRequest {
   if (typeof value !== 'object' || value === null) return false;
@@ -446,7 +451,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // Sync snapshots a window's own session cannot serve (none yet, or a
   // staged resync in flight) come from a session main opens for the window.
   const windowSessions = new WindowSnapshotSessions(
-    { isReady: (p) => engine.isReady(p), hostPort: (p) => engine.hostPort(p), request: (p, body, session, revision) => engine.request(p, body, session, revision), stageDocument: (p, session, bytes) => engine.stageDocument(p, session, bytes), event: (p, body, session) => engine.event(p, body, session) },
+    { isReady: (p) => engine.isReady(p), hostPort: (p) => engine.hostPort(p), request: (p, body, session, revision) => engine.request(p, body, session, revision), stageDocument: (p, session, bytes) => engine.stageDocument(p, session, bytes), event: (p, body, session) => engine.event(p, body, session), adoptNativeDocument: (owner, session, document, revision) => engine.adoptNativeDocument(owner, session, document, revision) },
     engine.definitions,
     log,
     undefined,
@@ -458,6 +463,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     windowSessions,
     log
   });
+
+  const uninstallDocumentKernel = installDocumentKernelIpc({ ipc: options.ipc, cache: path.join(cacheDirectory, 'Documents'), trusted: options.isTrustedSender, call: (owner, request, bytes) => engine!.documentKernel(owner, request, bytes) });
 
   // The font registry and subsetting run in the interactive engine (plan
   // section 12, Phase 2): main relays pm-wasm's font requests over its own
@@ -475,7 +482,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // viewer's presentation) from the round trip with the least delay.
   options.ipc.on(ENGINE_IPC.requestPorts, (event) => {
     if (!options.isTrustedSender(event)) return;
-    engine!.reconnectClient(event.sender.id);
+    engine!.refreshPorts(event.sender.id);
   });
   options.ipc.handle(ENGINE_IPC.hostTime, (event) => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -548,6 +555,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       directory: options.automaticOutputDirectory ?? path.join(options.home, 'Powermove'),
       resolveAsset: asset => options.resolveAsset!(asset, { process: 'job', session })
     }, document) } : {}),
+    ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
     ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}),
     log,
     // Each job renders its window's winning registrations (contract 10).
@@ -600,7 +608,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   /** The offline message before an interactive export (section 14.8).
    *  Resolves the options to export with, or the outcome to answer. */
   const checkOffline = async (window: BrowserWindow, sender: WebContents, project: Record<string, any>, request: EngineExportRequest): Promise<EngineExportRequest['options'] | EngineExportStart> => {
-    if (!options.resolveAsset || request.options.draft) return request.options;
+    if (!options.resolveAsset) return request.options;
     const clips = await offlineClips(project, (asset) => options.resolveAsset!(asset));
     if (!clips.length) return request.options;
     let proxies = !!options.resolveProxy;
@@ -608,7 +616,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       for (const clip of clips) if (!await options.resolveProxy!(clip.asset).catch(() => null)) proxies = false;
     }
     const choice = await askAboutOfflineMedia(window, clips, proxies);
-    if (choice === 'proxies') return { ...request.options, draft: true };
+    if (choice === 'proxies' || choice === 'without') return offlineExportOptions(request.options, choice);
     if (choice === 'locate') {
       const assets = clips.map((c) => c.asset);
       if (!sender.isDestroyed()) sender.send(ENGINE_IPC.locateMedia, assets);
@@ -762,6 +770,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       removeAgentFramesIpc();
       exportFrameBridge?.dispose();
       removeSnapshotIpc();
+      await uninstallDocumentKernel();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
       windowSessions.dispose();
       snapshots = null;
