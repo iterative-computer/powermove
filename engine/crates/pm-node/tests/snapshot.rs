@@ -156,37 +156,13 @@ fn the_host_snapshots_sessions_it_opened_for_a_window() {
     run_child("child_host_session");
 }
 
+/// SVG images are drawn by the engine: a snapshot answers at once (no
+/// renderer round trip), at any scale, and the viewer draws its first frame
+/// with the image without waiting for anything.
 #[test]
-fn level1_svg_snapshots_draw_the_windows_rasters() {
+fn svg_snapshots_and_viewer_frames_draw_natively() {
     run_child("child_svg");
 }
-
-#[test]
-fn a_snapshot_that_fails_on_fonts_leaves_the_viewer_asking_for_svg_rasters() {
-    run_child("child_svg_font_failure");
-}
-
-/// The viewer waits for an SVG bucket without a stand-in, but a bucket
-/// the window could not draw ends the wait at once (the frame is drawn
-/// without the image, as today), is asked for again after a while, and
-/// draws when it arrives (pm-node `present::wait`).
-#[test]
-fn an_svg_raster_the_window_cannot_draw_never_freezes_the_viewer() {
-    run_child("child_svg_viewer_failure");
-}
-
-/// A bucket the window never answers for: the viewer's wait times out at
-/// its bound and the frame is drawn without it.
-#[test]
-fn an_unanswered_svg_raster_times_out_instead_of_freezing_the_viewer() {
-    run_child_with(
-        "child_svg_viewer_timeout",
-        &[(pm_node::present::EXTERNAL_WAIT_ENV, SVG_WAIT_CAP_MS)],
-    );
-}
-
-/// The wait cap the SVG timeout child runs with (ms).
-const SVG_WAIT_CAP_MS: &str = "1500";
 
 /// Every message the engine sent, by port.
 #[derive(Default)]
@@ -1171,11 +1147,9 @@ fn child_fallback() {
             revision,
             fallback,
             compat,
-            svg,
         }) => {
             assert_eq!(revision.get(), 1);
             assert!(compat.is_empty());
-            assert!(svg.is_empty());
             fallback
         }
         other => panic!("expected needsRenderer, got {other:?}"),
@@ -1646,214 +1620,77 @@ fn try_serve_media<T>(
 }
 
 #[test]
-#[ignore = "run by level1_svg_snapshots_draw_the_windows_rasters"]
+#[ignore = "run by svg_snapshots_and_viewer_frames_draw_natively"]
 fn child_svg() {
-    use pm_protocol::snapshot::CompatMessage;
-    use pm_protocol::svg_raster::SvgRasterPixels;
     if std::env::var(CHILD_ENV).is_err() {
         return;
     }
-    let dir = std::env::temp_dir().join(format!("pm-snapshot-svg-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("art.svg");
-    std::fs::write(
-        &path,
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/></svg>"##,
-    )
-    .unwrap();
+    let file = SvgFile::new("native");
+    let path = file.0.join("art.svg");
     let mut c = Child::start();
     let session = c.session;
     c.resync(2, 1, &svg_project());
     let small = Size::new(320, 180);
-    // The engine never waits on the renderer: it names the bucket.
-    c.snapshot(
-        40,
-        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
-        Some(1),
-        WINDOW,
-        session,
-    );
-    let svg = match serve_media(&mut c, &path, Duration::from_secs(20), answer(40)) {
-        Ok(SnapshotOutcome::NeedsRenderer {
-            fallback,
-            compat,
-            svg,
-            ..
-        }) => {
-            assert!(fallback.is_empty() && compat.is_empty());
-            svg
-        }
-        other => panic!("expected needsRenderer, got {other:?}"),
-    };
-    assert_eq!(svg.len(), 1);
-    let key = svg[0].key.clone();
-    assert_eq!(
-        (key.width, key.height, svg[0].asset.as_str()),
-        (80, 45, "svg1")
-    );
-    assert_eq!(
-        key.content,
-        pm_render::vector::svg::content_hash(&path).unwrap()
-    );
-    // The window draws it, posts it in two bands, and asks again naming it.
     let fill = [0x4C, 0x8D, 0xFF, 0xFF];
-    for (row, rows) in [(0, 20), (20, 25)] {
-        c.event(Event::Compat(CompatMessage::SvgPixels(SvgRasterPixels {
-            key: key.clone(),
-            row,
-            rows,
-            data: Bytes(fill.repeat((key.width * rows) as usize)),
-        })));
+    // The 64 × 36 SVG `contain`ed in the 80 × 45 box at (160, 90), then
+    // at 200%: drawn at once, nothing asked of the window.
+    for (id, scale, revision) in [(40, 100.0, 1), (41, 200.0, 2)] {
+        if scale != 100.0 {
+            let mut moved = svg_project();
+            moved["layers"][0]["p"]["scale.x"] = ch(json!(scale));
+            moved["layers"][0]["p"]["scale.y"] = ch(json!(scale));
+            c.resync(3, revision, &moved);
+        }
+        c.snapshot(
+            id,
+            frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
+            Some(revision),
+            WINDOW,
+            session,
+        );
+        let px = pixels_of(&rendered(serve_media(
+            &mut c,
+            &path,
+            Duration::from_secs(20),
+            answer(id),
+        )));
+        assert_eq!(at(&px, 320, 160, 90), fill, "scale {scale}");
+        assert_eq!(at(&px, 320, 10, 10), BACKGROUND);
+        // The box's edge: 80 × 45 at 100%, 160 × 90 at 200%.
+        let half = (40.0 * scale / 100.0) as u32;
+        assert_eq!(at(&px, 320, 160 + half - 1, 90), fill, "scale {scale}");
+        assert_eq!(at(&px, 320, 160 + half, 90), BACKGROUND, "scale {scale}");
     }
-    let mut again = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
-    again.uploaded = vec![key.upload_key()];
-    c.snapshot(41, again, Some(1), WINDOW, session);
-    let px = pixels_of(&rendered(serve_media(
-        &mut c,
-        &path,
-        Duration::from_secs(20),
-        answer(41),
-    )));
-    assert_eq!(at(&px, 320, 160, 90), fill, "the window's raster");
-    assert_eq!(at(&px, 320, 10, 10), BACKGROUND);
-    // Kept: the next snapshot of that bucket draws at once.
-    c.snapshot(
-        42,
-        frame_request(SnapshotClass::Async, small, SnapshotPixels::Opaque, 5_000),
-        Some(1),
-        WINDOW,
-        session,
-    );
-    let px = pixels_of(&rendered(serve_media(
-        &mut c,
-        &path,
-        Duration::from_secs(20),
-        answer(42),
-    )));
-    assert_eq!(at(&px, 320, 160, 90), fill);
-
-    // Posted bands that reach the engine after the request (two ports
-    // race): the job waits for them instead of naming them again.
-    let mut moved = svg_project();
-    moved["layers"][0]["p"]["scale.x"] = ch(json!(200));
-    moved["layers"][0]["p"]["scale.y"] = ch(json!(200));
-    c.resync(3, 2, &moved);
-    c.snapshot(
-        43,
-        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000),
-        Some(2),
-        WINDOW,
-        session,
-    );
-    let key2 = match serve_media(&mut c, &path, Duration::from_secs(20), answer(43)) {
-        Ok(SnapshotOutcome::NeedsRenderer { svg, .. }) => svg[0].key.clone(),
-        other => panic!("expected needsRenderer, got {other:?}"),
-    };
-    assert_eq!((key2.width, key2.height), (160, 90));
-    let mut again = frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 5_000);
-    again.uploaded = vec![key2.upload_key()];
-    c.snapshot(44, again, Some(2), WINDOW, session);
-    assert!(
-        c.inbox
-            .try_wait(Duration::from_millis(200), &mut answer(44))
-            .is_none(),
-        "answered before the raster arrived"
-    );
-    let green = [0x20, 0xC0, 0x40, 0xFF];
-    c.event(Event::Compat(CompatMessage::SvgPixels(SvgRasterPixels {
-        key: key2.clone(),
-        row: 0,
-        rows: key2.height,
-        data: Bytes(green.repeat((key2.width * key2.height) as usize)),
-    })));
-    let px = pixels_of(&rendered(serve_media(
-        &mut c,
-        &path,
-        Duration::from_secs(20),
-        answer(44),
-    )));
-    assert_eq!(at(&px, 320, 160, 90), green);
+    // The viewer's first frame shows it; no stand-in.
+    c.event(Event::Viewer(viewer_state()));
+    let frame = serve_media(&mut c, &path, Duration::from_secs(20), viewer_frame);
+    assert!(!frame.quality.stand_in);
+    let stats = presenter_stats(&c);
+    assert_eq!(stats["externalWaitTimeouts"], json!(0), "{stats}");
     println!("CHILD-OK");
 }
 
-#[test]
-#[ignore = "run by a_snapshot_that_fails_on_fonts_leaves_the_viewer_asking_for_svg_rasters"]
-fn child_svg_font_failure() {
-    use pm_protocol::snapshot::CompatMessage;
-    if std::env::var(CHILD_ENV).is_err() {
-        return;
+/// A test's SVG file (a 64 × 36 #4C8DFF rect), removed with its directory.
+struct SvgFile(std::path::PathBuf);
+
+impl SvgFile {
+    fn new(tag: &str) -> SvgFile {
+        let dir =
+            std::env::temp_dir().join(format!("pm-snapshot-svg-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("art.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/></svg>"##,
+        )
+        .unwrap();
+        SvgFile(dir)
     }
-    let dir = std::env::temp_dir().join(format!("pm-snapshot-svg-fonts-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("art.svg");
-    std::fs::write(
-        &path,
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/></svg>"##,
-    )
-    .unwrap();
-    let mut c = Child::start();
-    let session = c.session;
-    // A text layer over the SVG: this engine has no font service, so the
-    // snapshot's render meets a font failure and returns early.
-    let mut doc = svg_project();
-    doc["layers"].as_array_mut().unwrap().push(json!({
-        "id": "title", "type": "text", "name": "title", "from": 0, "dur": 2, "on": true,
-        "lock": false, "shy": false, "collapsed": true, "threeD": false, "solo": false,
-        "color": "#4C8DFF", "blend": "normal", "mblur": false, "parent": null, "group": null,
-        "matteSource": null,
-        "p": {
-            "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(160)),
-            "position.y": ch(json!(40)), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
-            "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
-        },
-        "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
-        "d": {
-            "text": "Fonts", "boxWidth": ch(json!(0)), "boxHeight": ch(json!(0)),
-            "font": "Helvetica", "weight": 700, "size": 24, "tracking": 0, "leading": 1.2,
-            "color": "#F2E8D0", "align": "center", "italic": false
-        },
-        "locked_intent": {}
-    }));
-    c.resync(2, 1, &doc);
-    let small = Size::new(320, 180);
-    c.snapshot(
-        50,
-        frame_request(SnapshotClass::Sync, small, SnapshotPixels::Opaque, 20_000),
-        Some(1),
-        WINDOW,
-        session,
-    );
-    let outcome = serve_media(&mut c, &path, Duration::from_secs(40), answer(50));
-    assert_eq!(
-        outcome.err(),
-        Some(ErrorCode::Unsupported),
-        "the snapshot fails on its fonts"
-    );
-    // The viewer shares the snapshot's renderer: its misses still ask the
-    // window for rasters (a renderer left waiting fails them silently).
-    c.resync(3, 2, &svg_project());
-    c.event(Event::Viewer(viewer_state()));
-    let asked = serve_media(&mut c, &path, Duration::from_secs(20), |port, m| {
-        if port != WINDOW {
-            return None;
-        }
-        match &m.message {
-            Message::Event {
-                body: Event::Compat(CompatMessage::SvgRequests { requests }),
-            } => Some(requests.clone()),
-            _ => None,
-        }
-    });
-    assert!(
-        asked.iter().any(|r| r.asset == "svg1"),
-        "the viewer asked for the SVG's raster: {asked:?}"
-    );
-    let presenter: Value = serde_json::from_str(&c.host.status_json()).unwrap();
-    println!(
-        "CHILD-OK svg font failure ({} raster requests; presenter {})",
-        asked.len(),
-        presenter["presenter"]
-    );
+}
+
+impl Drop for SvgFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn shape_project(x: f64) -> Value {
@@ -1899,10 +1736,8 @@ fn child_compat() {
             revision,
             fallback,
             compat,
-            svg,
         }) => {
             assert_eq!(revision.get(), 1);
-            assert!(svg.is_empty());
             assert!(fallback.is_empty());
             assert_eq!(compat.len(), 1, "{compat:?}");
             compat[0].clone()
@@ -2084,11 +1919,9 @@ fn child_compat_viewer_pending() {
             revision,
             fallback,
             compat,
-            svg,
         }) => {
             assert_eq!(revision.get(), 1);
             assert!(fallback.is_empty());
-            assert!(svg.is_empty());
             compat
         }
         other => panic!("outstanding viewer need must not block a sync snapshot: {other:?}"),
@@ -2203,138 +2036,8 @@ fn viewer_frame(port: PortId, m: &Envelope) -> Option<pm_protocol::frame::FrameD
     }
 }
 
-/// The viewer's SVG raster requests from the window port.
-fn svg_asks(port: PortId, m: &Envelope) -> Option<Vec<pm_protocol::svg_raster::SvgRasterRequest>> {
-    use pm_protocol::snapshot::CompatMessage;
-    match &m.message {
-        Message::Event {
-            body: Event::Compat(CompatMessage::SvgRequests { requests }),
-        } if port == WINDOW => Some(requests.clone()),
-        _ => None,
-    }
-}
-
-/// The SVG project in the viewer: its first raster ask (no frame first).
-fn svg_viewer(c: &mut Child, path: &std::path::Path) -> pm_protocol::svg_raster::SvgRasterKey {
-    c.resync(2, 1, &svg_project());
-    c.event(Event::Viewer(viewer_state()));
-    let asked = serve_media(c, path, Duration::from_secs(20), |port, m| {
-        assert!(
-            viewer_frame(port, m).is_none(),
-            "a frame before the bucket was answered (a stand-in)"
-        );
-        svg_asks(port, m)
-    });
-    assert_eq!(asked.len(), 1);
-    assert_eq!(asked[0].asset, "svg1");
-    asked[0].key.clone()
-}
-
 fn presenter_stats(c: &Child) -> Value {
     let status: Value = serde_json::from_str(&c.host.status_json()).unwrap();
     status["presenter"].clone()
 }
 
-fn svg_file(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("pm-snapshot-svg-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("art.svg");
-    std::fs::write(
-        &path,
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36"><rect width="64" height="36" fill="#4C8DFF"/></svg>"##,
-    )
-    .unwrap();
-    path
-}
-
-#[test]
-#[ignore = "run by an_svg_raster_the_window_cannot_draw_never_freezes_the_viewer"]
-fn child_svg_viewer_failure() {
-    use pm_protocol::snapshot::CompatMessage;
-    use pm_protocol::svg_raster::SvgRasterPixels;
-    if std::env::var(CHILD_ENV).is_err() {
-        return;
-    }
-    let path = svg_file("viewer-failure");
-    let mut c = Child::start();
-    let key = svg_viewer(&mut c, &path);
-    // Waiting for the bucket: no frame meanwhile.
-    assert!(
-        try_serve_media(&mut c, &path, Duration::from_millis(300), viewer_frame).is_none(),
-        "a frame while the bucket is outstanding"
-    );
-    // The window cannot draw it: the frame is drawn at once, without it.
-    let t = Instant::now();
-    c.event(Event::Compat(CompatMessage::SvgFailed {
-        key: key.clone(),
-        reason: "decode".into(),
-        message: "Chromium could not decode this SVG".into(),
-    }));
-    let first = serve_media(&mut c, &path, Duration::from_secs(20), viewer_frame);
-    let shown = t.elapsed();
-    assert!(shown < Duration::from_secs(1), "the frame took {shown:?}");
-    assert_eq!(first.revision.get(), 1);
-    assert!(
-        !first.quality.stand_in,
-        "drawn without the image, not a stand-in"
-    );
-    let stats = presenter_stats(&c);
-    assert_eq!(stats["svgFailedFrames"], json!(1), "{stats}");
-    assert_eq!(stats["externalWaitTimeouts"], json!(0), "{stats}");
-    c.event(Event::ReleaseFrame(FrameRelease {
-        pool_index: first.pool_index,
-        seq: first.seq,
-    }));
-    // Paused, nothing draws again, yet the bucket it lacks is asked for
-    // again once the retry is due (5 s after the failure).
-    let again = serve_media(&mut c, &path, Duration::from_secs(20), |port, m| {
-        assert!(viewer_frame(port, m).is_none(), "drawn again for nothing");
-        svg_asks(port, m)
-    });
-    let retried = t.elapsed();
-    assert!(
-        retried >= Duration::from_millis(4_500) && retried < Duration::from_secs(8),
-        "asked again after {retried:?}"
-    );
-    assert_eq!(again[0].key, key);
-    // Now it arrives: the view draws it.
-    let fill = [0x4C, 0x8D, 0xFF, 0xFF];
-    let t = Instant::now();
-    c.event(Event::Compat(CompatMessage::SvgPixels(SvgRasterPixels {
-        key: key.clone(),
-        row: 0,
-        rows: key.height,
-        data: Bytes(fill.repeat((key.width * key.height) as usize)),
-    })));
-    let drawn = serve_media(&mut c, &path, Duration::from_secs(20), viewer_frame);
-    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
-    assert!(drawn.seq.get() > first.seq.get());
-    let stats = presenter_stats(&c);
-    assert_eq!(stats["svgFailedFrames"], json!(1), "drawn with it: {stats}");
-    println!("CHILD-OK svg viewer failure (shown {shown:?}, asked again {retried:?})");
-}
-
-#[test]
-#[ignore = "run by an_unanswered_svg_raster_times_out_instead_of_freezing_the_viewer"]
-fn child_svg_viewer_timeout() {
-    if std::env::var(CHILD_ENV).is_err() {
-        return;
-    }
-    let cap = Duration::from_millis(SVG_WAIT_CAP_MS.parse().unwrap());
-    let path = svg_file("viewer-timeout");
-    let mut c = Child::start();
-    let _key = svg_viewer(&mut c, &path);
-    let t = Instant::now();
-    // Never answered: drawn without it at the bound, counted from the ask.
-    let drawn = serve_media(&mut c, &path, Duration::from_secs(20), viewer_frame);
-    let waited = t.elapsed();
-    assert!(
-        waited + Duration::from_millis(100) >= cap && waited < cap + Duration::from_secs(2),
-        "drawn after {waited:?} (bound {cap:?})"
-    );
-    assert!(!drawn.quality.stand_in);
-    let stats = presenter_stats(&c);
-    assert_eq!(stats["externalWaitTimeouts"], json!(1), "{stats}");
-    assert_eq!(stats["svgFailedFrames"], json!(1), "{stats}");
-    println!("CHILD-OK svg viewer timeout (drawn after {waited:?})");
-}

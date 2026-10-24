@@ -842,7 +842,6 @@ pub fn requests() -> Vec<Envelope> {
                 source: crate::snapshot::CompatSource::RasterOverride,
                 scale: 1.0,
                 revision: rev(42),
-                svg: None,
                 frame: None,
                 blender: None,
             }),
@@ -876,19 +875,6 @@ pub fn requests() -> Vec<Envelope> {
             }),
         ),
     ]
-}
-
-/// A level 1 SVG raster request (decision S1).
-pub fn svg_request() -> crate::svg_raster::SvgRasterRequest {
-    crate::svg_raster::SvgRasterRequest {
-        key: crate::svg_raster::SvgRasterKey {
-            texture: None,
-            content: "9f".repeat(32),
-            width: 2,
-            height: 2,
-        },
-        asset: "a-art".into(),
-    }
 }
 
 /// A synchronous `renderFrameTo` snapshot (the compatibility path).
@@ -1469,22 +1455,6 @@ pub fn events() -> Vec<Envelope> {
                 scale: 2.0,
                 crop: Some(crate::common::PixelRect { x: 256, y: 0, width: 512, height: 256 }),
             }],
-        })),
-        event(Event::Compat(crate::snapshot::CompatMessage::SvgRequests {
-            requests: vec![svg_request()],
-        })),
-        event(Event::Compat(crate::snapshot::CompatMessage::SvgPixels(
-            crate::svg_raster::SvgRasterPixels {
-                key: svg_request().key,
-                row: 1,
-                rows: 1,
-                data: crate::common::Bytes(vec![255, 0, 0, 255, 0, 0, 0, 0]),
-            },
-        ))),
-        event(Event::Compat(crate::snapshot::CompatMessage::SvgFailed {
-            key: svg_request().key,
-            reason: "stale".into(),
-            message: "the window's SVG bytes hash differently".into(),
         })),
         event(Event::RenderStats(crate::snapshot::RenderStats {
             frames: Count::new(1_800).expect("count"),

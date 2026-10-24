@@ -287,9 +287,6 @@ pub struct Composed {
     /// Video layers drawn with a stand-in while their exact frame decodes
     /// (scrub renders, docs/engine/scrub.md): the source frame each shows.
     pub stand_ins: Vec<usize>,
-    /// Level 1 SVG rasters the frame drew without (decision S1): another
-    /// bucket stood in, or the layer drew nothing (`super::svg`).
-    pub svg_misses: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
 }
 
 const BLIT_WGSL: &str = r#"
@@ -850,7 +847,6 @@ impl Composer {
         let mut quads = Vec::new();
         let mut stand_ins = Vec::new();
         let mut scene3d_meta = Vec::new();
-        let mut svg_misses = Vec::new();
         if let Some(region) = place.region {
             let request = RenderRequest {
                 output_size: place.output,
@@ -898,22 +894,15 @@ impl Composer {
             // in place: frames of a paused time reuse the draws of layers
             // nothing changed (docs/engine/perf.md, "Draw reuse").
             self.renderer.set_draw_reuse(self.draw_reuse);
-            // A preview must use the bucket for this frame, just as today's
-            // synchronous SVG canvas redraw does. Render-ahead requests it
-            // before its display deadline; never publish a substituted bucket.
-            // A bucket the window could not draw is drawn as nothing instead
-            // (`super::wait`), as today draws the frame without a layer whose
-            // raster throws.
-            let mut renderer = self.renderer.svg_waiting_viewer();
             let rendered =
-                renderer.render_into(doc, composition, time, &request, media, scratch, None);
-            renderer.set_draw_reuse(false);
+                self.renderer
+                    .render_into(doc, composition, time, &request, media, scratch, None);
+            self.renderer.set_draw_reuse(false);
             let rendered = rendered?;
             scene3d_meta = rendered.scene3d_meta;
             failures = rendered.failures;
             quads = rendered.quads;
             stand_ins = rendered.stand_ins;
-            svg_misses = rendered.svg_misses;
         }
         // Place the region (or only clear when nothing is visible).
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -973,7 +962,6 @@ impl Composer {
             failures,
             cpu_us: super::render::now_us() - start,
             stand_ins,
-            svg_misses,
         })
     }
 }

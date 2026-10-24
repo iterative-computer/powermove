@@ -146,13 +146,13 @@ impl Generations {
 pub const POOL_RETRY_US: [i64; 4] = [50_000, 250_000, 1_000_000, 4_000_000];
 
 /// When a paused frame that failed with an error drawing it again may fix
-/// (the GPU, a readback, media, the shader fallback runner, an SVG raster)
+/// (the GPU, a readback, media, the shader fallback runner)
 /// is drawn again on its own, after the failure: then it waits for the next
 /// edit, view or transport change, as a deterministic failure does at once.
 pub const RENDER_RETRY_US: [i64; 3] = [100_000, 500_000, 2_000_000];
 
 /// Whether drawing the same frame again can succeed: errors of the GPU,
-/// its readbacks, media, the fallback runner and SVG rasters are of the
+/// its readbacks, media and the fallback runner are of the
 /// moment; an invalid request, a missing composition and a stopped job
 /// watchdog are not (they wait for a change).
 pub fn transient_render_error(error: &pm_render::RenderError) -> bool {
@@ -162,15 +162,13 @@ pub fn transient_render_error(error: &pm_render::RenderError) -> bool {
         | E::Readback(_)
         | E::Gpu(_)
         | E::Media(_)
-        | E::Fallback(_)
-        | E::SvgRaster(_) => true,
+        | E::Fallback(_) => true,
         E::Unsupported(_)
         | E::Composition(_)
         | E::Request(_)
         | E::Watchdog(_)
         | E::ShaderFallbackPending(_)
         | E::WatchdogPending
-        | E::SvgRastersPending(_)
         | E::CompatPending(_) => false,
     }
 }
@@ -576,10 +574,7 @@ pub struct Stats {
     /// again once the exact video arrived (docs/engine/scrub.md).
     pub stand_in_frames: u64,
     pub stand_in_redraws: u64,
-    /// Viewer frames drawn without a level 1 SVG bucket the window could
-    /// not draw (or did not answer for in time), and waits for the window's
-    /// pixels that timed out (docs/engine/perf.md).
-    pub svg_failed_frames: u64,
+    /// Waits for the window's pixels that timed out (docs/engine/perf.md).
     pub external_wait_timeouts: u64,
     /// Stand-in frames sent: (seq, the source frame the first stand-in
     /// layer shows), for measurements that count the distinct frames a
@@ -908,13 +903,10 @@ struct View {
     sample_due: bool,
     next_seq: u64,
     dirty: bool,
-    /// A frame waiting for Chromium's exact SVG bucket or shader pixels
-    /// (`super::wait`). Other views and the audio clock keep running while
-    /// its renderer answers on the port.
+    /// A frame waiting for the fallback runner's pixels (`super::wait`).
+    /// Other views and the audio clock keep running while its renderer
+    /// answers on the port.
     external_wait: Option<super::wait::ExternalWait>,
-    /// Level 1 SVG buckets the latest frame drew without (the window could
-    /// not draw them): asked for again while it shows them.
-    svg_without: Vec<pm_render::vector::svg_rasters::SvgRasterNeed>,
     requests: VecDeque<(RequestId, FrameRequest, Option<Revision>)>,
     /// The pool to make again after a failed hand-off.
     retry: Option<PoolRetry>,
@@ -1167,8 +1159,6 @@ struct Thread {
     work_start: i64,
     /// Sends frames shown at the next refresh once their GPU work is done.
     completer: Option<super::complete::Completer>,
-    /// Level 1 SVG rasters asked of the renderers (decision S1).
-    svg: super::svg::SvgState,
     /// GPU work seen last (frames and snapshots) and when; the idle
     /// targets and staging go once the viewer has rested ([`REST_RELEASE_US`]).
     rest: Rest,
@@ -1380,7 +1370,6 @@ pub fn run(
         doc_trace: BTreeMap::new(),
         work_start: 0,
         completer,
-        svg: super::svg::SvgState::default(),
         rest: Rest::default(),
         rasters,
         raster_mirrors: BTreeSet::new(),
@@ -2451,13 +2440,6 @@ impl Thread {
                     self.snapshot_error(&job, ErrorCode::BudgetExceeded, &refused.message());
                 }
             }
-            Command::Compat {
-                key,
-                message:
-                    message @ (pm_protocol::snapshot::CompatMessage::SvgPixels(_)
-                    | pm_protocol::snapshot::CompatMessage::SvgFailed { .. }
-                    | pm_protocol::snapshot::CompatMessage::SvgRequests { .. }),
-            } => self.svg_message(key, message),
             Command::Compat { key, message } => {
                 let (applied, rasters, bytes, answers, evicted) = {
                     let mut store = self.compat_store();
@@ -2511,87 +2493,6 @@ impl Thread {
             Command::FontsChanged => self.sync_font_generation(),
         }
         true
-    }
-
-    /// A renderer's level 1 SVG raster band or failure (decision S1). A
-    /// complete raster goes into the renderer every session on this thread
-    /// shares, and every view draws again (any of them may show it).
-    fn svg_message(&mut self, key: Key, message: pm_protocol::snapshot::CompatMessage) {
-        use pm_protocol::snapshot::CompatMessage as M;
-        match message {
-            M::SvgPixels(band) => match self.svg.band(key, band, now()) {
-                super::svg::Band::Partial => {}
-                super::svg::Band::Complete(raster, data) => {
-                    let (w, h) = (raster.width, raster.height);
-                    let stored = match self.gpu.as_mut() {
-                        Some(gpu) => gpu
-                            .composer_with(&self.config, self.frame_cache, &mut self.prepared)
-                            .renderer()
-                            .put_svg_raster(raster, data),
-                        None => Err("the engine has no GPU device".into()),
-                    };
-                    if let Err(why) = stored {
-                        (self.sink)(vec![Action::Log {
-                            level: LogLevel::Warn,
-                            message: format!(
-                                "viewer: an SVG raster ({w}x{h}) was not stored: {why}"
-                            ),
-                        }]);
-                    }
-                    for view in self.views.values_mut() {
-                        view.external_wait = None;
-                        view.dirty = true;
-                    }
-                }
-                super::svg::Band::Refused(raster) => {
-                    (self.sink)(vec![Action::Log {
-                        level: LogLevel::Warn,
-                        message:
-                            "viewer: too many SVG rasters are arriving at once; a band was dropped"
-                                .into(),
-                    }]);
-                    self.svg_failed(
-                        raster,
-                        "refused: too many SVG rasters were arriving at once",
-                    );
-                }
-            },
-            M::SvgFailed {
-                key: raster,
-                reason,
-                message,
-            } => self.svg_failed(raster, &format!("{reason}: {message}")),
-            // Logged failures, and requests (they travel the other way).
-            _ => {}
-        }
-    }
-
-    /// Asks `key`'s renderer for the level 1 SVG rasters a frame drew
-    /// without; returns whether one of them arrived meanwhile (the view
-    /// draws again).
-    fn ask_svg(
-        svg: &mut super::svg::SvgState,
-        sink: &Sink,
-        renderer: &pm_render::Renderer,
-        key: Key,
-        revision: Option<Revision>,
-        misses: &[pm_render::vector::svg_rasters::SvgRasterNeed],
-    ) -> bool {
-        let arrived = misses
-            .iter()
-            .any(|m| renderer.has_svg_raster(&m.request.key));
-        let requests = svg.wanted(key, misses, now(), |k| renderer.has_svg_raster(k));
-        for chunk in requests.chunks(pm_protocol::svg_raster::MAX_SVG_REQUESTS) {
-            let body = Event::Compat(pm_protocol::snapshot::CompatMessage::SvgRequests {
-                requests: chunk.to_vec(),
-            });
-            let mut envelope = Envelope::new(Message::Event { body }).with_session(key.1);
-            envelope.revision = revision;
-            if let Ok(bytes) = codec::encode(&envelope) {
-                sink(vec![Action::Send { port: key.0, bytes }]);
-            }
-        }
-        arrived
     }
 
     /// The runner's answer: a band of pixels (the frame renders again once
@@ -2680,98 +2581,30 @@ impl Thread {
             *slot = (*slot).min(at);
         }
         if let Some(view) = self.views.get_mut(&key) {
-            if view.external_wait.as_ref().is_some_and(|w| w.is_fallback()) {
-                view.external_wait = None;
-            }
+            view.external_wait = None;
             view.dirty = true;
-        }
-    }
-
-    /// The window could not draw level 1 SVG bucket `raster` (`why`), a
-    /// band of it was refused, or no answer came in time: viewer frames
-    /// draw without it from now on (`Renderer::fail_svg_raster`) until its
-    /// raster arrives, views waiting for it draw at once, and it is asked
-    /// for again after `super::svg::RETRY_US` while a view draws without
-    /// it. Logged once per key.
-    fn svg_failed(&mut self, raster: pm_protocol::svg_raster::SvgRasterKey, why: &str) {
-        let log = self.svg.failed(&raster, now());
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared)
-                .renderer()
-                .fail_svg_raster(raster.clone());
-        }
-        if log {
-            (self.sink)(vec![Action::Log {
-                level: LogLevel::Warn,
-                message: format!(
-                    "viewer: the renderer could not draw an SVG raster {}x{} ({why}); \
-                     the frame is drawn without it",
-                    raster.width, raster.height
-                ),
-            }]);
-        }
-        for view in self.views.values_mut() {
-            if view
-                .external_wait
-                .as_ref()
-                .is_some_and(|w| w.waits_for_svg(&raster))
-            {
-                view.external_wait = None;
-                view.dirty = true;
-            }
         }
     }
 
     /// A view's wait for its window's pixels timed out (`super::wait`):
     /// what it waited for is treated as a failure, and the frame is drawn
     /// without it. Its answer arriving later still draws it.
-    fn external_wait_timed_out(&mut self, key: Key, on: super::wait::Awaited) {
+    fn external_wait_timed_out(&mut self, key: Key, requests: Vec<String>) {
         if let Some(view) = self.views.get_mut(&key) {
             view.dirty = true;
         }
-        // A frame to draw again at once (nothing left to wait for).
-        if matches!(&on, super::wait::Awaited::Svg(k) if k.is_empty()) {
-            return;
-        }
         self.stats().external_wait_timeouts += 1;
-        match on {
-            super::wait::Awaited::Svg(keys) => {
-                // Those neither stored nor already failed meanwhile.
-                let late: Vec<_> = match self.gpu.as_mut().and_then(|g| g.composer.as_mut()) {
-                    Some(composer) => {
-                        let renderer = composer.renderer();
-                        keys.into_iter()
-                            .filter(|k| {
-                                !renderer.has_svg_raster(k) && !renderer.svg_raster_failed(k)
-                            })
-                            .collect()
-                    }
-                    None => keys,
-                };
-                let secs = self.wait_bounds().svg as f64 / 1e6;
-                for raster in late {
-                    self.svg_failed(raster, &format!("no answer within {secs} s"));
-                }
-            }
-            super::wait::Awaited::Fallback(requests) => {
-                let secs = self.wait_bounds().fallback as f64 / 1e6;
-                for request in requests {
-                    if self.fallback.asked.get(&request).map(|a| a.0) == Some(key) {
-                        self.fallback_failed(
-                            key,
-                            &request,
-                            "unanswered".into(),
-                            format!("the runner did not answer within {secs} s"),
-                        );
-                    }
-                }
+        let secs = super::wait::bound(self.config.external_wait_cap_us) as f64 / 1e6;
+        for request in requests {
+            if self.fallback.asked.get(&request).map(|a| a.0) == Some(key) {
+                self.fallback_failed(
+                    key,
+                    &request,
+                    "unanswered".into(),
+                    format!("the runner did not answer within {secs} s"),
+                );
             }
         }
-    }
-
-    /// The viewer's longest waits for its window's pixels.
-    fn wait_bounds(&self) -> super::wait::Bounds {
-        super::wait::Bounds::new(self.config.external_wait_cap_us)
     }
 
     fn forget_session(&mut self, key: Key) {
@@ -2821,7 +2654,6 @@ impl Thread {
         });
         fallback.logged.retain(|(k, _)| *k != key);
         fallback.retry_at.remove(&key);
-        self.svg.forget_session(key);
         self.docs.remove(&key);
         if self.raster_mirrors.remove(&key)
             && let Some(rasters) = &self.rasters
@@ -3587,7 +3419,6 @@ impl Thread {
             next_seq: 1,
             dirty: true,
             external_wait: None,
-            svg_without: Vec::new(),
             requests: VecDeque::new(),
             retry: None,
             reported: None,
@@ -4149,12 +3980,6 @@ impl Thread {
             if let Some(w) = &view.external_wait {
                 wake = wake.min(w.until);
             }
-            // Buckets the latest frame drew without are asked for again.
-            for need in &view.svg_without {
-                if let Some(at) = self.svg.retry_at(&need.request.key) {
-                    wake = wake.min(at);
-                }
-            }
             if (view.dirty
                 && !external_waiting
                 && view.state.headless != Some(true)
@@ -4276,48 +4101,11 @@ impl Thread {
                 return true;
             }
             if let Some(view) = views.get_mut(key) {
-                if view.external_wait.as_ref().is_some_and(|w| w.is_fallback()) {
-                    view.external_wait = None;
-                }
+                view.external_wait = None;
                 view.dirty = true;
             }
             false
         });
-        // Level 1 SVG buckets views draw without (the window could not
-        // draw them) are asked for again once due; no frame is drawn for
-        // it, their raster arriving draws them.
-        let due: Vec<Key> = self
-            .views
-            .iter()
-            .filter(|(_, v)| {
-                v.svg_without
-                    .iter()
-                    .any(|n| self.svg.retry_at(&n.request.key).is_some_and(|at| at <= t))
-            })
-            .map(|(k, _)| *k)
-            .collect();
-        for key in due {
-            let Some(view) = self.views.get(&key) else {
-                continue;
-            };
-            let revision = Some(view.revision);
-            let needs = view.svg_without.clone();
-            if let Some(gpu) = self.gpu.as_mut() {
-                let composer =
-                    gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
-                if Self::ask_svg(
-                    &mut self.svg,
-                    &self.sink,
-                    composer.renderer(),
-                    key,
-                    revision,
-                    &needs,
-                ) && let Some(view) = self.views.get_mut(&key)
-                {
-                    view.dirty = true;
-                }
-            }
-        }
         let keys: Vec<Key> = self.views.keys().copied().collect();
         for key in keys {
             self.work_view(key);
@@ -4734,7 +4522,7 @@ impl Thread {
                     return;
                 }
                 State::Obsolete => {}
-                State::TimedOut => self.external_wait_timed_out(key, wait.on),
+                State::TimedOut => self.external_wait_timed_out(key, wait.requests),
             }
         }
         // A frame drawn with stand-ins is drawn again once video it asked
@@ -5153,29 +4941,6 @@ impl Thread {
                     stand_in = !composed.stand_ins.is_empty();
                     view.stand_in = stand_in.then_some(landed_before);
                     stand_in_shown = composed.stand_ins.first().copied();
-                    // Level 1 SVG buckets this frame drew without: only
-                    // those the window could not draw (or did not answer
-                    // for in time) reach here; the viewer waits for every
-                    // other (`SvgRastersPending`). They are asked for again
-                    // after a while, and the view draws again when one
-                    // arrives. Not a stand-in: no other bucket is shown.
-                    view.svg_without = composed.svg_misses.clone();
-                    if !composed.svg_misses.is_empty() {
-                        self.stats
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .svg_failed_frames += 1;
-                        if Self::ask_svg(
-                            &mut self.svg,
-                            &self.sink,
-                            composer.renderer(),
-                            key,
-                            Some(view.revision),
-                            &composed.svg_misses,
-                        ) {
-                            view.dirty = true;
-                        }
-                    }
                     let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
                     stats.document_frames += 1;
                     stats.work_last = work.finish();
@@ -5254,55 +5019,6 @@ impl Thread {
                         }
                     }
                     self.stats().compat_waits += 1;
-                    return None;
-                }
-                Err(pm_render::RenderError::SvgRastersPending(needs)) => {
-                    // Buckets this thread already knows failed but this
-                    // renderer does not (a renderer made again after a
-                    // device loss): drawn without at once.
-                    let renderer = composer.renderer();
-                    let mut waiting = Vec::new();
-                    for need in &needs {
-                        let k = &need.request.key;
-                        if renderer.svg_raster_failed(k) {
-                            continue;
-                        }
-                        if self.svg.has_failed(k) {
-                            renderer.fail_svg_raster(k.clone());
-                        } else if !waiting.contains(k) {
-                            waiting.push(k.clone());
-                        }
-                    }
-                    let arrived = Self::ask_svg(
-                        &mut self.svg,
-                        &self.sink,
-                        renderer,
-                        key,
-                        Revision::new(doc.revision()).ok(),
-                        &needs,
-                    );
-                    let bound = super::wait::Bounds::new(self.config.external_wait_cap_us).svg;
-                    let t = now();
-                    // Nothing left to wait for (or it arrived meanwhile):
-                    // the frame is drawn again at once, keeping its slot.
-                    let until = if waiting.is_empty() || arrived {
-                        view.dirty = true;
-                        waiting.clear();
-                        t
-                    } else {
-                        super::wait::deadline(
-                            waiting.iter().map(|k| self.svg.asked_at(k)),
-                            t,
-                            bound,
-                        )
-                    };
-                    view.external_wait = Some(super::wait::ExternalWait {
-                        until,
-                        revision: doc.revision(),
-                        seq: view.state.view_seq.get(),
-                        epoch: view.clock.epoch(),
-                        on: super::wait::Awaited::Svg(waiting),
-                    });
                     return None;
                 }
                 Err(pm_render::RenderError::ShaderFallbackPending(requests)) => {
@@ -5391,7 +5107,7 @@ impl Thread {
                             }
                         }
                     }
-                    let bound = super::wait::Bounds::new(self.config.external_wait_cap_us).fallback;
+                    let bound = super::wait::bound(self.config.external_wait_cap_us);
                     // Counted from this view's own asks; a request another
                     // job asked for (a snapshot) gets the full bound from
                     // now, as only the view's own asks time out here.
@@ -5407,7 +5123,7 @@ impl Thread {
                         revision: doc.revision(),
                         seq: view.state.view_seq.get(),
                         epoch: view.clock.epoch(),
-                        on: super::wait::Awaited::Fallback(waiting),
+                        requests: waiting,
                     });
                     return None;
                 }
@@ -5801,7 +5517,6 @@ impl Thread {
             };
             let asked = &self.fallback.asked;
             let compat = &self.compat;
-            let svg = &self.svg;
             let outstanding = |k: &str| {
                 if k.starts_with("compat:") {
                     compat
@@ -5809,7 +5524,7 @@ impl Thread {
                         .unwrap_or_else(|e| e.into_inner())
                         .outstanding(k)
                 } else {
-                    asked.contains_key(k) || svg.outstanding(k)
+                    asked.contains_key(k)
                 }
             };
             let Some(job) = self.snapshots.next(revision, outstanding, pressure, now) else {
@@ -5869,7 +5584,6 @@ impl Thread {
             };
             let asked = &self.fallback.asked;
             let compat = &self.compat;
-            let svg = &self.svg;
             let outstanding = |k: &str| {
                 if k.starts_with("compat:") {
                     compat
@@ -5877,7 +5591,7 @@ impl Thread {
                         .unwrap_or_else(|e| e.into_inner())
                         .outstanding(k)
                 } else {
-                    asked.contains_key(k) || svg.outstanding(k)
+                    asked.contains_key(k)
                 }
             };
             let Some(job) = self
@@ -6185,25 +5899,17 @@ impl Thread {
                 return;
             }
         };
-        // A snapshot never draws an SVG bucket's stand-in: it waits for the
-        // renderer's raster (decision S1). The renderer is the viewer's
-        // too: the guard gives the viewer its policy back however this
-        // returns (a viewer left waiting fails its misses instead of asking
-        // the window for them).
-        let rendered = {
-            let mut renderer = renderer.svg_waiting();
-            renderer
-                .render_snapshot_into_copy(
-                    doc.document(),
-                    job.request.composition.as_str(),
-                    job.request.time,
-                    &request,
-                    doc.media(),
-                    &target,
-                    &copy,
-                )
-                .map(|(_, rows)| (target.width(), target.height(), rows))
-        };
+        let rendered = renderer
+            .render_snapshot_into_copy(
+                doc.document(),
+                job.request.composition.as_str(),
+                job.request.time,
+                &request,
+                doc.media(),
+                &target,
+                &copy,
+            )
+            .map(|(_, rows)| (target.width(), target.height(), rows));
         renderer.set_compat_rasters(None);
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
             readback.cancel(ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
@@ -6258,54 +5964,6 @@ impl Thread {
                         .into_iter()
                         .take(pm_protocol::snapshot::MAX_COMPAT_NEEDS)
                         .collect(),
-                    svg: Vec::new(),
-                };
-                let mut envelope = Envelope::new(Message::Response {
-                    id: job.id,
-                    body: Response::Snapshot(Box::new(outcome)),
-                });
-                envelope.revision = Some(revision);
-                self.send(job.host, envelope);
-                return;
-            }
-            Err(pm_render::RenderError::SvgRastersPending(needs)) => {
-                // As for fallback pixels: what the renderer posted is on
-                // its way (wait for it); the rest is named for it to draw.
-                let (posted, missing): (Vec<_>, Vec<_>) = needs
-                    .into_iter()
-                    .partition(|n| job.request.uploaded.contains(&n.request.key.upload_key()));
-                if let Some(failed) = posted.iter().find(|n| self.svg.has_failed(&n.request.key)) {
-                    let k = &failed.request.key;
-                    self.stats().snapshot_failures += 1;
-                    self.snapshot_error(
-                        &job,
-                        ErrorCode::Internal,
-                        &format!(
-                            "The window could not draw an SVG image's {}x{} raster for this frame.",
-                            k.width, k.height
-                        ),
-                    );
-                    return;
-                }
-                if missing.is_empty() {
-                    let mut job = job;
-                    job.waiting_for = posted.iter().map(|n| n.request.key.upload_key()).collect();
-                    for n in &posted {
-                        self.svg.expect(job.key, &n.request.key, now());
-                    }
-                    self.snapshots.requeue(job);
-                    return;
-                }
-                self.stats().snapshot_needs += 1;
-                let outcome = SnapshotOutcome::NeedsRenderer {
-                    revision,
-                    fallback: Vec::new(),
-                    compat: Vec::new(),
-                    svg: missing
-                        .into_iter()
-                        .take(pm_protocol::svg_raster::MAX_SVG_REQUESTS)
-                        .map(|n| n.request)
-                        .collect(),
                 };
                 let mut envelope = Envelope::new(Message::Response {
                     id: job.id,
@@ -6357,7 +6015,6 @@ impl Thread {
                     revision,
                     fallback,
                     compat: Vec::new(),
-                    svg: Vec::new(),
                 };
                 let mut envelope = Envelope::new(Message::Response {
                     id: job.id,
@@ -6736,7 +6393,6 @@ mod tests {
             doc_trace: BTreeMap::new(),
             work_start: 0,
             completer: None,
-            svg: super::super::svg::SvgState::default(),
             rest: Rest::default(),
             rasters: None,
             raster_mirrors: BTreeSet::new(),
@@ -7661,7 +7317,6 @@ mod tests {
         assert!(transient_render_error(&E::Gpu("lost".into())));
         assert!(transient_render_error(&E::Media("decode".into())));
         assert!(transient_render_error(&E::Fallback("runner".into())));
-        assert!(transient_render_error(&E::SvgRaster("window".into())));
         assert!(!transient_render_error(&E::Request(
             "viewport geometry: an imported scene over two million vertices".into()
         )));
