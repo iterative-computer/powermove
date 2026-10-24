@@ -1049,6 +1049,12 @@ const ARMED_FRAMES: i64 = 2;
 /// (a scrub or drag moves it sooner, and they are not drawn for it).
 const ARM_IDLE_US: i64 = 50_000;
 
+/// From a Play to its first frames and clock sample being in the viewer's
+/// presentation worker, ahead of the animation frame that draws them: the
+/// engine's port to the window, the window to the worker (measured 1.0 to
+/// 1.6 ms), and the start of that animation frame's callback.
+const START_ARRIVAL_US: f64 = 2_500.0;
+
 /// From a Play to the audio's render thread queueing its first chunk.
 const AUDIO_CONTROL_US: i64 = 2_000;
 
@@ -3275,7 +3281,7 @@ impl Thread {
                 .or(view.costs.average_us())
                 .unwrap_or(hint.period_us);
             let cost = (render - armed as f64 * Schedule::frame_us(&view.clock)).max(0.0);
-            let ready = now as f64 + cost + super::schedule::ARRIVAL_US;
+            let ready = now as f64 + cost + START_ARRIVAL_US;
             let shown = hint.next_at_or_after(ready, 0.0) + latency;
             // How far the first frame rendered for the run starts from the
             // paused media: the next one when the playhead's is on screen,

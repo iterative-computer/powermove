@@ -50,6 +50,62 @@ pub type LevelsSink = Box<dyn Fn(AudioLevels) + Send>;
 /// the composition is audible and opens the device.
 pub const WARM_IDLE: Duration = Duration::from_millis(100);
 
+/// `1`: play into a simulated output device instead of the system's (a
+/// machine whose audio output does not run, measurements of the audio
+/// clock's start and A/V sync): 48 kHz stereo, 512-frame buffers called
+/// back one buffer ahead of their output, and [`SIM_LATENCY_US`] to the
+/// speaker.
+pub const SIM_AUDIO_ENV: &str = "POWERMOVE_ENGINE_SIM_AUDIO";
+pub const SIM_LATENCY_US: u32 = 10_000;
+
+/// A simulated output device on its own thread ([`SIM_AUDIO_ENV`]).
+struct SimDevice {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl SimDevice {
+    const RATE: u32 = 48_000;
+    const BUFFER: usize = 512;
+
+    fn start(mut side: pm_audio::playback::DeviceSide) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("pm-sim-audio".into())
+            .spawn(move || {
+                use pm_audio::clock::host_now_us;
+                let buffer_us = Self::BUFFER as u64 * 1_000_000 / u64::from(Self::RATE);
+                let first = host_now_us() + 2 * buffer_us;
+                let mut out = vec![0f32; Self::BUFFER * 2];
+                let mut frames = 0u64;
+                while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    // The buffer's first frame reaches the output here; the
+                    // device asks for it a buffer before.
+                    let at = first + frames * 1_000_000 / u64::from(Self::RATE);
+                    let call = at.saturating_sub(buffer_us);
+                    let now = host_now_us();
+                    if call > now {
+                        std::thread::sleep(Duration::from_micros(call - now));
+                    }
+                    side.callback(&mut out, 2, at);
+                    frames += Self::BUFFER as u64;
+                }
+            })
+            .ok();
+        Self { stop, thread }
+    }
+}
+
+impl Drop for SimDevice {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// Decoded audio kept per viewer.
 const SOURCE_BUDGET: usize = 256 * 1024 * 1024;
 const DECODE_WORKERS: usize = 2;
@@ -138,6 +194,7 @@ impl AudioLink {
                     composition,
                     media,
                     playback: None,
+                    sim: None,
                     dirty: true,
                     broken: false,
                     loop_range: None,
@@ -207,6 +264,8 @@ struct Control {
     composition: String,
     media: MediaMap,
     playback: Option<Playback>,
+    /// The simulated device driving `playback` ([`SIM_AUDIO_ENV`]).
+    sim: Option<SimDevice>,
     /// The mixer plays an older revision, media map, or composition.
     dirty: bool,
     /// An update did not apply; wait for a resync.
@@ -330,6 +389,7 @@ impl Control {
 
     fn shutdown(&mut self) {
         *self.clock.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.sim = None;
         if let Some(mut playback) = self.playback.take() {
             playback.shutdown();
         }
@@ -493,16 +553,38 @@ impl Control {
     fn open(&mut self) -> bool {
         let rate = pm_audio::mixer::project_sample_rate(&self.doc);
         let cache = SourceCache::new(SOURCE_BUDGET, DECODE_WORKERS);
-        match Playback::start(MixFormat::stereo(rate), cache, PlaybackConfig::default()) {
+        let started = if std::env::var(SIM_AUDIO_ENV).as_deref() == Ok("1") {
+            Playback::start_headless(
+                MixFormat::stereo(rate),
+                cache,
+                PlaybackConfig::default(),
+                SimDevice::RATE,
+                2,
+                SIM_LATENCY_US,
+            )
+            .map(|(playback, side)| {
+                self.sim = Some(SimDevice::start(side));
+                playback
+            })
+        } else {
+            Playback::start(MixFormat::stereo(rate), cache, PlaybackConfig::default())
+        };
+        match started {
             Ok(playback) => {
                 playback.set_evaluator(|| {
                     pm_eval::Evaluator::new()
                         .with_expressions(Arc::new(pm_render::expr::PmExprEngine))
                 });
                 let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-                status.device = playback.device().map(|d| d.name.clone());
+                status.device = playback
+                    .device()
+                    .map(|d| d.name.clone())
+                    .or(self.sim.as_ref().map(|_| "simulated".into()));
                 status.device_rate = Some(playback.device_rate());
-                status.latency_us = playback.device().map(|d| d.latency_us());
+                status.latency_us = playback
+                    .device()
+                    .map(|d| d.latency_us())
+                    .or(self.sim.as_ref().map(|_| SIM_LATENCY_US));
                 status.error = None;
                 drop(status);
                 *self.clock.lock().unwrap_or_else(|e| e.into_inner()) =
