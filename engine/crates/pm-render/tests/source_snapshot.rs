@@ -6,7 +6,7 @@ use pm_protocol::snapshot::SourceFit;
 use pm_render::Renderer;
 
 #[test]
-fn compositor_source_returns_coded_nv12_with_chromium_sd_tags() {
+fn compositor_source_returns_coded_nv12_with_the_shared_sd_reading() {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
     let mut renderer = Renderer::headless().unwrap();
@@ -17,10 +17,11 @@ fn compositor_source_returns_coded_nv12_with_chromium_sd_tags() {
         Some(bytes.len() as u64),
         tags.byte_len(size.width, size.height)
     );
+    // pm_media::probe::color::video_reading for untagged 160x90 video.
     assert_eq!(tags.range, "limited");
-    assert_eq!(tags.primaries, "smpte170m");
+    assert_eq!(tags.primaries, "bt709");
     assert_eq!(tags.matrix, "smpte170m");
-    assert_eq!(tags.transfer, "smpte170m");
+    assert_eq!(tags.transfer, "bt709");
     // A still cannot silently become a P3/Canvas RGBA compositor payload.
     let dir = tempfile::tempdir().unwrap();
     let still = dir.path().join("still.png");
@@ -249,6 +250,21 @@ fn untagged_vp9_browser_rendition_uses_chromiums_i420_bitmap() {
         .unwrap();
     assert_eq!(pixels.len(), 160 * 90 * 4);
     assert!(pixels.chunks_exact(4).all(|p| p == [254, 0, 0, 255]));
+
+    // The monitor's coded planes for this rendition alternate across its
+    // red (0–1 s) / green (1–2 s) cut, as resize-then-seek does in the app.
+    let mut renderer = Renderer::headless().unwrap();
+    for seconds in [1.5, 0.5, 1.5, 0.5, 0.5, 1.5, 0.5, 1.5] {
+        let time =
+            Ticks::new((seconds * pm_protocol::common::TICKS_PER_SECOND as f64) as i64).unwrap();
+        let (_, planes, _) = renderer.source_video_planes(&proxy, time).unwrap();
+        let luma = planes[0];
+        let red = seconds < 1.0;
+        assert!(
+            if red { luma < 110 } else { luma > 120 },
+            "{seconds} s returned luma {luma}"
+        );
+    }
 }
 
 #[test]

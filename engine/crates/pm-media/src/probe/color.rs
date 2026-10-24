@@ -24,6 +24,37 @@ pub struct TaggedColor {
     pub source: Vec<String>,
 }
 
+/// VIDEO-SD-1 (pending with the owner): whether untagged SD video reads
+/// SMPTE 170M primaries. Off keeps composition's current look (Rec.709).
+pub const UNTAGGED_SD_PRIMARIES: bool = false;
+
+/// A complete video colour reading as H.273 code points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoReading {
+    pub primaries: u8,
+    pub transfer: u8,
+    pub matrix: u8,
+    pub full_range: bool,
+}
+
+/// The one video colour table shared by the source monitor, composition and
+/// export, for every codec: tags win field by field; an untagged matrix is
+/// BT.601 (SMPTE 170M) when the frame is at most 576 lines tall and under
+/// 1280 wide, otherwise BT.709 (the mpv/FFmpeg heuristic); an untagged
+/// transfer is BT.709, read as the sRGB curve; untagged primaries are Rec.709
+/// unless [`UNTAGGED_SD_PRIMARIES`]; the range is limited unless tagged full.
+pub fn video_reading(tagged: &TaggedColor, width: u32, height: u32) -> VideoReading {
+    let sd = height <= 576 && width < 1280;
+    VideoReading {
+        primaries: tagged
+            .primaries
+            .unwrap_or(if sd && UNTAGGED_SD_PRIMARIES { 6 } else { 1 }),
+        transfer: tagged.transfer.unwrap_or(1),
+        matrix: tagged.matrix.unwrap_or(if sd { 6 } else { 1 }),
+        full_range: tagged.full_range.unwrap_or(false),
+    }
+}
+
 /// SMPTE ST 2086 mastering display, chromaticities as (x, y).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -474,5 +505,40 @@ impl SideData {
             }
         }
         s
+    }
+}
+
+#[cfg(test)]
+mod reading_tests {
+    use super::*;
+
+    #[test]
+    fn video_reading_applies_the_shared_table() {
+        let untagged = TaggedColor::default();
+        let sd = video_reading(&untagged, 720, 576);
+        assert_eq!(
+            (sd.primaries, sd.transfer, sd.matrix, sd.full_range),
+            (1, 1, 6, false)
+        );
+        assert_eq!(video_reading(&untagged, 1280, 576).matrix, 1);
+        assert_eq!(video_reading(&untagged, 480, 720).matrix, 1);
+        let partial = TaggedColor {
+            matrix: Some(1),
+            full_range: Some(true),
+            ..TaggedColor::default()
+        };
+        let read = video_reading(&partial, 320, 180);
+        assert_eq!(
+            (read.primaries, read.transfer, read.matrix, read.full_range),
+            (1, 1, 1, true)
+        );
+        let tagged = TaggedColor {
+            primaries: Some(6),
+            transfer: Some(6),
+            matrix: Some(5),
+            ..TaggedColor::default()
+        };
+        let read = video_reading(&tagged, 1920, 1080);
+        assert_eq!((read.primaries, read.transfer, read.matrix), (6, 6, 5));
     }
 }

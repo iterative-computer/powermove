@@ -46,14 +46,6 @@ pub enum ProbeIssue {
     Unreadable(String),
 }
 
-/// Chrome's src= decoder selector prioritizes VideoToolbox for unchanging
-/// H.264/HEVC streams with a visible height of at least 360 pixels. This is
-/// used only by the coded source-video presenter; composition decode is
-/// independent of the browser's decoder policy.
-pub(crate) fn source_platform_priority(codec: &str, visible_height: u32) -> bool {
-    visible_height >= 360 && matches!(codec, "h264" | "hevc")
-}
-
 /// What the source pass needs to know about a source.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceColor {
@@ -1075,9 +1067,6 @@ pub struct MediaCache {
     /// Interactive source frames use exact Export-purpose decode on a warm
     /// worker. Batch jobs continue to decode on their caller's thread.
     source_viewer: ViewerDecode,
-    /// The coded source presenter asks VideoToolbox for Chrome's limited-
-    /// range output. Keep its decoder/cache separate from Export snapshots.
-    source_compositor_viewer: ViewerDecode,
     /// Scrub frames: a video whose exact frame is not decoded yet shows
     /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
     pub scrub: bool,
@@ -1127,10 +1116,6 @@ impl MediaCache {
             pool: FramePool::new(64 << 20),
             viewer: ViewerDecode::new(service.clone()),
             source_viewer: ViewerDecode::with_purpose(service.clone(), DecodePurpose::Export),
-            source_compositor_viewer: ViewerDecode::with_purpose(
-                service.clone(),
-                DecodePurpose::SourceCompositor,
-            ),
             service,
             scrub: false,
             stand_ins: Vec::new(),
@@ -1305,7 +1290,6 @@ impl MediaCache {
                 if let Some((_, old)) = self.sources.remove(path) {
                     self.viewer.release(Some(old.id));
                     self.source_viewer.release(Some(old.id));
-                    self.source_compositor_viewer.release(Some(old.id));
                     self.service.release(None, Some(old.id));
                 }
                 self.frames.retain(|k, _| k.path != path);
@@ -1406,11 +1390,9 @@ impl MediaCache {
         )
     }
 
-    /// The original decoded code planes for Chromium's source-only video
-    /// presenter. Software-priority sources share the exact Export worker;
-    /// VideoToolbox-priority sources use a separate limited-range decode
-    /// purpose. Both retain source-only GOP look-ahead. Composition and
-    /// Canvas2D paths are unaffected.
+    /// The original decoded code planes for the source monitor's video
+    /// presenter, from the exact Export worker shared with RGBA source
+    /// frames. Composition decode is unaffected.
     pub(crate) fn source_exact_decoded(
         &mut self,
         path: &Path,
@@ -1421,20 +1403,8 @@ impl MediaCache {
         let frame = source
             .select(time.get())
             .ok_or_else(|| MediaFailure::Failed("No source frame at this time".into()))?;
-        let platform = source.probe.video.as_ref().is_some_and(|video| {
-            let visible_height = video
-                .clean_aperture
-                .as_ref()
-                .map(|aperture| aperture.rect.3)
-                .unwrap_or(video.height);
-            source_platform_priority(&video.codec.codec, visible_height)
-        });
-        let worker = if platform {
-            &self.source_compositor_viewer
-        } else {
-            &self.source_viewer
-        };
-        let fetched = worker
+        let fetched = self
+            .source_viewer
             .fetch(&source, 0, frame, Want::Exact)
             .map_err(|e| MediaFailure::Failed(e.to_string()))?;
         if !fetched.exact || fetched.shown != frame {

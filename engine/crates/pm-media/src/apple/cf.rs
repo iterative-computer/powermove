@@ -245,9 +245,6 @@ unsafe extern "C" {
         key: CFStringRef,
         mode: *mut u32,
     ) -> CFTypeRef;
-    pub fn CVColorPrimariesGetIntegerCodePointForString(value: CFStringRef) -> i32;
-    pub fn CVTransferFunctionGetIntegerCodePointForString(value: CFStringRef) -> i32;
-    pub fn CVYCbCrMatrixGetIntegerCodePointForString(value: CFStringRef) -> i32;
     pub fn CVPixelBufferGetDataSize(pb: CVPixelBufferRef) -> usize;
     pub static kCVImageBufferYCbCrMatrixKey: CFStringRef;
     pub static kCVImageBufferColorPrimariesKey: CFStringRef;

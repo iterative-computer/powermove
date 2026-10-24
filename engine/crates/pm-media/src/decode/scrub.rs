@@ -596,7 +596,7 @@ impl Shared {
     fn ahead(&self, st: &mut State) -> Option<usize> {
         let from = st.ahead_from?;
         let stride = st.stride;
-        if stride == 0 && self.purpose == DecodePurpose::Display {
+        if stride == 0 && self.purpose != DecodePurpose::Export {
             st.ahead_from = None;
             return None;
         }

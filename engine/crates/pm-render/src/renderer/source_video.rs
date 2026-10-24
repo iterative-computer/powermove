@@ -4,14 +4,16 @@
 use std::path::Path;
 
 use pm_media::frame::{DecodedFrame, Layout, PixelFormat, PlaneFormat, PlaneView};
-use pm_media::probe::{VideoProbe, color::TaggedColor};
+use pm_media::probe::{
+    VideoProbe,
+    color::{TaggedColor, video_reading},
+};
 use pm_protocol::color::{Range, SampleAlignment};
 use pm_protocol::common::{Size, Ticks};
 use pm_protocol::frame::MAX_OUTPUT_DIMENSION;
 use pm_protocol::snapshot::SourceVideoFrame;
 
 use super::Renderer;
-use crate::media::source_platform_priority;
 
 /// The main-process source-surface pool's aggregate byte ceiling. Reject a
 /// single coded frame before allocating its packed planes.
@@ -68,7 +70,7 @@ impl Renderer {
                     .map(|bytes| (format, bytes))
             })
             .map_err(|e| e.to_string())??;
-        let mut tags = source_video_color(&frame, video, size, format)?;
+        let mut tags = source_video_color(&frame, video, format)?;
         if coded_width != visible_width {
             tags.visible_width = Some(visible_width);
         }
@@ -324,141 +326,40 @@ fn visible_row<'a>(plane: &'a PlaneView<'_>, row: usize, bytes: usize) -> Result
 fn source_video_color(
     frame: &DecodedFrame,
     video: &VideoProbe,
-    size: Size,
     format: &str,
 ) -> Result<SourceVideoFrame, String> {
-    let attachments = frame.core_video_color_codes();
-    if std::env::var_os("PM_SOURCE_PROFILE").is_some() {
-        eprintln!(
-            "pm source coded color cv={attachments:?} stream={:?}/{:?}/{:?} range={:?}",
-            video.color.tagged.primaries,
-            video.color.tagged.transfer,
-            video.color.tagged.matrix,
-            frame.format.range
-        );
-    }
-    let visible_height = video
-        .clean_aperture
-        .as_ref()
-        .map(|aperture| aperture.rect.3)
-        .unwrap_or(video.height);
     source_video_color_codes(
         &video.color.tagged,
-        size,
+        video.width,
+        video.height,
         format,
         frame.format.range,
-        &video.codec.codec,
-        visible_height,
-        attachments,
     )
 }
 
+/// Tags for the monitor's VideoFrame from the shared colour table
+/// (`pm_media::probe::color::video_reading`), so Chromium converts the planes
+/// as composition and export read them. The range describes the decoded
+/// planes themselves.
 fn source_video_color_codes(
     tagged: &TaggedColor,
-    size: Size,
+    width: u32,
+    height: u32,
     format: &str,
     decoded_range: Range,
-    codec: &str,
-    visible_height: u32,
-    attachments: Option<[Option<i32>; 3]>,
 ) -> Result<SourceVideoFrame, String> {
-    if matches!(codec, "vp8" | "vp9") {
-        // Chromium leaves unspecified VPx fields unspecified. The VPx
-        // decoder, unlike FFmpeg H.264, does not receive the demuxer's
-        // resolution-based REC601/REC709 inference. In particular, a VP9
-        // alpha proxy with no CICP tags has an invalid P/T/M color space;
-        // Chromium's video resource updater applies its Rec601 YUV default
-        // while preserving those unspecified output tags.
-        // https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.54/media/ffmpeg/ffmpeg_common.cc#723
-        // https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.54/media/filters/vpx_video_decoder.cc#363
-        return Ok(SourceVideoFrame {
-            format: format.into(),
-            primaries: tagged
-                .primaries
-                .map(|code| primaries(i32::from(code)))
-                .transpose()?
-                .unwrap_or("unspecified")
-                .into(),
-            transfer: tagged
-                .transfer
-                .map(|code| transfer(i32::from(code)))
-                .transpose()?
-                .unwrap_or("unspecified")
-                .into(),
-            matrix: tagged
-                .matrix
-                .map(|code| matrix(i32::from(code)))
-                .transpose()?
-                .unwrap_or("unspecified")
-                .into(),
-            range: if decoded_range == Range::Full {
-                "full".into()
-            } else {
-                "limited".into()
-            },
-            visible_width: None,
-        });
-    }
-
-    // Chromium prioritizes its platform decoder for src= video with visible
-    // height >=360; below that it prioritizes FFmpeg. That policy is source-
-    // only here. FFmpeg frames use the stream's CICP or demux default, even
-    // when our independent decoder happened to use VideoToolbox. Its 160x90
-    // untagged H.264 CV buffer, for example, carries 170M/709/170M while
-    // Chromium's actual software VideoFrame is 170M/170M/170M.
-    // https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.54/media/filters/decoder_selector.cc#59
-    let platform_priority = source_platform_priority(codec, visible_height);
-    if platform_priority {
-        // Chromium's VideoToolbox frame converter uses the CV attachments
-        // only when the entire color space is valid. Its requested output is
-        // limited-range.
-        // https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.54/media/gpu/mac/video_toolbox_frame_converter.cc#187
-        // Chromium reads the CoreVideo 709 transfer key as BT709_APPLE (a
-        // 1.961 gamma) for CSS video only; its Canvas2D/WebGL uploads, our
-        // composition and our sRGB-tagged export all use the sRGB curve that
-        // section 9 specifies for BT.709. The monitor uses that curve too
-        // (docs/engine/quality-ledger.md), so the CICP 709 code is sent.
-        if let Some([Some(p), Some(t), Some(m)]) = attachments {
-            if let (Ok(primaries), Ok(transfer), Ok(matrix)) =
-                (primaries(p), transfer(t), matrix(m))
-            {
-                return Ok(SourceVideoFrame {
-                    format: format.into(),
-                    primaries: primaries.into(),
-                    transfer: transfer.into(),
-                    matrix: matrix.into(),
-                    range: "limited".into(),
-                    visible_width: None,
-                });
-            }
-        }
-    }
-
-    // The demuxer supplies REC601 for untagged SD H.264 and REC709 for HD.
-    // Incomplete source CICP never mixes with that default field by field.
-    let sd = size.height < 720;
-    let fallback = if sd { 6 } else { 1 };
-    let [primaries_code, transfer_code, matrix_code] =
-        match (tagged.primaries, tagged.transfer, tagged.matrix) {
-            (Some(p), Some(t), Some(m)) => [i32::from(p), i32::from(t), i32::from(m)],
-            // VideoColorSpace::IsSpecified() requires all three fields; the
-            // demuxer's resolution inference replaces an incomplete set.
-            _ => [fallback; 3],
-        };
-    let primaries = primaries(primaries_code)?;
-    let transfer = transfer(transfer_code)?;
-    let matrix = matrix(matrix_code)?;
-    let range = if decoded_range == Range::Full {
-        "full"
-    } else {
-        "limited"
-    };
+    let reading = video_reading(tagged, width, height);
     Ok(SourceVideoFrame {
         format: format.into(),
-        primaries: primaries.into(),
-        transfer: transfer.into(),
-        matrix: matrix.into(),
-        range: range.into(),
+        primaries: primaries(i32::from(reading.primaries))?.into(),
+        transfer: transfer(i32::from(reading.transfer))?.into(),
+        matrix: matrix(i32::from(reading.matrix))?.into(),
+        range: if decoded_range == Range::Full {
+            "full"
+        } else {
+            "limited"
+        }
+        .into(),
         visible_width: None,
     })
 }
@@ -489,6 +390,33 @@ mod tests {
             label: "unit".into(),
             rgba_premultiplied: false,
         }
+    }
+
+    #[test]
+    fn monitor_tags_follow_the_shared_table_for_every_codec() {
+        let untagged = TaggedColor::default();
+        let sd = source_video_color_codes(&untagged, 160, 90, "nv12", Range::Limited).unwrap();
+        assert_eq!(
+            (&*sd.primaries, &*sd.transfer, &*sd.matrix, &*sd.range),
+            ("bt709", "bt709", "smpte170m", "limited")
+        );
+        let hd = source_video_color_codes(&untagged, 480, 720, "i420a", Range::Limited).unwrap();
+        assert_eq!(&*hd.matrix, "bt709");
+        let full = TaggedColor {
+            matrix: Some(1),
+            full_range: Some(true),
+            ..TaggedColor::default()
+        };
+        let partial = source_video_color_codes(&full, 320, 180, "nv12", Range::Full).unwrap();
+        assert_eq!(
+            (
+                &*partial.primaries,
+                &*partial.transfer,
+                &*partial.matrix,
+                &*partial.range
+            ),
+            ("bt709", "bt709", "bt709", "full")
+        );
     }
 
     #[test]
@@ -736,115 +664,6 @@ mod tests {
             pack_planes(&source, &planes, "nv12", 4).unwrap(),
             [1, 2, 0, 0, 3, 4, 0, 0, 10, 20, 0, 0]
         );
-    }
-
-    #[test]
-    fn coded_color_uses_browser_stream_tags_and_sd_default() {
-        let size = Size {
-            width: 160,
-            height: 90,
-        };
-        let untagged = TaggedColor::default();
-        let sd =
-            source_video_color_codes(&untagged, size, "nv12", Range::Limited, "h264", 90, None)
-                .unwrap();
-        assert_eq!(
-            (&*sd.primaries, &*sd.transfer, &*sd.matrix),
-            ("smpte170m", "smpte170m", "smpte170m")
-        );
-        let partial = TaggedColor {
-            transfer: Some(1),
-            ..TaggedColor::default()
-        };
-        let guessed =
-            source_video_color_codes(&partial, size, "nv12", Range::Limited, "h264", 90, None)
-                .unwrap();
-        assert_eq!(
-            (&*guessed.primaries, &*guessed.transfer, &*guessed.matrix),
-            ("smpte170m", "smpte170m", "smpte170m")
-        );
-        let tagged = TaggedColor {
-            primaries: Some(1),
-            transfer: Some(1),
-            matrix: Some(1),
-            ..TaggedColor::default()
-        };
-        let vt = source_video_color_codes(&tagged, size, "nv12", Range::Limited, "h264", 90, None)
-            .unwrap();
-        assert_eq!(
-            (&*vt.primaries, &*vt.transfer, &*vt.matrix),
-            ("bt709", "bt709", "bt709")
-        );
-    }
-
-    #[test]
-    fn platform_source_uses_only_complete_cv_tags() {
-        let size = Size {
-            width: 480,
-            height: 360,
-        };
-        let untagged = TaggedColor::default();
-        let cv = Some([Some(1), Some(1), Some(1)]);
-        let platform =
-            source_video_color_codes(&untagged, size, "nv12", Range::Full, "h264", 360, cv)
-                .unwrap();
-        assert_eq!(platform.primaries, "bt709");
-        assert_eq!(platform.transfer, "bt709");
-        assert_eq!(platform.matrix, "bt709");
-        assert_eq!(platform.range, "limited");
-
-        let software =
-            source_video_color_codes(&untagged, size, "nv12", Range::Limited, "h264", 359, cv)
-                .unwrap();
-        assert_eq!(software.transfer, "smpte170m");
-        let partial = source_video_color_codes(
-            &untagged,
-            size,
-            "nv12",
-            Range::Limited,
-            "h264",
-            360,
-            Some([Some(1), None, Some(1)]),
-        )
-        .unwrap();
-        assert_eq!(partial.transfer, "smpte170m");
-    }
-
-    #[test]
-    fn vp9_preserves_unspecified_and_partial_stream_colour() {
-        let size = Size {
-            width: 320,
-            height: 180,
-        };
-        let untagged = source_video_color_codes(
-            &TaggedColor::default(),
-            size,
-            "i420a",
-            Range::Limited,
-            "vp9",
-            180,
-            None,
-        )
-        .unwrap();
-        assert_eq!(untagged.primaries, "unspecified");
-        assert_eq!(untagged.transfer, "unspecified");
-        assert_eq!(untagged.matrix, "unspecified");
-        let partial = source_video_color_codes(
-            &TaggedColor {
-                matrix: Some(1),
-                ..TaggedColor::default()
-            },
-            size,
-            "nv12",
-            Range::Limited,
-            "vp9",
-            180,
-            None,
-        )
-        .unwrap();
-        assert_eq!(partial.primaries, "unspecified");
-        assert_eq!(partial.transfer, "unspecified");
-        assert_eq!(partial.matrix, "bt709");
     }
 
     #[test]
