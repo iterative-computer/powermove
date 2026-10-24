@@ -1,6 +1,7 @@
 /** Source media consumers. Decoding, source color and audio belong to the engine. */
 import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import { SourceVideoPresenter } from './source-video-presenter';
+import { markMediaActivity } from '../media/activity';
 import type { AudioMessage } from '../../../shared/engine-protocol';
 import type { EngineBridge, EngineMediaJobRequest } from '../../../shared/engine-ipc';
 import { EngineSnapshotError, type EngineSnapshot, type EngineRenderTransport } from './render-transport';
@@ -399,6 +400,7 @@ export class SourceMonitor extends EventTarget {
   get paused(): boolean { return !this.advancing; }
   get currentTime(): number { return Math.min(this.duration || Infinity, this.at + (this.advancing ? Math.max(0, performance.now() - this.arrived) / 1000 : 0)); }
   set currentTime(value: number) {
+    markMediaActivity();
     this.frameAbort?.abort();
     this.at = Math.max(0, Math.min(this.duration || Infinity, value));
     this.arrived = performance.now();
@@ -457,6 +459,7 @@ export class SourceMonitor extends EventTarget {
 
   private async paint(): Promise<void> {
     if (this.disposed || this.host.project().assets?.[this.asset]?.kind === 'audio') return;
+    markMediaActivity();
     if (this.rendering) { this.paintAgain = true; return; }
     this.rendering = true;
     const controller = this.frameAbort = new AbortController();

@@ -1,5 +1,6 @@
 import { cancelPreviewVideoSeek } from './video-seek';
 import { bridge as hostBridge } from '../../kernel/bridge';
+import { whenMediaIdle } from '../../media/activity';
 
 /** Full preview resolution and offline rendering always use the source. */
 export function previewVideoElement(PM: any, asset: any): HTMLVideoElement {
@@ -50,6 +51,9 @@ export function prepareVideoPreview(PM: any, asset: any, source: Blob, disposed:
         else ready();
         void el.play().catch(error => { clearTimeout(timer); reject(error); });
       });
+      // Publishing re-lays out every asset consumer. With the new engine,
+      // keep it out of source scrubs; setting-off timing stays as shipped.
+      if (PM.EngineSourceMedia) await whenMediaIdle(PM);
       if (disposed()) { el.removeAttribute('src'); el.load(); URL.revokeObjectURL(url); return; }
       asset.preview = { el, url, deferred: !!PM.playing };
       if (previewVideoElement(PM, asset) === el) {
