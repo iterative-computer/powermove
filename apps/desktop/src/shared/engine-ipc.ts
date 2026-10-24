@@ -269,11 +269,6 @@ export type EngineSnapshotRequest = {
    *  `compat` needs): main posts them on its session for the window before
    *  the snapshot, as the window's own session gets them on its port. */
   compatEvents?: EngineCompatEvent[];
-  /** Level 1 SVG rasters (premultiplied RGBA8, top-down) drawn for an
-   *  earlier `needsRenderer` answer of a `document` snapshot: main posts
-   *  them on its session for the window before asking again (the window
-   *  may have no session of its own yet; decision S1). */
-  svgPixels?: { key: import('./engine-protocol').SvgRasterKey; data: Uint8Array }[];
 };
 
 /** A `compat` session event (pm_protocol `CompatMessage`) a window sends. */
@@ -318,8 +313,6 @@ export type EngineSnapshotReply =
        *  texture, as the engine sent them to main ahead of the answer
        *  (main/engine/fallback-inputs.ts). */
       fallbackTextures?: { key: string; textures: Uint8Array[] }[];
-      /** Level 1 SVG rasters to draw and post before asking again (decision S1). */
-      svg?: import('./engine-protocol').SvgRasterRequest[];
     }
   | { status: 'empty'; revision: number }
   | { status: 'failed'; code: string; message: string };

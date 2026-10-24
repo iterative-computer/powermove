@@ -87,8 +87,6 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (fallback !== undefined && (document === undefined || !validFallback(fallback))) return false;
   const compat = v['compatEvents'];
   if (compat !== undefined && (document === undefined || !validCompatEvents(compat))) return false;
-  const svg = v['svgPixels'];
-  if (svg !== undefined && (document === undefined || !validSvgPixels(svg))) return false;
   if (v['revision'] !== null && !safeUint(v['revision'])) return false;
   const s = v['snapshot'] as Record<string, unknown> | null;
   if (!s || typeof s !== 'object') return false;
@@ -146,12 +144,6 @@ export const MAX_COMPAT_EVENTS = 4096;
 export function fallbackBudgetBytes(byteLength: number, colorDepth: 16 | 32): number {
   return byteLength / (colorDepth === 32 ? 2 : 1);
 }
-/** Most SVG rasters one request carries, and their bytes (a material
- *  map may be three.js's largest texture, 16384 × 16384). */
-export const MAX_SVG_PIXELS = 64;
-export const MAX_SVG_BYTES = 1024 * 1024 * 1024;
-/** Largest SVG raster edge (`svgRasterDimensions`' limit). */
-const MAX_SVG_EDGE = 8192;
 
 function validDocument(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -162,23 +154,6 @@ function validDocument(value: unknown): boolean {
   if (json === undefined || json === null) return d['hash'] === undefined || d['hash'] === null || (typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']));
   // A document's body comes with its canonical hash.
   return typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']) && json instanceof Uint8Array && json.byteLength > 0 && json.byteLength <= MAX_DOCUMENT_BYTES;
-}
-
-function validSvgPixels(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length > MAX_SVG_PIXELS) return false;
-  let bytes = 0;
-  for (const p of value as Record<string, unknown>[]) {
-    const key = p?.['key'] as Record<string, unknown> | undefined;
-    if (!key || typeof key !== 'object' || typeof key['content'] !== 'string' || !/^[0-9a-f]{64}$/.test(key['content'])) return false;
-    if (key['texture'] !== undefined && key['texture'] !== true) return false;
-    const max = key['texture'] === true ? 16384 : MAX_SVG_EDGE;
-    const w = key['width'], h = key['height'];
-    if (!Number.isInteger(w) || !Number.isInteger(h) || (w as number) < 1 || (h as number) < 1 || (w as number) > max || (h as number) > max) return false;
-    const data = p['data'];
-    if (!(data instanceof Uint8Array) || data.byteLength !== (w as number) * (h as number) * 4) return false;
-    bytes += data.byteLength;
-  }
-  return bytes <= MAX_SVG_BYTES;
 }
 
 function validFallback(value: unknown): boolean {
@@ -301,7 +276,6 @@ export class SnapshotService {
             windowId,
             request.document,
             (request.fallbackPixels ?? []).map((p) => ({ ...p })),
-            (request.svgPixels ?? []).map((p) => ({ key: { ...p.key }, data: p.data })),
             request.compatEvents ?? []
           ),
           new Promise<'timeout'>((resolve) => {
@@ -380,7 +354,7 @@ export class SnapshotService {
         if (textures) fallbackTextures.push({ key: r.key, textures });
       }
       return {
-        status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat, svg: outcome.svg ?? [],
+        status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat,
         ...(fallbackTextures.length ? { fallbackTextures } : {})
       };
     }

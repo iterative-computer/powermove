@@ -162,7 +162,7 @@ describe('SnapshotService', () => {
       return answer;
     });
     const service = new SnapshotService({ engine: e, takePixels: null, log: () => {} });
-    expect(await service.snapshot(9, request())).toEqual({ status: 'needsRenderer', revision: 41, fallback: [], compat: [], svg: [] });
+    expect(await service.snapshot(9, request())).toEqual({ status: 'needsRenderer', revision: 41, fallback: [], compat: [] });
     answer = { type: 'snapshot', outcome: 'empty', revision: 41 } as unknown as Response;
     expect(await service.snapshot(9, request())).toEqual({ status: 'empty', revision: 41 });
     answer = new RemoteError({ code: 'unsupported', scope: { kind: 'request', id: 1 }, message: 'The new engine cannot draw this frame: x.', retry: { kind: 'never' }, detail: null } as never);
@@ -290,15 +290,6 @@ describe('sync snapshots served by main’s session for the window', () => {
     expect(validSnapshotRequest(detached([{ ...full, rgba32f: new Uint8Array(15) }]))).toBe(false);
     expect(validSnapshotRequest(detached([{ ...full, rgba16f: new Uint8Array(8) }]))).toBe(false);
     expect(validSnapshotRequest(detached([{ ...full, rgba32f: undefined }]))).toBe(false);
-    const svgKey = { content: 'c'.repeat(64), width: 2, height: 1 };
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: svgKey, data: new Uint8Array(8) }] }))).toBe(true);
-    expect(validSnapshotRequest(request({}, { svgPixels: [{ key: svgKey, data: new Uint8Array(8) }] }))).toBe(false);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: svgKey, data: new Uint8Array(4) }] }))).toBe(false);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, content: 'C'.repeat(64) }, data: new Uint8Array(8) }] }))).toBe(false);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, width: 9000 }, data: new Uint8Array(9000 * 4) }] }))).toBe(false);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, texture: true, width: 16384 }, data: new Uint8Array(16384 * 4) }] }))).toBe(true);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, texture: true, width: 16385 }, data: new Uint8Array(16385 * 4) }] }))).toBe(false);
-    expect(validSnapshotRequest(request({}, { session: null, document: doc, svgPixels: [{ key: { ...svgKey, texture: false }, data: new Uint8Array(8) }] }))).toBe(false);
   });
 
   it('snapshot main’s session, the host naming itself, with no renderer session or launch match needed', async () => {
@@ -307,7 +298,7 @@ describe('sync snapshots served by main’s session for the window', () => {
     const service = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare }, log: () => {} });
     const reply = await service.snapshot(12, request({}, { session: null, generation: 0, document: doc }));
     expect(reply.status).toBe('rendered');
-    expect(prepare).toHaveBeenCalledWith(12, doc, [], [], []);
+    expect(prepare).toHaveBeenCalledWith(12, doc, [], []);
     expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
     expect(service.status().windowSessions).toBe(1);
   });
@@ -318,7 +309,7 @@ describe('sync snapshots served by main’s session for the window', () => {
     const service = new SnapshotService({ engine: e, takePixels: null, windowSessions: { prepare }, log: () => {} });
     const reference = { id: 'doc', revision: 41, nativeKernel: true as const };
     expect(await service.snapshot(12, request({}, { session: null, generation: 0, document: reference }))).toMatchObject({ status: 'rendered' });
-    expect(prepare).toHaveBeenCalledExactlyOnceWith(12, reference, [], [], []);
+    expect(prepare).toHaveBeenCalledExactlyOnceWith(12, reference, [], []);
     expect(reference).not.toHaveProperty('owner');
     expect(e.sent[0]!.body).toMatchObject({ type: 'snapshot', renderer: 3, session: 77 });
   });
