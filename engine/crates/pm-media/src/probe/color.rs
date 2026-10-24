@@ -24,9 +24,9 @@ pub struct TaggedColor {
     pub source: Vec<String>,
 }
 
-/// VIDEO-SD-1 (pending with the owner): whether untagged SD video reads
-/// SMPTE 170M primaries. Off keeps composition's current look (Rec.709).
-pub const UNTAGGED_SD_PRIMARIES: bool = false;
+/// VIDEO-SD-1 (resolved: fix): untagged SD video reads SMPTE 170M
+/// primaries, converted to the working space in composition and export.
+pub const UNTAGGED_SD_PRIMARIES: bool = true;
 
 /// A complete video colour reading as H.273 code points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -516,8 +516,9 @@ mod reading_tests {
         let sd = video_reading(&untagged, 720, 576);
         assert_eq!(
             (sd.primaries, sd.transfer, sd.matrix, sd.full_range),
-            (1, 1, 6, false)
+            (6, 1, 6, false)
         );
+        assert_eq!(video_reading(&untagged, 1280, 576).primaries, 1);
         assert_eq!(video_reading(&untagged, 1280, 576).matrix, 1);
         assert_eq!(video_reading(&untagged, 480, 720).matrix, 1);
         let partial = TaggedColor {
@@ -528,7 +529,7 @@ mod reading_tests {
         let read = video_reading(&partial, 320, 180);
         assert_eq!(
             (read.primaries, read.transfer, read.matrix, read.full_range),
-            (1, 1, 1, true)
+            (6, 1, 1, true)
         );
         let tagged = TaggedColor {
             primaries: Some(6),
@@ -581,7 +582,11 @@ mod interpret_tests {
                 assert_eq!(table.matrix, if matrix == Bt601 { 6 } else { 1 });
                 assert_eq!(i.transfer, Transfer::DisplayE);
                 assert_eq!(i.range, Range::Limited);
-                assert_eq!(i.primaries, Primaries::Bt709, "VIDEO-SD-1 off");
+                let want = match (tags[0], table.primaries) {
+                    (2, 6) => Primaries::Bt601_525,
+                    _ => Primaries::Bt709,
+                };
+                assert_eq!(i.primaries, want, "VIDEO-SD-1: {codec} {w}×{h}");
             }
         }
     }

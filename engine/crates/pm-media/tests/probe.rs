@@ -102,8 +102,8 @@ fn apple_aac_priming() {
 #[test]
 fn color_interpretation_follows_section_9() {
     let f = fixtures_dir();
-    // Untagged SD video: the shared table's BT.601 coefficients, Rec.709
-    // primaries (VIDEO-SD-1 open), limited range.
+    // Untagged SD video: the shared table's BT.601 coefficients, SMPTE 170M
+    // primaries (VIDEO-SD-1), limited range.
     let p = probe(&f.join("hevc.mp4")).unwrap().probe;
     let c = &p.video.unwrap().color;
     assert_eq!(
@@ -112,7 +112,11 @@ fn color_interpretation_follows_section_9() {
             c.interpreted.matrix,
             c.interpreted.range
         ),
-        (Primaries::Bt709, MatrixCoefficients::Bt601, Range::Limited)
+        (
+            Primaries::Bt601_525,
+            MatrixCoefficients::Bt601,
+            Range::Limited
+        )
     );
     assert!(
         c.defaults_applied
@@ -155,13 +159,12 @@ fn corpus_probe_facts() {
         v("mjpeg.avi").video.unwrap().color.interpreted.range,
         Range::Full
     );
-    // DV: SD coefficients by size (the shared table; its untagged primaries
-    // are Rec.709 while VIDEO-SD-1 is open), bottom field first from the
-    // bitstream.
+    // DV: SD coefficients and SMPTE 170M primaries by size (the shared
+    // table), bottom field first from the bitstream.
     let dv = v("dv-ntsc.dv");
     let dvv = dv.video.as_ref().unwrap();
     if dvv.color.tagged.primaries.is_none() {
-        assert_eq!(dvv.color.interpreted.primaries, Primaries::Bt709);
+        assert_eq!(dvv.color.interpreted.primaries, Primaries::Bt601_525);
     }
     assert_eq!(dvv.color.interpreted.matrix, MatrixCoefficients::Bt601);
     assert_eq!(dvv.fields.order, FieldOrder::BottomFirst);

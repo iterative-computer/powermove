@@ -52,7 +52,6 @@ fn source(
         siting: ChromaSiting::Left,
         alpha: AlphaMode::Opaque,
         tone_map: None,
-        curve: HdrCurve::Bt2446a,
     };
     let mut encoder = gpu
         .device
@@ -115,11 +114,10 @@ fn video_storage_follows_project_and_source_depth_with_one_reading() {
     let ten = fixtures.join("hevc10-709-limited.mp4");
     let hdr = fixtures.join("hevc10-2020-pq.mp4");
     use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
-    let mut convert = |media: &mut MediaCache,
+    let convert = |media: &mut MediaCache,
                        path: &Path,
                        precision,
-                       interpretation: Option<&Interpretation>,
-                       compat: bool| {
+                       interpretation: Option<&Interpretation>| {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = media
             .video(
@@ -136,7 +134,6 @@ fn video_storage_follows_project_and_source_depth_with_one_reading() {
                 interpretation,
                 pm_time::Rate::FPS_30,
                 false,
-                compat,
             )
             .unwrap()
             .unwrap();
@@ -155,14 +152,14 @@ fn video_storage_follows_project_and_source_depth_with_one_reading() {
         (&hdr, Precision::Unorm8, Rgba16Float),
     ] {
         assert_eq!(
-            convert(&mut media, path, precision, None, true).0,
+            convert(&mut media, path, precision, None).0,
             format,
             "{path:?} {precision:?}"
         );
     }
-    // Layer level, frame-placing overrides and an override equal to the
-    // file's reading do not change an SDR frame's colour.
-    let (_, base) = convert(&mut media, &eight, Precision::Float32, None, true);
+    // Frame-placing overrides and an override restating the file's reading
+    // leave an SDR frame's colour as it is.
+    let (_, base) = convert(&mut media, &eight, Precision::Float32, None);
     let placed = Interpretation {
         pixel_aspect: Some((1, 1)),
         clean_aperture: Some(false),
@@ -173,27 +170,13 @@ fn video_storage_follows_project_and_source_depth_with_one_reading() {
         transfer: Some(Transfer::DisplayE),
         ..Default::default()
     };
-    for (interpretation, compat) in [(None, false), (Some(&placed), true), (Some(&same), true)] {
-        assert_eq!(
-            convert(
-                &mut media,
-                &eight,
-                Precision::Float32,
-                interpretation,
-                compat
-            )
-            .1,
-            base,
-            "{interpretation:?} compat={compat}"
-        );
-    }
-    // The host's per-file override is the same reading too.
+    let colour = |media: &mut MediaCache, i| convert(media, &eight, Precision::Float32, i).1;
+    assert_eq!(colour(&mut media, Some(&placed)), base);
+    assert_eq!(colour(&mut media, Some(&same)), base);
+    // The host's per-file override restating the reading too.
     let reading = media.video_color(&eight).unwrap();
     media.interpret(&eight, Some(reading));
-    assert_eq!(
-        convert(&mut media, &eight, Precision::Float32, None, true).1,
-        base
-    );
+    assert_eq!(colour(&mut media, None), base);
     media.interpret(&eight, None);
 }
 
@@ -315,7 +298,6 @@ fn chroma_follows_its_siting_with_section_9_filters_at_every_storage_depth() {
         siting: ChromaSiting::Left,
         alpha: AlphaMode::Opaque,
         tone_map: None,
-        curve: HdrCurve::Bt2446a,
     };
     let converted = |format| {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());

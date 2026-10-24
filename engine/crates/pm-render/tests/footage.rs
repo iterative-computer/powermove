@@ -22,7 +22,7 @@
 mod support;
 
 use pm_color::chroma::{Factors, Plane, upsample};
-use pm_color::tonemap::{HdrSignal, hdr_to_sdr};
+use pm_color::tonemap::{HdrSignal, bt2020_to_709, to_sdr};
 use pm_color::ycbcr::Matrix;
 use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
 use pm_media::frame::DecodedFrame;
@@ -165,6 +165,20 @@ fn frame_rgb(f: &DecodedFrame, siting: ChromaSiting, matrix: MatrixCoefficients)
     )
 }
 
+/// E-encoded R′G′B′ in `primaries` to Rec.709, in linear light, the signal
+/// clipped first as a display does.
+fn in_709(rgb: Vec<[f64; 3]>, primaries: pm_protocol::color::Primaries) -> Vec<[f64; 3]> {
+    use pm_color::transfer::{display_decode, display_encode};
+    let m =
+        pm_color::primaries::conversion(primaries, pm_protocol::color::Primaries::Bt709).unwrap();
+    rgb.into_iter()
+        .map(|c| {
+            pm_color::primaries::apply(&m, c.map(|v| display_decode(v.clamp(0.0, 1.0))))
+                .map(display_encode)
+        })
+        .collect()
+}
+
 fn max_diff(ours: &[f32], want: &[[f64; 3]]) -> f64 {
     want.iter()
         .enumerate()
@@ -174,7 +188,7 @@ fn max_diff(ours: &[f32], want: &[[f64; 3]]) -> f64 {
 }
 
 #[test]
-fn hdr_sources_are_tone_mapped_with_method_a() {
+fn hdr_sources_are_tone_mapped_with_bt2390() {
     for (file, signal) in [
         ("hdr/hdr10.mov", HdrSignal::Pq),
         ("hdr/hlg.mov", HdrSignal::Hlg),
@@ -207,7 +221,11 @@ fn hdr_sources_are_tone_mapped_with_method_a() {
         let f = decode(&path, n);
         let want: Vec<[f64; 3]> = frame_rgb(&f, reading.siting.value, reading.matrix.value)
             .into_iter()
-            .map(|rgb| hdr_to_sdr(signal, rgb.map(|v| v.clamp(0.0, 1.0)), tm.peak_nits))
+            .map(|rgb| {
+                let sdr = to_sdr(signal, rgb.map(|v| v.clamp(0.0, 1.0)), tm.peak_nits);
+                pm_color::primaries::apply(&bt2020_to_709(), sdr)
+                    .map(pm_color::transfer::display_encode)
+            })
             .collect();
         let d = max_diff(&ours, &want);
         if std::env::var_os("PM_TRACE").is_some() {
@@ -236,9 +254,8 @@ fn hdr_sources_are_tone_mapped_with_method_a() {
             eprintln!("error histogram by decade from 1e-8: {hist:?}");
         }
         eprintln!("{file}: tone mapped frame {n}, max |Δ| {d:.2e} against the f64 oracle");
-        // f32 on the GPU against f64: the largest errors sit on channels near
-        // zero after the BT.2020 → Rec.709 matrix (cancellation, then the
-        // 1/2.4 power): 6.8e-4 on HDR10, a quarter of an 8-bit code value.
+        // f32 on the GPU against f64, a quarter of an 8-bit code value at
+        // most: the PQ curve's powers and the matrix's cancellation.
         assert!(d < 1e-3, "{file}: {d}");
     }
 }
@@ -395,6 +412,10 @@ fn deinterlaces_like_bwdif(path: &Path, order: &str) {
             reading.siting.value,
             reading.matrix.value,
         );
+        let want = match reading.primaries.value {
+            pm_protocol::color::Primaries::Bt709 => want,
+            p => in_709(want, p),
+        };
         let d = max_diff(&ours, &want);
         worst = worst.max(d);
         assert!(d < 1e-5, "{name} field {field}: max |Δ| {d}");
@@ -540,14 +561,20 @@ fn interpret_overrides_change_the_reading() {
     ] {
         let (doc, res) = document(&path, (w, h), 25.0, Some(interp.clone()));
         let ours = render(&mut r, &doc, (w, h), 0.1, &res);
-        let want = frame_rgb(&f, ChromaSiting::Left, matrix);
+        let want = in_709(
+            frame_rgb(&f, ChromaSiting::Left, matrix),
+            pm_protocol::color::Primaries::Bt601_625,
+        );
         let d = max_diff(&ours, &want);
         eprintln!("color-601-625.mov read with {matrix:?}: max |Δ| {d:.2e}");
         assert!(d < 1e-5, "{interp}: {d}");
     }
     let (doc, res) = document(&path, (w, h), 25.0, None);
     let level1 = render(&mut r, &doc, (w, h), 0.1, &res);
-    let tagged = frame_rgb(&f, ChromaSiting::Left, MatrixCoefficients::Bt601);
+    let tagged = in_709(
+        frame_rgb(&f, ChromaSiting::Left, MatrixCoefficients::Bt601),
+        pm_protocol::color::Primaries::Bt601_625,
+    );
     let d = max_diff(&level1, &tagged);
     eprintln!("color-601-625.mov at level 1: max |Δ| {d:.2e}");
     assert!(d < 1e-5, "level 1 reading: {d}");

@@ -331,7 +331,6 @@ impl Exec<'_> {
                         }
                     }
                     Source::Video {
-                        level2,
                         sequence,
                         path,
                         time,
@@ -353,7 +352,6 @@ impl Exec<'_> {
                             interpret.as_ref(),
                             *composition_rate,
                             *sequence,
-                            !*level2,
                         ) {
                             Ok(Some(t)) => {
                                 r.view = Some(t.view.clone());

@@ -58,19 +58,6 @@ pub struct SourceColor {
     pub alpha: AlphaMode,
     /// HDR input tone mapping (PQ and HLG sources in Standard, section 9).
     pub tone_map: Option<ToneMap>,
-    /// The curve `tone_map` uses.
-    pub curve: HdrCurve,
-}
-
-/// How an HDR source maps to SDR (section 9; owner decision HDR-1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum HdrCurve {
-    /// BT.2446 Method A: interpreted HDR and level 2 layers.
-    #[default]
-    Bt2446a,
-    /// Today's default look ([`pm_color::tonemap::rwtmo`]), for level 1
-    /// layers of HDR footage without HDR metadata.
-    Rwtmo,
 }
 
 pub(crate) fn stamp(path: &Path) -> Option<(u64, u128)> {
@@ -207,7 +194,6 @@ pub fn image_color(still: &pm_media::image::StillImage) -> Result<SourceColor, P
         siting: ChromaSiting::Center,
         alpha: c.alpha,
         tone_map: None,
-        curve: HdrCurve::Bt2446a,
     })
 }
 
@@ -325,7 +311,6 @@ fn interpreted_color(
                     _ => AlphaMode::Premultiplied,
                 },
                 tone_map: None,
-                curve: HdrCurve::Bt2446a,
             },
             colorsync: Some(r.alpha.value),
         });
@@ -354,7 +339,6 @@ fn interpreted_color(
             siting: ChromaSiting::Center,
             alpha: r.alpha.value,
             tone_map: r.tone_map,
-            curve: HdrCurve::Bt2446a,
         },
         colorsync: None,
     })
@@ -555,15 +539,15 @@ pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
 
 /// Whether a video file is drawn without routing: it opens and indexes,
 /// the renderer can draw it ([`video_drawable`]), and it shows nothing
-/// whose reading has not been checked against today's viewer (section 25).
-/// SDR footage in Rec.709, BT.601, BT.2020 and Display P3 primaries, and
-/// HDR footage of today's default look ([`todays_hdr_look`]), are drawn by
-/// the one video path (docs/engine/video-parity.md). These are drawn only
-/// when the asset carries Interpret Footage overrides, which only this
-/// engine reads:
+/// whose reading has not been checked against an f64 reference and today's
+/// viewer (section 25, `tests/video_reading.rs`). SDR footage in Rec.709,
+/// BT.601, BT.2020 and Display P3 primaries, and the HDR classes the gate
+/// covers ([`compared_hdr`]), are drawn by the one video path
+/// (docs/engine/video-parity.md). These are drawn only when the asset
+/// carries Interpret Footage overrides, which only this engine reads:
 ///
-/// - HDR with metadata-driven gain curves; native Interpret uses BT.2446
-///   Method A;
+/// - other HDR (mastering or light-level metadata, Dolby Vision, other
+///   codecs and layouts);
 /// - interlaced sources (bwdif, equal to FFmpeg's; today's viewer shows the
 ///   woven frame);
 /// - display rotations, non-square pixels, and a cropping clean aperture
@@ -619,9 +603,10 @@ pub fn probe_interpreted_video_issue(
         .map_err(|m| ProbeIssue::Unsupported(Feature::Media(m)))
 }
 
-/// The HDR footage today's viewer shows with its default curve (no
-/// metadata-driven gain): the class the level 1 RWTMO reading reproduces.
-fn todays_hdr_look(video: &VideoProbe) -> bool {
+/// The HDR classes `tests/video_reading.rs` covers: 10-bit 4:2:0 AV1 and
+/// HEVC, limited range, no alpha, no HDR metadata, PQ in BT.2020 or
+/// Display P3, HLG in BT.2020.
+fn compared_hdr(video: &VideoProbe) -> bool {
     matches!(video.codec.codec.as_str(), "av1" | "hevc")
         && video.codec.bit_depth == 10
         && (video.codec.log2_chroma_w, video.codec.log2_chroma_h) == (1, 1)
@@ -678,13 +663,10 @@ fn video_supported(src: &MediaSource) -> Result<(), String> {
         ));
     }
     let c = &src.color;
-    if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) && !todays_hdr_look(v) {
-        return Err(format!(
-            "HDR video with metadata-driven tone mapping ({WHEN})"
-        ));
+    if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) && !compared_hdr(v) {
+        return Err(format!("HDR video outside the compared classes ({WHEN})"));
     }
-    // BT.601 primaries read as Rec.709 (`standard_video_primaries`); BT.2020 and
-    // Display P3 convert in linear light.
+    // Every other reading converts its primaries in linear light.
     if !matches!(
         c.primaries,
         Primaries::Bt709
@@ -733,36 +715,11 @@ fn video_probe_drawable(video: Option<&VideoProbe>, interp: &Interpretation) -> 
     Ok(())
 }
 
-/// Whether Interpret Footage overrides how a video's code values become
-/// colour: primaries, transfer, matrix, range or chroma siting. Frame rate,
-/// field order, pixel aspect and clean aperture only choose or place frames,
-/// and an alpha choice only acts on a file with an alpha channel, so none of
-/// them may move a level 1 video off today's compatibility upload.
-fn interprets_video_color(i: &Interpretation) -> bool {
-    i.primaries.is_some()
-        || i.transfer.is_some()
-        || i.matrix.is_some()
-        || i.range.is_some()
-        || i.siting.is_some()
-}
-
-/// The primaries a video is drawn with: BT.601 525- and 625-line
-/// primaries (tagged SD video) read as Rec.709, as today's viewer reads
-/// them. Untagged video reaches here with the shared table's primaries
-/// (`pm_media::probe::color::UNTAGGED_SD_PRIMARIES`, owner decision
-/// VIDEO-SD-1, which covers this mapping too).
-pub fn standard_video_primaries(p: Primaries) -> Primaries {
-    match p {
-        Primaries::Bt601_525 | Primaries::Bt601_625 | Primaries::Unspecified => Primaries::Bt709,
-        other => other,
-    }
-}
-
 /// How a video frame's code values become colour: the probe's reading
-/// ([`pm_media::probe::color::video_reading`], the one table the source
-/// monitor and export share), Interpret Footage's overrides, or the host's per-file
-/// override. Every surface (playback, pause, scrub, thumbnails, export)
-/// reads a frame this way.
+/// ([`pm_media::probe::color::video_reading`], the table the source monitor
+/// shares), Interpret Footage's overrides, or the host's per-file override.
+/// Every surface (playback, pause, scrub, thumbnails, export) reads a frame
+/// this way.
 fn video_color(
     v: &VideoProbe,
     reading: &pm_media::interpret::VideoReading,
@@ -770,7 +727,6 @@ fn video_color(
     override_color: Option<ColorDescription>,
     has_alpha: bool,
     sequence: bool,
-    compat: bool,
 ) -> SourceColor {
     let mut desc = override_color.unwrap_or(reading.color);
     // raster.ts encodes image sequences as untagged BT.601 VP9, even at HD
@@ -782,37 +738,22 @@ fn video_color(
     {
         desc.matrix = MatrixCoefficients::Bt601;
     }
-    let hdr = matches!(desc.transfer, Transfer::Pq | Transfer::Hlg);
     SourceColor {
         transfer: desc.transfer,
-        primaries: standard_video_primaries(desc.primaries),
+        primaries: desc.primaries,
         matrix: desc.matrix,
         siting: desc.siting,
-        alpha: if has_alpha {
-            match desc.alpha {
-                AlphaMode::Opaque if interp.alpha.is_none() => AlphaMode::Straight,
-                other => other,
-            }
-        } else {
-            AlphaMode::Opaque
+        alpha: match (has_alpha, desc.alpha) {
+            (false, _) => AlphaMode::Opaque,
+            (true, AlphaMode::Opaque) if interp.alpha.is_none() => AlphaMode::Straight,
+            (true, other) => other,
         },
-        tone_map: hdr.then(|| {
+        tone_map: matches!(desc.transfer, Transfer::Pq | Transfer::Hlg).then(|| {
             reading.tone_map.unwrap_or(ToneMap {
                 transfer: desc.transfer,
                 peak_nits: 1000.0,
             })
         }),
-        // Level 1 keeps today's look of HDR footage without metadata.
-        curve: if compat
-            && hdr
-            && !interprets_video_color(interp)
-            && override_color.is_none()
-            && todays_hdr_look(v)
-        {
-            HdrCurve::Rwtmo
-        } else {
-            HdrCurve::Bt2446a
-        },
     }
 }
 
@@ -838,10 +779,9 @@ fn source_uniform(
     let tone = color
         .tone_map
         .filter(|t| matches!(t.transfer, Transfer::Pq | Transfer::Hlg));
-    let rwtmo = color.curve == HdrCurve::Rwtmo;
     let transfer = match (color.transfer, tone) {
-        (_, Some(t)) if t.transfer == Transfer::Pq => 5 + 2 * u32::from(rwtmo),
-        (_, Some(_)) => 6 + 2 * u32::from(rwtmo),
+        (_, Some(t)) if t.transfer == Transfer::Pq => 5,
+        (_, Some(_)) => 6,
         (Transfer::DisplayE, _) => 0,
         (Transfer::Bt1886, _) => 1,
         (Transfer::SceneReferredBt709, _) => 2,
@@ -849,24 +789,17 @@ fn source_uniform(
         (Transfer::Gamma22, _) => 4,
         (Transfer::Pq | Transfer::Hlg, None) => 0,
     };
-    let identity3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-    let primaries = if tone.is_some() && rwtmo {
-        // RWTMO's gain applies in BT.2020; its result is linear Rec.709.
-        pm_color::primaries::conversion(color.primaries, Primaries::Bt2020).unwrap_or(identity3)
-    } else if tone.is_some() {
-        // Method A works in BT.2020; its SDR result converts to Rec.709.
-        pm_color::tonemap::bt2020_to_709()
-    } else {
-        pm_color::primaries::conversion(
-            if color.primaries == Primaries::Unspecified {
-                Primaries::Bt709
-            } else {
-                color.primaries
-            },
-            Primaries::Bt709,
-        )
-        .unwrap_or(identity3)
-    };
+    // The source's primaries to Rec.709 in linear light: after the tone
+    // map for HDR, after the transfer for SDR.
+    let primaries = pm_color::primaries::conversion(
+        if color.primaries == Primaries::Unspecified {
+            Primaries::Bt709
+        } else {
+            color.primaries
+        },
+        Primaries::Bt709,
+    )
+    .unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
     let convert_primaries = tone.is_none()
         && color.primaries != Primaries::Bt709
         && color.primaries != Primaries::Unspecified;
@@ -1431,7 +1364,6 @@ impl MediaCache {
         interpret: Option<&Interpretation>,
         composition: pm_time::Rate,
         sequence: bool,
-        compat: bool,
     ) -> Result<Option<Target>, MediaFailure> {
         let src = self.source(path)?;
         let none = Interpretation::default();
@@ -1456,7 +1388,7 @@ impl MediaCache {
         let reading_key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            format!("{interp:?}{composition:?}{sequence}{compat}{override_color:?}").hash(&mut h);
+            format!("{interp:?}{composition:?}{sequence}{override_color:?}").hash(&mut h);
             h.finish()
         };
         let key_of = |frame: usize| FrameKey {
@@ -1525,7 +1457,6 @@ impl MediaCache {
             override_color,
             frame.format.has_alpha(),
             sequence,
-            compat,
         );
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));

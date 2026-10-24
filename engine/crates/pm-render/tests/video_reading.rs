@@ -1,11 +1,13 @@
 //! The one video reading (docs/engine/video-parity.md) against an f64
 //! reference, QUALITY-1's proof for video.
 //!
-//! The reference converts each case's decoded Y′CbCr in f64 with the
-//! stream's reading (pm-media's untagged-video table): range from the
-//! decoder's format, section 9's siting-aware chroma filters, the matrix
-//! from its Kr/Kb, primaries in linear light, and today's RWTMO curve for
-//! HDR. Like a display (and the source monitor's gate), it clips the video
+//! The reference converts each case's decoded Y′CbCr in f64 per the
+//! standards the stream's reading names (QUALITY-2: correct colour first):
+//! the shared table's reading (`pm_media::probe::color::video_reading`),
+//! range from the decoder's format, section 9's siting-aware chroma
+//! filters, the matrix from its Kr/Kb, primaries (BT.601 included) to
+//! Rec.709 in linear light, alpha as the file tags it, and PQ/HLG through
+//! BT.2100 and the BT.2390 EETF. Like a display (and the source monitor's gate), it clips the video
 //! signal to 0..1 before linearising it. A 1:1 video layer is rendered at all three project depths and
 //! compared with it in display code units, as is today's viewer: its paused
 //! (Canvas) and playing (direct upload) captures of the same frame.
@@ -19,7 +21,7 @@ mod doc;
 
 use pm_color::chroma::{Factors, filters, sample_origin, taps};
 use pm_color::primaries::{apply, conversion};
-use pm_color::tonemap::{HdrSignal, rwtmo};
+use pm_color::tonemap::{HdrSignal, to_sdr};
 use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
 use pm_media::frame::DecodedFrame;
 use pm_media::interpret::{Interpretation, resolve_video};
@@ -139,11 +141,7 @@ fn reference(c: &ColorDescription, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<
         MatrixCoefficients::Bt2020Ncl => (0.2627, 0.0593),
         other => panic!("no fixture reads {other:?}"),
     };
-    // Tagged BT.601 primaries draw as Rec.709 (VIDEO-SD-1).
-    let primaries = match c.primaries {
-        Primaries::Bt601_525 | Primaries::Bt601_625 => Primaries::Bt709,
-        other => other,
-    };
+    let primaries = c.primaries;
     let chroma = |i: i64, j: i64| {
         cc[(j.clamp(0, i64::from(ch) - 1) * i64::from(cw) + i.clamp(0, i64::from(cw) - 1)) as usize]
     };
@@ -171,6 +169,24 @@ fn reference(c: &ColorDescription, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<
             let r = luma + 2.0 * (1.0 - kr) * cbcr[1];
             let b = luma + 2.0 * (1.0 - kb) * cbcr[0];
             let rgb = [r, (luma - kr * r - kb * b) / (1.0 - kr - kb), b];
+            // Colour is converted straight: a file tagged premultiplied
+            // (HEVC's AlphaChannelMode) is divided by alpha first, except
+            // below section 9's 1/4096 floor, where it is kept as stored.
+            let premultiplied = c.alpha == AlphaMode::Premultiplied;
+            if premultiplied && alpha < 1.0 / 4096.0 {
+                out.push([
+                    rgb[0] * 255.0,
+                    rgb[1] * 255.0,
+                    rgb[2] * 255.0,
+                    alpha * 255.0,
+                ]);
+                continue;
+            }
+            let rgb = if premultiplied {
+                rgb.map(|v| v / alpha)
+            } else {
+                rgb
+            };
             let rgb = match c.transfer {
                 Transfer::Pq | Transfer::Hlg => {
                     let signal = if c.transfer == Transfer::Pq {
@@ -178,8 +194,10 @@ fn reference(c: &ColorDescription, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<
                     } else {
                         HdrSignal::Hlg
                     };
-                    let to_2020 = conversion(primaries, Primaries::Bt2020).unwrap();
-                    rwtmo::to_sdr(signal, rgb.map(|v| v.clamp(0.0, 1.0)), &to_2020).map(e_encode)
+                    // No fixture carries mastering metadata: a 1000 cd/m² peak.
+                    let sdr = to_sdr(signal, rgb.map(|v| v.clamp(0.0, 1.0)), 1000.0);
+                    let m = conversion(primaries, Primaries::Bt709).unwrap();
+                    apply(&m, sdr).map(e_encode)
                 }
                 _ if primaries == Primaries::Bt709 => rgb,
                 _ => {
@@ -187,12 +205,7 @@ fn reference(c: &ColorDescription, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<
                     apply(&m, rgb.map(|v| e_decode(v.clamp(0.0, 1.0)))).map(e_encode)
                 }
             };
-            // A file tagged premultiplied (HEVC's AlphaChannelMode) already
-            // holds premultiplied colour; straight colour is multiplied here.
-            let k = match c.alpha {
-                AlphaMode::Premultiplied => 255.0,
-                _ => alpha * 255.0,
-            };
+            let k = alpha * 255.0;
             out.push([rgb[0] * k, rgb[1] * k, rgb[2] * k, alpha * 255.0]);
         }
     }
@@ -288,13 +301,13 @@ fn render(
 /// project depth, in display codes. 8-bit output rounds once (half a
 /// code), after half-float source storage for deep and HDR sources (half
 /// an f16 step below 1.0, 0.125 codes). Half float rounds twice (source
-/// and output, 2⁻¹² each). Single float is bounded by the GPU's f32
-/// transcendentals in the PQ curve.
+/// and output, 2⁻¹² each). The GPU's f32 transcendentals in the PQ curve
+/// (powers of 78.8 and 6.3, round trip through the EETF) add up to 0.15.
 fn bound(depth: u32) -> f64 {
     match depth {
         8 => 0.625 + 1e-3,
-        16 => 0.125 + 0.05,
-        _ => 0.05,
+        16 => 0.125 + 0.15,
+        _ => 0.15,
     }
 }
 
@@ -331,9 +344,22 @@ fn video_reading_is_at_least_as_close_to_the_f64_reference_as_today() {
                 &reference,
                 &flat,
             );
+            // How far the correction moves today's paused composition
+            // (information for the quality ledger, not a gate).
+            let shift = case.today.first().map(|(_, bytes)| {
+                let today: Vec<[f64; 4]> = bytes
+                    .chunks_exact(4)
+                    .map(|p| std::array::from_fn(|c| f64::from(p[c])))
+                    .collect();
+                distance(
+                    |p| std::array::from_fn(|c| f64::from(rgba[p * 4 + c]) * 255.0),
+                    &today,
+                    &flat,
+                )
+            });
             println!(
                 "VIDEO-REFERENCE {}",
-                json!({"case": case.id, "depth": depth, "engine": engine,
+                json!({"case": case.id, "depth": depth, "engine": engine, "shiftFromToday": shift,
                     "today": today.iter().map(|(k, d)| json!({"reading": k, "distance": d}))
                         .collect::<Vec<_>>(),
                     "flatPixels": flat.iter().filter(|&&f| f).count(), "pixels": flat.len()})

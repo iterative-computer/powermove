@@ -800,9 +800,9 @@ linear blending off. The display choice is a machine setting.
 showing their origin. Before cutover (Phase 3b):
 
 - Primaries, transfer (E, BT.1886, scene-referred), matrix, range, chroma siting.
-- HDR sources (iPhone HLG, HDR10, Dolby Vision base layer) in Standard projects tone
-  mapped to SDR with BT.2446 Method A. Phase 0 measures today's Chromium handling;
-  any difference becomes an appendix A item with its own corpus case.
+- HDR sources (iPhone HLG, HDR10, Dolby Vision base layer) in Standard projects
+  decoded per BT.2100 and tone mapped to SDR with the BT.2390 EETF (owner decision
+  HDR-1, 2026-10-24; docs/engine/video-parity.md).
 - Alpha modes; frame rate override; field order; pixel aspect and clean aperture
   (`pasp`, `clap`).
 - Untagged video: height ≤ 576 uses BT.601 with 525- or 625-line primaries chosen by
