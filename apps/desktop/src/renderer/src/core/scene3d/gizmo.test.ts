@@ -17,7 +17,7 @@ vi.mock('three', async () => {
     setPixelRatio = vi.fn(); setSize = vi.fn(); setClearColor = vi.fn(); clear = vi.fn(); render = vi.fn();
     dispose = vi.fn(() => { for (const event of this.contextEvents) this.domElement.removeEventListener(event, this.onContext); });
     forceContextLoss = vi.fn();
-    constructor(readonly options: { canvas?: HTMLCanvasElement }) {
+    constructor(options: { canvas?: HTMLCanvasElement }) {
       this.domElement = options.canvas ?? document.createElement('canvas'); gpu.renderers.push(this);
       for (const event of this.contextEvents) this.domElement.addEventListener(event, this.onContext);
       if (gpu.failRenderer) { gpu.failRenderer = false; throw new Error('GPU setup failed'); }
@@ -94,12 +94,6 @@ describe('on-demand 3D gizmo resources', () => {
     expect(gpu.renderers).toHaveLength(0); expect(gpu.controls).toHaveLength(0); expect(f.runtime).not.toHaveBeenCalled();
     f.controller.dispose(); f.controller.dispose(); f.controller.update(f.rect, ['model']);
     expect(f.stage.querySelector('[data-scene-gizmo]')).toBeNull(); expect(gpu.renderers).toHaveLength(0);
-  });
-
-  it('keeps the drawn gizmo readable after compositing, so Library cards copy the chrome on screen', () => {
-    const f = fixture();
-    f.controller.update(f.rect, ['model']);
-    expect(gpu.renderers[0].options).toMatchObject({ canvas: f.canvas, alpha: true, preserveDrawingBuffer: true });
   });
 
   it('initializes synchronously on the first 3D update and retains the idle/reselection behavior', () => {

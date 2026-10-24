@@ -78,9 +78,7 @@ function createGizmoRenderer(canvas:HTMLCanvasElement):THREE.WebGLRenderer {
   canvas.addEventListener=function(...args:Parameters<HTMLCanvasElement['addEventListener']>) {
     registrations.push(args);add.apply(this,args);
   };
-  // The drawn gizmo stays readable after compositing, so a Library card copies
-  // the chrome the panel shows instead of racing the browser's buffer swap.
-  try {return new THREE.WebGLRenderer({canvas,alpha:true,antialias:true,preserveDrawingBuffer:true});}
+  try {return new THREE.WebGLRenderer({canvas,alpha:true,antialias:true});}
   catch(error){for(const args of registrations)canvas.removeEventListener(...args);throw error;}
   finally {if(descriptor)Object.defineProperty(canvas,'addEventListener',descriptor);else delete (canvas as any).addEventListener;}
 }

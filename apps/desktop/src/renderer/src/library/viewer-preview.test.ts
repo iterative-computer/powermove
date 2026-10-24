@@ -85,6 +85,17 @@ describe('Library canvas copy', () => {
     expect(customRender).toHaveBeenCalledOnce();
     expect([copy.width, copy.height, copy.style.width, copy.style.height]).toEqual([320, 180, '160px', '50%']);
   });
+
+  it('never copies the 3D transform gizmo, an editor overlay, into a card', () => {
+    const { source, clone } = pair('<canvas data-scene-gizmo width="320" height="180"></canvas><canvas width="320" height="180"></canvas>');
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as never);
+    copyClonedCanvasBitmaps(source, clone);
+    const [gizmo, content] = clone.querySelectorAll('canvas');
+    expect(gizmo!.hidden).toBe(true);
+    expect(content!.hidden).toBe(false);
+    expect(drawImage).toHaveBeenCalledExactlyOnceWith(source.querySelectorAll('canvas')[1], 0, 0);
+  });
 });
 
 describe('Library engine snapshots', () => {

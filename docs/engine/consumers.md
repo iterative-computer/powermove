@@ -247,12 +247,11 @@ view; the override carries only the editor camera
 (`core/scene3d/viewport.ts`, read without any native query). Pre-engine forks
 bound through `render.gl.init` receive the same camera
 (`engine-connection/canvas-view.ts`), refreshed on each view change. The
-viewport chrome is DOM plus the WebGL transform gizmo. The gizmo renderer
-preserves its drawing buffer, so the Library card copies the gizmo the panel
-shows. Without that, the copy raced the browser's buffer swap: cards usually
-lost the gizmo and selection wire and sometimes kept them (one of 48 repeated
-engine-on captures differed by 1,931 pixels). The gizmo is engine-independent,
-so the engine-off and engine-on cards now match deterministically.
+viewport chrome is DOM plus the WebGL transform gizmo. Library cards never
+show the gizmo: it is an editor overlay, not content. The card copy skips its
+canvas, whose WebGL buffer is undefined after compositing; copying it raced
+the buffer swap, so cards usually lacked the gizmo and occasionally showed it
+misplaced for the card's layout.
 
 The shared native 3D color pass mirrors ANGLE Metal's explicit WebGL
 resolve: add the four normalized samples in order as `f32`, divide by four,

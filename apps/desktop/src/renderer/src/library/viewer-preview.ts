@@ -46,6 +46,9 @@ export function copyClonedCanvasBitmaps(source: Element, target: Element): void 
   const from = source.querySelectorAll<HTMLCanvasElement>('canvas');
   target.querySelectorAll<HTMLCanvasElement>('canvas').forEach((canvas, index) => {
     const original = from[index];
+    // The 3D transform gizmo is an editor overlay, not content: cards never
+    // show it. (Its WebGL buffer is undefined after compositing anyway.)
+    if (original?.hasAttribute('data-scene-gizmo')) { canvas.hidden = true; return; }
     if (!original?.width || !original.height) return;
     // Keep legacy and custom canvases on their original Library copy path.
     // The native stage surface alone needs its source-stage coordinate box.
