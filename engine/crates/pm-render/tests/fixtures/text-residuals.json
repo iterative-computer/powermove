@@ -1,7 +1,0 @@
-{
-  "kind": "RATCHET",
-  "version": 1,
-  "decision": "FONTS-R",
-  "policy": "Exact Round 6 residual snapshots approved by the orchestrator on 2026-10-19. Raster strict bound remains 1 CV; composed text remains 2 CV. Never increase a budget or add cases. Lower the pixel and/or max-CV budget whenever either improves; remove a case once it meets the strict bound.",
-  "cases": []
-}

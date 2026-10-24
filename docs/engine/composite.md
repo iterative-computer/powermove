@@ -101,8 +101,8 @@ passes store them: the renderer probes how the device stores an `f32` output
 into `rgba16float` on first use (`composite/half_store.rs`: 0.75 + ¾ of an f16
 ulp) and the fused steps truncate (`half_rtz`) or round to nearest (`half_rne`)
 to match. Today's compositor on another GPU family stores with that GPU's
-rounding, so the probe, not a constant, decides; `tests/half_store.rs` checks
-that the probe agrees with the measured truncation on this GPU. The residual
+rounding, so the probe, not a constant, decides. This emulation is slated for
+removal (gate-policy.md); its byte-level test is gone. The residual
 that remained on the rotated soft-alpha images came from image sampling: today's
 image layers sample Blink's 8-bit premultiplied bitmap as an `RGBA8` texture,
 and the GPU's bilinear filter weighs 8-bit texels differently from half float
@@ -265,7 +265,6 @@ outside the repository.)
 | `tests/text_corpus.rs` | Text and captions projects of the same captures, with the built-in definitions | 2026-10-19: `space/groups-25d` drawn: text within the text class, every other pixel exact (max 0); `space/layers-25d` skipped (SVG images, the SVG route) |
 | `tests/path_masks.rs` | 54 path mask coverage canvases against today's (`pm-vector/tools/mask-ref`) | Pass: bit-exact |
 | `pm-vector` `tests/mask_coverage.rs`, `canvas2d::filter` unit tests | Item rasters exact where nothing is blurred; the CPU model of the blur within 2 CV; Skia's step counts and kernels | Pass |
-| `tests/half_store.rs` | `rgba16float` stores truncate on this GPU, and the renderer's probe agrees | Pass |
 | `tests/space25d_picks.rs` | 2.5D layers draw where they are picked; level 2 text on planes | Pass: 338,211 drawn pixels, all picked; level 2 placement 0 misses (motion.md). Samples where a layer draws nothing (today's capture is transparent there too) check no box |
 | `pm-vector` `tests/canvas2d.rs` | Level 1 shape and path rasters against today's, including the viewport sweep | 529 cases: 503 exact, 22 within 1, 4 pinned; the radius-24 cases and every `viewport-*` case must be bit-exact |
 | `pm-color` unit tests | Composite and matte references | Pass |
