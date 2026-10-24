@@ -1,5 +1,5 @@
 //! Layer rasters off the render thread (`render.raster()`'s base pixels:
-//! layer snapshots, RFC 16; docs/engine/extensions-compat.md, round seven).
+//! layer snapshots, RFC 16; docs/engine/extensions-compat.md, "Layer rasters").
 //!
 //! A raster override's base is a layer snapshot, and during playback the
 //! renderer asks for one on most frames (a typewriter's typed prefix, a
