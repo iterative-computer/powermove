@@ -24,7 +24,9 @@ use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
 use pm_media::frame::DecodedFrame;
 use pm_media::interpret::{Interpretation, resolve_video};
 use pm_media::vt::DecodePurpose;
-use pm_protocol::color::{AlphaMode, ColorDescription, MatrixCoefficients, Precision, Primaries, Transfer};
+use pm_protocol::color::{
+    AlphaMode, ColorDescription, MatrixCoefficients, Precision, Primaries, Transfer,
+};
 use pm_protocol::common::{Size, Ticks};
 use pm_render::footage::Timing;
 use pm_render::sampling::Sampling;
@@ -143,8 +145,7 @@ fn reference(c: &ColorDescription, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<
         other => other,
     };
     let chroma = |i: i64, j: i64| {
-        cc[(j.clamp(0, i64::from(ch) - 1) * i64::from(cw) + i.clamp(0, i64::from(cw) - 1))
-            as usize]
+        cc[(j.clamp(0, i64::from(ch) - 1) * i64::from(cw) + i.clamp(0, i64::from(cw) - 1)) as usize]
     };
     let mut out = Vec::with_capacity((w * h) as usize);
     let mut flat = Vec::with_capacity((w * h) as usize);
@@ -165,9 +166,7 @@ fn reference(c: &ColorDescription, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<
                 ((f64::from(y) - oy) / f64::from(factors.y)).floor() as i64,
             );
             let centre = chroma(i0, j0);
-            flat.push(
-                (j0 - 2..=j0 + 2).all(|j| (i0 - 2..=i0 + 2).all(|i| chroma(i, j) == centre)),
-            );
+            flat.push((j0 - 2..=j0 + 2).all(|j| (i0 - 2..=i0 + 2).all(|i| chroma(i, j) == centre)));
             let [luma, alpha] = ya[(y * w + x) as usize].map(f64::from);
             let r = luma + 2.0 * (1.0 - kr) * cbcr[1];
             let b = luma + 2.0 * (1.0 - kb) * cbcr[0];
@@ -274,7 +273,12 @@ fn render(
     let frame = renderer
         .render(&document, "Ptest-root", tick, &request, &assets)
         .unwrap();
-    assert!(frame.failures.is_empty(), "{}: {:?}", case.id, frame.failures);
+    assert!(
+        frame.failures.is_empty(),
+        "{}: {:?}",
+        case.id,
+        frame.failures
+    );
     let rgba = renderer.read_rgba(&frame).unwrap();
     renderer.recycle(frame);
     rgba
@@ -370,7 +374,11 @@ fn playback_pause_and_export_draw_the_same_video_frame() {
             let paused = render(&mut renderer, &case, size, depth, false, Sampling::Final);
             let playing = render(&mut renderer, &case, size, depth, false, Sampling::Playback);
             assert_eq!(paused, export, "{} {depth}-bit: paused vs export", case.id);
-            assert_eq!(playing, export, "{} {depth}-bit: playing vs export", case.id);
+            assert_eq!(
+                playing, export,
+                "{} {depth}-bit: playing vs export",
+                case.id
+            );
         }
     }
 }

@@ -1767,6 +1767,9 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
+        // Video sources this frame meets for the first time open together.
+        self.media
+            .open_cold(&media_prepare::planned_videos(&plan), request.export);
         // Exports never draw stand-ins (docs/engine/scrub.md).
         self.media.stand_ins.clear();
         let scrub = self.media.scrub;

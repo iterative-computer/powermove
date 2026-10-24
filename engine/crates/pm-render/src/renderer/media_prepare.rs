@@ -48,6 +48,31 @@ fn visit_plan(plan: &CompPlan, visit: &mut impl FnMut(&str, &Source)) {
     }
 }
 
+/// The video draws of a plan, nested compositions included.
+pub(super) fn planned_videos(plan: &CompPlan) -> Vec<crate::media::PlannedVideoDraw> {
+    let mut out = Vec::new();
+    visit_plan(plan, &mut |layer, source| {
+        if let Source::Video {
+            path,
+            time,
+            interpret,
+            composition_rate,
+            ..
+        } = source
+        {
+            out.push(crate::media::PlannedVideoDraw {
+                layer: layer.to_owned(),
+                path: path.clone(),
+                instance: crate::exec::instance_of(layer),
+                seconds: *time,
+                interpret: interpret.clone(),
+                composition: *composition_rate,
+            });
+        }
+    });
+    out
+}
+
 impl Renderer {
     /// Queue preparation of the videos selected by one planned view. The
     /// worker retains each completed source and matching idle decoder until
@@ -102,31 +127,24 @@ impl Renderer {
             return Err(RenderError::Unsupported(build.unsupported));
         }
         let mut result = MediaPreparation::default();
-        visit_plan(&plan, &mut |layer, source| {
-            if let Source::Video {
-                path,
-                time,
-                interpret,
-                composition_rate,
-                ..
-            } = source
-            {
-                match self.media.prepare_video(
-                    path,
-                    crate::exec::instance_of(layer),
-                    *time,
-                    request.export,
-                    interpret.as_ref(),
-                    *composition_rate,
-                ) {
-                    Ok(true) => result.queued_videos += 1,
-                    Ok(false) => {}
-                    Err(error) => result
+        for v in planned_videos(&plan) {
+            match self.media.prepare_video(
+                &v.path,
+                v.instance,
+                v.seconds,
+                request.export,
+                v.interpret.as_ref(),
+                v.composition,
+            ) {
+                Ok(true) => result.queued_videos += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    result
                         .failures
-                        .push(format!("{layer} ({}): {error:?}", path.display())),
+                        .push(format!("{} ({}): {error:?}", v.layer, v.path.display()))
                 }
             }
-        });
+        }
         Ok(result)
     }
 

@@ -39,6 +39,7 @@ pub use crate::stills::StillReader;
 
 #[path = "media/prewarm.rs"]
 mod prewarm;
+pub(crate) use prewarm::PlannedVideoDraw;
 
 /// Why a media file cannot be drawn.
 #[derive(Debug, Clone, PartialEq, Eq)]

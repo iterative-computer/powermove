@@ -230,3 +230,54 @@ fn display_preparation_is_bounded_across_many_layers() {
     // global prepared-session cap skips the remaining four.
     assert_eq!(renderer.media_usage().sessions, 8);
 }
+
+#[test]
+fn a_frame_opens_its_new_video_sources_together() {
+    let _serial = serial_preparation();
+    let fixtures =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video");
+    let (w, h) = (256, 144);
+    let clips = [
+        "h264-709-limited.mp4",
+        "hevc10-709-limited.mp4",
+        "vp9-601-limited.webm",
+    ];
+    let layers = clips
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            doc::layer(
+                &format!("v{i}"),
+                "video",
+                json!({"asset":format!("clip{i}"),"fit":"stretch","w":w,"h":h,"trim":0,"speed":1}),
+                f64::from(w) / 2.0,
+                f64::from(h) / 2.0,
+                2.0,
+            )
+        })
+        .collect();
+    let mut project = doc::project(w, h, 2.0, doc::no_fill(), layers);
+    let mut assets = MapResolver::default();
+    for (i, clip) in clips.iter().enumerate() {
+        let ext = clip.rsplit('.').next().unwrap();
+        doc::asset(&mut project, &format!("clip{i}"), "video", ext, w, h, 2.0);
+        assets.paths.insert(format!("clip{i}"), fixtures.join(clip));
+    }
+    let document = doc::load(&project);
+    let request = RenderRequest {
+        export: false,
+        video_end: VideoEnd::Final,
+        ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
+    };
+    let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    let frame = renderer
+        .render(&document, "Ptest-root", time, &request, &assets)
+        .unwrap();
+    renderer.wait_idle();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    // Every layer found its frame decoded: the sources were opened and
+    // their frames decoded together before the layers drew.
+    let stats = renderer.scrub_stats();
+    assert_eq!((stats.cached, stats.decoded), (3, 0), "{stats:?}");
+}

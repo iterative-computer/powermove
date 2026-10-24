@@ -116,7 +116,15 @@ fn main() {
     );
     let ext = clip.extension().unwrap().to_str().unwrap();
     for i in 0..layers {
-        doc::asset(&mut project, &format!("clip{i}"), "video", ext, 1920, 1080, dur);
+        doc::asset(
+            &mut project,
+            &format!("clip{i}"),
+            "video",
+            ext,
+            1920,
+            1080,
+            dur,
+        );
     }
     let document = doc::load(&project);
     let bench_of = |paths: &[&std::path::Path]| {
@@ -146,7 +154,11 @@ fn main() {
         std::os::unix::fs::symlink(std::fs::canonicalize(&clip).unwrap(), &alias.0).unwrap();
         alias
     };
-    let links = |name: &str| (0..layers).map(|i| alias(&format!("{name}{i}"))).collect::<Vec<_>>();
+    let links = |name: &str| {
+        (0..layers)
+            .map(|i| alias(&format!("{name}{i}")))
+            .collect::<Vec<_>>()
+    };
     let (layer_links, warm, prepared) = (links("layer"), links("warm"), links("prepared"));
     fn paths(links: &[Alias]) -> Vec<&std::path::Path> {
         links.iter().map(|a| a.0.as_path()).collect()

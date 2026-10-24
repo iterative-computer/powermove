@@ -98,7 +98,7 @@ impl BackgroundPrepare {
                     };
                     let route = (job.key.path.clone(), job.stamp);
                     let existing = sources.get(&route).and_then(Weak::upgrade);
-                    let completed = prepare_one(job, existing, &service, &stop);
+                    let completed = prepare_one(job, existing, &service, &stop, true);
                     if let Some(source) = &completed.source {
                         if sources.len() >= MAX_PENDING && !sources.contains_key(&route) {
                             sources.clear();
@@ -137,11 +137,15 @@ impl Drop for BackgroundPrepare {
     }
 }
 
+/// Opens a job's source and decodes its selected frame into the service's
+/// cache. Background preparation is `bounded` by the prepared-session cap;
+/// a frame about to draw the source is not.
 fn prepare_one(
     job: Job,
     shared: Option<Arc<MediaSource>>,
     service: &DecodeService,
     cancel: &AtomicBool,
+    bounded: bool,
 ) -> Completed {
     let mut source = job.existing.or(shared);
     let prepared = (|| {
@@ -181,7 +185,7 @@ fn prepare_one(
         if cancel.load(Ordering::Relaxed) {
             return Ok(false);
         }
-        if service.usage().sessions >= MAX_PREPARED_SESSIONS {
+        if bounded && service.usage().sessions >= MAX_PREPARED_SESSIONS {
             return Ok(false);
         }
         let purpose = if job.key.export {
@@ -213,7 +217,73 @@ fn prepare_one(
     }
 }
 
+/// A video draw of a planned frame: what the selected frame depends on.
+pub(crate) struct PlannedVideoDraw {
+    pub layer: String,
+    pub path: PathBuf,
+    pub instance: u64,
+    pub seconds: f64,
+    pub interpret: Option<Interpretation>,
+    pub composition: pm_time::Rate,
+}
+
 impl MediaCache {
+    /// Before a frame draws: opens the frame's video sources that are not
+    /// open yet and decodes their selected frames, concurrently, into the
+    /// shared decoded-frame cache. Drawing then finds each source and frame
+    /// ready instead of opening and decoding them one layer at a time. A
+    /// frame with at most one cold source keeps the usual path.
+    pub(crate) fn open_cold(&mut self, videos: &[PlannedVideoDraw], export: bool) {
+        self.drain_prepared();
+        let mut cold: Vec<(&PlannedVideoDraw, (u64, u128))> = Vec::new();
+        for v in videos {
+            let Some(current) = stamp(&v.path) else {
+                continue;
+            };
+            let open = self
+                .sources
+                .get(&v.path)
+                .is_some_and(|(seen, _)| *seen == current);
+            // One open per file: layers of a file share its decoded frames.
+            if !open && !cold.iter().any(|(c, _)| c.path == v.path) {
+                cold.push((v, current));
+            }
+        }
+        if cold.len() < 2 {
+            return;
+        }
+        let service = self.service.clone();
+        let cancel = AtomicBool::new(false);
+        let completed: Vec<Completed> = std::thread::scope(|scope| {
+            let workers: Vec<_> = cold
+                .iter()
+                .map(|(v, current)| {
+                    let job = Job {
+                        key: Key {
+                            path: v.path.clone(),
+                            instance: v.instance,
+                            export,
+                            stamp: *current,
+                            settings: String::new(),
+                        },
+                        stamp: *current,
+                        existing: None,
+                        seconds: v.seconds,
+                        interpret: v.interpret.clone(),
+                        composition: v.composition,
+                    };
+                    let (service, cancel) = (&service, &cancel);
+                    scope.spawn(move || prepare_one(job, None, service, cancel, false))
+                })
+                .collect();
+            workers.into_iter().filter_map(|w| w.join().ok()).collect()
+        });
+        for result in completed {
+            // Failures surface again, named, when the layer draws.
+            let _ = self.adopt_prepared(result);
+        }
+    }
+
     fn adopt_prepared(&mut self, result: Completed) -> Result<bool, MediaFailure> {
         if let Some(background) = &mut self.background {
             background.pending.remove(&result.key);
