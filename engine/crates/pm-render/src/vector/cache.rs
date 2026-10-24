@@ -184,6 +184,9 @@ pub struct VectorCache {
     gpu: Option<Option<GpuCoverage>>,
     paint: Option<Paint>,
     premultiply: Premultiply,
+    /// This frame's SVG batch: its signature and its images' keys
+    /// ([`Self::prepare_svgs`]).
+    svg_batch: Option<([u8; 32], Vec<[u8; 32]>)>,
     /// Which backend rendered the last level 2 scene or SVG (tests).
     pub last_backend: Option<&'static str>,
 }
@@ -207,6 +210,7 @@ impl VectorCache {
             gpu: None,
             paint: None,
             premultiply: Premultiply::default(),
+            svg_batch: None,
             last_backend: None,
         }
     }
@@ -257,6 +261,7 @@ impl VectorCache {
     /// bounded).
     pub fn begin_frame(&mut self) {
         self.frame += 1;
+        self.svg_batch = None;
         self.evict(self.max_bytes, self.max_entries, false);
     }
 
@@ -303,7 +308,12 @@ impl VectorCache {
         precision: Precision,
     ) -> Result<wgpu::TextureView, String> {
         self.tick += 1;
-        let key = (source.key(), precision as u8);
+        let mut key = (source.key(), precision as u8);
+        if let Some((sig, members)) = &self.svg_batch
+            && members.contains(&key.0)
+        {
+            key.0 = batch_key(&key.0, sig);
+        }
         if let Some(e) = self.entries.get_mut(&key) {
             e.used = self.tick;
             e.frame = self.frame;
@@ -338,13 +348,7 @@ impl VectorCache {
             VectorSource::Scene { scene, rect } => {
                 self.render_scene(device, queue, scene, *rect, precision)?
             }
-            VectorSource::SvgRaster {
-                path,
-                transform,
-                rect,
-                clip,
-                ..
-            } => {
+            VectorSource::SvgRaster { .. } => {
                 let item = SvgItem::of(source).expect("an SVG source")?;
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("pm svg"),
@@ -390,11 +394,15 @@ impl VectorCache {
         view
     }
 
-    /// Draws ahead, together, the SVG images of `plan` this cache does not
-    /// hold yet: one Vello pass per atlas page for the whole frame instead
-    /// of one per image (each pass has a fixed cost). [`Self::resolve`] then
-    /// finds them. A single miss, or one Vello cannot draw, is left to
-    /// `resolve`.
+    /// Draws a frame's SVG images ahead, together: one Vello pass per atlas
+    /// page for the whole frame instead of one per image (each pass has a
+    /// fixed cost). Vello's f32 arithmetic depends on where an image sits
+    /// in its page (a gradient's position can round to the neighbouring
+    /// ramp entry), so a frame's images are always drawn as the same
+    /// batch, the frame's list of them, and cached under it: the frame is
+    /// drawn the same in a viewer that holds other images as in a cold
+    /// export. [`Self::resolve`] finds them. A frame with one SVG image, or
+    /// images Vello cannot draw, leaves them to `resolve`.
     pub fn prepare_svgs(
         &mut self,
         device: &wgpu::Device,
@@ -403,23 +411,41 @@ impl VectorCache {
         plan: &crate::plan::CompPlan,
         precision: Precision,
     ) {
+        self.svg_batch = None;
         let mut sources = Vec::new();
         super::svg::svg_sources(plan, &mut sources);
-        let mut keys = Vec::new();
+        let mut members: Vec<[u8; 32]> = Vec::new();
         let mut items = Vec::new();
         for source in sources {
-            let key = (source.key(), precision as u8);
-            if self.entries.contains_key(&key) || keys.contains(&key) {
+            let key = source.key();
+            if members.contains(&key) {
                 continue;
             }
             if let Some(Ok(item)) = SvgItem::of(source)
                 && item.doc.gpu_paintable()
             {
-                keys.push(key);
+                members.push(key);
                 items.push(item);
             }
         }
         if items.len() < 2 || self.gpu(device).is_none() {
+            return;
+        }
+        let batch = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(b"pm-svg-batch/1");
+            members.iter().for_each(|k| h.update(k));
+            let sig: [u8; 32] = h.finalize().into();
+            (sig, members)
+        };
+        let keys: Vec<([u8; 32], u8)> = batch
+            .1
+            .iter()
+            .map(|k| (batch_key(k, &batch.0), precision as u8))
+            .collect();
+        self.svg_batch = Some(batch);
+        if keys.iter().all(|k| self.entries.contains_key(k)) {
             return;
         }
         // A failure leaves every image to `resolve`, which reports it.
@@ -860,6 +886,15 @@ impl Premultiply {
         drop(pass);
         out
     }
+}
+
+/// The cache key of an image drawn in the batch `sig`.
+fn batch_key(key: &[u8; 32], sig: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(key);
+    h.update(sig);
+    h.finalize().into()
 }
 
 /// One SVG image to draw: its document, user units to target pixels, its

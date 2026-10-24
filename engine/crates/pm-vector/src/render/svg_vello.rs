@@ -96,6 +96,44 @@ fn device(path: &BezPath, t: Affine) -> BezPath {
     out
 }
 
+/// `flat` (line segments) filled with `rule`, as disjoint contours: area
+/// coverage sums the winding over a pixel before the fill rule, so where
+/// overlapping pieces (a stroke's inner join, crossing strokes, a
+/// self-intersecting fill) meet an edge inside one pixel it covers too
+/// much. The result fills the same with either rule.
+fn resolve(flat: &BezPath, rule: Fill) -> BezPath {
+    use i_overlay::core::fill_rule::FillRule as Rule;
+    use i_overlay::float::simplify::SimplifyShape;
+    let mut contours: Vec<Vec<[f64; 2]>> = Vec::new();
+    for el in flat.elements() {
+        match *el {
+            kurbo::PathEl::MoveTo(p) => contours.push(vec![[p.x, p.y]]),
+            kurbo::PathEl::LineTo(p) => {
+                if let Some(c) = contours.last_mut() {
+                    c.push([p.x, p.y]);
+                }
+            }
+            _ => {}
+        }
+    }
+    contours.retain(|c| c.len() > 2 && c.iter().flatten().all(|v| v.is_finite()));
+    let shapes = contours.simplify_shape(match rule {
+        Fill::NonZero => Rule::NonZero,
+        Fill::EvenOdd => Rule::EvenOdd,
+    });
+    let mut out = BezPath::new();
+    for contour in shapes.iter().flatten() {
+        let mut points = contour.iter();
+        let Some(first) = points.next() else { continue };
+        out.move_to((first[0], first[1]));
+        for p in points {
+            out.line_to((p[0], p[1]));
+        }
+        out.close_path();
+    }
+    out
+}
+
 struct Encoder<'a> {
     scene: &'a mut Scene,
     /// Painting the content of a clip path or an alpha mask: every paint is
@@ -286,11 +324,11 @@ impl Encoder<'_> {
         let shape_clip = g.clip_path().and_then(|c| simple_clip(c).map(|(p, rule)| (c, p, rule)));
         match &shape_clip {
             Some((c, p, rule)) => self.scene.push_layer(
-                *rule,
+                Fill::NonZero,
                 blend,
                 g.opacity().get(),
                 Affine::IDENTITY,
-                &device(&bez(p.data()), t * affine(c.transform())),
+                &resolve(&device(&bez(p.data()), t * affine(c.transform())), *rule),
             ),
             None => self.scene.push_layer(
                 Fill::NonZero,
@@ -387,11 +425,11 @@ impl Encoder<'_> {
             usvg::FillRule::EvenOdd => Fill::EvenOdd,
         };
         self.scene.fill(
-            rule,
+            Fill::NonZero,
             Affine::IDENTITY,
             &brush,
             brush_transform,
-            &device(&bez(p.data()), t),
+            &resolve(&device(&bez(p.data()), t), rule),
         );
     }
 
@@ -432,7 +470,7 @@ impl Encoder<'_> {
             Affine::IDENTITY,
             &brush,
             brush_transform,
-            &device(&outline, t),
+            &resolve(&device(&outline, t), Fill::NonZero),
         );
     }
 
