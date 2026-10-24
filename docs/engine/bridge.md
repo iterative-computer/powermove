@@ -60,7 +60,8 @@ source. The open options are in
    anonymous port where every message must carry the accepted audit token.
    A restarted engine gets a new name.
 2. **Pool.** On the first viewer state the engine sizes a pool at viewer
-   device pixels: ring (2) + render-ahead (4) + 2 = 8 surfaces, `rgbaf16`
+   device pixels: ring (2) + render-ahead (4) + 2 = 8 surfaces (render-ahead
+   is longer in frames at high frame rates: [Pacing at 120 Hz](#pacing-at-120-hz)), `rgbaf16`
    when the viewer's display is EDR and the lease allows it, `bgra` with the
    blue-noise dither otherwise (amendment 4). Each IOSurface goes to main
    once over Mach; main imports it once with `importSharedTexture` and sends
@@ -1767,16 +1768,52 @@ P5) now belong to the perf3 lane.
   17 ms from run to run on 2026-10-16); a quiet-machine round would
   tighten the spread.
 
-## Perf3 worker commit phase
+## Pacing at 120 Hz
 
-Timed worker commits now target a fixed point between BeginFrames rather than
-racing the page's commit for the same refresh (`presenter.ts`,
-`commitPhaseRefreshes`; `present-worker.ts`, 0.75). Immediate gesture frames
-retain draw-on-arrival. The refresh fit is sampled before deferral, including
-when the display rate is initially unknown; pending timers are cancelled on
-retarget/dispose. The prediction is two refreshes plus the existing panel
-offset. See `perf.md`, "Worker commit deadlines (P4)": targeted unit tests pass,
-but final paired cadence and A/V feedback on an awake display remain required.
+Playback at the display's rate presents every frame the engine renders. Three
+rules keep it so; the 120 Hz rig's `playing` row checks them
+(`docs/engine/perfbench.md`, with `PM_PERFBENCH_RIG_TRACE` for the per-frame
+trace).
+
+1. **The worker draws timed frames in its animation frame.** A worker
+   canvas sends what an animation frame drew to viz as the callback returns.
+   A frame drawn later in the refresh waits for the next BeginFrame, so a
+   commit timer gains nothing, and a timer that fires after that BeginFrame
+   costs a refresh: its frame is dropped as late. The 0.75-refresh commit
+   timer (perf3) did that at 120 Hz under load and was removed. The display
+   prediction is 1.5 refreshes and 3.2 ms (A/V sync above).
+2. **Render-ahead covers twice the delivery time** (`Schedule::lead_frames`):
+   at least `DEFAULT_LEAD` (4) frames and 2 × delivery (3 refreshes, at least
+   12.5 ms). The viewer picks a frame about two refreshes before it shows;
+   the other delivery covers the wait for the render's phase slot, the render
+   and its jitter. Four frames at 120 fps (33 ms) arrived after the worker had
+   decided their refresh. It is 6 frames at 120 fps on a 120 Hz display and
+   unchanged at 60 fps and below. The playing pool stays ring + 4 + 2: a frame
+   leaves it when the viewer has drawn it, about two refreshes before it
+   shows, so six frames ahead hold about five surfaces (`poolWaits` stays 0).
+3. **Frame events follow the refresh that drew the frame**
+   (`PresentedEvents`). The worker's report arrives about a millisecond into
+   the refresh, the moment the page's own animation frame runs: taken in
+   arrival order, one page animation frame had none and the next had two, and
+   the older was never announced. A timed frame is emitted at the first page
+   animation frame of a later refresh than its draw (the page's and the
+   worker's BeginFrame times agree within 0.1 ms). It is still at most one
+   emission per page animation frame, inside it (decision EXT-TIMING-1 keeps
+   that timing).
+
+Open, outside the bridge:
+
+- **Start.** The line starts `PREROLL_US` (50 ms) after Play; today's viewer
+  advances at the next animation frame, so a fixed window from Play shows
+  about five fewer engine frames.
+- **viz's latch.** viz draws a refresh as soon as every client has submitted;
+  with the page and the worker canvas that is about 1.4 ms after BeginFrame.
+  Under load BeginFrames come up to 2 ms early (on both paths) and a draw
+  that early is presented with the previous one, which is never seen
+  (`Graphics.Pipeline.DrawAndSwap` feedback). Today's viewer escapes it on
+  heavy projects only because its page frame takes about 3 ms; on a light
+  project it shows the same collisions. Measured in hidden test windows; an
+  awake visible display may differ. C′ presents outside viz.
 
 #### perf3: prepare the viewer drawing before mount
 

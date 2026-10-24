@@ -257,8 +257,9 @@ then the next page animation frame**. This is a compositor opportunity, not a
 measurement of physical display scanout. The old `preview:presented` endpoints
 were unequal: today emits synchronously at the end of `GL.render`, after issuing
 WebGL commands but before GPU completion; the engine reports its presentation
-draw, then `PresentedEvents` merges those reports to one bus emission per rAF
-(newest wins). The direct presentation callback can precede the page's WebGPU
+draw, then `PresentedEvents` emits at most one bus event per rAF (a timed
+frame at the first page rAF of a later refresh than the one that drew it).
+The direct presentation callback can precede the page's WebGPU
 completion too. The rig now uses:
 
 - today: `gl.fenceSync` after the final `GL.render` commands, `gl.flush`,
@@ -319,15 +320,27 @@ edit, 13.0 ms before the reuse fix) were wrong and are withdrawn.
 
 Rows that are not frame steps:
 
-- **playing**: `PM.play()` for 3 s on the 500-layer project at 120 fps: frames
-  presented against the 360 a 120 Hz display would show, the gaps between
-  presentations, the page's animation-frame rate (the hidden test window's
+- **playing**: `PM.play()` for 3 s on the 500-layer project at 120 fps
+  (`PM_PERFBENCH_RIG_PLAY_FPS` for another rate): frames presented against the
+  360 a 120 Hz display would show, distinct frame times on the bus, frames
+  missing between the first and last shown (`droppedFrames`), the gaps between
+  presentations (longest, and their standard deviation as judder), the time
+  from `PM.play()` to the first later frame (`firstAdvanceMs`: the engine's
+  50 ms preroll), the page's animation-frame rate (the hidden test window's
   display link), and per presented frame the page's main thread and the
   engine's compose CPU, GPU-only and span. It retains bus-event counts/gaps and
-  counts engine direct callbacks, GPU draw completions, bus emissions, actual
-  replacements of pending emissions, and pending state at the measurement's
-  boundaries; continuous playback counts completed draws reaching a following
-  rAF, not distinct physical scanouts;
+  counts engine direct callbacks, GPU draw completions, bus emissions,
+  emissions passed over for a newer one, and pending reports at the
+  measurement's boundaries. Presented counts completed draws reaching a
+  following rAF, not physical scanouts. With `PM_PERFBENCH_RIG_TRACE=<file>`
+  the row also writes a per-frame trace there (outside the repository): the
+  page's animation frames, reports and emissions; the viewer presenter's
+  arrivals, draws and drops; the engine's per-frame record (render start, GPU
+  done, sent, the time it shows from; `POWERMOVE_BRIDGE_TRACE`); and viz's
+  presentation feedback for each submitted canvas frame
+  (`e2e/helpers/compositor-timing.ts`: which display frame showed it, and
+  submissions another one superseded). `PM_PERFBENCH_RIG_ORDER=engine` runs
+  the engine first, for paired runs that alternate;
 - **open**: the 2,000-layer project saved to a `.pmv` by today's app, then
   opened three times on each path through `PM.openProject`, each in a fresh app
   on a small project: time to its first GPU-complete frame plus next rAF, the
