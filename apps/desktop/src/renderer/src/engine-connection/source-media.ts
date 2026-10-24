@@ -50,7 +50,7 @@ export function sourcePosterSize(asset: Record<string, any>, edge = 320): { widt
 }
 
 export class EngineSourceMedia {
-  readonly stats = { frames: 0, presented: 0, hits: 0, filmstrips: 0, renditions: 0, cancelled: 0, frameMs: 0 };
+  readonly stats = { frames: 0, presented: 0, repaired: 0, hits: 0, filmstrips: 0, renditions: 0, cancelled: 0, frameMs: 0 };
   private readonly cache = new Map<string, EngineSnapshot>();
   private bytes = 0;
   private readonly strips = new Map<string, Uint8Array[]>();
@@ -379,7 +379,7 @@ export class SourceMonitor extends EventTarget {
     // Still images used to paint as an <img> below the transport. A canvas
     // changes Chromium's shadow compositing even when its RGBA bytes match.
     // Keep that presentation while every pixel still comes from the engine.
-    this.videoPresenter = meta?.kind === 'video' ? new SourceVideoPresenter(host.frameBridge) : null;
+    this.videoPresenter = meta?.kind === 'video' ? new SourceVideoPresenter(host.frameBridge, () => { source.stats.repaired++; }) : null;
     this.surface = this.videoPresenter?.surface ?? (meta?.kind === 'image' ? document.createElement('img') : this.canvas);
     if (this.surface instanceof HTMLImageElement) this.surface.alt = '';
     this.canvas.width = this.canvas.height = 1;

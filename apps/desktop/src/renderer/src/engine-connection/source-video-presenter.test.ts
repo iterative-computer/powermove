@@ -25,8 +25,9 @@ function fixture() {
   });
   vi.stubGlobal('VideoFrame', class {
     close = vi.fn();
-    constructor(readonly source: VideoFrame, readonly options: { timestamp: number }) {
-      created.push({ source, timestamp: options.timestamp, close: this.close });
+    constructor(readonly source: VideoFrame, readonly options?: { timestamp: number }) {
+      // The presenter's held copy of its latest frame takes no options.
+      if (options) created.push({ source, timestamp: options.timestamp, close: this.close });
     }
   });
   return { bridge, sourceFrame, discardSource, created, tracks, write, abort, play, pause };
@@ -124,6 +125,31 @@ describe('SourceVideoPresenter', () => {
     presented(0, { presentedFrames: ++count } as VideoFrameCallbackMetadata);
     await painting;
     expect(f.discardSource).toHaveBeenCalledWith('surface');
+    presenter.dispose();
+  });
+
+  it('writes the latest frame again when the element keeps presenting an older one', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    let presented!: VideoFrameRequestCallback;
+    Object.defineProperty(HTMLVideoElement.prototype, 'requestVideoFrameCallback', { configurable: true,
+      value: (callback: VideoFrameRequestCallback) => { presented = callback; return 1; } });
+    onTestFinished(() => { delete (HTMLVideoElement.prototype as Partial<HTMLVideoElement>).requestVideoFrameCallback; });
+    const repaired = vi.fn();
+    const presenter = new SourceVideoPresenter(undefined, repaired);
+    await presenter.paint({ width: 4, height: 2, data: new Uint8ClampedArray(12),
+      video: { format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } });
+    expect(f.write).toHaveBeenCalledOnce();
+    const written = f.created.at(-1)!.timestamp;
+    presented(0, { presentedFrames: 1, mediaTime: (written - 40_000) / 1e6 } as VideoFrameCallbackMetadata);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(repaired).toHaveBeenCalledOnce();
+    expect(f.write).toHaveBeenCalledTimes(2);
+    const again = f.created.at(-1)!.timestamp;
+    expect(again).toBeGreaterThan(written);
+    presented(0, { presentedFrames: 2, mediaTime: again / 1e6 } as VideoFrameCallbackMetadata);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(repaired).toHaveBeenCalledOnce();
     presenter.dispose();
   });
 

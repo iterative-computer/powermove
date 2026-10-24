@@ -55,7 +55,7 @@ const REFERENCE: Record<string, { tags: VideoTags; exact: boolean }> = {
 };
 type Yuv420 = { width: number; height: number; bits: 8 | 10; data: Buffer };
 type Closeness = { pixels: number; max: number; mean: number; over1: number; worst: unknown };
-type Capture = { file: string; geometry: unknown; covered: number[][]; monitorTime?: number | null; pngColor: ReturnType<typeof pngColorMetadata>; effectiveVideoFrameColorSpace?: unknown; legacyVideoFrameGeometry?: unknown; legacyCodedPlaneEdges?: unknown };
+type Capture = { file: string; geometry: unknown; covered: number[][]; monitorTime?: number | null; repaired?: number | null; pngColor: ReturnType<typeof pngColorMetadata>; effectiveVideoFrameColorSpace?: unknown; legacyVideoFrameGeometry?: unknown; legacyCodedPlaneEdges?: unknown };
 
 function syntheticPpm(width = WIDTH, height = HEIGHT): Buffer {
   // Every neutral code value across the top, then eight saturated and mixed
@@ -397,8 +397,11 @@ async function capture(session: LaunchedApp, file: string, enabled: boolean): Pr
     return rects;
   });
   await session.page.locator('#source-preview').screenshot({ path: file, animations: 'disabled', scale: 'device' });
-  const monitorTime = enabled ? await session.page.evaluate(() => (window as any).PM.EngineSourceMedia.monitorValue?.currentTime ?? null) : null;
-  return { file, geometry, covered, monitorTime, pngColor: pngColorMetadata(await readFile(file)),
+  const monitor = enabled ? await session.page.evaluate(() => {
+    const source = (window as any).PM.EngineSourceMedia;
+    return { time: source.monitorValue?.currentTime ?? null, repaired: source.stats.repaired };
+  }) : null;
+  return { file, geometry, covered, monitorTime: monitor?.time ?? null, repaired: monitor?.repaired ?? null, pngColor: pngColorMetadata(await readFile(file)),
     effectiveVideoFrameColorSpace: legacyVideoFrame?.colorSpace,
     legacyVideoFrameGeometry: legacyVideoFrame?.geometry,
     legacyCodedPlaneEdges: legacyVideoFrame?.codedPlaneEdges };

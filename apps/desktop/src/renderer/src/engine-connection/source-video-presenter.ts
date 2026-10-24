@@ -9,6 +9,9 @@ const STARTUP_REPLAY_MS = 16;
 const STARTUP_TIMEOUT_MS = 5_000;
 /** Bounds the wait for a shared-texture frame to reach the video element. */
 const PRESENT_TIMEOUT_MS = 250;
+/** A written frame the element has not presented by then is written again. */
+const CONFIRM_MS = 50;
+const CONFIRM_ATTEMPTS = 3;
 const releaseWriter = (writer: WritableStreamDefaultWriter<VideoFrame>): void => {
   try { writer.releaseLock(); } catch { /* A pending abort still owns the lock. */ }
 };
@@ -32,9 +35,13 @@ export class SourceVideoPresenter {
   private disposed = false;
   private readonly disposal = new AbortController();
   private presented = 0;
+  private presentedTime = -1;
   private readonly presentation = new Set<() => void>();
+  /** The last painted frame, kept until the element is seen presenting it. */
+  private latest: { frame: VideoFrame; timestamp: number; generation: number } | null = null;
+  private generation = 0;
 
-  constructor(private readonly bridge: SourceBridge | undefined) {
+  constructor(private readonly bridge: SourceBridge | undefined, private readonly repaired: () => void = () => {}) {
     this.surface.muted = true;
     this.surface.playsInline = true;
     this.surface.autoplay = true;
@@ -43,6 +50,7 @@ export class SourceVideoPresenter {
       const presented: VideoFrameRequestCallback = (_now, metadata) => {
         if (this.disposed) return;
         this.presented = metadata.presentedFrames;
+        this.presentedTime = metadata.mediaTime;
         for (const wake of this.presentation) wake();
         this.surface.requestVideoFrameCallback(presented);
       };
@@ -64,6 +72,33 @@ export class SourceVideoPresenter {
       this.presentation.delete(wake);
       if (timer !== null) clearTimeout(timer);
     });
+  }
+
+  /** A generated track's sink can keep showing the previous frame when two
+   * frames arrive within one vsync (resize then seek). Confirm through the
+   * presented media time that the latest frame reached the element, and
+   * write it again, a bounded number of times, if it did not. */
+  private async confirm(generation: number): Promise<void> {
+    if (typeof this.surface.requestVideoFrameCallback !== 'function') return;
+    for (let attempt = 0; attempt < CONFIRM_ATTEMPTS; attempt++) {
+      const shown = () => this.latest !== null && Math.abs(this.presentedTime * 1e6 - this.latest.timestamp) < 1;
+      if (!shown()) {
+        let wake!: () => void;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        await new Promise<void>(resolve => {
+          wake = () => { if (shown()) resolve(); };
+          timer = setTimeout(resolve, CONFIRM_MS);
+          this.presentation.add(wake);
+        }).finally(() => { this.presentation.delete(wake); if (timer !== null) clearTimeout(timer); });
+      }
+      const latest = this.latest;
+      if (this.disposed || !latest || latest.generation !== generation || !this.writer || shown()) return;
+      const timestamp = this.lastTimestamp = Math.max(this.lastTimestamp + 1, Math.round(performance.now() * 1000));
+      const again = new VideoFrame(latest.frame, { timestamp });
+      latest.timestamp = timestamp;
+      this.repaired();
+      void this.writer.write(again).catch(() => {}).finally(() => again.close());
+    }
   }
 
   private ensureWriter(): WritableStreamDefaultWriter<VideoFrame> {
@@ -162,6 +197,10 @@ export class SourceVideoPresenter {
         // accepted; releasing the import first could leave the previous frame
         // on screen. Buffer-backed frames own their planes.
         if ('token' in descriptor) await this.presentedAfter(before, cancelled);
+        const generation = ++this.generation;
+        this.latest?.frame.close();
+        this.latest = { frame: new VideoFrame(sourceFrame), timestamp: this.lastTimestamp, generation };
+        void this.confirm(generation);
       }
       catch (error) {
         // A rejected play or a detached sink can leave a write waiting for
@@ -191,6 +230,7 @@ export class SourceVideoPresenter {
     this.disposed = true;
     this.disposal.abort();
     this.presentation.clear();
+    this.latest?.frame.close(); this.latest = null;
     const writer = this.writer;
     this.writer = null;
     if (writer) void writer.abort(new Error('Source video presenter disposed')).catch(() => {}).finally(() => releaseWriter(writer));
