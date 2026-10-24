@@ -30,7 +30,19 @@ import type { Request, Response, SnapshotOutcome, SnapshotRequest, SourceVideoFr
 import type { Log } from './connection';
 import { RemoteError } from './protocol';
 import type { WindowSnapshotSessions } from './window-sessions';
-import { sourceVideoByteLength } from './source-surfaces';
+
+/** Bytes of a tightly packed source video frame in its WebCodecs layout
+ * (pm-protocol's `SourceVideoFrame::byte_len`); throws on unknown tags. */
+export function sourceVideoByteLength(width: number, height: number, video: SourceVideoFrame): number {
+  if (!['nv12', 'i420a', 'i422', 'i420p10'].includes(video?.format) || !['limited', 'full'].includes(video.range)
+      || [video.primaries, video.transfer, video.matrix].some(tag => typeof tag !== 'string' || !/^[a-z0-9.-]{1,16}$/.test(tag)))
+    throw new Error('Invalid source video format or colour tags');
+  if (video.visibleWidth !== undefined && (!Number.isSafeInteger(video.visibleWidth) || video.visibleWidth < 1 || video.visibleWidth > width))
+    throw new Error('Invalid source visible width');
+  const chromaHeight = video.format === 'i422' ? height : Math.ceil(height / 2);
+  const bytes = video.format === 'i420p10' ? 2 : 1;
+  return (width * height + 2 * Math.ceil(width / 2) * chromaHeight) * bytes + (video.format === 'i420a' ? width * height : 0);
+}
 
 /** What the service needs of the engine (NativeEngine). */
 export interface SnapshotEngine {
@@ -191,8 +203,6 @@ export type SnapshotServiceOptions = {
   windowSessions?: Pick<WindowSnapshotSessions, 'prepare'> | null;
   /** Absent when the pm-bridge addon did not load (then shared-memory results fail). */
   takePixels: TakePixels | null;
-  /** Native source planes are imported and transferred without an RGBA readback. */
-  sourceSurface?: (windowId: number, width: number, height: number, video: SourceVideoFrame, data: Uint8Array) => Promise<{ token: string; width: number; height: number }>;
   log: Log;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -384,14 +394,6 @@ export class SnapshotService {
       this.stats.failed++;
       return failed('internal', error instanceof Error ? error.message : String(error));
     }
-    let videoSurface: { token: string; width: number; height: number } | undefined;
-    if (video && !['nv12', 'i420a'].includes(video.format)) {
-      if (!this.options.sourceSurface) return failed('unavailable', 'Native source video presentation is unavailable.');
-      if (signal.aborted) return failed('cancelled', 'The source request was cancelled.');
-      try { videoSurface = await this.options.sourceSurface(windowId, outcome.width, outcome.height, video, data); }
-      catch (error) { return failed('internal', error instanceof Error ? error.message : String(error)); }
-      data = new Uint8Array(0);
-    }
     this.stats.served++;
     return {
       status: 'rendered',
@@ -401,8 +403,7 @@ export class SnapshotService {
       height: outcome.height,
       pixels: outcome.pixels,
       data,
-      ...(videoSurface ? { videoSurface } : {}),
-      ...(video && !videoSurface ? { videoPlanes: video } : {}),
+      ...(video ? { videoPlanes: video } : {}),
       origin: [outcome.origin[0], outcome.origin[1]],
       layerBox: outcome.layerBox ? [outcome.layerBox[0], outcome.layerBox[1]] : null,
       raster: outcome.raster ?? null,

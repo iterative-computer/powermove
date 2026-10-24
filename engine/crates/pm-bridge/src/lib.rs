@@ -44,8 +44,6 @@ mod node;
 
 #[cfg(all(target_os = "macos", feature = "node"))]
 mod fonts;
-#[cfg(all(target_os = "macos", feature = "node"))]
-mod source_surface;
 
 /// Microseconds on `CLOCK_UPTIME_RAW` (`mach_absolute_time`), the host
 /// clock every engine and Chromium timestamp on macOS uses (contract 13).

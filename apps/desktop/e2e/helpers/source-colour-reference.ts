@@ -240,11 +240,12 @@ export function displayCodeToXyzD50(profile: MatrixTrcProfile, codes: ColourTrip
 }
 
 /** Unrounded display code values (0–255, clipped only here) for one Y'CbCr sample. */
-export function referenceDisplayCodes(profile: MatrixTrcProfile, yuv: ColourTriple, tags: VideoTags): ColourTriple {
-  if (yuv.some(code => !Number.isInteger(code) || code < 0 || code > 255)) throw new Error('Invalid YUV code');
+export function referenceDisplayCodes(profile: MatrixTrcProfile, yuv: ColourTriple, tags: VideoTags, bits: 8 | 10 = 8): ColourTriple {
+  const top = 2 ** bits - 1, scale = 2 ** (bits - 8);
+  if (yuv.some(code => !Number.isInteger(code) || code < 0 || code > top)) throw new Error('Invalid YUV code');
   const [y, cb, cr] = tags.fullRange
-    ? [yuv[0] / 255, (yuv[1] - 128) / 255, (yuv[2] - 128) / 255]
-    : [(yuv[0] - 16) / 219, (yuv[1] - 128) / 224, (yuv[2] - 128) / 224];
+    ? [yuv[0] / top, (yuv[1] - 128 * scale) / top, (yuv[2] - 128 * scale) / top]
+    : [(yuv[0] - 16 * scale) / (219 * scale), (yuv[1] - 128 * scale) / (224 * scale), (yuv[2] - 128 * scale) / (224 * scale)];
   const { kr, kb } = MATRIX[tags.matrix];
   const kg = 1 - kr - kb;
   const signal: ColourTriple = [

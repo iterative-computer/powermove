@@ -46,9 +46,11 @@ const REFERENCE: Record<string, { tags: VideoTags; platform: boolean }> = {
   'bars-gradient-709-full.mp4': { tags: FULL709, platform: false },
   'bars-gradient-709-full-hd.mp4': { tags: FULL709, platform: true },
   'bars-gradient-untagged-hd.mp4': { tags: HD709, platform: true },
-  'bars-gradient-untagged-portrait.mp4': { tags: HD709, platform: true }
+  'bars-gradient-untagged-portrait.mp4': { tags: HD709, platform: true },
+  // 10-bit 4:2:0 HEVC: VideoToolbox P010, presented as a WebCodecs I420P10 frame.
+  'bars-gradient-709-main10-hd.mp4': { tags: HD709, platform: true }
 };
-type Yuv420 = { width: number; height: number; data: Buffer };
+type Yuv420 = { width: number; height: number; bits: 8 | 10; data: Buffer };
 type Closeness = { pixels: number; max: number; mean: number; over1: number; worst: unknown };
 type Capture = { file: string; geometry: unknown; covered: number[][]; pngColor: ReturnType<typeof pngColorMetadata>; effectiveVideoFrameColorSpace?: unknown; legacyVideoFrameGeometry?: unknown; legacyCodedPlaneEdges?: unknown };
 
@@ -66,13 +68,14 @@ function syntheticPpm(width = WIDTH, height = HEIGHT): Buffer {
   return Buffer.concat([Buffer.from(`P6\n${width} ${height}\n255\n`), pixels]);
 }
 
-type H264Variant = '709-limited' | '709-full' | 'untagged-sd' | 'untagged-hd' | 'untagged-portrait' | 'matrix-only-709';
+type H264Variant = '709-limited' | '709-full' | 'untagged-sd' | 'untagged-hd' | 'untagged-portrait' | 'matrix-only-709' | '709-main10';
 
 async function makeSyntheticFixture(scratch: string, name: string, variant: H264Variant, width = WIDTH, height = HEIGHT): Promise<string> {
   const file = path.join(scratch, `${name}.mp4`);
   const ppm = path.join(scratch, `bars-gradient-${width}x${height}.ppm`);
   await writeFile(ppm, syntheticPpm(width, height));
-  const tagged = variant === '709-limited' || variant === '709-full';
+  const tagged = variant === '709-limited' || variant === '709-full' || variant === '709-main10';
+  const main10 = variant === '709-main10';
   const full = variant === '709-full';
   const matrix = variant === 'untagged-sd' ? 'bt601' : 'bt709';
   const range = full ? 'full' : 'limited';
@@ -83,8 +86,9 @@ async function makeSyntheticFixture(scratch: string, name: string, variant: H264
       : `setparams=range=${range}:color_primaries=unknown:color_trc=unknown:colorspace=unknown`;
   await run(sourceFfmpeg(), ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     '-loop', '1', '-framerate', '2', '-i', ppm, '-frames:v', '3',
-    '-vf', `scale=${width}:${height}:out_color_matrix=${matrix}:out_range=${full ? 'pc' : 'tv'},format=yuv420p,${params}`,
-    '-c:v', 'h264_videotoolbox', '-allow_sw', '1', '-b:v', '5M', '-g', '1',
+    '-vf', `scale=${width}:${height}:out_color_matrix=${matrix}:out_range=${full ? 'pc' : 'tv'},format=${main10 ? 'p010le' : 'yuv420p'},${params}`,
+    ...(main10 ? ['-c:v', 'hevc_videotoolbox', '-profile:v', 'main10', '-tag:v', 'hvc1'] : ['-c:v', 'h264_videotoolbox']),
+    '-allow_sw', '1', '-b:v', '5M', '-g', '1',
     ...(tagged ? ['-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', full ? 'pc' : 'tv'] : []),
     ...(variant === 'matrix-only-709' ? ['-colorspace', 'bt709', '-color_range', 'tv'] : []),
     file], { timeout: 60_000 });
@@ -160,13 +164,15 @@ function pngColorMetadata(png: Buffer) {
   return { width: png.readUInt32BE(16), height: png.readUInt32BE(20), iccSha256, colorChunks: chunks };
 }
 
-async function decodeYuv420(file: string, time: number, width: number, height: number): Promise<Yuv420> {
-  // Native pix_fmt (yuv420p or yuvj420p): no range or matrix conversion.
+async function decodeYuv420(file: string, time: number, width: number, height: number, bits: 8 | 10): Promise<Yuv420> {
+  // Planar 4:2:0 at the stream's depth and range: no range or matrix conversion.
   const { stdout } = await run(sourceFfmpeg(), ['-hide_banner', '-loglevel', 'error', '-nostdin', '-ss', String(time), '-i', file,
-    '-frames:v', '1', '-f', 'rawvideo', 'pipe:1'], { timeout: 30_000, encoding: 'buffer', maxBuffer: width * height * 2 });
+    '-frames:v', '1', ...(bits === 10 ? ['-pix_fmt', 'yuv420p10le'] : []), '-f', 'rawvideo', 'pipe:1'],
+  { timeout: 30_000, encoding: 'buffer', maxBuffer: width * height * 4 });
   const data = Buffer.from(stdout);
-  if (data.length !== width * height + 2 * Math.ceil(width / 2) * Math.ceil(height / 2)) throw new Error(`${file} did not decode to 8-bit 4:2:0`);
-  return { width, height, data };
+  if (data.length !== (width * height + 2 * Math.ceil(width / 2) * Math.ceil(height / 2)) * (bits / 8 > 1 ? 2 : 1))
+    throw new Error(`${file} did not decode to ${bits}-bit 4:2:0`);
+  return { width, height, bits, data };
 }
 
 /** Per-channel code distance to the reference where the result does not
@@ -184,7 +190,9 @@ async function referenceCloseness(capture: Capture, covered: number[][], yuv: Yu
       if (right > left) mask.fill(1, left + my * width!, right + my * width!);
   }
   const cw = Math.ceil(yuv.width / 2), ch = Math.ceil(yuv.height / 2), u0 = yuv.width * yuv.height, v0 = u0 + cw * ch;
-  const at = (plane: number, stride: number, x: number, y: number) => yuv.data[plane + y * stride + x]!;
+  const at = yuv.bits === 10
+    ? (plane: number, stride: number, x: number, y: number) => yuv.data.readUInt16LE(2 * (plane + y * stride + x))
+    : (plane: number, stride: number, x: number, y: number) => yuv.data[plane + y * stride + x]!;
   const flat = (plane: number, stride: number, w: number, h: number, x: number, y: number, r: number) => {
     if (x - r < 0 || y - r < 0 || x + r >= w || y + r >= h) return false;
     const value = at(plane, stride, x, y);
@@ -202,9 +210,9 @@ async function referenceCloseness(capture: Capture, covered: number[][], yuv: Yu
     if (!flat(u0, cw, cw, ch, sx >> 1, sy >> 1, 4) || !flat(v0, cw, cw, ch, sx >> 1, sy >> 1, 4)) continue;
     if (!intrinsic && !flat(0, yuv.width, yuv.width, yuv.height, sx, sy, 2)) continue;
     const sample: [number, number, number] = [at(0, yuv.width, sx, sy), at(u0, cw, sx >> 1, sy >> 1), at(v0, cw, sx >> 1, sy >> 1)];
-    const key = (sample[0] << 16) | (sample[1] << 8) | sample[2];
+    const key = (sample[0] * 1024 + sample[1]) * 1024 + sample[2];
     let reference = cache.get(key);
-    if (!reference) cache.set(key, reference = referenceDisplayCodes(profile, sample, tags));
+    if (!reference) cache.set(key, reference = referenceDisplayCodes(profile, sample, tags, yuv.bits));
     const offset = (py * width! + px) * 4;
     let pixelMax = 0;
     for (let channel = 0; channel < 3; channel++) {
@@ -417,6 +425,7 @@ test('source monitor video matches CSS video exactly, or the colour reference wh
       { name: 'bars-gradient-709-full-hd.mp4', file: await makeSyntheticFixture(scratch, 'bars-gradient-709-full-hd', '709-full', 1280, 720), times: [.5] },
       { name: 'bars-gradient-untagged-hd.mp4', file: await makeSyntheticFixture(scratch, 'bars-gradient-untagged-hd', 'untagged-hd', 1280, 720), times: [.5] },
       { name: 'bars-gradient-untagged-portrait.mp4', file: await makeSyntheticFixture(scratch, 'bars-gradient-untagged-portrait', 'untagged-portrait', 480, 720), times: [.5] },
+      { name: 'bars-gradient-709-main10-hd.mp4', file: await makeSyntheticFixture(scratch, 'bars-gradient-709-main10-hd', '709-main10', 1280, 720), times: [.5] },
       { name: 'bars-gradient-matrix-only-709.mp4', file: await makeSyntheticFixture(scratch, 'bars-gradient-matrix-only-709', 'matrix-only-709'), times: [.5] },
       { name: 'bars-gradient-alpha-vp9.webm', file: await makeAlphaVp9Fixture(scratch), times: [.5] }
     ];
@@ -425,7 +434,8 @@ test('source monitor video matches CSS video exactly, or the colour reference wh
     await writeFile(path.join(captures, 'fixture-tags.json'), JSON.stringify(probed, null, 2));
     await writeFile(info.outputPath('fixture-tags.json'), JSON.stringify(probed, null, 2));
     for (const fixture of fixtures.filter(item => item.name.startsWith('bars-gradient-') && item.name.endsWith('.mp4')))
-      expect(probed[fixture.name]?.codec_name, `${fixture.name} codec`).toBe('h264');
+      expect(probed[fixture.name]?.codec_name, `${fixture.name} codec`).toBe(fixture.name.includes('main10') ? 'hevc' : 'h264');
+    expect(probed['bars-gradient-709-main10-hd.mp4']!.pix_fmt).toBe('yuv420p10le');
     const tagged = probed['bars-gradient-709-limited.mp4']!;
     expect(tagged.color_range).toBe('tv');
     expect(tagged.color_space).toBe('bt709');
@@ -565,7 +575,8 @@ test('source monitor video matches CSS video exactly, or the colour reference wh
     const comparisons = [];
     const decoded = new Map<string, Yuv420>();
     for (const fixture of fixtures) for (const time of fixture.times) if (REFERENCE[fixture.name])
-      decoded.set(`${fixture.name}-${time}`, await decodeYuv420(fixture.file, time, Number(probed[fixture.name]!.width), Number(probed[fixture.name]!.height)));
+      decoded.set(`${fixture.name}-${time}`, await decodeYuv420(fixture.file, time, Number(probed[fixture.name]!.width), Number(probed[fixture.name]!.height),
+        probed[fixture.name]!.pix_fmt === 'yuv420p10le' ? 10 : 8));
     for (const key of expectedKeys) {
       const reference = results.legacy![key];
       const actual = results.native![key];
@@ -606,8 +617,12 @@ test('source monitor video matches CSS video exactly, or the colour reference wh
           nativeToComposition: await referenceCloseness(actual, covered, yuv, composition, profile, intrinsic) };
       }
       const referenceGated = reading?.platform === true;
+      // Chromium's compositor keeps ~2 codes of error on 10-bit frames whether
+      // they arrive as a P010 IOSurface or a WebCodecs I420P10 buffer (both
+      // measured); 10-bit sources must still be at least as close as today.
+      const precise = decoded.get(`${fixture.name}-${time}`)?.bits === 10 || colour?.native!.max! <= REFERENCE_PRECISION;
       const closer = !colour || (colour.native!.pixels >= 1000 && colour.native!.max <= colour.legacy!.max && colour.native!.mean <= colour.legacy!.mean
-        && colour.native!.max <= REFERENCE_PRECISION);
+        && precise);
       const pass = delta.sameSize && (referenceGated ? closer : delta.max === 0) && geometryEqual && pngColorEqual;
       comparisons.push({ key, ...delta, referenceGated, colour, geometryEqual, pngColorEqual,
         legacy: { ...reference, covered: reference.covered.length, file: path.basename(reference.file) },

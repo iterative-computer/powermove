@@ -136,6 +136,9 @@ describe('independent PNG ICC and video colour reference', () => {
       const out = referenceDisplayCodes(srgb, [code, 128, 128], { matrix: 'bt709', fullRange: true, primaries: 'bt709' });
       for (const channel of out) expect(channel).toBeCloseTo(code, 1);
     }
+    const ten = referenceDisplayCodes(srgb, [512, 512, 512], { matrix: 'bt709', fullRange: false, primaries: 'bt709' }, 10);
+    const eight = referenceDisplayCodes(srgb, [128, 128, 128], { matrix: 'bt709', fullRange: false, primaries: 'bt709' });
+    for (let channel = 0; channel < 3; channel++) expect(ten[channel]).toBeCloseTo(eight[channel]!, 6);
     expect(srgbEotf(-0.5)).toBe(-srgbEotf(0.5));
     expect(srgbEotf(0.04045)).toBeCloseTo(0.04045 / 12.92, 12);
   });
