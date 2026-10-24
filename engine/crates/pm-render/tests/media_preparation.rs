@@ -281,3 +281,61 @@ fn a_frame_opens_its_new_video_sources_together() {
     let stats = renderer.scrub_stats();
     assert_eq!((stats.cached, stats.decoded), (3, 0), "{stats:?}");
 }
+
+#[test]
+fn sources_past_the_preparation_cap_still_open_together() {
+    let _serial = serial_preparation();
+    let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/video/h264-709-limited.mp4");
+    let dir = std::env::temp_dir().join(format!("pm-render-prepare-cap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    struct Clean(std::path::PathBuf);
+    impl Drop for Clean {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _clean = Clean(dir.clone());
+    let (w, h) = (256, 144);
+    let n = 12;
+    let mut assets = MapResolver::default();
+    let layers = (0..n)
+        .map(|i| {
+            let path = dir.join(format!("clip{i}.mp4"));
+            std::os::unix::fs::symlink(&fixture, &path).unwrap();
+            assets.paths.insert(format!("clip{i}"), path);
+            doc::layer(
+                &format!("v{i}"),
+                "video",
+                json!({"asset":format!("clip{i}"),"fit":"stretch","w":w,"h":h,"trim":0,"speed":1}),
+                f64::from(w) / 2.0,
+                f64::from(h) / 2.0,
+                2.0,
+            )
+        })
+        .collect();
+    let mut project = doc::project(w, h, 2.0, doc::no_fill(), layers);
+    for i in 0..n {
+        doc::asset(&mut project, &format!("clip{i}"), "video", "mp4", w, h, 2.0);
+    }
+    let document = doc::load(&project);
+    let request = RenderRequest {
+        export: false,
+        video_end: VideoEnd::Final,
+        ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
+    };
+    let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
+    let mut renderer = Renderer::headless().unwrap();
+    renderer
+        .prepare_media(&document, "Ptest-root", time, &request, &assets)
+        .unwrap();
+    assert!(renderer.finish_media_preparation().is_empty());
+    let frame = renderer
+        .render(&document, "Ptest-root", time, &request, &assets)
+        .unwrap();
+    renderer.wait_idle();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    // Every layer's frame was decoded before drawing, prepared or not.
+    let stats = renderer.scrub_stats();
+    assert_eq!((stats.cached, stats.decoded), (n, 0), "{stats:?}");
+}

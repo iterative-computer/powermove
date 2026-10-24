@@ -63,13 +63,33 @@ const STILL_CLASSES: &[(&str, bool)] = &[
 /// MSAA pass's approx-fit viewport (docs/engine/vector.md, "Residuals").
 const KNOWN_RESIDUALS: &[(&str, usize, u8)] = &[];
 
-/// Video-class frames pinned to an explained largest difference. The video
-/// class compares today's colour reading (`support::restate_today`); what
-/// remains here is section 9's chroma filter (Catmull-Rom across 4:2:0,
-/// today bilinear), a sampling correction proven against an f64 reference
-/// by tests/video_reading.rs: under a minifying 3D projection, patch
-/// interiors sit within its footprint of a chroma edge.
-const VIDEO_FILTER_RESIDUALS: &[(&str, u8)] = &[("space25d/precomps", 6)];
+/// Video-class projects drawing video minified under a projection, where
+/// patch interiors of today's frame average source pixels across chroma
+/// edges. The class restates today's reading (`support::restate_today`)
+/// except its chroma filter; these projects draw a rendition carrying
+/// today's filter (`support::todays_chroma_rendition`), so the rest is held
+/// to the class. The engine's own filter is proven against 4:4:4 truth by
+/// tests/chroma_truth.rs.
+const MINIFIED_VIDEO: &[&str] = &["space25d/precomps"];
+
+/// A scratch directory removed when dropped.
+struct TempDir(std::path::PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn tempdir_guard(name: &str) -> TempDir {
+    let dir = std::env::temp_dir().join(format!(
+        "pm-render-corpus-{}-{}",
+        std::process::id(),
+        name.replace('/', "_")
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    TempDir(dir)
+}
 
 #[test]
 fn corpus_render_parity() {
@@ -234,9 +254,25 @@ fn corpus_render_parity() {
             ));
             continue;
         }
+        let renditions = tempdir_guard(&p.name);
+        let mut resolver = pm_render::MapResolver {
+            paths: p.resolver.paths.clone(),
+        };
         if video {
             // Media reached without an asset record (generated corpus clips).
             support::restate_today_for_videos(&mut renderer, &p.resolver);
+            if MINIFIED_VIDEO.contains(&p.name.as_str()) {
+                for path in resolver.paths.values_mut() {
+                    let Ok(read) = renderer.video_color(path) else {
+                        continue;
+                    };
+                    let rendition = support::todays_chroma_rendition(path, &renditions.0);
+                    let mut c = renderer.video_color(&rendition).unwrap();
+                    (c.primaries, c.matrix, c.range) = (read.primaries, read.matrix, read.range);
+                    renderer.interpret(&rendition, Some(c));
+                    *path = rendition;
+                }
+            }
         }
         for s in &p.samples {
             // The capture's motion blur: 16 samples opaque, 20 transparent.
@@ -252,7 +288,7 @@ fn corpus_render_parity() {
                 &p.composition,
                 ticks(s.time),
                 &request,
-                &p.resolver,
+                &resolver,
             ) {
                 Ok(f) => f,
                 Err(e) => {
@@ -291,11 +327,7 @@ fn corpus_render_parity() {
                     p.name, s.time, n, max
                 );
                 eprintln!("{line}");
-                let pinned = VIDEO_FILTER_RESIDUALS
-                    .iter()
-                    .find(|r| r.0 == p.name)
-                    .map_or(2, |r| r.1);
-                if max > pinned || n == 0 {
+                if max > 2 || n == 0 {
                     failed.push(line);
                     if let Some(dir) = &diffs {
                         std::fs::create_dir_all(dir).unwrap();

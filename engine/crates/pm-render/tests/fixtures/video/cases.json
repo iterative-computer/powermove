@@ -7,7 +7,15 @@
    "width": 256,
    "height": 144,
    "paused": "h264-601-limited.paused.rgba.zlib",
-   "playing": "h264-601-limited.paused.rgba.zlib"
+   "playing": "h264-601-limited.paused.rgba.zlib",
+   "reading": {
+    "matrix": "bt601",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "h264-709-limited",
@@ -16,7 +24,15 @@
    "width": 256,
    "height": 144,
    "paused": "h264-709-limited.paused.rgba.zlib",
-   "playing": "h264-709-limited.paused.rgba.zlib"
+   "playing": "h264-709-limited.paused.rgba.zlib",
+   "reading": {
+    "matrix": "bt709",
+    "primaries": "bt709",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "h264-709-matrix-only",
@@ -25,7 +41,15 @@
    "width": 256,
    "height": 144,
    "paused": "h264-709-matrix-only.paused.rgba.zlib",
-   "playing": "h264-709-matrix-only.paused.rgba.zlib"
+   "playing": "h264-709-matrix-only.paused.rgba.zlib",
+   "reading": {
+    "matrix": "bt709",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "h264-2020-limited",
@@ -34,7 +58,15 @@
    "width": 256,
    "height": 144,
    "paused": "h264-2020-limited.paused.rgba.zlib",
-   "playing": "h264-2020-limited.playing.rgba.zlib"
+   "playing": "h264-2020-limited.playing.rgba.zlib",
+   "reading": {
+    "matrix": "bt2020",
+    "primaries": "bt2020",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "hevc10-709-limited",
@@ -43,7 +75,15 @@
    "width": 256,
    "height": 144,
    "paused": "hevc10-709-limited.paused.rgba.zlib",
-   "playing": "hevc10-709-limited.paused.rgba.zlib"
+   "playing": "hevc10-709-limited.paused.rgba.zlib",
+   "reading": {
+    "matrix": "bt709",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "vp9-untagged",
@@ -52,7 +92,15 @@
    "width": 256,
    "height": 144,
    "paused": "vp9-untagged.paused.rgba.zlib",
-   "playing": "vp9-untagged.paused.rgba.zlib"
+   "playing": "vp9-untagged.paused.rgba.zlib",
+   "reading": {
+    "matrix": "bt601",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "av1-709-limited",
@@ -61,7 +109,15 @@
    "width": 256,
    "height": 144,
    "paused": "av1-709-limited.paused.rgba.zlib",
-   "playing": "av1-709-limited.paused.rgba.zlib"
+   "playing": "av1-709-limited.paused.rgba.zlib",
+   "reading": {
+    "matrix": "bt709",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "hevc10-709-full",
@@ -70,7 +126,15 @@
    "width": 256,
    "height": 144,
    "paused": "hevc10-709-full.paused.rgba.zlib",
-   "playing": "hevc10-709-full.paused.rgba.zlib"
+   "playing": "hevc10-709-full.paused.rgba.zlib",
+   "reading": {
+    "matrix": "bt709",
+    "primaries": "bt709",
+    "transfer": "srgb",
+    "range": "full",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "hevc10-2020-limited",
@@ -79,7 +143,15 @@
    "width": 256,
    "height": 144,
    "paused": "hevc10-2020-limited.paused.rgba.zlib",
-   "playing": "hevc10-2020-limited.playing.rgba.zlib"
+   "playing": "hevc10-2020-limited.playing.rgba.zlib",
+   "reading": {
+    "matrix": "bt2020",
+    "primaries": "bt2020",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "h264-709-full-258x146",
@@ -88,7 +160,15 @@
    "width": 258,
    "height": 146,
    "paused": "h264-709-full-258x146.paused.rgba.zlib",
-   "playing": "h264-709-full-258x146.playing.rgba.zlib"
+   "playing": "h264-709-full-258x146.playing.rgba.zlib",
+   "reading": {
+    "matrix": "bt709",
+    "primaries": "bt709",
+    "transfer": "srgb",
+    "range": "full",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "vp9-601-limited",
@@ -97,7 +177,15 @@
    "width": 256,
    "height": 144,
    "paused": "vp9-601-limited.paused.rgba.zlib",
-   "playing": "vp9-601-limited.paused.rgba.zlib"
+   "playing": "vp9-601-limited.paused.rgba.zlib",
+   "reading": {
+    "matrix": "bt601",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "vp9-10bit-709-limited",
@@ -106,7 +194,15 @@
    "width": 256,
    "height": 160,
    "paused": "vp9-10bit-709-limited.paused.rgba.zlib",
-   "playing": "vp9-10bit-709-limited.paused.rgba.zlib"
+   "playing": "vp9-10bit-709-limited.paused.rgba.zlib",
+   "reading": {
+    "matrix": "bt709",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "vp9-alpha-709",
@@ -115,7 +211,15 @@
    "width": 256,
    "height": 144,
    "paused": "vp9-alpha-709.paused.rgba.zlib",
-   "playing": "vp9-alpha-709.playing.rgba.zlib"
+   "playing": "vp9-alpha-709.playing.rgba.zlib",
+   "reading": {
+    "matrix": "bt709",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "straight"
+   }
   },
   {
    "id": "hevc-alpha-untagged",
@@ -124,7 +228,15 @@
    "width": 256,
    "height": 144,
    "paused": "hevc-alpha-untagged.paused.rgba.zlib",
-   "playing": "hevc-alpha-untagged.paused.rgba.zlib"
+   "playing": "hevc-alpha-untagged.paused.rgba.zlib",
+   "reading": {
+    "matrix": "bt601",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "premultiplied"
+   }
   },
   {
    "id": "hevc10-2020-pq",
@@ -133,7 +245,15 @@
    "width": 256,
    "height": 144,
    "paused": "hevc10-2020-pq.paused.rgba.zlib",
-   "playing": "hevc10-2020-pq.playing.rgba.zlib"
+   "playing": "hevc10-2020-pq.playing.rgba.zlib",
+   "reading": {
+    "matrix": "bt2020",
+    "primaries": "bt2020",
+    "transfer": "pq",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "av1-10bit-2020-hlg",
@@ -142,7 +262,15 @@
    "width": 272,
    "height": 144,
    "paused": "av1-10bit-2020-hlg.paused.rgba.zlib",
-   "playing": "av1-10bit-2020-hlg.playing.rgba.zlib"
+   "playing": "av1-10bit-2020-hlg.playing.rgba.zlib",
+   "reading": {
+    "matrix": "bt2020",
+    "primaries": "bt2020",
+    "transfer": "hlg",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "hevc10-p3-pq",
@@ -151,7 +279,15 @@
    "width": 256,
    "height": 160,
    "paused": "hevc10-p3-pq.paused.rgba.zlib",
-   "playing": "hevc10-p3-pq.playing.rgba.zlib"
+   "playing": "hevc10-p3-pq.playing.rgba.zlib",
+   "reading": {
+    "matrix": "bt709",
+    "primaries": "p3",
+    "transfer": "pq",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
   },
   {
    "id": "hevc10-p3-sdr",
@@ -160,7 +296,42 @@
    "width": 256,
    "height": 160,
    "paused": "hevc10-p3-sdr.paused.rgba.zlib",
-   "playing": "hevc10-p3-sdr.playing.rgba.zlib"
+   "playing": "hevc10-p3-sdr.playing.rgba.zlib",
+   "reading": {
+    "matrix": "bt709",
+    "primaries": "p3",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
+  },
+  {
+   "id": "prores422",
+   "media": "../../../../../../apps/desktop/e2e/fixtures/prores422.mov",
+   "time": 0.25,
+   "reading": {
+    "matrix": "bt601",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "left",
+    "alpha": "none"
+   }
+  },
+  {
+   "id": "prores4444-alpha",
+   "media": "../../../../../../apps/desktop/e2e/fixtures/prores4444-alpha.mov",
+   "time": 0.25,
+   "reading": {
+    "matrix": "bt601",
+    "primaries": "smpte170m",
+    "transfer": "srgb",
+    "range": "limited",
+    "siting": "none",
+    "alpha": "straight"
+   }
   }
- ]
+ ],
+ "note": "Each reading is written by hand from the stream's tags and the shared table's rules (docs/engine/video-parity.md), not from the probe. paused/playing: today's viewer at that time; ProRes has none (today plays a VP9 rendition)."
 }

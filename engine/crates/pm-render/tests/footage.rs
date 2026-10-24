@@ -165,17 +165,14 @@ fn frame_rgb(f: &DecodedFrame, siting: ChromaSiting, matrix: MatrixCoefficients)
     )
 }
 
-/// E-encoded R′G′B′ in `primaries` to Rec.709, in linear light, the signal
-/// clipped first as a display does.
+/// E-encoded R′G′B′ in `primaries` to Rec.709, in linear light, extended:
+/// superwhites and sub-blacks are kept.
 fn in_709(rgb: Vec<[f64; 3]>, primaries: pm_protocol::color::Primaries) -> Vec<[f64; 3]> {
     use pm_color::transfer::{display_decode, display_encode};
     let m =
         pm_color::primaries::conversion(primaries, pm_protocol::color::Primaries::Bt709).unwrap();
     rgb.into_iter()
-        .map(|c| {
-            pm_color::primaries::apply(&m, c.map(|v| display_decode(v.clamp(0.0, 1.0))))
-                .map(display_encode)
-        })
+        .map(|c| pm_color::primaries::apply(&m, c.map(display_decode)).map(display_encode))
         .collect()
 }
 
@@ -679,8 +676,7 @@ fn wide_gamut_footage_converts_in_linear_light() {
     let want: Vec<[f64; 3]> = frame_rgb(&f, ChromaSiting::Left, MatrixCoefficients::Bt709)
         .into_iter()
         .map(|rgb| {
-            // The signal is clipped before it is linearised, as a display does.
-            let lin = rgb.map(|v| pm_color::transfer::display_decode(v.clamp(0.0, 1.0)));
+            let lin = rgb.map(pm_color::transfer::display_decode);
             pm_color::primaries::apply(&m, lin).map(pm_color::transfer::display_encode)
         })
         .collect();
