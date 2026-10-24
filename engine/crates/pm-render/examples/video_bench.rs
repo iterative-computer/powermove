@@ -5,7 +5,7 @@
 //!   cargo run --release -p pm-render --example video_bench -- CLIP [LAYERS]
 //!
 //! Output is 1920×1080 at the default depth with LAYERS (default 1) video
-//! layers of CLIP stacked, each its own decoder. Phases, on one renderer
+//! layers of CLIP stacked, each through its own path and decoder. Phases, on one renderer
 //! warmed on another path to the clip:
 //! - first: a cold source to its first frame on the GPU, and the first
 //!   frame after the background preparation the app runs at project open;
@@ -106,7 +106,7 @@ fn main() {
                 doc::layer(
                     &format!("v{i}"),
                     "video",
-                    json!({"asset":"clip","fit":"stretch","w":1920,"h":1080,"trim":0,"speed":1}),
+                    json!({"asset":format!("clip{i}"),"fit":"stretch","w":1920,"h":1080,"trim":0,"speed":1}),
                     960.0,
                     540.0,
                     dur,
@@ -115,19 +115,23 @@ fn main() {
             .collect(),
     );
     let ext = clip.extension().unwrap().to_str().unwrap();
-    doc::asset(&mut project, "clip", "video", ext, 1920, 1080, dur);
+    for i in 0..layers {
+        doc::asset(&mut project, &format!("clip{i}"), "video", ext, 1920, 1080, dur);
+    }
     let document = doc::load(&project);
-    let bench_of = |path: &std::path::Path| {
+    let bench_of = |paths: &[&std::path::Path]| {
         let mut assets = MapResolver::default();
-        assets.paths.insert("clip".into(), path.to_path_buf());
+        for (i, path) in paths.iter().enumerate() {
+            assets.paths.insert(format!("clip{i}"), path.to_path_buf());
+        }
         Bench {
             document: document.clone(),
             assets,
         }
     };
-    let bench = bench_of(&clip);
-    // A link is another path to the clip: warming the renderer on it opens
-    // its own source and decoder, so the timed first frame stays cold.
+    // A link is another path to the clip: its own source and decoder. Each
+    // layer reads its own path (as layers of different clips do), the warm
+    // and prepared renders their own, so the timed first frame stays cold.
     struct Alias(PathBuf);
     impl Drop for Alias {
         fn drop(&mut self) {
@@ -142,17 +146,24 @@ fn main() {
         std::os::unix::fs::symlink(std::fs::canonicalize(&clip).unwrap(), &alias.0).unwrap();
         alias
     };
-    let (warm, prepared) = (alias("warm"), alias("prepared"));
+    let links = |name: &str| (0..layers).map(|i| alias(&format!("{name}{i}"))).collect::<Vec<_>>();
+    let (layer_links, warm, prepared) = (links("layer"), links("warm"), links("prepared"));
+    fn paths(links: &[Alias]) -> Vec<&std::path::Path> {
+        links.iter().map(|a| a.0.as_path()).collect()
+    }
+    let mut timed = paths(&layer_links);
+    timed[0] = &clip;
+    let bench = bench_of(&timed);
     let span = duration.min(5.0);
     let frames = (span * fps).floor() as usize;
 
     // One renderer, as the app keeps: device, pipelines and the conversion
     // are warmed on the alias.
     let mut renderer = Renderer::headless().unwrap();
-    bench_of(&warm.0).render(&mut renderer, 0.0, false, Sampling::Final);
+    bench_of(&paths(&warm)).render(&mut renderer, 0.0, false, Sampling::Final);
     // The app prepares a project's videos when it opens (background probe,
     // index, decoder and selected frame); the first frame then draws.
-    let prepared = bench_of(&prepared.0);
+    let prepared = bench_of(&paths(&prepared));
     let request = RenderRequest {
         video_end: VideoEnd::Final,
         ..RenderRequest::at_scale(Size::new(1920, 1080), 1.0, Precision::Float16)
