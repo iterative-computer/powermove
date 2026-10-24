@@ -2610,18 +2610,6 @@ impl Thread {
                     | pm_protocol::snapshot::CompatMessage::SvgRequests { .. }),
             } => self.svg_message(key, message),
             Command::Compat { key, message } => {
-                if let pm_protocol::snapshot::CompatMessage::Producers { ref sources } = message {
-                    self.trace_event(
-                        if sources.is_empty() {
-                            "compat producers cleared"
-                        } else {
-                            "compat producers registered"
-                        },
-                        now(),
-                        0,
-                        key.1.get() as i64,
-                    );
-                }
                 let (applied, rasters, bytes, answers, evicted) = {
                     let mut store = self.compat_store();
                     let applied = store.apply(key, message);
@@ -6685,19 +6673,6 @@ impl Thread {
         if layer_target {
             self.run_layer_snapshot(job, started);
             return;
-        }
-        if self.config.trace {
-            let produces = self.compat_store().has_producers(job.key);
-            self.trace_event(
-                if produces {
-                    "snapshot with compat producers"
-                } else {
-                    "snapshot without compat producers"
-                },
-                started,
-                0,
-                job.request.time.get(),
-            );
         }
         if self.snapshot_poller.is_none() {
             self.stats().snapshot_failures += 1;
