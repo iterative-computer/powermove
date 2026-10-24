@@ -85,9 +85,8 @@ describe.skipIf(!existsSync(MODULE))('provisional revisions', () => {
       barrier.flushProvisional();
       // A second write before the comparison: it must be in what is confirmed.
       if (i % 4 === 1) write(() => { layer('L4').p.rotation.v = i; });
-      // A query mid-way flushes everything (only the edit's own answers
-      // read the provisional mirror).
-      if (i % 5 === 2) barrier.provisionalQueries(() => barrier.flush());
+      // A query mid-way completes the comparison first.
+      if (i % 5 === 2) barrier.flush();
       barrier.flush();
       expect(barrier.provisionalRevision).toBe(null);
       expect(doc.wasm!.hash()).toBe(canonicalProjectHash(PM.proj));
@@ -103,15 +102,18 @@ describe.skipIf(!existsSync(MODULE))('provisional revisions', () => {
     expect(items.some(item => item.provisional) && items.some(item => !item.provisional && !item.confirmed)).toBe(true);
   });
 
-  it('answers queries from the provisional mirror only inside provisionalQueries', async () => {
-    const { PM, barrier, layer, write } = await editor();
+  it('answers every query during a provisional revision from the whole document', async () => {
+    const { doc, barrier, layer, write } = await editor();
     write(() => { layer('L3').p['position.x'].v = 5; });
     barrier.flush();
-    write(() => { layer('L3').p['position.x'].v = 6; layer('L0').p['position.x'].v = 7; });
+    // The hot layer and one the write never changed before, in one touch().
+    write(() => { layer('L3').p['position.x'].v = 6; layer('L0').p.opacity.v = 7; });
     expect(barrier.flushProvisional()).toBe(true);
     const provisional = barrier.revision;
-    expect(barrier.provisionalQueries(() => { barrier.flush(); return barrier.revision; })).toBe(provisional);
-    barrier.flush();
+    // What a raster override asks while drawing the edit: the other layer's
+    // value is the live one, never the provisional mirror's.
+    expect(doc.api!.ev(layer('L0'), 'opacity', 0)).toBe(7);
+    expect(barrier.provisionalRevision).toBe(null);
     expect(barrier.revision).toBe(provisional + 1);
   });
 });

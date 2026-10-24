@@ -304,11 +304,6 @@ export type RenderTransportOptions = {
   /** The document revision the window has, after flushing pending edits to
    *  the engine (`PM.EngineDoc.barrier`). */
   revision: () => number | null;
-  /** The revision the window's own answers are made at: while a provisional
-   *  batch waits for the rest of the document's diff, that revision (the
-   *  answers overlap the diff; a superseded revision's answers never count),
-   *  otherwise `revision()`. */
-  answerRevision?: () => number | null;
   /** The composition the window has open. */
   composition: () => string;
   /** The open document's id (the engine's document id). */
@@ -405,8 +400,6 @@ export class EngineRenderTransport {
    * layer's exact need (including scale/crop) and document revision. */
   private readonly ahead = new Map<string, AheadEntry>();
   private pausedEditRevision: number | null = null;
-  /** Collects the preparations `prepareShown` starts. */
-  private startedPreparations: Promise<unknown>[] | null = null;
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private aheadTurn = 0;
   private pumpingAhead = false;
@@ -532,7 +525,7 @@ export class EngineRenderTransport {
       const deadline = performance.now() + LOOKAHEAD_BUDGET_MS;
       const playhead = this.options.playhead?.();
       const clock = this.options.playing?.() ? playhead : null;
-      const revision = this.answerRevision();
+      const revision = this.options.revision();
       const span = this.options.span?.() ?? null;
       const loop = this.playbackLoop(span);
       const entries = [...this.ahead.values()].filter(entry => {
@@ -664,7 +657,7 @@ export class EngineRenderTransport {
     this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
     const began = performance.now();
     this.trace.record('prepare dispatched', revision, time);
-    const prepared = Promise.resolve().then(() => prepare(need, revision, { urgent: !this.options.playing?.() && (time === entry.cursor || entry.required.has(time)) })).then(() => {
+    void Promise.resolve().then(() => prepare(need, revision, { urgent: !this.options.playing?.() && (time === entry.cursor || entry.required.has(time)) })).then(() => {
       this.trace.record('prepare ready', revision, time, began);
       const ms = performance.now() - began;
       this.prepareMs = this.prepareMs === null ? ms : this.prepareMs * 0.75 + ms * 0.25;
@@ -674,7 +667,7 @@ export class EngineRenderTransport {
         ? Math.floor(clock.time / Math.abs(entry.step)) * Math.abs(entry.step) : entry.cursor;
       const distance = runAhead(cursor, time, entry.step, entry.loop ?? null);
       if ((!this.options.playing?.() && !entry.required.has(time) && (!warm || performance.now() >= warmUntil)) || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
-        || this.preparers.get(need.source) !== prepare || revision !== this.answerRevision() || distance < -Math.abs(entry.step) || distance > COMPAT_LOOKAHEAD * Math.abs(entry.step)) {
+        || this.preparers.get(need.source) !== prepare || revision !== this.options.revision() || distance < -Math.abs(entry.step) || distance > COMPAT_LOOKAHEAD * Math.abs(entry.step)) {
         this.lookaheadStats.obsolete++;
         return;
       }
@@ -699,7 +692,6 @@ export class EngineRenderTransport {
       // hold its ready pixels behind a Promise.all barrier.
       this.presentedWhilePlaying(warm || [...this.ahead.values()].some(e => e.required.size > 0), warmUntil);
     });
-    this.startedPreparations?.push(prepared);
   }
 
   private scheduleAhead(): void {
@@ -791,21 +783,12 @@ export class EngineRenderTransport {
     return changed;
   }
 
-  private answerRevision(): number | null {
-    return (this.options.answerRevision ?? this.options.revision)();
-  }
-
   /** An edit while paused: prepares the frames around the playhead at the
-   *  new revision at once (the paused warm-up the engine's ask would start).
-   *  Settles once the preparations it started have posted their answers. */
-  prepareShown(): Promise<unknown> | null {
-    if (this.options.playing?.() || !this.ahead.size || !this.preparers.size) return null;
-    this.pausedEditRevision = this.answerRevision();
-    const started: Promise<unknown>[] = [];
-    this.startedPreparations = started;
-    try { this.presentedWhilePlaying(true); }
-    finally { this.startedPreparations = null; }
-    return started.length ? Promise.allSettled(started) : null;
+   *  new revision at once (the paused warm-up the engine's ask would start). */
+  prepareShown(): void {
+    if (this.options.playing?.() || !this.ahead.size || !this.preparers.size) return;
+    this.pausedEditRevision = this.options.revision();
+    this.presentedWhilePlaying(true);
   }
 
   private answerNeed(need: CompatNeed, session: TransportSession, prepared = false, refresh = false, beforePost?: (answer: string) => void): boolean {
@@ -816,7 +799,7 @@ export class EngineRenderTransport {
     if (!answerer || this.answering > 0) return false;
     this.compatStats.needs++;
     const began = performance.now();
-    const revision = this.answerRevision() ?? 0;
+    const revision = this.options.revision() ?? 0;
     const crop = need.crop ? { crop: { ...need.crop } } : {};
     const tag = this.needTag(need);
     // Asked again after a `reuse` at this revision: the engine no longer

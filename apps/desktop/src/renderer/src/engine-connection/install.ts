@@ -284,40 +284,29 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       const began = performance.now();
       try {
         const before = barrier?.revision ?? null;
-        // A write without paths: the layers it most likely wrote leave
-        // first, as a provisional revision the engine draws but does not
-        // present; the rest of the document is compared after the paused
-        // edit's own answers are made (they overlap the engine's work), and
-        // that comparison confirms the revision or supersedes it.
-        if (barrier?.flushProvisional()) {
+        // A paused write without paths: the layers it most likely wrote
+        // leave first, as a provisional revision the engine draws but does
+        // not present while the rest of the document is compared. That
+        // comparison confirms the revision or supersedes it; it runs before
+        // anything else here, so every answer (and every query a raster
+        // override makes) sees the whole document. During playback the
+        // comparison would follow at once anyway: no provisional batch.
+        if (!PM.playing && barrier?.flushProvisional()) {
           noteVersion();
           connection?.sendPatches();
           renderTransport.trace.record('provisional sent', barrier.revision, ticks(PM.time ?? 0), began);
-          const preparing = renderTransport.prepareShown();
-          let compared = false;
-          const compare = (): void => {
-            if (compared) return;
-            compared = true;
-            const provisional = barrier.revision;
-            const started = performance.now();
-            try {
-              barrier.flush();
-              noteVersion();
-            } catch (error) {
-              log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
-            }
-            renderTransport.trace.record('edit flushed', barrier.revision, ticks(PM.time ?? 0), started);
-            if (barrier.revision !== provisional) renderTransport.prepareShown();
-          };
-          if (preparing) {
-            void preparing.finally(compare);
-            // A preparation that waits on the engine (a base it draws) must
-            // not hold the comparison back.
-            setTimeout(compare, 0);
-          } else compare();
-          return;
         }
-        barrier?.flush();
+        try {
+          barrier?.flush();
+        } catch (error) {
+          // A comparison that fails must still end a provisional revision:
+          // a resync supersedes it (and releases or drops its frame).
+          log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
+          if (barrier?.provisionalRevision != null) {
+            barrier.markResync();
+            barrier.flush();
+          }
+        }
         noteVersion();
         renderTransport.trace.record('edit flushed', barrier?.revision ?? 0, ticks(PM.time ?? 0), began);
         // An edit while paused: the producers prepare the frame on screen at
@@ -447,13 +436,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     session: snapshotSession,
     sessions: () => [...sessions],
     revision: flushedRevision,
-    // While a provisional revision waits for its comparison, the window's
-    // own answers are made at it (`answerRevision`); a superseded one's
-    // answers never count.
-    answerRevision: () => {
-      const barrier = PM.EngineDoc?.barrier;
-      return barrier && barrier.provisionalRevision !== null ? barrier.revision : flushedRevision();
-    },
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     document: () => documentId(PM.proj?.id),
     viewSeq: () => current?.viewSeq ?? null,

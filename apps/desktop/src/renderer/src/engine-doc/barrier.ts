@@ -216,8 +216,6 @@ export class DocumentBarrier {
   private hot: Array<{ comp: string; id: string }> = [];
   /** The revision of a provisional batch not yet confirmed or superseded. */
   provisionalRevision: number | null = null;
-  /** Inside `provisionalQueries`: queries read the provisional mirror. */
-  private provisionalReads = 0;
   private origin: IncrementalOrigin = 'metadata';
   private subscribers = new Set<(batch: PatchBatch) => void>();
   /** Told when the barrier goes from nothing pending to something pending. */
@@ -464,22 +462,10 @@ export class DocumentBarrier {
     }
   }
 
-  /**
-   * Runs `fn` with queries answered by the provisional mirror: while a
-   * provisional revision waits, `flush` leaves the rest of the diff for
-   * later. Only for work tagged with that revision (a paused edit's own
-   * raster answers): it counts only if the revision is confirmed, when the
-   * provisional mirror was the whole document.
-   */
-  provisionalQueries<T>(fn: () => T): T {
-    this.provisionalReads++;
-    try { return fn(); } finally { this.provisionalReads--; }
-  }
-
   /** Flushes dirty paths into pm-wasm (section 6, item 2: before every query). */
   flush(): void {
     this.requireNativeAvailable();
-    if (this.flushing || (this.provisionalReads > 0 && this.provisionalRevision !== null)) return;
+    if (this.flushing) return;
     if (this.shadow !== undefined) this.beforeFlush();
     if (!this.pending) return;
     this.flushing = true;
@@ -611,6 +597,8 @@ export class DocumentBarrier {
       }
     } catch { /* the recovery will replace the unavailable owner */ }
     this.checkpoint = null; this.journal = []; this.journalBytes = 0;
+    // Recovery resyncs: a provisional revision is superseded by it.
+    this.provisionalRevision = null;
     this.touchedCanonical(ops.map(op => op.path), origin, { announce: false });
     this.resyncPending = true;
     throw Object.assign(new Error('The native document apply failed; asynchronous recovery is required', { cause }), { code: 'unavailable' });
@@ -681,6 +669,9 @@ export class DocumentBarrier {
    */
   snapshot(options: { checkpoint?: boolean } = {}): { revision: number; encoding: 'canonicalJsonV1'; bytes: Uint8Array; readonly json: string; hash: string } {
     this.flush();
+    // Never a document state that did not exist: a snapshot asked from
+    // inside the flush that sent a provisional batch (its listeners) waits.
+    if (this.provisionalRevision !== null) throw new Error('The document is being compared; snapshot after the comparison');
     // pm-wasm holds this revision (the shadow equals it): its canonical JSON
     // comes out as bytes, outside the JavaScript heap, for a large document
     // the difference between opening and running out of memory.
@@ -698,6 +689,7 @@ export class DocumentBarrier {
    * No JSON serialization or staging is needed when the engine kept it. */
   resume(): { revision: number; hash: string; batches: PatchBatch[] } {
     this.flush();
+    if (this.provisionalRevision !== null) throw new Error('The document is being compared; resume after the comparison');
     if (!this.checkpoint) {
       this.checkpoint = { revision: this.revision, hash: this.wasm.hash() };
       this.journal = []; this.journalBytes = 0;
