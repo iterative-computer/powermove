@@ -85,9 +85,7 @@ for 75 frames at 320×180.
 
 ## Decoders
 
-Chromium-compatible level-1 source uploads, captured format readings and remaining
-closure work are documented in [video-parity.md](video-parity.md). Native decode
-and Interpret Footage retain the section 13 normalization contract.
+Every surface reads a decoded frame the same way: [video-parity.md](video-parity.md).
 
 | Codec | Backends, in order |
 |---|---|
