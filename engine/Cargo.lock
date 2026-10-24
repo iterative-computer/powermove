@@ -2264,6 +2264,7 @@ dependencies = [
  "pm-blender",
  "pm-eval",
  "pm-export",
+ "pm-gpu",
  "pm-media",
  "pm-model",
  "pm-protocol",

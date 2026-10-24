@@ -16,7 +16,7 @@ use super::{
     reader,
 };
 use crate::atomic::AtomicOutput;
-use crate::convert::{ConvertParams, EncoderInput, WorkingFrame, convert};
+use crate::convert::{ConvertParams, EncoderInput, WorkingFrame, convert, convert_rgba8_into};
 use crate::pipeline::Sink;
 use crate::settings::*;
 use crate::verify::{self, BlockSample, Expected};
@@ -189,6 +189,7 @@ pub struct LegacyVideoSink {
     sampled: Vec<u64>,
     blocks: Vec<BlockSample>,
     capture: Option<File>,
+    rgba8: Vec<u8>,
 }
 impl LegacyVideoSink {
     pub fn new(spec: &ExportSpec) -> Result<Self, Error> {
@@ -263,6 +264,7 @@ impl LegacyVideoSink {
             sampled: verify::sampled_frames(spec.frames),
             blocks: vec![],
             capture,
+            rgba8: Vec::new(),
         })
     }
     fn complete(mut self, cancel: Option<&AtomicBool>) -> Result<Delivered, Error> {
@@ -310,9 +312,8 @@ impl Sink for LegacyVideoSink {
         // (`renderOpaqueFrame`), straight-alpha frames through `alphaFrame`'s
         // truncating unpremultiply and the Canvas2D round trip.
         let alpha = matches!(self.kind, Desktop::ProRes4444 { alpha: true });
-        let rgba = convert(
+        convert_rgba8_into(
             frame,
-            InputFormat::Rgba8,
             &ConvertParams {
                 working: self.spec.working,
                 alpha: if alpha {
@@ -324,8 +325,9 @@ impl Sink for LegacyVideoSink {
                 frame: index as u32,
                 legacy_png: alpha,
             },
+            &mut self.rgba8,
         )?;
-        let bytes = rgba.planes[0].u8().expect("RGBA8");
+        let bytes = &self.rgba8;
         if let Some(capture) = &mut self.capture {
             capture.write_all(bytes).map_err(io)?;
         }
