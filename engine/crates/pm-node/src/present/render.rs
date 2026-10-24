@@ -564,6 +564,10 @@ pub struct Stats {
     pub rerendered: u64,
     pub pool_waits: u64,
     pub releases: u64,
+    /// Releases of frames of a pool replaced since they were sent (a
+    /// Play's start frames, the frame on screen at a resize).
+    pub retired_releases: u64,
+    /// Releases that match no frame sent (a duplicate): ignored.
     pub release_mismatches: u64,
     pub gpu_us_max: i64,
     pub gpu_us_total: i64,
@@ -1017,6 +1021,8 @@ struct View {
     /// When the paused frame went out (host µs): the start frames are
     /// rendered once it has stayed [`ARM_IDLE_US`].
     paused_sent: Option<i64>,
+    /// Frames numbered below this were sent from a pool since replaced.
+    retired_below: u64,
     /// The C′ prototype's refresh-rate request while it plays, and whether
     /// this playback already tried (a failed request is not repeated).
     #[cfg(feature = "remote-layer")]
@@ -2230,16 +2236,18 @@ impl Thread {
                 }
             }
             Command::Release { key, release } => {
-                let ok = self
-                    .views
-                    .get_mut(&key)
+                let view = self.views.get_mut(&key);
+                let retired_below = view.as_ref().map_or(0, |v| v.retired_below);
+                let ok = view
                     .and_then(|view| view.pool.as_mut())
                     .is_some_and(|live| live.ledger.release(release).is_ok());
                 let mut stats = self.stats();
                 if ok {
                     stats.releases += 1;
+                } else if release.seq.get() < retired_below {
+                    // Sent from a pool replaced since: nothing to free here.
+                    stats.retired_releases += 1;
                 } else {
-                    // A frame of a retired pool, or a duplicate: ignored.
                     stats.release_mismatches += 1;
                 }
             }
@@ -3815,6 +3823,7 @@ impl Thread {
             compat_needs: None,
             armed: Vec::new(),
             paused_sent: None,
+            retired_below: 0,
             #[cfg(feature = "remote-layer")]
             rate: None,
             #[cfg(feature = "remote-layer")]
@@ -3888,7 +3897,10 @@ impl Thread {
         // The C′ prototype's layer moves to the new pool: main keeps
         // hosting its context, so a live resize never leaves it unhosted.
         let mut carried = None;
-        if let Some(mut old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
+        if let Some(view) = self.views.get_mut(&key)
+            && let Some(mut old) = view.pool.take()
+        {
+            view.retired_below = view.next_seq;
             carried = old.remote.take();
             self.retire_pool(key, old);
         }
