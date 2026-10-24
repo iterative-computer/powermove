@@ -31,7 +31,7 @@ presented as sRGB; today's monitor puts HDR on screen. There is no f64
 reference for tone mapping here, so the gate only requires that it plays
 with an SDR capture.
 
-Untagged 480-line-or-smaller SD H.264 (VIDEO-SD-1, resolved as a fix): the
+Untagged non-576-line SD H.264 (VIDEO-SD-1, resolved as a fix): the
 shared reading gives SMPTE 170M primaries, as today's VideoToolbox monitor
 does, and the monitor is byte-exact with today (max 0.49–0.69 from the
 reference for both). Composition and

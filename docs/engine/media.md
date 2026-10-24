@@ -41,9 +41,9 @@ through an `<img>` holding a lossless PNG of engine pixels.
 Colour has one function, `pm_media::probe::color::frame_reading` (over
 `video_reading`): tags win field by field; untagged matrices are BT.601 up to
 576 lines and under 1280 wide, else BT.709; untagged transfer is BT.709,
-shown with the sRGB curve; untagged SD primaries follow the line standard,
-EBU/BT.470BG above 486 lines and SMPTE 170M otherwise
-(`UNTAGGED_SD_PRIMARIES`, VIDEO-SD-1 resolved as a fix); range is limited
+shown with the sRGB curve; untagged SD primaries follow the line standard
+(VIDEO-SD-1): 576 lines read EBU/BT.470BG, other SD sizes SMPTE 170M; range
+is limited
 unless tagged full. Image sequences (encoded BT.601 by `media-proxy.ts`,
 which now also tags them) read BT.601 at any size. Composition and export
 adopt the same function with the videoparity lane; until then they differ

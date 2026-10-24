@@ -24,11 +24,6 @@ pub struct TaggedColor {
     pub source: Vec<String>,
 }
 
-/// VIDEO-SD-1 (resolved: fix): untagged SD video reads the primaries of its
-/// line standard on every surface: EBU/BT.470BG (625-line) above 486 lines,
-/// SMPTE 170M (525-line) otherwise.
-pub const UNTAGGED_SD_PRIMARIES: bool = true;
-
 /// A complete video colour reading as H.273 code points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VideoReading {
@@ -40,21 +35,19 @@ pub struct VideoReading {
 
 /// The one video colour table shared by the source monitor, composition and
 /// export, for every codec: tags win field by field; an untagged matrix is
-/// BT.601 (SMPTE 170M) when the frame is at most 576 lines tall and under
-/// 1280 wide, otherwise BT.709 (the mpv/FFmpeg heuristic); an untagged
-/// transfer is BT.709, read as the sRGB curve; untagged primaries are Rec.709
-/// unless [`UNTAGGED_SD_PRIMARIES`] (SD by line count: BT.470BG above 486
-/// lines, SMPTE 170M otherwise); the range is limited unless tagged full.
+/// BT.601 when the frame is at most 576 lines tall and under 1280 wide,
+/// otherwise BT.709 (the mpv/FFmpeg heuristic); untagged primaries follow
+/// the line count of the system an SD frame comes from (owner decision
+/// VIDEO-SD-1, mpv's rule): 576 lines are 625-line BT.470BG (EBU), other SD
+/// sizes 525-line SMPTE 170M, HD and above BT.709; an untagged transfer is
+/// BT.709, read as the sRGB curve; the range is limited unless tagged full.
 pub fn video_reading(tagged: &TaggedColor, width: u32, height: u32) -> VideoReading {
     let sd = height <= 576 && width < 1280;
+    let sd_primaries = if height == 576 { 5 } else { 6 };
     VideoReading {
         primaries: tagged
             .primaries
-            .unwrap_or(match (sd && UNTAGGED_SD_PRIMARIES, height > 486) {
-                (true, true) => 5,
-                (true, false) => 6,
-                (false, _) => 1,
-            }),
+            .unwrap_or(if sd { sd_primaries } else { 1 }),
         transfer: tagged.transfer.unwrap_or(1),
         matrix: tagged.matrix.unwrap_or(if sd { 6 } else { 1 }),
         full_range: tagged.full_range.unwrap_or(false),
@@ -261,13 +254,11 @@ pub fn interpret(
             defaults.push(format!("untagged primaries: {p:?} ({w}×{h})"));
             from[0] = Some(Origin::Default {
                 rule: match p {
+                    Primaries::Bt709 => "Untagged video reads as Rec.709 primaries".into(),
                     Primaries::Bt601_625 => {
-                        format!("Untagged {w}×{h} video reads as EBU (BT.470BG) primaries")
+                        format!("Untagged {w}×{h} (625-line) video reads as BT.470BG primaries")
                     }
-                    Primaries::Bt601_525 => {
-                        format!("Untagged {w}×{h} video reads as SMPTE 170M primaries")
-                    }
-                    _ => "Untagged video reads as Rec.709 primaries".into(),
+                    _ => format!("Untagged {w}×{h} (525-line) video reads as SMPTE 170M primaries"),
                 },
             });
             p
@@ -540,13 +531,16 @@ mod reading_tests {
     #[test]
     fn video_reading_applies_the_shared_table() {
         let untagged = TaggedColor::default();
+        // PAL: 625-line BT.470BG primaries; NTSC and other SD: 170M.
         let sd = video_reading(&untagged, 720, 576);
         assert_eq!(
             (sd.primaries, sd.transfer, sd.matrix, sd.full_range),
             (5, 1, 6, false)
         );
-        assert_eq!(video_reading(&untagged, 720, 486).primaries, 6);
-        assert_eq!(video_reading(&untagged, 640, 480).primaries, 6);
+        for (w, h) in [(720, 480), (720, 486), (640, 360), (256, 144)] {
+            assert_eq!(video_reading(&untagged, w, h).primaries, 6, "{w}×{h}");
+        }
+        assert_eq!(video_reading(&untagged, 1280, 576).primaries, 1);
         assert_eq!(video_reading(&untagged, 1280, 576).matrix, 1);
         assert_eq!(video_reading(&untagged, 480, 720).matrix, 1);
         let partial = TaggedColor {
@@ -610,10 +604,10 @@ mod interpret_tests {
                 assert_eq!(table.matrix, if matrix == Bt601 { 6 } else { 1 });
                 assert_eq!(i.transfer, Transfer::DisplayE);
                 assert_eq!(i.range, Range::Limited);
-                let primaries = match (tags[0] == 2 && h <= 576 && w < 1280, h > 486) {
-                    (true, true) => Primaries::Bt601_625,
-                    (true, false) => Primaries::Bt601_525,
-                    (false, _) => Primaries::Bt709,
+                let primaries = match (tags[0], h <= 576 && w < 1280, h) {
+                    (2, true, 576) => Primaries::Bt601_625,
+                    (2, true, _) => Primaries::Bt601_525,
+                    _ => Primaries::Bt709,
                 };
                 assert_eq!(
                     i.primaries, primaries,
