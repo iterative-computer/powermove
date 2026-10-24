@@ -7,18 +7,17 @@
 //!   [`VectorCache::resolve_svg`].
 //! - Level 2 SVG images that are not plain vectors are drawn by resvg at
 //!   output resolution and uploaded like level 1 rasters.
-//! - Level 2 scenes get analytic area coverage from Vello's GPU compute
-//!   renderer (or `vello_cpu` when Vello is unavailable or forced) in an
-//!   8-bit atlas; the float paint pass then composites `paint × coverage`
-//!   per item with premultiplied source-over at working precision
-//!   (amendment 10).
+//! - Coverage scenes get each item's exact area coverage
+//!   ([`crate::coverage`]) in `r32float` atlas pages; the float paint pass
+//!   then composites `paint × coverage` per item with premultiplied
+//!   source-over at working precision, in the same command buffer.
 
 use std::collections::HashMap;
 
 use pm_protocol::color::Precision;
-use pm_vector::gpu::GpuCoverage;
-use pm_vector::render::cpu::render_coverage;
 use pm_vector::render::scene::{AtlasLayout, CoverageScene, PixelRect};
+
+use crate::coverage::{AreaCoverage, Batch, Item};
 
 use super::VectorSource;
 use super::svg_rasters::{SvgMissPolicy, SvgRasterNeed, SvgRasterizer, SvgRasters};
@@ -37,16 +36,6 @@ pub enum SvgResolved {
 
 /// The precision slot of level 1 SVG raster textures (always `Rgba8Unorm`).
 const SVG_SLOT: u8 = u8::MAX;
-
-/// Which coverage backend level 2 uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoverageBackend {
-    /// Vello's GPU compute renderer, falling back to `vello_cpu` when it
-    /// cannot be created on the device.
-    Auto,
-    /// Always `vello_cpu` (the CPU fallback path).
-    Cpu,
-}
 
 struct Entry {
     _texture: wgpu::Texture,
@@ -100,7 +89,7 @@ struct Out {
 }
 
 @fragment fn fs(i: Out) -> @location(0) vec4<f32> {
-    let cov = textureLoad(coverage, vec2<i32>(floor(i.cell)), 0).a;
+    let cov = textureLoad(coverage, vec2<i32>(floor(i.cell)), 0).r;
     return i.color * cov;
 }
 "#;
@@ -192,11 +181,8 @@ pub struct VectorCache {
     bytes: u64,
     max_bytes: u64,
     max_entries: usize,
-    backend: CoverageBackend,
-    gpu: Option<Option<GpuCoverage>>,
+    coverage: Option<AreaCoverage>,
     paint: Option<Paint>,
-    /// Which backend rendered the last level 2 scene (tests).
-    pub last_backend: Option<&'static str>,
     /// Level 1 SVG rasters the renderers uploaded (decision S1).
     pub svg: SvgRasters,
 }
@@ -216,22 +202,10 @@ impl VectorCache {
             bytes: 0,
             max_bytes: DEFAULT_MAX_BYTES,
             max_entries: DEFAULT_MAX_ENTRIES,
-            backend: CoverageBackend::Auto,
-            gpu: None,
+            coverage: None,
             paint: None,
-            last_backend: None,
             svg: SvgRasters::default(),
         }
-    }
-
-    /// Selects the level 2 coverage backend; cached textures are dropped
-    /// when it changes, so the next frame is rendered by the new one.
-    pub fn set_backend(&mut self, backend: CoverageBackend) {
-        if backend != self.backend {
-            self.entries.clear();
-            self.bytes = 0;
-        }
-        self.backend = backend;
     }
 
     /// Bytes of cached textures and of the stored level 1 SVG rasters.
@@ -479,17 +453,9 @@ impl VectorCache {
         Ok(SvgResolved::Missing)
     }
 
-    fn gpu(&mut self, device: &wgpu::Device) -> Option<&mut GpuCoverage> {
-        if self.backend == CoverageBackend::Cpu {
-            return None;
-        }
-        self.gpu
-            .get_or_insert_with(|| GpuCoverage::new(device).ok())
-            .as_mut()
-    }
-
-    /// Renders a level 2 scene: coverage pages, then the float paint pass
-    /// into a `rect`-sized working texture.
+    /// Renders a coverage scene: each item's exact coverage in `r32float`
+    /// atlas pages, then the float paint pass into a `rect`-sized working
+    /// texture, in one command buffer.
     fn render_scene(
         &mut self,
         device: &wgpu::Device,
@@ -500,24 +466,35 @@ impl VectorCache {
     ) -> Result<(wgpu::Texture, u64), String> {
         let max_side = device.limits().max_texture_dimension_2d.min(8192);
         let layout = AtlasLayout::pack(scene, rect, max_side);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("pm vector"),
+        });
+        let coverage = self.coverage.get_or_insert_with(|| AreaCoverage::new(device));
+        let outlines: Vec<_> = layout
+            .cells
+            .iter()
+            .map(|c| scene.items[c.item].device_outline())
+            .collect();
         let mut pages: Vec<wgpu::Texture> = Vec::with_capacity(layout.pages.len());
-        let mut used_gpu = false;
-        if let Some(gpu) = self.gpu(device) {
-            used_gpu = true;
-            for (i, &(w, h)) in layout.pages.iter().enumerate() {
-                let tex = device.create_texture(&GpuCoverage::page_descriptor(w, h));
-                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-                gpu.render_page(device, queue, scene, &layout, i, &view)
-                    .map_err(|e| e.to_string())?;
-                pages.push(tex);
-            }
-        } else {
-            let cpu = render_coverage(scene, &layout);
-            for (i, &(w, h)) in layout.pages.iter().enumerate() {
-                pages.push(upload_rgba8(device, queue, w, h, &cpu.pages[i]));
-            }
+        for (i, &(w, h)) in layout.pages.iter().enumerate() {
+            let items: Vec<Item<'_>> = layout
+                .cells
+                .iter()
+                .zip(&outlines)
+                .filter(|(c, _)| c.page == i)
+                .map(|(c, path)| Item {
+                    path,
+                    bounds: c.device,
+                    at: [c.x, c.y],
+                })
+                .collect();
+            let batch = Batch::new(&items);
+            let page = device.create_texture(&crate::coverage::page_descriptor(w, h));
+            let view = page.create_view(&wgpu::TextureViewDescriptor::default());
+            let values = crate::coverage::buffer(device, batch.bytes());
+            coverage.encode(device, &mut encoder, &batch, &values, Some(&view));
+            pages.push(page);
         }
-        self.last_backend = Some(if used_gpu { "vello" } else { "vello_cpu" });
         let format = pm_gpu::working_format(precision);
         let out = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pm vector level 2"),
@@ -545,9 +522,6 @@ impl VectorCache {
             mapped_at_creation: false,
         });
         queue.write_buffer(&gbuf, 0, &f32_bytes(&globals));
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("pm vector paint"),
-        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pm vector paint"),

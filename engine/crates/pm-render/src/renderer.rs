@@ -1325,17 +1325,6 @@ impl Renderer {
         self.vector.bytes()
     }
 
-    /// Selects the level 2 coverage backend (Vello on the GPU with the
-    /// `vello_cpu` fallback, or `vello_cpu` always).
-    pub fn set_vector_backend(&mut self, backend: crate::vector::cache::CoverageBackend) {
-        self.vector.set_backend(backend);
-    }
-
-    /// The backend that rendered the last level 2 scene.
-    pub fn last_vector_backend(&self) -> Option<&'static str> {
-        self.vector.last_backend
-    }
-
     fn supports_precision(&self, precision: Precision) -> bool {
         precision != Precision::Float32
             || self

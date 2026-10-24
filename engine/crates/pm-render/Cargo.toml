@@ -23,7 +23,7 @@ pm-glsl = { path = "../pm-glsl" }
 pollster = "0.4"
 serde.workspace = true
 pm-media = { path = "../pm-media" }
-pm-vector = { path = "../pm-vector", features = ["gpu"] }
+pm-vector = { path = "../pm-vector", features = ["render"] }
 # Glyph rendering (text and captions, docs/engine/text-render.md).
 pm-text = { path = "../pm-text", default-features = false, features = ["render", "level2"] }
 vello = { version = "0.11", default-features = false, features = ["wgpu"] }

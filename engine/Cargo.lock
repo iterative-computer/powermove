@@ -2583,7 +2583,6 @@ dependencies = [
  "i_overlay",
  "kurbo",
  "libm",
- "peniko",
  "pm-skia-path",
  "pm-text",
  "png",
@@ -2592,9 +2591,6 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "usvg",
- "vello",
- "vello_cpu",
- "wgpu",
 ]
 
 [[package]]

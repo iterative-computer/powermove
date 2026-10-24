@@ -2,13 +2,11 @@
 //! (`compat` level 2, plan section 8 "Sampling and antialiasing").
 //!
 //! A [`CoverageScene`] is an ordered list of [`CoverageItem`]s, each one
-//! fill or stroke of a path in device pixels with one paint. A coverage
-//! backend (Vello on the GPU, `vello_cpu` as the fallback) renders every
-//! item's analytic area coverage into its own cell of an 8-bit atlas
-//! ([`AtlasLayout`]); the engine's float paint pass then composites
-//! `paint × coverage` per item in order with premultiplied source-over at the
-//! working precision (amendment 10: float paint as the engine's own pass over
-//! Vello's coverage).
+//! fill or stroke of a path in device pixels with one paint. The engine
+//! covers every item exactly into its own cell of an `r32float` atlas
+//! ([`AtlasLayout`], `pm_render::coverage`) and composites `paint ×
+//! coverage` per item in order with premultiplied source-over at the
+//! working precision.
 
 use kurbo::{Affine, BezPath, Cap, Join, Rect, Shape, Stroke};
 
@@ -18,7 +16,7 @@ use crate::shape::{ShapeGeometry, StrokePaint};
 
 /// Largest distance, in device pixels, between an item's curves and the
 /// line segments the coverage backends rasterize.
-pub const FLATTEN_TOLERANCE: f64 = 1.0 / 256.0;
+pub const FLATTEN_TOLERANCE: f64 = 1e-3;
 
 /// Fill rule of a filled item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -85,15 +83,13 @@ impl CoverageItem {
     /// flattened, all within [`FLATTEN_TOLERANCE`]; then the fill rule is
     /// resolved into contours that do not overlap.
     ///
-    /// Both coverage backends rasterize this outline, so their results
-    /// differ only by their area arithmetic. Left to themselves they flatten
-    /// curves with a quarter-pixel tolerance, which erodes every curved edge
-    /// by about 0.1 px (measured: a circle of radius 50 lost 42 px², 0.5% of
-    /// its area). And area coverage sums the winding number over a pixel
-    /// before applying the fill rule, so where overlapping pieces (a
-    /// stroke's inner join through its pivot, a self-intersecting fill)
-    /// meet an edge inside one pixel it covers too much: the inner corner
-    /// of a stroked rectangle drew 1 where it is 3/4.
+    /// Flattening within 10⁻³ px moves an edge by less than that (chords
+    /// lie inside convex curves: a coarse tolerance erodes curved edges).
+    /// Area coverage sums the winding number over a pixel before the fill
+    /// rule, so where overlapping pieces (a stroke's inner join through its
+    /// pivot, a self-intersecting fill) meet an edge inside one pixel it
+    /// covers too much: the inner corner of a stroked rectangle drew 1
+    /// where it is 3/4. Resolving the rule first leaves nothing to sum.
     pub fn device_outline(&self) -> BezPath {
         let (flat, rule) = self.flattened();
         resolve(&flat, rule)
@@ -422,7 +418,7 @@ impl AtlasLayout {
         ))
     }
 
-    /// Bytes of 8-bit RGBA coverage pages.
+    /// Bytes of the `r32float` coverage pages.
     pub fn bytes(&self) -> u64 {
         self.pages
             .iter()

@@ -11,29 +11,22 @@ publish.workspace = true
 # Deterministic geometry digest over generated cases, used to check that
 # native and wasm32 builds produce bit-identical output (see tests/wasm/).
 conformance = []
-# The rendering side (docs/engine/vector.md): the Canvas2D-compatible
-# rasterizer of compat level 1, the scene model, the vello_cpu coverage
-# backend, and SVG through usvg (text off) with filters through resvg.
-# Off for pm-eval and pm-wasm, which need geometry only.
-render = ["dep:pm-text", "dep:i_overlay", "usvg/text", "usvg/system-fonts", "dep:peniko", "dep:vello_cpu", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
-# Vello's GPU compute coverage backend on the engine's wgpu device.
-gpu = ["render", "dep:vello", "dep:wgpu"]
+# The rendering side (docs/engine/vector.md): coverage scenes, glyph paths,
+# and SVG through usvg with filters through resvg. Off for pm-eval and
+# pm-wasm, which need geometry only.
+render = ["dep:pm-text", "dep:i_overlay", "usvg/text", "usvg/system-fonts", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
 
 [dependencies]
 pm-text = { path = "../pm-text", default-features = false, features = ["render"], optional = true }
 kurbo = "0.13.1"
 libm.workspace = true
 ryu-js.workspace = true
-peniko = { version = "0.6.1", optional = true }
-vello_cpu = { version = "0.3", default-features = false, features = ["std", "u8_pipeline", "f32_pipeline"], optional = true }
 usvg = { version = "0.48.1", default-features = false, optional = true }
 resvg = { version = "0.48.1", default-features = false, features = ["raster-images"], optional = true }
 tiny-skia = { version = "0.12", optional = true }
 # Resolves overlapping outline pieces (stroke joins, self-intersecting
 # fills) into disjoint contours before area coverage.
 i_overlay = { version = "9.1", optional = true }
-vello = { version = "0.11", default-features = false, features = ["wgpu"], optional = true }
-wgpu = { version = "30", default-features = false, features = ["metal", "wgsl"], optional = true }
 
 [dev-dependencies]
 pm-text = { path = "../pm-text", default-features = false, features = ["render", "system"] }

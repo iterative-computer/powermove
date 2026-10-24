@@ -1,7 +1,6 @@
 //! Vector layers (plan section 10; docs/engine/vector.md): shapes and
 //! solids at output resolution with analytic edges whatever their `compat`
-//! level, Vello on the GPU against the `vello_cpu` fallback, the solid
-//! `radius`, and the vector cache's memory accounting.
+//! level, the solid `radius`, and the vector cache's memory accounting.
 //!
 //! References are computed here, not captured: each pixel's exact coverage
 //! of the transformed geometry, estimated with 16 × 16 samples.
@@ -10,7 +9,6 @@ mod support;
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
-use pm_render::vector::cache::CoverageBackend;
 use pm_render::{Feature, MapResolver, RenderRequest, Renderer, unsupported_with_media};
 use serde_json::{Value, json};
 use support::doc::*;
@@ -196,55 +194,6 @@ fn shape_edges_are_analytic_at_every_compat_level() {
         assert!(e.psnr_db >= 40.0, "{name}: edges are analytic ({:.1} dB)", e.psnr_db);
         assert!(e.max_any <= 0.03, "{name}: largest error {}", e.max_any);
     }
-}
-
-#[test]
-fn gpu_and_cpu_coverage_agree() {
-    let mut renderer = Renderer::headless().unwrap();
-    let layers = || {
-        vec![
-            placed(
-                "star",
-                "shape",
-                json!({ "shape": "star", "w": 180, "h": 180, "points": 9, "color": "#4C8DFF", "stroke": 6, "strokeColor": "#F2C14E" }),
-                2,
-                -23.0,
-                110.0,
-            ),
-            placed(
-                "rect",
-                "shape",
-                json!({ "shape": "rect", "w": 120, "h": 70, "radius": 18, "color": "#3FCF8E", "stroke": 0 }),
-                2,
-                41.0,
-                90.0,
-            ),
-        ]
-    };
-    renderer.set_vector_backend(CoverageBackend::Auto);
-    let gpu = render_alpha(&mut renderer, layers());
-    assert_eq!(
-        renderer.last_vector_backend(),
-        Some("vello"),
-        "Vello draws on the GPU"
-    );
-    renderer.set_vector_backend(CoverageBackend::Cpu);
-    let cpu = render_alpha(&mut renderer, layers());
-    assert_eq!(renderer.last_vector_backend(), Some("vello_cpu"));
-    let (mut max, mut sum, mut differing) = (0.0f32, 0.0f64, 0usize);
-    for (a, b) in gpu.iter().zip(&cpu) {
-        let e = (a - b).abs();
-        max = max.max(e);
-        sum += f64::from(e);
-        differing += usize::from(e > 0.0);
-    }
-    let mean = sum / gpu.len() as f64;
-    eprintln!("Vello GPU vs vello_cpu: {differing} pixels differ, max {max:.4}, mean {mean:.6}");
-    assert!(
-        max <= 3.0 / 255.0 + 1e-6,
-        "coverage agrees within 3/255 (max {max})"
-    );
-    assert!(mean <= 1e-3, "mean difference {mean}");
 }
 
 /// SOLID-RADIUS-1: the inspector edits and animates a solid's corner
