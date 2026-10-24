@@ -30,6 +30,23 @@ function audioLayer(): any {
 }
 
 describe('legacy audio install', () => {
+  it('starts a strip before zero at the matching source offset and ends on time', () => {
+    const PM = audioRegistry();
+    const layer = { ...audioLayer(), from: -3, dur: 5, d: { asset: 'asset-1', trim: 1 } };
+    const asset = { dur: 10 };
+    expect(PM.Audio.plan(layer, asset, 0, 10)).toMatchObject({
+      start: 0, end: 2, duration: 2, localStart: 3, sourceOffset: 4,
+    });
+    expect(PM.Audio.plan(layer, asset, 2, 10)).toBeNull();
+  });
+
+  it('does not schedule audio strips that end before the composition begins', () => {
+    const layer = { ...audioLayer(), from: -5, dur: 4 };
+    const PM = audioRegistry({ layers: [layer] });
+    expect(PM.Audio.hasAudibleLayers()).toBe(false);
+    expect(PM.Audio.plan(layer, { dur: 10 }, 0, 10)).toBeNull();
+  });
+
   it('limits a highly zoomed waveform to visible columns instead of drawing its offscreen tail', () => {
     const PM = audioRegistry();
     const layer = audioLayer(); layer.dur = 600;
@@ -124,4 +141,16 @@ describe('legacy audio install', () => {
     expect(PM.Audio.gainAt(layer, 2)).toBeCloseTo(4 / 3);
     expect(PM.Audio.gainAt(layer, 4)).toBe(0);
   });
+});
+
+it('exposes the cached index playhead for native exports until today invalidates it', () => {
+  const PM = audioRegistry();
+  PM.time = 2;
+  expect(PM.Audio.indexPlayhead()).toBe(2);
+  PM.time = 9;
+  expect(PM.Audio.indexPlayhead()).toBe(2);
+  PM.bus.emit('layers');
+  expect(PM.Audio.indexPlayhead()).toBe(9);
+  PM.Audio.destroy();
+  vi.unstubAllGlobals();
 });

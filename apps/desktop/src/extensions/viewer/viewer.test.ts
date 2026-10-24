@@ -57,7 +57,7 @@ function viewerApi(configure?: (api: PowermoveAPI) => void): PowermoveAPI {
       ],
     },
     model: { TYPE_META: { shape: {}, audio: { pickable: false } }, layer: (id: string) => project.layers.find((layer: any) => layer.id === id), curComp: () => project },
-    render: { gl: { bounds: () => null, pick: () => null, context: null, previewViewport: null } },
+    render: { gl: { bounds: () => null, pick: () => null, context: null, canvas: null, previewViewport: null } },
     transport: { time: () => 0, playing: () => false, quality: 1, perf: { auto: false }, previewResolution: 1, invalidate() {} },
     util: { clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)) },
     events: { on: () => ({ dispose() {} }) },
@@ -127,6 +127,27 @@ describe('viewer runtime', () => {
     stageRead.mockClear(); frameRead.mockClear(); context.clearRect!.mockClear();
     return { api, runtime, rect, handlers, frames, context, stageRead, frameRead, flush };
   }
+
+  it('coalesces project-tab notification bursts into one stage measurement', () => {
+    const h = overlayHarness();
+    for (let n = 0; n < 8; n++) {
+      h.handlers.get('project:changed')?.({ kind: 'structure' });
+      h.handlers.get('layout')?.();
+    }
+    expect(h.stageRead).not.toHaveBeenCalled();
+    h.flush();
+    expect(h.stageRead).toHaveBeenCalledOnce();
+    h.runtime.dispose();
+  });
+
+  it('does not measure a parked viewer or run deferred layout after disposal', () => {
+    const h = overlayHarness();
+    h.runtime.stage.closest = () => ({});
+    h.handlers.get('project:changed')?.({ kind: 'structure' }); h.flush();
+    expect(h.stageRead).not.toHaveBeenCalled();
+    h.handlers.get('layout')?.(); h.runtime.dispose(); h.flush();
+    expect(h.stageRead).not.toHaveBeenCalled();
+  });
 
   it('paints playback overlays once per frame without forcing DOM layout', () => {
     const h = overlayHarness();
@@ -534,6 +555,21 @@ describe('viewer runtime', () => {
     const space3d = testSpace3d(api);
     expect(editableTextAtPoint(api, 500, 350, 0, space3d)).toBe(selected);
     expect(editableTextAtPoint(api, 800, 350, 0, space3d)).toBeNull();
+  });
+
+  it.each(['selected', 'picked'])('refuses %s text under a locked group and restores editing after unlocking', route => {
+    const layer = { id: 'text', type: 'text', lock: false };
+    const group = { id: 'outer', lock: true };
+    const api = viewerApi();
+    api.selection.layers = () => route === 'selected' ? [layer.id] : [];
+    api.model.layer = () => layer as any;
+    api.groups.ancestors = () => [group] as any;
+    api.render.gl.pick = () => route === 'picked' ? layer as any : null;
+    api.render.gl.bounds = () => ({ x0: -100, y0: -25, x1: 100, y1: 25 });
+    api.anim.worldMatrix = () => [1, 0, 0, 1, 500, 350];
+    expect(editableTextAtPoint(api, 500, 350, 0, testSpace3d(api))).toBeNull();
+    group.lock = false;
+    expect(editableTextAtPoint(api, 500, 350, 0, testSpace3d(api))).toBe(layer);
   });
 
   it('resizes edge handles on one axis and preserves the opposite midpoint', () => {

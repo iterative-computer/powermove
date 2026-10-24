@@ -52,14 +52,20 @@ describe('kernel effects & transitions', () => {
     expect(() => kernel.registerEffect('ext', effect({ passes: 9 }))).toThrow(/passes/);
     expect(() => kernel.registerEffect('ext', effect({ params: [{ k: 'Bad', label: 'x', def: 0, min: 0, max: 1 }] }))).toThrow(/invalid param key/);
     expect(() => kernel.registerEffect('ext', effect({ frag: 'x'.repeat(64 * 1024 + 1) }))).toThrow(/too large/);
-    expect(() =>
-      kernel.registerEffect('ext', effect({ params: Array.from({ length: 33 }, (_, i) => ({ k: `p${i}`, label: 'x', def: 0, min: 0, max: 1 })) }))
-    ).toThrow(/too many params/);
 
     const handle = kernel.registerEffect('ext', effect());
     expect(kernel.effects.get('wave')?.label).toBe('Wave');
     handle.dispose();
     expect(kernel.effects.list()).toEqual([]);
+  });
+
+  it('registers effects and transitions beyond the former parameter limit', () => {
+    const kernel = createKernel();
+    const params = Array.from({ length: 100 }, (_, i) => ({ k: `p${i}`, label: `Parameter ${i}`, def: 0, min: 0, max: 1 }));
+    kernel.registerEffect('ext', effect({ params }));
+    kernel.registerTransition('ext', { id: 'wipe', label: 'Wipe', params, frag: 'o=vec4(1.);' });
+    expect(kernel.effects.get('wave')?.params).toHaveLength(100);
+    expect(kernel.transitions.get('wipe')?.params).toHaveLength(100);
   });
 
   it('registers transitions with the same validation', () => {

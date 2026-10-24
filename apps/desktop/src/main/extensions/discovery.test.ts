@@ -139,6 +139,33 @@ describe('extension discovery', () => {
     expect(result[0]?.error).toContain(`more than ${MANIFEST_LIMITS.sourceFiles}`);
   });
 
+  it.each([0, 1])('preserves the source-file boundary with %i extra files', async extra => {
+    const root = await temporaryDirectory();
+    const extension = await writeExtension(root, 'boundary-extension');
+    const source = path.join(extension, 'src');
+    await fs.mkdir(source);
+    await fs.mkdir(path.join(source, 'empty-directory'));
+    await Promise.all(
+      Array.from({ length: MANIFEST_LIMITS.sourceFiles - 1 + extra }, (_, index) =>
+        fs.writeFile(path.join(source, `${index}.ts`), '')
+      )
+    );
+    await fs.writeFile(path.join(source, '.hidden.ts'), '');
+    await fs.symlink(path.join(source, '0.ts'), path.join(source, 'linked-source.ts'));
+    await fs.symlink(path.join(source, 'missing.ts'), path.join(source, 'dangling-source.ts'));
+
+    const result = await scanExtensionDirs([{ dir: root, scope: 'user' }]);
+
+    expect(result).toHaveLength(1);
+    if (extra) {
+      expect(result[0]?.manifest).toBeNull();
+      expect(result[0]?.error).toContain(`more than ${MANIFEST_LIMITS.sourceFiles}`);
+    } else {
+      expect(result[0]?.manifest?.id).toBe('boundary-extension');
+      expect(result[0]?.error).toBeUndefined();
+    }
+  });
+
   it('ignores the hidden fork merge base when enforcing the loader source limit', async () => {
     const root = await temporaryDirectory();
     const extension = await writeExtension(root, 'forked-extension', {

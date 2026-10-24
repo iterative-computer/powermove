@@ -33,6 +33,15 @@ undo history) in `ProjectSave.finish` before publishing it.
 - `storage.ts` keeps, per key, the encoded JSON bytes the engine published (a
   `Buffer`, outside the V8 heap) and answers synchronous reads from them. It
   validates keys synchronously, as before.
+- Heavy keys (`project`, `projectHistory`, `projectState`, `projectJournal`,
+  `agentThreads`, `agentAttachment`) are listed at load without being read (main's
+  lazy store). The first read asks the engine (`read`; synchronous reads wait for it
+  with `Atomics.wait`, ceiling 60 s), which migrates a legacy history or quarantines
+  a corrupt file then. Loaded heavy values share a 64 MB budget, least recently read
+  dropped first; open, leased, most-recent-of-kind, and not-yet-written values stay.
+  The engine keeps no session it has not read: a metadata-only `projectState` write
+  for an unread or evicted session reads its stored history from disk first, and is
+  refused if that read fails.
 - `ProjectSave.finish` calls an injected validator; the desktop passes the worker's.
   Backups, the commit journal, `publishFile`, read-only (newer-reader) handling, and
   the `minReaderVersion` stamp are untouched.

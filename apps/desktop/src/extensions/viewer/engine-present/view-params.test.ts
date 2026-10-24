@@ -12,7 +12,9 @@ describe('view parameters', () => {
     expect(previewResolution('0.25')).toBe('quarter');
   });
 
-  it('sends pan only out of fit mode and the 3D override only for 3D compositions', () => {
+  const camera = { view: Array.from({ length: 16 }, (_, i) => (i % 5 === 0 ? 1 : 0)), projection: { kind: 'perspective' as const, fovYDegrees: 40, near: 0.1, far: 100 } };
+
+  it('sends pan only out of fit mode and the 3D override only in the Editor view', () => {
     expect(viewParamsFor({ shown: 0.4, fit: true, pan: [30, 4], previewResolution: 'auto' })).toEqual({
       zoom: 0.4,
       pan: [0, 0],
@@ -20,11 +22,14 @@ describe('view parameters', () => {
       media: 'automatic',
       playEveryFrame: false
     });
-    const flat = viewParamsFor({ shown: 2, fit: false, pan: [30, 4], previewResolution: 1, scene3d: { hasScene: false, shading: 'solid', xray: true } });
+    const flat = viewParamsFor({ shown: 2, fit: false, pan: [30, 4], previewResolution: 1, editorCamera: null });
+    expect(flat).not.toHaveProperty('camera');
     expect(flat).not.toHaveProperty('shading');
     expect(flat.pan).toEqual([30, 4]);
-    const scene = viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', scene3d: { hasScene: true, shading: 'solid', xray: true } });
-    expect(scene).toMatchObject({ camera: null, shading: 'solid', xray: true });
+    const editor = viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: camera });
+    expect(editor).toMatchObject({ camera });
+    expect(editor).not.toHaveProperty('shading');
+    expect(editor).not.toHaveProperty('xray');
   });
 
   it('describes today’s canvas: the whole composition below fit, the crop above', () => {
@@ -42,24 +47,28 @@ describe('view parameters', () => {
     expect(viewParamsFor({ shown: 0.61, fit: false, pan: [0, 0], previewResolution: 'auto', canvas: null })).not.toHaveProperty('canvas');
   });
 
-  it('yields a view override with X-ray only in draft shading', () => {
+  it('yields a view override with the editor camera and full shading, and none in the Camera view', () => {
     const sequencer = new ViewSequencer();
     const base = { composition: 'c', cssWidth: 100, cssHeight: 50, devicePixelRatio: 2, colorSpace: 'srgb' as const, edr: false };
-    const solid = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', scene3d: { hasScene: true, shading: 'solid', xray: true } }) });
-    expect(solid.state.view).toEqual({ camera: null, shading: 'solid', xray: true, localView: [] });
-    const material = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', scene3d: { hasScene: true, shading: 'material', xray: true } }) });
-    expect(material.state.view).toEqual({ camera: null, shading: 'material', xray: false, localView: [] });
-    expect(material.state.viewSeq).toBe(2);
+    const editor = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: camera }) });
+    expect(editor.state.view).toEqual({ camera, shading: 'rendered', xray: false, localView: [] });
+    const composition = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: null }) });
+    expect(composition.state.view).toBeNull();
+    expect(composition.state.viewSeq).toBe(2);
   });
 
-  it('carries the editor camera and Local View of the 3D viewport', () => {
+  it('carries a changed editor projection and clears the override in Camera view', () => {
     const sequencer = new ViewSequencer();
     const base = { composition: 'c', cssWidth: 100, cssHeight: 50, devicePixelRatio: 2, colorSpace: 'srgb' as const, edr: false };
     const camera = { view: Array.from({ length: 16 }, (_, i) => (i % 5 === 0 ? 1 : 0)), projection: { kind: 'perspective' as const, fovYDegrees: 50, near: 0.01, far: 1000 } };
-    const editor = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', scene3d: { hasScene: true, shading: 'solid', xray: false, camera, localView: ['a', 'b'] } }) });
-    expect(editor.state.view).toEqual({ camera, shading: 'solid', xray: false, localView: ['a', 'b'] });
-    const back = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', scene3d: { hasScene: true, shading: 'solid', xray: false, camera: null, localView: null } }) });
-    expect(back.state.view).toEqual({ camera: null, shading: 'solid', xray: false, localView: [] });
+    const editor = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: camera }) });
+    expect(editor.state.view).toEqual({ camera, shading: 'rendered', xray: false, localView: [] });
+    const changedCamera = { ...camera, projection: { ...camera.projection, fovYDegrees: 65 } };
+    const changed = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: changedCamera }) });
+    expect(changed.state.view?.camera).toEqual(changedCamera);
+    expect(changed.changed).toBe(true);
+    const back = sequencer.next({ ...base, ...viewParamsFor({ shown: 1, fit: true, pan: [0, 0], previewResolution: 'auto', editorCamera: null }) });
+    expect(back.state.view).toBeNull();
     expect(back.changed).toBe(true);
   });
 });

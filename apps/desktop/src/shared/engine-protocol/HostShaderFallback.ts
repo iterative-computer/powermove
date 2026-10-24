@@ -5,8 +5,9 @@ import type { ShaderFallbackRequest } from "./ShaderFallbackRequest";
 /**
  * Job engine → host (contract 14): run `request` in a window's runner.
  * `area` is a `cache {scratch}` handle of the job's session; `textures`
- * (one file per texture) and `output` name files in it: raw binary16 RGBA,
- * little-endian, rows in GL order, `width × height × 8` bytes. The host
+ * (one file per texture) and `output` name files in it: raw binary16 RGBA
+ * at 8/16 or binary32 RGBA at 32, little-endian, rows in GL order,
+ * `width × height × (8 or 16)` bytes. The host
  * answers `ack` once `output` is written, or an error: `shaderCompile`
  * (WebGL refuses the program), `watchdogTimeout` (its draw passed the
  * runner's deadline), `unsupported` (no runner is available).

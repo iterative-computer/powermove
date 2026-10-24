@@ -180,6 +180,16 @@ pub struct Placed {
     pub level2: Option<crate::sampling::Sampling>,
 }
 
+/// A compatibility raster drawn as a source (identity: the raster itself).
+#[derive(Debug, Clone)]
+pub struct CompatDraw(pub std::sync::Arc<crate::compat::CompatRaster>);
+
+impl PartialEq for CompatDraw {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Source {
     Image {
@@ -218,6 +228,9 @@ pub enum Source {
     Shader(Box<crate::shader_layers::ShaderSource>),
     /// A text or captions raster (`crate::text`).
     Text(Box<crate::text::TextPlan>),
+    /// A raster the document's renderer drew for the layer (a `raster`
+    /// override's result; `crate::compat`).
+    Compat(CompatDraw),
     /// Motion-blur samples accumulated with additive blending into a
     /// transparent target in the parent's pixel space (`crate::motion`).
     Accumulate(Box<CompPlan>),
@@ -267,6 +280,12 @@ pub struct Build<'r> {
     /// (each boundary group is a pass), by the layer list's address and
     /// length (the document is borrowed for the whole build).
     passes: Vec<((usize, usize), std::sync::Arc<PassFacts>)>,
+    /// The session's compatibility rasters (`crate::compat`): layers a
+    /// producer draws, and what the frame still needs from it.
+    compat: Option<&'r dyn crate::compat::CompatRasters>,
+    pub compat_missing: Vec<crate::compat::CompatNeed>,
+    /// [`BuildOptions::preview`].
+    preview: Option<crate::compat_crop::PreviewWindow>,
     /// Layer draws kept from the last frame (`crate::reuse`): the
     /// interactive viewer's renders only.
     pub(crate) reuse: Option<&'r mut crate::reuse::DrawReuse>,
@@ -301,6 +320,10 @@ pub struct BuildOptions {
     pub shader_fallback: bool,
     /// The end-of-clip padding of video sources ([`VideoEnd`]).
     pub video_end: VideoEnd,
+    /// The viewer's visible window when this is a viewer frame of the open
+    /// root composition (today's preview source clipping, which a `raster`
+    /// override sees as its `crop` argument: `crate::compat_crop`).
+    pub preview: Option<crate::compat_crop::PreviewWindow>,
     /// The top level's output origin
     /// ([`RenderRequest::origin`](crate::RenderRequest::origin)).
     pub origin: Option<(f64, f64)>,
@@ -340,6 +363,7 @@ pub fn build<'r>(
             video_end,
             ..BuildOptions::default()
         },
+        None,
     )
 }
 
@@ -370,6 +394,7 @@ pub fn build_with_effects<'r>(
         crate::scene3d::Options3d::default(),
         None,
         BuildOptions::default(),
+        None,
     )
 }
 
@@ -391,11 +416,12 @@ pub fn build_with<'r>(
     options3d: crate::scene3d::Options3d,
     text: Option<&'r mut crate::text::TextContext>,
     options: BuildOptions,
+    compat: Option<&'r dyn crate::compat::CompatRasters>,
 ) -> (CompPlan, Build<'r>) {
     let blender = crate::blender::PlanState::new(options3d.blender.clone());
     build_blender(
         ev, root_comp, project, time, width, height, scale, assets, effects, options3d, text,
-        options, blender, None,
+        options, blender, compat, None,
     )
 }
 
@@ -416,6 +442,7 @@ pub(crate) fn build_blender<'r>(
     text: Option<&'r mut crate::text::TextContext>,
     options: BuildOptions,
     blender: crate::blender::PlanState,
+    compat: Option<&'r dyn crate::compat::CompatRasters>,
     reuse: Option<&'r mut crate::reuse::DrawReuse>,
 ) -> (CompPlan, Build<'r>) {
     let video_padding = video_padding(options.video_end, root_comp);
@@ -454,6 +481,9 @@ pub(crate) fn build_blender<'r>(
         video_padding,
         origin: options.origin.unwrap_or((0.0, 0.0)),
         passes: Vec::new(),
+        compat,
+        compat_missing: Vec::new(),
+        preview: options.preview,
         reuse,
     };
     let mut scope = Scope::new(ev, root_comp, project);
@@ -1185,6 +1215,9 @@ fn native_content_quad<'d>(
 ) -> JsResult<Option<Quad>> {
     let ty = js::layer_type(layer);
     let comp_id = scope.comp.id().to_string_lossy();
+    if let Some(quad) = compat_quad(scope, b, layer, &ty, time, scale)? {
+        return Ok(quad);
+    }
     let (wf, hf) = (f64::from(width), f64::from(height));
     let d = scope.ev.resolve_content(scope.comp, layer, time)?;
     match ty.as_str() {
@@ -1695,6 +1728,188 @@ fn native_content_quad<'d>(
             Ok(None)
         }
     }
+}
+
+/// A layer a compatibility producer draws (`crate::compat`): the layers
+/// today's compositor rasterizes through `PM.raster` (text, captions, and
+/// shapes, at `continuousRasterScale(scaledWorld(L, T, W, H))`), when the
+/// session has a `raster` override. `None`: drawn natively. `Some(None)`:
+/// nothing is drawn (between caption cues, or still missing: the frame
+/// then needs it).
+fn compat_quad<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    ty: &str,
+    time: f64,
+    scale: (f64, f64),
+) -> JsResult<Option<Option<Quad>>> {
+    use crate::compat::{CompatAnswer, CompatSource};
+    let Some(compat) = b.compat else {
+        return Ok(None);
+    };
+    if !matches!(ty, "text" | "captions" | "shape")
+        || !compat.producing(CompatSource::RasterOverride)
+    {
+        return Ok(None);
+    }
+    // `compat` level 2 layers are the engine's own: no `PM.raster` today.
+    let level2 = node::to_number(node::member(Some(layer), "compat")) >= 2.0
+        || (ty == "shape" && crate::vector::level2(layer));
+    if level2 {
+        return Ok(None);
+    }
+    if ty == "captions" && b.text.as_deref().is_some_and(|t| t.captions_hidden()) {
+        return Ok(Some(None));
+    }
+    let world = scaled_world(scope, layer, time, scale, b.origin)?;
+    let raster_scale = crate::text::continuous_raster_scale(&world);
+    // Today's preview source clipping: the window the compositor passes to
+    // `PM.raster` in a viewer frame, or no raster call at all.
+    let crop = match preview_crop(scope, b, layer, ty, time, scale, raster_scale)? {
+        crate::compat_crop::CropPlan::Outside => return Ok(Some(None)),
+        crate::compat_crop::CropPlan::Solid => return Ok(None),
+        crate::compat_crop::CropPlan::Full => None,
+        crate::compat_crop::CropPlan::Crop(window) => Some(window),
+    };
+    let comp_id = scope.comp.id().to_string_lossy();
+    let id = js::layer_id(layer);
+    match compat.answer(
+        &comp_id,
+        &id,
+        time,
+        raster_scale,
+        CompatSource::RasterOverride,
+        crop,
+    ) {
+        CompatAnswer::Native => Ok(None),
+        CompatAnswer::Raster(raster) => {
+            let [w, h] = raster.size;
+            let [ax, ay] = raster.anchor;
+            let uv = raster.uv;
+            Ok(Some(Some(Quad::Texture {
+                source: Source::Compat(CompatDraw(raster)),
+                w,
+                h,
+                ax,
+                ay,
+                uv,
+            })))
+        }
+        CompatAnswer::Missing => {
+            let need = crate::compat::CompatNeed {
+                composition: comp_id.as_str().into(),
+                layer: id.as_str().into(),
+                time: crate::compat::ticks_of(time),
+                source: CompatSource::RasterOverride,
+                scale: raster_scale,
+                crop,
+            };
+            if !b.compat_missing.contains(&need) {
+                b.compat_missing.push(need);
+            }
+            Ok(Some(None))
+        }
+    }
+}
+
+/// Today's preview source clipping of a layer `PM.raster` draws
+/// (`nativeContentQuad`, `canClipPreviewSources`): only in a viewer frame
+/// of the open root composition, for a plain 2D text or shape layer (no
+/// paths, renderable effects, masks, track matte, or transitions; text
+/// without animators, styles, or typography anchoring). Anything else is
+/// drawn from the whole raster, as today.
+#[allow(clippy::too_many_arguments)]
+fn preview_crop<'d>(
+    scope: &mut Scope<'_, 'd>,
+    b: &mut Build<'_>,
+    layer: &'d Node,
+    ty: &str,
+    time: f64,
+    scale: (f64, f64),
+    raster_scale: f64,
+) -> JsResult<crate::compat_crop::CropPlan> {
+    use crate::compat_crop::{CropPlan, ShapeFacts, TextGeometry};
+    let Some(window) = b.preview else {
+        return Ok(CropPlan::Full);
+    };
+    if !matches!(ty, "text" | "shape")
+        || !(scope.comp.at_root() || scope.comp.is_open_canonical())
+        || b.precomp_depth > 0
+    {
+        return Ok(CropPlan::Full);
+    }
+    let d = node::member(Some(layer), "d");
+    let listed = |n: Option<&Node>, key: &str| {
+        node::member(n, key).is_some_and(|v| match v.kind() {
+            pm_model::NodeKind::Array(items) => !items.is_empty(),
+            _ => false,
+        })
+    };
+    if listed(d, "paths")
+        || listed(Some(layer), "masks")
+        || node::truthy(node::member(Some(layer), "matteSource"))
+        || node::truthy(node::member(Some(layer), "transitionIn"))
+        || node::truthy(node::member(Some(layer), "transitionOut"))
+        || scope.has_renderable_effects(layer, time)?
+    {
+        return Ok(CropPlan::Full);
+    }
+    // A 3D layer's plane: drawn from the whole raster here (see
+    // docs/engine/extensions-compat.md, "Crop").
+    if scope.is_3d_layer(layer)? {
+        return Ok(CropPlan::Full);
+    }
+    let mut visible = vector_world(scope, layer, time, scale, b.origin)?;
+    visible[4] -= window.x;
+    visible[5] -= window.y;
+    if ty == "shape" {
+        let content = scope.ev.resolve_content(scope.comp, layer, time)?;
+        let (shape, _) = crate::vector::shape_content(&content);
+        let color = js::string(js::get(&content, "color"));
+        let hex6 = color.len() == 7
+            && color.starts_with('#')
+            && color[1..].bytes().all(|c| c.is_ascii_hexdigit());
+        let plain_rect = matches!(js::get(&content, "shape"), pm_eval::JsValue::String(s) if s.to_string_lossy() == "rect")
+            && hex6;
+        let facts = ShapeFacts {
+            w: shape.w,
+            h: shape.h,
+            stroke: shape.stroke,
+            plain_rect,
+            corner_inset: pm_vector::corner::corner_inset(&shape.corners()),
+        };
+        return Ok(crate::compat_crop::shape_plan(
+            &facts,
+            raster_scale,
+            &visible,
+            window.width,
+            window.height,
+        ));
+    }
+    if listed(d, "animators")
+        || listed(d, "styles")
+        || node::truthy(node::member(d, "fontAnchorBounds"))
+    {
+        return Ok(CropPlan::Full);
+    }
+    let Some(fonts) = b.text.as_deref_mut().and_then(|t| t.fonts.as_deref_mut()) else {
+        return Ok(CropPlan::Full);
+    };
+    let placed = scope.text_raster(layer, time, fonts.measure())?;
+    let g = TextGeometry::at(
+        placed.w,
+        placed.h,
+        placed.anchor_x,
+        placed.anchor_y,
+        raster_scale,
+    );
+    Ok(crate::compat_crop::text_plan(
+        &g,
+        &visible,
+        window.width,
+        window.height,
+    ))
 }
 
 /// The quad of a planned shader or extension fragment layer: `{tex, w, h,

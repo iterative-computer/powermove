@@ -56,7 +56,7 @@ const resolveMedia = (name) => [path.join(fixtures, name), path.join(corpus, 'ge
 const profile = mkdtempSync(path.join(os.tmpdir(), 'pm-gate-switch-'));
 
 async function launch(flag) {
-  const env = { ...process.env, POWERMOVE_USER_DATA: profile, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_NEW_ENGINE: flag ? '1' : '0', POWERMOVE_FAKE_CHATGPT_STATUS: 'connected', CODEX_BINARY: path.join(desktop, 'src/main/codex/__fixtures__/fake-codex-app-server.sh') };
+  const env = { ...process.env, POWERMOVE_USER_DATA: profile, POWERMOVE_DEVTOOLS: '0', POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DISABLE_RUNTIME_UPDATES: '1', POWERMOVE_NEW_ENGINE: flag ? '1' : '0', POWERMOVE_FAKE_CHATGPT_STATUS: 'connected', CODEX_BINARY: path.join(desktop, 'src/main/codex/__fixtures__/fake-codex-app-server.sh') };
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await _electron.launch({ args: ['.'], cwd: desktop, env });
   await app.evaluate(({ dialog }) => {

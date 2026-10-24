@@ -89,6 +89,9 @@ pub struct Dependencies {
     pub context: ContextReads,
     /// Sorted and without duplicates.
     pub fields: Vec<FieldRead>,
+    /// A host hook (`sample`, `motionPath`) read other layers' channels:
+    /// any document change can change the result.
+    pub document: bool,
 }
 
 impl Dependencies {
@@ -107,6 +110,9 @@ impl Dependencies {
     /// the array's own path.
     pub fn affected_by(&self, root: Root, path: &[Step]) -> bool {
         if root == Root::Value && self.context.contains(ContextReads::VALUE) && path.is_empty() {
+            return true;
+        }
+        if self.document && root != Root::Value {
             return true;
         }
         self.fields

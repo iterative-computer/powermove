@@ -76,6 +76,8 @@ import { extensionLoad } from '../runtime/extension-load';
 import { IMPORT_DEFAULTS_SERVICE, validatedImportDefaults } from './import-defaults';
 import { bridge as hostBridge } from './bridge';
 import { PANEL_FRAME, type PanelFrame } from './panel-frame';
+import { ownWorkspaceAppearance, type WorkspaceAppearanceBackend } from './workspace-appearance';
+import { ownThemeState, type ThemeStateBackend } from './theme-state';
 
 /* Extensions never see the raw bridge (bridge.ts); haptics is the one bit a
    built-in (the viewer's snapping) needs, so it goes through the API. */
@@ -130,6 +132,8 @@ export interface HostDeps {
   uiState?: UIStateAPI;
   dnd?: DndAPI;
   workspace?: WorkspaceAPI;
+  workspaceAppearance?: WorkspaceAppearanceBackend;
+  themeAppearance?: ThemeStateBackend;
   util?: UtilAPI;
   ease?: EaseAPI;
   space3d?: Space3DAPI;
@@ -194,6 +198,9 @@ export function createExtensionAPI(
   const disposers: Array<() => void> = [];
   let disposed = false;
   let activating = false;
+  const workspace = deps.workspace && record.scope !== 'builtin'
+    ? ownWorkspaceAppearance(deps.workspace, id, deps.workspaceAppearance) : null;
+  const themeState = record.scope !== 'builtin' ? ownThemeState(kernel, id, deps.themeAppearance) : null;
 
   const log = (level: 'info' | 'warn' | 'error', message: string, ...data: unknown[]): void => {
     const line = `[ext:${id}] ${message}`;
@@ -252,6 +259,13 @@ export function createExtensionAPI(
     };
     disposers.push(release);
     return { dispose: release };
+  };
+
+  // Dropping an already registered contribution still emits registry changes.
+  // Retired APIs must stop before registration can rebuild live UI or replace it.
+  const contribute = (register: () => Disposable): Disposable => {
+    if (disposed) return { dispose() {} };
+    return collect(register());
   };
 
   /* Reactive reads: inside a template, $derived or $effect a read subscribes
@@ -323,7 +337,7 @@ export function createExtensionAPI(
         );
         collect({ dispose: release });
       }
-      return collect(kernel.panels.register(id, guarded));
+      return contribute(() => kernel.panels.register(id, guarded));
     },
     /* The backend merges kernel ids with panels the legacy PM still owns. */
     list: () => deps.panelsBackend.list(),
@@ -364,8 +378,10 @@ export function createExtensionAPI(
       }, `panel ${def.id} view`, undefined)
     };
     Object.defineProperty(panel, PANEL_FRAME, { value: { extensionId: id }, enumerable: true });
-    const registration = kernel.panels.register(id, panel);
-    return collect({ dispose() { registration.dispose(); release(); } });
+    return contribute(() => {
+      const registration = kernel.panels.register(id, panel);
+      return { dispose() { registration.dispose(); release(); } };
+    });
   }
 
   /* ── commands ──────────────────────────────────────────── */
@@ -382,7 +398,7 @@ export function createExtensionAPI(
         run: guard((...args: unknown[]) => run(...args), `command ${def.id}`, undefined),
         ...(settled ? { when: settled.when } : {})
       };
-      return collect(kernel.commands.register(id, settled ? withWhenCheck(guarded, settled.check) : guarded));
+      return contribute(() => kernel.commands.register(id, settled ? withWhenCheck(guarded, settled.check) : guarded));
     },
     run: (commandId, ...args) => runKernelCommand(kernel, commandId, args),
     has: (commandId) => kernel.commands.has(commandId),
@@ -393,8 +409,8 @@ export function createExtensionAPI(
   /* ── keybindings ───────────────────────────────────────── */
 
   const keybindings: KeybindingsAPI = {
-    bind: (def: KeybindingDefinition) => collect(kernel.bind(id, def)),
-    unbind: (key, all) => kernel.unbind(id, key, all),
+    bind: (def: KeybindingDefinition) => contribute(() => kernel.bind(id, def)),
+    unbind: (key, all) => { if (!disposed) kernel.unbind(id, key, all); },
     list: () => kernel.listBindings(),
     chordOf: (event) => chordOfEvent(event)
   };
@@ -402,19 +418,19 @@ export function createExtensionAPI(
   /* ── effects & transitions ─────────────────────────────── */
 
   const effects: EffectsAPI = {
-    register: (def: EffectDefinition) => collect(kernel.registerEffect(id, def)),
+    register: (def: EffectDefinition) => contribute(() => kernel.registerEffect(id, def)),
     list: () => kernel.effects.list(),
     get: (effectId) => kernel.effects.get(effectId)
   };
 
   const transitions: TransitionsAPI = {
-    register: (def: TransitionDefinition) => collect(kernel.registerTransition(id, def)),
+    register: (def: TransitionDefinition) => contribute(() => kernel.registerTransition(id, def)),
     list: () => kernel.transitions.list(),
     get: (transitionId) => kernel.transitions.get(transitionId)
   };
 
   const layers: ExtensionLayersAPI = {
-    register: (def: ExtensionLayerDefinition) => collect(kernel.registerLayerType(id, def)),
+    register: (def: ExtensionLayerDefinition) => contribute(() => kernel.registerLayerType(id, def)),
     list: () => kernel.layerTypes.list(),
     get: (definitionId) => kernel.layerTypes.get(definitionId)
   };
@@ -427,13 +443,13 @@ export function createExtensionAPI(
       for (const key of Object.keys(def.tokens ?? {})) {
         if (!key.startsWith('--')) throw new Error(`[ext:${id}] theme "${def.id}" token "${key}" must start with --`);
       }
-      return collect(kernel.themes.register(id, def));
+      return contribute(() => kernel.themes.register(id, def));
     },
-    activate: (themeId) => kernel.activateTheme(themeId),
+    activate: (themeId) => themeState ? themeState.activate(themeId) : kernel.activateTheme(themeId),
     active: reactive(reads.theme, () => kernel.theme.activeId),
     list: () => kernel.themes.list(),
     scheme: reactive(reads.theme, () => kernel.theme.scheme),
-    setScheme: (mode) => kernel.setScheme(mode)
+    setScheme: (mode) => themeState ? themeState.setScheme(mode) : kernel.setScheme(mode)
   };
 
   /* ── palette, menus, status ────────────────────────────── */
@@ -442,7 +458,7 @@ export function createExtensionAPI(
     registerProvider(provider: PaletteProvider) {
       if (typeof provider !== 'function') throw new Error(`[ext:${id}] palette.registerProvider requires a function`);
       const guarded = guard(polled((query: string) => provider(query) ?? []), 'palette provider', [] as PaletteEntry[]);
-      return collect(kernel.registerPaletteProvider(id, guarded));
+      return contribute(() => kernel.registerPaletteProvider(id, guarded));
     },
     open: (query) => deps.paletteOpen(query)
   };
@@ -452,7 +468,7 @@ export function createExtensionAPI(
       if (typeof items !== 'function') throw new Error(`[ext:${id}] menus.contribute requires a function`);
       const guarded = guard(polled((ctx: Record<string, unknown>) => items(ctx) ?? []), `menu ${location}`, [] as MenuContribution[]);
       const async = (items as { [ASYNC_CONTRIBUTOR]?: boolean })[ASYNC_CONTRIBUTOR] === true;
-      return collect(kernel.contributeMenu(id, location, guarded, { async }));
+      return contribute(() => kernel.contributeMenu(id, location, guarded, { async }));
     },
     collect: (location, ctx) => kernel.collectMenu(location, ctx),
     gather: async (location, ctx) => kernel.gatherMenu(location, ctx)
@@ -469,7 +485,7 @@ export function createExtensionAPI(
         text: guard(polled((): string | null => text()), `status ${item.id}`, null),
         ...(typeof onClick === 'function' ? { onClick: guard(() => onClick(), `status ${item.id} click`, undefined) } : {})
       };
-      return collect(kernel.status.register(id, guarded));
+      return contribute(() => kernel.status.register(id, guarded));
     },
     list: () => kernel.status.list()
   };
@@ -499,13 +515,13 @@ export function createExtensionAPI(
   const events: EventsAPI = {
     on(event, fn) {
       const guarded = guard((payload: never) => (fn as (value: never) => void)(payload), `event ${String(event)}`, undefined);
-      return collect(kernel.events.on(event, guarded as never, id));
+      return contribute(() => kernel.events.on(event, guarded as never, id));
     },
     emit: (event, payload) => kernel.events.emit(event, payload)
   };
 
   const services: ServicesAPI = {
-    register: <T,>(name: string, implementation: T) => collect(kernel.services.register(name, implementation)),
+    register: <T,>(name: string, implementation: T) => contribute(() => kernel.services.register(name, implementation)),
     get: <T,>(name: string) => kernel.services.get<T>(name)
   };
 
@@ -536,7 +552,7 @@ export function createExtensionAPI(
       ...deps.media as MediaAPI,
       get fonts() { return deps.media?.fonts as MediaAPI['fonts']; },
       registerImportDefaults(defaults) {
-        return collect(kernel.services.register(IMPORT_DEFAULTS_SERVICE, validatedImportDefaults(defaults)));
+        return contribute(() => kernel.services.register(IMPORT_DEFAULTS_SERVICE, validatedImportDefaults(defaults)));
       },
       getImportDefaults() {
         const defaults = kernel.services.get<import('./api').ImportDefaults>(IMPORT_DEFAULTS_SERVICE);
@@ -553,31 +569,33 @@ export function createExtensionAPI(
         const build = section.build;
         const when = section.when;
         const mounts = new Set<Disposable>();
-        const registration = kernel.inspectorSections.register(id, {
-          ...section,
-          after: section.after ?? 'transform',
-          ...(when ? { when: guard(polled(when), `inspector ${section.id} visibility`, false) } : {}),
-          build: guard((target, context) => {
-            let cleanup: ReturnType<typeof build>;
-            try { cleanup = build(target, context); }
-            catch (error) { target.replaceChildren(); throw error; }
-            const release = guard(() => {
-              try {
-                if (typeof cleanup === 'function') cleanup();
-                else cleanup?.dispose();
-              } finally { target.replaceChildren(); }
-            }, 'onDispose handler', undefined);
-            const mount = { dispose() {
-              if (mounts.delete(mount)) release();
-            } };
-            mounts.add(mount);
-            return mount;
-          }, `inspector ${section.id}`, undefined)
+        return contribute(() => {
+          const registration = kernel.inspectorSections.register(id, {
+            ...section,
+            after: section.after ?? 'transform',
+            ...(when ? { when: guard(polled(when), `inspector ${section.id} visibility`, false) } : {}),
+            build: guard((target, context) => {
+              let cleanup: ReturnType<typeof build>;
+              try { cleanup = build(target, context); }
+              catch (error) { target.replaceChildren(); throw error; }
+              const release = guard(() => {
+                try {
+                  if (typeof cleanup === 'function') cleanup();
+                  else cleanup?.dispose();
+                } finally { target.replaceChildren(); }
+              }, 'onDispose handler', undefined);
+              const mount = { dispose() {
+                if (mounts.delete(mount)) release();
+              } };
+              mounts.add(mount);
+              return mount;
+            }, `inspector ${section.id}`, undefined)
+          });
+          return { dispose() {
+            registration.dispose();
+            for (const mount of [...mounts]) mount.dispose();
+          } };
         });
-        return collect({ dispose() {
-          registration.dispose();
-          for (const mount of [...mounts]) mount.dispose();
-        } });
       },
       sections: () => kernel.inspectorSections.list()
     },
@@ -585,7 +603,7 @@ export function createExtensionAPI(
     uiState: deps.uiState as UIStateAPI,
     ui: extensionUI,
     dnd: deps.dnd as DndAPI,
-    workspace: deps.workspace as WorkspaceAPI,
+    workspace: workspace?.api ?? deps.workspace as WorkspaceAPI,
     util: deps.util as UtilAPI,
     ease: deps.ease as EaseAPI,
     space3d: deps.space3d as Space3DAPI,
@@ -625,6 +643,9 @@ export function createExtensionAPI(
           log('error', 'disposer failed', error);
         }
       }
+      try { workspace?.dispose(); }
+      catch (error) { log('error', 'workspace cleanup failed', error); }
+      themeState?.dispose();
       kernel.disposeOwner(id);
     }
   };

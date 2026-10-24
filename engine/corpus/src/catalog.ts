@@ -4,7 +4,7 @@
  * definitions the app registers. Nothing here is copied by hand except where a
  * module cannot be imported outside the renderer (shader presets, see below).
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -17,23 +17,26 @@ export const fixturesDir = path.join(desktopRoot, 'e2e/fixtures');
 // The inspector's text-animator module imports pure text-animation helpers
 // through the `powermove` alias that Vite maps to the editor helpers. Load a
 // copy whose alias points straight at the text-animation module it re-exports.
-function aliasedModule(file: string): string {
+async function aliasedModule(file: string): Promise<any> {
   const source = readFileSync(file, 'utf8');
   const target = path.join(rendererSrc, 'legacy/core/text-animation.ts');
   const rewritten = source.replace(/from 'powermove'/g, `from ${JSON.stringify(target)}`);
   if (rewritten === source) throw new Error(`${file} no longer imports from 'powermove'`);
-  const dir = path.join(tmpdir(), 'powermove-engine-corpus');
-  mkdirSync(dir, { recursive: true });
-  const out = path.join(dir, path.basename(file));
-  writeFileSync(out, rewritten);
-  return out;
+  const dir = mkdtempSync(path.join(tmpdir(), 'powermove-engine-corpus-'));
+  try {
+    const out = path.join(dir, path.basename(file));
+    writeFileSync(out, rewritten);
+    return await import(out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 const { EFFECTS } = await import(path.join(desktopSrc, 'extensions/effects-basic/effects.ts'));
 const { BUILTIN_TRANSITIONS } = await import(path.join(desktopSrc, 'extensions/transitions-basic/transitions.ts'));
 const { STUDIO_CUBE } = await import(path.join(desktopSrc, 'extensions/layers-3d/studio-cube.ts'));
 const { OBJ_MODEL } = await import(path.join(desktopSrc, 'extensions/layers-3d/obj-model.ts'));
-const animators = await import(aliasedModule(path.join(desktopSrc, 'extensions/inspector/text-animators.ts')));
+const animators = await aliasedModule(path.join(desktopSrc, 'extensions/inspector/text-animators.ts'));
 const schema3d = await import(path.join(rendererSrc, 'core/scene3d/schema.ts'));
 const layers3d = await import(path.join(rendererSrc, 'core/scene3d/layers.ts'));
 const captions = await import(path.join(rendererSrc, 'captions/model.ts'));
@@ -138,7 +141,7 @@ export function shaderPresets(): Record<string, string> {
  */
 export const EXTENSION_EFFECTS: Record<string, { extension: string; params: string[] }> = {
   typewriter: {
-    extension: 'typewriter-effect',
+    extension: 'compat-typewriter',
     params: ['progress', 'cursor', 'cursorWidth', 'cursorHeight', 'cursorOffsetX', 'cursorOffsetY', 'cursorRound', 'blinkRate',
       'gradStart', 'gradMid', 'gradEnd', 'gradMidPos', 'gradAngle', 'gradOffset', 'gradCycle'],
   },

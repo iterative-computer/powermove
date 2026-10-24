@@ -105,6 +105,7 @@ const TABLE: Array<[string, KeyboardEventInit, string]> = [
   ['cmd+p shows projects', { key: 'p', metaKey: true }, 'projects'],
   ['cmd+n makes a composition', { key: 'n', metaKey: true }, 'newComposition'],
   ['cmd+alt+n makes a project', { key: 'n', metaKey: true, altKey: true }, 'newProject'],
+  ['cmd+alt+y makes an adjustment layer', { key: 'y', metaKey: true, altKey: true }, 'newAdjustment'],
   ['F9 applies Easy Ease', { key: 'F9' }, 'easyEase'],
   ['shift+F9 applies Easy Ease In', { key: 'F9', shiftKey: true }, 'easyEaseIn'],
   ['cmd+shift+F9 applies Easy Ease Out', { key: 'F9', metaKey: true, shiftKey: true }, 'easyEaseOut'],

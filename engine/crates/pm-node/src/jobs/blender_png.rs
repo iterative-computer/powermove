@@ -191,6 +191,7 @@ impl<P: HostPort + ?Sized> HostBlenderPng<P> {
             scale: 1.0,
             revision: self.revision,
             svg: None,
+            frame: None,
             blender: Some(BlenderPngRequest {
                 asset: asset.to_owned(),
                 content: ContentHash(content),

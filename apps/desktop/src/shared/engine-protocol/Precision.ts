@@ -3,4 +3,4 @@
 /**
  * Intermediate storage precision.
  */
-export type Precision = "float16" | "float32";
+export type Precision = "unorm8" | "float16" | "float32";

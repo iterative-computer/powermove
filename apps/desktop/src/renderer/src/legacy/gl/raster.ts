@@ -12,8 +12,8 @@ import {
 import { fontAnchorOffset } from '../core/font-anchor';
 import { animatedGlyphs, isIdentityGlyph, textAnimationKey, textAnimationState } from '../core/text-animation';
 import { glyphLayout, textSourceLines } from '../core/text-layout';
+import { rasterPaths, pathRasterGeometry, pathValues, groupMatrix } from '../core/vector-paths';
 import { createCaptionRasterizer } from '../../captions/render';
-import { rasterPaths, pathValues, groupMatrix } from '../core/vector-paths';
 import { createVariableFontRenderer, variationEntries, variationSettings } from '../../typography/font-renderer';
 export { variationEntries as textVariationEntries, variationSettings as formatFontVariationSettings } from '../../typography/font-renderer';
 import { resolveContent } from '../core/content-properties';
@@ -24,14 +24,13 @@ import type { PMRegistry } from '../registry';
 import { parseObj } from '../../kernel/obj';
 import { loadGltf,disposeModel } from '../../core/scene3d/import-model';
 import { loadGltfFromEngine } from '../../core/scene3d/engine-import';
-import {disposeBlenderFrames} from '../../core/scene3d/rendering';
 import { disposeSceneRuntimes } from '../../core/scene3d/service';
 import { parseSvg } from '../core/svg-import';
 import { inspectorService, viewerService } from '../core/services';
 import { capturePoster } from '../core/poster';
 import { persistSourcePoster } from '../../engine-connection/source-posters';
 import { bridge as hostBridge } from '../../kernel/bridge';
-import { writeDocument } from '../../engine-doc/write';
+import { notifyDocument, writeDocument } from '../../engine-doc/write';
 
 const posterUrls = new Map<string, string>();
 
@@ -511,7 +510,7 @@ PM.captionBounds = (L: any, time: any = PM.time) => {
 };
 
 /** Get (and cache) a rasterized bitmap for a layer. `scale` = render supersample. */
-PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: string) => any, crop?: RasterWindow) => {
+PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: string) => any, crop?: RasterWindow, maxSourceBytes = Infinity) => {
   if (L.type === 'captions') return rasterCaptions(L, scale, time, uploaded);
   const d = L.type === 'text' ? resolvedTextContent(L, time) : resolveContent(PM, L, time);
   const animation=L.type==='text'&&(L.d.animators?.length||L.d.styles?.length)?textAnimation(L,d,time):null;
@@ -521,7 +520,8 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
   const rasterScale = L.type === 'shape' && !L.d.paths?.length ? shapeRasterGeometry(d, scale).density
     : L.type === 'text' && !L.d.animators?.length && !L.d.styles?.length ? textRasterGeometry(d, scale).density
     : scale;
-  const key = (L.d.paths?.length ? 'paths|'+JSON.stringify(L.d.paths.map((path:any)=>({values:pathValues(PM,L,path,time),matrix:groupMatrix(PM,L,path,time)})))+'|'+scale : L.type === 'text'
+  const paths = L.d.paths?.length ? L.d.paths.map((path:any)=>({values:pathValues(PM,L,path,time),matrix:groupMatrix(PM,L,path,time)})) : null;
+  const key = (paths ? 'paths|'+JSON.stringify(paths)+'|'+scale : L.type === 'text'
     ? 't|' + [d.text, d.boxWidth, d.boxHeight, d.font, d.weight, d.size, d.tracking, d.leading, d.color, d.align, d.italic, variationSettings(d), animation ? textAnimationKey(animation) : '', rasterScale].join('|')
     : 's|' + [d.shape, d.color, d.w, d.h, d.radius, d.independentCorners ? cornerRadii(d).join(',') : '', d.smoothing, d.stroke, d.strokeColor, d.points, rasterScale].join('|'))
     + (crop ? `|crop:${crop.x},${crop.y},${crop.width},${crop.height}` : '');
@@ -534,8 +534,15 @@ PM.raster = (L: any, scale: any = 1, time: any = PM.time, uploaded?: (key: strin
     if (Date.now() >= e.retryAt) { release(key, e); e = null; }
   }
   if (!e && !L.d.fontAnchorBounds) { const stub = uploaded?.(key); if (stub && !stub.blank) e = stub; }
+  if (e && e.bytes > maxSourceBytes) return null;
   if (!e) {
-    e = L.d.paths?.length ? rasterPaths(PM,L,time,scale) : L.type === 'text' ? (animation ? rasterAnimatedText(L,d,time,scale,animation) : rasterText(d, scale, crop)) : rasterShape(d, scale, crop);
+    const geometry = paths ? pathRasterGeometry(PM,L,time,scale,paths.map((record:any)=>({v:record.values,matrix:record.matrix})))
+      : L.type === 'text' ? textRasterGeometry(d,scale) : shapeRasterGeometry(d,scale);
+    if ((crop?.width ?? geometry.width) * (crop?.height ?? geometry.height) * 4 > maxSourceBytes) return null;
+    // Animated text can paint beyond the ordinary text geometry; leave that
+    // source to the visible render when speculation has a finite budget.
+    if (animation && Number.isFinite(maxSourceBytes)) return null;
+    e = paths ? rasterPaths(PM,L,time,scale,geometry) : L.type === 'text' ? (animation ? rasterAnimatedText(L,d,time,scale,animation) : rasterText(d, scale, crop)) : rasterShape(d, scale, crop);
     e.dirty = true;
     e.used = ++tick;
     e.bytes = Math.max(0, Number(e.cv?.width || 0) * Number(e.cv?.height || 0) * 4);
@@ -587,7 +594,7 @@ function assetKind(file: any) {
   if (mime.startsWith('video/')) return 'video';
   if (PM.Audio && PM.Audio.accepts(file)) return 'audio';
   const ext = mediaExtension(file.name);
-  if (['obj','glb','gltf','blend'].includes(ext) || ['application/x-blender','model/obj','text/plain+obj','model/gltf-binary','model/gltf+json'].includes(mime)) return 'model';
+  if (['obj','glb','gltf'].includes(ext) || ['model/obj','text/plain+obj','model/gltf-binary','model/gltf+json'].includes(mime)) return 'model';
   if (isImageExtension(ext)) return 'image';
   if (isVideoExtension(ext)) return 'video';
   return null;
@@ -745,7 +752,6 @@ async function prepareAsset({ id, name, kind, blob, meta = {}, onStage }: any): 
   const imageSequence = importedSequences.get(blob) || meta.imageSequence;
   if (kind === 'audio') return PM.Audio.prepareAsset({ id, name, blob, meta });
   if (kind === 'model') {
-    if(/\.blend$/i.test(name)||meta.format==='blend'){if(blob.size>256*1024*1024)throw new Error('Blender sources must be smaller than 256 MB');return {id,name,kind,format:'blend',blob,size:blob.size};}
     if(blob.size>128*1024*1024)throw new Error('3D models must be smaller than 128 MB');
     if(/\.(glb|gltf)$/i.test(name) || /^model\/gltf/.test(blob.type)) {
       const useEngineImporter=PM.EngineDoc?.enabled===true;
@@ -933,9 +939,9 @@ function assetIdentity(id: any, file: any, kind: any, prepared: any, fingerprint
 let assetEpoch = 0;
 function checkpointAssetMetadata(project: any) {
   if (!project || PM.proj !== project) return;
-  /* Asset metadata is mutated outside typed history, so an existing recovery
-     journal cannot replay it. Force the smallest full project checkpoint. */
-  try { PM.Projects?.put?.(project); } catch (error) { }
+  /* Asset metadata is mutated outside typed history: record it in the
+     recovery journal as one entry replacing `assets` (projects.ts). */
+  try { (PM.Projects?.checkpointAssets ?? PM.Projects?.put)?.(project); } catch (error) { }
 }
 /** Import and replacement share all reading, decoding, conversion, and storage. */
 async function prepareImportedAsset(file: any, { id, assertCurrentProject, resolved: settled, onStage, storage }: any) {
@@ -983,19 +989,27 @@ async function prepareImportedAsset(file: any, { id, assertCurrentProject, resol
      media store keeps originals: then the file itself is stored either way. */
   const mayNeedPlaybackProxy = kind === 'video' && !resolved.animated && mayNeedVideoProxy(extension);
   // Observe storage failures immediately, even while decoding is still pending.
-  const persist = (blob: any) => Promise.resolve().then(() => link ? true : PM.MediaStore.put(storageKey, blob, {
-    storageKey, fingerprint, type: blob.type || file.type,
-  })).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
+  const persist = (blob: any) => Promise.resolve().then(() => {
+    assertCurrentProject();
+    return link ? true : PM.MediaStore.put(storageKey, blob, { storageKey, fingerprint, type: blob.type || file.type });
+  }).then(value => ({ status: 'fulfilled', value }), reason => ({ status: 'rejected', reason }));
   const eagerBlob = keepStillOriginal ? file : source;
-  const eagerPersist = mayNeedPlaybackProxy && !keepsOriginals ? null : persist(eagerBlob);
   /* Renditions are named by the BLAKE3 of the original they render (two
      files can share a storage key): the link's hash, or the stored copy's. */
   const storedHash = (result: any, blob: any): string | null =>
     result?.status === 'fulfilled' && result.value === true ? PM.MediaStore.storedRecord?.(blob)?.hash ?? null : null;
+  const stored: { settle?: (hash: string | null) => void } = {};
   const originalHash: Promise<string | null> | null = !keepsOriginals ? null
     : link ? Promise.resolve(link.hash)
-      : eagerPersist ? eagerPersist.then((result) => storedHash(result, eagerBlob)) : null;
+      : new Promise<string | null>((resolve) => { stored.settle = resolve; });
+  // Preparation starts before the eager write is queued, so a project switch
+  // during that preparation stops the write (`assertCurrentProject`).
   const preparation = prepareAsset({ id, name: file.name, kind, blob: source, meta: { ...meta, storageKey, ...(originalHash ? { originalHash } : {}) }, onStage });
+  const eagerPersist = mayNeedPlaybackProxy && !keepsOriginals ? null : persist(eagerBlob);
+  if (stored.settle) {
+    if (eagerPersist) void eagerPersist.then((result) => stored.settle!(storedHash(result, eagerBlob)));
+    else stored.settle(null);
+  }
   const keptRendition = keepStillOriginal && originalHash
     ? originalHash.then((hash) => hash ? PM.MediaStore.rendition.put(hash, source) : false) : null;
   const preparedResult: any = await Promise.resolve(preparation).then(
@@ -1139,7 +1153,7 @@ async function recoverSourceAsset(meta: any, file: File, current: () => boolean)
   Object.assign(imported.prepared, meta);
   PM.assets.map.set(meta.id, imported.prepared);
   PM.assets.errors.delete(meta.id);
-  PM.touch();
+  PM.touch([['assets', meta.id]]);
   checkpointAssetMetadata(PM.proj);
   PM.Audio?.rebalanceCache?.();
 }
@@ -1289,8 +1303,13 @@ PM.assets = {
   get: (id: any) => PM.assets.map.get(id),
   poster: (id: any) => posterUrls.get(String(id)) || '',
   revokePoster,
+  /** Stop pending source recovery before another project stages its media. */
+  cancelRestores() {
+    assetEpoch++;
+    cloudMedia.clear();
+  },
   clear() {
-    disposeSceneRuntimes(PM);disposeBlenderFrames(PM);
+    disposeSceneRuntimes(PM);
     assetEpoch++;
     cloudMedia.clear();
     for (const [id, a] of PM.assets.map) {
@@ -1336,7 +1355,11 @@ PM.assets = {
   },
   /** Lets go of parked media that will never be resumed. */
   discard(parked: any) {
-    for (const asset of parked?.map?.values?.() || []) disposeAsset(asset);
+    for (const asset of parked?.map?.values?.() || []) {
+      // Media can be evicted while its tab's Undo stack stays live. A media
+      // replacement keeps these runtimes until that history releases them.
+      if (!historyAssetRetains.get(asset)) disposeAsset(asset);
+    }
     for (const url of parked?.posters?.values?.() || []) {
       try { window.URL?.revokeObjectURL?.(url); } catch (error) { }
     }
@@ -1351,7 +1374,7 @@ PM.assets = {
     const restored: any[] = [], missing: any[] = [];
     const loading = new Set(metas.map(meta => String(meta.id)));
     PM.assets.loading = loading;
-    PM.bus?.emit?.('assets');
+    notifyDocument(PM, 'assets');
     const results = await PM.MediaImport.mapBounded(metas, 3, async (meta: any) => {
       const current = () => epoch === assetEpoch && PM.proj === project && project.assets?.[meta.id] === meta;
       if (!current()) return { stale: true };
@@ -1405,7 +1428,7 @@ PM.assets = {
       finally {
         loading.delete(String(meta.id));
         if (epoch === assetEpoch && PM.proj === project) {
-          PM.bus?.emit?.('assets');
+          notifyDocument(PM, 'assets');
           PM.invalidate?.('render');
         }
       }
@@ -1422,17 +1445,19 @@ PM.assets = {
       });
       return { restored: [], missing: [], stale: true };
     }
+    const metadataPaths: any[][] = [];
     let repairedPosterMetadata = false;
     results.forEach((result: any) => {
       if (!result.posterBlob || !result.meta?.id || project.assets?.[result.meta.id] !== result.meta) return;
       setPoster(result.meta.id, result.posterBlob);
       if (result.meta.poster !== true) {
         result.meta.poster = true;
+        metadataPaths.push(['assets', result.meta.id, 'poster']);
         repairedPosterMetadata = true;
       }
     });
     if (repairedPosterMetadata) {
-      PM.touch();
+      PM.touch(metadataPaths);
       checkpointAssetMetadata(project);
     }
     let hydratedFormat = false;
@@ -1441,10 +1466,10 @@ PM.assets = {
          predate the explicit vector marker. Hydrate that marker in place so
          the editor UI and subsequent web exports also identify the asset. */
       const meta: any = project.assets?.[a.id];
-      if (a.format && meta && meta.format !== a.format) { meta.format = a.format; hydratedFormat = true; }
+      if (a.format && meta && meta.format !== a.format) { meta.format = a.format; hydratedFormat = true; metadataPaths.push(['assets', a.id, 'format']); }
     });
     /* A document write like any other: the write barrier must hear of it. */
-    if (hydratedFormat) PM.touch?.();
+    if (hydratedFormat) PM.touch?.(metadataPaths);
     const backfill = results.filter((result: any) => result.asset && !result.posterBlob && !result.kept);
     if (backfill.length) setTimeout(() => {
       void (async () => {
@@ -1473,9 +1498,9 @@ PM.assets = {
           applied++;
         });
         if (applied) {
-          PM.touch();
+          PM.touch(available.map(({ id }: any) => ['assets', id, 'poster']));
           checkpointAssetMetadata(project);
-          PM.bus?.emit?.('assets');
+          notifyDocument(PM, 'assets');
         }
       })();
     }, 0);
@@ -1501,10 +1526,19 @@ PM.assets = {
 /* SVG source remains in the durable asset store and in the live <img>. This
    cache is only the final GPU sampling boundary, rebuilt in resolution buckets
    chosen by the compositor from the layer's current display transform. */
+const svgSources = new WeakMap<object, string>();
+function svgSourceId(asset: any) {
+  if (!asset || typeof asset !== 'object') return 'missing';
+  let id = svgSources.get(asset);
+  if (!id) { id = crypto.randomUUID(); svgSources.set(asset, id); }
+  return id;
+}
 PM.rasterSvgAsset = (asset: any, requestedWidth: any, requestedHeight: any) => {
   const width = Math.max(1, Math.round(Number(requestedWidth) || 1));
   const height = Math.max(1, Math.round(Number(requestedHeight) || 1));
-  const key = `svg:${asset?.id || 'missing'}:${width}x${height}`;
+  // Duplicated projects and media replacement can share an asset id. The live
+  // source identity keeps their pixels separate while warm tabs reuse theirs.
+  const key = `svg:${asset?.id || 'missing'}:${svgSourceId(asset)}:${width}x${height}`;
   let entry = cache.get(key);
   if (entry) { entry.used = ++tick; return entry; }
   const cv = getCanvas(width, height);

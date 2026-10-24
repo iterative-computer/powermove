@@ -99,10 +99,12 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(20.0);
-    let dir = std::env::temp_dir().join(format!("pm-audio-bench-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let f48 = dir.join("a48.wav");
-    let f44 = dir.join("a44.wav");
+    let dir = tempfile::Builder::new()
+        .prefix("pm-audio-bench-")
+        .tempdir()
+        .unwrap();
+    let f48 = dir.path().join("a48.wav");
+    let f44 = dir.path().join("a44.wav");
     wav(&f48, 48_000, seconds + 1.0, 440.0);
     wav(&f44, 44_100, seconds + 1.0, 440.0);
     let media = vec![("a48".to_string(), f48), ("a44".to_string(), f44)];

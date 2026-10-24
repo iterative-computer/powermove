@@ -1,7 +1,6 @@
 // A floating listbox for select controls. One instance at a time, anchored to
 // its trigger, drawn above everything else. Opens with a short fade, scale and
-// slide from the trigger's edge; closes the same way in reverse. A pick
-// blinks its row first, as macOS menus do (menu-blink.ts).
+// slide from the trigger's edge; closes the same way in reverse. Picks commit immediately.
 
 import { blink } from '../menu-blink';
 
@@ -124,8 +123,7 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
   }
 
   let closed = false;
-  // Set from the pick until the blink ends: the row is chosen, so the pointer
-  // and the keys no longer move the highlight. A close meanwhile still picks.
+  // Guard against duplicate picks; the action commits in the same event.
   let picking = false;
   function pick(i: number): void {
     const option = req.options[i];
@@ -186,7 +184,9 @@ export function openSelectMenu(req: MenuRequest): MenuHandle {
     window.removeEventListener('blur', close);
     document.removeEventListener('scroll', onScroll, true);
     el.removeEventListener('keydown', onKey);
-    const finish = () => { el.remove(); req.onClose?.(); };
+    req.onClose?.();
+    let finished = false;
+    const finish = () => { if (!finished) { finished = true; el.remove(); } };
     if (reduce) { finish(); return; }
     el.dataset.state = 'closed';
     el.addEventListener('animationend', finish, { once: true });

@@ -136,6 +136,7 @@ fn settings_sized(
             end: Ticks::new(frames as i64 * 1001 * TICKS_PER_SECOND / 24000).unwrap(),
         },
         audio: false,
+        audio_index_playhead: None,
         motion_blur: false,
         color: OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,
@@ -418,9 +419,16 @@ fn generation(
         engine.clone(),
     );
     let mut r = renderer_for(&path);
-    let delivered = run_export(
+    // The generation bar measures the engine's VideoToolbox ProRes encoder.
+    // A job export of a level 1 document routes ProRes 4444 to today's
+    // 8-bit FFmpeg path instead (decision EXPORT-1; export.md).
+    let plan = plan_export(&job).unwrap();
+    let sink = OutputSink::new(&plan.spec).unwrap();
+    let delivered = run_export_into(
         &mut r,
         &job,
+        plan,
+        sink,
         &Unrestricted,
         &AtomicBool::new(false),
         &mut |_| {},

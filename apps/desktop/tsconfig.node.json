@@ -30,6 +30,7 @@
     /* canonical-json.test compares the shared format with these pure
        composition helpers; composite projects list every imported source. */
     "src/renderer/src/legacy/core/compositions.ts",
+    "src/renderer/src/engine-doc/write.ts",
     "src/renderer/src/legacy/registry.ts",
     "../../engine/crates/pm-model/tests/vectors/generate-patch-binary-vectors.ts"
   ],

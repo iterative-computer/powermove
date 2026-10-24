@@ -103,7 +103,7 @@ pub struct Bank {
 impl Bank {
     fn build(phases: usize, decimation: f64, free: bool) -> Bank {
         let decimation = decimation.max(1.0);
-        let taps = ((TAPS as f64 * decimation).ceil() as usize).next_multiple_of(8);
+        let taps = taps_for_decimation(decimation);
         let cutoff = design_cutoff() / decimation;
         let half = taps as f64 / 2.0;
         let (first, rows) = if free { (1, phases + 3) } else { (0, phases) };
@@ -276,6 +276,17 @@ fn free_step(decimation: f64) -> u32 {
     (d.log2() * 8.0).ceil() as u32
 }
 
+fn taps_for_decimation(decimation: f64) -> usize {
+    ((TAPS as f64 * decimation.max(1.0)).ceil() as usize).next_multiple_of(8)
+}
+
+/// The exact tap count of [`free_bank`] without constructing filter rows.
+/// Source bounds use this before the first audible resampling bank exists.
+pub fn free_taps(decimation: f64) -> usize {
+    let step = free_step(decimation);
+    taps_for_decimation(2f64.powf(step as f64 / 8.0))
+}
+
 /// The free-position bank for reading `decimation` source samples per
 /// output sample (at least 1).
 pub fn free_bank(decimation: f64) -> Arc<Bank> {
@@ -330,5 +341,31 @@ mod tests {
         assert!((bank.cutoff - design_cutoff() / 2.0).abs() < 1e-12);
         assert!(free_bank(1.5).decimation >= 1.5);
         assert!(free_bank(1.5).decimation < 1.5 * 1.1);
+    }
+
+    #[test]
+    fn free_tap_bounds_match_banks_at_rate_and_quantization_boundaries() {
+        let ratios = [
+            0.5,
+            1.0,
+            44_100.0 / 48_000.0,
+            48_000.0 / 44_100.0,
+            96_000.0 / 48_000.0,
+            192_000.0 / 44_100.0,
+            8.0,
+            16.0,
+        ];
+        for ratio in ratios
+            .into_iter()
+            .chain([1, 8, 16].into_iter().flat_map(|step| {
+                let boundary = 2f64.powf(step as f64 / 8.0);
+                [boundary - 1e-12, boundary, boundary + 1e-12]
+            }))
+        {
+            let bank = free_bank(ratio);
+            let taps = free_taps(ratio);
+            assert_eq!(taps, bank.taps, "ratio {ratio}");
+            assert_eq!(taps / 2 - 1, bank.before(), "ratio {ratio}");
+        }
     }
 }

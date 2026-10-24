@@ -7,16 +7,21 @@ import { permissionFindings } from '../cloud/permission-scan';
 import { compileExtension } from '../extensions/compiler';
 import type { AgentWorkspace } from './workspace';
 import { AgentResultValidationError } from './result-repair';
+import { analyzeExtension, type ExtensionDeprecationWarning } from '../../shared/extension-analysis';
 
 /**
  * Check generated source with the same compiler used by the live mod loader.
  * Pass a stage snapshot (withStageSnapshot): its bundles land outside the
  * agent-writable workspace, and what was checked is what publishes.
+ *
+ * Resolves to the deprecated compatibility APIs the staged source uses
+ * (amendment 23): warnings for the agent, never a reason to refuse.
  */
 export async function validateStagedExtensions(
   layout: Pick<AgentWorkspace, 'stagingDirectory'> & { compiledDirectory: string },
   changes: readonly AgentExtensionChange[]
-): Promise<void> {
+): Promise<ExtensionDeprecationWarning[]> {
+  const warnings: ExtensionDeprecationWarning[] = [];
   for (const change of changes) {
     if (!EXTENSION_ID.test(change.id)) throw new Error('Invalid staged extension id.');
     if (change.action === 'removed') continue;
@@ -37,7 +42,15 @@ export async function validateStagedExtensions(
     for (const finding of permissionFindings(texts, manifest.manifest)) console.warn(`[extension ${change.id}] ${finding.text}`);
     const compiled = await compileExtension({ dir, entry: manifest.manifest.entry || 'index.ts', outDir: layout.compiledDirectory });
     if (!compiled.ok) throw new AgentResultValidationError(`${change.id} failed compilation: ${compiled.error}. Repair its staged source. Nothing was published.`);
+    warnings.push(...analyzeExtension(change.id, texts));
   }
+  return warnings;
+}
+
+/** Reads an extension folder's source for `analyzeExtension` (bounded like the credential scan). */
+export async function extensionSourceWarnings(id: string, dir: string): Promise<ExtensionDeprecationWarning[]> {
+  try { return analyzeExtension(id, await readStagedText(dir)); }
+  catch { return []; }
 }
 
 const KIND_LABEL: Record<ScanKind, string> = {

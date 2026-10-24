@@ -4,7 +4,21 @@ The Electron editor. This is the only supported application; the earlier root-pa
 
 ## Project files
 
-Use **Command+S** to save an editable `.pmv` project and **Shift+Command+S** for Save As. Subsequent saves update the same file, keep the previous version in a hidden backup store, and keep unsaved changes separate from local recovery. **Command+O** reopens projects with their embedded media. See [saving and recovery](docs/project-files.md) for details and the current file-size limit.
+Use **Command+S** to save an editable `.pmv` project and **Shift+Command+S** for Save As. Subsequent saves update the same file; local crash recovery keeps edits separately without accumulating full project backups. Imported originals stay linked to their source files. Use project export for a portable copy with all available media embedded. See [saving and recovery](docs/project-files.md) for details.
+
+## Paste from Figma
+
+Copy layers normally in Figma and paste onto Powermove's canvas with **Command+V**. No plugin or Figma account connection is required. Supported selections become editable text, primitive shapes, vector paths, frames, and groups, centred in the composition at the playhead. Names, stacking, transforms, visibility, and opacity are retained, and the paste is one undo step.
+
+Complex features (including image/gradient fills, effects, masks, component instances, compound vectors, and unavailable fonts) prompt before falling back to the **entire selection as one image**. The notice explains that its individual parts will not be editable. Cancel leaves the project unchanged. If Figma did not supply a PNG preview, the notice asks you to use **Copy as PNG** in Figma and paste again. Text rendering can differ from Figma; auto layout and component relationships are not retained. Figma's private clipboard format may change between versions.
+
+## Timeline markers
+
+Right-click the timeline ruler and choose **Add marker here**, or run **Add marker**
+from the command palette to mark the playhead's frame. Gray pins and vertical
+guides appear in both timeline modes. Right-click a pin and choose **Remove marker**;
+**Remove marker at playhead** is also available in the command palette.
+Markers save with the project, and adding or removing one supports Undo and Redo.
 
 ## Kernel and extensions
 
@@ -157,6 +171,30 @@ macOS packaging is currently ad-hoc signed for development distribution; see the
 - Local builds remain ad-hoc signed. `bun run dist:release` is the guarded
   Developer ID, hardened-runtime, notarization, and verification lane; it exits
   before building unless the required certificate and Apple credentials exist.
+
+## Project storage
+
+Internal project documents, history, backups, recovery snapshots, AI workspaces
+and shared media stay in Powermove's Application Support folder. Saving a `.pmv`
+project uses the file location selected by the user.
+
+**Settings → Storage** shows usage and manages older backups and temporary caches.
+Files imported from disk stay linked to the original, without copying their
+media into Application Support or ordinary native saves. Pasted, generated and
+converted media share a durable file. Project export includes available media
+for portability. Large project recovery records use lossless compression;
+successful saves release their temporary rollback copy. Older backups and
+uncertain-save recovery copies remain protected by the existing cleanup rules. Generated AI
+dependency caches expire while idle; artifacts, source, attachments, conversations
+and unfinished extension changes remain protected.
+
+The first launch with the storage update runs a one-time background optimization.
+It compresses existing recovery records, verifies media against original files,
+migrates older browser media, and removes proven duplicate backups and idle
+dependency caches. Progress appears in the task indicator. A completion notice
+shows the approximate reduction and opens Storage settings; it remains until
+dismissed. Interrupted work resumes automatically, including after a restart.
+Unique older versions, unresolved recovery files and unavailable originals stay.
 
 ## Design and migration notes
 

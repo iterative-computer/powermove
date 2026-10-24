@@ -20,7 +20,7 @@ use pm_protocol::color::{BlendMode, Precision, WorkingEncoding};
 use super::effects::{Covered, EffectContext, Padding, PreparedEffects, PreparedTransition};
 use super::gpu::{
     FLAG_BLEND_IN_E, FLAG_HALF, FLAG_HALF_NEAREST, FLAG_LINEAR, FLAG_MASKS, FLAG_MATTE,
-    FLAG_MATTE_INVERTED, FLAG_MATTE_LUMA, FLAG_PATH_MASKS, Op, OpUniform,
+    FLAG_MATTE_INVERTED, FLAG_MATTE_LUMA, FLAG_PATH_MASKS, FLAG_UNORM8, Op, OpUniform,
 };
 use super::region::Region;
 use super::{AdjustmentNode, LayerNode, Masks, Matte, Node};
@@ -59,6 +59,9 @@ impl Exec<'_> {
                 flags |= FLAG_HALF_NEAREST;
             }
         }
+        if self.precision == Precision::Unorm8 {
+            flags |= FLAG_UNORM8;
+        }
         OpUniform {
             m: full_quad(full),
             res: [full.0 as f32, full.1 as f32, 0.0, 0.0],
@@ -75,6 +78,26 @@ impl Exec<'_> {
             .take_working(self.device, rect.width, rect.height, self.precision);
         self.taken.push(t.clone());
         t
+    }
+
+    /// A working target covering `rect` that the node loop gives back
+    /// itself once nothing reads it ([`Self::release`]).
+    fn take_scoped(&mut self, rect: Region) -> Target {
+        self.pool
+            .take_working(self.device, rect.width, rect.height, self.precision)
+    }
+
+    /// Gives back a [`Self::take_scoped`] target whose last read is
+    /// recorded: later work in this frame may draw into it (commands run in
+    /// the order they are recorded). With the depth and id surface, which
+    /// reads the frame's images afterwards, it stays until the frame is
+    /// submitted.
+    fn release(&mut self, target: Target) {
+        if self.depth_id {
+            self.taken.push(target);
+        } else {
+            self.pool.give(target);
+        }
     }
 
     fn viewport(rect: Region, full: (u32, u32)) -> Option<[f32; 4]> {
@@ -130,11 +153,16 @@ impl Exec<'_> {
         let rect = want.grow(padding, full);
         let pass_region = (rect != Region::full(full.0, full.1)).then_some(rect);
         // The accumulator: the caller's target until a node writes a new one.
+        // `owned`: the loop took it (`take_scoped`) and gives it back once a
+        // node replaced it, as today's compositor frees an accumulator after
+        // its last use; layer images stay (later draws and the depth and id
+        // surface read them).
         let mut in_target = rect == want;
+        let mut owned = !in_target;
         let mut acc = if in_target {
             target.clone()
         } else {
-            self.take_rect(rect)
+            self.take_scoped(rect)
         };
         let mut pending: Vec<Resolved> = Vec::new();
         let mut cleared = false;
@@ -180,7 +208,7 @@ impl Exec<'_> {
                         // `withLayer`: the stack with the layer, then the
                         // transition from the stack beneath to it.
                         let with_layer = if n.blend == BlendMode::Normal {
-                            let w = self.take_rect(rect);
+                            let w = self.take_scoped(rect);
                             copy_same(encoder, &acc, &w);
                             self.draw_pass(
                                 encoder,
@@ -192,7 +220,7 @@ impl Exec<'_> {
                             );
                             w
                         } else {
-                            let out = self.take_rect(rect);
+                            let out = self.take_scoped(rect);
                             let u = self.composite_uniform(full, n.blend, n.alpha);
                             self.run_op(
                                 encoder,
@@ -206,7 +234,9 @@ impl Exec<'_> {
                             );
                             out
                         };
-                        acc = match self.run_transition(
+                        // A transition's result is its own target (in
+                        // `taken`), never one of its inputs.
+                        let (next, next_owned) = match self.run_transition(
                             encoder,
                             transition,
                             &acc,
@@ -215,21 +245,29 @@ impl Exec<'_> {
                             full,
                             plan.view,
                         ) {
-                            Ok(Some(t)) => t,
-                            Ok(None) => with_layer,
+                            Ok(Some(t)) => {
+                                self.release(with_layer);
+                                (t, false)
+                            }
+                            Ok(None) => (with_layer, true),
                             Err(message) => {
                                 // The layer fails; the stack stays as it was.
+                                self.release(with_layer);
                                 self.fail_layer(plan, &n.layer, message);
                                 continue;
                             }
                         };
+                        let old = std::mem::replace(&mut acc, next);
+                        if std::mem::replace(&mut owned, next_owned) {
+                            self.release(old);
+                        }
                         in_target = false;
                         ids.push(image);
                     } else if n.blend == BlendMode::Normal {
                         // `drawFbo(res, W, H, compositeAlpha)`.
                         pending.push(image);
                     } else {
-                        let out = self.take_rect(rect);
+                        let out = self.take_scoped(rect);
                         let u = self.composite_uniform(full, n.blend, n.alpha);
                         self.run_op(
                             encoder,
@@ -241,14 +279,20 @@ impl Exec<'_> {
                             rect,
                             full,
                         );
-                        acc = out;
+                        let old = std::mem::replace(&mut acc, out);
+                        if std::mem::replace(&mut owned, true) {
+                            self.release(old);
+                        }
                         in_target = false;
                         ids.push(image);
                     }
                 }
                 Node::Adjustment(n) => {
                     if let Some(out) = self.adjustment_node(encoder, plan, n, rect, &acc) {
-                        acc = out;
+                        let old = std::mem::replace(&mut acc, out);
+                        if std::mem::replace(&mut owned, false) {
+                            self.release(old);
+                        }
                         in_target = false;
                     }
                 }
@@ -262,6 +306,9 @@ impl Exec<'_> {
             let (dx, dy) = want.texel_offset(rect, full.1);
             u.off = [dx, dy, 0, 0];
             self.run_op(encoder, Op::Copy, &u, &acc, None, target, want, full);
+        }
+        if owned {
+            self.release(acc);
         }
         ids
     }

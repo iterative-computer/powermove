@@ -5,7 +5,7 @@ import { nextProjectColor, readProjectColor, type ProjectColorSettings } from '.
 
 export function projectColorSettings(PM: any): ProjectColorSettings {
   const color = readProjectColor(PM.proj);
-  return { linearBlending: color.linearBlending, precision: color.precision };
+  return { linearBlending: color.linearBlending };
 }
 
 export function applyProjectColor(PM: any, patch: Partial<ProjectColorSettings>): boolean {
@@ -16,8 +16,7 @@ export function applyProjectColor(PM: any, patch: Partial<ProjectColorSettings>)
     if (next) PM.proj.color = next;
     else delete PM.proj.color;
   };
-  const label = patch.precision !== undefined ? 'Precision' : 'Blend in linear light';
-  if (PM.hist?.do) PM.hist.do(label, apply);
+  if (PM.hist?.do) PM.hist.do('Blend in linear light', apply);
   else apply();
   PM.touch?.();
   PM.bus?.emit?.('project');

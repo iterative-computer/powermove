@@ -26,6 +26,7 @@ pub mod engine;
 pub mod expr;
 pub mod geometry;
 pub mod imported_model;
+pub mod kernel;
 mod queries;
 pub mod reply;
 

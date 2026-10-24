@@ -488,6 +488,11 @@ pub struct ExportSettings {
     pub frame_rate: FrameRate,
     pub range: TickRange,
     pub audio: bool,
+    /// App playhead when audioLayers last built its index (embedded and
+    /// precomposition trims). Omitted by headless clients: use range start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub audio_index_playhead: Option<Ticks>,
     pub motion_blur: bool,
     pub color: OutputColor,
     /// Defaults to 32-bit when the output or any source exceeds 10 bits.
@@ -550,6 +555,15 @@ pub struct DeliveryOptions {
     /// PNG sequences: the name frame files start with (`<name>_00000.png`),
     /// usually the destination folder's name. A bare name.
     pub sequence_name: Option<String>,
+    /// Compatibility producers the exporting window has (a `raster`
+    /// override): the job asks the host for those layers' pixels at each
+    /// frame (`Request::CompatFrame`). Empty: every layer is the engine's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::snapshot::CompatSource>>", optional)
+    )]
+    pub compat: Vec<crate::snapshot::CompatSource>,
 }
 
 impl ExportFormat {
@@ -1081,6 +1095,7 @@ mod tests {
                 end: Ticks::from_whole_seconds(10),
             },
             audio: true,
+            audio_index_playhead: None,
             motion_blur: true,
             color: OutputColor::Rec709Broadcast,
             precision: Precision::Float32,
@@ -1134,6 +1149,7 @@ mod tests {
         assert!(
             ExportSettings {
                 audio: false,
+                audio_index_playhead: None,
                 ..png_audio.clone()
             }
             .validate()
@@ -1142,6 +1158,7 @@ mod tests {
         assert!(
             ExportSettings {
                 audio: false,
+                audio_index_playhead: None,
                 color: OutputColor::Rec709Broadcast,
                 ..png_audio
             }

@@ -1,4 +1,5 @@
 import type { AffineMatrix, Point, PowermoveAPI, TextCaretLayout } from 'powermove';
+import { layerIsLocked } from './layer-locks';
 
 import { caretAt, indexAtPoint, paragraphRangeAt, selectionRects, textFrame, verticalMove, wordRangeAt, type Rect } from './text-geometry';
 
@@ -79,7 +80,7 @@ function firstLine(text: string): string {
 }
 
 export function beginTextEdit(api: PowermoveAPI, V: TextEditorHost, layer: any, options: TextEditOptions = {}): TextEditSession | null {
-  if (!layer || layer.lock) return null;
+  if (!layer || layerIsLocked(api, layer)) return null;
   V.finishCanvasText?.();
   api.selection.select([layer.id]);
   api.transport.pause();

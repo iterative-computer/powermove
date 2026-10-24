@@ -1,4 +1,23 @@
 import { chooseNativeMenu, expect, test } from './helpers/app';
+import type { Page } from '@playwright/test';
+
+async function disclosurePoint(page: Page, name: string) {
+  await page.waitForFunction(name => (window as any).PM.Kernel.services.get('timeline').rows.some((row: any) => row.L.name === name), name);
+  await page.evaluate(name => {
+    const PM = (window as any).PM, timeline = PM.Kernel.services.get('timeline');
+    const index = timeline.rows.findIndex((row: any) => row.kind === 'layer' && row.L.name === name);
+    const box = timeline.cv.getBoundingClientRect();
+    timeline.scrollY = Math.max(0, index * timeline.row - (box.height - timeline.ruler) / 2);
+    PM.invalidate('timeline');
+  }, name);
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  return page.evaluate(name => {
+    const timeline = (window as any).PM.Kernel.services.get('timeline');
+    const index = timeline.rows.findIndex((row: any) => row.kind === 'layer' && row.L.name === name);
+    const row = timeline.rows[index], box = timeline.cv.getBoundingClientRect();
+    return { x: box.x + 64 + (row.depth || 0) * 12, y: box.y + timeline.ruler + index * timeline.row - timeline.scrollY + timeline.row / 2 };
+  }, name);
+}
 
 test('compact layer rows keep names centered and parenting in dedicated controls',async({session})=>{
   await session.openEditor();
@@ -28,9 +47,11 @@ test('compact layer rows keep names centered and parenting in dedicated controls
   await page.mouse.move(box.x+110,box.y+box.ruler+box.row*2.5,{steps:8});await page.mouse.up();
   expect(await page.evaluate(()=>{const PM=(window as any).PM;return PM.L(PM.firstSel().parent).name;})).toBe('Info button');
   // Nested disclosure buttons follow the indentation of their badges and names.
-  await page.mouse.click(box.x+64,box.y+box.ruler+box.row*8.5);
+  const outer = await disclosurePoint(page, 'Terminal');
+  await page.mouse.click(outer.x, outer.y);
   await page.waitForFunction(()=>{ const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return timeline.rows.some((r:any)=>r.L.name==='Nested'); });
-  await page.mouse.click(box.x+76,box.y+box.ruler+box.row*9.5);
+  const inner = await disclosurePoint(page, 'Nested');
+  await page.mouse.click(inner.x, inner.y);
   await page.waitForFunction(()=>{ const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return timeline.rows.some((r:any)=>r.L.name==='Prompt'); });
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

@@ -18,7 +18,7 @@ describe('external Powermove MCP sessions', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-mcp-'));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const ipc = new EventEmitter();
-    const owner = Object.assign(new EventEmitter(), { id: 1, isDestroyed: () => false,
+    const owner = Object.assign(new EventEmitter(), { id: 1, isDestroyed: (): boolean => false, isCrashed: (): boolean => false,
       send: (_channel: string, request: AgentToolRequestEvent) => queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, {
         runId: request.runId, callId: request.callId, ok: true,
         content: [{ type: 'text', text: JSON.stringify(request.tool === '__mcp_context'
@@ -55,6 +55,21 @@ describe('external Powermove MCP sessions', () => {
     expect(root).toContain('powermove-mcp');
   });
 
+  it('returns deprecated compatibility API uses from publish_extensions and still publishes', async () => {
+    const { root, session } = await setup();
+    const opened: any = await session.call('start_session', { prompt: 'Make an extension' });
+    const dir = path.join(opened.stagingDirectory, 'frame-grab');
+    await mkdir(dir);
+    await writeFile(path.join(dir, 'manifest.json'), JSON.stringify({ id: 'frame-grab', name: 'Frame grab', version: '1.0.0', apiVersion: 3, contributes: ['commands'] }));
+    await writeFile(path.join(dir, 'index.ts'), 'export default function activate(api) {\n  const gl = api.render.gl.context;\n}\n');
+    const published: any = await session.call('publish_extensions', { extensions: [{ id: 'frame-grab', action: 'created', summary: 'Grab' }] });
+    expect(published.changeSetId).toEqual(expect.any(String));
+    expect(published.deprecations).toEqual([expect.objectContaining({ extension: 'frame-grab', file: 'index.ts', line: 2, member: 'render.gl.context' })]);
+    expect(published.guidance).toMatch(/only when the user agrees/);
+    expect((await stat(path.join(root, 'extensions', 'frame-grab', 'index.ts'))).isFile()).toBe(true);
+    await session.call('finish_session', { commit: true });
+  });
+
   it('enforces planning access and blocks project switching during an active session', async () => {
     const { session } = await setup();
     await session.call('start_session', { prompt: 'Inspect', access: 'editor' });
@@ -63,6 +78,40 @@ describe('external Powermove MCP sessions', () => {
     await expect(session.call('export_video', {})).rejects.toThrow('only inspect');
     await expect(session.call('publish_extensions', { extensions: [] })).rejects.toThrow('Planning');
     expect(mcpToolResult(await session.call('get_project_state', {}))).toMatchObject({ isError: false });
+  });
+
+  it.each(['list_projects', 'start_session'])('preserves the original %s failure when rollback also fails', async name => {
+    const { session, bridge } = await setup();
+    vi.spyOn(bridge, 'callRenderer').mockImplementation(async (_session, tool) => {
+      throw new Error(`Powermove timed out while running ${tool}.`);
+    });
+    await expect(session.call(name, name === 'start_session' ? { prompt: 'Build' } : {}))
+      .rejects.toThrow(name === 'start_session' ? '__mcp_context' : '__mcp_list_projects');
+  });
+
+  it('allows a new session on the same connection after the renderer recovers', async () => {
+    const { session, owner, detach } = await setup();
+    await session.call('start_session', { prompt: 'Inspect', access: 'editor' });
+    const crashed = vi.spyOn(owner, 'isCrashed').mockReturnValue(true);
+    owner.emit('render-process-gone');
+    await vi.waitFor(() => expect(detach).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(owner.listenerCount('render-process-gone')).toBe(0));
+    crashed.mockReturnValue(false);
+    await expect(session.call('start_session', { prompt: 'Inspect recovery', access: 'editor' })).resolves.toMatchObject({ projectId: 'project-one' });
+  });
+
+  it('preserves a detachment error and still removes the workspace when rollback fails', async () => {
+    const { session, bridge, detach } = await setup();
+    const opened: any = await session.call('start_session', { prompt: 'Build' });
+    await writeFile(path.join(opened.artifactsDirectory, 'partial.txt'), 'unfinished');
+    detach.mockRejectedValueOnce(new Error('Could not save the agent task journal.'));
+    const renderer = vi.spyOn(bridge, 'callRenderer').mockRejectedValue(new Error('Powermove timed out while running __finish_run.'));
+    await expect(session.call('finish_session', { commit: false })).rejects.toThrow('Could not save the agent task journal.');
+    expect(renderer).toHaveBeenCalledWith(expect.anything(), '__finish_run', { commit: false });
+    await expect(stat(opened.artifactsDirectory)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(opened.stagingDirectory)).rejects.toMatchObject({ code: 'ENOENT' });
+    renderer.mockRestore();
+    await expect(session.call('start_session', { prompt: 'Inspect', access: 'editor' })).resolves.toMatchObject({ projectId: 'project-one' });
   });
 
   it('authenticates local discovery and closes the owning session on disconnect', async () => {

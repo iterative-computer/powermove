@@ -12,6 +12,7 @@ import { registerMediaStoreIpc } from '../main/media-store/ipc';
  * Agents (Codex, Claude) run on this machine, so a laptop can close while a
  * Linux box keeps working on the project.
  */
+import { parseStoreKey } from '../shared/store-keys';
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createReadStream } from 'node:fs';
@@ -252,6 +253,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   /* store */
   const store = createStore(path.join(userData, 'store'));
   await store.load();
+  const remoteProjects = new Map<RemoteWindow, { id: string; release(): void }>();
+  const pinRemoteProject = (window: RemoteWindow, id: string | null): void => {
+    const previous = remoteProjects.get(window);
+    if (previous?.id === id) return;
+    const next = id ? { id, release: store.acquireProject!(id) } : null;
+    if (next) remoteProjects.set(window, next); else remoteProjects.delete(window);
+    previous?.release();
+  };
   registerStoreIpc(ipcMain, store, {
     isTrustedSender,
     broadcastChange: (keys, sender) => { for (const client of ipc.all()) if (client !== sender) client.send(IPC.storeChanged, { keys }); }
@@ -259,7 +268,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
 
   /* project sessions: every tab on a project shares the host's document */
   const sessions = new ProjectSessions({
-    read: (key) => { const raw = store.getSerialized?.(key); return raw == null ? store.snapshot()[key] ?? null : JSON.parse(raw); },
+    acquireProject: id => store.acquireProject!(id),
+    read: (key) => { const raw = store.getSerialized?.(key); return raw == null ? (store.get ? store.get(key) : store.snapshot()[key]) ?? null : JSON.parse(raw); },
     set: (key, value) => store.set(key, value)
   }, { channel: WEB.syncPatch, version: options.version, log });
   ipc.handle(WEB.syncJoin, (event, payload) => {
@@ -403,6 +413,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   /* agents */
   const apiPackDir = path.join(options.resourcesDir, 'api-pack');
   registerCodexIpc(ipcMain, {
+    acquireProject: id => store.acquireProject!(id),
     getWindow: () => asBrowserWindow(ipc.current()?.window ?? null),
     broadcast: (send) => { for (const client of ipc.all()) send(asWebContents(client)); },
     userData,
@@ -446,14 +457,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const recent = editors.all().filter((other) => other !== window).map((other) => editors.projectOf(other)).find((id) => !!id) ?? null;
     const projectId = own ?? recent;
     if (projectId && !own) editors.claim(window, projectId);
+    pinRemoteProject(window, projectId);
     event.returnValue = { projectId, taken: [] } satisfies WindowInitialProject;
   });
-  ipc.handle(IPC.windowClaimProject, (event, payload): WindowClaimResult => {
+  ipc.handle(IPC.windowClaimProject, async (event, payload): Promise<WindowClaimResult> => {
     const window = trustedClient(event).window;
     const projectId = readProjectId(payload, IPC.windowClaimProject);
     // Unlike desktop windows, tabs share a project through its session, so a
     // claim never bounces to another tab.
     editors.claim(window, projectId);
+    pinRemoteProject(window, projectId);
+    if (projectId) await store.preloadProject?.(projectId);
     return { claimed: true, focused: false };
   });
   ipc.handle(IPC.windowOpenProject, (event, payload): WindowOpenResult => {
@@ -652,6 +666,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         response.end(body);
         return;
       }
+      // Legacy browser consumers still read synchronously. This authenticated
+      // single-key endpoint keeps that API without shipping the whole store.
+      if (pathname === '/__powermove/store') {
+        const key = url.searchParams.get('key') ?? '';
+        if (!parseStoreKey(key)) { text(response, 400, 'Invalid store key'); return; }
+        const value = store.getEncodedSerializedAsync
+          ? await store.getEncodedSerializedAsync(key)
+          : store.getEncodedSerialized?.(key) ?? store.getSerialized?.(key) ?? null;
+        response.writeHead(200, headers('application/json; charset=utf-8', { 'Cache-Control': 'no-store' }));
+        response.end(JSON.stringify(value));
+        return;
+      }
       if (pathname === '/__powermove/fonts/file') {
         const face = await fontStore.file(url.searchParams.get('ps') ?? '');
         if (!face) { text(response, 404, 'Not found'); return; }
@@ -708,6 +734,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       const origin = `${request.headers.origin ?? `${scheme}://localhost`}/`;
       const client = ipc.connect({ send: (data) => ws.send(data), close: (code, reason) => ws.close(code, reason) }, origin);
       if (isEngine) { client.kind = 'engine'; engineRestarts = 0; } else editors.add(client.window, projectId);
+      if (!isEngine) pinRemoteProject(client.window, projectId);
       log(`[serve] ${isEngine ? 'engine' : 'client'} ${client.id} connected${projectId ? ` (project ${projectId})` : ''}`);
       ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
         if (!isBinary) return;
@@ -725,7 +752,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         try { ws.ping(); } catch { ws.terminate(); }
       }, HEARTBEAT_MS);
       heartbeat.unref();
-      ws.on('close', () => { clearInterval(heartbeat); log(`[serve] ${client.kind} ${client.id} disconnected`); editors.remove(client.window); client.destroy(); });
+      ws.on('close', () => { clearInterval(heartbeat); log(`[serve] ${client.kind} ${client.id} disconnected`); editors.remove(client.window); client.destroy(); pinRemoteProject(client.window, null); });
       ws.on('error', (error: Error) => log(`[serve] client ${client.id}: ${error.message}`));
     });
   });

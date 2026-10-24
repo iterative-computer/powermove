@@ -34,10 +34,14 @@
 
 pub(crate) mod blender;
 pub(crate) mod blender_png;
+pub(crate) mod compat;
 mod compile;
 mod definitions;
+mod encode;
+mod encode_gpu;
 mod fallback;
 pub mod gate;
+mod qos;
 mod source;
 mod svg;
 
@@ -53,7 +57,7 @@ use pm_engine::priority::Scheduler;
 use pm_export::render::{
     ExportJob, JobError, MediaPaths, OfflineClip, Progress, StillRouting, asset_records,
     encode_jpeg, encode_png, offline_media, plan_export_for, render_still, run_export_with_blender,
-    sink_for, to_rgba8,
+    sink_for_with, to_rgba8,
 };
 use pm_protocol::common::{AgentRunId, JobId, RequestId, SessionId};
 use pm_protocol::envelope::{Envelope, Event, Message, Request, Response};
@@ -200,6 +204,7 @@ struct Shared {
     work: Condvar,
     answers: Condvar,
     gate: Arc<Gate>,
+    playback: Arc<AtomicBool>,
     wake: Wake,
     gpu: Mutex<Option<(wgpu::Device, wgpu::Queue)>>,
     /// The engine's font service: lanes' renderers lay text out through it.
@@ -322,6 +327,7 @@ impl Shared {
         (self.wake)();
         let mut st = self.lock();
         loop {
+            pm_export::render::refresh_current_worker_qos();
             if let Some(answer) = st.answers.remove(&token) {
                 return Some(answer);
             }
@@ -375,6 +381,12 @@ impl Shared {
 
     fn device(&self) -> Result<wgpu::Device, String> {
         self.gpu().map(|(device, _)| device)
+    }
+}
+
+impl compat::CompatHost for Shared {
+    fn call(&self, request: Request, session: SessionId) -> Result<Response, String> {
+        Shared::call(self, request, Some(session)).map_err(|e| e.message)
     }
 }
 
@@ -450,6 +462,7 @@ fn engine_error(job: &JobId, e: &JobError) -> EngineError {
 pub struct JobEngineService {
     shared: Arc<Shared>,
     threads: Vec<JoinHandle<()>>,
+    probes_only: bool,
 }
 
 impl JobEngineService {
@@ -465,6 +478,10 @@ impl JobEngineService {
         wake: Wake,
         fonts: Option<Arc<crate::fonts::hub::FontHub>>,
     ) -> Result<JobEngineService, String> {
+        // Check in before the bridge's startup deadline. A failed optional
+        // bridge is cached and reported by GPU WebM, without disabling other
+        // job formats or agent snapshots.
+        let _ = encode_gpu::connect();
         let state = State {
             user: Some(Scheduler::new(EngineProcess::Job)),
             ..State::default()
@@ -474,6 +491,7 @@ impl JobEngineService {
             work: Condvar::new(),
             answers: Condvar::new(),
             gate: Arc::new(Gate::new()),
+            playback: Arc::new(AtomicBool::new(false)),
             wake,
             gpu: Mutex::new(None),
             fonts,
@@ -505,7 +523,32 @@ impl JobEngineService {
             })
             .map_err(|e| format!("could not start the pm-job-compile worker: {e}"))?;
         threads.push(handle);
-        Ok(JobEngineService { shared, threads })
+        Ok(JobEngineService {
+            shared,
+            threads,
+            probes_only: false,
+        })
+    }
+
+    /// Interactive engines need media facts without paying for a second
+    /// utility process or the job engine's GPU/render lanes. The probe
+    /// worker itself starts on the first request.
+    pub fn start_probes_only(wake: Wake) -> JobEngineService {
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State::default()),
+            work: Condvar::new(),
+            answers: Condvar::new(),
+            gate: Arc::new(Gate::new()),
+            wake,
+            gpu: Mutex::new(None),
+            fonts: None,
+            playback: Arc::new(AtomicBool::new(false)),
+        });
+        JobEngineService {
+            shared,
+            threads: Vec::new(),
+            probes_only: true,
+        }
     }
 
     pub fn stats(&self) -> ServiceStats {
@@ -527,24 +570,68 @@ impl JobEngineService {
 pub struct StatsHandle(Arc<Shared>);
 
 impl StatsHandle {
+    /// QoS for the shared JavaScript/host thread, based on live service state.
+    pub(crate) fn runtime_qos(&self) -> pm_engine::qos::JobQos {
+        let playing = self.0.playback.load(Ordering::Acquire);
+        let running_user = self.0.lock().jobs.values().any(|record| {
+            record.class == PriorityClass::UserJob && record.state == JobState::Running
+        });
+        qos::runtime_qos(running_user, playing)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_job(&self, id: &str, class: PriorityClass, state: JobState) {
+        self.0.lock().jobs.insert(
+            JobId::from(id),
+            JobRecord {
+                class,
+                run: None,
+                host: PortId(1),
+                state,
+                progress: 0.0,
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_playback(&self, playing: bool) {
+        self.0.playback.store(playing, Ordering::Release);
+    }
+
     pub fn json(&self) -> serde_json::Value {
-        let gpu_created = self
-            .0
-            .gpu
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
+        let gpu = self.0.gpu.lock().unwrap_or_else(|e| e.into_inner());
+        let gpu_created = gpu.is_some();
+        let metal_device = gpu
+            .as_ref()
+            .and_then(|(device, _)| pm_gpu::device::metal_device_allocation(device))
+            .map(|allocation| {
+                serde_json::json!({
+                    "currentAllocatedBytes": allocation.current_allocated_bytes,
+                    "recommendedMaxWorkingSetBytes": allocation.recommended_max_working_set_bytes,
+                    "unifiedMemory": allocation.unified_memory,
+                    "maxTransferBytesPerSecond": allocation.max_transfer_bytes_per_second,
+                })
+            });
+        drop(gpu);
         let st = self.0.lock();
         serde_json::json!({
             "service": st.stats,
             "gate": self.0.gate.stats(),
             "gpuCreated": gpu_created,
+            "metalDevice": metal_device,
             "queued": {
                 "snapshots": st.snapshots.len(),
                 "agentExports": st.agent_exports.len(),
                 "user": st.user.as_ref().map_or(0, |s| s.len()),
             },
             "jobs": st.jobs.len(),
+            // Work that still needs this process: main retires an idle job
+            // utility only when all of these are zero and it has no session.
+            "active": st.jobs.values().filter(|r| !r.state.is_terminal()).count(),
+            "probes": st.probes.len(),
+            "frameRuns": st.frame_runs.len(),
+            "compiles": st.compiles.0.len(),
         })
     }
 }
@@ -578,6 +665,13 @@ impl JobService for JobEngineService {
         document: Option<JobDocument>,
     ) -> Result<JobAccepted, Box<EngineError>> {
         let job = submit.job.clone();
+        if self.probes_only {
+            return Err(Box::new(job_error(
+                &job,
+                ErrorCode::Unsupported,
+                "This engine only probes media.",
+            )));
+        }
         if matches!(&submit.spec, JobSpec::GenerateProxy { .. }) {
             return Err(Box::new(job_error(
                 &job,
@@ -716,6 +810,13 @@ impl JobService for JobEngineService {
         document: JobDocument,
         request: AgentFrameRequest,
     ) -> Result<(), Box<EngineError>> {
+        if self.probes_only {
+            return Err(Box::new(EngineError::new(
+                ErrorCode::Unsupported,
+                ErrorScope::Request { id },
+                "This engine only probes media.",
+            )));
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         let mut st = self.shared.lock();
         st.frame_runs.push((request.run.clone(), cancel.clone()));
@@ -740,12 +841,33 @@ impl JobService for JobEngineService {
     ) -> Result<(), Box<EngineError>> {
         // Probing opens and indexes the file: off the engine thread, on the
         // probe lane.
+        if self.probes_only && self.threads.is_empty() {
+            let shared = self.shared.clone();
+            let handle = pm_engine::qos::spawn_engine_thread(
+                EngineProcess::Interactive,
+                "pm-media-probes",
+                move || run_probes(&shared),
+            )
+            .map_err(|e| {
+                Box::new(EngineError::new(
+                    ErrorCode::Internal,
+                    ErrorScope::Request { id },
+                    format!("Could not start media probing: {e}"),
+                ))
+            })?;
+            self.threads.push(handle);
+        }
         self.shared.lock().probes.push_back((port, id, probe));
         self.shared.work.notify_all();
         Ok(())
     }
 
     fn signal(&mut self, signal: &DeadlineSignal) {
+        if matches!(signal, DeadlineSignal::PlaybackStarted { .. }) {
+            self.shared.playback.store(true, Ordering::Release);
+        } else if matches!(signal, DeadlineSignal::PlaybackStopped { .. }) {
+            self.shared.playback.store(false, Ordering::Release);
+        }
         self.shared.gate.signal(signal);
         if let DeadlineSignal::PlaybackStarted { .. } | DeadlineSignal::PlaybackStopped { .. } =
             signal
@@ -817,6 +939,9 @@ impl JobService for JobEngineService {
         session: SessionId,
         update: &pm_protocol::definitions::DefinitionsUpdate,
     ) -> bool {
+        if self.probes_only {
+            return false;
+        }
         self.shared.lock().compiles.0.push_back(compile::Pending {
             port,
             id,
@@ -905,6 +1030,13 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
     let mut blender = LaneBlender::default();
     let mut definitions = definitions::LaneDefinitions::default();
     while let Some(work) = next_work(shared, lane) {
+        let export_qos = match &work {
+            Work::Export { submit, .. } if qos::follows_playback(submit.class) => {
+                Some(Arc::new(qos::UserExportQos::new(shared.playback.clone())))
+            }
+            _ => None,
+        };
+        let _qos_scope = export_qos.as_ref().map(|qos| qos.enter());
         if renderer.is_none() {
             let init_started = Instant::now();
             match shared.renderer() {
@@ -988,17 +1120,23 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
                 submit,
                 document,
                 cancel,
-            } => run_job(
-                shared,
-                r,
-                &gate,
-                &job,
-                host,
-                &submit,
-                &document,
-                &cancel,
-                &mut blender,
-            ),
+            } => {
+                let export_gate = qos::ExportGate {
+                    lane: gate.clone(),
+                    qos: export_qos.clone(),
+                };
+                run_job(
+                    shared,
+                    r,
+                    &export_gate,
+                    &job,
+                    host,
+                    &submit,
+                    &document,
+                    &cancel,
+                    &mut blender,
+                );
+            }
         }
         r.set_svg_source(None);
         // Keep the pool small between work items (lease pressure).
@@ -1174,18 +1312,20 @@ fn run_frames(
             ));
             continue;
         }
-        let rendered = render_still(
-            renderer,
-            &document.document,
-            frame.composition.as_str(),
-            frame.time,
-            request.max_dimension,
-            &media,
-            &mut routing,
-            gate,
-            still_seed(frame.composition.as_str()),
-            cancel,
-        );
+        let rendered = objc2::rc::autoreleasepool(|_| {
+            render_still(
+                renderer,
+                &document.document,
+                frame.composition.as_str(),
+                frame.time,
+                request.max_dimension,
+                &media,
+                &mut routing,
+                gate,
+                still_seed(frame.composition.as_str()),
+                cancel,
+            )
+        });
         let outcome = match rendered {
             Ok(f) => {
                 let rgba = to_rgba8(&f.rgba);
@@ -1337,7 +1477,7 @@ fn destination(
 fn run_job(
     shared: &Arc<Shared>,
     renderer: &mut Renderer,
-    gate: &LaneGate,
+    gate: &qos::ExportGate,
     job: &JobId,
     host: PortId,
     submit: &SubmitJob,
@@ -1346,7 +1486,7 @@ fn run_job(
     blender: &mut LaneBlender,
 ) {
     if !matches!(&submit.spec, JobSpec::Export { .. }) {
-        source::run(shared, renderer, gate, job, host, submit, document, cancel);
+        source::run(shared, renderer, &gate.lane, job, host, submit, document, cancel);
         return;
     }
     let JobSpec::Export {
@@ -1416,19 +1556,13 @@ fn run_job(
             h.finish()
         },
     };
-    // Offline media (section 14.8): agent exports go to the current exporter
-    // (`mediaOffline`), draft renders fail when even proxies are missing, and
-    // queued user jobs wait for the media.
+    // Queued user jobs wait for relinking. An interactive export has already
+    // obtained the user's "Export Without Missing Media" choice in main;
+    // agent exports are unattended. Both use pm-export's missing-layer
+    // appearance and report the clips to their caller.
     let offline = offline_media(&document.document, composition.as_str(), &export.media);
     if !offline.is_empty() {
         let message = offline_message(&offline);
-        if submit.class == PriorityClass::AgentExport {
-            return finish(
-                JobState::Failed,
-                None,
-                Some(job_error(job, ErrorCode::MediaOffline, message)),
-            );
-        }
         if settings.draft_from_proxies {
             return finish(
                 JobState::Failed,
@@ -1440,19 +1574,21 @@ fn run_job(
                 )),
             );
         }
-        match wait_for_media(
-            shared,
-            host,
-            job,
-            document,
-            composition.as_str(),
-            cancel,
-            &message,
-        ) {
-            Some(media) => export.media = Arc::new(media),
-            None => return finish(JobState::Cancelled, None, None),
+        if submit.class == PriorityClass::UserJob && job.as_str().starts_with("queue-export-") {
+            match wait_for_media(
+                shared,
+                host,
+                job,
+                document,
+                composition.as_str(),
+                cancel,
+                &message,
+            ) {
+                Some(media) => export.media = Arc::new(media),
+                None => return finish(JobState::Cancelled, None, None),
+            }
+            shared.status(host, job, |r| r.state = JobState::Running);
         }
-        shared.status(host, job, |r| r.state = JobState::Running);
     }
     // Blender compositions (contract 11): the lane's Blender stage, when
     // host services run Blender; a host without Blender routes them.
@@ -1513,7 +1649,27 @@ fn run_job(
             Some(session),
         );
     };
-    let sink = match sink_for(&plan) {
+    // Opaque WebM goes to the host's WebCodecs encoders, as today's
+    // exporter encodes it (decision EXPORT-1).
+    let encoder: Box<dyn pm_export::webcodecs::EncodeHost> = Box::new(
+        encode::HostEncoder::new(
+            shared.clone(),
+            session,
+            job.clone(),
+            cancel.clone(),
+            dest.handle.clone(),
+        )
+        .with_gpu(
+            renderer.device().clone(),
+            renderer.queue().clone(),
+            Arc::new(gate.clone()),
+            pm_export::render::pass_key(
+                export.seed ^ 0x5745_424d_5247_4241,
+                plan.request.output_size,
+            ),
+        ),
+    );
+    let sink = match sink_for_with(&plan, Some(encoder)) {
         Ok(s) => s,
         Err(e) => {
             discard(shared);
@@ -1539,6 +1695,33 @@ fn run_job(
             shared.status_with(host, job, preview, None, |r| r.progress = f.min(0.999));
         }
     };
+    // A `raster` override's layers (the exporting window's producers):
+    // each frame asks the host for them (`compat::JobCompat`).
+    let job_compat = (!settings.delivery.compat.is_empty()).then(|| {
+        let id = document
+            .document
+            .root()
+            .map(pm_render::js::layer_id)
+            .unwrap_or_default();
+        Arc::new(compat::JobCompat::new(
+            shared.clone() as Arc<dyn compat::CompatHost>,
+            document.session,
+            id,
+            document.revision,
+            settings.delivery.compat.clone(),
+        ))
+    });
+    renderer.set_compat_rasters(
+        job_compat
+            .clone()
+            .map(|c| c as Arc<dyn pm_render::compat::CompatRasters>),
+    );
+    // A compatibility context in the exporting window draws over each frame
+    // (today's WebM frames, `frame:rendered` before the canvas was encoded).
+    let mut plan = plan;
+    plan.frame_post = job_compat
+        .as_ref()
+        .and_then(|c| c.context_frames(export.composition.clone()));
     let result = run_export_with_blender(
         renderer,
         &export,
@@ -1549,6 +1732,14 @@ fn run_job(
         &mut progress,
         stage,
     );
+    renderer.set_compat_rasters(None);
+    // A layer the window's override could not answer for fails with why.
+    let result = match (result, job_compat.as_ref().and_then(|c| c.failure())) {
+        (Err(_), Some(why)) => Err(JobError::Render(format!(
+            "An extension in the editor draws a layer of this export, and it could not be drawn: {why}"
+        ))),
+        (result, _) => result,
+    };
     match result {
         Ok(delivered) => {
             let r = &delivered.report;
@@ -1710,7 +1901,7 @@ fn run_probes(shared: &Shared) {
             }
         };
         let (port, id, probe) = next;
-        probe_media(shared, port, id, probe);
+        objc2::rc::autoreleasepool(|_| probe_media(shared, port, id, probe));
     }
 }
 
@@ -1836,6 +2027,67 @@ fn wait_for_media(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_probe_starts_without_render_lanes_or_gpu() {
+        let mut service = JobEngineService::start_probes_only(Arc::new(|| {}));
+        assert!(service.threads.is_empty());
+        assert!(service.shared.gpu.lock().unwrap().is_none());
+        let id = RequestId::new(1).unwrap();
+        service
+            .probe_media(
+                PortId(1),
+                id,
+                pm_protocol::media::ProbeMedia {
+                    handle: CapabilityHandle::from_random_bytes([1; 16]),
+                    interpret: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(service.threads.len(), 1);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let call = loop {
+            if let Some(call) = service.drain().host_requests.into_iter().next() {
+                break call;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "probe did not ask to resolve its handle"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert!(matches!(
+            call.request,
+            Request::ResolveHandle(ResolveHandle {
+                session: SessionId::ZERO,
+                ..
+            })
+        ));
+        assert_eq!(call.session, None);
+        service.host_answer(
+            call.token,
+            Err(EngineError::new(
+                ErrorCode::CapabilityRejected,
+                ErrorScope::Request { id },
+                "invalid handle",
+            )),
+        );
+        loop {
+            if let Some((port, answer)) = service.drain().messages.into_iter().next() {
+                assert_eq!(port, PortId(1));
+                assert!(
+                    matches!(answer.message, Message::Error { id: error_id, error } if error_id == id && error.code == ErrorCode::CapabilityRejected)
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "probe did not relay the rejection"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(service.shared.gpu.lock().unwrap().is_none());
+    }
 
     #[test]
     fn offline_messages_name_the_clips() {

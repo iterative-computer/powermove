@@ -5,7 +5,8 @@
 //! loader (`apps/desktop/src/renderer/src/engine-doc/wasm.ts`) is a few
 //! dozen lines and the same module runs in Electron's renderer and in Node.
 //!
-//! Buffers live in linear memory and only grow:
+//! Buffers live in linear memory; input and reply allocations can be released
+//! after large transfers (linear memory itself never shrinks):
 //!
 //! * the input buffer (`pm_in`): request JSON, patch bodies, documents;
 //! * the reply buffer (`pm_out_ptr`, `pm_out_len`): JSON replies, hashes,
@@ -121,7 +122,15 @@ fn revision(r: f64) -> Option<u64> {
 /// An input buffer of at least `len` bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_in(len: usize) -> *mut u8 {
-    with(|s| reserve(&mut s.input, len))
+    with(|s| {
+        // The caller already knows the exact byte count. Geometric growth
+        // here can strand hundreds of MB in linear memory after a resync.
+        if len > s.input.len() {
+            s.input.reserve_exact(len - s.input.len());
+            s.input.resize(len, 0);
+        }
+        s.input.as_mut_ptr()
+    })
 }
 
 /// Frees the input buffer (after a large resync).
@@ -140,11 +149,13 @@ pub extern "C" fn pm_out_len() -> usize {
     with(|s| s.out.len())
 }
 
-/// Release a large output after JavaScript has copied it out of linear
-/// memory. The next reply can allocate afresh.
+/// Frees a reply after the caller has copied it out of linear memory.
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_out_release() {
-    with(|s| s.out = Vec::new())
+    with(|s| {
+        s.out = Vec::new();
+        s.out_special = false;
+    })
 }
 
 /// Whether the last JSON reply holds special-number markers (`crate::reply`).
@@ -163,8 +174,11 @@ pub extern "C" fn pm_resync(len: usize, rev: f64) -> u32 {
             reply(s, "invalid revision", false);
             return 1;
         };
-        let bytes = input(s, len).to_vec();
-        match s.engine.resync(&bytes, rev) {
+        // Borrowed in place rather than copied: a large document's copy
+        // would stay in wasm memory (which never shrinks) as a peak.
+        let len = len.min(s.input.len());
+        let result = s.engine.resync(&s.input[..len], rev);
+        match result {
             Ok(()) => 0,
             Err(e) => {
                 reply(s, &e, false);
@@ -217,12 +231,25 @@ pub extern "C" fn pm_hash() -> usize {
     })
 }
 
+/// Incremental local consistency digest (separate from the canonical wire hash).
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_consistency_hash() -> usize {
+    with(|s| {
+        let hash = s.engine.consistency_hash();
+        reply(s, &hash, false)
+    })
+}
+
 /// The canonical serialization of the mirror into the reply buffer.
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_to_json() -> usize {
     with(|s| {
-        let json = s.engine.to_json();
-        reply(s, &json, false)
+        // Drop an earlier large reply before serializing. Moving the String's
+        // allocation avoids a second complete copy of the document in wasm.
+        s.out = Vec::new();
+        s.out = s.engine.to_json().into_bytes();
+        s.out_special = false;
+        s.out.len()
     })
 }
 
@@ -648,6 +675,17 @@ pub extern "C" fn pm_heap_live() -> f64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn pm_heap_peak() -> f64 {
     PEAK.load(Ordering::Relaxed) as f64
+}
+
+/// Retained transfer-buffer capacities, already included in `pm_heap_live`.
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_heap_input() -> f64 {
+    with(|s| s.input.capacity() as f64)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pm_heap_output() -> f64 {
+    with(|s| s.out.capacity() as f64)
 }
 
 #[unsafe(no_mangle)]

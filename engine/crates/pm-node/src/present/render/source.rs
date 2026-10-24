@@ -486,7 +486,7 @@ impl Thread {
             }
         };
         let Some(gpu) = self.gpu.as_mut() else { return };
-        let composer = gpu.composer_with(&self.config, self.frame_cache);
+        let composer = gpu.composer_with(&self.config, self.frame_cache, &mut self.prepared);
         let mut coded_video = None;
         let painted = if let Some(request) = &svg_request {
             composer.renderer().source_svg_rgba8(

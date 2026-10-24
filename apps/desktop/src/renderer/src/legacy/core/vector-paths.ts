@@ -67,14 +67,16 @@ export function tracePath(context:CanvasRenderingContext2D,values:any):void {
 
 export function groupMatrix(PM:any,layer:any,path:VectorPath,time:number,seen=new Set<string>()):number[] {
   if(seen.has(path.id))return [1,0,0,1,0,0];seen.add(path.id);
-  const v=pathValues(PM,layer,path,time),r=v.rotation*Math.PI/180,c=Math.cos(r),s=Math.sin(r);
+  // A transform does not depend on vertices, fills, or strokes. Imported
+  // artwork can have hundreds of paths; avoid evaluating them a second time.
+  const v=Object.fromEntries(['x','y','rotation','scaleX','scaleY'].map(key=>{
+    const value=path.p[key];return [key,isProperty(value)?PM.evP(layer,value,time,`g.${path.id}.${key}`):value];
+  })),r=v.rotation*Math.PI/180,c=Math.cos(r),s=Math.sin(r);
   const local=[c*v.scaleX/100,s*v.scaleX/100,-s*v.scaleY/100,c*v.scaleY/100,v.x,v.y];
   const parent=layer.d.paths?.find((p:VectorPath)=>p.id===path.parent);
   return parent?PM.mul(groupMatrix(PM,layer,parent,time,seen),local):local;
 }
-export function rasterPaths(PM:any,layer:any,time:number,scale:number):any {
-  const paths=(layer.d.paths || []) as VectorPath[];
-  const records=paths.map(path=>({path,v:pathValues(PM,layer,path,time),matrix:groupMatrix(PM,layer,path,time)}));
+export function pathRasterGeometry(PM:any,layer:any,time:number,scale:number,records = (layer.d.paths || []).map((path:VectorPath)=>({v:pathValues(PM,layer,path,time),matrix:groupMatrix(PM,layer,path,time)}))):any {
   let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
   for(const rec of records)for(let i=0;i<Math.min(256,Math.max(1,Math.round(rec.v.copies)));i++){
     const r=i*rec.v.repeatRotation*Math.PI/180,c=Math.cos(r),s=Math.sin(r),m=PM.mul(rec.matrix,[c,s,-s,c,i*rec.v.repeatX,i*rec.v.repeatY]);
@@ -83,6 +85,10 @@ export function rasterPaths(PM:any,layer:any,time:number,scale:number):any {
   }
   if(!Number.isFinite(x0)){x0=y0=0;x1=y1=1;}
   const w=Math.max(1,x1-x0),h=Math.max(1,y1-y0),density=Math.min(scale,8192/w,8192/h);
+  return {records,x0,y0,x1,y1,w,h,density,width:Math.ceil(w*density),height:Math.ceil(h*density)};
+}
+export function rasterPaths(PM:any,layer:any,time:number,scale:number,geometry=pathRasterGeometry(PM,layer,time,scale)):any {
+  const {records,x0,y0,x1,y1,w,h,density}=geometry;
   const cv=document.createElement('canvas');cv.width=Math.ceil(w*density);cv.height=Math.ceil(h*density);
   const ctx=cv.getContext('2d')!;ctx.scale(density,density);ctx.translate(-x0,-y0);
   for(const rec of records)for(let i=0;i<Math.min(256,Math.max(1,Math.round(rec.v.copies)));i++){

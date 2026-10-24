@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 
 import type { CodexTraceEvent } from '../shared/ipc';
 import { AgentApprovals, ALLOW_ONCE, ALLOW_RUN, DENY } from './agent-approvals';
@@ -12,6 +17,30 @@ function asked(trace: ReturnType<typeof vi.fn>): Extract<CodexTraceEvent, { kind
 }
 
 describe('agent approvals', () => {
+  it('executes a harmless approved fixture exactly once, ignoring duplicate and stale answers', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'powermove-approval-execution-'));
+    const file = path.join(root, 'marker');
+    const approvals = new AgentApprovals(), trace = vi.fn();
+    try {
+      const decision = approvals.requester('fixture-run', trace)({ title: 'Run this command?', detail: 'Append one local QA marker line' });
+      const execution = decision.then(async result => {
+        if (result.allowed) await promisify(execFile)(process.execPath, ['-e',
+          "require('node:fs').appendFileSync(process.argv[1], 'approved\\n')", file]);
+        return result;
+      });
+      const answer = { id: 'fixture-run', itemId: asked(trace).itemId, answers: { decision: [ALLOW_ONCE] } };
+      expect(approvals.answer(answer)).toBe(true);
+      expect(approvals.answer(answer)).toBe(false);
+      await expect(execution).resolves.toEqual({ allowed: true });
+      approvals.closeRun('fixture-run');
+      expect(approvals.answer(answer)).toBe(false);
+      expect(await readFile(file, 'utf8')).toBe('approved\n');
+    } finally {
+      approvals.closeRun('fixture-run');
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('shows a blocking card and allows once', async () => {
     const approvals = new AgentApprovals();
     const trace = vi.fn();

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+// @vitest-environment happy-dom
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { install } from './media';
@@ -42,6 +43,14 @@ describe('legacy media install', () => {
     expect(PM.MediaTiming.earliestStart(video)).toBe(1.5);
   });
 
+  it('trims media before zero while respecting the beginning of its source', () => {
+    const PM = mediaRegistry();
+    const video = { type: 'video', from: -3, d: { trim: 1, speed: 2 } };
+    expect(PM.MediaTiming.earliestStart(video)).toBe(-3.5);
+    expect(PM.MediaTiming.trimAtStart(video, -3.5)).toBe(0);
+    expect(PM.MediaTiming.trimAtStart(video, -2)).toBe(3);
+  });
+
   it('preserves order without exceeding bounded work concurrency', async () => {
     const PM = mediaRegistry();
     let active = 0;
@@ -71,4 +80,77 @@ describe('legacy media install', () => {
     expect(project.assets.old).toBeUndefined();
     expect(PM.MediaImport.removeAsset(project, 'current')).toEqual({ removedLayers: 1, removedLayerIds: ['mesh'] });
   });
+
+  describe('IndexedDB open', () => {
+    /** An IndexedDB whose open answer the test delivers; writes commit at once. */
+    function fakeIndexedDB() {
+      const opened: any[] = [];
+      const db = {
+        closed: 0,
+        objectStoreNames: { contains: () => true },
+        close() { this.closed++; },
+        transaction() {
+          const tx: any = {
+            objectStore: () => ({
+              put: () => {
+                const req: any = { result: 'stored' };
+                queueMicrotask(() => { req.onsuccess?.(); tx.oncomplete?.(); });
+                return req;
+              },
+            }),
+          };
+          return tx;
+        },
+      };
+      const indexedDB = { open: () => { const req: any = { result: null }; opened.push(req); return req; } };
+      const answer = (req: any) => { req.result = db; req.onsuccess(); };
+      return { indexedDB, db, opened, answer };
+    }
+    let clock = 0;
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      delete (window as any).indexedDB;
+    });
+    function install() {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      clock = 0;
+      vi.spyOn(performance, 'now').mockImplementation(() => clock);
+      const fake = fakeIndexedDB();
+      (window as any).indexedDB = fake.indexedDB;
+      return { PM: mediaRegistry(), ...fake };
+    }
+
+    it('does not time out an open whose answer waited behind a long main-thread task', async () => {
+      const { PM, opened, answer } = install();
+      // The first access (an extension import) starts the open...
+      const importing = PM.MediaStore.put('import', new Blob(['clip']));
+      expect(opened).toHaveLength(1);
+      // ...then an 80 s task blocks the page. Its timers come due during the
+      // task and run before the queued open answer.
+      clock += 80_000;
+      vi.advanceTimersByTime(80_000);
+      // A project open's media restore now waits on the same connection.
+      const restoring = PM.MediaStore.put('restore', new Blob(['media']));
+      answer(opened[0]);
+      expect(await importing).toBe(true);
+      expect(await restoring).toBe(true);
+      expect(opened).toHaveLength(1);
+    });
+
+    it('still gives up after five responsive seconds and closes a late connection', async () => {
+      const { PM, db, opened, answer } = install();
+      const put = PM.MediaStore.put('key', new Blob(['x']));
+      for (let t = 0; t < 5000; t += 250) { clock += 250; vi.advanceTimersByTime(250); }
+      expect(await put).toBe(false);
+      answer(opened[0]);
+      expect(db.closed).toBe(1);
+      // The next access opens again rather than reusing the abandoned attempt.
+      const retry = PM.MediaStore.put('key', new Blob(['x']));
+      expect(opened).toHaveLength(2);
+      answer(opened[1]);
+      expect(await retry).toBe(true);
+    });
+  });
 });
+

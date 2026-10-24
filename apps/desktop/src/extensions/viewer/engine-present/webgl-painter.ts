@@ -4,7 +4,7 @@
  * deliberately reject an 8-bit drawing buffer instead of silently losing EDR.
  * The engine still renders every frame natively; this only presents its surface.
  */
-import { DeviceLostError, FrameUnusableError, type FramePainter, type PaintTarget } from './gpu';
+import { DeviceLostError, FrameUnusableError, type FramePainter, type FramePainterMemory, type PaintTarget } from './gpu';
 import type { SurfaceFormat, ViewerColorSpace } from './protocol';
 
 type GlWithFloatDrawingBuffer = WebGL2RenderingContext & {
@@ -57,6 +57,8 @@ export async function createWebGlPainter(canvas: PaintTarget): Promise<FramePain
     alpha: true,
     premultipliedAlpha: true,
     antialias: false,
+    depth: false,
+    stencil: false,
     preserveDrawingBuffer: false,
     powerPreference: 'high-performance'
   }) as GlWithFloatDrawingBuffer | null;
@@ -65,8 +67,8 @@ export async function createWebGlPainter(canvas: PaintTarget): Promise<FramePain
     throw new WebGlPainterCapabilityError('F16 drawing-buffer or color-space API is missing');
   }
   const attributes = gl.getContextAttributes();
-  if (!attributes?.alpha || !attributes.premultipliedAlpha || attributes.antialias) {
-    throw new WebGlPainterCapabilityError('required alpha, premultiplication, or antialias configuration was not accepted');
+  if (!attributes?.alpha || !attributes.premultipliedAlpha || attributes.antialias || attributes.depth || attributes.stencil) {
+    throw new WebGlPainterCapabilityError('required alpha, premultiplication, depth/stencil, or antialias configuration was not accepted');
   }
   if (!gl.getExtension('EXT_color_buffer_float') && !gl.getExtension('EXT_color_buffer_half_float')) {
     throw new WebGlPainterCapabilityError('float color-buffer extension is missing');
@@ -105,6 +107,10 @@ export async function createWebGlPainter(canvas: PaintTarget): Promise<FramePain
   gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.BROWSER_DEFAULT_WEBGL);
 
   let configured = '';
+  let configuredSize: { width: number; height: number; format: string; colorSpace: string } | null = null;
+  let uploadedSize: { width: number; height: number } | null = null;
+  let trimmed = false;
+  let trimError: string | null = null;
   let disposed = false;
   let lostReason: string | null = null;
   let resolveLost!: (reason: string) => void;
@@ -189,6 +195,8 @@ export async function createWebGlPainter(canvas: PaintTarget): Promise<FramePain
       }
       gl.viewport(0, 0, width, height);
       configured = key;
+      configuredSize = { width, height, format, colorSpace };
+      trimmed = false;
     },
     draw(frame: VideoFrame): void {
       checkContext();
@@ -210,6 +218,7 @@ export async function createWebGlPainter(canvas: PaintTarget): Promise<FramePain
       // F16 input; an unsupported upload fails closed instead of using RGBA8.
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, frame);
       checkUpload();
+      uploadedSize = { width: frame.codedWidth, height: frame.codedHeight };
       gl.bindVertexArray(vao);
       gl.useProgram(program);
       gl.clearColor(0, 0, 0, 0);
@@ -259,6 +268,51 @@ export async function createWebGlPainter(canvas: PaintTarget): Promise<FramePain
         };
         fence.timer = setTimeout(poll, 0);
       });
+    },
+    trim(): void {
+      if (disposed || lostReason !== null || gl.isContextLost() || !configured) return;
+      // A deliberately hidden viewer has no pixels to preserve. Keep the
+      // worker/context/program ready, but release the F16 upload and drawing
+      // storage after the presenter's GPU fences have drained.
+      configured = '';
+      configuredSize = null;
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 1, 1, 0, gl.RGBA, gl.HALF_FLOAT, null);
+      const uploadError = gl.getError();
+      if (uploadError !== gl.NO_ERROR) {
+        trimError = `upload texture shrink failed (GL 0x${uploadError.toString(16)})`;
+        return;
+      }
+      uploadedSize = { width: 1, height: 1 };
+      gl.drawingBufferStorage!(gl.RGBA16F, 1, 1);
+      const bufferError = gl.getError();
+      if (bufferError !== gl.NO_ERROR) {
+        trimError = `drawing buffer shrink failed (GL 0x${bufferError.toString(16)})`;
+        return;
+      }
+      gl.viewport(0, 0, 1, 1);
+      trimError = null;
+      trimmed = true;
+    },
+    memoryStats(): FramePainterMemory {
+      const attrs = gl.getContextAttributes();
+      const width = gl.drawingBufferWidth;
+      const height = gl.drawingBufferHeight;
+      const bufferBytesPerPixel = gl.drawingBufferFormat === gl.RGBA16F ? 8 : 4;
+      return {
+        backend: 'webgl2',
+        canvas: { width: canvas.width, height: canvas.height },
+        configured: configuredSize,
+        drawingBuffer: width > 0 && height > 0 ? { width, height, bytesPerPixel: bufferBytesPerPixel, nominalBytes: width * height * bufferBytesPerPixel } : null,
+        uploadTexture: uploadedSize ? { ...uploadedSize, bytesPerPixel: 8, nominalBytes: uploadedSize.width * uploadedSize.height * 8 } : null,
+        pendingFences: fences.size,
+        contextLost: lostReason !== null || gl.isContextLost(),
+        trimmed,
+        compositorBuffers: 'unknown',
+        contextAttributes: attrs ? { alpha: attrs.alpha === true, premultipliedAlpha: attrs.premultipliedAlpha === true, antialias: attrs.antialias === true, preserveDrawingBuffer: attrs.preserveDrawingBuffer === true, depth: attrs.depth === true, stencil: attrs.stencil === true } : null,
+        channelBits: { red: gl.getParameter(gl.RED_BITS) as number, green: gl.getParameter(gl.GREEN_BITS) as number, blue: gl.getParameter(gl.BLUE_BITS) as number, alpha: gl.getParameter(gl.ALPHA_BITS) as number },
+        trimError,
+      };
     },
     dispose(): void {
       if (disposed) return;

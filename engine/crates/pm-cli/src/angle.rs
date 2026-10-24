@@ -117,6 +117,7 @@ impl AngleHost {
         }))
     }
     fn request(&self, job: &FallbackJob) -> Result<FallbackPixels, RunnerFailure> {
+        let float32 = job.request.color_depth == 32;
         let bins: Vec<_> = job
             .textures
             .iter()
@@ -126,15 +127,24 @@ impl AngleHost {
         let textures: Vec<Vec<u8>> = job
             .textures
             .iter()
-            .map(|t| pm_render::shader_layers::fallback::half_bytes(&t.rgba16f))
-            .collect();
+            .map(|t| {
+                if float32 {
+                    t.rgba32f
+                        .as_ref()
+                        .map(|bits| pm_render::shader_layers::fallback::float_bytes(bits))
+                        .ok_or_else(|| RunnerFailure::from("missing float32 ANGLE input"))
+                } else {
+                    Ok(pm_render::shader_layers::fallback::half_bytes(&t.rgba16f))
+                }
+            })
+            .collect::<Result<_, _>>()?;
         let body = frame(
             &serde_json::json!({"request": job.request, "textures": bins}),
             &textures,
         )?;
         let expected = (job.request.width as usize)
             .checked_mul(job.request.height as usize)
-            .and_then(|n| n.checked_mul(8))
+            .and_then(|n| n.checked_mul(if float32 { 16 } else { 8 }))
             .ok_or("ANGLE target is too large")?;
         if expected > 512 * 1024 * 1024 {
             return Err("ANGLE target exceeds 512 MB".into());
@@ -145,6 +155,7 @@ impl AngleHost {
             &job.request.key,
             job.request.width,
             job.request.height,
+            job.request.color_depth,
         )
     }
 
@@ -377,6 +388,7 @@ fn decode(
     _key: &str,
     width: u32,
     height: u32,
+    color_depth: u8,
 ) -> Result<FallbackPixels, RunnerFailure> {
     let length = u32::from_be_bytes(
         bytes
@@ -411,14 +423,20 @@ fn decode(
             .try_into()
             .unwrap(),
     ) as usize;
-    let expected = width as usize * height as usize * 8;
+    let expected = width as usize * height as usize * if color_depth == 32 { 16 } else { 8 };
     if size != expected || bytes.len() != at + 4 + size {
         return Err("ANGLE pixels do not match the target".into());
     }
     Ok(FallbackPixels {
         width,
         height,
-        rgba16f: pm_render::shader_layers::fallback::halves(&bytes[at + 4..]),
+        rgba16f: if color_depth == 32 {
+            Vec::new()
+        } else {
+            pm_render::shader_layers::fallback::halves(&bytes[at + 4..])
+        },
+        rgba32f: (color_depth == 32)
+            .then(|| pm_render::shader_layers::fallback::float_bits(&bytes[at + 4..])),
     })
 }
 
@@ -475,7 +493,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&(header.len() as u32).to_be_bytes());
         bytes.extend_from_slice(header);
-        let failure = decode(&bytes, "a", 1, 1).unwrap_err().0;
+        let failure = decode(&bytes, "a", 1, 1, 16).unwrap_err().0;
         assert_eq!(failure.reason, "compile");
         assert_eq!(failure.message, "fixture compile failure");
     }
@@ -524,11 +542,27 @@ mod tests {
         bytes.extend_from_slice(&8u32.to_be_bytes());
         bytes.extend_from_slice(&[0, 60, 0, 0, 0, 0, 0, 60]);
         assert_eq!(
-            decode(&bytes, "a", 1, 1).unwrap().rgba16f,
+            decode(&bytes, "a", 1, 1, 16).unwrap().rgba16f,
             [0x3c00, 0, 0, 0x3c00]
         );
-        assert!(decode(&bytes[..bytes.len() - 1], "a", 1, 1).is_err());
+        assert!(decode(&bytes[..bytes.len() - 1], "a", 1, 1, 16).is_err());
         bytes.push(0);
-        assert!(decode(&bytes, "a", 1, 1).is_err());
+        assert!(decode(&bytes, "a", 1, 1, 16).is_err());
+    }
+    #[test]
+    fn accepts_exact_binary32_without_half_conversion() {
+        let header = br#"{"ok":true,"pixels":{"$bin":0}}"#;
+        let bits = [0x3f80_0001u32, 0x3f00_0001, 0x0000_0001, 0xbf80_0001];
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(header.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&16u32.to_be_bytes());
+        for value in bits {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let pixels = decode(&bytes, "a", 1, 1, 32).unwrap();
+        assert!(pixels.rgba16f.is_empty());
+        assert_eq!(pixels.rgba32f, Some(bits.to_vec()));
+        assert!(decode(&bytes[..bytes.len() - 1], "a", 1, 1, 32).is_err());
     }
 }

@@ -5,7 +5,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { canonicalProject, canonicalProjectHash, canonicalStringify } from '../../../shared/canonical-json';
 import { applyOps, diffOps } from '../../../shared/patch-ids';
@@ -115,6 +115,25 @@ function exercise(PM: any, doc: EngineDoc, random: () => number) {
 
 const mismatches = (doc: EngineDoc) => doc.dual!.stats.samples;
 
+describe('bus announcements', () => {
+  it('does not treat a runtime-only assets event as a document write', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing', 'gl/compositor');
+    // The module never loads: only the bus wrapper is under test.
+    installEngineDoc(PM, { mode: parseMode('audit'), loadModule: () => new Promise<WebAssembly.Module>(() => {}), sink: () => {}, auditMs: 1e9 });
+    const announce = vi.fn();
+    PM.bus.__engineDocAnnounce = announce;
+    const heard: unknown[] = [];
+    PM.bus.on('assets', (change: unknown) => heard.push(change));
+    PM.bus.emit('assets', { runtimeOnly: true });
+    expect(announce).not.toHaveBeenCalled();
+    PM.bus.emit('assets');
+    PM.bus.emit('assets', { runtimeOnly: false });
+    PM.bus.emit('layers', { runtimeOnly: true });
+    expect(announce).toHaveBeenCalledTimes(3);
+    expect(heard).toEqual([{ runtimeOnly: true }, undefined, { runtimeOnly: false }]);
+  });
+});
+
 describe.skipIf(!built)('engine-doc with pm-wasm', () => {
   it('answers every routed query like the legacy evaluator on random projects', async () => {
     for (const seed of [1, 2, 3, 4, 5]) {
@@ -223,6 +242,27 @@ describe.skipIf(!built)('engine-doc with pm-wasm', () => {
     doc.barrier!.flush();
     expect(doc.barrier!.stats.resyncs).toBe(resyncs + 1);
     expect(doc.wasm!.hash()).toBe(canonicalProjectHash(PM.proj));
+  });
+
+  it('hands the document to receivers as pm-wasm bytes, and encodes a load batch only when one is read', async () => {
+    // A 180 MB project (C1) must not become several JavaScript strings of
+    // the whole document: the renderer ran out of heap opening it.
+    const { PM, doc } = await editor('on');
+    populate(PM, rng(7), 4);
+    const snap = doc.snapshot()!;
+    expect(snap.bytes).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(snap.bytes)).toBe(canonicalStringify(canonicalProject(PM.proj)));
+    expect(snap.json).toBe(new TextDecoder().decode(snap.bytes));
+    const loads: any[] = [];
+    doc.subscribe(batch => { if (batch.origin === 'load') loads.push(batch); });
+    PM.replaceProject(PM.mkProject({ name: 'Another' }));
+    doc.barrier!.flush();
+    expect(loads).toHaveLength(1);
+    const described = Object.getOwnPropertyDescriptor(loads[0], 'body')!;
+    expect(typeof described.get).toBe('function');
+    const ops = decodePatchOps(loads[0].body);
+    expect(ops).toMatchObject([{ path: [], exists: true }]);
+    expect(loads[0].body).toBe(loads[0].body);
   });
 
   it('carries load only on whole-document resyncs, so a receiver following the stream rules stays equal', async () => {

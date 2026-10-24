@@ -1,9 +1,17 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const sdk = vi.hoisted(() => ({ query: vi.fn(), loads: 0 }));
+vi.mock('@anthropic-ai/claude-agent-sdk', () => {
+  sdk.loads += 1;
+  return { query: sdk.query };
+});
 
 import { ClaudeAccountClient, claudeAccountStatusFromJson, claudeModelsFromSdk } from './account';
+
+afterEach(() => { vi.clearAllMocks(); });
 
 function childThatCloses(stdoutText: string, code: number): EventEmitter & {
   stdout: PassThrough; stderr: PassThrough; killed: boolean; kill: ReturnType<typeof vi.fn>;
@@ -36,6 +44,16 @@ function waitingChild(): EventEmitter & {
 }
 
 describe('Claude account client', () => {
+  it('keeps the model SDK unloaded when checking account status', async () => {
+    const client = new ClaudeAccountClient({ userData: '/tmp/claude-account', claudeBinaryPref: () => null }, {
+      discoverBinary: async () => '/bin/claude', prepareHome: async () => '/tmp/claude-account',
+      spawnProcess: () => childThatCloses('{"loggedIn":false}', 0) as never
+    });
+    await expect(client.status()).resolves.toMatchObject({ state: 'disconnected' });
+    expect(sdk.loads).toBe(0);
+    expect(sdk.query).not.toHaveBeenCalled();
+    await client.shutdown();
+  });
   it('includes resolved Claude model IDs from SDK aliases', () => {
     expect(claudeModelsFromSdk([
       { value: 'opus', resolvedModel: 'claude-opus-5-5', displayName: 'Opus', description: '', supportedEffortLevels: ['low', 'high', 'max'] },
@@ -130,5 +148,36 @@ printf '%s\\n' '{"loggedIn":false}'
     );
     await client.shutdown();
     expect(login.kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('loads the SDK on demand and shares concurrent model discovery with session cleanup', async () => {
+    const models = [{ value: 'opus', displayName: 'Opus', description: '', supportedEffortLevels: ['low', 'high'] }];
+    const session = { supportedModels: vi.fn(async () => models), close: vi.fn() };
+    sdk.query.mockReturnValue(session);
+    const client = new ClaudeAccountClient({ userData: '/tmp/claude-account', claudeBinaryPref: () => null }, {
+      discoverBinary: async () => '/bin/claude', prepareHome: async () => '/tmp/claude-account'
+    });
+    const first = client.models(), second = client.models();
+    expect(second).toBe(first);
+    await expect(first).resolves.toEqual([{ id: 'opus', label: 'Opus', reasoningEfforts: ['low', 'high'] }]);
+    expect(sdk.query).toHaveBeenCalledOnce();
+    expect(sdk.query).toHaveBeenCalledWith(expect.objectContaining({
+      options: expect.objectContaining({ pathToClaudeCodeExecutable: '/bin/claude', tools: [], settingSources: [], env: expect.objectContaining({ CLAUDE_CONFIG_DIR: '/tmp/claude-account' }) })
+    }));
+    expect(session.close).toHaveBeenCalledOnce();
+    await client.shutdown();
+  });
+
+  it('closes failed model-discovery sessions and allows a later retry', async () => {
+    const session = { supportedModels: vi.fn().mockRejectedValueOnce(new Error('models unavailable')).mockResolvedValueOnce([]), close: vi.fn() };
+    sdk.query.mockReturnValue(session);
+    const client = new ClaudeAccountClient({ userData: '/tmp/claude-account', claudeBinaryPref: () => null }, {
+      discoverBinary: async () => '/bin/claude', prepareHome: async () => '/tmp/claude-account'
+    });
+    await expect(client.models()).rejects.toThrow('models unavailable');
+    expect(session.close).toHaveBeenCalledOnce();
+    await expect(client.models()).resolves.toEqual([]);
+    expect(session.close).toHaveBeenCalledTimes(2);
+    await client.shutdown();
   });
 });

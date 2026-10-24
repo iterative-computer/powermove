@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PowermoveAPI } from 'powermove';
-import { ENGINE_VIEWER_SERVICE, type EngineViewerHandlers, type EngineViewerService } from './engine-present/presentation';
+import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, type EngineViewerHandlers, type EngineViewerService } from './engine-present/presentation';
 import type { FrameDescriptor } from './engine-present/protocol';
 import { createViewerRuntime } from './viewer';
 
@@ -31,7 +31,7 @@ function viewerApi(services: Map<string, unknown>, log: (level: string, message:
     groups: { ancestors: () => [], transformRoots: () => [] },
     anim: { active: () => true, ev: () => 0, version: () => 0, worldMatrix: () => [1, 0, 0, 1, 0, 0] },
     model: { TYPE_META: {}, layer: () => undefined, curComp: () => project },
-    render: { gl: { bounds: () => null, pick: () => null, context: null, previewViewport: null, resize: vi.fn() } },
+    render: { gl: { bounds: () => null, pick: () => null, context: null, canvas: null, previewViewport: null, resize: vi.fn() } },
     transport: { time: () => 0, playing: () => false, quality: 1, perf: { auto: false }, previewResolution: 1, invalidate() {} },
     util: { clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)) },
     events: { on: () => ({ dispose() {} }) },
@@ -62,6 +62,49 @@ function mount(runtime: any, size = { width: 1000, height: 700 }): { stage: HTML
 }
 
 describe('viewer engine presentation hook', () => {
+  it('suspends and resumes an opted-in service without replacing its viewer canvas', async () => {
+    gpu.fake = true;
+    try {
+      const services = new Map<string, unknown>();
+      let eligible = true;
+      const channels: { closed: boolean; states: unknown[] }[] = [];
+      const service: EngineViewerService = {
+        source: { videoFrame: () => null, onSurface: () => () => {}, retire: () => 0 },
+        composition: () => 'comp-1',
+        offMainThread: false,
+        mayPresent: () => eligible,
+        open: () => {
+          const channel = { closed: false, states: [] as unknown[] };
+          channels.push(channel);
+          return { sendViewerState(state) { channel.states.push(state); }, release() {}, close() { channel.closed = true; } };
+        },
+        onReady: () => () => {}
+      };
+      services.set(ENGINE_VIEWER_SERVICE, service);
+      const runtime = createViewerRuntime(viewerApi(services, () => {})) as any;
+      mount(runtime);
+      runtime.layout();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const presentation = runtime.enginePresentation;
+      const canvas = presentation.canvas;
+      expect(channels).toHaveLength(1);
+      eligible = false;
+      window.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(channels[0]!.closed).toBe(true);
+      expect(runtime.enginePresentation).toBe(presentation);
+      expect(canvas.style.visibility).toBe('hidden');
+      eligible = true;
+      window.dispatchEvent(new Event(ENGINE_VIEWER_CHANGED));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(runtime.enginePresentation.canvas).toBe(canvas);
+      expect(channels).toHaveLength(2);
+      expect(channels[1]!.states[0]).toMatchObject({ surfaceEpoch: 1 });
+      runtime.dispose();
+    } finally {
+      gpu.fake = false;
+    }
+  });
   it('does nothing without the engine.viewer service', () => {
     const services = new Map<string, unknown>();
     const runtime = createViewerRuntime(viewerApi(services, () => {})) as any;
@@ -86,6 +129,36 @@ describe('viewer engine presentation hook', () => {
     // that resize would bind engine presentation to the canvas it left.
     runtime.layout();
     expect(resize.mock.calls.length).toBe(calls);
+  });
+
+  it('sends the 3D Editor view\'s camera, and sends it again at each view or pose change', () => {
+    const services = new Map<string, unknown>();
+    const camera = { view: Array.from({ length: 16 }, (_, i) => (i % 5 === 0 ? 1 : 0)), projection: { kind: 'perspective' as const, fovYDegrees: 40, near: 0.1, far: 100 } };
+    const service: EngineViewerService = {
+      source: { videoFrame: () => null, onSurface: () => () => {}, retire: () => 0 },
+      composition: () => 'comp-1',
+      open: vi.fn(() => null),
+      onReady: () => () => {},
+      editorCamera: vi.fn(() => camera)
+    };
+    services.set(ENGINE_VIEWER_SERVICE, service);
+    let view: 'camera' | 'editor' = 'camera';
+    let onView: (() => void) | null = null;
+    const offView = vi.fn();
+    const api = viewerApi(services, () => {}) as any;
+    api.scene3d = { getView: () => view, onViewChange: (listener: () => void) => { onView = listener; return { dispose: offView }; } };
+    const runtime = createViewerRuntime(api) as any;
+    mount(runtime);
+    runtime.layout();
+    const update = vi.spyOn(runtime.enginePresentation, 'update');
+    view = 'editor';
+    onView!();
+    expect(update.mock.lastCall![0]).toMatchObject({ camera });
+    view = 'camera';
+    onView!();
+    expect(update.mock.lastCall![0]).not.toHaveProperty('camera');
+    runtime.dispose();
+    expect(offView).toHaveBeenCalledOnce();
   });
 
   it('attaches a presentation canvas under the overlay when the service is registered, and removes it on dispose', async () => {

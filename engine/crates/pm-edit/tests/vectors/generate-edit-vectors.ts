@@ -6,8 +6,7 @@
  * (`extensions/inspector/align.ts` with the strip's own box rule), the size
  * anchor's capture and its rescale after an anchor edit (`size-anchor.ts`,
  * `font-anchor.ts`), Pre-compose › Leave all attributes
- * (`compositions.ts`), material peer synchronization
- * (`scene3d/materials.ts`), split text over given layouts
+ * (`compositions.ts`), split text over given layouts
  * (`split-text.ts`), and the font anchor (`font-anchor.ts`: capture,
  * reference, Pan Behind rescale) and split text measured end to end through
  * `PM.raster` and `PM.textLayout` (`legacy/gl/raster.ts`) on a synthetic
@@ -36,7 +35,6 @@ import { captureSizeAnchor, sizeAnchorReference } from '../../../../../apps/desk
 import { captureFontAnchor, fontAnchorReference, rescaleAnchorBounds } from '../../../../../apps/desktop/src/renderer/src/legacy/core/font-anchor';
 import { leaveAttributeBounds, shiftLeaveAnchor } from '../../../../../apps/desktop/src/renderer/src/legacy/core/compositions';
 import { splitTextLayers } from '../../../../../apps/desktop/src/renderer/src/legacy/core/split-text';
-import { shaderPeers, synchronizeShaderPeers } from '../../../../../apps/desktop/src/renderer/src/core/scene3d/materials';
 import { alignDelta, deltaInParent, unionBox, type AlignMode } from '../../../../../apps/desktop/src/extensions/inspector/align';
 import { adoptTemporalEase } from '../../../../../apps/desktop/src/renderer/src/core/anim/temporal-ease';
 import { canonicalProject } from '../../../../../apps/desktop/src/shared/canonical-json';
@@ -237,7 +235,10 @@ function makeDoc(index: number, bounded: boolean): any {
       } } } };
       layer.threeD = true;
     }
-    if (type === 'group' && chance(0.2)) layer.p.opacity = channel(range(20, 90), 10, animated());
+    // Opacity keyed past 100 is clamped when ungrouping folds it into a member.
+    if (type === 'group' && chance(0.2)) layer.p.opacity = channel(range(20, 140), 10, animated());
+    // A hidden group leaves its members hidden.
+    if (type === 'group' && chance(0.15)) layer.on = false;
     layers.push(layer);
   }
   // Groups and parents (no cycles: a parent comes earlier in a random order).
@@ -295,7 +296,8 @@ type Case = Record<string, unknown>;
 /** The renderer's own checks before it asks a kernel (locks, cycles,
  *  styled groups): their throws are not the kernels'. */
 const PRECHECKS = ['Group not found', 'Layer not found', 'Unlock layers before moving', 'Grouping would create a cycle',
-  'Select a group to ungroup', 'Unlock the group first', 'Unlock the group contents before ungrouping', 'Remove visual compositing from'];
+  'Select a group to ungroup', 'Unlock the group first', 'Unlock the group contents before ungrouping', 'Remove visual compositing from',
+  'Turn off Solo before ungrouping', 'Pre-compose this group to keep'];
 const precheck = (result: any) => typeof result?.throw === 'string' && PRECHECKS.some(m => result.throw.startsWith(m));
 
 function reparentCases(doc: string, T: number, out: Case[]): void {
@@ -424,7 +426,7 @@ function alignCommands(layers: any[], mode: AlignMode, time: number): any[] {
       .map(([x, y]) => ({ x: m[0] * x! + m[2] * y! + m[4], y: m[1] * x! + m[3] * y! + m[5] }));
     return { x0: Math.min(...corners.map(p => p.x)), y0: Math.min(...corners.map(p => p.y)), x1: Math.max(...corners.map(p => p.x)), y1: Math.max(...corners.map(p => p.y)) };
   };
-  const targets = layers.filter(layer => layer && !layer.lock && layer.type !== 'audio');
+  const targets = layers.filter(layer => layer && !layer.lock && !PM.groupAncestors(layer).some((group: any) => group.lock) && layer.type !== 'audio');
   const boxed = targets.map(layer => ({ layer, box: worldBox(layer) })).filter((item): item is { layer: any; box: any } => !!item.box);
   const bounds = unionBox(boxed.map(item => item.box));
   if (!bounds) return [];
@@ -450,6 +452,16 @@ function alignCases(doc: string, T: number, out: Case[]): void {
     const mode = pick(['left', 'hcenter', 'right', 'top', 'vcenter', 'bottom'] as const);
     out.push({ kind: 'align', t: hex(T), layers: chosen, mode, out: run(() => alignCommands(chosen.map(i => L[i]), mode, T)) });
   }
+  // A locked group keeps its members in place (`isInspectorLayerEditable`).
+  const groups = L.filter((layer: any) => layer.type === 'group');
+  if (!groups.length) return;
+  const L2 = open(doc, T);
+  L2[L.indexOf(pick(groups))].lock = true;
+  PM.touch();
+  const locked = JSON.stringify(settle(PM.proj));
+  const chosen = L2.map((_: any, i: number) => i);
+  const mode = pick(['left', 'hcenter', 'right', 'top', 'vcenter', 'bottom'] as const);
+  out.push({ kind: 'align', doc: locked, t: hex(T), layers: chosen, mode, out: run(() => alignCommands(chosen.map((i: number) => L2[i]), mode, T)) });
 }
 
 function sizeAnchorCases(doc: string, T: number, out: Case[]): void {
@@ -487,56 +499,6 @@ function leaveCases(doc: string, T: number, out: Case[]): void {
     let bounds: any = null;
     const result = run(() => { bounds = leaveAttributeBounds(PM, layer, T); shiftLeaveAnchor(layer, bounds.ax, bounds.ay); return null; });
     out.push({ kind: 'leaveAttributes', t: hex(T), layer: li, out: result.throw ? result : enc({ bounds, layers: layersAfter(doc) }) });
-  }
-}
-
-/* ── materials ──────────────────────────────────────────────────────────── */
-function shaderChannel(): any {
-  return channel(range(0, 1), 1, chance(0.6));
-}
-function materialDoc(index: number): any {
-  const shaders = ['shaderA', 'shaderB'];
-  const material = () => ({ shader: chance(0.85) ? { id: pick(shaders), p: Object.fromEntries(['mix', 'glow'].filter(() => chance(0.8)).map(k => [k, shaderChannel()])) } : null, p: {} });
-  const object = (i: number, comp: string): any => {
-    const d: any = { definition: 'powermove.3d.object', data: { object: {} } };
-    if (chance(0.5)) d.data.object.slots = Array.from({ length: int(1, 3) }, (_, s) => ({ id: `s${s}`, name: `Slot ${s}`, material: material() }));
-    else d.data.object.material = material();
-    return { id: `${comp}O${i}`, name: `Object ${i}`, type: 'extension', from: pick([0, range(-1, 2), 1 / 30 * int(1, 40)]), dur: 5, on: true, threeD: true, parent: null, group: null, p: transformChannels(true), d };
-  };
-  const fps = pick([24, 30, 29.97]);
-  const comp = (id: string) => ({ id, name: id, w: 640, h: 360, fps: pick([fps, 25, 60]), dur: 5, layers: Array.from({ length: int(0, 3) }, (_, i) => object(i, id)) });
-  const other = Object.fromEntries(Array.from({ length: int(0, 2) }, (_, i) => [`K${index}x${i}`, comp(`K${index}x${i}`)]));
-  return {
-    id: `M${index}`, compId: `MC${index}`, compName: 'Materials', name: 'Materials', w: 640, h: 360, fps, dur: 5,
-    layers: Array.from({ length: int(1, 4) }, (_, i) => object(i, `MC${index}`)), comps: other, params: {},
-  };
-}
-
-function materialCases(doc: string, T: number, out: Case[]): void {
-  const L = open(doc, T);
-  for (let li = 0; li < L.length; li++) {
-    const object = L[li].d?.data?.object;
-    const slots = object?.slots?.length ? object.slots.map((s: any) => ({ prefix: `slots.${s.id}.shader`, material: s.material })) : [{ prefix: 'shader', material: object?.material }];
-    for (const slot of slots) {
-      for (const param of Object.keys(slot.material?.shader?.p || {})) {
-        if (!chance(0.6)) continue;
-        const channelPath = `${slot.prefix}.${param}`;
-        const L2 = open(doc, T);
-        const layer = L2[li];
-        const prop = PM.findProp(layer, channelPath) || layer.p[channelPath];
-        if (!prop) continue;
-        // The edit the pipeline made before synchronizing: a new value, a
-        // key at a frame, or a moved key.
-        const roll = rand();
-        if (roll < 0.4) prop.v = range(0, 1);
-        else if (roll < 0.8) PM.setKeyOn(prop, Math.round(range(0, 3) * PM.proj.fps) / PM.proj.fps - layer.from, range(0, 1), 'linear', PM.proj.fps);
-        else if (prop.kf.length) prop.kf[0].t += 1 / PM.proj.fps;
-        PM.touch();
-        const before = JSON.stringify(settle(PM.proj));
-        const result = run(() => { synchronizeShaderPeers(PM, shaderPeers(PM, layer, channelPath), prop, layer); return null; });
-        out.push({ kind: 'syncPeers', doc: before, t: hex(T), layer: li, channel: channelPath, out: result.throw ? result : enc(layersAfter(before)) });
-      }
-    }
   }
 }
 
@@ -795,7 +757,7 @@ if (CORPUS) {
     add(doc, (text, T, out) => {
       const before = out.length;
       reparentCases(text, T, out); moveCases(text, T, out); ungroupCases(text, T, out);
-      alignCases(text, T, out); groupPlacementCases(text, T, out); sizeAnchorCases(text, T, out); leaveCases(text, T, out); materialCases(text, T, out);
+      alignCases(text, T, out); groupPlacementCases(text, T, out); sizeAnchorCases(text, T, out); leaveCases(text, T, out);
       // The real project is large: keep a sample of its cases.
       if (real) out.splice(before, out.length - before, ...out.slice(before).filter(() => chance(0.25)));
     }, times);
@@ -825,7 +787,6 @@ if (CORPUS) {
     const doc = makeDoc(1000 + index, true);
     add(doc, (text, T, out) => { alignCases(text, T, out); groupPlacementCases(text, T, out); sizeAnchorCases(text, T, out); leaveCases(text, T, out); }, timesFor(doc));
   }
-  for (let index = 0; index < 30 * SCALE; index++) add(materialDoc(index), materialCases, [0, range(0, 4)]);
   for (let index = 0; index < 30 * SCALE; index++) add(splitDoc(index), splitCases, [0, range(0, 3)]);
   for (let index = 0; index < 40 * SCALE; index++) {
     const doc = fontDoc(index);

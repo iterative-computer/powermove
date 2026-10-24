@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron';
@@ -43,6 +44,7 @@ import {
 import { IPC, LIMITS, type FileSaveResult } from '../shared/ipc';
 import { ProjectFiles } from './project-files';
 import { decodeProjectContainer } from '../shared/project-container';
+import { FILE_CHUNK_BYTES } from './file-upload';
 import { withAgentExport } from './agent-export';
 
 type InvokeHandler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
@@ -80,7 +82,7 @@ describe('save IPC', () => {
   it('delivers an agent project through the existing save pipeline without a dialog', async () => {
     const folder = await mkdtemp(path.join(tmpdir(), 'pm-agent-save-'));
     const { ipcMain, invokes } = fakeIpcMain();
-    const sender = { once: vi.fn() }, event = invokeEvent(sender);
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false }), event = invokeEvent(sender);
     const showSave = vi.fn();
     electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
@@ -99,7 +101,8 @@ describe('save IPC', () => {
     const output = path.join(folder, 'Project.pmv');
     const projects = new ProjectFiles(path.join(folder, 'registry.json'), path.join(folder, 'backups'));
     const { ipcMain, invokes } = fakeIpcMain();
-    const sender = { once: vi.fn(), isDestroyed: () => false }, other = { once: vi.fn(), isDestroyed: () => false };
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    const other = Object.assign(new EventEmitter(), { isDestroyed: () => false });
     const call = (channel: string, payload: unknown, owner = sender): Promise<any> => Promise.resolve(invokes.get(channel)!(invokeEvent(owner), payload));
     electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, projects,
@@ -133,12 +136,12 @@ describe('save IPC', () => {
     electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
     const { ipcMain, invokes } = fakeIpcMain();
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
-    const sender = { once: vi.fn() };
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
     const call = (channel: string, payload: unknown, owner = sender) => invokes.get(channel)!(invokeEvent(owner), payload);
     try {
       const token = await call(IPC.exportChoose, { name: 'chosen.png', directory });
       expect(await readdir(folder)).toEqual([]);
-      await expect(call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token }, { once: vi.fn() })).rejects.toThrow('Unknown export destination');
+      await expect(call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token }, Object.assign(new EventEmitter(), { isDestroyed: () => false }))).rejects.toThrow('Unknown export destination');
       if (directory) await expect(call(IPC.fileSave, { name: '../escape.png', data: new Uint8Array([7]), destinationToken: token })).rejects.toThrow('Invalid export frame name');
       expect(await call(IPC.fileSave, { name: 'chosen.png', data: new Uint8Array([7]), destinationToken: token })).toEqual({ ok: true, path: output });
       expect([...await readFile(output)]).toEqual([7]);
@@ -153,7 +156,7 @@ describe('save IPC', () => {
     const showSave = vi.fn(async () => ({ canceled: true, filePath: '' }));
     const { ipcMain, invokes } = fakeIpcMain();
     registerSaveIpc(ipcMain, { isTrustedSender: () => true, dialogs: { showSave } });
-    const event = invokeEvent({ once: vi.fn() });
+    const event = invokeEvent(Object.assign(new EventEmitter(), { isDestroyed: () => false }));
     expect(await invokes.get(IPC.exportChoose)!(event, { name: 'export.webm' })).toBeNull();
     expect(await invokes.get(IPC.exportChoose)!(event, { name: 'export.webm' })).toBeNull();
     expect(showSave).toHaveBeenCalledTimes(2);
@@ -179,7 +182,7 @@ describe('save IPC', () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'powermove-save-test-'));
     const destination = path.join(directory, 'chosen.pmv');
     const showSave = vi.fn().mockResolvedValue({ canceled: false, filePath: destination });
-    const sender = {};
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
     const window = { isDestroyed: () => false };
     electronMocks.browserWindowFromWebContents.mockReturnValue(window);
     const { ipcMain, invokes } = fakeIpcMain();
@@ -208,7 +211,8 @@ describe('save IPC', () => {
 
   it('bounds uploads to their sender, rejects incomplete writes and cleans up after repeated saves', async () => {
     const { EventEmitter } = await import('node:events');
-    const sender = new EventEmitter(), other = new EventEmitter();
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    const other = Object.assign(new EventEmitter(), { isDestroyed: () => false });
     const directory = await mkdtemp(path.join(tmpdir(), 'pm-upload-'));
     const destination = path.join(directory, 'chunks.pmv');
     electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
@@ -227,8 +231,9 @@ describe('save IPC', () => {
       }
       expect([...await readFile(destination)]).toEqual([1, 2, 3]);
       expect(sender.listenerCount('destroyed')).toBe(1);
-      await call(IPC.fileSaveUpload, 3);
+      const discarded = await call(IPC.fileSaveUpload, 3);
       sender.emit('destroyed');
+      await call(IPC.fileSaveAbort, discarded);
       const finalUpload = await call(IPC.fileSaveUpload, 3);
       expect(finalUpload).toBeTypeOf('string');
       await call(IPC.fileSaveAbort, finalUpload);
@@ -258,6 +263,108 @@ describe('save IPC', () => {
     expect(projects.close).toHaveBeenLastCalledWith('read-token', false);
   });
 
+  it('keeps a streamed document reader alive through bounded owner reads and expires it after inactivity', async () => {
+    vi.useFakeTimers();
+    try {
+      const { EventEmitter } = await import('node:events');
+      const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+      const other = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+      const documentRange = { offset: 5, length: FILE_CHUNK_BYTES * 3, sha256: 'a'.repeat(64) };
+      const projects = {
+        open: vi.fn(async () => ({ token: 'stream-token', path: '/chosen.pmv', projectId: 'project-1',
+          documentRange, media: [], size: documentRange.length + 100 })),
+        read: vi.fn(async (_token: string, _offset: number, length: number) => new Uint8Array(length)),
+        close: vi.fn(async () => undefined)
+      };
+      electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
+      electronMocks.dialogShowOpen.mockResolvedValue({ canceled: false, filePaths: ['/chosen.pmv'] });
+      const { ipcMain, invokes } = fakeIpcMain();
+      registerSaveIpc(ipcMain, { isTrustedSender: () => true, projects: projects as any });
+      const call = (channel: string, payload?: unknown, owner = sender) => invokes.get(channel)!(invokeEvent(owner), payload);
+      const result = await call(IPC.projectOpen);
+      expect(result).toMatchObject({ ok: true, documentRange });
+      expect(result).not.toHaveProperty('document');
+      for (let offset = 0; offset < documentRange.length; offset += FILE_CHUNK_BYTES) {
+        await vi.advanceTimersByTimeAsync(119_000);
+        const request = { token: 'stream-token', offset: documentRange.offset + offset, length: FILE_CHUNK_BYTES };
+        await expect(call(IPC.projectRead, request, other)).rejects.toThrow('token');
+        expect((await call(IPC.projectRead, request) as Uint8Array).length).toBe(FILE_CHUNK_BYTES);
+        expect(projects.close).not.toHaveBeenCalled();
+      }
+      expect(projects.read).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(119_000);
+      await expect(call(IPC.projectRead, { token: 'stream-token', offset: 5, length: 1 }, other)).rejects.toThrow('token');
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(projects.close).toHaveBeenCalledWith('stream-token', false);
+      await expect(call(IPC.projectRead, { token: 'stream-token', offset: 5, length: 1 })).rejects.toThrow('token');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('starts reader idle expiry only after a read completes and suspends it during reads', async () => {
+    const { EventEmitter } = await import('node:events');
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
+    electronMocks.dialogShowOpen.mockResolvedValue({ canceled: false, filePaths: ['/chosen.pmv'] });
+    let finishRead!: (bytes: Uint8Array) => void;
+    const projects = {
+      open: vi.fn(async () => ({ token: 'slow-reader', document: {}, media: [], size: 4 })),
+      read: vi.fn()
+        .mockResolvedValueOnce(new Uint8Array([1, 2]))
+        .mockImplementationOnce(() => new Promise<Uint8Array>((resolve) => { finishRead = resolve; })),
+      close: vi.fn(async () => undefined)
+    };
+    const { ipcMain, invokes } = fakeIpcMain();
+    registerSaveIpc(ipcMain, { isTrustedSender: () => true, projects: projects as any });
+    const call = (channel: string, payload?: unknown) => invokes.get(channel)!(invokeEvent(sender), payload);
+    vi.useFakeTimers();
+    try {
+      expect(await call(IPC.projectOpen)).toMatchObject({ ok: true, token: 'slow-reader' });
+      await vi.advanceTimersByTimeAsync(121_000);
+      expect(projects.close).not.toHaveBeenCalled();
+      expect(await call(IPC.projectRead, { token: 'slow-reader', offset: 0, length: 2 })).toEqual(new Uint8Array([1, 2]));
+      await vi.advanceTimersByTimeAsync(119_000);
+      const pending = call(IPC.projectRead, { token: 'slow-reader', offset: 2, length: 2 });
+      await vi.advanceTimersByTimeAsync(121_000);
+      expect(projects.close).not.toHaveBeenCalled();
+      finishRead(new Uint8Array([3, 4]));
+      expect(await pending).toEqual(new Uint8Array([3, 4]));
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(projects.close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(projects.close).toHaveBeenCalledExactlyOnceWith('slow-reader', false);
+      await expect(call(IPC.projectRead, { token: 'slow-reader', offset: 0, length: 1 })).rejects.toThrow('token');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds unopened readers per window and closes only that window’s tokens on destruction', async () => {
+    const { EventEmitter } = await import('node:events');
+    const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    const other = Object.assign(new EventEmitter(), { isDestroyed: () => false });
+    electronMocks.browserWindowFromWebContents.mockReturnValue({ isDestroyed: () => false });
+    electronMocks.dialogShowOpen.mockResolvedValue({ canceled: false, filePaths: ['/chosen.pmv'] });
+    let nextToken = 0;
+    const projects = {
+      open: vi.fn(async () => ({ token: `reader-${++nextToken}`, document: {}, media: [], size: 4 })),
+      read: vi.fn(async () => new Uint8Array([1])),
+      close: vi.fn(async () => undefined)
+    };
+    const { ipcMain, invokes } = fakeIpcMain();
+    registerSaveIpc(ipcMain, { isTrustedSender: () => true, projects: projects as any });
+    const call = (channel: string, payload?: unknown, owner = sender) => invokes.get(channel)!(invokeEvent(owner), payload);
+    for (let i = 0; i < 32; i++) expect(await call(IPC.projectOpen)).toMatchObject({ ok: true, token: `reader-${i + 1}` });
+    expect(await call(IPC.projectOpen, undefined, other)).toMatchObject({ ok: true, token: 'reader-33' });
+    expect(await call(IPC.projectOpen)).toMatchObject({ ok: false, error: 'Too many open project readers for this window.' });
+    expect(projects.close).toHaveBeenCalledExactlyOnceWith('reader-34', false);
+    await expect(call(IPC.projectRead, { token: 'reader-1', offset: 0, length: 1 }, other)).rejects.toThrow('token');
+    sender.emit('destroyed');
+    expect(projects.close).toHaveBeenCalledTimes(33);
+    expect(await call(IPC.projectRead, { token: 'reader-33', offset: 0, length: 1 }, other)).toEqual(new Uint8Array([1]));
+    await call(IPC.projectReadClose, 'reader-33', other);
+    expect(projects.close).toHaveBeenLastCalledWith('reader-33', true);
+  });
+
   it('opens a picked project by path and refuses anything else', async () => {
     const { EventEmitter } = await import('node:events');
     const sender = Object.assign(new EventEmitter(), { isDestroyed: () => false });
@@ -266,7 +373,7 @@ describe('save IPC', () => {
     registerProjectOpenPathIpc(ipcMain, { isTrustedSender: () => true, projects: projects as any });
     const call = (payload: unknown) => invokes.get(IPC.projectOpenPath)!(invokeEvent(sender), payload);
     expect(await call('/chosen.pmv')).toMatchObject({ ok: true, token: 'read-token' });
-    expect(projects.open).toHaveBeenCalledWith('/chosen.pmv');
+    expect(projects.open).toHaveBeenCalledWith('/chosen.pmv', { allowDocumentRange: true });
     await expect(call('relative.pmv')).rejects.toThrow('invalid project path');
     await expect(call('/etc/passwd')).rejects.toThrow('invalid project path');
     await expect(call(42)).rejects.toThrow('invalid project path');

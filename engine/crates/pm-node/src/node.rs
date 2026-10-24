@@ -130,6 +130,12 @@ impl JsEngineHost {
         convert(self.inner.pump())
     }
 
+    #[napi]
+    pub fn document_kernel(&mut self, owner: u32, request: String, data: Option<Buffer>) -> String {
+        self.inner
+            .document_kernel_bytes(owner, &request, data.as_deref())
+    }
+
     /// The engine's state as JSON (sessions, ports, lease, QoS, presenter).
     #[napi]
     pub fn status(&self) -> String {

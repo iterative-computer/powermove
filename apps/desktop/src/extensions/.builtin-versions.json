@@ -4,16 +4,16 @@
     "treeSha": "52c6c3cc4a5d9eee1fdd0da9634898eacab48b52"
   },
   "inspector": {
-    "version": "1.2.5",
-    "treeSha": "314ca7264f092cf647654ca0c8a80c64f1857cf9"
+    "version": "1.8.0",
+    "treeSha": "33f3e890f7f54dc74a652a5f9154b533a6bf8afd"
   },
   "keymap-default": {
-    "version": "1.0.3",
-    "treeSha": "d65615ab99fc7282b39af577bcd973cc5bbd9ea0"
+    "version": "1.1.1",
+    "treeSha": "0d4512e61fc389fe41ca60827ccdb7df23fb032c"
   },
   "layers-3d": {
-    "version": "1.4.0",
-    "treeSha": "d74d706c0a4908d8c1e18599c2575d4653201b78"
+    "version": "1.1.1",
+    "treeSha": "d51f407ca750fcee163cf028f9f709bef0ea3e23"
   },
   "mods": {
     "version": "1.0.0",
@@ -24,19 +24,19 @@
     "treeSha": "b69ac96e7ade6661dde9b596b903a48bf1592ff0"
   },
   "timeline": {
-    "version": "1.1.4",
-    "treeSha": "d0c97ec7dad8fbdd5adf94f6f07435d1e29f73d2"
+    "version": "1.2.2",
+    "treeSha": "9628347bfbf88b36dba1cdc1a4795a59435af9f3"
   },
   "toolbar": {
-    "version": "1.0.0",
-    "treeSha": "4ee0baeadaad3e4cf4cfc529c6a7d97a538efd75"
+    "version": "1.0.1",
+    "treeSha": "f54db82f39c8000fb09652bea572f375cbb9a0d6"
   },
   "transitions-basic": {
     "version": "1.0.0",
     "treeSha": "5c9bb6ea0faddf0d8c66006789c120adebb18802"
   },
   "viewer": {
-    "version": "1.2.11",
-    "treeSha": "f129ae5579e7c23e25666dde7c5fa2b6a798f88a"
+    "version": "1.3.12",
+    "treeSha": "01afd97e5b61ded30594d57d747418aa016e81c8"
   }
 }

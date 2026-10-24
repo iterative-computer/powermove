@@ -14,7 +14,6 @@ import type { EffectDefinition, EffectParamDefinition, TransitionDefinition } fr
 export const EFFECT_ID = /^[a-zA-Z][a-zA-Z0-9._-]{0,63}$/;
 export const PARAM_KEY = /^[a-z][a-zA-Z0-9]*$/;
 export const MAX_PASSES = 8;
-export const MAX_PARAMS = 32;
 export const MAX_FRAG_BYTES = 64 * 1024;
 
 export interface LegacyFx {
@@ -38,7 +37,6 @@ const isColor = (param: EffectParamDefinition): boolean => param.type === 'color
 
 function validateParams(params: unknown, what: string): EffectParamDefinition[] {
   if (!Array.isArray(params)) throw new Error(`${what}: "params" must be an array`);
-  if (params.length > MAX_PARAMS) throw new Error(`${what}: too many params (${params.length} > ${MAX_PARAMS})`);
   const seen = new Set<string>();
   for (const param of params as EffectParamDefinition[]) {
     if (!param || typeof param !== 'object') throw new Error(`${what}: each param must be an object`);

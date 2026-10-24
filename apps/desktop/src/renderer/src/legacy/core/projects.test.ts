@@ -20,6 +20,66 @@ function projectsRegistry(): { PM: PMRegistry; memory: Map<string, any> } {
 }
 
 describe('legacy project registry install', () => {
+  it('opens legacy string envelopes and autosaves through the asynchronous path', async () => {
+    const { PM, memory } = projectsRegistry();
+    PM.store.getAsync = async (key: string, fallback: any) => structuredClone(memory.has(key) ? memory.get(key) : fallback);
+    const project = { id: 'P1', name: 'Legacy', layers: [] };
+    memory.set('project.P1', JSON.stringify({ proj: project }));
+    expect(await PM.Projects.getAsync('P1')).toEqual(project);
+    memory.delete('project.P1');
+    memory.set('autosave', JSON.stringify({ proj: project }));
+    expect(await PM.Projects.getAsync('P1')).toEqual(project);
+  });
+
+  it('does not replay an older journal over a newer asynchronous checkpoint', async () => {
+    const { PM, memory } = projectsRegistry();
+    const keys: string[] = [];
+    PM.store.getAsync = async (key: string, fallback: any) => {
+      keys.push(key); return structuredClone(memory.has(key) ? memory.get(key) : fallback);
+    };
+    memory.set('projectJournal.P1', [{ revision: 3, patches: [{ path: ['name'], exists: true, value: 'Older' }] }]);
+    memory.set('project.P1', { proj: { id: 'P1', revision: 4, name: 'Latest', layers: [] } });
+    expect((await PM.Projects.getAsync('P1')).name).toBe('Latest');
+    expect(keys).toEqual(['projectJournal.P1', 'project.P1']);
+  });
+  it('retains edits arriving while an asynchronous recovery checkpoint reaches storage', async () => {
+    const { PM, memory } = projectsRegistry();
+    const project = { id: 'P1', name: 'One', revision: 50, layers: [{ id: 'one' }] };
+    PM.proj = project;
+    const patch = (revision: number, id: string) => ({ revision, patches: [
+      { path: ['layers', 0, 'id'], exists: true, value: id }, { path: ['revision'], exists: true, value: revision },
+    ] });
+    memory.set('projectJournal.P1', [patch(50, 'one')]);
+    PM.store.has = (key: string) => memory.has(key);
+    let finish!: () => void;
+    PM.store.setSnapshotAsync = async (key: string, value: any) => {
+      const snapshot = JSON.parse(JSON.stringify(value));
+      await new Promise<void>(resolve => finish = resolve);
+      memory.set(key, snapshot); return true;
+    };
+    const get = vi.spyOn(PM.store, 'get');
+    const recovering = PM.Projects.recoverAsync(project, undefined, () => true);
+    project.layers[0]!.id = 'two'; project.revision++;
+    memory.set('projectJournal.P1', [patch(50, 'one'), patch(51, 'two')]);
+    finish(); expect(await recovering).toBe(true);
+    expect(get.mock.calls.some(([key]) => key === 'project.P1')).toBe(false);
+    expect(memory.get('projectJournal.P1')).toEqual([patch(51, 'two')]);
+    expect(PM.Projects.get('P1')).toEqual(project);
+  });
+
+  it('keeps recovery patches when a checkpoint is superseded or fails', async () => {
+    const { PM, memory } = projectsRegistry();
+    const project = { id: 'P1', revision: 50, layers: [] };
+    const entries = [{ revision: 50, patches: [{ path: ['name'], exists: true, value: 'New' }] }];
+    memory.set('projectJournal.P1', entries);
+    PM.store.has = () => true;
+    PM.store.setSnapshotAsync = vi.fn(async () => false);
+    expect(await PM.Projects.recoverAsync(project, undefined, () => true)).toBe(false);
+    expect(memory.get('projectJournal.P1')).toEqual(entries);
+    PM.store.setSnapshotAsync.mockRejectedValue(new Error('Disk full'));
+    await expect(PM.Projects.recoverAsync(project, undefined, () => true)).rejects.toThrow('Disk full');
+    expect(memory.get('projectJournal.P1')).toEqual(entries);
+  });
   it('removes the agent workspace when a project is destroyed, not when trashed', () => {
     const forget = vi.fn(async () => undefined);
     installBridgeForTests({ artifacts: { forget } } as any);

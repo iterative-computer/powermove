@@ -15,7 +15,7 @@ function decodeBase64(value: string): string {
   return Buffer.from(value, 'base64').toString('utf8');
 }
 
-function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; serializedBridge?: boolean; snapshotJSON?: Record<string, string>; bootstrapJSON?: Record<string, string>; encodedValues?: Record<string, string>; windows?: boolean; storeSync?: boolean } = {}) {
+function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; serializedBridge?: boolean; snapshotJSON?: Record<string, string>; bootstrapJSON?: Record<string, string>; encodedValues?: Record<string, string>; windows?: boolean; storeSync?: boolean; engineOn?: boolean } = {}) {
   const emitted: Array<[string, unknown]> = [];
   const PM: PMRegistry = {
     uid: vi.fn((prefix: string) => `${prefix}test`),
@@ -70,6 +70,7 @@ function loadShim(options: { snapshotError?: Error; nativeAsyncStore?: boolean; 
     setTheme: vi.fn(),
     log: vi.fn(),
     onMenuCommand: vi.fn(),
+    ...(options.engineOn ? { nativeEngine: { enabledSync: () => true } } : {}),
   };
   const addEventListener = vi.fn();
   const shimWindow: any = {
@@ -100,6 +101,65 @@ afterEach(() => {
 });
 
 describe('legacy Electron shim install', () => {
+  it('checks checkpoint presence without cloning or reading deferred project data', () => {
+    const { PM, bridge, window } = loadShim({ bootstrapJSON: {
+      __powermoveLazyKeys: JSON.stringify(['project.large']),
+    } });
+    const clone = vi.spyOn(window, 'structuredClone');
+    expect(PM.store.has('project.large')).toBe(true);
+    expect(PM.store.has('missing')).toBe(false);
+    expect(bridge.store.getEncodedSync).not.toHaveBeenCalled();
+    expect(clone).not.toHaveBeenCalled();
+    PM.store.del('project.large');
+    expect(PM.store.has('project.large')).toBe(false);
+  });
+
+  it('keeps background project checkpoints isolated and waits for them on flush', async () => {
+    const { PM, bridge, window } = loadShim({ serializedBridge: true });
+    const clone = vi.spyOn(window, 'structuredClone');
+    const source = { proj: { layers: Array.from({ length: 2000 }, (_, id) => ({ id })) } };
+    const saved = PM.store.setSnapshotAsync('project.large', source, () => true);
+    await PM.store.flush();
+    expect(await saved).toBe(true);
+    expect(clone).not.toHaveBeenCalled();
+    expect(bridge.store.set).not.toHaveBeenCalled();
+    expect(JSON.parse(bridge.store.setSerialized.mock.calls[0][1])).toEqual(source);
+    source.proj.layers[0]!.id = -1;
+    const opened = PM.store.get('project.large', null);
+    expect(opened.proj.layers[0].id).toBe(0);
+    opened.proj.layers[0].id = -2;
+    expect(PM.store.get('project.large', null).proj.layers[0].id).toBe(0);
+  });
+
+  it.each(['edit', 'close', 'delete'])('discards a partial checkpoint superseded by %s', async mode => {
+    const { PM, bridge } = loadShim({ serializedBridge: true });
+    let current = true;
+    const clock = vi.spyOn(performance, 'now');
+    let now = 0; clock.mockImplementation(() => now += 5);
+    try {
+      const source = { layers: Array.from({ length: 2000 }, (_, id) => ({ id })) };
+      const saved = PM.store.setSnapshotAsync('project.demo', source, () => current);
+      if (mode === 'edit') { current = false; source.layers[0]!.id = -1; }
+      if (mode === 'close') PM.store.set('project.demo', { layers: ['latest'] });
+      if (mode === 'delete') PM.store.del('project.demo');
+      expect(await saved).toBe(false);
+      await PM.store.flush();
+      // Only the closing write (a slot is written as its JSON text) reaches the store, never the snapshot.
+      expect(bridge.store.setSerialized.mock.calls).toEqual(mode === 'close' ? [['project.demo', '{"layers":["latest"]}']] : []);
+      // A landed text slot is read back from main.
+      bridge.store.getEncodedSync = vi.fn((key: string) => bridge.store.setSerialized.mock.calls.findLast(([written]: any) => written === key)?.[1] ?? null);
+      expect(PM.store.get('project.demo', null)).toEqual(mode === 'close' ? { layers: ['latest'] }
+        : mode === 'delete' ? null : { layers: [{ id: 'one' }] });
+    } finally { clock.mockRestore(); }
+  });
+
+  it('reports asynchronous checkpoint failures to recovery and flush', async () => {
+    const { PM, bridge } = loadShim({ serializedBridge: true });
+    bridge.store.setSerialized.mockRejectedValue(new Error('Disk full'));
+    await expect(PM.store.setSnapshotAsync('project.demo', { id: 'new' }, () => true)).rejects.toThrow('Disk full');
+    await expect(PM.store.flush()).rejects.toThrow('Disk full');
+    expect(PM.store.get('project.demo', null)).toEqual({ layers: [{ id: 'one' }] });
+  });
   it('loads deferred history only on demand and exposes isolated legacy values', () => {
     const history = { version: 1, index: -1, entries: [{ label: 'Add',
       forward: [{ path: ['layers'], exists: true, value: [{ id: 'one' }] }], backward: [],
@@ -133,6 +193,72 @@ describe('legacy Electron shim install', () => {
     expect(PM.store.get('project.demo', null)).toEqual({ id: 'local' });
     expect(bridge.store.getEncodedSync).toHaveBeenCalledTimes(2);
   });
+
+  it('with the new engine on, keeps no clone of a written project slot and answers whether it exists without reading it', () => {
+    // C1: the clone of the last autosave was a second copy of a 180 MB
+    // project in the heap next to the engine's shadow of it.
+    const { PM, bridge } = loadShim({ engineOn: true, bootstrapJSON: { __powermoveLazyKeys: JSON.stringify(['project.demo']) }, encodedValues: { 'project.demo': '{"id":"saved"}' } });
+    expect(PM.store.has('project.demo')).toBe(true);
+    expect(PM.store.has('project.other')).toBe(false);
+    expect(bridge.store.getEncodedSync).not.toHaveBeenCalled();
+    PM.store.set('project.demo', { id: 'local' });
+    expect(bridge.store.set).toHaveBeenCalledWith('project.demo', { id: 'local' });
+    expect(PM.store.has('project.demo')).toBe(true);
+    expect(bridge.store.getEncodedSync).not.toHaveBeenCalled();
+    // Read again, it comes from main (which has the write).
+    bridge.store.getEncodedSync.mockImplementation(() => '{"id":"local"}');
+    expect(PM.store.get('project.demo', null)).toEqual({ id: 'local' });
+    expect(bridge.store.getEncodedSync).toHaveBeenCalledTimes(1);
+    // Other keys are kept as before.
+    PM.store.set('projects', [{ id: 'demo' }]);
+    expect(PM.store.get('projects', null)).toEqual([{ id: 'demo' }]);
+    expect(bridge.store.getEncodedSync).toHaveBeenCalledTimes(1);
+    PM.store.del('project.demo');
+    expect(PM.store.has('project.demo')).toBe(false);
+  });
+
+  it('sends a project slot to main as its JSON text, in call order, and answers reads from it until main has it', async () => {
+    // OPENWRITE-1: an object crossing the context bridge was copied member by
+    // member (60 to 75 s for a 180 MB project); text crosses in one copy.
+    const { PM, bridge } = loadShim({ serializedBridge: true, nativeAsyncStore: true, bootstrapJSON: { __powermoveAsyncStore: 'true' } });
+    const order: string[] = [];
+    let commit!: () => void;
+    bridge.store.setSerialized.mockImplementation((key: string) => { order.push(`set ${key}`); return new Promise<void>(resolve => { commit = resolve; }); });
+    bridge.store.delete.mockImplementation((key: string) => { order.push(`delete ${key}`); });
+    const project = { v: '1.0.0', proj: { id: 'demo', when: new Date(0), skip: undefined, layers: [{ id: 'one', n: -0 }] } };
+    expect(PM.store.set('project.demo', project)).toBe(true);
+    PM.store.del('projectJournal.demo');
+    expect(order).toEqual(['set project.demo', 'delete projectJournal.demo']);
+    expect(bridge.store.setSerialized).toHaveBeenCalledWith('project.demo', JSON.stringify(project));
+    expect(bridge.store.set).not.toHaveBeenCalled();
+    // A snapshot of the call: later edits do not reach the stored value.
+    project.proj.layers[0]!.id = 'changed';
+    expect(PM.store.has('project.demo')).toBe(true);
+    expect(PM.store.get('project.demo', null)).toEqual(JSON.parse(JSON.stringify({ ...project, proj: { ...project.proj, layers: [{ id: 'one', n: 0 }] } })));
+    const flushed = PM.store.flush();
+    let done = false; void flushed.then(() => { done = true; });
+    await flush();
+    expect(done).toBe(false);
+    commit();
+    await flushed;
+    expect(await PM.store.writtenDigest('project.demo')).toMatch(/^[0-9a-f]{64}$/);
+    expect(PM.store.writtenChars('project.demo')).toBe(JSON.stringify({ v: '1.0.0', proj: { id: 'demo', when: new Date(0), layers: [{ id: 'one', n: 0 }] } }).length);
+    // Afterwards reads come from main again.
+    bridge.store.getEncodedSync = vi.fn(() => '{"id":"from main"}');
+    expect(PM.store.get('project.demo', null)).toEqual({ id: 'from main' });
+  });
+
+  it('reports a refused project slot write like any other store error', async () => {
+    const { PM, bridge, emitted } = loadShim({ serializedBridge: true, nativeAsyncStore: true, bootstrapJSON: { __powermoveAsyncStore: 'true' } });
+    bridge.store.setSerialized.mockImplementation(async () => { throw new Error('disk full'); });
+    expect(PM.store.set('project.demo', { proj: { id: 'demo' } })).toBe(true);
+    await expect(PM.store.flush()).rejects.toThrow('disk full');
+    expect(emitted.some(([event]) => event === 'storage:error')).toBe(true);
+    expect(PM.toast).toHaveBeenCalledWith(expect.stringContaining('Could not save project.demo'));
+    const cyclic: any = { proj: {} }; cyclic.proj.self = cyclic;
+    expect(PM.store.set('project.cyclic', cyclic)).toBe(false);
+  });
+
   it('requires agreement from native storage and preload before migrating undo history', () => {
     expect(loadShim({ serializedBridge: true }).PM.store.separateHistory).toBe(false);
     expect(loadShim({ nativeAsyncStore: true }).PM.store.separateHistory).toBe(false);

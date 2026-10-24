@@ -7,7 +7,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { PROTOCOL_BUILD, type CompatFrameRequest, type CrashReport, type EngineProcess, type Envelope, type Event, type Request, type Response } from '../../shared/engine-protocol';
-import { NativeEngine, PROBE_SUPERSEDED } from './native-engine';
+import { NativeEngine, PROBE_SUPERSEDED, JOB_RUN_HOLD_MS, jobReportIdle } from './native-engine';
 import type { ChildLike, ClientPortInfo, EngineControl, PortLike } from './ports';
 import { decodeEnvelope, encodeEnvelope, envelope, eventMessage, localRanges, requestMessage, responseMessage } from './protocol';
 
@@ -69,6 +69,7 @@ class FakeEngine implements ChildLike {
   readonly pid = FakeEngine.nextPid++;
   ports = new Map<number, { port: FakePort; peer: string }>();
   received: Envelope[] = [];
+  resyncRefusals = 0;
   private exitListeners: Array<(code: number) => void> = [];
   private messageListeners: Array<(message: unknown) => void> = [];
   dead = false;
@@ -115,13 +116,16 @@ class FakeEngine implements ChildLike {
       this.ports.get(control.port)?.port.close();
       this.ports.delete(control.port);
     } else if (control.type === 'status') {
-      if (!this.silent) queueMicrotask(() => this.notify({ type: 'status', id: control.id, json: JSON.stringify({ process: this.process, presenter: { framesDelivered: 3 } }) }));
+      if (!this.silent) queueMicrotask(() => this.notify({ type: 'status', id: control.id, json: JSON.stringify({ process: this.process, presenter: { framesDelivered: 3 }, ...this.reportFields }) }));
     } else if (control.type === 'shutdown') {
       this.exit(0);
     }
   }
   /** Leaves status requests unanswered (a hung engine). */
   silent = false;
+  /** Added to status reports (a job engine's sessions and work). */
+  reportFields: Record<string, unknown> = {};
+  holdHandshake = false;
 
   kill(): boolean {
     this.exit(137);
@@ -165,6 +169,7 @@ class FakeEngine implements ChildLike {
     this.received.push(message);
     const body = message.message;
     if (body.kind === 'hello') {
+      if (this.holdHandshake) return;
       this.send(port, envelope({
         kind: 'welcome',
         role: this.process === 'interactive' ? 'interactiveEngine' : 'jobEngine',
@@ -180,8 +185,12 @@ class FakeEngine implements ChildLike {
         categories: { frameCache: 0, renderCache: 0, blenderSurfaces: 0, geometry3d: 0, surfacePool: 0, decoders: 0, pipelines: 0, other: 0 }
       };
       this.send(port, envelope(responseMessage(body.id, response)));
+    } else if (body.kind === 'request' && body.body.type === 'resync') {
+      this.send(port, this.resyncRefusals-- > 0
+        ? envelope({ kind: 'error', id: body.id, error: { code: 'budgetExceeded', scope: { kind: 'request', id: body.id }, message: 'reader busy', retry: { kind: 'after', ms: 1 }, detail: null } })
+        : envelope(responseMessage(body.id, { type: 'patchesApplied', document: body.body.document, revision: body.body.revision })));
     } else if (body.kind === 'request' && body.body.type === 'probeMedia') {
-      // A job engine resolves the handle through the host, then answers.
+      // The engine resolves the handle through its own host port, then answers.
       const id = body.id;
       const handle = body.body.handle;
       void this.ask({ type: 'resolveHandle', handle, session: 0 }).then((answer) => {
@@ -223,6 +232,7 @@ describe('NativeEngine with fake engines', () => {
     now = 0;
     compatRequests = [];
     host = new NativeEngine({
+      eagerJobs: true,
       spawn: (process) => {
         const engine = new FakeEngine(process);
         engines.push(engine);
@@ -283,6 +293,14 @@ describe('NativeEngine with fake engines', () => {
     expect(compatRequests).toHaveLength(2);
   });
 
+  it('retries document-reader backpressure on the same engine launch', async () => {
+    const engine = live('job');
+    engine.resyncRefusals = 2;
+    const response = await host.request('job', { type: 'resync', document: 'doc', revision: 1, encoding: 'canonicalJsonV1', source: { kind: 'inline', body: new Uint8Array([123, 125]) }, hash: new Uint8Array(32) }, 1);
+    expect(response).toMatchObject({ type: 'patchesApplied', revision: 1 });
+    expect(engine.received.filter(e => e.message.kind === 'request' && e.message.body.type === 'resync')).toHaveLength(3);
+  });
+
   it('negotiates both engines, grants leases, sends the slicing policy, and links them', () => {
     expect(host.status().interactive.state).toBe('ready');
     expect(host.status().job.state).toBe('ready');
@@ -313,6 +331,27 @@ describe('NativeEngine with fake engines', () => {
     host.removeClient(1);
     await settle();
     expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(0);
+  });
+
+  it('gives a page whose connection closed fresh ports to the same launches, replacing the old ones', async () => {
+    // The engine closed the window's connection (a message it refused) while
+    // its launch lives: the window asks again (`requestPorts`) and gets new
+    // ports of the same generation; the engines drop the old ones.
+    const delivered: ClientPortInfo[] = [];
+    host.addClient(1, (info) => delivered.push(info));
+    await settle();
+    const first = delivered.find((d) => d.process === 'interactive')!;
+    host.refreshPorts(1);
+    await settle();
+    const again = delivered.filter((d) => d.process === 'interactive');
+    expect(again.map((d) => d.generation)).toEqual([1, 1]);
+    expect(again[1]!.port).not.toBe(first.port);
+    expect(live('interactive').controls).toContainEqual({ type: 'disconnect', port: first.port });
+    expect([...live('interactive').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(1);
+    // A window main does not know gets nothing.
+    host.refreshPorts(99);
+    await settle();
+    expect(delivered.filter((d) => d.process === 'interactive')).toHaveLength(2);
   });
 
   it('gives main\'s font client one font port to each interactive launch, and none to the job engine', async () => {
@@ -365,6 +404,19 @@ describe('NativeEngine with fake engines', () => {
     const pending = host.report('interactive');
     live('interactive').kill();
     expect(await pending).toBeNull();
+  });
+
+  it('forwards native document bytes separately and reports evaluator transport loss on exit', async () => {
+    const launch = host.supervisor('interactive').current!;
+    const bytes = new Uint8Array([0x50, 0x4d, 0x50, 1]);
+    const request = '{"op":"apply","args":{"base":1,"revision":2}}';
+    const pending = launch.documentKernel!(7, request, bytes);
+    await settle();
+    const control = live('interactive').controls.find(message => message.type === 'documentKernel');
+    expect(control).toMatchObject({ owner: 7, request, bytes });
+    expect(request).not.toContain('body');
+    live('interactive').kill();
+    expect(JSON.parse(await pending)).toMatchObject({ ok: false, code: 'unavailable' });
   });
 
   it("keeps the interactive engine's fallback texture bands for the snapshot answer they precede", async () => {
@@ -544,7 +596,7 @@ describe('NativeEngine with fake engines', () => {
     expect(otherEngine.message.kind).toBe('error');
   });
 
-  it('probes media through a mediaRead handle bound to the job engine and session 0, revoked after', async () => {
+  it('probes media in the interactive utility through a mediaRead handle bound to session 0, revoked after', async () => {
     const file = path.join(dir, 'clip.mov');
     const probing = new NativeEngine({
       spawn: (process) => {
@@ -565,23 +617,25 @@ describe('NativeEngine with fake engines', () => {
         return { cancel: () => { timer.cancelled = true; } };
       }
     });
+    const jobCount = engines.filter((e) => e.process === 'job').length;
     await probing.start();
     await settle();
     try {
       const facts = await probing.probeMedia('clip', '{"range":"full"}');
       expect(facts.facts[0]).toEqual({ label: 'Path', value: file });
       expect(facts.displaySize).toEqual([320, 180]);
-      const job = engines.filter((e) => e.process === 'job' && !e.dead).at(-1)!;
-      const probe = job.received.find((m) => m.message.kind === 'request' && m.message.body.type === 'probeMedia');
+      expect(engines.filter((e) => e.process === 'job')).toHaveLength(jobCount);
+      const interactive = engines.filter((e) => e.process === 'interactive' && !e.dead).at(-1)!;
+      const probe = interactive.received.find((m) => m.message.kind === 'request' && m.message.body.type === 'probeMedia');
       const body = probe?.message.kind === 'request' && probe.message.body.type === 'probeMedia' ? probe.message.body : null;
       expect(body?.interpret).toBe('{"range":"full"}');
       // The handle is gone once the answer arrived.
-      const again = await job.ask({ type: 'resolveHandle', handle: body!.handle, session: 0 });
+      const again = await interactive.ask({ type: 'resolveHandle', handle: body!.handle, session: 0 });
       expect(again.message.kind).toBe('error');
       await expect(probing.probeMedia('missing', null)).rejects.toThrow('not available');
       // One probe per asset in flight: a request waiting behind it is
       // superseded by a newer one and never reaches the engine.
-      const sent = () => job.received.filter((m) => m.message.kind === 'request' && m.message.body.type === 'probeMedia').length;
+      const sent = () => interactive.received.filter((m) => m.message.kind === 'request' && m.message.body.type === 'probeMedia').length;
       const before = sent();
       const first = probing.probeMedia('clip', '{"range":"limited"}');
       const second = probing.probeMedia('clip', '{"range":"full"}');
@@ -589,7 +643,7 @@ describe('NativeEngine with fake engines', () => {
       await expect(second).rejects.toThrow(PROBE_SUPERSEDED);
       await expect(first).resolves.toMatchObject({ displaySize: [320, 180] });
       await expect(third).resolves.toMatchObject({ displaySize: [320, 180] });
-      const bodies = job.received
+      const bodies = interactive.received
         .slice()
         .filter((m) => m.message.kind === 'request' && m.message.body.type === 'probeMedia')
         .slice(before)
@@ -652,5 +706,303 @@ describe('NativeEngine with fake engines', () => {
     await host.stop();
     expect(host.status().interactive.state).toBe('stopped');
     expect(timers.filter((t) => !t.cancelled)).toHaveLength(0);
+  });
+});
+
+
+describe('on-demand job engine startup', () => {
+  let dir: string;
+  let host: NativeEngine;
+  let engines: FakeEngine[];
+  let holdJob: boolean;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'pm-lazy-engine-'));
+    engines = [];
+    holdJob = false;
+    host = new NativeEngine({
+      spawn: (kind) => {
+        const child = new FakeEngine(kind);
+        child.holdHandshake = kind === 'job' && holdJob;
+        engines.push(child);
+        return child;
+      },
+      channel,
+      cacheDirectory: path.join(dir, 'cache'),
+      automaticOutputDirectory: path.join(dir, 'outputs'),
+      physicalMemory: 16 * 1024 ** 3,
+      log: () => {},
+      hostNow: () => 42
+    });
+    await host.start();
+    await settle();
+  });
+  afterEach(async () => {
+    await host.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+  it('keeps idle jobs absent and shares one first launch across concurrent work', async () => {
+    expect(engines.map(e => e.process)).toEqual(['interactive']);
+    expect(host.status().job).toMatchObject({ state: 'stopped', pid: null, generation: 0 });
+    expect(host.canRequest('job')).toBe(true);
+    const deliveries: ClientPortInfo[] = [];
+    host.addClient(123, (info, port) => { deliveries.push(info); port.start(); });
+    await Promise.all([host.ensureReady('job'), host.ensureReady('job'), host.ensureReady('job')]);
+    await settle();
+    expect(engines.map(e => e.process)).toEqual(['interactive', 'job']);
+    expect(deliveries.map(d => d.process)).toEqual(['interactive', 'job']);
+    const child = engines[1]!;
+    expect(child.events('slicing')).toHaveLength(1);
+    expect(host.memory.isAcknowledged('job')).toBe(true);
+    // Late startup must still connect the direct peer and replay playback policy.
+    expect(child.controls.some(c => c.type === 'connect' && c.peer === 'peer')).toBe(true);
+  });
+  it('cancels a pending first launch when the host stops and can restart cleanly', async () => {
+    holdJob = true;
+    const pending = host.ensureReady('job');
+    const outcome = pending.then(() => 'ready', (error: Error) => error.message);
+    await settle();
+    await host.stop();
+    expect(await outcome).toMatch(/stopped/);
+    expect(host.canRequest('job')).toBe(false);
+    expect(engines.every(e => e.dead)).toBe(true);
+    holdJob = false;
+    await host.start();
+    await host.ensureReady('job');
+    expect(host.isReady('job')).toBe(true);
+  });
+  it('reports a fatal cold load and never restarts it as a new demand', async () => {
+    holdJob = true;
+    const pending = host.ensureReady('job');
+    const failure = expect(pending).rejects.toThrow('could not start');
+    await settle();
+    const child = engines.find(e => e.process === 'job')!;
+    child.notify({ type: 'fatal', message: 'addon unavailable' });
+    child.exit(70);
+    await failure;
+    expect(host.canRequest('job')).toBe(false);
+    await expect(host.ensureReady('job')).rejects.toThrow('could not start');
+    expect(engines.filter(e => e.process === 'job')).toHaveLength(1);
+  });
+});
+
+/** A job engine report with nothing that needs the process. */
+const IDLE_JOB_REPORT = {
+  sessions: [], inFlight: 0,
+  jobs: { jobs: 0, active: 0, probes: 0, frameRuns: 0, compiles: 0, queued: { snapshots: 0, agentExports: 0, user: 0 } }
+};
+
+describe('job engine retirement when unused', () => {
+  let dir: string;
+  let host: NativeEngine;
+  let engines: FakeEngine[];
+  let timers: Array<{ fn: () => void; ms: number; due: number; cancelled: boolean }>;
+  let logs: string[];
+  let fakeNow: number;
+  const advance = async (ms: number): Promise<void> => {
+    fakeNow += ms;
+    const live = timers.filter((t) => !t.cancelled && t.due <= fakeNow);
+    for (const t of live) { t.cancelled = true; t.fn(); }
+    await settle(40);
+  };
+  const fire = (): Promise<void> => advance(1000);
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'pm-retire-engine-'));
+    engines = [];
+    timers = [];
+    logs = [];
+    fakeNow = 0;
+    host = new NativeEngine({
+      spawn: (kind) => {
+        const child = new FakeEngine(kind);
+        if (kind === 'job') child.reportFields = IDLE_JOB_REPORT;
+        engines.push(child);
+        return child;
+      },
+      channel,
+      cacheDirectory: path.join(dir, 'cache'),
+      automaticOutputDirectory: path.join(dir, 'outputs'),
+      physicalMemory: 16 * 1024 ** 3,
+      log: (_level, message) => logs.push(message),
+      hostNow: () => 42,
+      jobIdleMs: 1000,
+      schedule: (fn, ms) => {
+        const timer = { fn, ms, due: fakeNow + ms, cancelled: false };
+        timers.push(timer);
+        return { cancel: () => { timer.cancelled = true; } };
+      },
+      resolveAsset: async () => ({ path: path.join(dir, 'clip.mov'), contentHash: null })
+    });
+    await host.start();
+    await settle();
+  });
+  afterEach(async () => {
+    await host.stop();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const jobs = (): FakeEngine[] => engines.filter((e) => e.process === 'job');
+
+  it('stops an idle job engine and starts a fresh one for the next request', async () => {
+    const deliveries: ClientPortInfo[] = [];
+    host.addClient(7, (info, port) => { deliveries.push(info); port.start(); });
+    await host.ensureReady('job');
+    await settle();
+    expect(jobs()).toHaveLength(1);
+    await fire();
+    expect(jobs()[0]!.dead).toBe(true);
+    expect(host.status().job.state).toBe('stopped');
+    expect(host.canRequest('job')).toBe(true);
+    expect(logs.some((l) => l.includes('exited after'))).toBe(true);
+    // The interactive engine lost its peer with it.
+    const interactive = engines[0]!;
+    expect(interactive.controls.filter((c) => c.type === 'disconnect')).toHaveLength(1);
+    const states: string[] = [];
+    host.listen({ status: (s) => states.push(s.job.state) });
+    await host.ensureReady('job');
+    expect(jobs()).toHaveLength(2);
+    expect(jobs()[1]!.dead).toBe(false);
+    // An asked-for start, not a crash restart.
+    expect(states).toContain('starting');
+    expect(states).not.toContain('restarting');
+    await settle();
+    expect(deliveries.filter((d) => d.process === 'job')).toHaveLength(2);
+    expect(interactive.controls.filter((c) => c.type === 'connect' && c.peer === 'peer')).toHaveLength(2);
+  });
+
+  it('keeps a job engine that holds a session or unfinished work', async () => {
+    await host.ensureReady('job');
+    await settle();
+    const child = jobs()[0]!;
+    child.reportFields = { ...IDLE_JOB_REPORT, sessions: [{ session: 3, port: 9, document: 'd', role: 'job' }] };
+    await fire();
+    expect(child.dead).toBe(false);
+    child.reportFields = { ...IDLE_JOB_REPORT, jobs: { ...IDLE_JOB_REPORT.jobs, active: 1 } };
+    await fire();
+    expect(child.dead).toBe(false);
+    child.reportFields = { ...IDLE_JOB_REPORT, inFlight: 1 };
+    await fire();
+    expect(child.dead).toBe(false);
+    // A silent or malformed report never retires it.
+    child.reportFields = { sessions: [] };
+    await fire();
+    expect(child.dead).toBe(false);
+    child.reportFields = IDLE_JOB_REPORT;
+    await fire();
+    expect(child.dead).toBe(true);
+  });
+
+  it('retires an idle job utility while the interactive utility probes media', async () => {
+    await host.ensureReady('job');
+    await settle();
+    const first = jobs()[0]!;
+    await host.probeMedia('clip', null);
+    await fire();
+    expect(first.dead).toBe(true);
+    expect(jobs()).toHaveLength(1);
+  });
+
+  it('holds a warm job utility past the idle deadline only while an agent run is active', async () => {
+    host.holdJobRun('agent-run');
+    await host.ensureReady('job');
+    await settle();
+    const child = jobs()[0]!;
+    await advance(120_000);
+    expect(child.dead).toBe(false);
+    expect(timers.some((t) => !t.cancelled && t.ms === 1000)).toBe(false);
+    host.releaseJobRun('agent-run');
+    await fire();
+    expect(child.dead).toBe(true);
+  });
+
+  it('keeps overlapping export UI holds warm until the final panel closes, without an expiry', async () => {
+    const closeSheet = host.holdJobUtility();
+    await host.ensureReady('job');
+    const child = jobs()[0]!;
+    const closeSavePanel = host.holdJobUtility();
+    await advance(JOB_RUN_HOLD_MS + 60_000);
+    expect(child.dead).toBe(false);
+    closeSheet();
+    closeSheet();
+    await fire();
+    expect(child.dead).toBe(false);
+    closeSavePanel();
+    await fire();
+    expect(child.dead).toBe(true);
+  });
+
+  it('ignores an already queued idle callback while an export panel holds the job', async () => {
+    await host.ensureReady('job');
+    await settle();
+    const idle = timers.filter((t) => !t.cancelled && t.ms === 1000).at(-1)!;
+    const release = host.holdJobUtility();
+    idle.fn();
+    await settle();
+    expect(jobs()[0]!.dead).toBe(false);
+    release();
+    await fire();
+    expect(jobs()[0]!.dead).toBe(true);
+  });
+
+  it('expires an orphaned run hold and ignores a cancelled earlier expiry', async () => {
+    host.holdJobRun('agent-run');
+    await host.ensureReady('job');
+    const firstExpiry = timers.find((t) => t.ms === JOB_RUN_HOLD_MS)!;
+    host.holdJobRun('agent-run');
+    firstExpiry.fn(); // A callback already queued before cancellation.
+    await fire();
+    expect(jobs()[0]!.dead).toBe(false);
+    const currentExpiry = timers.filter((t) => !t.cancelled && t.ms === JOB_RUN_HOLD_MS).at(-1)!;
+    expect(currentExpiry.due).toBe(JOB_RUN_HOLD_MS);
+    await advance(JOB_RUN_HOLD_MS);
+    await fire();
+    expect(jobs()[0]!.dead).toBe(true);
+  });
+
+  it('lets a request that arrives during the idle check wait and then run', async () => {
+    await host.ensureReady('job');
+    await settle();
+    const first = jobs()[0]!;
+    const live = timers.filter((t) => !t.cancelled && t.ms === 1000);
+    for (const t of live) { t.cancelled = true; t.fn(); }
+    // The check is waiting for the report; a new job start arrives now.
+    await host.ensureReady('job');
+    await settle();
+    // The caller waited for the stop, then started a fresh engine.
+    expect(first.dead).toBe(true);
+    expect(jobs()).toHaveLength(2);
+    expect(jobs().filter((e) => !e.dead)).toHaveLength(1);
+  });
+
+  it('never retires eager job engines (host integration fixtures)', async () => {
+    await host.stop();
+    engines = [];
+    timers = [];
+    host = new NativeEngine({
+      eagerJobs: true,
+      spawn: (kind) => { const c = new FakeEngine(kind); c.reportFields = IDLE_JOB_REPORT; engines.push(c); return c; },
+      channel,
+      cacheDirectory: path.join(dir, 'cache'),
+      automaticOutputDirectory: path.join(dir, 'outputs'),
+      physicalMemory: 16 * 1024 ** 3,
+      log: () => {},
+      hostNow: () => 42,
+      jobIdleMs: 1000,
+      schedule: (fn, ms) => { const t = { fn, ms, due: fakeNow + ms, cancelled: false }; timers.push(t); return { cancel: () => { t.cancelled = true; } }; }
+    });
+    await host.start();
+    await host.ensureReady('job');
+    await settle();
+    expect(timers.filter((t) => t.ms === 1000)).toHaveLength(0);
+    expect(jobs()[0]!.dead).toBe(false);
+  });
+});
+
+describe('jobReportIdle', () => {
+  it('needs every work counter to be zero and no session', () => {
+    expect(jobReportIdle(IDLE_JOB_REPORT)).toBe(true);
+    expect(jobReportIdle(null)).toBe(false);
+    expect(jobReportIdle({ ...IDLE_JOB_REPORT, jobs: null })).toBe(false);
+    expect(jobReportIdle({ ...IDLE_JOB_REPORT, jobs: { ...IDLE_JOB_REPORT.jobs, queued: { user: 1 } } })).toBe(false);
+    expect(jobReportIdle({ ...IDLE_JOB_REPORT, jobs: { ...IDLE_JOB_REPORT.jobs, probes: 2 } })).toBe(false);
+    expect(jobReportIdle({ ...IDLE_JOB_REPORT, jobs: { ...IDLE_JOB_REPORT.jobs, compiles: 1 } })).toBe(false);
   });
 });

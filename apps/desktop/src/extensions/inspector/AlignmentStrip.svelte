@@ -1,6 +1,7 @@
 <script lang="ts">
   import { inspectorContext } from './context';
   import { ALIGN_LABELS, alignDelta, deltaInParent, unionBox, type AlignMode, type Box } from './align';
+  import { isInspectorLayerEditable } from './multi-edit';
 
   /* Alignment strip: two rounded segments, horizontal then vertical, with the
      panel showing through the gap between them. One selected layer aligns to
@@ -50,7 +51,7 @@
   }
 
   function alignCommands(mode: AlignMode, time: number): any[] {
-    const targets = layers.filter(layer => layer && !layer.lock && layer.type !== 'audio');
+    const targets = layers.filter(layer => layer && isInspectorLayerEditable(api, layer) && layer.type !== 'audio');
     const boxed = targets.map(layer => ({ layer, box: worldBox(layer, time) })).filter((item): item is { layer: any; box: Box } => !!item.box);
     const bounds = unionBox(boxed.map(item => item.box));
     if (!bounds) return [];

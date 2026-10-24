@@ -4,21 +4,23 @@ import { layerVideoElement, pruneVideoInstances } from './video-instances';
 import { cancelPreviewVideoSeek, seekPreviewVideo } from './video-seek';
 import { capturePlaybackVideoFrame, clearPlaybackVideoFrames, startPlaybackVideoFrames, stopPlaybackVideoFrames, playbackVideoFrameAt, type PlaybackVideoFrame } from './video-playback-frames';
 import { videoPlaybackTime } from '../../../../shared/video-timing';
-import { prepareFrame } from './frame-preparation';
+import { prepareFrame, type FramePreparationOptions } from './frame-preparation';
 import { renderOpaqueFrame } from './frame-capture';
 import { installPreviewCache } from './preview-cache';
 import { sourceTime } from './retiming';
 import { viewerService } from './services';
 import { createPreviewQualityMonitor } from './preview-quality';
+import { installPreviewResolution } from './preview-resolution';
+import { installAutomaticPreview } from './automatic-preview-install';
 /* Ported from js/core/engine.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 
 const ENGINE_RUNTIME = Symbol.for('powermove.engine.runtime');
 
 export function install(PM: PMRegistry): void {
-/* Options are the exporter's (output size, motion blur, shutter samples); without
-   them a frame is prepared at composition size with the preview's samples. */
-PM.prepareFrame=(time:number,options?:{width?:number;height?:number;mblur?:boolean;mbSamples?:number;shutter?:number})=>prepareFrame(PM,time,PM.proj,options);
+/* Options are the exporter's (output size, motion blur, shutter samples, capture
+   signal); without them a frame is prepared at composition size with the preview's samples. */
+PM.prepareFrame=(time:number,options?:FramePreparationOptions)=>prepareFrame(PM,time,PM.proj,options);
 
 // Renderer bootstrap can be evaluated again while the same PM registry stays
 // alive. A second animation loop advances the shared playhead a second time on
@@ -37,6 +39,7 @@ PM.loop = true;
 
 const E = { fps: 0, ms: 0, drops: 0, budget: 1000 / 60, auto: true };
 PM.perf = E;
+installPreviewResolution(PM);
 const previewQuality = createPreviewQualityMonitor();
 
 /* Video uses HTMLMediaElement.play(), which settles asynchronously. A pause can
@@ -113,7 +116,8 @@ function ensureMediaPaused(el: any) {
   if (mustStopPendingStart || !el.paused) { try { el.pause(); } catch (e) { } }
 }
 let playingVideos = new Set<any>();
-let decoderAssets = new Set<any>();
+let decoderOwnership = new Map<any, Set<string>>();
+const emptyDecoderOwnership = new Set<string>();
 let bufferedVideos = new Set<HTMLVideoElement>();
 const frameVideoSeeks = new Map<any, number>();
 // Ownership, synchronization and lookahead frequently ask for the same time.
@@ -123,6 +127,11 @@ function plannedVideoClips(time: number): VideoClip[] {
   let clips = videoClipPlans.get(time);
   if (!clips) { clips = videoClipsAt(PM, time); videoClipPlans.set(time, clips); }
   return clips;
+}
+function sameVideoClips(first: number, second: number): boolean {
+  if (first === second) return true;
+  const before = plannedVideoClips(first), after = plannedVideoClips(second);
+  return before.length === after.length && before.every((clip, index) => clip.id === after[index]!.id);
 }
 function flushFrameVideoSeeks() {
   for (const [el, target] of frameVideoSeeks) seekPreviewVideo(el, target, .0005);
@@ -188,11 +197,20 @@ function scrubVideos(T: any, lookahead = true) {
 
   // Do not retain a decoder (and its decoded frame buffers) for every clip
   // ever visited. Only visible clips and the bounded lookahead stay allocated.
-  const empty = new Set<string>();
-  for (const asset of new Set([...decoderAssets, ...retained.keys()])) {
-    pruneVideoInstances(asset, retained.get(asset) ?? empty, true);
+  // Stable clips keep the same pool through playback and scrub redraws. Prune
+  // only when ownership changes; proxy replacement is handled by layerVideoElement.
+  for (const asset of decoderOwnership.keys()) {
+    if (!retained.has(asset)) pruneVideoInstances(asset, emptyDecoderOwnership, true);
   }
-  decoderAssets = new Set(retained.keys());
+  for (const [asset, ids] of retained) {
+    const previous = decoderOwnership.get(asset);
+    let changed = !previous || previous.size !== ids.size;
+    if (!changed) for (const id of ids) {
+      if (!previous!.has(id)) { changed = true; break; }
+    }
+    if (changed) pruneVideoInstances(asset, ids, true);
+  }
+  decoderOwnership = retained;
   for (const el of bufferedVideos) if (!buffers.has(el)) stopPlaybackVideoFrames(el);
   bufferedVideos = buffers;
 
@@ -397,6 +415,8 @@ PM.setAudioScrub = (enabled: boolean) => {
 
 /* ── transport ─────────────────────────────────────────── */
 PM.setTime = (t: any, opt: any = {}) => {
+  // Invalid gesture/plugin input must never replace the current valid frame.
+  if (!Number.isFinite(t)) return;
   const p = PM.proj;
   t = PM.clamp(t, 0, p.dur);
   if (!opt.raw) t = PM.snapF(t, p.fps);
@@ -495,6 +515,7 @@ let interactionUntil = 0, refinePending = false, lastQualityChange = -Infinity;
 let inputUntil = 0;
 PM.interactionActive = () => window.performance.now() < Math.max(inputUntil, interactionUntil);
 for (const event of ['pointerdown', 'pointermove', 'wheel', 'keydown']) window.document?.addEventListener?.(event, () => { inputUntil = window.performance.now() + 500; }, { passive: true });
+const automaticPreview = installAutomaticPreview(PM);
 PM.bus.on('time', () => { if (!PM.playing) { interactionUntil = window.performance.now() + 150; refinePending = true; } });
 for (const event of ['layers', 'project', 'assets', 'quality']) PM.bus.on(event, () => {
   contentGeneration++;
@@ -505,6 +526,7 @@ PM.bus.on('draw', () => { needsDraw = true; });
 
 function frame(now: any) {
   window.requestAnimationFrame(frame);
+  automaticPreview.request();
   const cadenceSlow = previewQuality.tick(now, PM.playing, drawnFps());
   E.budget = previewQuality.budget(drawnFps());
   // Offline renderers own the shared video decoders and canvas until done.
@@ -544,7 +566,13 @@ function frame(now: any) {
       }
       if (now - clock.t0 > 500) { E.fps = Math.round(clock.frames * 1000 / (now - clock.t0)); clock.frames = 0; clock.t0 = now; PM.invalidate('status'); }
     }
-    if (needsDraw) { needsDraw = false; PM.bus.emit('overlay'); }
+    if (needsDraw) {
+      needsDraw = false;
+      // Today's paused redraw announces the frame it draws (`preview:presented`,
+      // then `overlay`); the engine presents one only for a change.
+      if (!PM.playing) (PM as any).EngineRedraw?.();
+      PM.bus.emit('overlay');
+    }
     return;
   }
   if (PM.playing) {
@@ -570,6 +598,9 @@ function frame(now: any) {
         || synchronizedFrame.generation !== contentGeneration
         || synchronizedFrame.seekGeneration !== videoSeekGeneration)) synchronizedFrame = null;
     const drawn = Math.floor(t * drawnFps() + 1e-7) / drawnFps();
+    // A held decode belongs to its visible clips. Once playback crosses a cut,
+    // waiting for an outgoing clip must not block the incoming composition.
+    if (synchronizedFrame && !sameVideoClips(synchronizedFrame.time, drawn)) synchronizedFrame = null;
     // A high-refresh display must not redo decoder ownership, lookahead and
     // timeline evaluation between project frames. Only skip a frame that was
     // actually presented: pending decodes still retry on every display tick.
@@ -590,7 +621,7 @@ function frame(now: any) {
   }
   const interactive = !PM.playing && now < interactionUntil;
   if (refinePending && !interactive && !PM.playing) { needsDraw = true; refinePending = false; }
-  if (!needsDraw || !PM.GL.gl) return;
+  if (!needsDraw || PM.EngineConnection || !PM.GL.gl) return;
   // During a paused zoom gesture the viewer can transform valid presented
   // pixels immediately. Keep the redraw pending until refinement is needed;
   // playback and content/time changes always bypass this navigation-only path.
@@ -599,6 +630,9 @@ function frame(now: any) {
   // pointer position. Chasing a changing target in the compositor's readiness
   // gate otherwise hides every completed seek until the user stops dragging.
   if (PM.playing || pausedFrame?.project !== p || pausedFrame?.generation !== contentGeneration) pausedFrame = null;
+  // Retain completed seeks during a drag within a clip, but abandon an old
+  // request when the user moves across a cut (including into an empty gap).
+  if (pausedFrame && !sameVideoClips(pausedFrame.time, PM.time)) pausedFrame = null;
   if (!PM.playing) pausedFrame ??= { time: PM.time, project: p, generation: contentGeneration };
   let renderTime=PM.playing ? (synchronizedFrame?.time ?? Math.floor(PM.time * drawnFps() + 1e-7) / drawnFps()) : pausedFrame!.time;
   // A saved composition frame may bypass compositor readiness entirely.
@@ -677,10 +711,10 @@ window.document?.addEventListener?.('visibilitychange',resumeView);
 ['layers', 'sel', 'project', 'assets', 'quality'].forEach(ev => PM.bus.on(ev, () => PM.invalidate()));
 
 /* ── offscreen frame render (agent `look`, exporter, thumbnails) ── */
-PM.renderFrameTo = (T: any, w: any, h: any, options: any = {}) => {
+PM.renderFrameTo = (T: any, w: any, h: any, options: any = {}, target?: HTMLCanvasElement) => {
   const image = renderOpaqueFrame(PM, T, w, h, options);
-  const out = window.document.createElement('canvas');
-  out.width = w; out.height = h;
+  const out = target || window.document.createElement('canvas');
+  if (out.width !== w || out.height !== h) { out.width = w; out.height = h; }
   out.getContext('2d')!.putImageData(image, 0, 0);
   return out;
 };

@@ -6,7 +6,7 @@
 //! Electron utility process, or `pm-cli`) delivers bytes per port with
 //! [`Engine::receive`], drives time with [`Engine::tick`], and carries out
 //! the returned [`Action`]s: send bytes on a port, close a port, or log. It
-//! never blocks on I/O except to read a resync file the host resolved.
+//! stages large document ingestion on a bounded reader thread.
 //!
 //! Ports are assigned by the host out of band ([`Engine::attach`]) with the
 //! kind of peer they lead to, and the peer's `hello` must claim that role: a
@@ -26,8 +26,7 @@ use pm_protocol::error::{
     CrashReport, EngineError, EngineProcess, ErrorCode, ErrorScope, FailureReport, Retry,
 };
 use pm_protocol::host::{
-    CapabilityHandle, CapabilityKind, HandleAccess, HandleGrant, HandleResolved, MintHandle,
-    PortId, ResolveHandle,
+    CapabilityHandle, CapabilityKind, HandleAccess, HandleGrant, MintHandle, PortId, ResolveHandle,
 };
 use pm_protocol::patch::{
     Admission, ConsistencyCheck, ConsistencyResult, DocumentEncoding, PatchBatch, PatchEncoding,
@@ -152,9 +151,33 @@ struct Session {
     definitions: DefinitionSet,
     /// Patch batches could not be applied; the mirror is behind until a resync.
     stale: bool,
+    /// The revision and canonical hash the mirror was resynced at, checked
+    /// then; with no batch applied since, another session resyncing to the
+    /// same hash shares this mirror instead of reading and parsing it again.
+    verified: Option<(u64, ContentHash)>,
     /// The document's media as the host resolved it for this session
     /// (interactive sessions whose presenter renders documents).
     media: MediaTable,
+    checkpoint: Option<ReconnectMirror>,
+    checkpoint_bytes: usize,
+    checkpoint_batches: usize,
+}
+
+#[derive(Clone)]
+struct ReconnectMirror {
+    document: pm_protocol::common::DocumentId,
+    mirror: pm_model::Document,
+    hash: ContentHash,
+    expires: std::time::Instant,
+}
+
+struct KernelMirror {
+    document: pm_protocol::common::DocumentId,
+    mirror: pm_model::Document,
+    verified_hash: Option<String>,
+    // The renderer resumes this immutable checkpoint and replays its journal.
+    // Keep it when edits invalidate verification of the current tree.
+    checkpoint: Option<(pm_model::Document, String)>,
 }
 
 /// A call this engine made to the host, keyed by its request id on the host port.
@@ -297,6 +320,19 @@ pub struct Engine {
     job_work: BTreeMap<u64, WorkToken>,
     logged_once: BTreeSet<String>,
     overdue_logged: Option<u64>,
+    reader: Option<crate::resync::Reader>,
+    reconnect_mirror: Option<ReconnectMirror>,
+    kernel_mirrors: BTreeMap<u32, KernelMirror>,
+    document_owners: BTreeMap<PortId, u32>,
+    resync_work: BTreeMap<u64, PendingResync>,
+}
+
+struct PendingResync {
+    port: PortId,
+    id: RequestId,
+    sid: SessionId,
+    resync: Resync,
+    base_revision: u64,
 }
 
 /// A decoded patch body.
@@ -353,6 +389,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::ShaderFallback(_) => "shaderFallback",
         Request::Snapshot(_) => "snapshot",
         Request::CompatFrame(_) => "compatFrame",
+        Request::HostEncode(_) => "hostEncode",
     }
 }
 
@@ -387,10 +424,9 @@ fn event_name(event: &Event) -> &'static str {
 
 /// The canonical hash of a mirror (`null` for an empty document).
 fn mirror_digest(mirror: &pm_model::Document) -> [u8; 32] {
-    match mirror.root() {
-        Some(root) => pm_model::hash::canonical_digest(root),
-        None => pm_model::hash::canonical_digest(&pm_model::Value::Null),
-    }
+    mirror
+        .canonical_digest()
+        .unwrap_or_else(|| pm_model::hash::canonical_digest(&pm_model::Value::Null))
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
@@ -427,11 +463,162 @@ impl Engine {
             job_work: BTreeMap::new(),
             logged_once: BTreeSet::new(),
             overdue_logged: None,
+            reader: None,
+            reconnect_mirror: None,
+            kernel_mirrors: BTreeMap::new(),
+            document_owners: BTreeMap::new(),
+            resync_work: BTreeMap::new(),
         }
     }
 
     pub fn process(&self) -> EngineProcess {
         self.config.process
+    }
+
+    /// The trusted host associates renderer ports with their window. Host
+    /// snapshot ports may serve several owners and remain unbound.
+    pub fn set_document_owner(&mut self, port: PortId, owner: Option<u32>) {
+        if let Some(owner) = owner {
+            self.document_owners.insert(port, owner);
+        } else {
+            self.document_owners.remove(&port);
+        }
+    }
+
+    /// Publishes a cheap shared tree from the native evaluator. `verified_hash`
+    /// is supplied only after hashing off-thread or an explicit hash request.
+    /// This starts a new checkpoint history (activation or full resync).
+    pub fn register_document_kernel(
+        &mut self,
+        owner: u32,
+        document: pm_protocol::common::DocumentId,
+        mirror: pm_model::Document,
+        verified_hash: Option<String>,
+    ) {
+        self.kernel_mirrors.insert(
+            owner,
+            KernelMirror {
+                document,
+                checkpoint: verified_hash
+                    .as_ref()
+                    .map(|hash| (mirror.clone(), hash.clone())),
+                mirror,
+                verified_hash,
+            },
+        );
+    }
+
+    /// Advances the live evaluator tree without discarding the renderer's
+    /// verified checkpoint. An explicit hash of the live tree also leaves the
+    /// checkpoint intact until the renderer publishes a replacement.
+    pub fn update_document_kernel(
+        &mut self,
+        owner: u32,
+        document: pm_protocol::common::DocumentId,
+        mirror: pm_model::Document,
+        verified_hash: Option<String>,
+    ) {
+        if let Some(saved) = self.kernel_mirrors.get_mut(&owner)
+            && saved.document == document
+        {
+            saved.mirror = mirror;
+            saved.verified_hash = verified_hash;
+        } else {
+            self.register_document_kernel(owner, document, mirror, verified_hash);
+        }
+    }
+
+    /// A cheap guard lets the host retire replaced checkpoints off-thread.
+    pub fn document_kernel_checkpoint(&self, owner: u32) -> Option<pm_model::Document> {
+        self.kernel_mirrors
+            .get(&owner)?
+            .checkpoint
+            .as_ref()
+            .map(|(document, _)| document.clone())
+    }
+
+    /// Transfer an expired checkpoint to the host's retirement worker. Taking
+    /// ownership here avoids releasing its last tree reference on this thread.
+    pub fn drop_document_kernel_checkpoint(&mut self, owner: u32) -> Option<pm_model::Document> {
+        self.kernel_mirrors
+            .get_mut(&owner)?
+            .checkpoint
+            .take()
+            .map(|(document, _)| document)
+    }
+
+    /// Main's window snapshot session adopts the evaluator's exact current
+    /// tree. This authority comes from the trusted host, independently of the
+    /// renderer reconnect checkpoint. It never computes a canonical hash.
+    pub fn adopt_document_kernel_session(
+        &mut self,
+        owner: u32,
+        sid: SessionId,
+        document: &pm_protocol::common::DocumentId,
+        revision: u64,
+    ) -> Result<(), String> {
+        if self.config.process != EngineProcess::Interactive {
+            return Err("Native window capture requires the interactive engine".into());
+        }
+        let session = self
+            .sessions
+            .get(&sid)
+            .ok_or("The native capture session is not open")?;
+        let host = self.ports.get(&session.port).is_some_and(|connection| {
+            connection.kind == PeerKind::Host && matches!(connection.state, ConnState::Open(_))
+        });
+        if !host
+            || session.role != SessionRole::Interactive
+            || self
+                .document_owners
+                .get(&session.port)
+                .is_some_and(|bound| *bound != owner)
+        {
+            return Err("Native window capture requires a host-owned interactive session".into());
+        }
+        if self.resync_work.values().any(|pending| pending.sid == sid)
+            || self.host_calls.values().any(
+                |call| matches!(call, HostCall::ResyncFromFile { session, .. } if *session == sid),
+            )
+        {
+            return Err("The native capture session has a resync in progress".into());
+        }
+        if session.document == *document && session.revisions.applied().get() > revision {
+            return Err("The native capture session is ahead of the requested revision".into());
+        }
+        let saved = self
+            .kernel_mirrors
+            .get(&owner)
+            .filter(|saved| saved.document == *document && saved.mirror.revision() == revision)
+            .ok_or("The native capture document or revision changed")?;
+        let mirror = saved.mirror.clone();
+        let revision = Revision::new(revision).map_err(|e| e.to_string())?;
+        let resync = Resync {
+            document: document.clone(),
+            revision,
+            encoding: DocumentEncoding::CanonicalJsonV1,
+            source: ResyncSource::Inline {
+                body: pm_protocol::common::Bytes(Vec::new()),
+            },
+            hash: ContentHash([0; 32]),
+        };
+        let session = self.sessions.get_mut(&sid).expect("checked");
+        if session.document != *document {
+            session.document = document.clone();
+            session.media.clear();
+        }
+        self.install_document(sid, &resync, mirror)
+            .map_err(|(_, message)| message)?;
+        // No wire proof was supplied. Never let the internal placeholder hash
+        // become a verified mirror or reconnect checkpoint for another port.
+        let session = self.sessions.get_mut(&sid).expect("installed");
+        session.verified = None;
+        session.checkpoint = None;
+        Ok(())
+    }
+
+    pub fn unregister_document_kernel(&mut self, owner: u32) {
+        self.kernel_mirrors.remove(&owner);
     }
 
     /// Installs the canonical patch body decoder (RFC 05).
@@ -449,16 +636,21 @@ impl Engine {
         self.presenter.is_some()
     }
 
-    /// Installs the render and export service (contracts 12 and 13). Only
-    /// the job engine runs jobs and agent frames.
+    /// Installs the render and export service (contracts 12 and 13), or the
+    /// interactive engine's lightweight media probe service. Only the job
+    /// engine accepts jobs and agent frames, takes the service's Blender
+    /// events, and releases agent frames waiting for a revision; the
+    /// interactive engine uses its service for `ProbeMedia` alone (its
+    /// outbox, host calls, and session and port closes).
     pub fn set_job_service(&mut self, service: Box<dyn JobService>) {
-        if self.config.process == EngineProcess::Job {
-            self.jobs = Some(service);
-        }
+        self.jobs = Some(service);
     }
 
+    /// Whether this engine runs jobs and agent frames: the job engine with
+    /// its service installed. A probe service in the interactive engine is
+    /// not one.
     pub fn has_job_service(&self) -> bool {
-        self.jobs.is_some()
+        self.config.process == EngineProcess::Job && self.jobs.is_some()
     }
 
     /// Sends what the job service produced off this thread: its responses,
@@ -466,6 +658,7 @@ impl Engine {
     /// wakes it; `receive` and `tick` pump too.
     pub fn pump(&mut self) -> Vec<Action> {
         let mut out = Out::default();
+        self.drain_resyncs(&mut out);
         self.drain_jobs(&mut out);
         self.drain_presenter(&mut out);
         out.0
@@ -585,6 +778,7 @@ impl Engine {
     }
 
     fn forget_port(&mut self, port: PortId, out: &mut Out) {
+        self.document_owners.remove(&port);
         if self.ports.remove(&port).is_none() {
             return;
         }
@@ -595,8 +789,15 @@ impl Engine {
             .map(|(id, _)| *id)
             .collect();
         for id in &closed {
-            self.sessions.remove(id);
+            if let Some(mut session) = self.sessions.remove(id) {
+                if let Some(mut checkpoint) = session.checkpoint.take() {
+                    checkpoint.expires =
+                        std::time::Instant::now() + std::time::Duration::from_secs(15);
+                    self.reconnect_mirror = Some(checkpoint);
+                }
+            }
         }
+        self.resync_work.retain(|_, p| p.port != port);
         self.with_presenter(out, |p, ctx| p.port_closed(ctx, port));
         self.viewers_stopped(|(p, _)| *p == port, out);
         self.waiting_frames.retain(|w| w.port != port);
@@ -679,10 +880,10 @@ impl Engine {
             }
         }
         self.flush_document_updates(now, &mut out);
-        if self.jobs.is_some() {
+        if self.has_job_service() {
             self.release_waiting_frames(now, &mut out);
-            self.drain_jobs(&mut out);
         }
+        self.drain_jobs(&mut out);
         self.drain_presenter(&mut out);
         out.0
     }
@@ -988,10 +1189,10 @@ impl Engine {
             Request::Snapshot(snapshot) if kind == PeerKind::Host && self.presenter.is_some() => {
                 self.snapshot(port, id, snapshot, revision, out)
             }
-            Request::SubmitJob(job) if self.jobs.is_some() && kind == PeerKind::Host => {
+            Request::SubmitJob(job) if self.has_job_service() && kind == PeerKind::Host => {
                 self.submit_job(port, id, job, out)
             }
-            Request::CancelJobs(cancel) if self.jobs.is_some() && kind == PeerKind::Host => {
+            Request::CancelJobs(cancel) if self.has_job_service() && kind == PeerKind::Host => {
                 let cancelled = self.jobs.as_mut().expect("checked").cancel(&cancel);
                 self.respond(
                     port,
@@ -1002,7 +1203,7 @@ impl Engine {
                     out,
                 );
             }
-            Request::AgentFrames(request) if self.jobs.is_some() && kind == PeerKind::Host => {
+            Request::AgentFrames(request) if self.has_job_service() && kind == PeerKind::Host => {
                 self.agent_frames(port, id, session, revision, request, now, out)
             }
             Request::ProbeMedia(probe) if self.jobs.is_some() && kind == PeerKind::Host => {
@@ -1134,9 +1335,13 @@ impl Engine {
                 role: open.role,
                 revisions: RevisionTracker::new(Revision::ZERO),
                 mirror: None,
+                verified: None,
                 definitions: DefinitionSet::default(),
                 stale: false,
                 media: MediaTable::default(),
+                checkpoint: None,
+                checkpoint_bytes: 0,
+                checkpoint_batches: 0,
             },
         );
         self.respond(
@@ -1187,6 +1392,24 @@ impl Engine {
         let Some(sid) = self.owned_session(port, id, session, out) else {
             return;
         };
+        if self.resync_work.values().any(|p| p.sid == sid)
+            || self.host_calls.values().any(
+                |call| matches!(call, HostCall::ResyncFromFile { session, .. } if *session == sid),
+            )
+        {
+            self.finish_resync(
+                port,
+                id,
+                sid,
+                &resync,
+                Err((
+                    ErrorCode::StaleRevision,
+                    "A resync is already pending for this session.".into(),
+                )),
+                out,
+            );
+            return;
+        }
         if self.sessions[&sid].document != resync.document
             && self.sessions[&sid].role == SessionRole::Interactive
             && resync.document.is_valid()
@@ -1206,11 +1429,30 @@ impl Engine {
             self.send_error(port, id, error, out);
             return;
         }
+        // Main's snapshot session for a window and the window's own session
+        // carry the same document: one checked mirror serves both (pm-model
+        // shares the tree), and the second body is neither read nor parsed.
+        if let Some(mirror) = self.verified_mirror(sid, &resync) {
+            let result = self.install_document(sid, &resync, mirror);
+            self.finish_resync(port, id, sid, &resync, result, out);
+            return;
+        }
         match &resync.source {
             ResyncSource::Inline { body } => {
                 let body = body.0.clone();
-                let result = self.install_mirror(sid, &resync, &body);
-                self.finish_resync(port, id, sid, &resync, result, out);
+                if body.len() >= 64 * 1024 {
+                    self.start_resync(
+                        port,
+                        id,
+                        sid,
+                        resync,
+                        crate::resync::Source::Inline(body),
+                        out,
+                    );
+                } else {
+                    let result = self.install_mirror(sid, &resync, &body);
+                    self.finish_resync(port, id, sid, &resync, result, out);
+                }
             }
             ResyncSource::CacheFile { handle, length } => {
                 let Some(host) = self.open_host() else {
@@ -1251,45 +1493,131 @@ impl Engine {
         resync: &Resync,
         body: &[u8],
     ) -> Result<(), (ErrorCode, String)> {
-        let value = match resync.encoding {
-            DocumentEncoding::CanonicalJsonV1 => {
-                pm_model::json::parse_bytes(body).map_err(|e| {
-                    (
-                        ErrorCode::InvalidMessage,
-                        format!("The resync body is not JSON ({e})."),
-                    )
-                })?
-            }
-            DocumentEncoding::CanonicalBinaryV1 => {
-                return Err((
-                    ErrorCode::Unsupported,
-                    "The canonical binary document encoding is not readable yet; resync as canonical JSON.".into(),
-                ));
-            }
-        };
-        let shared = self
-            .presents_documents()
-            .then(|| std::sync::Arc::new(value.clone()));
-        let mirror = pm_model::Document::new(Some(value), resync.revision.get());
-        let digest = mirror_digest(&mirror);
-        if ContentHash(digest) != resync.hash {
-            return Err((
-                ErrorCode::InvalidMessage,
-                "The resync body does not match its canonical hash; send it again.".into(),
-            ));
+        let mirror = crate::resync::parse(resync, self.base_mirror(sid, resync), body)?;
+        self.install_document(sid, resync, mirror)
+    }
+
+    /// Whether `sid` may start from another session's tree: only before it
+    /// has a mirror of its own. Node revisions are the window's revision
+    /// numbers, and render caches keep a subtree while its revision is at
+    /// most the one they were validated at; a session with caches of its
+    /// own reconciles against its own mirror, never a tree another window
+    /// stamped.
+    fn may_share_from_others(&self, sid: SessionId) -> bool {
+        self.sessions.get(&sid).is_some_and(|s| s.mirror.is_none())
+    }
+
+    /// Another session's mirror that was resynced to this resync's hash, at
+    /// or before its revision, with nothing applied since: the same content,
+    /// every node stamped no later than this revision.
+    fn verified_mirror(&self, sid: SessionId, resync: &Resync) -> Option<pm_model::Document> {
+        if resync.encoding != DocumentEncoding::CanonicalJsonV1 {
+            return None;
         }
+        let session = self.sessions.get(&sid)?;
+        let owner = self.document_owners.get(&session.port);
+        let hash = hex(&resync.hash.0);
+        if let Some(mirror) = self.kernel_mirrors.iter().find_map(|(candidate, saved)| {
+            if !owner.is_none_or(|owner| owner == candidate) || saved.document != resync.document {
+                return None;
+            }
+            let usable = |mirror: &pm_model::Document, verified: Option<&str>| {
+                verified == Some(hash.as_str())
+                    && mirror.revision() <= resync.revision.get()
+                    // Existing sessions must take the checkpoint's exact
+                    // revision so its node stamps cannot hide changed values.
+                    && (session.mirror.is_none() || mirror.revision() == resync.revision.get())
+            };
+            if usable(&saved.mirror, saved.verified_hash.as_deref()) {
+                Some(&saved.mirror)
+            } else {
+                saved.checkpoint.as_ref().and_then(|(mirror, hash)| {
+                    usable(mirror, Some(hash.as_str())).then_some(mirror)
+                })
+            }
+        }) {
+            return Some(mirror.shared_at_revision(resync.revision.get()));
+        }
+        if !self.may_share_from_others(sid) {
+            return None;
+        }
+        if let Some(saved) = self.reconnect_mirror.as_ref().filter(|saved| {
+            saved.expires > std::time::Instant::now()
+                && saved.document == resync.document
+                && saved.hash == resync.hash
+                && saved.mirror.revision() <= resync.revision.get()
+        }) {
+            return Some(saved.mirror.shared_at_revision(resync.revision.get()));
+        }
+        self.sessions.iter().find_map(|(other, s)| {
+            let (revision, hash) = s.verified.as_ref()?;
+            let mirror = s.mirror.as_ref()?;
+            (*other != sid
+                && s.document == resync.document
+                && !s.stale
+                && *hash == resync.hash
+                && *revision <= resync.revision.get()
+                && s.revisions.applied().get() == *revision
+                && mirror.revision() == *revision)
+                .then(|| mirror.shared_at_revision(resync.revision.get()))
+        })
+    }
+
+    /// A mirror of the resync's document to reconcile against, at or before
+    /// the resync's revision (so no node is stamped later than the new
+    /// revision): this session's own (even behind after a refused batch:
+    /// what changed since is stamped anew), else, for a session without one,
+    /// another session's.
+    fn base_mirror(&self, sid: SessionId, resync: &Resync) -> Option<&pm_model::Document> {
+        let usable = |s: &Session| {
+            s.document == resync.document
+                && s.mirror
+                    .as_ref()
+                    .is_some_and(|m| m.revision() <= resync.revision.get())
+        };
+        if !self.may_share_from_others(sid) {
+            return self
+                .sessions
+                .get(&sid)
+                .filter(|s| usable(s))
+                .and_then(|s| s.mirror.as_ref());
+        }
+        self.sessions
+            .values()
+            .find(|s| usable(s) && !s.stale)
+            .and_then(|s| s.mirror.as_ref())
+    }
+
+    /// Installs a checked mirror and tells the presenter.
+    fn install_document(
+        &mut self,
+        sid: SessionId,
+        resync: &Resync,
+        mirror: pm_model::Document,
+    ) -> Result<(), (ErrorCode, String)> {
+        let presents = self.presents_documents();
         let session = self.sessions.get_mut(&sid).ok_or((
             ErrorCode::UnknownSession,
             "The session closed during the resync.".into(),
         ))?;
         session.revisions.resynced(resync);
+        let root = presents.then(|| mirror.root().cloned());
+        session.checkpoint = Some(ReconnectMirror {
+            document: resync.document.clone(),
+            mirror: mirror.clone(),
+            hash: resync.hash,
+            expires: std::time::Instant::now(),
+        });
+        session.checkpoint_bytes = 0;
+        session.checkpoint_batches = 0;
         session.mirror = Some(mirror);
+        session.verified = Some((resync.revision.get(), resync.hash));
         session.stale = false;
-        if let Some(root) = shared {
+        if let Some(root) = root {
             self.pending_updates.push((
                 sid,
                 DocumentUpdate::Replace {
-                    root: Some(root),
+                    root,
                     revision: resync.revision,
                 },
             ));
@@ -1470,7 +1798,10 @@ impl Engine {
                 out,
             ),
             Err((code, message)) => {
-                let error = request_error(id, code, &message);
+                let mut error = request_error(id, code, &message);
+                if code == ErrorCode::BudgetExceeded {
+                    error = error.with_retry(Retry::After { ms: 250 });
+                }
                 self.send_error(port, id, error, out)
             }
         }
@@ -1609,10 +1940,11 @@ impl Engine {
                 }
             }
             (event @ (Event::BlenderProgress(_) | Event::BlenderSurface(_)), PeerKind::Host)
-                if self.jobs.is_some() =>
+                if self.has_job_service() =>
             {
                 // Contract 11: surfaces and progress of the job engine's
-                // Blender requests.
+                // Blender requests. The interactive engine's probe service
+                // never asks for Blender: its events are the viewer's.
                 self.jobs.as_mut().expect("checked").host_event(&event);
             }
             (event @ (Event::BlenderProgress(_) | Event::BlenderSurface(_)), PeerKind::Host)
@@ -1780,6 +2112,12 @@ impl Engine {
                 let forward = self.presents_documents();
                 let session = self.sessions.get_mut(&sid).expect("exists");
                 let applied = session.revisions.applied();
+                session.checkpoint_bytes =
+                    session.checkpoint_bytes.saturating_add(batch.body.0.len());
+                session.checkpoint_batches += 1;
+                if session.checkpoint_bytes > 8 * 1024 * 1024 || session.checkpoint_batches > 128 {
+                    session.checkpoint = None;
+                }
                 let result = match (&decoded, session.mirror.as_mut()) {
                     (Ok(Decoded::Patches(patches)), Some(mirror)) => mirror
                         .apply_at(patches, batch.revision.get())
@@ -1853,6 +2191,17 @@ impl Engine {
     }
 
     fn on_cancel(&mut self, port: PortId, id: RequestId, out: &mut Out) {
+        let tokens: Vec<_> = self
+            .resync_work
+            .iter()
+            .filter(|(_, p)| p.port == port && p.id == id)
+            .map(|(token, _)| *token)
+            .collect();
+        for token in tokens {
+            self.resync_work.remove(&token);
+            let error = request_error(id, ErrorCode::Cancelled, "The resync was cancelled.");
+            self.send_error(port, id, error, out);
+        }
         // Everything but a resync from a file is answered synchronously, so a
         // cancel normally arrives after its answer and has nothing to do.
         let pending = self
@@ -1924,12 +2273,14 @@ impl Engine {
                 },
                 Response::HandleResolved(resolved),
             ) => {
-                let result = self
-                    .read_resync_file(&resync, &resolved, length)
-                    .and_then(|body| self.install_mirror(session, &resync, &body));
-                if self.ports.contains_key(&port) {
-                    self.finish_resync(port, request, session, &resync, result, out);
-                }
+                self.start_resync(
+                    port,
+                    request,
+                    session,
+                    resync,
+                    crate::resync::Source::File(resolved, length),
+                    out,
+                );
             }
             (HostCall::Lease, Response::Lease(lease)) => {
                 match self.lease.grant(lease, now, self.evict.as_mut()) {
@@ -2160,41 +2511,92 @@ impl Engine {
         }
     }
 
-    fn read_resync_file(
-        &self,
-        resync: &Resync,
-        resolved: &HandleResolved,
-        length: u64,
-    ) -> Result<Vec<u8>, (ErrorCode, String)> {
-        let ResyncSource::CacheFile { handle, .. } = &resync.source else {
-            return Err((ErrorCode::Internal, "not a file resync".into()));
-        };
-        let readable = matches!(
-            resolved.access,
-            HandleAccess::Read | HandleAccess::ReadWrite
-        ) && matches!(resolved.kind, CapabilityKind::Cache { .. });
-        if &resolved.handle != handle || !readable {
-            return Err((
-                ErrorCode::CapabilityRejected,
-                "The resync handle does not name a readable cache file.".into(),
-            ));
+    fn start_resync(
+        &mut self,
+        port: PortId,
+        id: RequestId,
+        sid: SessionId,
+        resync: Resync,
+        source: crate::resync::Source,
+        out: &mut Out,
+    ) {
+        let base = self.base_mirror(sid, &resync).cloned();
+        let base_revision = self
+            .sessions
+            .get(&sid)
+            .map(|s| s.revisions.applied().get())
+            .unwrap_or(0);
+        let token = self.next_token;
+        self.next_token += 1;
+        let result = (|| {
+            if self.reader.is_none() {
+                self.reader = Some(crate::resync::Reader::new(self.config.process).map_err(
+                    |_| {
+                        (
+                            ErrorCode::Internal,
+                            "The document reader could not start.".into(),
+                        )
+                    },
+                )?);
+            }
+            self.reader
+                .as_ref()
+                .expect("started")
+                .submit(crate::resync::Work {
+                    token,
+                    resync: resync.clone(),
+                    base,
+                    source,
+                })
+        })();
+        match result {
+            Ok(()) => {
+                self.resync_work.insert(
+                    token,
+                    PendingResync {
+                        port,
+                        id,
+                        sid,
+                        resync,
+                        base_revision,
+                    },
+                );
+            }
+            Err(error) => self.finish_resync(port, id, sid, &resync, Err(error), out),
         }
-        let bytes = std::fs::read(&resolved.path).map_err(|e| {
-            (
-                ErrorCode::CapabilityRejected,
-                format!("The resync file could not be read ({}).", e.kind()),
-            )
-        })?;
-        if bytes.len() as u64 != length {
-            return Err((
-                ErrorCode::InvalidMessage,
-                format!(
-                    "The resync file holds {} bytes, not the {length} announced.",
-                    bytes.len()
-                ),
-            ));
+    }
+
+    fn drain_resyncs(&mut self, out: &mut Out) {
+        while let Some(done) = self.reader.as_ref().and_then(|r| r.poll()) {
+            let Some(pending) = self.resync_work.remove(&done.token) else {
+                continue;
+            };
+            let PendingResync {
+                port,
+                id,
+                sid,
+                resync,
+                base_revision,
+            } = pending;
+            let Some(session) = self.sessions.get(&sid).filter(|s| s.port == port) else {
+                continue;
+            };
+            if !self.ports.contains_key(&port) {
+                continue;
+            }
+            let current = session.document == resync.document
+                && session.revisions.applied().get() == base_revision;
+            let result = if current {
+                done.result
+                    .and_then(|mirror| self.install_document(sid, &resync, mirror))
+            } else {
+                Err((
+                    ErrorCode::StaleRevision,
+                    "The document changed while the resync was being read; resync again.".into(),
+                ))
+            };
+            self.finish_resync(port, id, sid, &resync, result, out);
         }
-        Ok(bytes)
     }
 
     /// The host port, if its handshake finished.
@@ -2322,12 +2724,20 @@ impl Engine {
     /// breadcrumb. Call every 100 ms or so, and after `begin_work`.
     pub fn tick(&mut self, now: HostMicros) -> Vec<Action> {
         let mut out = Out::default();
+        self.drain_resyncs(&mut out);
+        if self
+            .reconnect_mirror
+            .as_ref()
+            .is_some_and(|r| r.expires <= std::time::Instant::now())
+        {
+            self.reconnect_mirror = None;
+        }
         self.retry_media(now, &mut out);
         self.flush_document_updates(now, &mut out);
-        if self.jobs.is_some() {
+        if self.has_job_service() {
             self.release_waiting_frames(now, &mut out);
-            self.drain_jobs(&mut out);
         }
+        self.drain_jobs(&mut out);
         self.drain_presenter(&mut out);
         self.flush_inflight(&mut out);
         let active = !self.sessions.is_empty();
@@ -2755,5 +3165,315 @@ pub mod testing {
 
     pub fn handle_for(byte: u8) -> CapabilityHandle {
         CapabilityHandle::from_random_bytes([byte; 16])
+    }
+}
+
+#[cfg(test)]
+mod kernel_tests {
+    use super::*;
+    use pm_protocol::common::Bytes;
+    use pm_protocol::frame::{FrameRelease, FrameRequest, ViewerState};
+    use std::sync::{Arc, Mutex};
+
+    struct CaptureRecorder(Arc<Mutex<pm_model::Document>>);
+    impl FramePresenter for CaptureRecorder {
+        fn viewer(
+            &mut self,
+            _: &mut PresentContext<'_>,
+            _: PortId,
+            _: SessionId,
+            _: ViewerState,
+            _: Option<Revision>,
+        ) {
+        }
+        fn release(&mut self, _: PortId, _: SessionId, _: FrameRelease) {}
+        fn transport(
+            &mut self,
+            _: &mut PresentContext<'_>,
+            _: PortId,
+            _: SessionId,
+            _: pm_protocol::clock::TransportCommand,
+        ) {
+        }
+        fn render(
+            &mut self,
+            _: &mut PresentContext<'_>,
+            _: PortId,
+            _: SessionId,
+            _: RequestId,
+            _: FrameRequest,
+            _: Option<Revision>,
+        ) -> Result<(), Box<EngineError>> {
+            Ok(())
+        }
+        fn session_closed(&mut self, _: &mut PresentContext<'_>, _: PortId, _: SessionId) {}
+        fn port_closed(&mut self, _: &mut PresentContext<'_>, _: PortId) {}
+        fn renders_documents(&self) -> bool {
+            true
+        }
+        fn document(
+            &mut self,
+            _: &mut PresentContext<'_>,
+            _: PortId,
+            _: SessionId,
+            update: DocumentUpdate,
+        ) {
+            update.apply_to(&mut self.0.lock().unwrap()).unwrap();
+        }
+    }
+
+    fn capture_session(
+        engine: &mut Engine,
+        port: PortId,
+        kind: PeerKind,
+        role: SessionRole,
+    ) -> SessionId {
+        engine.attach(port, kind);
+        engine.receive(
+            port,
+            &testing::hello(if kind == PeerKind::Host {
+                PeerRole::Host
+            } else {
+                PeerRole::Renderer
+            }),
+            HostMicros::ZERO,
+        );
+        let sid = engine.next_session;
+        engine.open_session(
+            port,
+            RequestId::new(1).unwrap(),
+            OpenSession {
+                document: "old".into(),
+                role,
+                process: engine.config.process,
+                color: pm_protocol::color::ProjectColor::DEFAULT,
+            },
+            &mut Out::default(),
+        );
+        assert!(engine.sessions.contains_key(&sid));
+        sid
+    }
+
+    #[test]
+    fn native_kernel_capture_adopts_exact_current_tree_without_publishing_a_fake_hash() {
+        let mut engine = Engine::new(EngineConfig::new(EngineProcess::Interactive));
+        let presented = Arc::new(Mutex::new(pm_model::Document::default()));
+        engine.set_presenter(Box::new(CaptureRecorder(presented.clone())));
+        let host_port = PortId(2);
+        let host = capture_session(
+            &mut engine,
+            host_port,
+            PeerKind::Host,
+            SessionRole::Interactive,
+        );
+        let renderer = capture_session(
+            &mut engine,
+            PortId(3),
+            PeerKind::Renderer,
+            SessionRole::Interactive,
+        );
+        let mut job_engine = Engine::new(EngineConfig::new(EngineProcess::Job));
+        let job = capture_session(
+            &mut job_engine,
+            PortId(4),
+            PeerKind::Host,
+            SessionRole::JobSnapshot,
+        );
+        assert!(
+            job_engine
+                .adopt_document_kernel_session(7, job, &"doc".into(), 2)
+                .is_err()
+        );
+        let base = pm_model::Document::from_root(
+            Some(pm_model::Node::parse_bytes(br#"{"value":1}"#, 1).unwrap()),
+            1,
+        );
+        engine.register_document_kernel(
+            7,
+            "doc".into(),
+            base.clone(),
+            Some(base.canonical_hash().unwrap()),
+        );
+        let mut current = base;
+        let op = pm_model::ops::Op::from_value(
+            &pm_model::json::parse(r#"{"path":["value"],"exists":true,"value":2}"#).unwrap(),
+        )
+        .unwrap();
+        current.apply_ops_at(&[op], 2).unwrap();
+        engine.update_document_kernel(7, "doc".into(), current.clone(), None);
+        for (owner, session, document, revision) in [
+            (8, host, "doc", 2),
+            (7, host, "other", 2),
+            (7, host, "doc", 1),
+            (7, renderer, "doc", 2),
+        ] {
+            assert!(
+                engine
+                    .adopt_document_kernel_session(owner, session, &document.into(), revision)
+                    .is_err()
+            );
+        }
+        engine.set_document_owner(host_port, Some(8));
+        assert!(
+            engine
+                .adopt_document_kernel_session(7, host, &"doc".into(), 2)
+                .is_err()
+        );
+        engine.set_document_owner(host_port, None);
+        assert!(engine.sessions[&host].mirror.is_none());
+        engine
+            .adopt_document_kernel_session(7, host, &"doc".into(), 2)
+            .unwrap();
+        let session = &engine.sessions[&host];
+        assert_eq!(session.document.as_str(), "doc");
+        assert_eq!(session.revisions.applied().get(), 2);
+        assert!(session.verified.is_none());
+        assert!(session.checkpoint.is_none());
+        assert!(engine.kernel_mirrors[&7].verified_hash.is_none());
+        assert_eq!(engine.document_kernel_checkpoint(7).unwrap().revision(), 1);
+        let (pm_model::NodeKind::Object(original), pm_model::NodeKind::Object(adopted)) = (
+            current.root().unwrap().kind(),
+            session.mirror.as_ref().unwrap().root().unwrap().kind(),
+        ) else {
+            panic!("objects");
+        };
+        assert!(Arc::ptr_eq(original, adopted));
+        assert_eq!(
+            presented.lock().unwrap().revision(),
+            0,
+            "adoption waits for the host's explicit pre-capture flush"
+        );
+        engine.tick(HostMicros::ZERO);
+        let shown = presented.lock().unwrap();
+        assert_eq!(shown.revision(), 2);
+        let pm_model::NodeKind::Object(shown_root) = shown.root().unwrap().kind() else {
+            panic!("object");
+        };
+        assert!(
+            Arc::ptr_eq(original, shown_root),
+            "the render presenter must receive the same shared tree"
+        );
+        drop(shown);
+        let future = Resync {
+            document: "doc".into(),
+            revision: Revision::new(3).unwrap(),
+            encoding: DocumentEncoding::CanonicalJsonV1,
+            source: ResyncSource::Inline {
+                body: Bytes(vec![]),
+            },
+            hash: ContentHash([0; 32]),
+        };
+        engine
+            .sessions
+            .get_mut(&host)
+            .unwrap()
+            .revisions
+            .resynced(&future);
+        assert!(
+            engine
+                .adopt_document_kernel_session(7, host, &"doc".into(), 2)
+                .is_err(),
+            "stale captures must not backdate the session"
+        );
+    }
+
+    #[test]
+    fn native_kernel_mirror_sharing_checks_owner_document_revision_and_verification() {
+        let mut engine = Engine::new(EngineConfig::new(EngineProcess::Interactive));
+        let port = PortId(2);
+        engine.attach(port, PeerKind::Renderer);
+        engine.receive(
+            port,
+            &testing::hello(PeerRole::Renderer),
+            HostMicros::new(0).unwrap(),
+        );
+        engine.set_document_owner(port, Some(7));
+        let mut out = Out::default();
+        engine.open_session(
+            port,
+            RequestId::new(1).unwrap(),
+            OpenSession {
+                document: "doc".into(),
+                role: SessionRole::Interactive,
+                process: EngineProcess::Interactive,
+                color: pm_protocol::color::ProjectColor::DEFAULT,
+            },
+            &mut out,
+        );
+        let sid = *engine.sessions.keys().next().unwrap();
+        let mirror = pm_model::Document::from_root(
+            Some(pm_model::Node::parse_bytes(br#"{"value":3}"#, 3).unwrap()),
+            3,
+        );
+        let hash = ContentHash(mirror.canonical_digest().unwrap());
+        let mut resync = Resync {
+            document: "doc".into(),
+            revision: Revision::new(4).unwrap(),
+            encoding: DocumentEncoding::CanonicalJsonV1,
+            source: ResyncSource::Inline {
+                body: Bytes(vec![]),
+            },
+            hash,
+        };
+        engine.register_document_kernel(7, "doc".into(), mirror.clone(), Some(hex(&hash.0)));
+        let shared = engine.verified_mirror(sid, &resync).unwrap();
+        assert_eq!(shared.revision(), 4);
+        let pm_model::NodeKind::Object(original) = mirror.root().unwrap().kind() else {
+            panic!("object");
+        };
+        let pm_model::NodeKind::Object(cloned) = shared.root().unwrap().kind() else {
+            panic!("object");
+        };
+        assert!(
+            std::sync::Arc::ptr_eq(original, cloned),
+            "the evaluator and session must share their native tree"
+        );
+        engine.set_document_owner(port, Some(8));
+        assert!(engine.verified_mirror(sid, &resync).is_none());
+        engine.set_document_owner(port, Some(7));
+        resync.document = "other".into();
+        assert!(engine.verified_mirror(sid, &resync).is_none());
+        resync.document = "doc".into();
+        resync.revision = Revision::new(2).unwrap();
+        assert!(engine.verified_mirror(sid, &resync).is_none());
+        resync.revision = Revision::new(4).unwrap();
+        // Existing sessions can take the exact prepared revision, never an
+        // older tree whose stamps could hide changes from render caches.
+        engine.sessions.get_mut(&sid).unwrap().mirror = Some(pm_model::Document::new(None, 1));
+        assert!(engine.verified_mirror(sid, &resync).is_none());
+        resync.revision = Revision::new(3).unwrap();
+        assert!(engine.verified_mirror(sid, &resync).is_some());
+        let edited = pm_model::Document::from_root(
+            Some(pm_model::Node::parse_bytes(br#"{"value":5}"#, 5).unwrap()),
+            5,
+        );
+        engine.update_document_kernel(7, "doc".into(), edited.clone(), None);
+        assert!(
+            engine.verified_mirror(sid, &resync).is_some(),
+            "edits must retain the verified renderer checkpoint"
+        );
+        let checkpoint = engine.document_kernel_checkpoint(7).unwrap();
+        let pm_model::NodeKind::Object(saved) = checkpoint.root().unwrap().kind() else {
+            panic!("object")
+        };
+        assert!(std::sync::Arc::ptr_eq(original, saved));
+        let edited_hash = edited.canonical_digest().unwrap();
+        engine.update_document_kernel(7, "doc".into(), edited.clone(), Some(hex(&edited_hash)));
+        assert!(
+            engine.verified_mirror(sid, &resync).is_some(),
+            "explicit current hash must preserve the old checkpoint"
+        );
+        resync.revision = Revision::new(5).unwrap();
+        resync.hash = ContentHash(edited_hash);
+        assert!(engine.verified_mirror(sid, &resync).is_some());
+        engine.register_document_kernel(7, "doc".into(), edited, Some(hex(&edited_hash)));
+        resync.revision = Revision::new(3).unwrap();
+        resync.hash = hash;
+        assert!(
+            engine.verified_mirror(sid, &resync).is_none(),
+            "activation replaces the old checkpoint history"
+        );
+        engine.unregister_document_kernel(7);
+        assert!(engine.kernel_mirrors.is_empty());
     }
 }

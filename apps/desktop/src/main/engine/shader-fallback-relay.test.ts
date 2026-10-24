@@ -126,7 +126,7 @@ describe('serving a job engine fallback request', () => {
     dir = await mkdtemp(path.join(os.tmpdir(), 'pm-fallback-serve-'));
     await writeFile(path.join(dir, 'in-0.rgba16f'), Buffer.from(new Uint16Array(8).fill(0x3c00).buffer));
     await writeFile(path.join(dir, 'in-1.rgba16f'), Buffer.from(new Uint16Array(8).fill(0x3800).buffer));
-    let seen: Uint16Array[] = [];
+    let seen: (Uint16Array | Float32Array)[] = [];
     await serveHostFallback(body(), scratch, async (_r, textures) => {
       seen = textures;
       return { ok: true, rgba16f: new Uint16Array(8).fill(0x3400) };
@@ -134,6 +134,22 @@ describe('serving a job engine fallback request', () => {
     expect(seen.map((t) => t[0])).toEqual([0x3c00, 0x3800]);
     const out = new Uint16Array(new Uint8Array(await readFile(path.join(dir, 'out.rgba16f'))).buffer);
     expect(Array.from(out)).toEqual(new Array(8).fill(0x3400));
+  });
+
+  it('keeps float32 input and output bits in job scratch files', async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'pm-fallback-serve32-'));
+    const input = Float32Array.from([1 + 2 ** -20, -2.125, 0.0001, 1, 0.33333334, 2.75, -0.25, 0.5]);
+    const bits = new Uint32Array(input.buffer).slice();
+    await writeFile(path.join(dir, 'in-0.rgba32f'), new Uint8Array(input.buffer));
+    const req = { ...request(1), colorDepth: 32 };
+    await serveHostFallback(body({ request: req, textures: ['in-0.rgba32f'], output: 'out.rgba32f' }), scratch, async (_r, textures) => {
+      expect(textures).toHaveLength(1);
+      expect(textures[0]).toBeInstanceOf(Float32Array);
+      expect(new Uint32Array(textures[0]!.buffer)).toEqual(bits);
+      return { ok: true, rgba16f: new Uint16Array(0), rgba32f: input };
+    });
+    const output = new Uint8Array(await readFile(path.join(dir, 'out.rgba32f')));
+    expect(new Uint32Array(output.buffer)).toEqual(bits);
   });
 
   it('refuses paths, other areas, short textures, and answers runner failures with their codes', async () => {

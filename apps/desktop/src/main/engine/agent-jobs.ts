@@ -55,6 +55,8 @@ import {
 } from '../../shared/delivery';
 import type {
   AgentFrameOutcome,
+  CompatFrameRequest,
+  CompatSource,
   DefinitionsApplied,
   DefinitionsUpdate,
   EngineError,
@@ -70,6 +72,7 @@ import { type SheetExportOptions, validSheetExportOptions } from '../../shared/e
 import { resolveFrameRate, TICKS_PER_SECOND } from '../../shared/frame-rate';
 import type { WindowDefinitions } from './definitions';
 import { RemoteError } from './protocol';
+import { offlineClips, type OfflineClip } from './offline-media';
 
 /** What the agent jobs need from the engine host (NativeEngine). */
 export interface AgentJobsEngine {
@@ -77,9 +80,15 @@ export interface AgentJobsEngine {
   stageDocument(process: EngineProcess, session: number, bytes: Uint8Array): Promise<{ handle: string; length: number }>;
   listen(listener: { jobStatus?(status: JobStatus): void; status?(status: unknown): void }): () => void;
   isReady(process: EngineProcess): boolean;
+  canRequest?(process: EngineProcess): boolean;
+  ensureReady?(process: EngineProcess): Promise<void>;
+  holdJobRun?(run: string): void;
+  releaseJobRun?(run: string): void;
   /** A user-chosen destination as a write handle for `job` on `session`,
    *  placed under `overwrite` (the engine's default for chosen files is replace). */
   chooseOutput?(file: string, job: string, session: number, overwrite?: 'uniqueName' | 'replace' | 'fail'): string;
+  /** Starts only the hidden WebM encoder window while a user snapshot opens. */
+  warmExportEncoder?(): void;
   /** Marks a job session as a draft render (offline media from proxies). */
   setDraftSession?(session: number, draft: boolean): void;
 }
@@ -118,10 +127,10 @@ export type ExportVideoInput = {
 };
 
 export type ExportVideoResult =
-  | { status: 'done'; jobId: string; path: string; width: number; height: number; fps: number }
-  | { status: 'queued'; jobId: string };
+  | { status: 'done'; jobId: string; path: string; width: number; height: number; fps: number; missingMedia?: OfflineClip[] }
+  | { status: 'queued'; jobId: string; missingMedia?: OfflineClip[] };
 
-export type RenderStatus = { jobId: string; state: JobState; progress: number; path?: string; error?: string };
+export type RenderStatus = { jobId: string; state: JobState; progress: number; path?: string; error?: string; missingMedia?: OfflineClip[] };
 
 /** An export from the export sheet or the render queue, as the renderer asks
  *  for it (shared/engine-ipc.ts `SheetExportOptions`). */
@@ -194,8 +203,9 @@ function agentFormat(input: ExportVideoInput): { format: DeliveryFormat; deliver
 }
 
 /** The job engine's settings for a format and the sheet's delivery options:
- *  tags, audio coding, start timecode and reel, precision (exports render at
- *  32-bit, amendment 8), and dither (on for 8-bit outputs, section 17). */
+ *  tags, audio coding, start timecode and reel, a Float32 wire hint (the
+ *  project's colorDepth selects working precision), and dither for outputs
+ *  at 8 bits or less. */
 export function wireSettings(input: {
   format: DeliveryFormat;
   delivery: DeliveryOptions;
@@ -206,11 +216,13 @@ export function wireSettings(input: {
   start: number;
   end: number;
   audio: boolean;
+  audioIndexPlayhead?: number;
   motionBlur: boolean;
   hideCaptions?: boolean;
   draft?: boolean;
   preview?: boolean;
   sequenceName?: string;
+  compat?: CompatSource[];
 }): ExportSettings {
   const { format, delivery } = input;
   const image = format === 'png' || format === 'still';
@@ -226,6 +238,7 @@ export function wireSettings(input: {
     frameRate: { num: input.rate.num, den: input.rate.den },
     range: { start: toTicks(Math.max(0, input.start)), end: toTicks(input.end) },
     audio: input.audio && !image,
+    ...(input.audioIndexPlayhead !== undefined ? { audioIndexPlayhead: toTicks(input.audioIndexPlayhead) } : {}),
     motionBlur: input.motionBlur,
     color: wireColor(format, delivery),
     precision: 'float32',
@@ -236,7 +249,9 @@ export function wireSettings(input: {
       timecode,
       hideCaptions: input.hideCaptions === true,
       preview: input.preview === true,
-      sequenceName: format === 'png' ? input.sequenceName ?? null : null
+      sequenceName: format === 'png' ? input.sequenceName ?? null : null,
+      // The exporting window's compatibility producers (a raster override).
+      ...(Array.isArray(input.compat) && input.compat.length ? { compat: input.compat } : {})
     }
   };
 }
@@ -246,10 +261,9 @@ export function wireSettings(input: {
  *  pixels, the composition rate, all or the work area, ProRes 4444 (straight
  *  alpha when asked) or H.264 at the High tier (16 Mbps), Rec.709 (QuickTime
  *  and Safari) tags; or a preset's or another delivery format's. Exports
- *  render at 32-bit precision (amendment 8 asks for it whenever a source
- *  exceeds 10 bits; agent exports do not inspect sources first), and 8-bit
- *  outputs are dithered (section 17). */
-export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput): ExportSettings {
+ *  use the project's colorDepth despite the Float32 wire hint, and delivery
+ *  formats at 8 bits or less are dithered (section 17). */
+export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput, compat: readonly CompatSource[] = []): ExportSettings {
   const project = asProject(projectValue);
   const rate = resolveFrameRate(project['fps'], project['fpsRational']);
   if (!rate) throw new AgentJobError('The project has no valid frame rate.');
@@ -269,7 +283,9 @@ export function exportSettingsFor(projectValue: unknown, input: ExportVideoInput
     format, delivery, alpha, quality: 'high',
     size: { width: evenSize(width), height: evenSize(height) },
     rate, start, end, audio: input.audio, motionBlur: input.motionBlur,
-    sequenceName: suggestedName(project, input.name)
+    sequenceName: suggestedName(project, input.name),
+    // The window's compatibility producers: the job asks it for those layers.
+    compat: compatSources(compat)
   });
 }
 
@@ -296,10 +312,34 @@ export function userExportSettings(projectValue: unknown, options: UserExportOpt
   return wireSettings({
     format, delivery, alpha: o.alpha, quality: o.quality, size, rate,
     start: o.start, end: format === 'still' ? Math.max(o.end, o.start + 1 / (rate.num / rate.den)) : o.end,
-    audio: o.audio, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
+    audio: o.audio, audioIndexPlayhead: o.audioIndexPlayhead, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
+    ...(Array.isArray(o.compat) ? { compat: compatSources(o.compat) } : {}),
     ...(extra.preview ? { preview: true } : {}),
     ...(extra.sequenceName ? { sequenceName: extra.sequenceName } : {})
   });
+}
+
+/** A layer object of a project (its root composition or a nested one) by id. */
+export function snapshotLayer(project: Project, composition: string, layer: string): unknown {
+  const root = String(project['compId'] ?? project['id'] ?? '');
+  const comps = project['comps'] && typeof project['comps'] === 'object' ? project['comps'] as Record<string, { layers?: unknown }> : {};
+  const lists: unknown[] = [];
+  if (composition === root) lists.push(project['layers']);
+  if (comps[composition]) lists.push(comps[composition]!.layers);
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    const found = list.find((l) => !!l && typeof l === 'object' && (l as Record<string, unknown>)['id'] === layer);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** The compatibility producers a window named (unknown values dropped). */
+export function compatSources(value: unknown): CompatSource[] {
+  if (!Array.isArray(value)) return [];
+  const out: CompatSource[] = [];
+  for (const s of value) if ((s === 'rasterOverride' || s === 'compatContext') && !out.includes(s)) out.push(s);
+  return out;
 }
 
 /** The file name the agent asked for, or the project's, as a bare name part. */
@@ -339,6 +379,9 @@ type JobRecord = {
   size: { width: number; height: number };
   fps: number;
   changed: Array<() => void>;
+  missingMedia?: OfflineClip[];
+  /** The project as the job's snapshot holds it (compatibility frames name its layers). */
+  project?: Project;
 };
 
 type FrameSession = {
@@ -349,6 +392,8 @@ type FrameSession = {
 
 export type AgentJobsOptions = {
   engine: AgentJobsEngine;
+  /** Resolves a clip in the pinned job session for agent export reports. */
+  resolveAsset?(asset: string, context: { process: EngineProcess; session: number }): Promise<unknown>;
   /** Pins media for each export snapshot until its session closes. */
   bindMediaSession?(session: number, project: Project | null): Promise<void>;
   /** Status of an export sheet job, for its window. */
@@ -378,6 +423,12 @@ export class AgentJobs {
   private readonly finished: string[] = [];
   /** One live-following job session per window for its agent frames. */
   private readonly frameSessions = new Map<number, Promise<FrameSession>>();
+  /** Owners whose frame sessions a run has used. A shared owner stays open
+   *  until its last run finishes. */
+  private readonly runOwners = new Map<string, Set<number>>();
+  private readonly finishedRuns = new Set<string>();
+  private readonly preparingRuns = new Map<string, Promise<void>>();
+  private readonly heldRuns = new Set<string>();
   /** The window each agent frame session works for (by job engine session). */
   private readonly frameOwners = new Map<number, number>();
 
@@ -407,11 +458,46 @@ export class AgentJobs {
 
   dispose(): void {
     this.unlisten();
+    for (const run of this.heldRuns) this.options.engine.releaseJobRun?.(run);
+    this.heldRuns.clear();
   }
 
   /** Whether the job engine can take work now. */
   get available(): boolean {
-    return this.options.engine.isReady('job');
+    return this.options.engine.canRequest?.('job') ?? this.options.engine.isReady('job');
+  }
+
+  /** Begin the separate render utility while an agent is setting up its
+   *  project run. The caller does not wait: the first render still awaits
+   *  readiness and receives a startup failure through the normal path. */
+  async prepareRun(run: string): Promise<void> {
+    this.heldRuns.add(run);
+    this.options.engine.holdJobRun?.(run);
+    const pending = this.preparingRuns.get(run);
+    if (pending) return pending;
+    const start = this.options.engine.ensureReady?.('job') ?? Promise.resolve();
+    this.preparingRuns.set(run, start);
+    try {
+      await start;
+    } catch (error) {
+      this.releaseRunHold(run);
+      throw error;
+    } finally {
+      if (this.preparingRuns.get(run) === start) this.preparingRuns.delete(run);
+    }
+  }
+
+  private releaseRunHold(run: string): void {
+    if (!this.heldRuns.delete(run)) return;
+    this.options.engine.releaseJobRun?.(run);
+  }
+
+  /** End a committed run's warm hold and close its idle frame sessions.
+   *  Accepted async exports retain their own job sessions. */
+  async finishRun(run: string): Promise<void> {
+    this.releaseRunHold(run);
+    this.finishedRuns.add(run);
+    await this.closeRunFrames(run);
   }
 
   private nextSaveSession = -1;
@@ -426,18 +512,38 @@ export class AgentJobs {
     } finally { await this.options.bindMediaSession?.(session, null); }
   }
 
+  /**
+   * The layer a job's compatibility frame names, as the job's snapshot
+   * holds it (JSON): the window draws that layer rather than its live one,
+   * so an export (and a render queue job started later) draws the project
+   * as it was exported, as today's exporter and queue did. Null when the
+   * session is not a job of these or the layer is not in its snapshot.
+   */
+  compatLayer(session: number | null, request: CompatFrameRequest): string | null {
+    if (session === null) return null;
+    for (const record of this.jobs.values()) {
+      if (record.session !== session || !record.project) continue;
+      const layer = snapshotLayer(record.project, String(request.composition), String(request.layer));
+      return layer === null ? null : JSON.stringify(layer);
+    }
+    return null;
+  }
+
   /* ── export_video ──────────────────────────────────────────────────── */
 
   /** Runs an agent export; throws a named engine failure on refusal. */
-  async exportVideo(owner: number, run: string, projectValue: unknown, input: ExportVideoInput, onStarted?: () => void): Promise<ExportVideoResult> {
+  async exportVideo(owner: number, run: string, projectValue: unknown, input: ExportVideoInput, onStarted?: () => void, compat: readonly CompatSource[] = []): Promise<ExportVideoResult> {
     const project = asProject(projectValue);
-    const settings = exportSettingsFor(project, input);
+    const settings = exportSettingsFor(project, input, compat);
     const { format, delivery } = agentFormat(input);
     // PNG sequences are folders (`png` names the frames' extension); the job
     // engine asks for a folder destination by the format.
     const extension = extensionOf(format, delivery) ?? 'png';
     const jobId = `agent-export-${randomUUID()}`;
     const session = await this.openSnapshot(project, `agent-export-${jobId}`, owner, this.windowUpdates(owner));
+    const missingMedia = this.options.resolveAsset
+      ? await offlineClips(project, (asset) => this.options.resolveAsset!(asset, { process: 'job', session }))
+      : [];
     const record: JobRecord = {
       jobId, owner, run, session,
       status: { job: jobId, class: 'agentExport', state: 'queued', progress: 0, path: null, error: null },
@@ -445,7 +551,8 @@ export class AgentJobs {
       name: suggestedName(project, input.name),
       size: settings.size,
       fps: Number(project['fps']) || settings.frameRate.num / settings.frameRate.den,
-      changed: []
+      changed: [], missingMedia,
+      ...(settings.delivery?.compat?.length ? { project } : {})
     };
     this.jobs.set(jobId, record);
     try {
@@ -474,7 +581,7 @@ export class AgentJobs {
       switch (status.state) {
         case 'done':
           if (!status.path) throw new AgentJobError('The export finished without a path.', 'internal');
-          return { status: 'done', jobId: record.jobId, path: status.path, width: record.size.width, height: record.size.height, fps: record.fps };
+          return { status: 'done', jobId: record.jobId, path: status.path, width: record.size.width, height: record.size.height, fps: record.fps, missingMedia: record.missingMedia ?? [] };
         case 'failed':
           throw new AgentJobError(errorText(status.error), status.error?.code ?? 'exportFailed');
         case 'cancelled':
@@ -482,9 +589,9 @@ export class AgentJobs {
         default:
           break;
       }
-      if (mode === 'async') return { status: 'queued', jobId: record.jobId };
+      if (mode === 'async') return { status: 'queued', jobId: record.jobId, missingMedia: record.missingMedia ?? [] };
       const waiting = status.state === 'queued' || status.state === 'waitingForMedia';
-      if (waiting && this.now() - record.queuedAt > this.queueBoundMs) return { status: 'queued', jobId: record.jobId };
+      if (waiting && this.now() - record.queuedAt > this.queueBoundMs) return { status: 'queued', jobId: record.jobId, missingMedia: record.missingMedia ?? [] };
       await new Promise<void>((resolve) => {
         record.changed.push(resolve);
         // Re-check the queue bound while nothing changes.
@@ -505,6 +612,7 @@ export class AgentJobs {
       jobId,
       state: status.state,
       progress: Math.max(0, Math.min(1, status.progress)),
+      ...(record.missingMedia ? { missingMedia: record.missingMedia } : {}),
       ...(status.state === 'done' && status.path ? { path: status.path } : {}),
       ...(status.state === 'failed' ? { error: errorText(status.error) } : {})
     };
@@ -515,8 +623,11 @@ export class AgentJobs {
     const live = [...this.jobs.values()].some((r) => r.run === run && !terminal(r.status.state));
     // Frame batches carry their own wire run (one per batch), so a batch can
     // be cancelled alone; the agent run's cancel reaches every one of them.
+    // No live work means no request: a retired job utility is not restarted
+    // just to cancel nothing.
     const wires = [...(live ? [run] : []), ...(this.frameRuns.get(run) ?? [])];
     const counts = await Promise.all(wires.map((wire) => this.cancelWireRun(wire, run)));
+    await this.finishRun(run);
     return counts.reduce((sum, count) => sum + count, 0);
   }
 
@@ -625,6 +736,7 @@ export class AgentJobs {
     const sequenceName = format === 'png' ? path.basename(destination) : undefined;
     const settings = userExportSettings(project, options, { preview: !queue, ...(sequenceName ? { sequenceName } : {}) });
     if (!this.options.engine.chooseOutput) throw new AgentJobError('This host cannot write user exports.');
+    if (settings.format.kind === 'webm' && settings.alpha === 'none') this.options.engine.warmExportEncoder?.();
     const jobId = `${queue ? 'queue' : 'user'}-export-${randomUUID()}`;
     // Queue ownership is for status delivery; seed ownership follows the
     // window that queued this snapshot while that renderer still exists.
@@ -636,7 +748,8 @@ export class AgentJobs {
       name: suggestedName(project, undefined),
       size: settings.size,
       fps: options.fps,
-      changed: []
+      changed: [],
+      ...(settings.delivery?.compat?.length ? { project } : {})
     };
     this.jobs.set(jobId, record);
     try {
@@ -676,6 +789,8 @@ export class AgentJobs {
 
   /** Agent run -> the wire runs of its frame batches in flight. */
   private readonly frameRuns = new Map<string, Set<string>>();
+  /** Agent run -> its renderFrames calls in progress (startup included). */
+  private readonly frameCalls = new Map<string, number>();
   private frameBatch = 0;
 
   /** Renders agent frames at the agent's revision in the agent snapshot
@@ -683,10 +798,30 @@ export class AgentJobs {
   async renderFrames(owner: number, run: string, plan: FramesPlan, options: FramesOptions = {}): Promise<AgentFramesResult> {
     const project = asProject(plan.project);
     if (!plan.times.length) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
+    const owners = this.runOwners.get(run) ?? new Set<number>();
+    owners.add(owner);
+    this.runOwners.set(run, owners);
+    // Count the whole call, including startup and session creation: a run
+    // finishing during either must not close the session underneath it.
+    this.frameCalls.set(run, (this.frameCalls.get(run) ?? 0) + 1);
+    try {
+      return await this.renderFrameBatch(owner, run, project, plan, options);
+    } finally {
+      const left = (this.frameCalls.get(run) ?? 1) - 1;
+      if (left) this.frameCalls.set(run, left); else this.frameCalls.delete(run);
+      if (!left && this.finishedRuns.has(run)) await this.closeRunFrames(run);
+    }
+  }
+
+  private async renderFrameBatch(owner: number, run: string, project: Project, plan: FramesPlan, options: FramesOptions): Promise<AgentFramesResult> {
+    const { signal } = options;
+    if (signal?.aborted) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
+    // Startup announces its generation and invalidates old frame sessions.
+    // Wait before installing the first cached session, so it is not discarded.
+    await this.options.engine.ensureReady?.('job');
     const w = Number(project['w']), h = Number(project['h']);
     // `width` is today's output width; the engine takes the longest edge.
     const maxDimension = Math.max(1, Math.min(8192, Math.round(h > w && w > 0 ? plan.width * h / w : plan.width)));
-    const { signal } = options;
     if (signal?.aborted) return { status: 'rendered', images: [], revision: plan.revision, queuedMs: 0 };
     const frameSession = await this.frameSession(owner, project);
     const wire = `${run}#frames-${++this.frameBatch}`;
@@ -723,6 +858,17 @@ export class AgentJobs {
     }
     if (response.type !== 'agentFrames') throw new AgentJobError('The job engine answered agent frames with something else.');
     return this.frameImages(plan.times, response.outcomes, response.queuedMs, frameSession.revision, aborted, plan.imageFormat === 'png' ? 'image/png' : 'image/jpeg');
+  }
+
+  private async closeRunFrames(run: string): Promise<void> {
+    if (this.frameCalls.has(run)) return;
+    const owners = this.runOwners.get(run);
+    this.runOwners.delete(run);
+    this.finishedRuns.delete(run);
+    for (const owner of owners ?? []) {
+      if ([...this.runOwners.values()].some((other) => other.has(owner))) continue;
+      await this.forgetOwner(owner);
+    }
   }
 
   /** The batch's images in request order. A batch cancelled through its
@@ -840,7 +986,10 @@ export class AgentJobs {
     const pending = this.frameSessions.get(owner);
     this.frameSessions.delete(owner);
     const current = await pending?.catch(() => null);
-    if (current && current.generation === this.generation) await this.closeSession(current.session);
+    if (current) {
+      this.frameOwners.delete(current.session);
+      if (current.generation === this.generation) await this.closeSession(current.session);
+    }
   }
 
   /* ── sessions ──────────────────────────────────────────────────────── */
@@ -866,6 +1015,9 @@ export class AgentJobs {
   }
 
   private async openSession(document: string, role: 'job' | 'jobSnapshot', owner: number | null): Promise<number> {
+    // A retired job utility starts on demand; a fatal startup or a crash
+    // still down at the bound is the named error below.
+    await this.options.engine.ensureReady?.('job').catch(() => undefined);
     await this.whenAvailable();
     const opened = await this.options.engine.request('job', { type: 'openSession', document, role, process: 'job', color: STANDARD_COLOR });
     if (opened.type !== 'sessionOpened') throw new AgentJobError('The job engine did not open a session.');
@@ -935,8 +1087,11 @@ export class AgentJobs {
   private async closeSession(session: number): Promise<void> {
     this.frameOwners.delete(session);
     void this.sessionOwner(session, null);
-    await this.options.bindMediaSession?.(session, null);
-    await this.options.engine.request('job', { type: 'closeSession' }, session).catch(() => undefined);
+    try {
+      await this.options.bindMediaSession?.(session, null);
+    } finally {
+      await this.options.engine.request('job', { type: 'closeSession' }, session).catch(() => undefined);
+    }
   }
 }
 

@@ -1,3 +1,4 @@
+import { DOCUMENT_KERNEL_IPC } from '../shared/document-kernel';
 import { contextBridge, ipcRenderer, sharedTexture, webUtils, type IpcRendererEvent } from 'electron';
 
 import {
@@ -57,7 +58,9 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
     session: request?.session ?? null,
     revision: request?.revision ?? null,
     snapshot: request?.snapshot ? { ...request.snapshot, target: target ? { ...target, content: undefined } : target } : request?.snapshot,
-    document: request?.document ? { id: request.document.id, revision: request.document.revision, hash: request.document.hash ?? null } : undefined
+    // A native kernel reference carries no body or hash; main adopts the
+    // owner's shared tree (main/engine/window-sessions.ts).
+    document: request?.document ? { id: request.document.id, revision: request.document.revision, hash: request.document.hash ?? null, ...(request.document.nativeKernel === true ? { nativeKernel: true as const } : {}) } : undefined
   })) as EngineSnapshotRequest;
   if (target?.kind === 'layer' && plain.snapshot?.target?.kind === 'layer') (plain.snapshot.target as { content?: Uint8Array | null }).content = bytes(target.content);
   if (plain.document) {
@@ -65,7 +68,7 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
     if (json) plain.document.json = json;
   }
   if (Array.isArray(request?.fallbackPixels)) {
-    plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0) }));
+    plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0), ...(p?.rgba32f !== undefined ? { rgba32f: bytes(p.rgba32f) ?? new Uint8Array(0) } : {}) }));
   }
   if (Array.isArray(request?.svgPixels)) {
     plain.svgPixels = request.svgPixels.map((p) => ({ key: { content: String(p?.key?.content), width: Number(p?.key?.width), height: Number(p?.key?.height) }, data: bytes(p?.data) ?? new Uint8Array(0) }));
@@ -201,18 +204,14 @@ const bridge: PowermoveBridge = {
   },
   confirmProjectClose: (name) => ipcRenderer.invoke(IPC.projectConfirmClose, name),
   confirm: (request) => ipcRenderer.invoke(IPC.dialogConfirm, request) as Promise<boolean>,
+  offlineExport: (clips) => ipcRenderer.invoke(IPC.dialogOfflineExport, clips) as Promise<'locate' | 'without' | 'cancel'>,
   clipboardWriteText: (text) => ipcRenderer.invoke(IPC.clipboardWriteText, text) as Promise<void>,
   pasteMedia: () => ipcRenderer.invoke(IPC.mediaPaste) as Promise<boolean>,
 
-  blender: {
-    status: () => ipcRenderer.invoke(IPC.blenderStatus),
-    choose: () => ipcRenderer.invoke(IPC.blenderChoose),
-    run: job => ipcRenderer.invoke(IPC.blenderRun, job),
-    cancel: () => ipcRenderer.invoke(IPC.blenderCancel),
-  },
   render: {
     start: options => ipcRenderer.invoke(IPC.renderStart,options),
-    write: (token,data,audio) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio}),
+    write: (token,data,audio,retain) => ipcRenderer.invoke(IPC.renderWrite,{token,data,audio,retain}),
+    repeat: (token,count) => ipcRenderer.invoke(IPC.renderWrite,{token,repeat:count}),
     finish: token => ipcRenderer.invoke(IPC.renderFinish,{token}),
     cancel: token => ipcRenderer.invoke(IPC.renderCancel,{token}),
   },
@@ -371,10 +370,12 @@ const bridge: PowermoveBridge = {
 
   store: {
     setSerialized: (key, serialized) => ipcRenderer.invoke(IPC.storeSetSerialized, { key, serialized }),
+    appendJournal: (key, serialized) => ipcRenderer.invoke(IPC.storeAppendJournal, { key, serialized }),
     snapshotSync: () => ipcRenderer.sendSync(IPC.storeSnapshotSync) as StoreSnapshot,
     snapshotSerializedSync: () => ipcRenderer.sendSync(IPC.storeSnapshotSerializedSync) as Record<string, string>,
     bootstrapSerializedSync: () => ipcRenderer.sendSync(IPC.storeBootstrapSync) as Record<string, string>,
     getEncodedSync: (key) => ipcRenderer.sendSync(IPC.storeGetEncodedSync, { key }) as string | null,
+    getEncoded: (key) => ipcRenderer.invoke(IPC.storeGetEncoded, { key }) as Promise<string | null>,
     snapshot: () => ipcRenderer.invoke(IPC.storeSnapshot) as Promise<StoreSnapshot>,
     set: (key, value) => {
       ipcRenderer.send(IPC.storeSet, { key, value });
@@ -382,7 +383,7 @@ const bridge: PowermoveBridge = {
     delete: (key) => {
       ipcRenderer.send(IPC.storeDelete, { key });
     },
-    flush: () => ipcRenderer.invoke(IPC.storeFlush) as Promise<void>,
+    flush: () => ipcRenderer.invoke(IPC.storeFlush) as Promise<void | { failing?: string[] }>,
     onError: (cb) => {
       const listener = (_event: IpcRendererEvent, error: StoreErrorEvent): void => cb(error);
       ipcRenderer.on(IPC.storeError, listener);
@@ -416,6 +417,13 @@ const bridge: PowermoveBridge = {
     },
     openProject: (projectId) =>
       ipcRenderer.invoke(IPC.windowOpenProject, { projectId }) as Promise<WindowOpenResult>,
+    renameProject: (projectId, name) =>
+      ipcRenderer.invoke(IPC.windowRenameProject, { projectId, name }) as Promise<boolean>,
+    onRenameRequest: (cb) => {
+      const listener = (_event: IpcRendererEvent, request: { projectId: string; name: string }): void => cb(request);
+      ipcRenderer.on(IPC.windowRenameRequest, listener);
+      return () => ipcRenderer.removeListener(IPC.windowRenameRequest, listener);
+    },
     create: () => ipcRenderer.invoke(IPC.windowNew) as Promise<void>,
     close: () => {
       ipcRenderer.send(IPC.windowClose);
@@ -575,6 +583,18 @@ const bridge: PowermoveBridge = {
 
   /* ── native engine (behind "Use New Engine") ── */
   nativeEngine: {
+    documentKernel: {
+      automaticRecovery: true,
+      call: (request, bytes) => ipcRenderer.sendSync(DOCUMENT_KERNEL_IPC.call, String(request), bytes),
+      begin: () => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.begin),
+      write: (token, chunk) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.write, String(token), chunk),
+      commit: (token, document, revision) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.commit, String(token), String(document), revision),
+      abort: (token) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.abort, String(token)),
+      beginDigest: (prefix) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.digestBegin, String(prefix)),
+      writeDigest: (token, chunk) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.digestWrite, String(token), chunk),
+      endDigest: (token) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.digestEnd, String(token)),
+      digestBatch: (instructions) => ipcRenderer.invoke(DOCUMENT_KERNEL_IPC.digestBatch, instructions)
+    },
     status: () => ipcRenderer.invoke(ENGINE_IPC.getStatus) as Promise<EngineStatusMessage>,
     enabledSync: () => ipcRenderer.sendSync(ENGINE_IPC.enabledSync) === true,
     hostTime: () => ipcRenderer.invoke(ENGINE_IPC.hostTime) as Promise<number>,
@@ -594,6 +614,7 @@ const bridge: PowermoveBridge = {
     cancelSnapshot: (requestId) => ipcRenderer.invoke(ENGINE_IPC.cancelSnapshot, String(requestId)),
     browserRendition: (request) => ipcRenderer.invoke(ENGINE_IPC.browserRendition, { ...request }),
     cancelMediaJob: (requestId) => ipcRenderer.invoke(ENGINE_IPC.cancelMediaJob, String(requestId)),
+    exportSheet: (sheet, open) => ipcRenderer.send(ENGINE_IPC.exportSheet, sheet, open === true),
     exportVideo: (request) => ipcRenderer.invoke(ENGINE_IPC.exportVideo, {
       project: String(request.project),
       name: String(request.name),
@@ -650,13 +671,13 @@ const bridge: PowermoveBridge = {
     // The job engine's fallback requests, run in this window's runner
     // (main/engine/shader-fallback-relay.ts).
     onShaderFallback: (run) => {
-      const handler = (_event: Electron.IpcRendererEvent, job: { id: number; request: never; textures: Uint16Array[] }) => {
+      const handler = (_event: Electron.IpcRendererEvent, job: { id: number; request: never; textures: (Uint16Array | Float32Array)[] }) => {
         // Acknowledged at once: main passes over a window that does not.
         ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, received: true });
         void Promise.resolve()
           .then(() => run({ request: job.request, textures: job.textures }))
           .then(
-            (rgba16f) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, ok: true, rgba16f }),
+            (pixels) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, { id: job.id, ok: true, ...pixels }),
             (error: { reason?: unknown; message?: unknown }) => ipcRenderer.send(ENGINE_IPC.shaderFallbackResult, {
               id: job.id, ok: false, reason: String(error?.reason ?? 'unavailable'), message: String(error?.message ?? error)
             })

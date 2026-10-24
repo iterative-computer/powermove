@@ -239,6 +239,8 @@ pub enum WorkingEncoding {
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub enum Precision {
+    /// Normalized 8-bit working targets (`rgba8unorm`), matching project Color depth 8.
+    Unorm8,
     /// `rgba16float` (default).
     Float16,
     /// `rgba32float`.
@@ -292,9 +294,12 @@ impl ProjectColor {
         }
     }
 
-    /// Non-default color settings require the native engine (section 6 table).
+    /// Color depth is shared with the shipped engine; only the additional
+    /// color operations require the native engine.
     pub fn requires_native(&self) -> bool {
-        *self != Self::DEFAULT
+        self.mode != Self::DEFAULT.mode
+            || self.linear_blending
+            || self.blend_domain != Self::DEFAULT.blend_domain
     }
 }
 
@@ -786,6 +791,15 @@ mod tests {
     fn project_color_default_is_decision_1() {
         assert_eq!(ProjectColor::DEFAULT.working(), WorkingEncoding::Standard);
         assert!(!ProjectColor::DEFAULT.requires_native());
+        for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
+            assert!(
+                !ProjectColor {
+                    precision,
+                    ..ProjectColor::DEFAULT
+                }
+                .requires_native()
+            );
+        }
         let linear = ProjectColor {
             linear_blending: true,
             ..ProjectColor::DEFAULT

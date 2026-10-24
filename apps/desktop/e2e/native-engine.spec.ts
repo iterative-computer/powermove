@@ -11,7 +11,7 @@ const engineProcesses = (app: import('playwright').ElectronApplication): Promise
     .filter((name) => / Engine/.test(name))
     .sort());
 
-type Host = { engine: { status(): Record<string, { state: string; generation: number }>; reconnectClient(id: number): void } | null };
+type Host = { engine: { ensureReady(process: 'job'): Promise<void>; status(): Record<string, { state: string; generation: number }>; reconnectClient(id: number): void } | null };
 
 test('Use New Engine off: no engine process and no ports', async () => {
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '0' } });
@@ -27,13 +27,14 @@ test('Use New Engine off: no engine process and no ports', async () => {
   }
 });
 
-test('Use New Engine on: the editor window gets a live port to each engine', async () => {
+test('Use New Engine on: idle jobs stay absent and their first request gets live ports', async () => {
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
   try {
     await expect.poll(() => session.app.evaluate(() => {
       const status = (globalThis as { __powermoveNativeEngine?: Host }).__powermoveNativeEngine?.engine?.status();
       return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';
-    }), { timeout: 15_000 }).toBe('ready/ready');
+    }), { timeout: 15_000 }).toBe('ready/stopped');
+    expect(await engineProcesses(session.app)).toHaveLength(1);
 
     // Collect the ports the preload hands to the page, then ask main for fresh ones.
     await session.page.evaluate(() => {
@@ -44,8 +45,9 @@ test('Use New Engine on: the editor window gets a live port to each engine', asy
         w.__enginePorts.push({ process: event.data.process, generation: event.data.generation, port: event.ports[0] });
       });
     });
-    await session.app.evaluate(({ BrowserWindow }) => {
+    await session.app.evaluate(async ({ BrowserWindow }) => {
       const host = (globalThis as { __powermoveNativeEngine?: Host }).__powermoveNativeEngine!;
+      await host.engine!.ensureReady('job');
       for (const window of BrowserWindow.getAllWindows()) host.engine!.reconnectClient(window.webContents.id);
     });
     await session.page.waitForFunction(() => (window as unknown as { __enginePorts: unknown[] }).__enginePorts.length >= 2);
@@ -75,6 +77,38 @@ test('Use New Engine on: the editor window gets a live port to each engine', asy
     const engines = await engineProcesses(session.app);
     expect(engines, JSON.stringify(engines)).toHaveLength(2);
     expect(engines.join()).toMatch(/Interactive Engine.*Job Engine/);
+  } finally {
+    await session.close();
+  }
+});
+
+test('Use New Engine on: an unused job engine exits and the next request starts it again', async () => {
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1', POWERMOVE_ENGINE_JOB_IDLE_MS: '1500' } });
+  const state = (): Promise<string> => session.app.evaluate(() => {
+    const status = (globalThis as { __powermoveNativeEngine?: Host }).__powermoveNativeEngine?.engine?.status();
+    return status ? `${status['interactive']!.state}/${status['job']!.state}/${status['job']!.generation}` : 'missing';
+  });
+  try {
+    await expect.poll(state, { timeout: 15_000 }).toBe('ready/stopped/0');
+    const firstMs = await session.app.evaluate(async () => {
+      const start = performance.now();
+      await (globalThis as { __powermoveNativeEngine?: Host }).__powermoveNativeEngine!.engine!.ensureReady('job');
+      return performance.now() - start;
+    });
+    expect(await state()).toBe('ready/ready/1');
+    expect(await engineProcesses(session.app)).toHaveLength(2);
+    // Nothing uses it: it exits on its own, and so does its process.
+    await expect.poll(state, { timeout: 15_000 }).toBe('ready/stopped/0');
+    await expect.poll(() => engineProcesses(session.app), { timeout: 10_000 }).toHaveLength(1);
+    // The interactive engine and the viewer carry on.
+    await expect.poll(() => session.page.evaluate(() => (window as any).PM.EngineConnection?.status().connected), { timeout: 10_000 }).toBe(true);
+    // The next request starts a new one.
+    await session.app.evaluate(async () => {
+      await (globalThis as { __powermoveNativeEngine?: Host }).__powermoveNativeEngine!.engine!.ensureReady('job');
+    });
+    expect(await state()).toMatch(/^ready\/ready\/\d+$/);
+    expect(await engineProcesses(session.app)).toHaveLength(2);
+    test.info().annotations.push({ type: 'cold job readiness ms', description: firstMs.toFixed(1) });
   } finally {
     await session.close();
   }

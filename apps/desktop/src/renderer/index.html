@@ -5,6 +5,45 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Powermove</title>
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+<style>
+/* Cold boot: quiet stand-ins for the default panel layout fill the body until
+   interactive chrome mounts; its loading overlay takes over. It paints before the
+   token sheet can load, so every token carries its light value as a fallback.
+   Matches .project-ghost in css/app.css. */
+#boot-ghost{
+  --boot-panel:var(--bg-panel,#FDFDFE);
+  --boot-shadow:var(--shadow-panel,0 0 0 .5px rgb(20 22 28 / .09),0 1px 1px rgb(20 22 28 / .04),0 4px 10px -2px rgb(20 22 28 / .07));
+  --boot-ink-1:var(--ink-1,rgb(20 22 28 / .045));
+  --boot-ink-2:var(--ink-2,rgb(20 22 28 / .08));
+  position:fixed;inset:44px 0 22px;z-index:34;pointer-events:none;
+  display:grid;grid-template:"left center right" minmax(0,1fr) "bottom bottom right" min(300px,40%) / 250px minmax(0,1fr) 300px;
+  gap:var(--gap,10px);padding:0 var(--pad,12px) 4px;
+  opacity:0;animation:boot-ghost-in 160ms cubic-bezier(.22,1,.36,1) 150ms forwards;
+}
+body:has(> #projects-screen.on) #boot-ghost,body:has(> #settings-screen.on) #boot-ghost{visibility:hidden}
+/* Until the shell mounts and applies the saved appearance, follow the system's. */
+@media (prefers-color-scheme:dark){
+  #app:not(:has(> #titlebar[data-svelte-shell])) ~ #boot-ghost{
+    --boot-panel:#1C1917;
+    --boot-shadow:0 0 0 .5px rgb(245 245 244 / .1),0 1px 1px rgb(0 0 0 / .3),0 6px 14px -4px rgb(0 0 0 / .45);
+    --boot-ink-1:rgb(245 245 244 / .045);
+    --boot-ink-2:rgb(245 245 244 / .08);
+  }
+}
+#boot-ghost>div{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;background:var(--boot-panel);border-radius:var(--r-lg,12px);box-shadow:var(--boot-shadow)}
+#boot-ghost>div::before{content:'';flex:none;width:64px;height:8px;margin:15px 14px 21px;border-radius:999px;background:var(--boot-ink-2)}
+#boot-ghost i{display:block;flex:none;height:8px;width:62%;margin:0 14px 22px;border-radius:999px;background:var(--boot-ink-1);animation:boot-ghost-breathe 3.6s cubic-bezier(.45,0,.2,1) infinite}
+#boot-ghost i:nth-of-type(4n+2){width:44%}
+#boot-ghost i:nth-of-type(4n+3){width:71%}
+#boot-ghost i:nth-of-type(4n){width:53%}
+#boot-ghost .boot-ghost-stage{flex:1 1 auto;width:auto;height:auto;margin:4px 24px 24px;border-radius:var(--r-md,8px)}
+@keyframes boot-ghost-in{to{opacity:1}}
+@keyframes boot-ghost-breathe{50%{opacity:.55}}
+@media (prefers-reduced-motion:reduce){
+  #boot-ghost{animation:boot-ghost-in 1ms linear 150ms forwards}
+  #boot-ghost i{animation:none}
+}
+</style>
 </head>
 <body>
 <div id="app">
@@ -15,6 +54,12 @@
   </div>
   <div id="body"></div>
   <div id="status"></div>
+</div>
+<div id="boot-ghost" aria-hidden="true">
+  <div style="grid-area:left"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <div style="grid-area:center"><i class="boot-ghost-stage"></i></div>
+  <div style="grid-area:bottom"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <div style="grid-area:right"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
 </div>
 <div id="scrim"><div class="titlebar-overlay-drag" aria-hidden="true"></div></div>
 <div class="toastwrap" id="toasts"></div>

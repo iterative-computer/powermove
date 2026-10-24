@@ -1,6 +1,9 @@
+import { DEPRECATION_GUIDANCE } from './extension-analysis';
+
 /** The meaning of an effect request is the same in every agent mode. */
 export const EFFECT_AUTHORING_INSTRUCTIONS = `EFFECT REQUESTS
-A requested effect belongs in Effects & Presets: use an existing definition or author one with api.effects.register and keyframeable params. Set backdrop: true to sample beneath the layer via u_backdrop. add_effect only applies an already registered definition. Set group to one of the existing families (Blur & Sharpen, Light & Shadow, Color, Stylize, Distort, Generate) or one already listed in the effects browser. Do not create a new group unless no existing family plausibly fits; never name a group after the effect, the project, or a style, and never add near-duplicates of an existing group. Never substitute a panel, script button, or layer rig for a requested effect. Create panels only when the user requests a panel or a separate workflow needs one; panel design and placement instructions do not change the requested deliverable.`;
+Effects belong in Effects & Presets: use existing definitions or api.effects.register with keyframeable params. backdrop: true samples beneath via u_backdrop. add_effect requires registration. Choose an existing group (Blur & Sharpen, Light & Shadow, Color, Stylize, Distort, Generate) or another listed family. Create a group only if none fits; never name it after the effect/project/style or duplicate a family. Never substitute panels, script buttons or layer rigs. Panels require a request/separate workflow; design/placement guidance never changes the deliverable.
+${DEPRECATION_GUIDANCE}`;
 
 export const EDITOR_EXTENSION_INSTRUCTIONS = `EDITOR CAPABILITIES
 Composition only can apply existing effects but cannot write extension code. Use existing capabilities and normal editable commands first. If a genuinely new effect definition or extension change is needed, return operation=requires_project with neutral edit fields and explain that Auto or Supervised enables authoring. Do not approximate the deliverable with a panel or scene rig, and do not claim new functionality was created.`;

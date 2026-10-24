@@ -63,6 +63,12 @@ impl<'a> PresentContext<'a> {
         self.lease.granted()
     }
 
+    /// Why the host issued the current lease. Transport-driven pool changes
+    /// are not a memory-pressure signal for unrelated caches.
+    pub fn lease_reason(&self) -> Option<pm_protocol::lease::LeaseReason> {
+        self.lease.lease().map(|lease| lease.reason)
+    }
+
     /// Bytes charged across every category.
     pub fn used(&self) -> u64 {
         self.lease.used()

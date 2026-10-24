@@ -6,6 +6,11 @@
 #include <cmath>
 #include <cstring>
 
+#ifndef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
+#	define SIGNALSMITH_STRETCH_SETUP_CHECKPOINT() ((void)0)
+#	define SIGNALSMITH_LINEAR_FFT_LOCAL_SETUP_CHECKPOINT
+#endif
+
 #if defined(__FAST_MATH__) && (__apple_build_version__ >= 16000000) && (__apple_build_version__ <= 16000099) && !defined(SIGNALSMITH_IGNORE_BROKEN_APPLECLANG)
 #	error Apple Clang 16.0.0 generates incorrect SIMD for ARM. If you HAVE to use this version of Clang, turn off -ffast-math.
 #endif
@@ -111,11 +116,14 @@ struct SimpleFFT {
 	
 	void resize(size_t size) {
 		twiddles.resize(size*3/4);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		for (size_t i = 0; i < size*3/4; ++i) {
+			if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 			Sample twiddlePhase = -2*M_PI*i/size;
 			twiddles[i] = std::polar(Sample(1), twiddlePhase);
 		}
 		working.resize(size);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 	}
 	
 	void fft(const Complex *time, Complex *freq) {
@@ -358,18 +366,25 @@ struct SplitFFT {
 			outerSize /= 2;
 		}
 		tmpFreq.resize(size);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		innerFFT.resize(innerSize);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		
 		outerTwiddles.resize(innerSize*(outerSize - 1));
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		outerTwiddlesR.resize(innerSize*(outerSize - 1));
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		outerTwiddlesI.resize(innerSize*(outerSize - 1));
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		for (size_t i = 0; i < innerSize; ++i) {
+			SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 			for (size_t s = 1; s < outerSize; ++s) {
 				Sample twiddlePhase = Sample(-2*M_PI*i/innerSize*s/outerSize);
 				outerTwiddles[i + (s - 1)*innerSize] = std::polar(Sample(1), twiddlePhase);
 			}
 		}
 		for (size_t i = 0; i < outerTwiddles.size(); ++i) {
+			if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 			outerTwiddlesR[i] = outerTwiddles[i].real();
 			outerTwiddlesI[i] = outerTwiddles[i].imag();
 		}
@@ -970,24 +985,30 @@ struct RealFFT {
 	void resize(size_t size) {
 		size_t hSize = size/2;
 		complexFft.resize(hSize);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		tmpFreq.resize(hSize);
 		tmpTime.resize(hSize);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		
 		twiddles.resize(hSize/2 + 1);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		
 		if (!halfBinShift) {
 			for (size_t i = 0; i < twiddles.size(); ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 				Sample rotPhase = i*(-2*M_PI/size) - M_PI/2; // bake rotation by (-i) into twiddles
 				twiddles[i] = std::polar(Sample(1), rotPhase);
 			}
 		} else {
 			for (size_t i = 0; i < twiddles.size(); ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 				Sample rotPhase = (i + 0.5)*(-2*M_PI/size) - M_PI/2;
 				twiddles[i] = std::polar(Sample(1), rotPhase);
 			}
 	
 			halfBinTwists.resize(hSize);
 			for (size_t i = 0; i < hSize; ++i) {
+				if ((i & 63) == 0) SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 				Sample twistPhase = -2*M_PI*i/size;
 				halfBinTwists[i] = std::polar(Sample(1), twistPhase);
 			}
@@ -1383,4 +1404,8 @@ using ModifiedRealFFT = RealFFT<Sample, splitComputation, true>;
 #	include "./platform/fft-linear.h"
 #endif
 
+#ifdef SIGNALSMITH_LINEAR_FFT_LOCAL_SETUP_CHECKPOINT
+#	undef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
+#	undef SIGNALSMITH_LINEAR_FFT_LOCAL_SETUP_CHECKPOINT
+#endif
 #endif // include guard

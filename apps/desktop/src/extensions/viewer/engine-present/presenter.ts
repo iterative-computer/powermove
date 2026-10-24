@@ -192,7 +192,13 @@ export interface Presenter {
   /** The viewer's window is being resized now (a live resize step). */
   noteResize?(): void;
   dispose(): void;
+  /** Settles after every frame submitted before disposal has finished GPU use. */
+  drained?(): Promise<void>;
+  /** Live VideoFrame references at this presenter, read only on request. */
+  memoryStats?(): PresenterMemory;
 }
+
+export type PresenterMemory = { localVideoFrames: number; workerCloneUpperBound: number; queuedFrames: number; parkedDescriptors: number; submittedFences: number };
 
 export class EnginePresenter implements Presenter {
   private readonly buffer = new JitterBuffer<Payload>();
@@ -220,6 +226,7 @@ export class EnginePresenter implements Presenter {
   private hintSentMs = -Infinity;
   private raf = 0;
   private refreshTimer: number | null = null;
+  private refreshDeadline: number | null = null;
   private disposed = false;
   private unsubscribe: () => void;
   private readonly now: () => number;
@@ -265,17 +272,33 @@ export class EnginePresenter implements Presenter {
       // supersedes the initial deadline before it fires.
       const fit = this.vsync.sample(t);
       const period = fit?.periodMs ?? this.nominalPeriodMs;
-      this.cancelRefresh();
+      const deadline = t + fraction * period;
+      if (this.refreshTimer !== null) {
+        if (this.refreshDeadline !== null && this.refreshDeadline <= this.now()) {
+          // Under load BeginFrame can overtake its commit timer. Fulfil
+          // that overdue turn now instead of canceling it forever.
+          this.cancelRefresh();
+          this.refresh(t, fit);
+          return;
+        }
+        // A newer refresh may move a deadline earlier (a faster display),
+        // but must never postpone a commit that is already queued.
+        if (this.refreshDeadline !== null && deadline >= this.refreshDeadline) return;
+        this.cancelRefresh();
+      }
       const run = () => {
         this.refreshTimer = null;
+        this.refreshDeadline = null;
         if (this.disposed || token !== this.loop) return;
         // A delayed task uses the current refresh, never a stale decision.
         const current = t + Math.max(0, Math.floor((this.now() - t) / period)) * period;
         this.refresh(current, fit);
       };
-      const delay = t + fraction * period - this.now();
-      if (delay > 0) this.refreshTimer = this.options.timers?.set(run, delay) ?? setTimeout(run, delay) as unknown as number;
-      else run();
+      const delay = deadline - this.now();
+      if (delay > 0) {
+        this.refreshDeadline = deadline;
+        this.refreshTimer = this.options.timers?.set(run, delay) ?? setTimeout(run, delay) as unknown as number;
+      } else run();
     };
     this.raf = requestFrame(loop);
   }
@@ -285,6 +308,7 @@ export class EnginePresenter implements Presenter {
     if (this.options.timers) this.options.timers.clear(this.refreshTimer);
     else clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
+    this.refreshDeadline = null;
   }
 
   /**
@@ -628,6 +652,10 @@ export class EnginePresenter implements Presenter {
   /** After dispose, resolves only when every submitted surface was released. */
   async drained(): Promise<void> {
     await Promise.all(this.submitted);
+  }
+
+  memoryStats(): PresenterMemory {
+    return { localVideoFrames: this.buffer.size + this.submitted.size, workerCloneUpperBound: 0, queuedFrames: this.buffer.size, parkedDescriptors: this.parked.length, submittedFences: this.submitted.size };
   }
 
   dispose(cancelFrame: (id: number) => void = this.cancelFrame): void {

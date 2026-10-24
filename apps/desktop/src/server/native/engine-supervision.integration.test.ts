@@ -97,7 +97,7 @@ describe.runIf(process.platform === 'darwin' && !!addon && !!dist)('hidden host 
     const child = path.join(dist!, 'native-engine-child.cjs');
     const transport = new NodeEngineTransport();
     const spawn = transport.spawn(child, addon!, line => log.push(line), { POWERMOVE_ENGINE_SHADER_CACHE: path.join(dir, 'Shader Cache') });
-    engine = new NativeEngine({ spawn, channel: transport.channel, cacheDirectory: path.join(dir, 'Engine Cache'), automaticOutputDirectory: path.join(dir, 'out'),
+    engine = new NativeEngine({ eagerJobs: true, spawn, channel: transport.channel, cacheDirectory: path.join(dir, 'Engine Cache'), automaticOutputDirectory: path.join(dir, 'out'),
       physicalMemory: os.totalmem(), hostNow: () => Math.round(performance.now() * 1000), log: (level, message) => log.push(`[${level}] ${message}`),
       resolveAsset: async id => id === 'attribution-image' ? { path: path.join(dir, 'image.png'), contentHash: null } : null });
     engine.listen({ crash: report => reports.push(report) });

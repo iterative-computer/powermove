@@ -17,7 +17,7 @@ export function parameterLayout(params: EffectParamDefinition[], authored?: Para
   for (const p of params) {
     if (!/X$/.test(p.k) || !numeric(p)) continue;
     const y=p.k.slice(0,-1)+'Y';
-    if (numeric(byKey.get(y)) && !hints.some(w=>w?.kind==='point' && (w.x===p.k || w.y===y))) hints.push({kind:'point',x:p.k,y,label:p.label.replace(/\s*X$/i,''),advanced:p.advanced ?? byKey.get(y)?.advanced});
+    if (numeric(byKey.get(y)) && !hints.some(w=>w?.kind==='point' && (w.x===p.k || w.y===y))) hints.push({kind:'point',x:p.k,y,label:String(p.label ?? p.k).replace(/\s*X$/i,''),advanced:p.advanced ?? byKey.get(y)?.advanced});
   }
   const used = new Set<string>(), widgets: ParameterWidget[]=[];
   for (const hint of hints) {

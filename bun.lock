@@ -56,6 +56,7 @@
         "@anthropic-ai/claude-code-darwin-arm64": "2.1.280",
         "@lisse/core": "0.7.2",
         "@motion-core/motion-gpu": "0.15.1",
+        "@open-pencil/kiwi": "0.16.0",
         "@openai/codex": "0.159.1",
         "@openai/codex-darwin-arm64": "npm:@openai/codex@0.159.1-darwin-arm64",
         "@powermove/macos-haptics": "workspace:*",
@@ -64,6 +65,7 @@
         "@powermove/tokens": "workspace:*",
         "electron-updater": "6.8.3",
         "esbuild": "0.25.12",
+        "fzstd": "0.1.1",
         "hono": "4.13.8",
         "node-diff3": "3.2.1",
         "smol-toml": "1.9.0",
@@ -489,6 +491,8 @@
     "@noble/ciphers": ["@noble/ciphers@2.4.0", "", {}, "sha512-AnjFn0Jv92laAkvMrghlFZq4qQCIN/4DxFV/eooqtC2YTjB7kBeLMS2T9KJX4Dn+ZVXLOwK0lSgqDtx9gvxtiw=="],
 
     "@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
+
+    "@open-pencil/kiwi": ["@open-pencil/kiwi@0.16.0", "", { "dependencies": { "fflate": "^0.8.3", "fzstd": "^0.1.1" } }, "sha512-6wyEY0pyy8X2j2iGgs8d+gjhsdd+p6IYmtZb463lHaczOZV+dDLr0yaOzTtwMKvpoHhLzXKWQaye4l6Q5eKgVA=="],
 
     "@openai/codex": ["@openai/codex@0.159.1", "", { "optionalDependencies": { "@openai/codex-darwin-arm64": "npm:@openai/codex@0.159.1-darwin-arm64", "@openai/codex-darwin-x64": "npm:@openai/codex@0.159.1-darwin-x64", "@openai/codex-linux-arm64": "npm:@openai/codex@0.159.1-linux-arm64", "@openai/codex-linux-x64": "npm:@openai/codex@0.159.1-linux-x64", "@openai/codex-win32-arm64": "npm:@openai/codex@0.159.1-win32-arm64", "@openai/codex-win32-x64": "npm:@openai/codex@0.159.1-win32-x64" }, "bin": { "codex": "bin/codex.js" } }, "sha512-tCAmvOk40hcmVDefwV4Jae/i5eAMrl7qUCRYUq1uYiQGZoIIVSCa/b3Fs+0uXG46p4jaG2DzqhG/RIunvnOa1g=="],
 
@@ -997,6 +1001,8 @@
     "fsevents": ["fsevents@2.3.3", "", { "os": "darwin" }, "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw=="],
 
     "function-bind": ["function-bind@1.1.2", "", {}, "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA=="],
+
+    "fzstd": ["fzstd@0.1.1", "", {}, "sha512-dkuVSOKKwh3eas5VkJy1AW1vFpet8TA/fGmVA5krThl8YcOVE/8ZIoEA1+U1vEn5ckxxhLirSdY837azmbaNHA=="],
 
     "generate-function": ["generate-function@2.3.1", "", { "dependencies": { "is-property": "^1.0.2" } }, "sha512-eeB5GfMNeevm/GRYq20ShmsaGcmI81kIX2K9XQx5miC8KdHaC6Jm0qQ8ZNeGOi7wYB8OsdxKs+Y2oVuTFuVwKQ=="],
 

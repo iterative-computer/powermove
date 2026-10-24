@@ -175,7 +175,7 @@ struct OrientParams {
 /// The orientation pass (`orient.wgsl`): crop and quarter turns of a
 /// working texture into a new one, exactly (no resampling).
 pub struct Orient {
-    pipelines: [wgpu::ComputePipeline; 2],
+    pipelines: [wgpu::ComputePipeline; 3],
 }
 
 impl Orient {
@@ -199,7 +199,7 @@ impl Orient {
             })
         };
         Orient {
-            pipelines: [make("rgba16float"), make("rgba32float")],
+            pipelines: [make("rgba16float"), make("rgba32float"), make("rgba8unorm")],
         }
     }
 
@@ -235,6 +235,7 @@ impl Orient {
         });
         queue.write_buffer(&buffer, 0, crate::pipelines::bytes_of(&params));
         let pipeline = match precision {
+            Precision::Unorm8 => &self.pipelines[2],
             Precision::Float16 => &self.pipelines[0],
             Precision::Float32 => &self.pipelines[1],
         };

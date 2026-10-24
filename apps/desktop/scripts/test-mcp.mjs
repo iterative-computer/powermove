@@ -61,7 +61,7 @@ if (desktop) {
   // Hidden, never focused (background-testing.ts); the new engine on; agent exports in the temp folder.
   app = spawn(electron, ['.'], {
     cwd: desktopDir, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...env, POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DEVTOOLS: '0', POWERMOVE_NEW_ENGINE: '1', POWERMOVE_AGENT_EXPORTS: exportsDir, POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' }
+    env: { ...env, POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DISABLE_RUNTIME_UPDATES: '1', POWERMOVE_DEVTOOLS: '0', POWERMOVE_NEW_ENGINE: '1', POWERMOVE_AGENT_EXPORTS: exportsDir, POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' }
   });
   for (const stream of [app.stdout, app.stderr]) stream.on('data', chunk => { appLog = (appLog + chunk.toString()).slice(-40000); });
   const connection = path.join(profile, 'mcp/connection.json');

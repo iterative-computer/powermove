@@ -52,6 +52,34 @@ describe('presented frames are emitted once per animation frame', () => {
   });
 });
 
+describe('a paused redraw announces the frame on screen when nothing new is coming', () => {
+  it('as today\'s frame loop announces the frame it draws again, but never ahead of a changed revision, view or time', () => {
+    const frames: Array<() => void> = [];
+    const events = new PresentedEvents(() => {}, (fn) => frames.push(fn));
+    const announced: number[] = [];
+    const announce = (frame: { seq: number }) => { announced.push(frame.seq); return true; };
+    const now = (over: Partial<{ revision: number | null; viewSeq: number | null; pts: number | null }> = {}) => ({ revision: 4, viewSeq: 2, pts: 1000, frameTicks: 100, ...over });
+    // Nothing on screen yet.
+    expect(events.redraw(now(), announce)).toBe(false);
+    events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 7 }, 1);
+    frames.shift()!();
+    expect(events.redraw(now(), announce)).toBe(true);
+    expect(announced).toEqual([7]);
+    // An edit (a newer revision), a view change, or another frame: the
+    // engine presents a new frame, so nothing is announced now.
+    expect(events.redraw(now({ revision: 5 }), announce)).toBe(false);
+    expect(events.redraw(now({ viewSeq: 3 }), announce)).toBe(false);
+    expect(events.redraw(now({ pts: 1100 }), announce)).toBe(false);
+    // A frame waiting for its animation frame wins.
+    events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 8 }, 1);
+    expect(events.redraw(now(), announce)).toBe(false);
+    frames.shift()!();
+    // The announcer declines when the redraw changed what the engine draws.
+    expect(events.redraw(now(), () => false)).toBe(false);
+    expect(events.redraws).toBe(1);
+  });
+});
+
 describe('engine stats for the status bar', () => {
   const stats = (frames: number, avg: number): RenderStats => ({ frames, timedFrames: frames, lateSkipped: 0, cpuUs: 1000, gpuUs: 2000, layers: 12, frameUsAvg: avg, programs: 4, rasters: 9, layerFailures: 0, snapshots: 0, snapshotUsMax: 0, revision: 3 });
 

@@ -12,6 +12,15 @@ const DB_VERSION: any = 2;
 const STORE: any = 'assets';
 const SAMPLE_BYTES: any = 64 * 1024;
 let dbPromise: any = null;
+/* IndexedDB normally opens in milliseconds. A request still pending after five
+   seconds of waiting is treated as unavailable, but only time in which the
+   page could have handled the answer counts. During a long main-thread task
+   (a large project's open reply takes over a minute to arrive) the answer is
+   queued behind that task; a wall-clock timer that ran first used to fail
+   every waiting read and write, including the media restore of the project
+   being opened, which then opened blank. */
+const OPEN_TIMEOUT_MS = 5000;
+const OPEN_POLL_MS = 250;
 
 function openDB() {
   if (!window.indexedDB) return Promise.resolve(null);
@@ -28,13 +37,25 @@ function openDB() {
     let req: any;
     try { req = window.indexedDB.open(DB_NAME, DB_VERSION); }
     catch (e: any) { finish(null); return; }
-    timer = setTimeout(() => { dbPromise = null; finish(null); }, 5000);
+    let waited = 0, last = performance.now();
+    const poll = () => {
+      const now = performance.now();
+      // A late poll means the page was blocked: count at most one period of it.
+      waited += Math.min(now - last, 2 * OPEN_POLL_MS);
+      last = now;
+      if (waited < OPEN_TIMEOUT_MS) { timer = setTimeout(poll, OPEN_POLL_MS); return; }
+      dbPromise = null;
+      finish(null);
+    };
+    timer = setTimeout(poll, OPEN_POLL_MS);
     req.onupgradeneeded = () => {
       const db: any = req.result;
       if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'id' });
     };
     req.onsuccess = () => {
       const db: any = req.result;
+      // Opened after this attempt gave up: a later attempt owns the connection.
+      if (settled) { try { db.close(); } catch (e: any) { } return; }
       db.onversionchange = () => { try { db.close(); } catch (e: any) { } dbPromise = null; };
       finish(db);
     };
@@ -334,7 +355,7 @@ PM.MediaTiming = {
   },
   earliestStart(L: any) {
     const trim: any = Math.max(0, Number(L ? resolveContent(PM, L, PM.time).trim : 0) || 0);
-    return Math.max(0, Number(L.from || 0) - trim / this.rate(L));
+    return Number(L.from || 0) - trim / this.rate(L);
   },
   /* Content patch that keeps a clip's content where it was in composition
      time when its In point moves to `nextFrom` (trim-in, a split's tail, the

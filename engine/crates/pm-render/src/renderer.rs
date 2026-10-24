@@ -227,8 +227,41 @@ fn build_options(
         sampling: request.sampling,
         shader_fallback,
         video_end: request.video_end,
+        preview: preview_window(comp, request),
         origin: request.origin,
     }
+}
+
+/// The viewer's source-clipping window in a preview of the open root
+/// composition: today's `canClipPreviewSources` (`crate::compat_crop`). A
+/// supplied canvas includes its pan buffer, even when presentation only
+/// draws a smaller region. Without a canvas, the region is the window.
+fn preview_window(
+    comp: &Comp<'_>,
+    request: &RenderRequest,
+) -> Option<crate::compat_crop::PreviewWindow> {
+    if request.export
+        || !(comp.at_root() || comp.is_open_canonical())
+        || !matches!(request.video_end, crate::request::VideoEnd::Preview)
+    {
+        return None;
+    }
+    let r = if request.preview_canvas {
+        pm_protocol::common::PixelRect {
+            x: 0,
+            y: 0,
+            width: request.output_size.width,
+            height: request.output_size.height,
+        }
+    } else {
+        request.region?
+    };
+    Some(crate::compat_crop::PreviewWindow {
+        x: f64::from(r.x),
+        y: f64::from(r.y),
+        width: f64::from(r.width),
+        height: f64::from(r.height),
+    })
 }
 
 /// The renderer.
@@ -262,10 +295,14 @@ pub struct Renderer {
     explicit_meshes: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
     text: crate::text::TextContext,
     text_gpu: crate::text::gpu::TextGpu,
+    /// The session's compatibility rasters (`crate::compat`).
+    compat: Option<Arc<dyn crate::compat::CompatRasters>>,
     /// Layer draws kept across frames of one paused time
     /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
     reuse: crate::reuse::DrawReuse,
     reuse_enabled: bool,
+    /// [`Renderer::set_channel_memo`].
+    channel_memo: bool,
     /// The bottom of the last reusing frame kept on the GPU
     /// (`crate::frame_prefix`).
     prefix: crate::frame_prefix::FramePrefix,
@@ -380,8 +417,10 @@ impl Renderer {
             shaders: Default::default(),
             fallback_host: None,
             explicit_meshes: Default::default(),
+            compat: None,
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
+            channel_memo: true,
             prefix: Default::default(),
             svg_wait: false,
             svg_skip_failed: false,
@@ -390,6 +429,14 @@ impl Renderer {
             source_reuse: source::SourceReuse::default(),
             binds: crate::binds::BindCache::default(),
         }
+    }
+
+    /// The compatibility rasters frames draw from (`crate::compat`): with a
+    /// producer for a source, the layers it draws ask it, and a frame whose
+    /// answers have not arrived fails with [`RenderError::CompatPending`].
+    /// `None` (the default): every layer is the engine's own.
+    pub fn set_compat_rasters(&mut self, compat: Option<Arc<dyn crate::compat::CompatRasters>>) {
+        self.compat = compat;
     }
 
     /// Whether [`Renderer::render_into`] plans with the layer draws kept
@@ -402,10 +449,33 @@ impl Renderer {
         self.reuse_enabled = enabled;
     }
 
+    /// Whether frames plan with the channels found in the same unchanged
+    /// document on earlier frames (`pm_eval` `channel_memo`; on by default).
+    /// Every plan is the one planned without it; tests turn it off to
+    /// compare.
+    pub fn set_channel_memo(&mut self, enabled: bool) {
+        self.channel_memo = enabled;
+        if !enabled {
+            self.evaluator.clear_channel_memo();
+        }
+    }
+
+    /// Opens the channel memo for a plan of `document` when it is on.
+    fn open_channel_memo(&mut self, document: &Document) {
+        if self.channel_memo {
+            self.evaluator.open_channel_memo(document);
+        }
+    }
+
     /// Drops the kept layer draws and the kept bottom of the last frame.
     pub fn clear_draw_reuse(&mut self) {
         self.reuse.clear();
         self.prefix.clear(&mut self.pool);
+    }
+
+    /// The channel memo's hits and misses so far (`pm_eval` `channel_memo`).
+    pub fn channel_memo_stats(&self) -> (u64, u64) {
+        self.evaluator.channel_memo_stats()
     }
 
     /// The draw reuse's counters (with the frames drawn from a kept bottom
@@ -723,6 +793,7 @@ impl Renderer {
     pub fn swap_effects(&mut self, effects: &mut Effects) {
         std::mem::swap(&mut self.effects, effects);
         self.effects.fallback.runner = self.shaders.fallback_runner;
+        self.refresh_meshes();
     }
 
     /// Runs `f` with an effect context over the renderer's own definitions,
@@ -905,6 +976,14 @@ impl Renderer {
                         pm_perf::bump(pm_perf::Counter::RasterAnswers);
                         self.put_fallback_pixels(key.clone(), pixels);
                         break None;
+                    }
+                    Ok(pixels) if let Some(code) = pixels.invalid_rgba8_code(&job.request) => {
+                        crate::shader_layers::FallbackFailure {
+                            reason: "pixelCode".into(),
+                            message: format!(
+                                "the runner returned invalid RGBA8 channel code {code} (expected 0..=255)"
+                            ),
+                        }
                     }
                     Ok(pixels) => crate::shader_layers::FallbackFailure {
                         reason: "size".into(),
@@ -1232,6 +1311,16 @@ impl Renderer {
         self.text_gpu.trim(bytes);
     }
 
+    /// Frees every idle intermediate target (a viewer at rest) and returns
+    /// the bytes freed. Targets in use, such as the kept bottom of the last
+    /// frame (`crate::frame_prefix`), and every content cache stay; the
+    /// next frame takes fresh targets from the device.
+    pub fn release_idle_targets(&mut self) -> u64 {
+        let before = self.pool.bytes();
+        self.pool.trim(0);
+        before - self.pool.bytes()
+    }
+
     /// The vector cache's standing bound, enforced while frames render
     /// (default: today's raster cache, 192 MiB and 4096 entries).
     pub fn set_vector_cache_budget(&mut self, max_bytes: u64, max_entries: usize) {
@@ -1261,21 +1350,40 @@ impl Renderer {
     }
 
     fn supports_precision(&self, precision: Precision) -> bool {
-        precision == Precision::Float16
+        precision != Precision::Float32
             || self
                 .device
                 .features()
                 .contains(wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE)
     }
 
-    /// The output format a fresh [`Self::render`] frame would use. Callers
-    /// rendering into their own target must make the same precision choice.
+    /// The project's requested output format on a device supporting its depth.
+    /// Callers rendering into their own target use [`Self::device_target_format`]
+    /// to include the shipped compositor's hardware fallback.
     pub fn target_format(document: &Document, request: &RenderRequest) -> wgpu::TextureFormat {
         let precision = match document.root().map(project_settings) {
             Some(Ok(c)) => effective_precision(request.precision, c.precision),
             _ => request.precision,
         };
         working_format(precision)
+    }
+
+    /// The actual output format on this device. Main's compositor falls
+    /// back from 32 to 16 when float32 filtering/blending is unavailable.
+    /// Viewers, snapshots and caller-owned targets must use this choice.
+    pub fn device_target_format(
+        &self,
+        document: &Document,
+        request: &RenderRequest,
+    ) -> wgpu::TextureFormat {
+        let format = Self::target_format(document, request);
+        if format == wgpu::TextureFormat::Rgba32Float
+            && !self.supports_precision(Precision::Float32)
+        {
+            working_format(Precision::Float16)
+        } else {
+            format
+        }
     }
 
     /// Renders `composition` at `time` into a new texture.
@@ -1288,7 +1396,7 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let format = Self::target_format(document, request);
+        let format = self.device_target_format(document, request);
         // A target a finished frame gave back (`recycle`), when it fits.
         let target = match self.frame_reuse.target.take() {
             Some(t)
@@ -1598,7 +1706,10 @@ impl Renderer {
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
         debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
-        let precision = effective_precision(request.precision, color.precision);
+        let precision = available_precision(
+            effective_precision(request.precision, color.precision),
+            self.supports_precision(Precision::Float32),
+        );
         if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
                 "32-bit precision on a device without rgba32float filtering and blending",
@@ -1637,6 +1748,9 @@ impl Renderer {
         }
         let options3d = self.options3d.for_request(request);
         let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        // Channels found in this document are kept across its frames while
+        // it is unchanged (`pm_eval` `channel_memo`).
+        self.open_channel_memo(document);
         let (mut plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
@@ -1651,8 +1765,10 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             blender,
+            self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
+        self.evaluator.close_channel_memo();
         if !request.background {
             plan.background = Background::Transparent;
         }
@@ -1667,6 +1783,9 @@ impl Renderer {
         let mut failures = build.failures;
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
+        }
+        if !build.compat_missing.is_empty() {
+            return Err(RenderError::CompatPending(build.compat_missing));
         }
         let region = request.region.map(|r| Region {
             x: r.x,
@@ -1737,6 +1856,8 @@ impl Renderer {
                 pyramids: &mut self.pyramids,
                 failures: Vec::new(),
                 unsupported: Vec::new(),
+                twins: crate::exec::comp_twins(&plan),
+                comps: Vec::new(),
             };
             // Generic renders flip GL rows into the caller's top-down target.
             // Standard snapshots draw directly into their readback target.
@@ -2234,6 +2355,7 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             crate::blender::PlanState::collecting(preview, options),
+            self.compat.as_deref(),
             None,
         );
         Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
@@ -2264,6 +2386,7 @@ impl Renderer {
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         let options3d = self.options3d.for_request(request);
         let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        self.open_channel_memo(document);
         let (plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
@@ -2278,8 +2401,10 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             blender,
+            self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
+        self.evaluator.close_channel_memo();
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
         }
@@ -2314,14 +2439,42 @@ fn project_settings(root: &pm_model::Node) -> Result<ColorSettings, RenderError>
         })
 }
 
-/// The precision intermediates use: the request's, raised to the project's
-/// (Settings › Project › Color › Precision is a floor for every render of
-/// the project; exports raise it further by amendment 8).
-pub fn effective_precision(request: Precision, project: Precision) -> Precision {
-    if request == Precision::Float32 || project == Precision::Float32 {
-        Precision::Float32
-    } else {
-        Precision::Float16
+/// The project Color depth is authoritative for preview, snapshots and export.
+/// Request precision is retained in the protocol for older callers, but cannot
+/// change the rounding boundaries of an existing project (DEPTH-1).
+pub fn effective_precision(_request: Precision, project: Precision) -> Precision {
+    project
+}
+
+/// The shipped compositor's hardware fallback: 32 → 16 on devices without
+/// float32 filtering and blending. The saved project depth is unchanged.
+fn available_precision(precision: Precision, float32: bool) -> Precision {
+    match (precision, float32) {
+        (Precision::Float32, false) => Precision::Float16,
+        _ => precision,
+    }
+}
+
+#[cfg(test)]
+mod depth_device_tests {
+    use super::*;
+    #[test]
+    fn float32_hardware_fallback_matches_main_without_promoting_other_depths() {
+        assert_eq!(
+            available_precision(Precision::Float32, false),
+            Precision::Float16
+        );
+        for depth in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
+            assert_eq!(available_precision(depth, true), depth);
+        }
+        assert_eq!(
+            available_precision(Precision::Unorm8, false),
+            Precision::Unorm8
+        );
+        assert_eq!(
+            available_precision(Precision::Float16, false),
+            Precision::Float16
+        );
     }
 }
 

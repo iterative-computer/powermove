@@ -1,8 +1,50 @@
 import { describe, it, expect } from 'vitest';
-import { planeMatrix, projectPoint, planeContains, depthOrderedLayers, CHANNELS_3D, affinePlane } from './space-3d';
+import { planeMatrix, projectPoint, planeContains, depthOrderedLayers, CHANNELS_3D, affinePlane, local3D } from './space-3d';
 const layer = (id = 'a', p: any = {}) => ({ id, threeD: true, p: { ...CHANNELS_3D, 'position.x': 320, 'position.y': 180, 'scale.x': 100, 'scale.y': 100, ...p } });
 const pm = (layers: any[] = []) => ({ proj: { w: 640, h: 360 }, L: (id: string) => layers.find(l => l.id === id), ev: (l: any, k: string) => l.p[k] ?? 0, worldMatrix: () => [1, 0, 0, 1, 320, 180], localMatrix: () => [1, 0, 0, 1, 320, 180] });
 describe('2.5D planes', () => {
+    it('preserves full matrix composition for every rotation axis, skew, anchors and reflections', () => {
+        const identity = () => [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1];
+        const multiply = (a: number[], b: number[]) => Array.from({ length: 16 }, (_, index) => {
+            const row = index % 4, column = index - row;
+            return a[row]! * b[column]! + a[row + 4]! * b[column + 1]!
+                + a[row + 8]! * b[column + 2]! + a[row + 12]! * b[column + 3]!;
+        });
+        const translate = (x: number, y: number, z: number) => {
+            const matrix = identity(); matrix[12] = x; matrix[13] = y; matrix[14] = z; return matrix;
+        };
+        const reference = (properties: Record<string, number>) => {
+            let matrix = translate(properties['position.x']!, properties['position.y']!, properties['position.z']!);
+            for (const [axis, key] of [[2,'rotation'],[1,'rotation.y'],[0,'rotation.x'],[2,'orientation.z'],[1,'orientation.y'],[0,'orientation.x']] as const) {
+                const rotation = identity(), a = (axis + 1) % 3, b = (axis + 2) % 3;
+                const angle = properties[key]! * Math.PI / 180;
+                rotation[a * 4 + a] = rotation[b * 4 + b] = Math.cos(angle);
+                rotation[a * 4 + b] = Math.sin(angle); rotation[b * 4 + a] = -Math.sin(angle);
+                if (angle !== 0) matrix = multiply(matrix, rotation);
+            }
+            const scale = identity();
+            scale[0] = properties['scale.x']! / 100; scale[5] = properties['scale.y']! / 100; scale[10] = properties['scale.z']! / 100;
+            scale[4] = Math.tan(properties.skew! * Math.PI / 180) * scale[5]!;
+            return multiply(multiply(matrix, scale), translate(-properties['anchor.x']!, -properties['anchor.y']!, -properties['anchor.z']!));
+        };
+        for (let sample = 0; sample < 128; sample++) {
+            const properties = {
+                'position.x': sample * 11 - 500, 'position.y': sample * 3 - 250, 'position.z': sample - 80,
+                'anchor.x': sample % 7 - 3, 'anchor.y': 30 - sample, 'anchor.z': sample % 11,
+                'scale.x': sample % 5 ? sample * 7 - 400 : 0, 'scale.y': sample % 9 ? 250 - sample * 4 : 0, 'scale.z': sample * 3 - 200,
+                rotation: sample % 4 ? sample * 17 - 270 : 0, 'rotation.y': sample % 5 ? sample * 3 - 60 : 0,
+                'rotation.x': sample % 6 ? 80 - sample * 5 : 0, 'orientation.z': sample % 7 ? sample * 11 - 90 : 0,
+                'orientation.y': sample % 8 ? sample * 7 - 120 : 0, 'orientation.x': sample % 9 ? 65 - sample * 9 : 0,
+                skew: sample % 161 - 80,
+            };
+            const expected = reference(properties), actual = local3D(pm(), layer('a', properties), sample / 30);
+            actual.forEach((value, index) => expect(value).toBeCloseTo(expected[index]!, 10));
+            // WebGL receives float32 matrix values. Preserve the exact numeric
+            // input at that boundary in addition to the double-precision check.
+            expect(Array.from(Float32Array.from(actual), value => value || 0))
+                .toEqual(Array.from(Float32Array.from(expected), value => value || 0));
+        }
+    });
     it('adjusts focal length without an upper cap and keeps picking aligned', () => {
         const PM = pm(), l = layer('a', { 'position.z': 640 * 50 / 36 });
         for (const [strength, expectedX] of [[50,370],[25,320+100/3],[50000,320+100/1.001]]) {

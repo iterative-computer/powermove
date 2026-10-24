@@ -15,13 +15,14 @@
 import { applyFrameRate, coerceFrameRate } from '../../../../shared/frame-rate';
 import type { PMRegistry } from '../registry';
 import type { Patch, PathPart } from '../../../../shared/patch';
+import { notifyDocument } from '../../engine-doc/write';
 
 /** Fields that belong to a composition rather than to the project. */
-export const COMP_FIELDS = ['w', 'h', 'fps', 'fpsRational', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain', 'render3d'] as const;
+export const COMP_FIELDS = ['w', 'h', 'fps', 'fpsRational', 'dur', 'bg', 'backgroundFill', 'layers', 'markers', 'work', 'shutter', 'audioGain'] as const;
 /** Composition fields that may be absent (absent = default). When the open
  * composition changes they must be cleared rather than inherited, or one
  * composition's value would leak into the next. */
-const OPTIONAL_COMP_FIELDS: ReadonlySet<string> = new Set(['fpsRational', 'audioGain', 'render3d']);
+const OPTIONAL_COMP_FIELDS: ReadonlySet<string> = new Set(['fpsRational', 'audioGain']);
 /** Top-level project key → key on a stored composition. */
 const ROOT_TO_COMP: Record<string, string> = {
   compId: 'id', compName: 'name',
@@ -196,7 +197,7 @@ export function install(PM: PMRegistry): void {
   const layersOf = (id: string): any[] => isRoot(id) ? PM.proj.layers : comps()[id]?.layers || [];
   const allIds = () => PM.proj ? [PM.proj.compId, ...Object.keys(comps())] : [];
 
-  const naturalCompare = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+  const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare;
 
   const uniqueName = (base: string, except?: string) => {
     const taken = new Set(allIds().filter(id => id !== except).map(id => String(get(id)?.name || '')));
@@ -237,13 +238,25 @@ export function install(PM: PMRegistry): void {
     return out;
   };
 
-  const list = () => allIds().map(id => {
-    const comp = get(id);
-    return {
-      id, name: String(comp.name || 'Comp'), w: comp.w, h: comp.h, fps: comp.fps, dur: comp.dur, bg: comp.bg,
-      open: isRoot(id), layers: (comp.layers || []).length, uses: users(id).length,
-    };
-  }).sort((a, b) => naturalCompare(a.name, b.name));
+  const list = () => {
+    const ids = allIds(), uses = new Map<string, number>(ids.map(id => [id, 0]));
+    // Count every precomp instance in one pass. Re-scanning all project layers
+    // for each card also repeated that work for every background thumbnail.
+    // Rebuild on every list call so in-place edits and comp switches stay live.
+    for (const id of ids) for (const layer of layersOf(id)) {
+      if (layer.type !== 'precomp') continue;
+      const target = layer.d?.comp;
+      const count = uses.get(target);
+      if (count !== undefined) uses.set(target, count + 1);
+    }
+    return ids.map(id => {
+      const comp = get(id);
+      return {
+        id, name: String(comp.name || 'Comp'), w: comp.w, h: comp.h, fps: comp.fps, dur: comp.dur, bg: comp.bg,
+        open: isRoot(id), layers: (comp.layers || []).length, uses: uses.get(id) || 0,
+      };
+    }).sort((a, b) => naturalCompare(a.name, b.name));
+  };
 
   const openTabs = (): string[] => {
     if (!PM.proj) return [];
@@ -316,7 +329,6 @@ export function install(PM: PMRegistry): void {
       id: PM.uid('C'), name: String(settings.name || nextName('Comp')).trim(),
       w, h, fps, dur, bg, backgroundFill: PM.normalizeFill({ type: 'solid', color: bg }, bg),
       layers: [], comps: {}, markers: [], work: [0, dur], shutter: base.shutter ?? .5,
-      ...(settings.render3d?{render3d:structuredClone(settings.render3d)}:{}),
     };
   };
   /**
@@ -484,7 +496,41 @@ export function install(PM: PMRegistry): void {
   };
 
   /** Shift every time on a layer's timeline by `delta` seconds. */
-  const shiftLayer = (layer: any, delta: number) => { layer.from = Math.max(0, layer.from + delta); };
+  const shiftLayer = (layer: any, delta: number) => { layer.from += delta; };
+
+  /** Keep animated coordinate spaces when only part of a rig crosses a comp boundary.
+   * Copies are non-rendering nulls (or groups for membership), with independent keys.
+   * Plan both sides before touching links on the original layers. */
+  const boundaryRigs = (members: any[], source: any[], sharedGroups = new Set<string>()) => {
+    const originals = new Map(source.map(layer => [layer.id, layer]));
+    const local = new Map(members.map(layer => [layer.id, layer]));
+    const copies: any[] = [], links = new Map<any, { parent: string | null; group: string | null }>();
+    const queue = [...members];
+    for (let index = 0; index < queue.length; index++) {
+      for (const id of [queue[index].parent, queue[index].group]) {
+        if (!id || local.has(id)) continue;
+        const original = originals.get(id);
+        if (!original) continue;
+        const copy = PM.cloneLayer(original);
+        copy.name = original.name;
+        copy.type = original.type === 'group' ? 'group' : 'null';
+        copy.fx = []; copy.masks = []; copy.matteSource = null;
+        copy.transitionIn = null; copy.transitionOut = null;
+        if (sharedGroups.has(id)) {
+          copy.p.opacity = PM.P(100); copy.blend = 'normal'; copy.mblur = false;
+        }
+        if (copy.type === 'null') copy.solo = false;
+        local.set(id, copy); copies.push(copy); queue.push(copy);
+      }
+    }
+    for (let index = 0; index < queue.length; index++) {
+      const layer = queue[index];
+      const next = { parent: local.get(layer.parent)?.id ?? null, group: local.get(layer.group)?.id ?? null };
+      if (index < members.length) links.set(layer, next);
+      else Object.assign(layer, next);
+    }
+    return { copies, links, layers: source.map(layer => local.get(layer.id)).filter(Boolean) };
+  };
 
   /**
    * Layer ▸ Pre-compose (⇧⌘C).
@@ -506,43 +552,66 @@ export function install(PM: PMRegistry): void {
       return leaveAttributes(layer, name, options.open === true);
     }
     const pickedIds = new Set(picked.map((layer: any) => layer.id));
+    // Keep a shared visual boundary outside the precomp, rather than applying
+    // opacity/effects separately to its moved and remaining children. This is
+    // safe only in an unchanged coordinate space: nested comps have a fixed
+    // viewport, so moving a transformed group outside can clip its contents.
+    const styled = (group: any) => {
+      const differs = (prop: any, value: any) => prop && typeof prop === 'object'
+        ? !!(prop.expr || prop.kf?.length || prop.v !== value) : prop !== value;
+      return differs(group.p.opacity, 100) || group.fx?.length || group.masks?.length
+        || group.matteSource || differs(group.blend, 'normal') || differs(group.mblur, false)
+        || group.transitionIn || group.transitionOut;
+    };
+    const ancestors = (item: any) => PM.groupAncestors(item, host.layers) as any[];
+    const external = picked.flatMap(ancestors).filter((group: any) => !pickedIds.has(group.id));
+    let sharedGroup: any = null;
+    const sharedGroups = new Set<string>();
+    if (external.some(styled)) {
+      const roots = picked.filter((item: any) => !ancestors(item).some(group => pickedIds.has(group.id)));
+      sharedGroup = host.layers.find((item: any) => item.id === roots[0]?.group);
+      const chain = sharedGroup ? [sharedGroup, ...ancestors(sharedGroup)] : [];
+      const transformKeys = ['position.x', 'position.y', 'anchor.x', 'anchor.y', 'scale.x', 'scale.y', 'rotation', 'skew'];
+      const identity = [1, 0, 0, 1, 0, 0];
+      const safe = sharedGroup && roots.every((item: any) => item.group === sharedGroup.id)
+        && external.every((group: any) => chain.includes(group))
+        && !picked.some((item: any) => item.threeD)
+        && chain.every((group: any) => !group.threeD && !group.parent
+          && !pickedIds.has(group.matteSource)
+          && transformKeys.every(key => !group.p[key]?.expr && !group.p[key]?.kf?.length)
+          && PM.localMatrix(group, 0).every((value: number, index: number) => Math.abs(value - identity[index]!) < 1e-8));
+      if (!safe) throw new Error('Select the whole styled group to pre-compose it without changing its appearance.');
+      chain.forEach((group: any) => sharedGroups.add(group.id));
+    }
     let start = 0, dur = host.dur;
     if (options.adjustDuration) {
       start = Math.min(...picked.map((layer: any) => layer.from));
       dur = Math.max(1 / host.fps, Math.max(...picked.map((layer: any) => layer.from + layer.dur)) - start);
     }
-    const comp: any = compWithRate({ name, w: host.w, h: host.h, fps: host.fps, fpsRational: host.fpsRational, dur, bg: host.bg, render3d:host.render3d });
+    const comp: any = compWithRate({ name, w: host.w, h: host.h, fps: host.fps, fpsRational: host.fpsRational, dur, bg: host.bg });
     comp.name = name;
     const index = host.layers.findIndex((layer: any) => pickedIds.has(layer.id));
-    /* Parenting cannot cross a composition boundary, so links to layers left
-       outside are cut. When every moved root hung from the same outside layer
-       (a child pre-composed without its rig), the new precomp layer takes that
-       parent instead: its own transform maps the composition onto the host
-       one to one, so the moved layers keep their animated placement. */
-    const roots = picked.filter((layer: any) => !layer.parent || !pickedIds.has(layer.parent));
-    const outsideParent = roots[0]?.parent && !pickedIds.has(roots[0].parent)
-      && host.layers.some((layer: any) => layer.id === roots[0].parent)
-      && roots.every((layer: any) => layer.parent === roots[0].parent) ? roots[0].parent : null;
     let layer: any = null;
     transact('Pre-compose', () => {
-      comp.layers = picked;
-      for (const moved of picked) {
-        if (moved.parent && !pickedIds.has(moved.parent)) moved.parent = null;
-        if (moved.group && !pickedIds.has(moved.group)) moved.group = null;
+      const rest = host.layers.filter((item: any) => !pickedIds.has(item.id));
+      const innerRig = boundaryRigs(picked, host.layers, sharedGroups), outerRig = boundaryRigs(rest, host.layers);
+      comp.layers = innerRig.layers;
+      for (const moved of comp.layers) {
+        const links = innerRig.links.get(moved);
+        if (links) Object.assign(moved, links);
         if (moved.matteSource && !pickedIds.has(moved.matteSource)) moved.matteSource = null;
         if (start) shiftLayer(moved, -start);
       }
       PM.proj.comps = { ...comps(), [comp.id]: comp };
       layer = makeLayer(comp.id, host, start);
+      if (sharedGroup) layer.group = sharedGroup.id;
       layer.p['anchor.x'].v = comp.w / 2; layer.p['anchor.y'].v = comp.h / 2;
-      if (outsideParent) layer.parent = outsideParent;
-      const rest = host.layers.filter((item: any) => !pickedIds.has(item.id));
       for (const item of rest) {
-        if (pickedIds.has(item.parent)) item.parent = null;
+        Object.assign(item, outerRig.links.get(item));
         if (pickedIds.has(item.matteSource)) item.matteSource = null;
       }
       rest.splice(Math.max(0, Math.min(index, rest.length)), 0, layer);
-      host.layers = rest;
+      host.layers = [...rest, ...outerRig.copies];
       PM.ProjectIndex?.invalidate();
       PM.selectLayers(layer.id);
     });
@@ -564,7 +633,7 @@ export function install(PM: PMRegistry): void {
     const { w, h, ax, ay, ops } = edits ? edits.leaveAttributes(layer, PM.time, legacy) : { ...legacy(), ops: null };
     /* The new comp spans the layer; the layer's source timing (trim, speed,
        time remap) moves inside with the source, so every frame is unchanged. */
-    const comp: any = compWithRate({ name, w, h, fps: PM.proj.fps, fpsRational: PM.proj.fpsRational, dur: layer.dur, bg: PM.proj.bg, render3d:PM.proj.render3d });
+    const comp: any = compWithRate({ name, w, h, fps: PM.proj.fps, fpsRational: PM.proj.fpsRational, dur: layer.dur, bg: PM.proj.bg });
     comp.name = name;
     const inner = PM.mkLayer(layer.type, { name: layer.name, d: JSON.parse(JSON.stringify(layer.d)) }, comp);
     inner.from = 0;
@@ -588,7 +657,7 @@ export function install(PM: PMRegistry): void {
   /** Project panel ▸ New Comp from Selection: a comp matching the footage. */
   const fromAsset = (assetId: string) => {
     const meta: any = PM.proj?.assets?.[assetId];
-    if (!meta) return null;
+    if (!meta||meta.kind==='lut') return null;
     const live = PM.assets?.get?.(assetId);
     const w = Math.round(meta.w || live?.w || PM.proj.w), h = Math.round(meta.h || live?.h || PM.proj.h);
     const dur = Number(meta.dur) > 0 ? Number(meta.dur) : PM.proj.dur;
@@ -615,5 +684,7 @@ export function install(PM: PMRegistry): void {
       if (fallback) open(fallback, { tab: false });
     },
   };
-  PM.bus?.on?.('project', () => PM.bus.emit('comps'));
+  // Project publication already synchronized the document. This relay only
+  // refreshes composition consumers; it does not write composition data.
+  PM.bus?.on?.('project', () => notifyDocument(PM, 'comps'));
 }

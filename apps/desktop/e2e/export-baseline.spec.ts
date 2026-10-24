@@ -1,3 +1,4 @@
+import { requestJobEngine } from './helpers/job-engine';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,6 +19,7 @@ const FPS = 24;
 const SECONDS = Number(process.env.PM_EXPORT_BASELINE_SECONDS) || 6;
 
 async function engineReady(app: ElectronApplication): Promise<void> {
+  await requestJobEngine(app);
   await expect.poll(() => app.evaluate(() => {
     const status = (globalThis as { __powermoveNativeEngine?: { engine: { status(): Record<string, { state: string }> } | null } }).__powermoveNativeEngine?.engine?.status();
     return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';

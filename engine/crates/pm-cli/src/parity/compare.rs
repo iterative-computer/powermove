@@ -107,12 +107,7 @@ pub fn revive(v: Value) -> Value {
                     _ => Value::Null,
                 };
             }
-            Value::Object(
-                map.into_btree()
-                    .into_iter()
-                    .map(|(k, v)| (k, revive(v)))
-                    .collect(),
-            )
+            Value::Object(map.into_iter().map(|(k, v)| (k, revive(v))).collect())
         }
         Value::Array(items) => Value::Array(items.into_iter().map(revive).collect()),
         other => other,

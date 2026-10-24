@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { PMRegistry } from '../legacy/registry';
-  import { clampPanelHeight, resolvePairResize, transferPanelHeights } from './geometry';
+  import { clampPanelHeight, growPanelPair, resolvePairResize, transferPanelHeights } from './geometry';
+  import { scrollSideDock, SIDE_DOCKS } from './side-scroll';
   import { applyPanelSize, defaultDockSize, panelMinHeight, setPanelCollapsed, type DockSpec, type PanelSpec } from './model';
 
   let {
@@ -53,14 +54,10 @@
   // cannot reach the adjacent side column from their hit area.
   onMount(() => {
     const onWheel = (event: WheelEvent): void => {
-      if (mode !== 'vertical' || event.ctrlKey || event.metaKey || event.shiftKey || !event.deltaY) return;
-      const target = [beforeDock, afterDock].find((dock) => dock?.id === 'left' || dock?.id === 'right');
+      if (mode !== 'vertical') return;
+      const target = [beforeDock, afterDock].find((dock) => dock && SIDE_DOCKS.has(dock.id));
       const dock = target && document.getElementById(`dock-${target.id}`);
-      if (!dock || dock.scrollHeight <= dock.clientHeight) return;
-      const unit = event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? dock.clientHeight
-        : event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
-      event.preventDefault();
-      dock.scrollTop += event.deltaY * unit;
+      if (dock) scrollSideDock(dock, event);
     };
     splitter.addEventListener('wheel', onWheel, { passive: false });
     return () => splitter.removeEventListener('wheel', onWheel);
@@ -130,8 +127,35 @@
     minimum = bounds.min;
     maximum = bounds.max;
   };
-  const panelMin = (spec: PanelSpec): number => panelMinHeight(spec, PM.PANELS[spec.id] || {});
+  const panelDockId = (): string | undefined => splitter?.closest<HTMLElement>('.dock')?.dataset.dock;
+  const sideDock = (): HTMLElement | null => {
+    const dock = splitter?.closest<HTMLElement>('.dock');
+    return dock && SIDE_DOCKS.has(dock.dataset.dock ?? '') ? dock : null;
+  };
+  // Floors follow the state a drag leaves the panel in, not the one it starts in.
+  const panelMin = (spec: PanelSpec, fluid: boolean): number => panelMinHeight(spec, PM.PANELS[spec.id] || {}, panelDockId(), fluid);
+  /* A side column scrolls, so its dividers resize the pair directly (see
+     growPanelPair) instead of trading height inside the visible column. Two
+     fluid neighbours would split spare height and drift from the pointer, so
+     the one above becomes sized. */
+  const sideGeometry = (dock: HTMLElement) => {
+    const before = beforeSpec!;
+    const after = afterSpec!;
+    const element = panelElement(before);
+    const otherElement = panelElement(after);
+    if (!element || !otherElement) return null;
+    const otherFluid = isFlexPanel(after);
+    const fluid = isFlexPanel(before) && !otherFluid;
+    return {
+      side: { dock, fluid, otherFluid },
+      resize: { mode: 'transfer' as const }, spec: before, other: after, sign: 1 as const, element, otherElement,
+      start: element.getBoundingClientRect().height, otherStart: otherElement.getBoundingClientRect().height,
+      pairHeight: 0, gap: 0, min: panelMin(before, fluid), otherMin: panelMin(after, otherFluid)
+    };
+  };
   const horizontalGeometry = () => {
+    const dock = sideDock();
+    if (dock) return sideGeometry(dock);
     const { resize, spec, other, sign } = horizontalPair();
     const element = panelElement(spec);
     const otherElement = panelElement(other);
@@ -141,17 +165,34 @@
     const gap = resize.mode === 'transfer' ? 0 : Number.parseFloat(window.getComputedStyle(splitter).height) || 8;
     return {
       resize, spec, other, sign, element, otherElement, start, otherStart,
-      pairHeight: start + otherStart, gap, min: panelMin(spec), otherMin: panelMin(other)
+      pairHeight: start + otherStart, gap, min: panelMin(spec, false), otherMin: panelMin(other, resize.mode !== 'transfer'),
+      side: null
     };
   };
-  const pin = (element: HTMLElement, spec: PanelSpec, height: number): void => {
+  const pin = (element: HTMLElement, spec: PanelSpec, height: number, fluid = false): void => {
     spec.size = height;
-    delete spec.flex;
-    applyPanelSize(element, spec, PM.PANELS[spec.id] || {});
+    if (fluid) spec.flex = true; else delete spec.flex;
+    applyPanelSize(element, spec, PM.PANELS[spec.id] || {}, panelDockId());
+  };
+  /* Keep the divider in view while a drag lengthens the column past its edge,
+     clear of the edge itself, where the bottom dock's divider sits. */
+  const REVEAL_MARGIN = 32;
+  const revealSplitter = (dock: HTMLElement): void => {
+    const box = dock.getBoundingClientRect();
+    const own = splitter.getBoundingClientRect();
+    if (own.bottom > box.bottom - REVEAL_MARGIN) dock.scrollTop += own.bottom - box.bottom + REVEAL_MARGIN;
+    else if (own.top < box.top + REVEAL_MARGIN) dock.scrollTop -= box.top + REVEAL_MARGIN - own.top;
   };
   const setHorizontal = (geometry: NonNullable<ReturnType<typeof horizontalGeometry>>, delta: number): void => {
     let height: number;
-    if (geometry.resize.mode === 'transfer') {
+    if (geometry.side) {
+      const { dock, fluid, otherFluid } = geometry.side;
+      const next = growPanelPair(geometry.start, geometry.otherStart, delta, geometry.min, geometry.otherMin);
+      pin(geometry.element, geometry.spec, Math.round(next.before), fluid);
+      pin(geometry.otherElement, geometry.other, Math.round(next.after), otherFluid);
+      revealSplitter(dock);
+      height = next.before;
+    } else if (geometry.resize.mode === 'transfer') {
       const next = transferPanelHeights(geometry.start, geometry.otherStart, delta, geometry.min, geometry.otherMin);
       pin(geometry.element, geometry.spec, next.before);
       pin(geometry.otherElement, geometry.other, next.after);
@@ -161,12 +202,12 @@
       pin(geometry.element, geometry.spec, height);
       geometry.other.flex = true;
       delete geometry.other.size;
-      geometry.otherElement.style.flex = '1 1 auto';
+      applyPanelSize(geometry.otherElement, geometry.other, PM.PANELS[geometry.other.id] || {}, panelDockId());
     }
     value = Math.round(height);
     splitter?.setAttribute('aria-valuenow', String(value));
     minimum = geometry.min;
-    maximum = Math.max(geometry.min, geometry.pairHeight - geometry.otherMin - geometry.gap);
+    maximum = geometry.side ? undefined : Math.max(geometry.min, geometry.pairHeight - geometry.otherMin - geometry.gap);
   };
 
   let hoverCurrent: number | null = null;
@@ -209,7 +250,7 @@
     const geometry = horizontalGeometry();
     if (!geometry) return;
     minimum = geometry.min;
-    maximum = Math.max(geometry.min, geometry.pairHeight - geometry.otherMin - geometry.gap);
+    maximum = geometry.side ? undefined : Math.max(geometry.min, geometry.pairHeight - geometry.otherMin - geometry.gap);
   }
 
   /* Dragging a splitter next to a collapsed panel means "give me that panel
@@ -286,8 +327,8 @@
         if (saved.flex == null) delete geometry.spec.flex; else geometry.spec.flex = saved.flex;
         if (otherSaved.size == null) delete geometry.other.size; else geometry.other.size = otherSaved.size;
         if (otherSaved.flex == null) delete geometry.other.flex; else geometry.other.flex = otherSaved.flex;
-        applyPanelSize(geometry.element, geometry.spec, PM.PANELS[geometry.spec.id] || {});
-        applyPanelSize(geometry.otherElement, geometry.other, PM.PANELS[geometry.other.id] || {});
+        applyPanelSize(geometry.element, geometry.spec, PM.PANELS[geometry.spec.id] || {}, panelDockId());
+        applyPanelSize(geometry.otherElement, geometry.other, PM.PANELS[geometry.other.id] || {}, panelDockId());
         PM.bus.emit('layout:applied');
       }
     });

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pm_model::{Node, NodeKind, Op, Patch, Value};
+use pm_model::{Node, NodeKind, Op, Patch};
 use pm_protocol::common::Revision;
 use pm_protocol::patch::PatchEncoding;
 
@@ -32,9 +32,12 @@ pub fn decode_canonical(encoding: PatchEncoding, body: &[u8]) -> Result<Vec<Op>,
 /// A change to a session's document, as the presenter receives it.
 #[derive(Debug, Clone)]
 pub enum DocumentUpdate {
-    /// The whole document (a resync): replaces the presenter's mirror.
+    /// The whole document (a resync): replaces the presenter's mirror. The
+    /// tree shares its subtrees with the engine's mirror (pm-model's shared
+    /// subtrees), so handing it to the render and audio threads copies
+    /// nothing.
     Replace {
-        root: Option<Arc<Value>>,
+        root: Option<Node>,
         revision: Revision,
     },
     /// Canonical operations taking the mirror to `revision`.
@@ -62,7 +65,7 @@ impl DocumentUpdate {
     pub fn apply_to(&self, doc: &mut pm_model::Document) -> Result<(), String> {
         match self {
             DocumentUpdate::Replace { root, revision } => {
-                *doc = pm_model::Document::new(root.as_deref().cloned(), revision.get());
+                *doc = pm_model::Document::from_root(root.clone(), revision.get());
                 Ok(())
             }
             DocumentUpdate::Ops { ops, revision } => doc
@@ -142,7 +145,7 @@ fn media_fingerprint(record: &Node) -> [u8; 32] {
         return pm_model::hash::canonical_digest(record);
     }
     let mut value = record.to_value();
-    if let Value::Object(map) = &mut value {
+    if let pm_model::Value::Object(map) = &mut value {
         map.remove("poster");
     }
     pm_model::hash::canonical_digest(&value)

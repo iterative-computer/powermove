@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events';
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { IPC, type ChatGPTAccountStatus, type CodexRunRequest } from '../../shared/ipc';
+import * as codexEnv from './env';
+import * as claudeEnv from '../claude/env';
 
 const mocks = vi.hoisted(() => {
   const cancel = vi.fn(async () => true);
@@ -57,6 +59,8 @@ const mocks = vi.hoisted(() => {
   const forgetWorkspace = vi.fn(async () => undefined);
   const sweepWorkspaces = vi.fn(async () => ['orphan']);
   return {
+    installRuntimeIfNewer: vi.fn(async () => null),
+    installLatestRuntime: vi.fn(async (provider: 'claude' | 'codex') => ({ provider, version: '9.0.0' })),
     forgetWorkspace,
     sweepWorkspaces,
     appOnce: vi.fn(),
@@ -131,6 +135,12 @@ vi.mock('./workspace-lifetime', () => ({
   sweepOrphanWorkspaces: mocks.sweepWorkspaces
 }));
 
+vi.mock('../runtime-updates', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../runtime-updates')>(),
+  installRuntimeIfNewer: mocks.installRuntimeIfNewer,
+  installLatestRuntime: mocks.installLatestRuntime
+}));
+
 import { registerCodexIpc } from './index';
 
 class Sender extends EventEmitter {
@@ -163,6 +173,8 @@ function runRequest(): CodexRunRequest {
 }
 
 describe('registerCodexIpc', () => {
+  const releaseProject = vi.fn();
+  const acquireProject = vi.fn(() => releaseProject);
   const handlers = new Map<string, (event: { sender: Sender }, request: unknown) => Promise<unknown>>();
   const ipcMain = {
     handle: vi.fn((channel: string, handler: (event: { sender: Sender }, request: unknown) => Promise<unknown>) => {
@@ -177,6 +189,7 @@ describe('registerCodexIpc', () => {
     mocks.toolFinish.mockResolvedValue({ changed: true, revision: 2, historyId: 'native-history-1' });
     registerCodexIpc(ipcMain as never, {
       getWindow: () => null,
+      acquireProject,
       userData: '/tmp/powermove-index-test',
       extensionsDir: '/tmp/powermove-user-extensions',
       builtinExtensionsDir: '/tmp/powermove-builtin-extensions',
@@ -185,6 +198,45 @@ describe('registerCodexIpc', () => {
       codexBinaryPref: () => null,
       openExternal: async () => undefined
     }, mocks.account, mocks.account, mocks.appRunner as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it.each([undefined, '0', '1'])('only disables automatic runtime refresh when the switch is 1 (value: %s)', async (value) => {
+    vi.useFakeTimers();
+    vi.stubEnv('POWERMOVE_DISABLE_RUNTIME_UPDATES', value);
+    vi.stubEnv('CODEX_BINARY', undefined);
+    vi.stubEnv('CLAUDE_BINARY', undefined);
+    vi.spyOn(codexEnv, 'discoverCodexBinary').mockResolvedValue('/test/codex');
+    vi.spyOn(claudeEnv, 'discoverClaudeBinary').mockResolvedValue('/test/claude');
+    const sender = new Sender();
+
+    await handlers.get(IPC.chatgptModels)!({ sender }, undefined);
+    await handlers.get(IPC.claudeModels)!({ sender }, undefined);
+
+    expect(vi.getTimerCount()).toBe(value === '1' ? 0 : 2);
+    expect(mocks.installRuntimeIfNewer).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(20_000);
+    if (value === '1') {
+      expect(mocks.accountStatus).not.toHaveBeenCalled();
+      expect(mocks.installRuntimeIfNewer).not.toHaveBeenCalled();
+    } else {
+      expect(mocks.installRuntimeIfNewer).toHaveBeenCalledWith('codex', '/test/codex');
+      expect(mocks.installRuntimeIfNewer).toHaveBeenCalledWith('claude', '/test/claude');
+    }
+  });
+
+  it('keeps explicit runtime updates available when automatic refresh is disabled', async () => {
+    vi.stubEnv('POWERMOVE_DISABLE_RUNTIME_UPDATES', '1');
+    const sender = new Sender();
+    await expect(handlers.get(IPC.agentRuntimeUpdate)!({ sender }, 'claude')).resolves.toEqual({
+      provider: 'claude', version: '9.0.0'
+    });
+    expect(mocks.installLatestRuntime).toHaveBeenCalledWith('claude');
   });
 
   it('registers every frozen Codex, consent, and artifact channel', () => {
@@ -221,6 +273,8 @@ describe('registerCodexIpc', () => {
     const owner = new Sender();
     const pending = handlers.get(IPC.codexRun)!({ sender: owner }, runRequest());
     await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
+    expect(acquireProject).toHaveBeenCalledExactlyOnceWith('ipc-project');
+    expect(releaseProject).not.toHaveBeenCalled();
     await handlers.get(IPC.artifactForget)!({ sender: owner }, 'ipc-project');
     expect(mocks.forgetWorkspace).not.toHaveBeenCalled();
     await expect(handlers.get(IPC.artifactSweep)!({ sender: owner }, ['other'])).resolves.toEqual(['orphan']);
@@ -228,6 +282,7 @@ describe('registerCodexIpc', () => {
     await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
     mocks.resolve({ ok: true, text: '{}' });
     await pending;
+    expect(releaseProject).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => expect(mocks.forgetWorkspace).toHaveBeenCalledWith('/tmp/powermove-index-test', 'ipc-project'));
 
     await handlers.get(IPC.artifactForget)!({ sender: owner }, 'idle-project');
@@ -424,6 +479,21 @@ describe('registerCodexIpc', () => {
     const decoded = JSON.parse(result.text);
     expect(decoded.commands).toEqual([]);
     expect(decoded.notes.join(' ')).toContain('duplicated edits');
+  });
+
+  it('keeps completed project edits when extension publication reports a conflict', async () => {
+    registerCodexIpc(ipcMain as never, {
+      getWindow: () => null, userData: '/tmp/powermove-index-test', extensionsDir: '/tmp/powermove-user-extensions',
+      apiPackFiles, isTrustedSender: () => true, codexBinaryPref: () => null, openExternal: async () => undefined,
+      agentToolServerPath: '/test/mcp-server.mjs', agentToolCommand: '/test/electron'
+    }, mocks.account, mocks.account, mocks.appRunner as never);
+    const pending = handlers.get(IPC.codexRun)!({ sender: new Sender() }, {
+      ...runRequest(), mode: 'autonomous', access: 'project', projectJSON: '{"revision":1}'
+    });
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalled());
+    mocks.resolve({ ok: false, cancelled: false, preserveLiveEdits: true, error: 'Extension publication conflict' });
+    await expect(pending).resolves.toMatchObject({ ok: false, preserveLiveEdits: true });
+    expect(mocks.toolFinish).toHaveBeenCalledExactlyOnceWith(true);
   });
 
   it('steers only an active run owned by the requesting renderer', async () => {

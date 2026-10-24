@@ -162,6 +162,32 @@ export class InlinePrompt {
   }
 
   private select(range: Range) { const selection = window.getSelection(); selection?.removeAllRanges(); selection?.addRange(range); this.bookmark = range.cloneRange(); }
+  private revealCaret() {
+    const selection = window.getSelection();
+    if (document.activeElement !== this.element || !selection?.isCollapsed
+      || !selection.rangeCount || !this.element.contains(selection.focusNode)) return;
+    const range = selection.getRangeAt(0).cloneRange();
+    let rect = range.getBoundingClientRect();
+    // Element-boundary selections (undo) and empty final lines have no caret
+    // box. Measure the adjacent text end or presentation-only break instead.
+    if (!rect.height) {
+      const adjacent = selection.focusNode === this.element
+        ? this.element.childNodes[selection.focusOffset - 1]
+        : selection.focusNode?.nextSibling;
+      if (adjacent) {
+        if (adjacent.nodeType === Node.TEXT_NODE) { range.selectNodeContents(adjacent); range.collapse(false); }
+        else range.selectNode(adjacent);
+        rect = range.getBoundingClientRect();
+      }
+    }
+    if (!rect.height) return;
+    const top = this.element.getBoundingClientRect().top + this.element.clientTop;
+    const bottom = top + this.element.clientHeight;
+    // Scripted edits bypass Chromium's native caret scrolling. Move only this
+    // field, only enough to reveal the caret, after the composer has autosized.
+    if (rect.bottom > bottom) this.element.scrollTop += rect.bottom - bottom;
+    else if (rect.top < top) this.element.scrollTop += rect.top - top;
+  }
   private disarm() { this.armed?.classList.remove('is-selected'); this.armed = null; }
   private historyAvailability() {
     this.element.dataset.promptCanUndo = String(this.historyIndex > 0);
@@ -179,7 +205,7 @@ export class InlinePrompt {
     if (this.history.length > 100) { this.history.shift(); this.historyIndex--; }
     this.lastEdit = typing ? now : 0;
     this.historyAvailability();
-    this.change(draft); this.remember();
+    this.change(draft); this.remember(); this.revealCaret();
   }
   input = () => { this.disarm(); this.commit(true); };
   setText(text: string) { this.render({ text, attachments: this.read().attachments }); this.commit(false); }
@@ -194,6 +220,7 @@ export class InlinePrompt {
         this.historyIndex = index; this.render(this.history[index]!); this.change(this.read());
         this.historyAvailability();
         const range = document.createRange(); range.selectNodeContents(this.element); range.collapse(false); this.select(range);
+        this.revealCaret();
       }
       return true;
     }

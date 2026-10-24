@@ -19,8 +19,7 @@ export const PRIMITIVES: ReadonlyArray<{ id: Primitive; label: string }> = [
 export const LIGHT_TYPES: ReadonlyArray<{ id: LightType; label: string }> = [
   { id: 'sun', label: 'Sun' },
   { id: 'point', label: 'Point' },
-  { id: 'spot', label: 'Spot' },
-  { id: 'area', label: 'Area' }
+  { id: 'spot', label: 'Spot' }
 ];
 
 export const MAP_SLOTS: ReadonlyArray<{ id: MapSlot; label: string }> = [
@@ -59,12 +58,7 @@ export function lightFields(type: LightType): FieldSpec[] {
     ...xyz('', 'Position', 0.01)
   ];
   if (type !== 'point') fields.push(...xyz('target', 'Target', 0.01));
-  if (type === 'area') {
-    fields.push(
-      { key: 'width', label: 'Size X', kind: 'num', step: 0.05, min: 0.001 },
-      { key: 'height', label: 'Size Y', kind: 'num', step: 0.05, min: 0.001 }
-    );
-  } else if (type !== 'sun') {
+  if (type !== 'sun') {
     fields.push(
       { key: 'distance', label: 'Range', kind: 'num', step: 0.1, min: 0 },
       { key: 'decay', label: 'Falloff', kind: 'num', step: 0.05, min: 0 }

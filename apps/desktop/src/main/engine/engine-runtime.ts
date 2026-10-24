@@ -10,6 +10,8 @@
  * carries out its actions. Engine work never runs here beyond decoding
  * and dispatch: rendering lanes run on the engine's own threads.
  */
+import { getHeapStatistics } from 'node:v8';
+
 import type { PortLike } from './ports';
 
 import type { EngineBootstrap, EngineControl, EngineNotice } from './ports';
@@ -28,6 +30,7 @@ type Addon = {
     /** What threads off this one produced (host calls, job status). */
     pump(): EngineAction[];
     status(): string;
+    documentKernel(owner: number, request: string, bytes?: Buffer): string;
     simulateGpuLoss?(): boolean;
     /** The viewer presenter's per-frame trace as JSON, emptied (POWERMOVE_BRIDGE_TRACE=1). */
     presentTrace?(): string;
@@ -94,6 +97,27 @@ export function startEngineProcess(parent: EngineParent): void {
     if (!traceOn || typeof engine.presentTrace !== 'function' || !json.startsWith('{') || !json.endsWith('}')) return json;
     return `${json.slice(0, -1)}${json.length > 2 ? ',' : ''}"presentTrace":${engine.presentTrace()}}`;
   };
+  // Measurement runs opt in to Node/V8 attribution. Keep ordinary status
+  // reports cheap; the memory counters are sampled only when requested.
+  const runtimeMemoryOn = process.env['POWERMOVE_ENGINE_RUNTIME_MEMORY'] === '1';
+  const withRuntimeMemory = (json: string): string => {
+    if (!runtimeMemoryOn || !json.startsWith('{') || !json.endsWith('}')) return json;
+    const usage = process.memoryUsage();
+    const heap = getHeapStatistics();
+    const runtimeMemory = {
+      rss: usage.rss,
+      heapUsed: usage.heapUsed,
+      heapTotal: usage.heapTotal,
+      external: usage.external,
+      arrayBuffers: usage.arrayBuffers,
+      v8Physical: heap.total_physical_size,
+      v8Available: heap.total_available_size,
+      v8Limit: heap.heap_size_limit,
+      v8Malloced: heap.malloced_memory,
+      v8PeakMalloced: heap.peak_malloced_memory
+    };
+    return `${json.slice(0, -1)}${json.length > 2 ? ',' : ''}"runtimeMemory":${JSON.stringify(runtimeMemory)}}`;
+  };
   const shutdown = (): void => {
     for (const port of ports.values()) port.close();
     ports.clear();
@@ -134,8 +158,16 @@ export function startEngineProcess(parent: EngineParent): void {
     } else if (message?.type === 'simulateGpuLoss') {
       const lost = engine.simulateGpuLoss?.() === true;
       notify({ type: 'log', level: 'warn', message: lost ? 'simulated a GPU device loss' : 'this engine does not present; no GPU device to lose' });
+    } else if (message?.type === 'documentKernel' && Number.isSafeInteger(message.id) && Number.isSafeInteger(message.owner)) {
+      let json: string;
+      try { json = engine.documentKernel(message.owner, message.request, message.bytes ? Buffer.from(message.bytes.buffer, message.bytes.byteOffset, message.bytes.byteLength) : undefined); }
+      catch (error) { json = JSON.stringify({ ok: false, code: 'unavailable', error: error instanceof Error ? error.message : String(error) }); }
+      // Main's private adoption call must publish the shared root to the
+      // presenter before its next synchronous snapshot can be dispatched.
+      if (message.flushDocumentUpdates) run(engine.tick());
+      notify({ type: 'documentKernel', id: message.id, json });
     } else if (message?.type === 'status' && Number.isSafeInteger(message.id)) {
-      notify({ type: 'status', id: message.id, json: withPresentTrace(engine.status()) });
+      notify({ type: 'status', id: message.id, json: withRuntimeMemory(withPresentTrace(engine.status())) });
     } else if (message?.type === 'shutdown') {
       shutdown();
     }

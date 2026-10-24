@@ -30,6 +30,8 @@ pub enum EvalError {
     NotAFunction,
     /// `param()` when the composition itself is `undefined` or `null`.
     ReadOfNullish { base: &'static str, key: String },
+    /// An `Error` a host hook threw (`sample`, `motionPath`), with its message.
+    Thrown(String),
 }
 
 impl EvalError {
@@ -44,6 +46,7 @@ impl EvalError {
             EvalError::ReadOfNullish { base, key } => {
                 format!("Cannot read properties of {base} (reading '{key}')")
             }
+            EvalError::Thrown(message) => message.clone(),
         }
     }
 }
@@ -321,6 +324,8 @@ pub(crate) struct Evaluator<'a, H: Host> {
     context: ContextReads,
     reads: Vec<Rc<Path>>,
     tracking: bool,
+    /// A host hook read the document (`sample`, `motionPath`).
+    document: bool,
 }
 
 impl<'a, H: Host> Evaluator<'a, H> {
@@ -332,6 +337,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
             context: ContextReads::empty(),
             reads: Vec::new(),
             tracking: true,
+            document: false,
         }
     }
 
@@ -349,6 +355,7 @@ impl<'a, H: Host> Evaluator<'a, H> {
         Dependencies {
             context: self.context,
             fields,
+            document: self.document,
         }
     }
 
@@ -844,10 +851,60 @@ impl<'a, H: Host> Evaluator<'a, H> {
             };
             return self.param(&name);
         }
+        if helper == Helper::Sample || helper == Helper::MotionPath {
+            return self.document_helper(helper, args, &numbers);
+        }
         if helper == Helper::Wiggle {
             self.context.insert(ContextReads::LOCAL_TIME);
         }
         Ok(apply_helper(helper, &numbers, self.ctx.t).map_or(Value::Undefined, Value::Number))
+    }
+
+    /// `sample` and `motionPath` (`expression.ts`): `String(args[0] ?? '')`,
+    /// `String(args[1] ?? '')`, then `Number(args[2] ?? t)` or the three
+    /// numbers, handed to the host's hook. They read the document beyond
+    /// `layer` and `comp`'s own fields, so the evaluation depends on the
+    /// whole document.
+    fn document_helper(
+        &mut self,
+        helper: Helper,
+        args: &[V<H::Obj>],
+        numbers: &[f64],
+    ) -> R<V<H::Obj>> {
+        let text = |this: &mut Self, i: usize| -> R<JsStr> {
+            match args.get(i) {
+                None | Some(Value::Undefined | Value::Null) => Ok(JsStr::default()),
+                Some(v) => this.js_string(v),
+            }
+        };
+        let layer = text(self, 0)?;
+        let channel = text(self, 1)?;
+        let number = |i: usize| numbers.get(i).copied().unwrap_or(f64::NAN);
+        self.document = true;
+        if helper == Helper::Sample {
+            let local_time = match args.get(2) {
+                None | Some(Value::Undefined | Value::Null) => {
+                    self.context.insert(ContextReads::LOCAL_TIME);
+                    self.ctx.t
+                }
+                Some(_) => number(2),
+            };
+            return match self.host.sample(&layer, &channel, local_time) {
+                None => Ok(Value::Undefined),
+                // The whole document is a dependency (`document`); reads
+                // inside a sampled object need no paths of their own.
+                Some(Ok(v)) => Ok(v.map_doc(|obj| Tracked { obj, path: None })),
+                Some(Err(message)) => Err(EvalError::Thrown(message)),
+            };
+        }
+        match self
+            .host
+            .motion_path(&layer, &channel, number(2), number(3), number(4))
+        {
+            None => Ok(Value::Undefined),
+            Some(Ok(n)) => Ok(Value::Number(n)),
+            Some(Err(message)) => Err(EvalError::Thrown(message)),
+        }
     }
 
     /// `paramGet(name)` in `anim.ts`: `comp.params && comp.params[name]`, then
@@ -1075,8 +1132,9 @@ pub(crate) fn apply_helper(helper: Helper, numbers: &[f64], t: f64) -> Option<f6
                 duration * 2.0 - position
             }
         }
-        // `param` reads the document; the evaluators handle it themselves.
-        Helper::Param => return None,
+        // `param`, `sample`, and `motionPath` read the document; the
+        // evaluators handle them themselves.
+        Helper::Param | Helper::Sample | Helper::MotionPath => return None,
     })
 }
 

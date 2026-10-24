@@ -200,8 +200,7 @@ impl<'a, 'd> Scope<'a, 'd> {
 
     /// `PM.ev(L, key, T)`.
     pub fn channel(&mut self, layer: &'d Node, key: &str, time: f64) -> JsResult<JsValue> {
-        self.ev
-            .ev(self.comp, Some(layer), &JsString::from(key), time)
+        self.ev.ev_key(self.comp, Some(layer), key, time)
     }
 
     /// `Number(PM.ev(L, key, T))` (JavaScript's `ToNumber`, as arithmetic

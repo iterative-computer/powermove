@@ -377,3 +377,13 @@ composite `path-masks*` corpus was not rerun this round: no pm-cli build exists 
 this worktree, and building one with 45 GB free risked the 40 GB disk floor. Its
 round 1 result (bit-exact) stands. The
 playback cadence tail is issue P4 (perf3 lane).
+
+
+## DEPTH-1 project depth
+
+The earlier Precision-floor/export-promotion description is superseded by
+[Project color depth](color-depth.md). The single saved depth selects RGBA8,
+f16 or f32 intermediates; fused mask/matte passes reproduce the separate
+8-bit stores. The level-1 text sampling residual is resolved, and all 21
+depth-corpus output images are byte-exact. The remaining qualification limits
+are recorded in that note.

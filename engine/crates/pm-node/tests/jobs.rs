@@ -444,6 +444,9 @@ impl Host {
                         payload: pm_protocol::snapshot::PixelPayload::Inline {
                             bytes: Bytes(fill.repeat((k.width * k.height) as usize)),
                         },
+                        native: false,
+                        size: None,
+                        uv: None,
                     },
                 )))
             }
@@ -565,6 +568,7 @@ fn settings(format: ExportFormat) -> ExportSettings {
             end: Ticks::from_whole_seconds(1),
         },
         audio: true,
+        audio_index_playhead: None,
         motion_blur: false,
         color: OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,

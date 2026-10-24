@@ -16,7 +16,8 @@ test('native dropdowns reopen and custom pickers toggle on repeated clicks', asy
     };
   });
   let menuRequests = 0;
-  const triggers = page.locator('button[aria-haspopup="menu"], button.panel-options');
+  // The panel pool also keeps offscreen panels mounted; exercise the workspace.
+  const triggers = page.locator('#body button[aria-haspopup="menu"], #body button.panel-options');
   expect(await triggers.count()).toBeGreaterThan(5);
   const checked: string[] = [];
   for (let index = 0; index < await triggers.count(); index++) {
@@ -24,6 +25,7 @@ test('native dropdowns reopen and custom pickers toggle on repeated clicks', asy
     if (!await trigger.isVisible() || !await trigger.isEnabled()) continue;
     const label = await trigger.getAttribute('aria-label');
     await test.step(label || `Dropdown ${index}`, async () => {
+      await trigger.scrollIntoViewIfNeeded();
       for (let click = 0; click < 3; click++) {
         await trigger.click();
         await expect.poll(() => session.app.evaluate(() => (globalThis as any).__menuRequests)).toBe(++menuRequests);
@@ -33,6 +35,7 @@ test('native dropdowns reopen and custom pickers toggle on repeated clicks', asy
   }
   await test.info().attach('checked-dropdowns', { body: JSON.stringify(checked, null, 2), contentType: 'application/json' });
 
+  await session.openAgent();
   for (const selector of ['.thread-trigger']) {
     const trigger = page.locator(selector);
     await expect(trigger).toBeVisible();

@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-e4d3e603f331ed53";
+export const PROTOCOL_BUILD = "protocol-0a1b4d7c6c09382c";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -56,9 +56,11 @@ export type { CommitOutput } from "./CommitOutput";
 export type { Compat } from "./Compat";
 export type { CompatFormat } from "./CompatFormat";
 export type { CompatFrame } from "./CompatFrame";
+export type { CompatFrameInput } from "./CompatFrameInput";
 export type { CompatFrameRequest } from "./CompatFrameRequest";
 export type { CompatKey } from "./CompatKey";
 export type { CompatMessage } from "./CompatMessage";
+export type { CompatNative } from "./CompatNative";
 export type { CompatNeed } from "./CompatNeed";
 export type { CompatPixels } from "./CompatPixels";
 export type { CompatSource } from "./CompatSource";
@@ -88,6 +90,8 @@ export type { DocumentEncoding } from "./DocumentEncoding";
 export type { DocumentId } from "./DocumentId";
 export type { EditorCamera } from "./EditorCamera";
 export type { EffectInstanceId } from "./EffectInstanceId";
+export type { EncodeAudio } from "./EncodeAudio";
+export type { EncodeVideoCodec } from "./EncodeVideoCodec";
 export type { EngineError } from "./EngineError";
 export type { EngineFact } from "./EngineFact";
 export type { EngineProcess } from "./EngineProcess";
@@ -125,6 +129,7 @@ export type { HardwareSessionGrant } from "./HardwareSessionGrant";
 export type { HardwareSessionKind } from "./HardwareSessionKind";
 export type { HardwareSessionRequest } from "./HardwareSessionRequest";
 export type { Hello } from "./Hello";
+export type { HostEncode } from "./HostEncode";
 export type { HostMicros } from "./HostMicros";
 export type { HostShaderFallback } from "./HostShaderFallback";
 export type { HostSnapshot } from "./HostSnapshot";

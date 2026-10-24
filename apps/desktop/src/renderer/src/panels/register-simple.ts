@@ -4,6 +4,7 @@ import MixerPanel from './MixerPanel.svelte';
 import NotesPanel from './NotesPanel.svelte';
 import TakesPanel from './TakesPanel.svelte';
 import WorkspacesPanel from './WorkspacesPanel.svelte';
+import EasingPanel from './EasingPanel.svelte';
 import '../controls/controls.css';
 import './panels.css';
 import { registerSveltePanel } from './registerSveltePanel';
@@ -54,4 +55,5 @@ export function registerSimplePanels(PM: LegacyPM): void {
   registerSveltePanel(PM, 'workspaces', { title: 'Workspaces', size: 200, component: WorkspacesPanel });
   registerSveltePanel(PM, 'takes', { title: 'Takes', size: 180, component: TakesPanel });
   registerSveltePanel(PM, 'notes', { title: 'Notes', size: 180, component: NotesPanel });
+  registerSveltePanel(PM, 'easing', { title: 'Easing', icon: 'graph', size: 320, min: 240, component: EasingPanel });
 }

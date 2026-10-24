@@ -844,6 +844,7 @@ pub(crate) fn convert(
         factors,
         reuse,
         working_format(precision),
+        false,
     )
 }
 
@@ -863,6 +864,7 @@ fn convert_format(
     factors: Factors,
     reuse: Option<Target>,
     format: wgpu::TextureFormat,
+    compatibility_storage: bool,
 ) -> Target {
     let (luma, chroma, chroma_info) = match normalized {
         Normalized::Rgb { rgba } => (rgba, None, None),
@@ -890,7 +892,7 @@ fn convert_format(
         // Store the f32 conversion directly: an intermediate half-float
         // rounding can change which side of an 8-bit boundary it lands on.
         uniform.c[2] = 0;
-        if let Some((factors, _, _)) = chroma_info {
+        if let Some((factors, _, _)) = chroma_info.filter(|_| compatibility_storage) {
             // Chromium's Skia video upload treats subsampled chroma as
             // centered and reconstructs it bilinearly before the RGBA8
             // store. Keep the native float source's siting/filter policy.
@@ -1696,6 +1698,7 @@ impl MediaCache {
             factors,
             reuse,
             format,
+            compatibility_bitmap,
         );
         let importer = self.importer()?;
         if fields.is_none() {

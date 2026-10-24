@@ -75,7 +75,7 @@ const USAGE: &str = "usage:
       --audio pcm16|pcm24|float|aac        (default 24-bit PCM in MOV, AAC in MP4)
       --timecode HH:MM:SS:FF  --reel NAME  start timecode (`;` for drop-frame), MOV
       --no-audio  --no-captions  --color quicktime|broadcast|srgb|rec709
-      --dither on|off  --precision 16|32
+      --dither on|off  --precision 8|16|32
       --composition ID  --media ASSET=FILE  --force (replace an existing file)
       --definitions FILE  a definition set snapshot (contract 10, JSON) to draw
                effects, transitions, and extension layers with (default: the

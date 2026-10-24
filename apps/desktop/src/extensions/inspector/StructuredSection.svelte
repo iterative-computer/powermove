@@ -7,10 +7,13 @@
   import { pathTargets, structuredProperties } from 'powermove';
   import { inspectorRefresh } from './refresh.svelte';
   import TextAnimators from './TextAnimators.svelte';
+  import { isInspectorLayerEditable } from './multi-edit';
 
   const {api,doc,transport,mixed,edit:inspectorEdit,tools,viewer}=inspectorContext();
   const {Section,Row,SelectField,ColorField}=api.ui.controls;
   let {layer}:{layer:any}=$props();
+  const canChange=()=>isInspectorLayerEditable(api,layer);
+  const editable=$derived((doc.tick.structure,doc.tick.values,doc.tick.history,doc.proj,inspectorRefresh.version,canChange()));
 
   const targets=$derived((doc.tick.structure,doc.tick.values,doc.proj,inspectorRefresh.version,pathTargets(layer)));
   const shapeTargets=$derived(targets.filter((target:any)=>target.prefix.startsWith('g.')));
@@ -29,7 +32,7 @@
   const bind=(path:string)=>({mode:'command' as const,label:'Edit '+path,origin:'inspector' as const,command:(value:any)=>({type:'set_property' as const,target:layer.id,path,value,time:transport.time,preserveHandEdits:false})});
   const channel=(key:string)=>`${activeTarget.prefix}.${key}`;
   const property=(key:string)=>activeTarget?.path.p?.[key];
-  function mutate(label:string,fn:()=>void){inspectorEdit.mutate(label,fn,{origin:'inspector'});api.transport.invalidate();inspectorRefresh.bump();}
+  function mutate(label:string,fn:()=>void){if(!canChange())return;inspectorEdit.mutate(label,fn,{origin:'inspector'});api.transport.invalidate();inspectorRefresh.bump();}
   function applyPathValue(key:string,value:any,label:string){
     if(!activeTarget)return;
     inspectorEdit.apply({type:'set_property',target:layer.id,path:channel(key),value,time:transport.time,preserveHandEdits:false},{label,origin:'inspector'});
@@ -38,20 +41,20 @@
   function setActivePath(value:string|null){const service=viewer();if(service)service.activePath=value;}
   function makePath(){const values={x:0,y:0,rotation:0,scaleX:100,scaleY:100,closed:false,fill:'#E8E2CF',fillEnabled:true,fillOpacity:100,stroke:'#ffffff',strokeWidth:2,strokeOpacity:100,trimStart:0,trimEnd:100,trimOffset:0,copies:1,repeatX:30,repeatY:0,repeatRotation:0};return{id:api.util.uid('path'),name:'Path',parent:null,vertices:[],p:Object.fromEntries(Object.entries(values).map(([key,value])=>[key,api.model.P(value)]))};}
   function selectPath(target:any,startEditing=false){activePathId=target.path.id;setActivePath(target.path.id);if(startEditing)tools()?.setTool('pen');}
-  function addPath(){mutate('Add path',()=>{const path=makePath();(layer.d.paths||=[]).push(path);activePathId=path.id;setActivePath(path.id);});tools()?.setTool('pen');}
+  function addPath(){if(!canChange())return;mutate('Add path',()=>{const path=makePath();(layer.d.paths||=[]).push(path);activePathId=path.id;setActivePath(path.id);});tools()?.setTool('pen');}
   function removePath(target:any){mutate('Remove path',()=>{layer.d.paths=layer.d.paths.filter((path:any)=>path.id!==target.path.id);for(const path of layer.d.paths)if(path.parent===target.path.id)path.parent=null;activePathId=layer.d.paths[0]?.id??null;setActivePath(activePathId);});}
   const label=(key:string)=>key.replace(/([A-Z])/g,' $1').replace(/^./,x=>x.toUpperCase());
 </script>
 
 {#if layer.type==='shape' && activeTarget}
-  <SectionHeading title={shapeTargets.length===1?'Path':'Paths'}><button class="section-action" onclick={addPath} aria-label="Add path" title="Add path"><Icon name="plus" /></button></SectionHeading>
+  <SectionHeading title={shapeTargets.length===1?'Path':'Paths'}><button class="section-action" disabled={!editable} onclick={addPath} aria-label="Add path" title="Add path"><Icon name="plus" /></button></SectionHeading>
   <div class="path-list" class:multiple={shapeTargets.length>1}>
     {#each shapeTargets as target (target.path.id)}
       <div class="path-item" class:active={target.path.id===activeTarget.path.id}>
         <button class="path-edit" onclick={()=>selectPath(target,true)} aria-label={`Edit ${target.path.name} vertices`}>
           <span class="path-icon" aria-hidden="true">⌁</span><span>{target.path.name}</span><span class="path-edit-label">Edit vertices</span>
         </button>
-        {#if shapeTargets.length>1}<button class="path-remove" onclick={()=>removePath(target)} aria-label={`Remove ${target.path.name}`} title="Remove path"><span aria-hidden="true">−</span></button>{/if}
+        {#if shapeTargets.length>1}<button class="path-remove" disabled={!editable} onclick={()=>removePath(target)} aria-label={`Remove ${target.path.name}`} title="Remove path"><span aria-hidden="true">−</span></button>{/if}
       </div>
     {/each}
   </div>
@@ -59,7 +62,7 @@
   <details class="advanced">
     <summary>Advanced path options</summary>
     {#if shapeTargets.length>1}
-      <Row {api} label="Group"><SelectField {api} {mixed} label="Path parent group" get={()=>activeTarget.path.parent} options={[{v:null,label:'None'},...shapeTargets.filter((target:any)=>target!==activeTarget&&!target.path.parent).map((target:any)=>({v:target.path.id,label:target.path.name}))]} edit={{mode:'set',label:'Group path',set:(value:any)=>{activeTarget.path.parent=value;api.transport.invalidate();inspectorRefresh.bump();}}} /></Row>
+      <fieldset disabled={!editable}><Row {api} label="Group"><SelectField {api} {mixed} label="Path parent group" get={()=>activeTarget.path.parent} onChange={canChange} options={[{v:null,label:'None'},...shapeTargets.filter((target:any)=>target!==activeTarget&&!target.path.parent).map((target:any)=>({v:target.path.id,label:target.path.name}))]} edit={{mode:'set',label:'Group path',set:(value:any)=>{if(!canChange())return;activeTarget.path.parent=value;api.transport.invalidate();inspectorRefresh.bump();}}} /></Row></fieldset>
     {/if}
     <div class="advanced-label">Path transform</div>
     {#each ['x','y','rotation','scaleX','scaleY'] as key (key)}
@@ -99,7 +102,7 @@
   <Section {api} title="Mask paths" />
   {#each maskTargets as target (target.path.id)}
     <details><summary>{target.path.name}</summary>
-      <div class="buttons"><button class="chip" onclick={()=>selectPath(target,true)}>Edit vertices</button><button class="chip" onclick={()=>mutate('Remove path',()=>{const mask=layer.masks.find((candidate:any)=>candidate.path===target.path);if(mask)layer.masks=layer.masks.filter((candidate:any)=>candidate!==mask);})}>Remove</button></div>
+      <div class="buttons"><button class="chip" onclick={()=>selectPath(target,true)}>Edit vertices</button><button class="chip" disabled={!editable} onclick={()=>mutate('Remove path',()=>{const mask=layer.masks.find((candidate:any)=>candidate.path===target.path);if(mask)layer.masks=layer.masks.filter((candidate:any)=>candidate!==mask);})}>Remove</button></div>
       {#each records.filter((record:any)=>record.key.startsWith(target.prefix+'.')&&!record.key.includes('.v.')) as record (record.key)}
         {@const value=api.anim.evP(layer,record.prop,transport.time,record.key)}
         {#if typeof value==='number'}<ChannelRow {layer} channel={record.key} property={record.prop} label={label(record.label)} step={1} />
@@ -114,6 +117,7 @@
 {/if}
 
 <style>
+  fieldset { border:0; padding:0; margin:0; min-inline-size:0; }
   .path-list {
     display: flex;
     flex-direction: column;

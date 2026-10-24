@@ -50,13 +50,15 @@ export type WindowDocument = {
   /** The engine's document id. */
   id: string;
   revision: number;
+  /** Main adopts this window's current native root without JSON or hashing. */
+  nativeKernel?: true;
   /** The canonical hash (hex), with `json`. */
   hash?: string | null;
   /** Canonical JSON; absent when the window expects main to have it. */
   json?: Uint8Array | null;
 };
 
-export type FallbackPixels = { key: string; width: number; height: number; rgba16f: Uint8Array };
+export type FallbackPixels = { key: string; width: number; height: number; rgba16f: Uint8Array; rgba32f?: Uint8Array };
 /** A level 1 SVG raster: premultiplied RGBA8, top-down (decision S1). */
 export type SvgPixels = { key: SvgRasterKey; data: Uint8Array };
 /** Largest SVG band posted in one event (the renderer's band size,
@@ -70,6 +72,7 @@ export interface WindowSessionEngine {
   request(process: 'interactive', body: Request, session?: number | null, revision?: number | null): Promise<Response>;
   stageDocument(process: 'interactive', session: number, bytes: Uint8Array): Promise<{ handle: string; length: number }>;
   event(process: 'interactive', body: Event, session: number | null): void;
+  adoptNativeDocument?(owner: number, session: number, document: string, revision: number): Promise<void>;
 }
 
 export interface WindowDefinitions {
@@ -110,9 +113,9 @@ export class WindowSnapshotSessions {
   /** The window's session at `document`, ready for a snapshot: `{ port,
    *  session }`, or `needsDocument` when main lacks the revision and the
    *  request carried no document. Serialized per window. */
-  prepare(windowId: number, document: WindowDocument, fallback: FallbackPixels[] = [], svg: SvgPixels[] = []): Promise<{ port: number; session: number } | 'needsDocument'> {
+  prepare(windowId: number, document: WindowDocument, fallback: FallbackPixels[] = [], svg: SvgPixels[] = [], compat: readonly { [key: string]: unknown }[] = []): Promise<{ port: number; session: number } | 'needsDocument'> {
     const previous = this.chains.get(windowId) ?? Promise.resolve();
-    const next = previous.catch(() => {}).then(() => this.run(windowId, document, fallback, svg));
+    const next = previous.catch(() => {}).then(() => this.run(windowId, document, fallback, svg, compat));
     this.chains.set(windowId, next);
     void next.finally(() => {
       if (this.chains.get(windowId) === next) this.chains.delete(windowId);
@@ -120,7 +123,7 @@ export class WindowSnapshotSessions {
     return next;
   }
 
-  private async run(windowId: number, document: WindowDocument, fallback: FallbackPixels[], svg: SvgPixels[]): Promise<{ port: number; session: number } | 'needsDocument'> {
+  private async run(windowId: number, document: WindowDocument, fallback: FallbackPixels[], svg: SvgPixels[], compat: readonly { [key: string]: unknown }[] = []): Promise<{ port: number; session: number } | 'needsDocument'> {
     const host = this.engine.hostPort('interactive');
     if (!host) throw new Error('the new engine is not running');
     // Session ids may be reused after a restart. Clear every old binding
@@ -134,7 +137,7 @@ export class WindowSnapshotSessions {
     // the window's session when the page loads again), so the document id
     // and revision name the content.
     const sameDocument = record?.document === document.id && record.revision === document.revision;
-    if (!sameDocument && !(document.json && document.hash)) {
+    if (!sameDocument && !(document.nativeKernel || (document.json && document.hash))) {
       this.stats.needsDocument++;
       return 'needsDocument';
     }
@@ -166,16 +169,21 @@ export class WindowSnapshotSessions {
       }
     }
     if (!sameDocument) {
-      const json = document.json!;
-      let source: { kind: 'inline'; body: Uint8Array } | { kind: 'cacheFile'; handle: string; length: number };
-      if (json.byteLength > INLINE_LIMIT) {
-        const staged = await this.engine.stageDocument('interactive', record.session, json);
-        source = { kind: 'cacheFile', handle: staged.handle, length: staged.length };
-        this.stats.staged++;
+      if (document.nativeKernel) {
+        if (!this.engine.adoptNativeDocument) throw new Error('The native document reference is unavailable');
+        await this.engine.adoptNativeDocument(windowId, record.session, document.id, document.revision);
       } else {
-        source = { kind: 'inline', body: json };
+        const json = document.json!;
+        let source: { kind: 'inline'; body: Uint8Array } | { kind: 'cacheFile'; handle: string; length: number };
+        if (json.byteLength > INLINE_LIMIT) {
+          const staged = await this.engine.stageDocument('interactive', record.session, json);
+          source = { kind: 'cacheFile', handle: staged.handle, length: staged.length };
+          this.stats.staged++;
+        } else {
+          source = { kind: 'inline', body: json };
+        }
+        await this.engine.request('interactive', { type: 'resync', document: document.id, revision: document.revision, encoding: 'canonicalJsonV1', source, hash: hexBytes(document.hash!) } as unknown as Request, record.session);
       }
-      await this.engine.request('interactive', { type: 'resync', document: document.id, revision: document.revision, encoding: 'canonicalJsonV1', source, hash: hexBytes(document.hash!) } as unknown as Request, record.session);
       record.document = document.id;
       record.revision = document.revision;
       record.hash = document.hash ?? null;
@@ -183,6 +191,10 @@ export class WindowSnapshotSessions {
     }
     for (const pixels of fallback) this.postFallback(record.session, pixels);
     for (const pixels of svg) this.postSvg(record.session, pixels);
+    // The window's compatibility producers and answers (a `raster`
+    // override): this session asks for, and draws, the window's layers as
+    // the window's own session would.
+    for (const event of compat) this.engine.event('interactive', event as unknown as Event, record.session);
     return { port: record.port, session: record.session };
   }
 
@@ -204,15 +216,18 @@ export class WindowSnapshotSessions {
 
   /** Posts a fallback program's pixels to the session in bands. */
   private postFallback(session: number, pixels: FallbackPixels): void {
-    const rowBytes = pixels.width * 8;
-    if (rowBytes <= 0 || pixels.rgba16f.byteLength !== rowBytes * pixels.height) {
+    const float32 = pixels.rgba32f !== undefined;
+    const rowBytes = pixels.width * (float32 ? 16 : 8);
+    const bytes = float32 ? pixels.rgba32f! : pixels.rgba16f;
+    if (rowBytes <= 0 || bytes.byteLength !== rowBytes * pixels.height || (float32 && pixels.rgba16f.byteLength !== 0)) {
       this.log('warn', `fallback pixels for ${pixels.key.slice(0, 12)} do not match their size; dropped`);
       return;
     }
     const rowsPerBand = Math.max(1, Math.floor(MAX_FALLBACK_BAND_BYTES / rowBytes));
     for (let row = 0; row < pixels.height; row += rowsPerBand) {
       const rows = Math.min(rowsPerBand, pixels.height - row);
-      this.engine.event('interactive', { type: 'shaderFallback', fallback: 'pixels', key: pixels.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: pixels.rgba16f.slice(row * rowBytes, (row + rows) * rowBytes) } as unknown as Event, session);
+      const band = bytes.slice(row * rowBytes, (row + rows) * rowBytes);
+      this.engine.event('interactive', { type: 'shaderFallback', fallback: 'pixels', key: pixels.key, width: pixels.width, height: pixels.height, row, rows, rgba16f: float32 ? new Uint8Array(0) : band, ...(float32 ? { rgba32f: band } : {}) } as unknown as Event, session);
     }
   }
 
