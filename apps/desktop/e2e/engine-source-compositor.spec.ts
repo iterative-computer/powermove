@@ -48,6 +48,7 @@ const RECIPES: Record<string, Recipe> = {
   'bars-gradient-709-main10-hd.mp4': { codec: 'hevc10', width: 1280, height: 720, matrix: 'bt709', tags: TAG709 },
   'bars-gradient-170m-sd.mp4': { codec: 'h264', matrix: 'bt601', tags: { primaries: 'smpte170m', trc: 'smpte170m', space: 'smpte170m' } },
   'bars-gradient-470bg-pal.mp4': { codec: 'h264', width: 720, height: 576, matrix: 'bt601', tags: { primaries: 'bt470bg', trc: 'bt470bg', space: 'bt470bg' } },
+  'bars-gradient-untagged-pal.mp4': { codec: 'h264', width: 720, height: 576, matrix: 'bt601' },
   'bars-gradient-2020-sdr-hd.mp4': { codec: 'hevc10', width: 1280, height: 720, matrix: 'bt2020', tags: { primaries: 'bt2020', trc: 'bt2020-10', space: 'bt2020nc' } },
   'bars-gradient-pq-hd.mp4': { codec: 'hevc10', width: 1280, height: 720, matrix: 'bt2020', tags: { primaries: 'bt2020', trc: 'smpte2084', space: 'bt2020nc' } },
   'bars-gradient-untagged-hd.webm': { codec: 'vp9', width: 1280, height: 720, matrix: 'bt709' },
@@ -73,7 +74,9 @@ const REFERENCE: Record<string, { tags: VideoTags | null; exact: boolean; sequen
   'bars-gradient-170m-sd.mp4': { tags: SD601, exact: true },
   // BT.470 gamma 2.8 reads as the display encoding, like other SDR curves.
   'bars-gradient-470bg-pal.mp4': { tags: { ...SD601, primaries: 'bt470bg' }, exact: false },
-  // Converted in the engine (wide-gamut primaries clip to Rec.709 as in composition).
+  // Untagged 576-line video reads the 625-line (EBU, BT.470BG) primaries.
+  'bars-gradient-untagged-pal.mp4': { tags: { ...SD601, primaries: 'bt470bg' }, exact: false },
+  // Converted in the engine as composition reads it.
   'bars-gradient-2020-sdr-hd.mp4': { tags: { matrix: 'bt2020', fullRange: false, primaries: 'bt2020' }, exact: false },
   'bars-gradient-pq-hd.mp4': { tags: null, exact: false },
   'bars-gradient-untagged-hd.webm': { tags: HD709, exact: false },

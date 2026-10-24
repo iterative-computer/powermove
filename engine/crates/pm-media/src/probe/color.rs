@@ -24,8 +24,9 @@ pub struct TaggedColor {
     pub source: Vec<String>,
 }
 
-/// VIDEO-SD-1 (resolved: fix): untagged SD video reads the SMPTE 170M
-/// primaries its BT.601 matrix implies, on every surface.
+/// VIDEO-SD-1 (resolved: fix): untagged SD video reads the primaries of its
+/// line standard on every surface: EBU/BT.470BG (625-line) above 486 lines,
+/// SMPTE 170M (525-line) otherwise.
 pub const UNTAGGED_SD_PRIMARIES: bool = true;
 
 /// A complete video colour reading as H.273 code points.
@@ -42,13 +43,18 @@ pub struct VideoReading {
 /// BT.601 (SMPTE 170M) when the frame is at most 576 lines tall and under
 /// 1280 wide, otherwise BT.709 (the mpv/FFmpeg heuristic); an untagged
 /// transfer is BT.709, read as the sRGB curve; untagged primaries are Rec.709
-/// unless [`UNTAGGED_SD_PRIMARIES`]; the range is limited unless tagged full.
+/// unless [`UNTAGGED_SD_PRIMARIES`] (SD by line count: BT.470BG above 486
+/// lines, SMPTE 170M otherwise); the range is limited unless tagged full.
 pub fn video_reading(tagged: &TaggedColor, width: u32, height: u32) -> VideoReading {
     let sd = height <= 576 && width < 1280;
     VideoReading {
         primaries: tagged
             .primaries
-            .unwrap_or(if sd && UNTAGGED_SD_PRIMARIES { 6 } else { 1 }),
+            .unwrap_or(match (sd && UNTAGGED_SD_PRIMARIES, height > 486) {
+                (true, true) => 5,
+                (true, false) => 6,
+                (false, _) => 1,
+            }),
         transfer: tagged.transfer.unwrap_or(1),
         matrix: tagged.matrix.unwrap_or(if sd { 6 } else { 1 }),
         full_range: tagged.full_range.unwrap_or(false),
@@ -247,17 +253,21 @@ pub fn interpret(
         Some(12) => Primaries::DisplayP3,
         Some(_) => Primaries::Unspecified,
         None => {
-            let p = if table.primaries == 6 {
-                Primaries::Bt601_525
-            } else {
-                Primaries::Bt709
+            let p = match table.primaries {
+                5 => Primaries::Bt601_625,
+                6 => Primaries::Bt601_525,
+                _ => Primaries::Bt709,
             };
             defaults.push(format!("untagged primaries: {p:?} ({w}×{h})"));
             from[0] = Some(Origin::Default {
-                rule: if p == Primaries::Bt709 {
-                    "Untagged video reads as Rec.709 primaries".into()
-                } else {
-                    format!("Untagged {w}×{h} video reads as SMPTE 170M primaries")
+                rule: match p {
+                    Primaries::Bt601_625 => {
+                        format!("Untagged {w}×{h} video reads as EBU (BT.470BG) primaries")
+                    }
+                    Primaries::Bt601_525 => {
+                        format!("Untagged {w}×{h} video reads as SMPTE 170M primaries")
+                    }
+                    _ => "Untagged video reads as Rec.709 primaries".into(),
                 },
             });
             p
@@ -533,8 +543,10 @@ mod reading_tests {
         let sd = video_reading(&untagged, 720, 576);
         assert_eq!(
             (sd.primaries, sd.transfer, sd.matrix, sd.full_range),
-            (6, 1, 6, false)
+            (5, 1, 6, false)
         );
+        assert_eq!(video_reading(&untagged, 720, 486).primaries, 6);
+        assert_eq!(video_reading(&untagged, 640, 480).primaries, 6);
         assert_eq!(video_reading(&untagged, 1280, 576).matrix, 1);
         assert_eq!(video_reading(&untagged, 480, 720).matrix, 1);
         let partial = TaggedColor {
@@ -598,10 +610,10 @@ mod interpret_tests {
                 assert_eq!(table.matrix, if matrix == Bt601 { 6 } else { 1 });
                 assert_eq!(i.transfer, Transfer::DisplayE);
                 assert_eq!(i.range, Range::Limited);
-                let primaries = if tags[0] == 2 && h <= 576 && w < 1280 {
-                    Primaries::Bt601_525
-                } else {
-                    Primaries::Bt709
+                let primaries = match (tags[0] == 2 && h <= 576 && w < 1280, h > 486) {
+                    (true, true) => Primaries::Bt601_625,
+                    (true, false) => Primaries::Bt601_525,
+                    (false, _) => Primaries::Bt709,
                 };
                 assert_eq!(
                     i.primaries, primaries,
