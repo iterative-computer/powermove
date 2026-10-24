@@ -118,9 +118,9 @@ function visibleOnAnyDisplay(bounds: Electron.Rectangle): boolean {
   });
 }
 
-// The S1 load generator (CommonJS, shared with the spike).
+// The S1 load generator (CommonJS).
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { MainLoad } = require('../../../../../../engine/spikes/s1-bridge/app/load.cjs') as {
+const { MainLoad } = require('./measure-load.cjs') as {
   MainLoad: new (options: { win: BrowserWindow; ipcMain: Electron.IpcMain; log: (m: string) => void; nowUs: () => number }) => {
     start(options: Record<string, unknown>): void;
     stop(): Record<string, unknown>;

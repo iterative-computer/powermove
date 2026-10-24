@@ -2,7 +2,7 @@
 /* Spike S5's targets measured in the app (docs/rust-engine.md, section 26,
    Phase 1 gate: "S5 targets met in the app"): the built editor, hidden and
    unfocusable, with the native evaluator on, the 884-layer synthetic project
-   of S5 open (engine/spikes/s5-wasm/js/synth.mjs), and the real write path:
+   of S5 open (scripts/lib/synth-project.mjs), and the real write path:
    the kernel's evP through the identity registry, edits through the Edit
    pipeline and history, flushed through the write barrier into pm-wasm.
 
@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron } from 'playwright';
-import { project884 } from '../../../engine/spikes/s5-wasm/js/synth.mjs';
+import { project884 } from './lib/synth-project.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appDir = path.resolve(here, '..');

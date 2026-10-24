@@ -17,7 +17,6 @@ pm-eval = { path = "../pm-eval" }
 pm-expr = { path = "../pm-expr" }
 pm-color = { path = "../pm-color" }
 pm-geom3d = { path = "../pm-geom3d" }
-pm-blender = { path = "../pm-blender" }
 png = "0.18"
 pm-gpu = { path = "../pm-gpu", features = ["glsl"] }
 pm-glsl = { path = "../pm-glsl" }
@@ -47,7 +46,6 @@ pm-export = { path = "../pm-export", features = ["test-sinks"] }
 # Anchor edits on level 2 text (the semantic gate runs the edit kernels).
 pm-edit = { path = "../pm-edit" }
 pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }
-flate2 = "1.1"
 read-fonts = "0.45"
 png = "0.18"
 

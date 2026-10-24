@@ -1685,7 +1685,7 @@ impl Scene3dRenderer {
                             // pm-cli's explicitly reported SVG approximation.
                             if let Ok((doc, _)) = crate::vector::svg::document(&map.path) {
                                 let mut pixels = doc.raster(key.width, key.height).rgba;
-                                crate::blender::snapshot::unpremultiply(&mut pixels);
+                                unpremultiply(&mut pixels);
                                 let row = key.width as usize * 4;
                                 for y in 0..key.height as usize / 2 {
                                     let other = key.height as usize - 1 - y;
@@ -2119,8 +2119,8 @@ impl Scene3dRenderer {
 /// Three r180's `WebGLMorphtargets.update` chooses the first present morph
 /// attribute for its target count, then unconditionally reads the position
 /// target's `.count` while packing. This throws only when a drawable reaches
-/// `renderBufferDirect`; loaders, queries, and Blender snapshot construction
-/// still succeed for a normal-only or color-only target.
+/// `renderBufferDirect`; loaders and queries still succeed for a
+/// normal-only or color-only target.
 fn legacy_morph_packer_error(
     morph: Option<&(
         bool,
@@ -2155,6 +2155,28 @@ impl Prepared {
         }
         pass.set_index_buffer(self.index.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(self.range.clone(), 0, 0..self.instances);
+    }
+}
+
+/// Skia's read of premultiplied RGBA8 into an unpremultiplied image (the
+/// canvas's `toBlob`): each byte to f32 `b × (1 / 255)`, color times `1 /
+/// a` (0 where a is 0), clamped to [0, 1], stored as `(int)(v × 255 +
+/// 0.5)`.
+fn unpremultiply(rgba: &mut [u8]) {
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 255 {
+            continue;
+        }
+        let scale = if a == 0 {
+            0.0
+        } else {
+            1.0 / (f32::from(a) * (1.0 / 255.0))
+        };
+        for c in &mut px[..3] {
+            let v = (f32::from(*c) * (1.0 / 255.0) * scale).clamp(0.0, 1.0);
+            *c = (v * 255.0 + 0.5) as u8;
+        }
     }
 }
 

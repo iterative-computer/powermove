@@ -105,8 +105,7 @@ impl Renderer {
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         let options3d = self.options3d.for_request(request);
-        let blender = crate::blender::PlanState::new(options3d.blender.clone());
-        let (plan, build) = plan::build_blender(
+        let (plan, build) = plan::build_reusing(
             &mut self.evaluator,
             &comp,
             &project,
@@ -119,10 +118,10 @@ impl Renderer {
             options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
-            blender,
             None,
             None,
         );
+        self.evaluator.close_channel_memo();
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
         }

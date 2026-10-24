@@ -64,7 +64,7 @@ fn export_png(
         mode: Some(0o600),
         seed: 17,
     };
-    let plan = plan_export_for(&job, false, r).unwrap();
+    let plan = plan_export_for(&job, r).unwrap();
     let sink = sink_for(&plan).unwrap();
     run_export_into(
         r,

@@ -23,7 +23,7 @@ use pm_protocol::host_encode::{
 };
 use pm_protocol::snapshot::{INLINE_PIXEL_BYTES, PixelPayload};
 
-use super::blender::HostPort;
+use super::HostPort;
 
 /// How long one frame or audio step may take: the encoder queue drains
 /// within a frame's encode time; minutes mean the window is gone.
@@ -306,7 +306,6 @@ impl<P: HostPort + ?Sized + 'static> EncodeHost for HostEncoder<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pm_protocol::blender::BlenderSurface;
     use pm_protocol::error::{EngineError, ErrorCode, ErrorScope};
     use std::sync::Mutex;
 
@@ -371,10 +370,6 @@ mod tests {
             } else {
                 Ok(Response::Ack)
             })
-        }
-        fn begin_blender_job(&self, _: &JobId) {}
-        fn take_blender_surfaces(&self, _: &JobId) -> Vec<BlenderSurface> {
-            vec![]
         }
     }
 

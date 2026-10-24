@@ -99,8 +99,6 @@ export type EngineStatusMessage = {
   processes: Record<EngineProcess, { state: EngineProcessState; generation: number; attempts: number }>;
 };
 
-export type EngineCrashMessage = CrashReport;
-
 export type StageDocumentRequest = { process: EngineProcess; session: number; bytes: Uint8Array };
 
 /** The export sheet's settings for one export (exporter.ts), in composition

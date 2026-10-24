@@ -1,7 +1,7 @@
 # pm-media: design notes
 
 Production media I/O for plan section 13, built from the S6 spike
-(`docs/engine/spikes/S6.md`, `engine/spikes/s6-decode`). Crates:
+(`docs/engine/spikes/S6.md`). Crates:
 `engine/crates/pm-media` (probe, index, decode, images, cache, hashing) and the
 decode-in half of `engine/crates/pm-gpu` (zero-copy import, normalization,
 deinterlacing). This file records how the code meets the plan and where it

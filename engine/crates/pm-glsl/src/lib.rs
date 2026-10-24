@@ -4,7 +4,7 @@
 //! Legacy GLSL ES 3.00, as the kernel wraps it (`kernel/glsl.ts`,
 //! `kernel/extension-layers.ts`), becomes naga IR that wgpu runs with
 //! `ShaderSource::Naga`. This is the production form of spike S3's naga
-//! path (`docs/engine/spikes/S3.md`, `engine/spikes/s3-shaders`): every
+//! path (`docs/engine/spikes/S3.md`): every
 //! stage, polyfill, SPIR-V rewrite, limit, and the bind check, without the
 //! SPIRV-Cross comparison path. Design notes: `docs/engine/effects.md`.
 //!

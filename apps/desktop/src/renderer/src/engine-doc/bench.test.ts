@@ -12,8 +12,8 @@ import { expect, it } from 'vitest';
 import { makePM } from '../legacy/__tests__/make-pm';
 import { parseMode } from './flags';
 import { installEngineDoc } from './install';
-// @ts-expect-error: the spike's generator is plain JavaScript.
-import { project884 } from '../../../../../../engine/spikes/s5-wasm/js/synth.mjs';
+// @ts-expect-error: the generator is plain JavaScript.
+import { project884 } from '../../../../scripts/lib/synth-project.mjs';
 
 const MODULE = fileURLToPath(new URL('../../public/engine/pm_wasm.wasm', import.meta.url));
 

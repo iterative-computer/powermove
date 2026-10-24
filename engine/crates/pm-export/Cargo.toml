@@ -20,7 +20,6 @@ pm-eval = { path = "../pm-eval" }
 # The job engine's export pipeline: render through pm-render, mix through
 # pm-audio's offline API (section 17).
 pm-render = { path = "../pm-render" }
-pm-blender = { path = "../pm-blender" }
 pm-audio = { path = "../pm-audio" }
 # FFmpeg (libvpx, libopus, the WebM muxer) through pm-media's bindings to
 # Powermove's LGPL build.

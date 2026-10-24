@@ -36,7 +36,6 @@ use pm_render::footage::Timing;
 use pm_render::sampling::Sampling;
 use pm_render::{MapResolver, RenderRequest, Renderer, VideoEnd};
 use serde_json::{Value, json};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// A clip's reading as H.273 names, written by hand in cases.json.
@@ -63,11 +62,19 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video")
 }
 
+/// Today's capture: premultiplied RGBA8 rows stored as PNG pixels.
 fn raster(file: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    flate2::read::ZlibDecoder::new(&std::fs::read(fixtures().join(file)).unwrap()[..])
-        .read_to_end(&mut out)
-        .unwrap();
+    let decoder = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(fixtures().join(file)).unwrap(),
+    ));
+    let mut reader = decoder.read_info().unwrap();
+    let mut out = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut out).unwrap();
+    assert_eq!(
+        (info.color_type, info.bit_depth),
+        (png::ColorType::Rgba, png::BitDepth::Eight)
+    );
+    out.truncate(info.buffer_size());
     out
 }
 

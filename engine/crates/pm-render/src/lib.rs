@@ -22,13 +22,12 @@
 //!   Cube included), and the decision 19 fallback runner.
 
 pub mod assets;
-mod binds;
-pub mod blender;
 pub mod capability;
 pub mod compat;
 pub mod compat_crop;
 pub mod composite;
 pub mod effects;
+mod binds;
 mod error;
 mod exec;
 pub mod expr;

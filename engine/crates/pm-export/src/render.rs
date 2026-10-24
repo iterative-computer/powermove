@@ -65,10 +65,6 @@ pub enum JobError {
     Render(String),
     #[error("audio failed: {0}")]
     Audio(String),
-    /// Blender is missing, failed, or did not deliver a surface (contract
-    /// 11: `blenderMissing`, `blenderFailed`).
-    #[error("{0}")]
-    Blender(pm_blender::BlenderError),
     #[error(transparent)]
     Export(Error),
 }
@@ -301,7 +297,7 @@ fn wait_idle(renderer: &mut Renderer) {
 /// admits every unit, else bands of rows as regions of interest. A one-off
 /// frame (an agent still, a parity frame): the renderer keeps no staging
 /// buffer or frame target afterwards (an export keeps them from frame to
-/// frame, [`run_export_with_blender`]).
+/// frame, [`run_export_into`]).
 #[allow(clippy::too_many_arguments)]
 pub fn render_frame(
     renderer: &mut Renderer,
@@ -336,7 +332,7 @@ pub fn render_frame(
 /// [`render_frame`], keeping the frame's staging buffer and target for the
 /// next frame (an export's frames; the caller releases them with
 /// `Renderer::release_frame_reuse` when its frames end, as
-/// [`run_export_with_blender`] does).
+/// [`run_export_into`] does).
 #[allow(clippy::too_many_arguments)]
 pub fn render_frame_reusing(
     renderer: &mut Renderer,
@@ -985,28 +981,17 @@ pub fn offline_media(
 /// spec, and the audio graph. Offline media is not checked here; the job
 /// engine asks [`offline_media`] first (queued jobs wait for it, section 14.8).
 pub fn plan_export(job: &ExportJob) -> Result<ExportPlan, JobError> {
-    plan_export_with(job, false)
-}
-
-/// [`plan_export`] for a job engine with a Blender stage: compositions
-/// rendered with Blender are not routed for that reason
-/// (`crate::blender`).
-pub fn plan_export_with(job: &ExportJob, blender: bool) -> Result<ExportPlan, JobError> {
-    plan_export_checked(job, blender, &|doc, composition, media| {
+    plan_export_checked(job, &|doc, composition, media| {
         pm_render::unsupported_with_media(doc, composition, media)
     })
 }
 
-/// [`plan_export_with`] routed with `renderer`'s own capabilities
+/// [`plan_export`] routed with `renderer`'s own capabilities
 /// (`Renderer::unsupported_with_media`): the definitions the job embeds
 /// (contract 10; set on the renderer before planning) draw its effects,
 /// transitions, and extension layers, and its fonts its text.
-pub fn plan_export_for(
-    job: &ExportJob,
-    blender: bool,
-    renderer: &Renderer,
-) -> Result<ExportPlan, JobError> {
-    plan_export_checked(job, blender, &|doc, composition, media| {
+pub fn plan_export_for(job: &ExportJob, renderer: &Renderer) -> Result<ExportPlan, JobError> {
+    plan_export_checked(job, &|doc, composition, media| {
         renderer.unsupported_with_media(doc, composition, media)
     })
 }
@@ -1017,7 +1002,6 @@ pub type CapabilityCheck<'a> =
 
 fn plan_export_checked(
     job: &ExportJob,
-    blender: bool,
     check: &CapabilityCheck<'_>,
 ) -> Result<ExportPlan, JobError> {
     let s = &job.settings;
@@ -1033,7 +1017,6 @@ fn plan_export_checked(
     let tags = tags_of(s.color)?;
     let mut problems: Vec<String> = check(doc, &job.composition, &job.media)
         .iter()
-        .filter(|u| !(blender && u.feature == pm_render::Feature::Blender))
         .map(ToString::to_string)
         .collect();
     let rate = rate_of(s)?;
@@ -1122,7 +1105,6 @@ fn plan_export_checked(
         background: alpha == AlphaOutput::None,
         export: true,
         view: None,
-        blender: Default::default(),
         // Today's export counts: 16 samples opaque, 20 with alpha (the
         // composition's `motionBlurSamples` when set).
         motion_blur: if s.motion_blur {
@@ -1252,26 +1234,7 @@ pub fn run_export_into<S: Sink + Send>(
 where
     S::Output: Send,
 {
-    run_export_with_blender(renderer, job, plan, sink, gate, cancel, progress, None)
-}
-
-/// [`run_export_into`] with the job lane's Blender stage: each frame's
-/// Blender surfaces are prepared before it renders (`crate::blender`).
-#[allow(clippy::too_many_arguments)]
-pub fn run_export_with_blender<S: Sink + Send>(
-    renderer: &mut Renderer,
-    job: &ExportJob,
-    plan: ExportPlan,
-    sink: S,
-    gate: &dyn GpuGate,
-    cancel: &AtomicBool,
-    progress: &mut (dyn FnMut(Progress) + Send),
-    blender: Option<&mut crate::blender::ExportBlender>,
-) -> Result<S::Output, JobError>
-where
-    S::Output: Send,
-{
-    let result = export_frames(renderer, job, plan, sink, gate, cancel, progress, blender);
+    let result = export_frames(renderer, job, plan, sink, gate, cancel, progress);
     // The frames' staging buffer, target and pixels are kept only while
     // exporting (one-off frames release them in `render_frame`).
     renderer.release_frame_reuse();
@@ -1287,7 +1250,6 @@ fn export_frames<S: Sink + Send>(
     gate: &dyn GpuGate,
     cancel: &AtomicBool,
     progress: &mut (dyn FnMut(Progress) + Send),
-    mut blender: Option<&mut crate::blender::ExportBlender>,
 ) -> Result<S::Output, JobError>
 where
     S::Output: Send,
@@ -1468,82 +1430,55 @@ where
                     available_pixels.push(rgba);
                 }
             }
-            let frame_request = match blender.as_deref_mut() {
-                None => Ok(request.clone()),
-                Some(stage) => stage
-                    .prepare(
-                        renderer,
-                        &document,
-                        &job.composition,
-                        timeline.tick(n),
-                        &request,
-                        &*job.media,
-                        cancel,
-                        &mut |_, _| {},
-                    )
-                    .map(|surfaces| crate::blender::with_surfaces(&request, surfaces)),
-            };
             let preview_due = wants_preview && last_gpu_preview.elapsed() >= PREVIEW_EVERY;
             if preview_due {
                 last_gpu_preview = Instant::now();
             }
             let needs_readback = !gpu_frames || sampled.contains(&n) || preview_due;
             let frame_started = Instant::now();
-            let rendered = frame_request
-                .and_then(|frame_request| {
-                    render_frame_output(
-                        renderer,
-                        &document,
-                        &job.composition,
-                        timeline.tick(n),
-                        &frame_request,
-                        &job.media,
-                        gate,
-                        pass,
-                        cancel,
-                        gpu_frames,
-                        needs_readback,
-                        Some(&mut staging),
-                        if needs_readback {
-                            available_pixels.pop().unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        },
-                    )
-                })
-                .and_then(|mut f| {
-                    f.failures.retain(|failure| {
-                        let asset = failure
-                            .message
-                            .strip_prefix("media for asset ")
-                            .and_then(|rest| rest.strip_suffix(" is offline"));
-                        !offline
-                            .iter()
-                            .any(|clip| asset == Some(clip.asset.as_str()))
-                    });
-                    if f.failures.is_empty() {
-                        Ok(f)
-                    } else if let Some(l) = f
-                        .failures
+            let rendered = render_frame_output(
+                renderer,
+                &document,
+                &job.composition,
+                timeline.tick(n),
+                &request,
+                &job.media,
+                gate,
+                pass,
+                cancel,
+                gpu_frames,
+                needs_readback,
+                Some(&mut staging),
+                if needs_readback {
+                    available_pixels.pop().unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+            )
+            .and_then(|mut f| {
+                // Offline clips render absent (their names go in the report).
+                f.failures.retain(|failure| {
+                    let asset = failure
+                        .message
+                        .strip_prefix("media for asset ")
+                        .and_then(|rest| rest.strip_suffix(" is offline"));
+                    !offline
                         .iter()
-                        .find(|l| l.message == pm_render::blender::NOT_PREPARED)
-                    {
-                        // A Blender surface is missing: the export fails
-                        // (contract 11 invariant 7), it is never routed.
-                        Err(JobError::Blender(pm_blender::BlenderError::Failed(
-                            format!("layer {} in {}: {}", l.layer, l.composition, l.message),
-                        )))
-                    } else {
-                        Err(JobError::Unsupported(
-                            f.failures
-                                .iter()
-                                .map(|l| {
-                                    format!("layer {} in {}: {}", l.layer, l.composition, l.message)
-                                })
-                                .collect(),
-                        ))
-                    }
+                        .any(|clip| asset == Some(clip.asset.as_str()))
                 });
+                if f.failures.is_empty() {
+                    Ok(f)
+                } else {
+                    Err(JobError::Unsupported(
+                        f.failures
+                            .iter()
+                            .map(|l| {
+                                format!("layer {} in {}: {}", l.layer, l.composition, l.message)
+                            })
+                            .collect(),
+                    ))
+                }
+            });
             render_ns += frame_started.elapsed().as_nanos();
             // The frame as the exporting window's compatibility context
             // leaves it (today's WebM frames: `frame:rendered` handlers drew

@@ -93,9 +93,7 @@ export class CompatFrames {
     const windows = this.options.windows();
     // Level 1 SVG images are Chromium's rasters, drawn by the window that
     // has the project open (decision S1).
-    const closed = request.source === 'blenderPng'
-      ? 'Blender image conversion needs the editor window that has this project open.'
-      : request.source === 'svgImage'
+    const closed = request.source === 'svgImage'
       ? 'SVG images are drawn by the editor window that has this project open; open the project in a window to export it.'
       : 'This layer is drawn by an extension in the editor; open the project in a window to export it.';
     if (!windows.length) throw new ProtocolError('notHeadlessRenderable', closed);

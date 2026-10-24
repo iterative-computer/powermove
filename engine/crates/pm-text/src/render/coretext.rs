@@ -5,7 +5,7 @@
 //! level 2 gate and in Jude's side-by-side review sheets; the engine never
 //! renders with it (S4: coverage comes from Skrifa outlines on every host).
 //!
-//! Ported from spike S4 (`engine/spikes/s4-text/crates/s4-render`).
+//! Ported from spike S4 (`docs/engine/spikes/S4.md`).
 
 use std::collections::HashMap;
 use std::ptr::NonNull;
