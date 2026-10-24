@@ -171,7 +171,7 @@ export function formatDeprecationWarning(warning: DeprecationWarning): string {
 }
 
 /** What agents are told to do with these warnings (harness, MCP, runners). */
-export const DEPRECATION_GUIDANCE = 'Deprecated compatibility APIs keep working fully at apiVersion 1 to 3: never use them in new code. When an extension you read, compile or publish uses one, tell the user which file and line and what replaces it, and suggest the migration. Change the code only when the user agrees; never rewrite it silently, and never raise apiVersion for it.';
+export const DEPRECATION_GUIDANCE = 'Deprecated compatibility APIs work fully at apiVersion 1-3; never use them in new code. For one in an extension you read, compile or publish, give the user its file, line and replacement and suggest the migration. Change it only when the user agrees; never raise apiVersion for it.';
 
 function message(member: DeprecatedMember, access: DeprecationAccess): string {
   const name = member.service ? `the '${member.service}' service override (api.services)` : `api.${member.id}`;
