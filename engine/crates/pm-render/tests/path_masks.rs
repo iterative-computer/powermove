@@ -8,7 +8,8 @@
 //! add, subtract and subtract-only combinations, 10 parametric masks with a
 //! path, signed rectangles, HD and UHD.
 //!
-//! The reference composites, per mask in order, `pm_reference::coverage::
+//! The reference (`support/mask_reference.rs`, shared with the corpus
+//! gates) composites, per mask in order, `pm_reference::coverage::
 //! fill(outline, NonZero, 16)` feathered by `pm_reference::gaussian::blur`
 //! (transparent edges) at the authored σ = max(0, feather)·|world x|/2,
 //! `source-over` for add and `destination-out` for subtract, from 1 when no
@@ -28,11 +29,13 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "support/mask_reference.rs"]
+#[allow(dead_code)]
+mod mask_reference;
+
 use pm_reference::compare::{Bounds, Class, Stats, classify, compare, geometry, identical, same_geometry};
-use pm_reference::coverage::{FillRule, fill};
-use pm_reference::gaussian::{Edge, blur};
 use pm_render::composite::path_masks::{PathCoverage, coverage_values};
-use pm_vector::{LayerMasks, MaskMode, MaskShape, MaskValues, PathMasks, PathValues, Vertex};
+use pm_vector::{LayerMasks, MaskMode, MaskShape, MaskValues, PathValues, Vertex};
 
 /// The engine's precision bound per pixel (composite.md "Path masks"): the
 /// `r16float` store, half a step below 1 (2⁻¹²), once; per mask, the node
@@ -140,50 +143,6 @@ fn read_coverage(path: &Path) -> Vec<f64> {
     buf.chunks_exact(4).map(|p| f64::from(p[3]) / 255.0).collect()
 }
 
-/// The reference coverage canvas of `masks` on a layer whose world matrix
-/// is `world`.
-fn reference(masks: &PathMasks, world: [f64; 6], width: usize, height: usize) -> Vec<f64> {
-    let mut canvas = vec![if masks.start_covered { 1.0 } else { 0.0 }; width * height];
-    for m in &masks.masks {
-        let outline = m.transform_from(world).affine() * &m.path;
-        let cov = fill(&outline, FillRule::NonZero, 16, width, height);
-        let sigma = m.feather * world[0].hypot(world[1]) / 2.0;
-        let sigma = if sigma.is_finite() { sigma } else { 0.0 };
-        // The blur of the coverage's window grown by the kernel's 8σ reach
-        // (exact: everything outside the window is 0).
-        let reach = (8.0 * sigma).ceil() as usize;
-        let x0 = cov.x0.saturating_sub(reach);
-        let y0 = cov.y0.saturating_sub(reach);
-        let x1 = (cov.x0 + cov.width + reach).min(width);
-        let y1 = (cov.y0 + cov.height + reach).min(height);
-        if x1 <= x0 || y1 <= y0 {
-            continue;
-        }
-        let (w, h) = (x1 - x0, y1 - y0);
-        let mut window = vec![0.0; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                window[y * w + x] = cov.at(x0 + x, y0 + y);
-            }
-        }
-        let window = if sigma > 0.0 {
-            blur(&window, w, h, 1, (sigma, sigma), Edge::Transparent)
-        } else {
-            window
-        };
-        for y in 0..h {
-            for x in 0..w {
-                let (v, a) = (window[y * w + x], &mut canvas[(y0 + y) * width + x0 + x]);
-                *a = match m.mode {
-                    MaskMode::Add => v + *a * (1.0 - v),
-                    MaskMode::Subtract => *a * (1.0 - v),
-                };
-            }
-        }
-    }
-    canvas
-}
-
 /// Coverage as premultiplied white RGBA.
 fn rgba(c: &[f64]) -> Vec<f64> {
     c.iter().flat_map(|v| [*v; 4]).collect()
@@ -224,7 +183,7 @@ fn path_mask_coverage_gate() {
             failures.push(format!("{}: repeated renders differ: {e}", c.id));
         }
         let engine: Vec<f64> = first.iter().map(|v| f64::from(*v)).collect();
-        let exact = reference(&masks, c.world, w, h);
+        let exact = mask_reference::path_coverage(&masks, c.world, w, h);
         let edge: Vec<bool> = exact.iter().map(|v| *v > 1e-9 && *v < 1.0 - 1e-9).collect();
         let classes = classify(&edge, &vec![false; w * h], w, h, 2);
         let today = capture
