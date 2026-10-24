@@ -112,11 +112,7 @@ fn color_interpretation_follows_section_9() {
             c.interpreted.matrix,
             c.interpreted.range
         ),
-        (
-            Primaries::Bt709,
-            MatrixCoefficients::Bt601,
-            Range::Limited
-        )
+        (Primaries::Bt709, MatrixCoefficients::Bt601, Range::Limited)
     );
     assert!(
         c.defaults_applied
