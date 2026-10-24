@@ -12,7 +12,7 @@ import { ENGINE_VIEWER_CHANGED as VIEWER_CHANGED, ENGINE_VIEWER_SERVICE as VIEWE
 import { EngineConnection, type PortLike } from './connection';
 import { bestOffset, HostClock } from './host-clock';
 import { ENGINE_VIEWER_CHANGED, ENGINE_VIEWER_SERVICE, missedRoute } from './install';
-import { DEFINITIONS_RETRIES, DocumentSession, documentId, hexBytes, type StreamBatch } from './session';
+import { DEFINITIONS_RETRIES, DocumentSession, MAX_PATCH_BODY_BYTES, documentId, hexBytes, type StreamBatch } from './session';
 import { EngineTransport, mediaTicksAt, ticks, TICKS_PER_SECOND } from './transport';
 import { followOpenComposition } from './composition-follow';
 import { EnginePreview, documentWake } from './preview';
@@ -111,6 +111,27 @@ async function connected(port = engine()) {
 }
 
 describe('the engine connection', () => {
+  it('registers session producers before the initial document can become usable', async () => {
+    const { connection, port } = await connected();
+    const opened = vi.fn(() => {
+      expect(session.id).toBe(5);
+      expect(session.applied).toBe(0);
+      expect(port.requests('resync')).toHaveLength(0);
+      session.post({ type: 'compat', compat: 'producers', sources: ['rasterOverride'] });
+    });
+    const session = new DocumentSession({
+      connection, stream: stream(), documentId: () => 'P', log: () => {},
+      handlers: { message: () => {}, closed: () => {} }, onOpened: opened
+    });
+    await session.start();
+    expect(opened).toHaveBeenCalledOnce();
+    const producer = port.sent.indexOf(port.events('compat')[0]!);
+    const resync = port.sent.indexOf(port.requests('resync')[0]!);
+    expect(producer).toBeGreaterThanOrEqual(0);
+    expect(producer).toBeLessThan(resync);
+    session.close(); connection.close('test complete');
+  });
+
   it('shares the viewer service names with the viewer', () => {
     expect(ENGINE_VIEWER_SERVICE).toBe(VIEWER_SERVICE);
     expect(ENGINE_VIEWER_CHANGED).toBe(VIEWER_CHANGED);
@@ -182,6 +203,19 @@ describe('the engine connection', () => {
     const applied = port.events('applyPatches').map((e) => (e.message as { body: { baseRevision: number; revision: number } }).body);
     expect(applied.map((b) => [b.baseRevision, b.revision])).toEqual([[3, 4], [4, 5]]);
     expect(session.batches).toBe(2);
+    // A provisional batch, then its confirmation, on the same port in order;
+    // a confirmation for a revision the session moved past sends nothing.
+    doc.emit({ revision: 6, provisional: true });
+    doc.emit({ revision: 6, baseRevision: 6, count: 0, body: new Uint8Array(0), confirmed: true });
+    await flush();
+    doc.emit({ revision: 7, provisional: true });
+    doc.emit({ revision: 8 });
+    doc.emit({ revision: 7, baseRevision: 7, count: 0, body: new Uint8Array(0), confirmed: true });
+    await flush();
+    const order = port.sent.flatMap((e) => (e.message.kind === 'event' ? [e.message.body as { type: string; revision?: number; provisional?: boolean }] : []))
+      .filter((b) => b.type === 'applyPatches' || b.type === 'confirmRevision').slice(2)
+      .map((b) => [b.type, b.revision, b.provisional ?? false]);
+    expect(order).toEqual([['applyPatches', 6, true], ['confirmRevision', 6, false], ['applyPatches', 7, true], ['applyPatches', 8, false]]);
 
     // A frame says the engine draws the composition; an `unsupported`
     // failure routes it to the legacy viewer. The report names the newest
@@ -852,6 +886,44 @@ it('resumes a checkpoint and replays only the bounded patch suffix without takin
   expect(session.batches).toBe(2);
   const patches = port.events('applyPatches').map(e => (e.message as any).body);
   expect(patches.at(-1).revision).toBe(5);
+  session.close(); connection.close('test complete');
+});
+
+it('replays a journaled provisional batch with its confirmation on reconnect, so the engine never holds the frame', async () => {
+  const { connection, port } = await connected();
+  const suffix: StreamBatch[] = [
+    { baseRevision: 3, revision: 4, origin: 'structuralDiff', count: 1, body: new Uint8Array([1]), provisional: true },
+    { baseRevision: 4, revision: 4, origin: 'metadata', count: 0, body: new Uint8Array(0), confirmed: true },
+    { baseRevision: 4, revision: 5, origin: 'structuralDiff', count: 1, body: new Uint8Array([2]), provisional: true },
+    { baseRevision: 5, revision: 6, origin: 'structuralDiff', count: 1, body: new Uint8Array([3]) },
+  ];
+  const doc = { ...stream(), resume: () => ({ revision: 3, hash: 'ab'.repeat(32), batches: suffix }) };
+  const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+  await session.start(); await flush();
+  const order = port.sent.flatMap((e) => (e.message.kind === 'event' ? [e.message.body as { type: string; revision?: number; provisional?: boolean }] : []))
+    .filter((b) => b.type === 'applyPatches' || b.type === 'confirmRevision').map((b) => [b.type, b.revision, b.provisional ?? false]);
+  // 4 is confirmed; 5 was superseded by 6, which the engine presents.
+  expect(order).toEqual([['applyPatches', 4, true], ['confirmRevision', 4, false], ['applyPatches', 5, true], ['applyPatches', 6, false]]);
+  session.close(); connection.close('test complete');
+});
+
+it.each(['oversize', 'gap'] as const)('never resyncs from a provisional batch it cannot forward (%s); its confirmation resyncs the settled document', async (why) => {
+  const { connection, port } = await connected();
+  const doc = stream();
+  const snapshot = vi.fn(doc.snapshot);
+  const session = new DocumentSession({ connection, stream: { ...doc, snapshot }, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+  await session.start(); await flush();
+  const resyncs = () => port.requests('resync').length;
+  const before = resyncs(), snapshots = snapshot.mock.calls.length;
+  if (why === 'oversize') doc.emit({ revision: 4, provisional: true, body: new Uint8Array(MAX_PATCH_BODY_BYTES + 1) });
+  else doc.emit({ revision: 5, baseRevision: 4, provisional: true });
+  await flush();
+  expect([resyncs(), snapshot.mock.calls.length]).toEqual([before, snapshots]);
+  expect(port.events('applyPatches').filter((e) => (e.message as any).body.provisional)).toEqual([]);
+  doc.emit({ revision: doc.snapshot().revision, baseRevision: doc.snapshot().revision, count: 0, body: new Uint8Array(0), confirmed: true });
+  await flush();
+  expect(resyncs()).toBe(before + 1);
+  expect(port.events('confirmRevision')).toEqual([]);
   session.close(); connection.close('test complete');
 });
 

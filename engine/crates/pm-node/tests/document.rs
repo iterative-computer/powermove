@@ -47,7 +47,7 @@ use pm_protocol::frame::{
 };
 use pm_protocol::host::PortId;
 use pm_protocol::patch::{
-    DocumentEncoding, PatchBatch, PatchEncoding, PatchOrigin, Resync, ResyncSource,
+    ConfirmRevision, DocumentEncoding, PatchBatch, PatchEncoding, PatchOrigin, Resync, ResyncSource,
 };
 use pm_protocol::version::PeerRole;
 use serde_json::{Value, json};
@@ -678,7 +678,7 @@ fn child_engine() {
 
     // A patch batch (pm-wasm's canonical binary) moves the layer.
     let mut revision = 1;
-    let mut edit = |host: &mut EngineHost, next: Value, doc: &mut Value| {
+    let mut edit = |host: &mut EngineHost, next: Value, doc: &mut Value, provisional: bool| {
         let ops = pm_model::ops::diff_ops(Some(&model(doc)), Some(&model(&next)));
         let body = pm_model::binary::encode(&ops).unwrap();
         let batch = PatchBatch {
@@ -689,13 +689,14 @@ fn child_engine() {
             encoding: PatchEncoding::CanonicalV1,
             patch_count: ops.len() as u32,
             body: Bytes(body),
+            provisional,
         };
         revision += 1;
         *doc = next;
         send(host, event(Event::ApplyPatches(batch)));
         revision
     };
-    let r = edit(&mut host, project(solid(130.0, json!([]))), &mut doc);
+    let r = edit(&mut host, project(solid(130.0, json!([]))), &mut doc, false);
     let moved = inbox.wait(Duration::from_secs(10), |m| {
         frame(m).filter(|d| d.revision.get() == r)
     });
@@ -706,9 +707,67 @@ fn child_engine() {
     );
     release(&mut host, &moved);
 
+    // A provisional batch (an unscoped write's layers the renderer sent
+    // before comparing the rest): its frame waits for the confirmation.
+    let confirm = |host: &mut EngineHost, revision: u64| {
+        send(
+            host,
+            event(Event::ConfirmRevision(ConfirmRevision {
+                document: "Ptracer".into(),
+                revision: Revision::new(revision).unwrap(),
+            })),
+        );
+    };
+    let held = edit(&mut host, project(solid(140.0, json!([]))), &mut doc, true);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        inbox
+            .take()
+            .iter()
+            .filter_map(frame)
+            .all(|d| d.revision.get() < held),
+        "a provisional revision's frame waits for its confirmation"
+    );
+    confirm(&mut host, held);
+    let confirmed = inbox.wait(Duration::from_secs(10), |m| {
+        frame(m).filter(|d| d.revision.get() == held)
+    });
+    release(&mut host, &confirmed);
+    // Superseded: the comparison found more, so the next batch replaces the
+    // provisional revision, whose frame is never presented, even when a
+    // late confirmation names it.
+    let partial = edit(&mut host, project(solid(150.0, json!([]))), &mut doc, true);
+    std::thread::sleep(Duration::from_millis(300));
+    let whole = edit(&mut host, project(solid(160.0, json!([]))), &mut doc, false);
+    confirm(&mut host, partial);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut seen: Vec<FrameDescriptor> = Vec::new();
+    while !seen.iter().any(|d| d.revision.get() == whole) {
+        assert!(Instant::now() < deadline, "the whole change was not drawn");
+        std::thread::sleep(Duration::from_millis(20));
+        seen.extend(inbox.take().iter().filter_map(frame));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    seen.extend(inbox.take().iter().filter_map(frame));
+    assert!(
+        seen.iter().all(|d| d.revision.get() != partial),
+        "a superseded provisional revision is never presented"
+    );
+    let shown = seen
+        .iter()
+        .find(|d| d.revision.get() == whole)
+        .unwrap()
+        .clone();
+    let dx = shown.overlay.as_ref().unwrap().layers[0].bounds[0][0] - x0;
+    assert!(
+        (dx - 60.0 * 4.0).abs() < 1e-6,
+        "the whole change is shown: {dx}"
+    );
+    release(&mut host, &shown);
+
     // An effect routes the composition to the legacy viewer.
     let fx = json!([{ "id": "fx1", "type": "blur", "on": true, "params": {} }]);
-    let routed_revision = edit(&mut host, project(solid(130.0, fx)), &mut doc);
+    let routed_revision = edit(&mut host, project(solid(130.0, fx)), &mut doc, false);
     let code = inbox.wait(Duration::from_secs(10), failure);
     assert_eq!(code, ErrorCode::Unsupported);
     std::thread::sleep(Duration::from_millis(200));
@@ -721,7 +780,7 @@ fn child_engine() {
         "no engine frames while routed"
     );
     // Without it, engine frames come back.
-    let r = edit(&mut host, project(solid(130.0, json!([]))), &mut doc);
+    let r = edit(&mut host, project(solid(130.0, json!([]))), &mut doc, false);
     let back = inbox.wait(Duration::from_secs(10), |m| {
         frame(m).filter(|d| d.revision.get() == r)
     });
@@ -753,7 +812,7 @@ fn child_engine() {
     assert_eq!(applied.generation, Seq::new(1).unwrap());
     let blurred =
         json!([{ "id": "fx1", "type": "blur", "on": true, "p": { "amount": ch(json!(8)) } }]);
-    let r = edit(&mut host, project(solid(130.0, blurred)), &mut doc);
+    let r = edit(&mut host, project(solid(130.0, blurred)), &mut doc, false);
     let drawn = inbox.wait(Duration::from_secs(20), |m| {
         frame(m).filter(|d| d.revision.get() == r)
     });
@@ -771,12 +830,12 @@ fn child_engine() {
         .as_array_mut()
         .unwrap()
         .insert(0, adjustment);
-    let r = edit(&mut host, adjusted, &mut doc);
+    let r = edit(&mut host, adjusted, &mut doc, false);
     let inverted = inbox.wait(Duration::from_secs(20), |m| {
         frame(m).filter(|d| d.revision.get() == r)
     });
     release(&mut host, &inverted);
-    let r = edit(&mut host, project(solid(130.0, json!([]))), &mut doc);
+    let r = edit(&mut host, project(solid(130.0, json!([]))), &mut doc, false);
     let plain = inbox.wait(Duration::from_secs(10), |m| {
         frame(m).filter(|d| d.revision.get() == r)
     });
@@ -968,6 +1027,7 @@ fn child_report_after_in_flight_frame() {
             encoding: PatchEncoding::CanonicalV1,
             patch_count: ops.len() as u32,
             body: Bytes(pm_model::binary::encode(&ops).unwrap()),
+            provisional: false,
         };
         revision += 1;
         *doc = next;

@@ -85,6 +85,7 @@ impl FramePresenter for Recorder {
         _: PortId,
         _: SessionId,
         update: DocumentUpdate,
+        _: bool,
     ) {
         let mut mirror = self.mirror.lock().unwrap();
         update.apply_to(&mut mirror).unwrap();
@@ -189,6 +190,7 @@ fn batch(document: &str, base: u64, revision: u64, before: &str, after: &str) ->
         encoding: PatchEncoding::CanonicalV1,
         patch_count: ops.len() as u32,
         body: Bytes(pm_model::binary::encode(&ops).unwrap()),
+        provisional: false,
     })
 }
 

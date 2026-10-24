@@ -111,11 +111,12 @@ export async function engineRaster(transport: EngineRenderTransport, host: Raste
 }
 
 /** Playback's base pixels, asynchronously prepared at dependency priority. */
-export async function engineRasterPrepared(transport: EngineRenderTransport, host: RasterHost, layer: any, scale: number, time: number, crop: RasterCrop): Promise<EngineRasterSurface | null> {
+/** The engine's raster and the document revision it was drawn at. */
+export async function engineRasterPrepared(transport: EngineRenderTransport, host: RasterHost, layer: any, scale: number, time: number, crop: RasterCrop): Promise<{ surface: EngineRasterSurface | null; revision: number } | null> {
   const window = engineCrop(crop);
   const where = host.locate(layer);
   const snapshot = await transport.rasterForCompat(String(layer?.id ?? ''), scale, time, window, rasterOptions(layer, where));
-  return snapshot ? toRasterSurface(withoutInk(snapshot, layer, scale), layer, window, s => transport.toCanvas(s), host, time) : null;
+  return snapshot ? { surface: toRasterSurface(withoutInk(snapshot, layer, scale), layer, window, s => transport.toCanvas(s), host, time), revision: snapshot.revision } : null;
 }
 
 /** Today's raster at zero, a negative scale, or NaN draws through a

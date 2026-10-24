@@ -412,6 +412,7 @@ fn child_engine() {
             encoding: PatchEncoding::CanonicalV1,
             patch_count: ops.len() as u32,
             body: Bytes(body),
+            provisional: false,
         })),
     );
     let next = inbox.wait(Duration::from_secs(20), |m| match &m.message {
@@ -523,6 +524,7 @@ fn child_engine() {
             encoding: PatchEncoding::CanonicalV1,
             patch_count: ops.len() as u32,
             body: Bytes(body),
+            provisional: false,
         })),
     );
     let effect = inbox.wait(Duration::from_secs(20), |m| match &m.message {
@@ -589,6 +591,7 @@ fn child_engine() {
             encoding: PatchEncoding::CanonicalV1,
             patch_count: ops.len() as u32,
             body: Bytes(pm_model::binary::encode(&ops).unwrap()),
+            provisional: false,
         })),
     );
     let full = inbox.wait(Duration::from_secs(20), |m| match &m.message {

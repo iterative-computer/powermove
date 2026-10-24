@@ -38,7 +38,8 @@ use crate::host::{
 use crate::interop::SurfacePool;
 use crate::lease::{Lease, LeaseRequest, LeaseUsage};
 use crate::patch::{
-    ConsistencyCheck, ConsistencyResult, EngineFact, PatchBatch, PatchesApplied, Resync,
+    ConfirmRevision, ConsistencyCheck, ConsistencyResult, EngineFact, PatchBatch, PatchesApplied,
+    Resync,
 };
 use crate::preview::{PreviewControl, PreviewStatus};
 use crate::priority::{
@@ -287,6 +288,9 @@ pub enum Response {
 pub enum Event {
     /// pm-wasm → engine (session-bound): canonical patches, in revision order.
     ApplyPatches(PatchBatch),
+    /// Renderer → engine (session-bound): a provisional batch was the whole
+    /// change; frames of its revision may be presented.
+    ConfirmRevision(ConfirmRevision),
     /// Engine → renderer: coalesced acknowledgement of applied patches.
     PatchesApplied(PatchesApplied),
     /// Engine → viewer, over the viewer's port (never through main,
@@ -499,7 +503,10 @@ impl Response {
 impl Event {
     pub const fn contract(&self) -> ContractId {
         match self {
-            Event::ApplyPatches(_) | Event::PatchesApplied(_) | Event::Fact(_) => ContractId::Patch,
+            Event::ApplyPatches(_)
+            | Event::ConfirmRevision(_)
+            | Event::PatchesApplied(_)
+            | Event::Fact(_) => ContractId::Patch,
             Event::Frame(_) | Event::ReleaseFrame(_) | Event::Viewer(_) => ContractId::Frame,
             Event::SurfacePool(_) => ContractId::GpuInterop,
             Event::Transport(_) | Event::Clock(_) | Event::Audio(_) => ContractId::Clock,
@@ -518,6 +525,7 @@ impl Event {
         matches!(
             self,
             Event::ApplyPatches(_)
+                | Event::ConfirmRevision(_)
                 | Event::PatchesApplied(_)
                 | Event::Frame(_)
                 | Event::ReleaseFrame(_)
