@@ -283,7 +283,9 @@ viewer's worker, which draws it on arrival; `frame:rendered` follows in the
 window's next animation frame. The gate "a paused edit is presented only
 whole" makes the comparison find more twice (the write moved another layer;
 the override moves one and calls `touch()` while it draws) and requires that
-no frame of either superseded revision is ever drawn.
+no frame of either superseded revision is ever drawn. A third phase adds
+2,500 layers, so the comparison outlasts the engine's frame: the engine parks
+it, and the extra change found then must drop it.
 
 Build the native addons, wasm and app before acquiring the Electron lock.
 Run the opt-in gate from the repository root:
