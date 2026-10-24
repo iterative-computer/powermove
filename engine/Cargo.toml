@@ -28,6 +28,11 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 2
 
+# The quality gates' f64 references (Gaussian blurs at large σ) are billions
+# of operations per frame.
+[profile.dev.package.pm-reference]
+opt-level = 3
+
 # wgpu 30.0.1's front crate with the engine's work counters added to its
 # resource creations, pass commands, uploads, and readbacks (pm-perf;
 # engine/third_party/wgpu/POWERMOVE.md, docs/engine/perfbench.md).
