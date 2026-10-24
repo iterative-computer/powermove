@@ -27,6 +27,17 @@ impl core::fmt::Display for GpuUnavailable {
 
 impl std::error::Error for GpuUnavailable {}
 
+/// One SVG document in a [`GpuCoverage::render_svgs`] pass.
+pub struct SvgCell<'a> {
+    pub doc: &'a SvgDocument,
+    /// User units to target pixels.
+    pub transform: Affine,
+    /// The document's clip polygon in target pixels.
+    pub clip: [kurbo::Point; 4],
+    /// The part of the target that is this document's.
+    pub cell: Rect,
+}
+
 /// A Vello renderer on the engine's device, area coverage only.
 pub struct GpuCoverage {
     renderer: Renderer,
@@ -71,24 +82,29 @@ impl GpuCoverage {
         }
     }
 
-    /// Renders `doc` under `transform` (user units to `target` pixels),
-    /// clipped to the polygon `clip`, into `target` (a texture made with
-    /// [`Self::page_descriptor`] at `width` × `height`): straight-alpha
-    /// sRGB values, as Vello stores them. Only for
-    /// [`SvgDocument::gpu_paintable`] documents.
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_svg(
+    /// Renders SVG documents into `target` (a texture made with
+    /// [`Self::page_descriptor`] at `width` × `height`) in one pass: each
+    /// under its transform (user units to `target` pixels), clipped to its
+    /// polygon and to its cell of the target. Straight-alpha sRGB values,
+    /// as Vello stores them. Only for [`SvgDocument::gpu_paintable`]
+    /// documents.
+    pub fn render_svgs(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        doc: &SvgDocument,
-        transform: Affine,
-        clip: &[kurbo::Point],
+        cells: &[SvgCell<'_>],
         (width, height): (u32, u32),
         target: &wgpu::TextureView,
     ) -> Result<(), GpuUnavailable> {
         self.scene.reset();
-        doc.encode(&mut self.scene, transform, clip);
+        for cell in cells {
+            // One clip: the document's polygon within its cell.
+            let clip = crate::render::svg_vello::clip_to_rect(&cell.clip, cell.cell);
+            if clip.len() >= 3 {
+                cell.doc.encode(&mut self.scene, cell.transform, &clip);
+            }
+        }
+
         let params = RenderParams {
             base_color: AlphaColor::from_rgba8(0, 0, 0, 0),
             width,

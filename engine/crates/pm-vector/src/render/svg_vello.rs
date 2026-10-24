@@ -7,10 +7,11 @@
 //!   transform as the brush transform), interpolated in sRGB with straight
 //!   alpha as Skia and resvg interpolate SVG gradients.
 //! - Groups that isolate (opacity, blend mode, clip path, mask,
-//!   `isolation`) are layers over their layer bounds; clip paths and masks
-//!   are luminance masks applied to the group's content before its opacity
-//!   and blend (clip children are opaque white fills with their clip rule,
-//!   an alpha mask is its content painted white).
+//!   `isolation`) are layers over their layer bounds; a clip path of one
+//!   plain path is the layer's clip shape, other clip paths and masks are
+//!   luminance masks applied to the group's content before its opacity and
+//!   blend (clip children are opaque white fills with their clip rule, an
+//!   alpha mask is its content painted white).
 //! - Text is its usvg outlines.
 //!
 //! Documents with anything else are not [`SvgDocument::gpu_paintable`].
@@ -55,6 +56,36 @@ impl SvgDocument {
     }
 }
 
+/// The convex polygon `poly` clipped to `rect` (Sutherland–Hodgman).
+pub(crate) fn clip_to_rect(poly: &[Point], rect: Rect) -> Vec<Point> {
+    let mut out: Vec<Point> = poly.to_vec();
+    let edges: [(fn(Point, Rect) -> f64, fn(Point, Point, Rect) -> Point); 4] = [
+        (|p, r| p.x - r.x0, |a, b, r| lerp(a, b, (r.x0 - a.x) / (b.x - a.x))),
+        (|p, r| r.x1 - p.x, |a, b, r| lerp(a, b, (r.x1 - a.x) / (b.x - a.x))),
+        (|p, r| p.y - r.y0, |a, b, r| lerp(a, b, (r.y0 - a.y) / (b.y - a.y))),
+        (|p, r| r.y1 - p.y, |a, b, r| lerp(a, b, (r.y1 - a.y) / (b.y - a.y))),
+    ];
+    fn lerp(a: Point, b: Point, t: f64) -> Point {
+        a + (b - a) * t
+    }
+    for (inside, cross) in edges {
+        let input = core::mem::take(&mut out);
+        for (i, &b) in input.iter().enumerate() {
+            let a = input[(i + input.len() - 1) % input.len()];
+            let (ia, ib) = (inside(a, rect) >= 0.0, inside(b, rect) >= 0.0);
+            if ib {
+                if !ia {
+                    out.push(cross(a, b, rect));
+                }
+                out.push(b);
+            } else if ia {
+                out.push(cross(a, b, rect));
+            }
+        }
+    }
+    out
+}
+
 struct Encoder<'a> {
     scene: &'a mut Scene,
     /// Painting the content of a clip path or an alpha mask: every paint is
@@ -91,6 +122,30 @@ fn mix(mode: usvg::BlendMode) -> Mix {
         B::Color => Mix::Color,
         B::Luminosity => Mix::Luminosity,
     }
+}
+
+/// The one fill path `c` clips to, with its clip rule, when that is all it
+/// is: no clip path of its own, one visible filled path and nothing else
+/// (resvg draws exactly that path's fill as the clip's coverage).
+fn simple_clip(c: &usvg::ClipPath) -> Option<(&usvg::Path, Fill)> {
+    if c.clip_path().is_some() {
+        return None;
+    }
+    let [usvg::Node::Path(p)] = c.root().children() else {
+        return None;
+    };
+    let f = p.fill()?;
+    let b = p.data().bounds();
+    if !p.is_visible() || b.width() == 0.0 || b.height() == 0.0 {
+        return None;
+    }
+    Some((
+        p,
+        match f.rule() {
+            usvg::FillRule::NonZero => Fill::NonZero,
+            usvg::FillRule::EvenOdd => Fill::EvenOdd,
+        },
+    ))
 }
 
 impl Encoder<'_> {
@@ -176,15 +231,28 @@ impl Encoder<'_> {
             return;
         }
         let bounds = Self::layer_rect(g, t);
-        self.scene.push_layer(
-            Fill::NonZero,
-            BlendMode::new(mix(g.blend_mode()), Compose::SrcOver),
-            g.opacity().get(),
-            Affine::IDENTITY,
-            &bounds,
-        );
+        let blend = BlendMode::new(mix(g.blend_mode()), Compose::SrcOver);
+        // A clip path of one plain path is the layer's own clip shape (no
+        // mask layer); any other is a luminance mask.
+        let shape_clip = g.clip_path().and_then(|c| simple_clip(c).map(|(p, rule)| (c, p, rule)));
+        match &shape_clip {
+            Some((c, p, rule)) => self.scene.push_layer(
+                *rule,
+                blend,
+                g.opacity().get(),
+                t * affine(c.transform()),
+                &bez(p.data()),
+            ),
+            None => self.scene.push_layer(
+                Fill::NonZero,
+                blend,
+                g.opacity().get(),
+                Affine::IDENTITY,
+                &bounds,
+            ),
+        }
         self.children(g, t);
-        if let Some(c) = g.clip_path() {
+        if let (Some(c), None) = (g.clip_path(), &shape_clip) {
             self.clip(c, t, bounds);
         }
         if let Some(m) = g.mask() {
@@ -313,5 +381,27 @@ impl Encoder<'_> {
                 self.fill(p, t);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rotated_clip_is_cut_to_its_cell() {
+        let square = [
+            Point::new(5.0, -5.0),
+            Point::new(15.0, 5.0),
+            Point::new(5.0, 15.0),
+            Point::new(-5.0, 5.0),
+        ];
+        let cut = clip_to_rect(&square, Rect::new(0.0, 0.0, 10.0, 10.0));
+        // The diamond within the cell: an octagon, every point inside.
+        assert_eq!(cut.len(), 8);
+        assert!(cut.iter().all(|p| (0.0..=10.0).contains(&p.x) && (0.0..=10.0).contains(&p.y)));
+        let inside = clip_to_rect(&square, Rect::new(-10.0, -10.0, 20.0, 20.0));
+        assert_eq!(inside, square.to_vec());
+        assert!(clip_to_rect(&square, Rect::new(30.0, 30.0, 40.0, 40.0)).is_empty());
     }
 }

@@ -1591,6 +1591,8 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
+        self.vector
+            .prepare_svgs(&self.device, &self.queue, &mut encoder, &plan, precision);
         // Exports never draw stand-ins (docs/engine/scrub.md).
         self.media.stand_ins.clear();
         let scrub = self.media.scrub;

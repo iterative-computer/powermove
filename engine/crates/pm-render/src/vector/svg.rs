@@ -129,6 +129,36 @@ pub fn plan_svg(
     })))
 }
 
+/// The SVG image sources `plan` draws (nested compositions, layers drawn
+/// through their own targets, and matte passes included), in draw order.
+pub fn svg_sources<'p>(plan: &'p crate::plan::CompPlan, out: &mut Vec<&'p VectorSource>) {
+    use crate::plan::{Content, Source};
+    fn content<'p>(c: &'p Content, out: &mut Vec<&'p VectorSource>) {
+        match c {
+            Content::Placed(p) => content(&p.content, out),
+            Content::Texture { source, .. } => match source {
+                Source::Vector(v) if matches!(**v, VectorSource::SvgRaster { .. }) => out.push(v),
+                Source::Comp(child) | Source::Accumulate(child) => svg_sources(child, out),
+                _ => {}
+            },
+            Content::Composite(node) => {
+                if let crate::composite::Node::Layer(l) = &**node {
+                    for d in &l.content {
+                        content(&d.content, out);
+                    }
+                    if let Some(m) = &l.matte {
+                        svg_sources(&m.source, out);
+                    }
+                }
+            }
+            Content::Solid(_) => {}
+        }
+    }
+    for d in &plan.draws {
+        content(&d.content, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
