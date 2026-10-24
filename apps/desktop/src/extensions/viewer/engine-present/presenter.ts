@@ -139,11 +139,6 @@ export type PresenterOptions = {
    * frame anyway.
    */
   drawOnArrival?: boolean;
-  /** Submit timed canvas frames between compositor deadlines, avoiding a
-   * race with the page's frame for the same BeginFrame. Gestures still
-   * draw on arrival. Fraction of a refresh after the rAF timestamp. */
-  commitPhaseRefreshes?: number;
-  timers?: { set(fn: () => void, ms: number): number; clear(id: number): void };
 };
 
 type Payload = { frame: VideoFrame };
@@ -203,7 +198,6 @@ export type PresenterMemory = { localVideoFrames: number; workerCloneUpperBound:
 export class EnginePresenter implements Presenter {
   private readonly buffer = new JitterBuffer<Payload>();
   private vsync: VsyncEstimator;
-  private nominalPeriodMs: number;
   private cancelFrame: (id: number) => void = (id) => cancelAnimationFrame(id);
   /** Bumped when the loop moves, so a stale loop's callbacks stop. */
   private loop = 0;
@@ -225,8 +219,6 @@ export class EnginePresenter implements Presenter {
   private hint: VsyncHint | null = null;
   private hintSentMs = -Infinity;
   private raf = 0;
-  private refreshTimer: number | null = null;
-  private refreshDeadline: number | null = null;
   private disposed = false;
   private unsubscribe: () => void;
   private readonly now: () => number;
@@ -245,7 +237,6 @@ export class EnginePresenter implements Presenter {
 
   constructor(private readonly options: PresenterOptions) {
     this.vsync = new VsyncEstimator(options.displayHz ?? null);
-    this.nominalPeriodMs = 1000 / (options.displayHz ?? 60);
     this.now = options.now ?? (() => performance.now());
     this.trace = options.trace ? { arrivals: [], draws: [], drops: [], releases: [], rafs: [] } : null;
     this.generation = options.generation ?? 0;
@@ -253,62 +244,26 @@ export class EnginePresenter implements Presenter {
     this.unsubscribe = options.source.onSurface((generation, poolIndex) => this.unpark(generation, poolIndex));
   }
 
-  /** Starts presenting at every animation frame. */
+  /**
+   * Starts presenting at every animation frame. Timed frames are drawn in
+   * the animation frame itself: a worker canvas sends its frame to viz as
+   * the callback returns, while a frame drawn later in the refresh waits
+   * for the next BeginFrame and a timer that fires late loses a refresh
+   * (docs/engine/bridge.md, "Pacing at 120 Hz").
+   */
   start(
     requestFrame: (cb: (t: number) => void) => number = (cb) => requestAnimationFrame(cb),
     cancelFrame: (id: number) => void = (id) => cancelAnimationFrame(id)
   ): void {
     if (this.raf) this.cancelFrame(this.raf);
-    this.cancelRefresh();
-    this.raf = 0;
     this.cancelFrame = cancelFrame;
     const token = ++this.loop;
     const loop = (t: number): void => {
       if (this.disposed || token !== this.loop) return;
       this.raf = requestFrame(loop);
-      const fraction = this.options.commitPhaseRefreshes ?? 0;
-      if (!fraction) { this.refresh(t); return; }
-      // Fit on every BeginFrame, even if a not-yet-known faster display
-      // supersedes the initial deadline before it fires.
-      const fit = this.vsync.sample(t);
-      const period = fit?.periodMs ?? this.nominalPeriodMs;
-      const deadline = t + fraction * period;
-      if (this.refreshTimer !== null) {
-        if (this.refreshDeadline !== null && this.refreshDeadline <= this.now()) {
-          // Under load BeginFrame can overtake its commit timer. Fulfil
-          // that overdue turn now instead of canceling it forever.
-          this.cancelRefresh();
-          this.refresh(t, fit);
-          return;
-        }
-        // A newer refresh may move a deadline earlier (a faster display),
-        // but must never postpone a commit that is already queued.
-        if (this.refreshDeadline !== null && deadline >= this.refreshDeadline) return;
-        this.cancelRefresh();
-      }
-      const run = () => {
-        this.refreshTimer = null;
-        this.refreshDeadline = null;
-        if (this.disposed || token !== this.loop) return;
-        // A delayed task uses the current refresh, never a stale decision.
-        const current = t + Math.max(0, Math.floor((this.now() - t) / period)) * period;
-        this.refresh(current, fit);
-      };
-      const delay = deadline - this.now();
-      if (delay > 0) {
-        this.refreshDeadline = deadline;
-        this.refreshTimer = this.options.timers?.set(run, delay) ?? setTimeout(run, delay) as unknown as number;
-      } else run();
+      this.refresh(t);
     };
     this.raf = requestFrame(loop);
-  }
-
-  private cancelRefresh(): void {
-    if (this.refreshTimer === null) return;
-    if (this.options.timers) this.options.timers.clear(this.refreshTimer);
-    else clearTimeout(this.refreshTimer);
-    this.refreshTimer = null;
-    this.refreshDeadline = null;
   }
 
   /**
@@ -323,7 +278,6 @@ export class EnginePresenter implements Presenter {
   ): void {
     if (this.disposed) return;
     this.vsync = new VsyncEstimator(displayHz);
-    this.nominalPeriodMs = 1000 / (displayHz ?? 60);
     this.offsetKey = '';
     this.offsetUs = 0;
     // Another display: its grid replaces the old one as soon as it is fitted.
@@ -489,10 +443,10 @@ export class EnginePresenter implements Presenter {
   }
 
   /** One refresh: called at requestAnimationFrame with its timestamp. */
-  refresh(rafMs: number, sampledFit?: VsyncFit | null): void {
+  refresh(rafMs: number): void {
     if (this.disposed) return;
     this.trace?.rafs.push(rafMs);
-    const fit = sampledFit === undefined ? this.vsync.sample(rafMs) : sampledFit;
+    const fit = this.vsync.sample(rafMs);
     this.updateHint(rafMs, fit);
     this.expireParked(rafMs);
     const { decisionMs, displayMs } = this.decision(rafMs, fit);
@@ -664,7 +618,6 @@ export class EnginePresenter implements Presenter {
     for (const { desc } of this.parked) this.releaseDesc(desc, 'disposed');
     this.parked = [];
     this.disposed = true;
-    this.cancelRefresh();
     if (this.raf) cancelFrame(this.raf);
     this.unsubscribe();
     this.listeners.clear();

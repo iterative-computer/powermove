@@ -123,8 +123,6 @@ class Pair {
   workerNow = 0;
   private readonly rafs = new Map<number, (t: number) => void>();
   private nextRaf = 1;
-  private nextTimer = 1;
-  private timers = new Map<number, { at: number; run: () => void }>();
   private toPage: ((event: MessageEvent<FromWorker>) => void)[] = [];
   private errors: ((event: Event) => void)[] = [];
   private toWorker: ((event: MessageEvent<ToWorker>) => void)[] = [];
@@ -151,10 +149,6 @@ class Pair {
       performance: { now: () => pair.workerNow, timeOrigin: 1000 }
     };
     servePresenter(scope, {
-      timers: {
-        set: (run, ms) => { const id = pair.nextTimer++; pair.timers.set(id, { at: pair.workerNow + ms, run }); return id; },
-        clear: id => { pair.timers.delete(id); },
-      },
       createPainter: async () => {
         if (failPainter) throw new Error('no WebGPU in workers');
         return pair.painter;
@@ -194,12 +188,6 @@ class Pair {
     const due = [...this.rafs.values()];
     this.rafs.clear();
     for (const cb of due) cb(t);
-    // Commit-phase tasks fire between this BeginFrame and the next one.
-    for (const [id, task] of [...this.timers]) {
-      this.timers.delete(id);
-      this.workerNow = task.at;
-      task.run();
-    }
   }
 }
 
@@ -305,7 +293,7 @@ describe('WorkerPresenter and the presentation worker', () => {
     for (let i = 0; i < 8; i++) pair.frame(i * (1000 / 120));
     await settle();
     // Picked for the instant a worker canvas's frame reaches the panel
-    // (2 refreshes and 3.2 ms after its animation frame, rounded to the
+    // (1.5 refreshes and 3.2 ms after its animation frame, rounded to the
     // nearest refresh; 60 Hz until the refresh grid is fitted): at the
     // first animation frame that is media 36.5 ms, so frames 10 (0 to
     // 16.7 ms) and 11 (16.7 to 33.3 ms) are dropped as late.

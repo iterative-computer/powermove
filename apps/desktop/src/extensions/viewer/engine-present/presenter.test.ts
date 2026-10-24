@@ -538,69 +538,35 @@ describe('EnginePresenter', () => {
 });
 
 
-it('keeps gesture arrival immediate while timed commits wait for their deadline and cancel on disposal', () => {
-  let now = 0;
-  let tick: ((t:number)=>void) | null = null;
-  let deadline: {run:()=>void; at:number} | null = null;
-  const source = new Source(), painter = new Painter(), link = new Link();
-  const presenter = new EnginePresenter({link, source, painter, displayHz:120, drawOnArrival:true, commitPhaseRefreshes:.75, now:()=>now,
-    timers:{set:(run,ms)=>{deadline={run,at:now+ms};return 1;},clear:()=>{deadline=null;}}});
-  presenter.start(cb=>{tick=cb;return 1;},()=>{});
-  tick!(0);
-  expect(deadline!.at).toBeCloseTo(6.25);
-  source.arrive(1,1);
-  presenter.receive({type:'frame',frame:desc(1)});
-  expect(painter.draws).toHaveLength(1);
-  expect(deadline).not.toBeNull();
-  presenter.dispose();
-  expect(deadline).toBeNull();
-});
-
-it('fits an unknown 120 Hz clock even when the initial 60 Hz commit deadline is superseded', () => {
-  let now = 0;
-  let tick: ((t:number)=>void) | null = null;
-  let deadline: {run:()=>void; at:number} | null = null;
-  const source = new Source(), painter = new Painter(), link = new Link();
-  const presenter = new EnginePresenter({link, source, painter, commitPhaseRefreshes:.75, now:()=>now,
-    timers:{set:(run,ms)=>{deadline={run,at:now+ms};return 1;},clear:()=>{deadline=null;}}});
-  presenter.receive({type:'clock',sample:{epoch:1,seq:1,state:'playing',hostTime:0,mediaTime:0,rate:{num:1,den:1},outputLatencyUs:0,sampleRate:48000,loopRange:null}},0);
-  source.arrive(1,1);
-  presenter.receive({type:'frame',frame:desc(1,{duration:TICKS_PER_SECOND})});
-  presenter.start(cb=>{tick=cb;return 1;},()=>{});
-  for (let i=0;i<40;i++) {
-    now=i*1000/120;
-    tick!(now);
-    const task = deadline as {run:()=>void;at:number} | null;
-    if (task && task.at < (i+1)*1000/120) {
-      now=task.at;
-      task.run();
-    }
-  }
-  expect(painter.draws).toHaveLength(1);
-  presenter.dispose();
-});
-
-it('presents timed frames when commit timers are delayed past the following animation frame', () => {
+it('draws each refresh\'s timed frame inside its animation frame, one per refresh at 120 Hz', () => {
+  // A worker canvas sends what the animation frame drew as the callback
+  // returns; a draw deferred past it waits for the next BeginFrame.
   let now = 0;
   let tick: ((t: number) => void) | null = null;
-  const pending = new Map<number, () => void>();
-  let nextTimer = 0;
+  const P = 1000 / 120;
+  const F120 = TICKS_PER_SECOND / 120;
   const source = new Source(), painter = new Painter(), link = new Link();
-  const presenter = new EnginePresenter({ link, source, painter, displayHz: 120,
-    drawOnArrival: true, commitPhaseRefreshes: .75, now: () => now,
-    timers: { set: run => { pending.set(++nextTimer, run); return nextTimer; }, clear: id => { pending.delete(id); } }
-  });
+  const presenter = new EnginePresenter({ link, source, painter, displayHz: 120, drawOnArrival: true, now: () => now,
+    latencyRefreshes: 1.5, presentOffsetMs: 3.2, nearestRefresh: true });
   presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 1, state: 'playing', hostTime: 0, mediaTime: 0,
     rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, 0);
-  source.arrive(1, 1);
-  presenter.receive({ type: 'frame', frame: desc(1, { duration: TICKS_PER_SECOND }) });
   presenter.start(cb => { tick = cb; return 1; }, () => {});
+  const shown: number[] = [];
+  presenter.onPresented((f) => shown.push(Math.round(f.pts / F120)));
   try {
-    // CPU contention lets BeginFrame overtake timer callbacks repeatedly.
-    // Timed frames must still draw; a later rAF must not erase an overdue commit.
-    for (let i = 0; i < 12; i++) { now = i * 1000 / 120; tick!(now); }
-    expect(painter.draws).toHaveLength(1);
-    expect(pending.size).toBeLessThanOrEqual(1);
+    for (let i = 0; i < 60; i++) {
+      // Frames arrive well ahead of their refresh (the engine's render-ahead).
+      const k = i + 6;
+      source.arrive(1, k % 12);
+      presenter.receive({ type: 'frame', frame: desc(k + 1, { poolIndex: k % 12, pts: k * F120, duration: F120 }) }, now);
+      now = i * P;
+      const before = painter.draws.length;
+      tick!(now);
+      if (i >= 30) expect(painter.draws.length).toBe(before + 1);
+      painter.finishGpu();
+    }
+    const steady = shown.slice(-30);
+    expect(steady.slice(1).map((k, i) => k - steady[i]!)).toEqual(Array(29).fill(1));
+    expect(presenter.stats.dropped['late'] ?? 0).toBeLessThanOrEqual(3);
   } finally { presenter.dispose(); }
-  expect(pending.size).toBe(0);
 });
