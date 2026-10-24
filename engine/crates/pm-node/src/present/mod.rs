@@ -111,8 +111,9 @@ pub const DEFAULT_PHASE_PERMILLE: u32 = 500;
 
 /// Frames being rendered or waiting for their command buffer.
 pub const RING: u32 = 2;
-/// Default render-ahead: S1 found a lead of 4 enough once main is off the
-/// per-frame path (121 ms of slack at lead 10).
+/// Default render-ahead in frames: S1 found a lead of 4 enough once main is
+/// off the per-frame path (121 ms of slack at lead 10). A floor: high frame
+/// rates render further ahead in frames (`Schedule::lead_frames`).
 pub const DEFAULT_LEAD: u32 = 4;
 
 /// What produces viewer frames.
@@ -161,7 +162,7 @@ impl PresenterConfig {
         Some(Self {
             thread: ThreadConfig {
                 bridge_name: Some(bridge_name),
-                lead: number(LEAD_ENV, DEFAULT_LEAD, 28).max(1),
+                lead: number(LEAD_ENV, DEFAULT_LEAD, schedule::MAX_LEAD).max(1),
                 fps: number(FPS_ENV, 60, 240).max(1),
                 extra_passes: number(LOAD_ENV, 0, 8),
                 trace: env(TRACE_ENV).as_deref() == Some("1"),
