@@ -78,6 +78,7 @@ fn transfers_agree() {
             (pm_color::transfer::display_encode(v), Transfer::Srgb.from_linear(v), 1e-12),
             (pm_color::transfer::bt709_inverse_oetf(v), Transfer::Bt709.to_linear(v), 2e-4),
             (pm_color::transfer::gamma22_decode(v), Transfer::Gamma(2.2).to_linear(v), 1e-12),
+            (pm_color::transfer::bt1886_decode(v), Transfer::Bt1886.to_linear(v), 1e-12),
         ];
         for (k, (x, y, tolerance)) in pairs.into_iter().enumerate() {
             assert!((x - y).abs() < tolerance, "pair {k} at {v}: {x} vs {y}");

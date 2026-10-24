@@ -768,6 +768,7 @@ impl FramePresenter for BridgePresenter {
         port: PortId,
         session: SessionId,
         update: pm_engine::document::DocumentUpdate,
+        provisional: bool,
     ) {
         let key = (port, session);
         let audio_forwarded = self.audio_ingress.document(key, &update);
@@ -775,7 +776,21 @@ impl FramePresenter for BridgePresenter {
             key,
             audio_forwarded,
             update,
+            provisional,
             posted: render::now_us(),
+        });
+    }
+
+    fn confirm(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        revision: Revision,
+    ) {
+        self.send(Command::Confirm {
+            key: (port, session),
+            revision,
         });
     }
 

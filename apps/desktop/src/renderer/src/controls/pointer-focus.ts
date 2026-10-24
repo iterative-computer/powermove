@@ -1,21 +1,27 @@
 /** Pointer clicks must not leave an action selected for subsequent Space presses.
  * Run before action handlers so a dialog or text field they focus keeps its focus.
  * Keyboard activation has detail=0 and retains normal keyboard navigation.
+ * A control inside a focusable dialog hands focus to that dialog rather than to
+ * <body>: the dialog's Escape and Tab handling listen on it, and a focused
+ * dialog keeps keys away from the editor shortcuts behind it.
  */
 export function installPointerFocus(doc: Document = document): () => void {
+  const focused = (): Element | null => {
+    let active = doc.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+    return active;
+  };
   const release = (event: MouseEvent): void => {
     if (event.detail === 0) return;
     const control = event.composedPath().find((node): node is HTMLElement =>
       node instanceof HTMLElement && node.matches('button,[role="button"],[role="tab"],[role="radio"],[role="menuitem"]'));
-    if (!control) return;
-    let active = doc.activeElement;
-    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
-    if (active === control) control.blur();
-    // Keep sheet keyboard handling reachable after releasing an action's focus.
-    // Its handler may still move focus to a field or close the sheet afterwards.
-    if (doc.activeElement === doc.body) {
-      control.closest<HTMLElement>('[data-svelte-overlay-modal]')?.focus({ preventScroll: true });
-    }
+    if (!control || focused() !== control) return;
+    // Keep the enclosing dialog or sheet's Escape/Tab handling reachable
+    // (its handler may still move focus to a field or close it afterwards).
+    const dialog = control.parentElement?.closest<HTMLElement>('[data-svelte-overlay-modal],[role="dialog"],[role="alertdialog"]');
+    if (dialog && (dialog.hasAttribute('data-svelte-overlay-modal') || dialog.hasAttribute('tabindex'))) dialog.focus({ preventScroll: true });
+    // A dialog that could not take focus (inert, hidden) must still not leave the control focused.
+    if (focused() === control) control.blur();
   };
   doc.addEventListener('click', release, true);
   return () => doc.removeEventListener('click', release, true);

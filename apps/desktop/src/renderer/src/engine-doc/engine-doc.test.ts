@@ -840,6 +840,30 @@ describe.skipIf(!built)('the tracking Proxy', () => {
     expect(doc.check('test')!.ok).toBe(true);
   });
 
+  it('leaves keys adopted by a document replacement to its resync or whole diff, and keeps the mirror right', async () => {
+    const { PM, doc } = await editor('audit');
+    const legacyKeys = () => [
+      { t: 0, v: 0, eo: [0.4, 0], inInterp: 'bezier', outInterp: 'bezier' },
+      { t: 1, v: 90, ei: [0.6, 1], inInterp: 'bezier', outInterp: 'bezier' },
+    ];
+    for (const sameProject of [false, true]) {
+      const next = sameProject ? JSON.parse(JSON.stringify(PM.proj)) : PM.mkProject({ dur: 2 });
+      next.layers = Array.from({ length: 40 }, () => { const l = PM.mkLayer('solid', {}, next); l.p.rotation.kf = legacyKeys(); return l; });
+      // No path search per adopted key list: the replacement's resync or
+      // whole-document diff covers them (a search per list was quadratic).
+      const touched = vi.spyOn(doc.barrier!, 'touched');
+      PM.replaceProject(next);
+      expect(touched).not.toHaveBeenCalled();
+      touched.mockRestore();
+      // The replacement adopted every legacy key (a write per key list) while
+      // its resync or whole-document diff was pending.
+      expect(Object.prototype.propertyIsEnumerable.call(PM.proj.layers[39].p.rotation.kf[0], 'eo')).toBe(false);
+      doc.barrier!.flush();
+      expect(doc.check('test')!.ok).toBe(true);
+      expect(doc.auditor!.audit()).toBe(true);
+    }
+  });
+
   it('treats legacy key adoption during evaluation as a known writer, and keeps the mirror right', async () => {
     const { PM, doc } = await editor('strict');
     PM.hist.do('Add', () => PM.addLayer(PM.mkLayer('solid')));

@@ -444,7 +444,7 @@ function range(opts: any) {
   return opts.range === 'work' && p.work && p.work[1] > p.work[0] ? [p.work[0], p.work[1]] : [0, p.dur];
 }
 
-function progressUI(total: any) {
+function progressUI(total: any, preparingMedia = false, operation: { cancel: boolean; busy?: boolean } = X) {
   const bar: any = h('i', { style: { width: '0%' } });
   const label: any = h('span', 'Preparing…');
   const eta: any = h('span');
@@ -456,9 +456,9 @@ function progressUI(total: any) {
   const mod: any = PM.modal({
     title: 'Exporting ' + (PM.proj.name || 'Untitled'), body, width: 580,
     dismissible: false,
-    onClose: () => { if (X.busy) X.cancel = true; stopPreview(); },
+    onClose: () => { if (preparingMedia || operation.busy) operation.cancel = true; stopPreview(); },
     actions: [{ label: 'Cancel', run: () => {
-      X.cancel = true;
+      operation.cancel = true;
       label.textContent = 'Cancelling…'; eta.textContent = '';
       const button = mod.el.querySelector('.mf button');
       if (button) { button.disabled = true; button.textContent = 'Cancelling…'; }
@@ -473,7 +473,7 @@ function progressUI(total: any) {
   return {
     mod, prev,
     set(i: any, extra: any) {
-      if (X.cancel) return;
+      if (operation.cancel) return;
       bar.parentElement.setAttribute('aria-valuenow', String(Math.round(i / total * 100)));
       bar.style.width = (i / total * 100).toFixed(1) + '%';
       label.textContent = `Frame ${i} / ${total}  ·  ${(i / total * 100).toFixed(0)}%` + (extra ? '  ·  ' + extra : '');
@@ -486,14 +486,22 @@ function progressUI(total: any) {
         eta.textContent = 'Finishing…';
       }
     },
+    preparing(done: number, total: number) {
+      if (operation.cancel) return;
+      const percent = Math.max(0, Math.min(100, done / total * 100));
+      bar.parentElement.setAttribute('aria-valuenow', String(Math.round(percent)));
+      bar.style.width = `${percent}%`;
+      label.textContent = 'Preparing media…';
+      eta.textContent = `${Math.floor(done)} / ${total}`;
+    },
     /** "Waiting for media · 2 clips offline" (section 14.8). */
     waiting(message: string) {
-      if (X.cancel) return;
+      if (operation.cancel) return;
       label.textContent = message;
       eta.textContent = '';
     },
     preview(frame: { width: number; height: number; jpeg: Uint8Array }) {
-      if (decoding || X.cancel || typeof window.createImageBitmap !== 'function') return;
+      if (decoding || operation.cancel || typeof window.createImageBitmap !== 'function') return;
       decoding = true;
       const blob = new window.Blob([frame.jpeg as BlobPart], { type: 'image/jpeg' });
       void window.createImageBitmap(blob).then((image: ImageBitmap) => {
@@ -504,6 +512,27 @@ function progressUI(total: any) {
       }).catch(() => undefined).finally(() => { decoding = false; });
     },
   };
+}
+
+/** Reuses the export sheet while old media is copied into the engine store.
+ * The host calls back only when there is migration work, so already-bound
+ * projects proceed straight to the destination dialog. */
+async function prepareMedia(project: any, operation: { cancel: boolean; busy?: boolean } = X): Promise<boolean> {
+  let ui: ReturnType<typeof progressUI> | null = null;
+  try {
+    await PM.HostMedia?.flushBindings(project, (done: number, total: number) => {
+      if (!(total > 0)) return;
+      ui ??= progressUI(1, true, operation);
+      ui.preparing(done, total);
+    });
+    return !operation.cancel;
+  } finally {
+    if (ui) {
+      const cancelled = operation.cancel;
+      (ui as ReturnType<typeof progressUI>).mod.close();
+      operation.cancel = cancelled;
+    }
+  }
 }
 
 let destinationToken: string | null = null;
@@ -688,7 +717,7 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
   const off = engine.onExportStatus((s: any) => { if (listener) listener(s); else early.push(s); });
   try {
     const request = { project: JSON.stringify(p), name: outputName(opts), options: sheetOptions(opts) };
-    await PM.HostMedia?.flushBindings(p);
+    if (!await prepareMedia(p)) return { cancelled: true };
     // Main captures this window's definitions for the job (contract 10):
     // pending registrations and extension reloads reach it first.
     await PM.EngineDefinitions?.settle?.();
@@ -768,9 +797,12 @@ X.addToQueue = async (rawOpts: any) => {
     ...(sidecars.length ? { sidecars } : {}),
     ...(opts.preset ? { preset: String(opts.preset) } : {})
   };
+  // Queue preparation can run alongside a foreground export. Its cancellation
+  // belongs to this add only; the foreground export owns X.busy and X.cancel.
+  const operation = { cancel: false };
   const releaseJob = holdExportJob();
   try {
-    await PM.HostMedia?.flushBindings(project);
+    if (!await prepareMedia(project, operation)) return { status: 'cancelled' };
     // The queued job keeps this window's definitions as they are now.
     await PM.EngineDefinitions?.settle?.();
     const result = await engine.queueAdd(request);

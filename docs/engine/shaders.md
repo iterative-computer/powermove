@@ -324,9 +324,10 @@ values scaled by max(1, |reference|).
   ANGLE's MSL round a few operations differently, which is enough. Metal fast
   math is not the cause: with it off in the engine the gate moved further
   from WebGL (48 to 53 px, and the alt variant failed too; effects.md,
-  Parity, 2026-10-19). Under
-  amendment 22 this is a visible difference for a user with this effect:
-  escalated to Jude with side-by-sides (`PM_SHADER_GATE_DIFFS=<dir>` writes
+  Parity, 2026-10-19). Under the
+  earlier amendment 22 (any visible difference a blocker) this was
+  escalated to Jude with side-by-sides; the current one does not treat a
+  disagreement with ANGLE as an error (gate-policy.md, lane L6) (`PM_SHADER_GATE_DIFFS=<dir>` writes
   the engine's output, WebGL's, and the differing pixels for every
   WebGL-unstable variant). **Resolved 2026-10-19** (orchestrator decision
   DEFS-2): the program is listed in `pm_render::effects::ANGLE_ONLY` and

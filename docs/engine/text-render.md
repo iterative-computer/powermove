@@ -1043,7 +1043,7 @@ normal visibility for the next capture or viewer frame. A visibility change
 also clears draw reuse. The burn-in test now checks shown → hidden → shown,
 and transport/IPC/protocol tests cover the flag's default and forwarding.
 
-## Round 8: the ratchet cannot loosen or go unchecked
+## Round 8: capture sets and the UI font census
 
 Fixes:
 

@@ -20,7 +20,9 @@ function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: 
     cv: { width: Math.round(48 * scale), height: Math.round(24 * scale) }, w: 48, h: 24, anchorX: 4, anchorY: 18, layer, scale, time, key: `engine:${layer.id}`
   });
   const engineRaster = vi.fn(surface);
-  const engineRasterAsync = vi.fn(async (layer: any, scale: number, time: number) => surface(layer, scale, time));
+  // The window's document revision, and the engine's (what an async base is drawn at).
+  const revisions = { document: 1, engine: 1 };
+  const engineRasterAsync = vi.fn(async (layer: any, scale: number, time: number) => ({ surface: surface(layer, scale, time), revision: revisions.engine }));
   const readPixels = vi.fn((source: { width: number; height: number }) => ({ width: source.width, height: source.height, format: 'rgba8Premultiplied' as const, data: new Uint8Array(source.width * source.height * 4).fill(7) }));
   let base: any;
   const compat = createRasterCompat(PM, {
@@ -29,7 +31,12 @@ function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: 
     onChainChange: (fn) => services.onChange('raster', fn),
     engineRaster,
     engineRasterAsync: withAsync ? engineRasterAsync : undefined,
-    rasterKey,
+    // A plain shape's base holds across revisions (kernel/install.ts rasterContentKey).
+    rasterKey: rasterKey && ((layer, scale, time, crop) => {
+      const key = rasterKey(layer, scale, time, crop);
+      return key === null ? null : { key, persistent: layer?.type === 'shape' };
+    }),
+    documentRevision: () => revisions.document,
     readPixels,
     readPixelsAsync,
     log: () => {}
@@ -38,7 +45,7 @@ function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: 
   services.register('raster', base);
   const need = (layer: string, time = 0.5, scale = 2, composition = 'P-root'): CompatNeed =>
     ({ composition, layer, time: Math.round(time * TICKS_PER_SECOND), source: 'rasterOverride', scale });
-  return { PM, services, compat, engineRaster, engineRasterAsync, readPixels, base, need };
+  return { PM, services, compat, engineRaster, engineRasterAsync, readPixels, base, need, revisions };
 }
 
 describe('the raster override producer', () => {
@@ -62,8 +69,65 @@ describe('the raster override producer', () => {
     expect(compat.answer(need('title', 0.5), 3)).toEqual({ kind: 'reuse', key: first.key });
   });
 
-  it('reuses a native-evaluated unchanged base across playback times while wrappers still run at each time', async () => {
-    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.d, scale, crop]));
+  it('shares a paused viewer readback with a delayed duplicate need, but refreshes captures and redraws', async () => {
+    const { PM, services, compat, need, readPixels } = setup(true, (layer, scale) => JSON.stringify([layer.d, scale]));
+    const original = services.get<any>('raster');
+    let state = 'first';
+    const wrapper = vi.fn((...args: any[]) => ({ ...original(...args), key: state }));
+    services.register('raster', wrapper);
+    const n = need('box');
+    await compat.prepare(n, 4, { urgent: true });
+    expect(compat.answer(n, 4, { prepared: true })).toMatchObject({ key: 'first' });
+    const calls = wrapper.mock.calls.length;
+    await compat.prepare(n, 4, { urgent: true });
+    expect(compat.answer(n, 4, { prepared: true })).toMatchObject({ key: 'first' });
+    expect(wrapper).toHaveBeenCalledTimes(calls);
+    expect(readPixels).toHaveBeenCalledTimes(1);
+    PM.bus.on.mock.calls.find(([name]: [string]) => name === 'preview:presented')[1]();
+    state = 'next-frame';
+    await compat.prepare(n, 4, { urgent: true });
+    expect(compat.answer(n, 4, { prepared: true })).toMatchObject({ key: 'next-frame' });
+    state = 'capture';
+    await compat.prepare(n, 4);
+    expect(compat.answer(n, 4, { prepared: true })).toMatchObject({ key: 'capture' });
+    state = 'redraw';
+    expect(compat.answer(n, 4)).toMatchObject({ key: 'redraw' });
+    await compat.prepare(n, 4, { urgent: true });
+    expect(compat.answer(n, 4, { prepared: true })).toMatchObject({ key: 'redraw' });
+    compat.dispose();
+  });
+
+  it('does not put a required paused raster behind background scheduler work', async () => {
+    const postTask = vi.fn(async () => {});
+    vi.stubGlobal('scheduler', { postTask });
+    const { services, compat, engineRaster, engineRasterAsync, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => ({ ...original(...args), key: 'required' }));
+    try {
+      await compat.prepare(need('box'), 4, { urgent: true });
+      expect(postTask).not.toHaveBeenCalled();
+      expect(engineRasterAsync).toHaveBeenCalledOnce();
+      expect(engineRaster).not.toHaveBeenCalled();
+      expect(compat.answer(need('box'), 4, { prepared: true })).toMatchObject({ key: 'required' });
+      await compat.prepare(need('box', 1), 4);
+      expect(postTask).toHaveBeenCalled();
+    } finally { compat.dispose(); vi.unstubAllGlobals(); }
+  });
+
+  it('reads a paused edit\'s own answer back on the window\'s thread, and other preparations on the worker', async () => {
+    const readPixelsAsync = vi.fn(async (source: { width: number; height: number }) => ({ width: source.width, height: source.height, format: 'rgba8Premultiplied' as const, data: new Uint8Array(source.width * source.height * 4) }));
+    const { services, compat, readPixels, need } = setup(true, undefined, readPixelsAsync);
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => ({ ...original(...args), key: 'tinted' }));
+    await compat.prepare(need('box'), 4, { urgent: true });
+    expect([readPixels.mock.calls.length, readPixelsAsync.mock.calls.length]).toEqual([1, 0]);
+    await compat.prepare(need('box', 1), 4);
+    expect([readPixels.mock.calls.length, readPixelsAsync.mock.calls.length]).toEqual([1, 1]);
+    compat.dispose();
+  });
+
+  it('reuses unchanged shape bases across edits while wrappers still run, and fetches changed content', async () => {
+    const { PM, services, compat, engineRaster, engineRasterAsync, need } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.d, scale, crop]));
     const original = services.get<any>('raster');
     services.register('raster', (layer: any, scale: number, time: number, ...rest: any[]) => ({ ...original(layer, scale, time, ...rest), key: `animated-wrapper:${time}` }));
     expect(compat.answer(need('box', 0), 4)).toMatchObject({ key: 'animated-wrapper:0' });
@@ -71,9 +135,41 @@ describe('the raster override producer', () => {
     expect(compat.answer(need('box', 1), 4, { prepared: true })).toMatchObject({ key: 'animated-wrapper:1' });
     expect(engineRaster).toHaveBeenCalledTimes(1);
     expect(engineRasterAsync).not.toHaveBeenCalled();
-    // A new document revision invalidates content-identical cached pixels.
+    // Moving a shape changes the revision, but none of its base pixels.
     await compat.prepare(need('box', 1.5), 5);
+    expect(compat.answer(need('box', 1.5), 5, { prepared: true })).toMatchObject({ key: 'animated-wrapper:1.5' });
+    expect(engineRasterAsync).not.toHaveBeenCalled();
+    // Resolved content is the identity: changing it still fetches a base.
+    PM.proj.layers = PM.proj.layers.map((l: any) => l.id === 'box' ? { ...l, d: { ...l.d, w: 41 } } : l);
+    await compat.prepare(need('box', 1.5), 6);
     expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+    compat.reset();
+    await compat.prepare(need('box', 1.5), 6);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(2);
+    compat.dispose();
+  });
+
+  it('keeps an async base under its content key only if the engine drew it at the revision the key was read at', async () => {
+    const { PM, services, compat, engineRasterAsync, need, revisions } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.d, scale, crop]));
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => ({ ...original(...args), key: 'tinted' }));
+    // The shape is edited while its base is on its way: the engine draws the
+    // base at the newer revision, the content the key was read for is gone.
+    revisions.engine = 2;
+    await compat.prepare(need('box', 1), 4);
+    expect(compat.answer(need('box', 1), 4, { prepared: true })).toMatchObject({ key: 'tinted' });
+    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+    // Not cached: the next preparation of the same content asks again.
+    await compat.prepare(need('box', 1.5), 5);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(2);
+    // Drawn at the key's revision: cached, and reused by the next edit.
+    revisions.document = revisions.engine = 3;
+    PM.proj.layers = PM.proj.layers.map((l: any) => l.id === 'box' ? { ...l, d: { ...l.d, w: 43 } } : l);
+    await compat.prepare(need('box', 1.5), 6);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(3);
+    await compat.prepare(need('box', 2), 7);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(3);
+    compat.dispose();
   });
 
   it('reuses a detached copy\'s content-identical base across frames instead of a synchronous engine raster each frame', async () => {

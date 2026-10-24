@@ -34,7 +34,7 @@ test('library previews contain tall panel content without changing the live pane
   expect(await page.evaluate(() => (window as any).PM.panelInst['fit-fixture'].el.clientHeight)).toBe(220);
 });
 
-test('built-in Library previews fit their scrollable content', async ({ session }) => {
+test('built-in Library previews fit their scrollable content', async ({ session }, testInfo) => {
   const { page } = session;
   await page.setViewportSize({ width: 1600, height: 1000 });
   await page.waitForFunction(() => Boolean((window as any).PM?.GL?.gl));
@@ -52,5 +52,5 @@ test('built-in Library previews fit their scrollable content', async ({ session 
     ).map(node => ({ panel: clone.closest<HTMLElement>('[data-panel-id]')!.dataset.panelId, class:node.className, overflow:node.scrollHeight-node.clientHeight }));
   }));
   expect(clipped).toEqual([]);
-  await page.screenshot({ path: '/private/tmp/powermove-library-fit.png' });
+  await page.screenshot({ path: testInfo.outputPath('library-fit.png') });
 });

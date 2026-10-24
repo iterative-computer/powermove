@@ -75,6 +75,26 @@ const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFi
 const safeUint = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 const id = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && new TextEncoder().encode(v).length <= MAX_ID;
 
+function validViewer(value: unknown, width: number, height: number): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const viewer = value as Record<string, any>;
+  const positiveRect = (r: any) => r && ['x', 'y', 'width', 'height'].every(k => finite(r[k])) && r.width > 0 && r.height > 0;
+  const canvas = viewer.canvas;
+  if (!safeUint(viewer.viewSeq) || !canvas || canvas.width !== width || canvas.height !== height
+    || !positiveRect(canvas.crop) || !positiveRect(canvas.css)) return false;
+  const view = viewer.view;
+  if (view === null) return true;
+  if (!view || !['wireframe', 'solid', 'material', 'rendered'].includes(view.shading)
+    || typeof view.xray !== 'boolean' || !Array.isArray(view.localView) || !view.localView.every(id)) return false;
+  if (view.xray && !['wireframe', 'solid'].includes(view.shading)) return false;
+  if (view.camera === null) return true;
+  const camera = view.camera, p = camera?.projection;
+  return Array.isArray(camera?.view) && camera.view.length === 16 && camera.view.every(finite)
+    && p && finite(p.near) && finite(p.far) && p.far > p.near
+    && (p.kind === 'orthographic' ? finite(p.halfHeight) && p.halfHeight > 0
+      : p.kind === 'perspective' && p.near > 0 && finite(p.fovYDegrees) && p.fovYDegrees > 0 && p.fovYDegrees < 180);
+}
+
 /** Checks a window's snapshot request (IPC input: trust nothing). */
 export function validSnapshotRequest(value: unknown): value is EngineSnapshotRequest {
   if (!value || typeof value !== 'object') return false;
@@ -98,6 +118,9 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (!['opaque', 'premultiplied', 'straight'].includes(s['pixels'] as string)) return false;
   if (!['sync', 'async', 'idle'].includes(s['class'] as string)) return false;
   if (s['viewSeq'] !== null && !safeUint(s['viewSeq'])) return false;
+  if (s['viewer'] != null && !validViewer(s['viewer'], w, h)) return false;
+  if (s['viewer'] != null && s['viewSeq'] !== null
+    && s['viewSeq'] !== (s['viewer'] as { viewSeq: number }).viewSeq) return false;
   if (!Number.isInteger(s['waitMs']) || (s['waitMs'] as number) < 1 || (s['waitMs'] as number) > MAX_WAIT_MS) return false;
   // A Blender wait (today's `snapshotAsync` prepares the frame): never for
   // a blocked thread.
@@ -120,6 +143,7 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
       typeof target['background'] === 'boolean' && typeof target['draft3d'] === 'boolean';
   }
   if (target['kind'] === 'layer') {
+    if (s['viewer'] != null) return false;
     const crop = target['crop'] as Record<string, unknown> | null;
     const cropOk = crop === null || (crop && typeof crop === 'object' && ['x', 'y', 'width', 'height'].every((k) => safeUint(crop[k])) && (crop['width'] as number) > 0 && (crop['height'] as number) > 0);
     const content = target['content'];

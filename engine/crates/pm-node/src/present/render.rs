@@ -299,6 +299,13 @@ pub enum Command {
         key: Key,
         update: DocumentUpdate,
         posted: i64,
+        /// Frames of the update's revision wait for [`Command::Confirm`].
+        provisional: bool,
+    },
+    /// The provisional update that made `revision` was the whole change.
+    Confirm {
+        key: Key,
+        revision: Revision,
     },
     /// The session's definitions (contract 10), and those a delta
     /// registered again.
@@ -613,6 +620,12 @@ pub struct Stats {
     pub compat_asked: u64,
     /// Viewer frames that waited for producer answers.
     pub compat_waits: u64,
+    /// Frames of provisional revisions: parked until confirmed, confirmed
+    /// revisions, and parked frames dropped because a later update
+    /// superseded their revision (never presented).
+    pub provisional_parked: u64,
+    pub provisional_confirmed: u64,
+    pub provisional_dropped: u64,
     /// Layer rasters the worker drew off this thread ([`super::rasters`]).
     pub layer_rasters_off_thread: u64,
     /// Times the worker's document mirror was seeded (a session's first
@@ -1151,7 +1164,7 @@ struct Thread {
     /// answers (shared with the renderer for the frame being drawn).
     compat: std::sync::Arc<std::sync::Mutex<super::compat::CompatStore>>,
     /// Waveform requests waiting for the host's media answer.
-    peaks_waiting: BTreeSet<(Key, String)>,
+    peaks_waiting: BTreeMap<(Key, String), Option<Seq>>,
     /// With the per-frame trace on: each session's revisions not shown yet
     /// (revision, posted, applied; host µs).
     doc_trace: BTreeMap<Key, Vec<[i64; 3]>>,
@@ -1159,6 +1172,12 @@ struct Thread {
     work_start: i64,
     /// Sends frames shown at the next refresh once their GPU work is done.
     completer: Option<super::complete::Completer>,
+    /// Per session, the revision of a provisional update not yet confirmed
+    /// or superseded: its frames are parked, not sent.
+    provisional: BTreeMap<Key, Revision>,
+    /// A finished paused frame of a provisional revision, waiting for
+    /// [`Command::Confirm`] (sent then) or the next update (dropped).
+    parked: BTreeMap<Key, super::complete::Pending>,
     /// GPU work seen last (frames and snapshots) and when; the idle
     /// targets and staging go once the viewer has rested ([`REST_RELEASE_US`]).
     rest: Rest,
@@ -1182,6 +1201,8 @@ struct Rest {
     since: i64,
     /// Idle memory was released since then.
     released: bool,
+    /// The open documents' frame pipelines were compiled since then.
+    prewarmed: bool,
 }
 
 /// Definition sets prepared on the presenter thread before a GPU device exists.
@@ -1253,6 +1274,10 @@ impl PreparedDefinitions {
 /// textures, the cached snapshot attachment and staging buffers. They are
 /// recreated by the next frame (docs/engine/memory.md, "At rest").
 pub const REST_RELEASE_US: i64 = 2_000_000;
+
+/// How long the viewer rests before the open documents' frame pipelines
+/// are compiled ([`Thread::prewarm_at_rest`]).
+pub const PREWARM_REST_US: i64 = 250_000;
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -1366,10 +1391,12 @@ pub fn run(
         last_interactive: None,
         snapshot_costs: BTreeMap::new(),
         compat: Default::default(),
-        peaks_waiting: BTreeSet::new(),
+        peaks_waiting: BTreeMap::new(),
         doc_trace: BTreeMap::new(),
         work_start: 0,
         completer,
+        provisional: BTreeMap::new(),
+        parked: BTreeMap::new(),
         rest: Rest::default(),
         rasters,
         raster_mirrors: BTreeSet::new(),
@@ -1379,7 +1406,16 @@ pub fn run(
     let mut last_inventory_us = 0;
     loop {
         let timeout = thread.next_wake();
-        match rx.recv_timeout(timeout) {
+        let waiting_at = thread.config.trace.then(now);
+        let received = rx.recv_timeout(timeout);
+        if let Some(waiting_at) = waiting_at {
+            let woke_at = now();
+            let late_us = wake_lateness_us(waiting_at, woke_at, timeout);
+            if late_us >= 2_000 {
+                thread.trace_event("render wake late", woke_at - late_us, late_us, -1);
+            }
+        }
+        match received {
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(command) => {
                 let started = now();
@@ -1388,7 +1424,10 @@ pub fn run(
                     break;
                 }
                 thread.note_turn(what, started);
+                let drain_started = thread.config.trace.then(now);
+                let mut drained = 0;
                 while let Ok(command) = rx.try_recv() {
+                    drained += 1;
                     let started = now();
                     let what = command_name(&command);
                     if matches!(command, Command::Shutdown)
@@ -1398,6 +1437,12 @@ pub fn run(
                         return;
                     }
                     thread.note_turn(what, started);
+                }
+                if let Some(drain_started) = drain_started {
+                    let drain_us = now() - drain_started;
+                    if drain_us >= 2_000 {
+                        thread.trace_event("command drain", drain_started, drain_us, drained);
+                    }
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -1421,6 +1466,15 @@ pub fn run(
 /// status report and a warning in the engine log).
 pub const STALL_US: i64 = 250_000;
 
+/// Time the render thread woke after its requested deadline, distinct from
+/// work it did on that turn. A loaded OS can suspend an otherwise idle
+/// thread; attributing that gap to the next raster would be misleading.
+fn wake_lateness_us(started: i64, woke: i64, timeout: Duration) -> i64 {
+    (woke - started)
+        .saturating_sub(timeout.as_micros().min(i64::MAX as u128) as i64)
+        .max(0)
+}
+
 /// The lower bounds of the slow-turn bands in [`Stats::slow_turns`].
 pub const SLOW_TURN_BANDS_US: [i64; 4] = [50_000, 100_000, STALL_US, 1_000_000];
 
@@ -1441,6 +1495,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Close { .. } => "close",
         Command::ClosePort { .. } => "close port",
         Command::Document { .. } => "document",
+        Command::Confirm { .. } => "confirm",
         Command::Definitions { .. } => "definitions",
         Command::Media { .. } => "media",
         Command::ShaderFallback { .. } => "shader fallback",
@@ -1460,6 +1515,41 @@ fn command_name(command: &Command) -> &'static str {
 }
 
 impl Thread {
+    /// Whether any frame, snapshot or request is in progress or waiting.
+    fn busy(&self) -> bool {
+        !self.pending_snapshots.is_empty()
+            || self.snapshots.waiting()
+            || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
+            || self.views.values().any(|v| {
+                v.clock.is_playing()
+                    || (v.dirty && v.state.headless != Some(true))
+                    || v.awaiting.is_some()
+                    || !v.requests.is_empty()
+            })
+    }
+
+    /// Compiles the frame pipelines of every viewed document once nothing
+    /// was drawn for [`PREWARM_REST_US`] ([`pm_render::Renderer::prewarm`]).
+    /// Pipelines are built on first use, so without this an import or the
+    /// first layer of an empty project pays for them in its frame. Once per
+    /// rest, never while anything is drawing.
+    fn prewarm_at_rest(&mut self) {
+        if self.busy() {
+            return;
+        }
+        self.rest.prewarmed = true;
+        let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) else {
+            return;
+        };
+        for (key, view) in &self.views {
+            if view.state.headless != Some(true)
+                && let Some(doc) = self.docs.get(key)
+            {
+                composer.renderer().prewarm(doc.document());
+            }
+        }
+    }
+
     /// Frees idle GPU memory once nothing was drawn for [`REST_RELEASE_US`]:
     /// the renderer's idle intermediate targets, viewer scratch textures,
     /// the cached snapshot attachment and staging buffers. Exported surface
@@ -1475,22 +1565,17 @@ impl Thread {
             self.rest = Rest {
                 seen,
                 since: now_us,
-                released: false,
+                ..Rest::default()
             };
             return;
+        }
+        if !self.rest.prewarmed && now_us - self.rest.since >= PREWARM_REST_US {
+            self.prewarm_at_rest();
         }
         if self.rest.released || now_us - self.rest.since < REST_RELEASE_US {
             return;
         }
-        let busy = !self.pending_snapshots.is_empty()
-            || self.snapshots.waiting()
-            || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
-            || self.views.values().any(|v| {
-                v.clock.is_playing()
-                    || (v.dirty && v.state.headless != Some(true))
-                    || v.awaiting.is_some()
-                    || !v.requests.is_empty()
-            });
+        let busy = self.busy();
         let Some(gpu) = self.gpu.as_mut() else {
             self.rest.released = true;
             return;
@@ -2300,10 +2385,36 @@ impl Thread {
                 key,
                 update,
                 posted,
+                provisional,
             } => {
+                let revision = update.revision();
                 let mirrored = self.raster_mirrors.contains(&key).then(|| update.clone());
                 self.document(key, update, posted, audio_forwarded);
                 self.mirror_update(key, mirrored);
+                // Any update ends the previous provisional revision: a frame
+                // parked for it showed a state the renderer superseded.
+                self.drop_parked(key);
+                if provisional {
+                    self.provisional.insert(key, revision);
+                } else {
+                    self.provisional.remove(&key);
+                }
+            }
+            Command::Confirm { key, revision } => {
+                if self.provisional.get(&key) == Some(&revision) {
+                    self.provisional.remove(&key);
+                    self.stats().provisional_confirmed += 1;
+                    match (self.parked.remove(&key), self.completer.as_ref()) {
+                        (Some(pending), Some(completer)) => completer.submit(pending),
+                        // Not drawn yet (or held without a completion
+                        // thread): draw it now.
+                        _ => {
+                            if let Some(view) = self.views.get_mut(&key) {
+                                view.dirty = true;
+                            }
+                        }
+                    }
+                }
             }
             Command::FrameSent {
                 key,
@@ -2404,8 +2515,9 @@ impl Thread {
                 }
             }
             Command::Media { key, asset, path } => {
-                if self.peaks_waiting.remove(&(key, asset.clone())) {
-                    self.peaks.request(key, asset.clone(), path.clone());
+                if let Some(request) = self.peaks_waiting.remove(&(key, asset.clone())) {
+                    self.peaks
+                        .request(key, asset.clone(), path.clone(), request);
                 }
                 let doc = self.docs.entry(key).or_default();
                 doc.set_media(&asset, path);
@@ -2607,7 +2719,38 @@ impl Thread {
         }
     }
 
+    /// Drops the frame parked for `key`'s provisional revision: a later
+    /// update superseded that revision, so it is never presented.
+    fn drop_parked(&mut self, key: Key) {
+        if let Some(pending) = self.parked.remove(&key) {
+            self.stats().provisional_dropped += 1;
+            self.release_parked(pending);
+        }
+    }
+
+    /// Returns a parked frame's surface to the pool (the viewer never got
+    /// it) and draws the view again.
+    fn release_parked(&mut self, pending: super::complete::Pending) {
+        let super::complete::Pending { key, meta, .. } = pending;
+        self.preview_candidates.remove(&(key, meta.seq));
+        if let Some(view) = self.views.get_mut(&key) {
+            if let (Some(live), Ok(seq)) = (view.pool.as_mut(), Seq::new(meta.seq))
+                && live.spec.generation == meta.generation
+            {
+                let _ = live.ledger.release(FrameRelease {
+                    pool_index: meta.index,
+                    seq,
+                });
+            }
+            view.dirty = true;
+        }
+    }
+
     fn forget_session(&mut self, key: Key) {
+        self.provisional.remove(&key);
+        if let Some(pending) = self.parked.remove(&key) {
+            self.release_parked(pending);
+        }
         self.prepared.forget(key);
         self.preview_controls.forget(key);
         self.preview_candidates.retain(|(k, _), _| *k != key);
@@ -2615,7 +2758,7 @@ impl Thread {
         self.auto_generation.remove(&key);
         self.snapshot_costs.remove(&key);
         self.compat_store().forget_session(key);
-        self.peaks_waiting.retain(|(k, _)| *k != key);
+        self.peaks_waiting.retain(|(k, _), _| *k != key);
         // A frame already submitted for readback is no longer in the
         // scheduler. Cancel its mapping too, before the session disappears.
         let (ended, live): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_snapshots)
@@ -3187,14 +3330,17 @@ impl Thread {
                     audio.send(AudioCtl::Solo(solo));
                 }
             }
-            AudioMessage::PeaksWanted { asset } => {
+            AudioMessage::PeaksWanted { asset, request } => {
                 // Asked before the host answered for the asset (a file just
                 // imported): wait for the answer rather than call it offline.
                 match self.docs.get(&key).and_then(|d| d.media().answer(&asset)) {
-                    Some(path) => self.peaks.request(key, asset, path),
+                    Some(path) => self.peaks.request(key, asset, path, request),
                     None => {
-                        if self.peaks_waiting.len() < MAX_PEAKS_WAITING {
-                            self.peaks_waiting.insert((key, asset));
+                        let pending = (key, asset);
+                        if self.peaks_waiting.contains_key(&pending)
+                            || self.peaks_waiting.len() < MAX_PEAKS_WAITING
+                        {
+                            self.peaks_waiting.insert(pending, request);
                         }
                     }
                 }
@@ -4333,8 +4479,12 @@ impl Thread {
                 trace_audio_transport("decided-without-deferred", key, view, None);
             }
         }
-        if let Some(link) = self.audio.get(&key) {
-            let status = link.status();
+        let status = self.audio.get(&key).map(AudioLink::status);
+        if let Some(view) = self.views.get_mut(&key) {
+            // The renderer's status bar and performance panel (A5).
+            view.costs.audio(status.as_ref());
+        }
+        if let Some(status) = status {
             self.stats().audio.insert(view_name(key), status);
         }
         route == Route::Engine
@@ -4519,6 +4669,7 @@ impl Thread {
             ) {
                 State::Waiting => {
                     view.external_wait = Some(wait);
+                    self.send_stats(key);
                     return;
                 }
                 State::Obsolete => {}
@@ -4581,10 +4732,22 @@ impl Thread {
             // At most `MAX_IN_FLIGHT` frames wait on the GPU; the completion
             // thread sends this one (its descriptor is not sent here).
             let deferred = self.completer.is_some();
+            // Without the completion thread nothing can hold a frame: a
+            // provisional revision is drawn once it is confirmed.
+            let held = !deferred
+                && self
+                    .views
+                    .get(&key)
+                    .is_some_and(|v| self.provisional.get(&key) == Some(&v.revision));
             if let Some(view) = self.views.get_mut(&key) {
                 view.render_failed = false;
             }
-            if let Some(descriptor) = self.render(key, media, -1, None, deferred, true) {
+            if held {
+                // The confirmation draws it (`Command::Confirm`).
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = false;
+                }
+            } else if let Some(descriptor) = self.render(key, media, -1, None, deferred, true) {
                 let seq = descriptor.seq;
                 self.queue_auto_preview(key, seq);
                 if let Some(view) = self.views.get_mut(&key) {
@@ -4608,12 +4771,20 @@ impl Thread {
             view.dirty = false;
         }
         // Playback: render ahead while frames are due and slots are free.
+        // Never at a provisional revision: the renderer confirms or
+        // supersedes it before it plays (its frames could show a partial
+        // edit).
         loop {
+            if self.provisional.contains_key(&key) {
+                break;
+            }
             let Some(view) = self.views.get_mut(&key) else {
                 return;
             };
+            // Before its pool arrives a view draws nothing, but its audio
+            // status still reports (below).
             if view.pool.is_none() {
-                return;
+                break;
             }
             let t = now();
             let phase = Self::phase(&self.config, &view.state);
@@ -4626,7 +4797,7 @@ impl Thread {
                     {
                         self.stats().pool_waits += 1;
                         self.trace_event("pool wait", t, 0, k);
-                        return;
+                        break;
                     }
                     // Its answers are on their way and it can still be shown:
                     // it waits (an answer arriving wakes the thread).
@@ -4664,7 +4835,7 @@ impl Thread {
                     // frame follows when the raster arrives (never skip it
                     // merely because its asynchronous request was sent).
                     if rendered.is_none() && view.external_wait.is_some() {
-                        return;
+                        break;
                     }
                     // Waiting for the window's compatibility answers keeps
                     // this frame's slot too, rather than skipping a frame
@@ -5323,13 +5494,23 @@ impl Thread {
             if timing.is_none() {
                 self.last_interactive = Some(now());
             }
-            completer.submit(super::complete::Pending {
+            let pending = super::complete::Pending {
                 key,
                 device: gpu.device.clone(),
                 submission,
                 bytes,
                 meta,
-            });
+            };
+            let replaced = if self.provisional.get(&key) == Some(&descriptor.revision) {
+                self.stats().provisional_parked += 1;
+                self.parked.insert(key, pending)
+            } else {
+                completer.submit(pending);
+                None
+            };
+            if let Some(old) = replaced {
+                self.release_parked(old);
+            }
             return Some(descriptor);
         }
         let done = gpu.device.poll(wgpu::PollType::Wait {
@@ -5507,12 +5688,16 @@ impl Thread {
         loop {
             let pressure = self.pressure();
             let docs = &self.docs;
+            let provisional = &self.provisional;
             // A document whose media the host has not answered yet is not
             // ready: the snapshot waits (within its wait) rather than draw
-            // media missing that is on its way.
+            // media missing that is on its way. Nor is a provisional one: a
+            // capture asked earlier must not draw a partial edit.
             let revision = |key: Key| {
                 docs.get(&key)
-                    .filter(|d| d.has_document() && d.media_ready())
+                    .filter(|d| {
+                        d.has_document() && d.media_ready() && !provisional.contains_key(&key)
+                    })
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
@@ -5577,9 +5762,12 @@ impl Thread {
             }
             let pressure = self.pressure();
             let docs = &self.docs;
+            let provisional = &self.provisional;
             let revision = |key: Key| {
                 docs.get(&key)
-                    .filter(|d| d.has_document() && d.media_ready())
+                    .filter(|d| {
+                        d.has_document() && d.media_ready() && !provisional.contains_key(&key)
+                    })
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
@@ -5650,11 +5838,23 @@ impl Thread {
             self.snapshots.published(name, length);
         }
         let t = now();
+        self.trace_event(
+            "layer raster queue",
+            done.started - done.queued_us,
+            done.queued_us,
+            done.time,
+        );
         if let Some(render_us) = done.render_us {
             let costs = self.snapshot_costs.entry(done.key).or_default();
             costs.0 += 1;
             costs.1 = costs.1.max(render_us);
-            self.trace_event("layer raster", t - render_us, render_us, done.time);
+            self.trace_event("layer raster", done.started, render_us, done.time);
+            self.trace_event(
+                "layer raster completion delivery",
+                done.started + render_us,
+                (t - done.started - render_us).max(0),
+                done.time,
+            );
         } else {
             self.trace_event("layer raster failed", t, 0, done.time);
         }
@@ -5759,7 +5959,12 @@ impl Thread {
         costs.1 = costs.1.max(render_us);
         let result = SnapshotResult {
             revision,
-            view_seq: job.request.view_seq,
+            view_seq: job
+                .request
+                .viewer
+                .as_ref()
+                .map(|v| v.view_seq)
+                .or(job.request.view_seq),
             width,
             height,
             pixels: job.request.pixels,
@@ -5829,6 +6034,32 @@ impl Thread {
             );
             return;
         };
+        let viewer_grid = if let Some(viewer) = &job.request.viewer {
+            let comp =
+                match pm_eval::Comp::resolve(doc.document(), job.request.composition.as_str()) {
+                    Ok(comp) => comp,
+                    Err(_) => {
+                        self.stats().snapshot_failures += 1;
+                        self.snapshot_error(
+                            &job,
+                            ErrorCode::InvalidMessage,
+                            "The viewer snapshot has no composition.",
+                        );
+                        return;
+                    }
+                };
+            let number = |key: &str| {
+                let v = pm_eval::node::to_number(comp.member(key));
+                if v.is_finite() && v > 0.0 { v } else { 1.0 }
+            };
+            Some(super::compose::canvas_render_grid(
+                &viewer.canvas,
+                number("w"),
+                number("h"),
+            ))
+        } else {
+            None
+        };
         let (composer, readback, snapshot_target) =
             gpu.composer_and_snapshot_resources(&self.config, self.frame_cache, &mut self.prepared);
         // The session's definitions, without consuming the re-registrations
@@ -5850,28 +6081,50 @@ impl Thread {
             output_size: job.request.output_size,
             // Today's capture derives the scale from the composition size
             // (`W / comp.w`, `H / comp.h`).
-            scale: None,
+            scale: viewer_grid.and_then(|grid| grid.0),
             region: None,
-            preview_canvas: false,
+            // A pinned canvas is the live viewer's canvas: the same
+            // compatibility clip window and canvas density rules.
+            preview_canvas: job.request.viewer.is_some(),
             precision: pm_protocol::color::Precision::Float16,
             depth_id: false,
-            background,
-            export: purpose == pm_protocol::frame::FramePurpose::Export,
-            view: None,
-            motion_blur: if motion_blur == 0 {
+            background: if job.request.viewer.is_some() {
+                true
+            } else {
+                background
+            },
+            export: job.request.viewer.is_none()
+                && purpose == pm_protocol::frame::FramePurpose::Export,
+            view: job.request.viewer.as_ref().and_then(|v| v.view.clone()),
+            motion_blur: if job.request.viewer.is_some() {
+                pm_render::motion::MotionBlur::Kind(
+                    pm_protocol::frame::MotionBlurKind::PreviewPaused,
+                )
+            } else if motion_blur == 0 {
                 pm_render::motion::MotionBlur::Off
             } else {
                 pm_render::motion::MotionBlur::Samples(motion_blur)
             },
             sampling: pm_render::sampling::Sampling::Final,
-            video_end: pm_render::VideoEnd::of(purpose),
-            origin: None,
+            video_end: if job.request.viewer.is_some() {
+                pm_render::VideoEnd::Preview
+            } else {
+                pm_render::VideoEnd::of(purpose)
+            },
+            origin: viewer_grid.and_then(|grid| grid.1),
         };
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         // The session's compatibility producers (the `raster` override).
         renderer.set_compat_rasters(compat_view(&self.compat, job.key, revision, None));
         let size = request.target_size();
-        let format = renderer.device_target_format(doc.document(), &request);
+        // The live viewer renders its region at the project's format, then
+        // places it in the display working texture before color conversion.
+        // A pinned canvas captures those display pixels.
+        let format = if job.request.viewer.is_some() {
+            pm_gpu::bridge_out::display::WORKING_FORMAT
+        } else {
+            renderer.device_target_format(doc.document(), &request)
+        };
         let target = snapshot_output_target(
             snapshot_target,
             renderer.device(),
@@ -5899,8 +6152,8 @@ impl Thread {
                 return;
             }
         };
-        let rendered = renderer
-            .render_snapshot_into_copy(
+        let rendered = if job.request.viewer.is_some() {
+            renderer.render_viewer_snapshot_into_copy(
                 doc.document(),
                 job.request.composition.as_str(),
                 job.request.time,
@@ -5909,7 +6162,18 @@ impl Thread {
                 &target,
                 &copy,
             )
-            .map(|(_, rows)| (target.width(), target.height(), rows));
+        } else {
+            renderer.render_snapshot_into_copy(
+                doc.document(),
+                job.request.composition.as_str(),
+                job.request.time,
+                &request,
+                doc.media(),
+                &target,
+                &copy,
+            )
+        }
+        .map(|(_, rows)| (target.width(), target.height(), rows));
         renderer.set_compat_rasters(None);
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
             readback.cancel(ticket, MAX_CACHED_SNAPSHOT_TARGET_BYTES);
@@ -6313,6 +6577,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wake_lateness_excludes_the_requested_wait_and_early_commands() {
+        let wait = Duration::from_micros(1_000);
+        assert_eq!(wake_lateness_us(10, 510, wait), 0);
+        assert_eq!(wake_lateness_us(10, 1_010, wait), 0);
+        assert_eq!(wake_lateness_us(10, 330_010, wait), 329_000);
+    }
+
+    #[test]
     fn snapshot_target_cache_policy_accounts_for_format_and_resize() {
         use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
 
@@ -6322,6 +6594,37 @@ mod tests {
         assert!(cache_snapshot_target(4096, 4096, Rgba8Unorm));
         assert!(!cache_snapshot_target(4096, 4096, Rgba16Float));
         assert!(!cache_snapshot_target(4096, 2048, Rgba32Float));
+    }
+
+    #[test]
+    fn raster_trace_uses_worker_timestamps_and_separates_queue_and_delivery() {
+        let (mut thread, _) = preview_thread();
+        thread.config.trace = true;
+        thread.raster_done(super::super::rasters::RasterDone {
+            key: preview_key(),
+            bytes: 0,
+            published: None,
+            render_us: Some(300),
+            queued_us: 200,
+            started: 1_000,
+            time: 42,
+        });
+        let stats = thread.stats();
+        let events: Vec<_> = stats.turn_trace.iter().collect();
+        assert_eq!(
+            (events[0].what, events[0].at, events[0].us),
+            ("layer raster queue", 800, 200)
+        );
+        assert_eq!(
+            (events[1].what, events[1].at, events[1].us),
+            ("layer raster", 1_000, 300)
+        );
+        assert_eq!(
+            (events[2].what, events[2].at),
+            ("layer raster completion delivery", 1_300)
+        );
+        assert!(events[2].us > 0);
+        assert!(events.iter().all(|event| event.k == 42));
     }
 
     fn preview_thread() -> (Thread, Arc<Mutex<Vec<PreviewStatus>>>) {
@@ -6389,10 +6692,12 @@ mod tests {
             last_interactive: None,
             snapshot_costs: BTreeMap::new(),
             compat: Default::default(),
-            peaks_waiting: BTreeSet::new(),
+            peaks_waiting: BTreeMap::new(),
             doc_trace: BTreeMap::new(),
             work_start: 0,
             completer: None,
+            provisional: BTreeMap::new(),
+            parked: BTreeMap::new(),
             rest: Rest::default(),
             rasters: None,
             raster_mirrors: BTreeSet::new(),
@@ -6760,6 +7065,23 @@ mod tests {
     }
 
     #[test]
+    fn frame_pipelines_compile_once_per_rest_after_the_viewer_settles() {
+        let (mut thread, _) = preview_thread();
+        let t0 = 1_000_000;
+        thread.release_at_rest(t0);
+        thread.release_at_rest(t0 + PREWARM_REST_US - 1);
+        assert!(!thread.rest.prewarmed, "too early");
+        thread.release_at_rest(t0 + PREWARM_REST_US);
+        assert!(thread.rest.prewarmed);
+        // A frame starts a new rest, which compiles again once it settles.
+        thread.stats().frames += 1;
+        thread.release_at_rest(t0 + PREWARM_REST_US + 1);
+        assert!(!thread.rest.prewarmed);
+        thread.release_at_rest(t0 + 2 * PREWARM_REST_US + 1);
+        assert!(thread.rest.prewarmed);
+    }
+
+    #[test]
     fn idle_gpu_memory_goes_once_the_viewer_rests() {
         let (mut thread, _) = preview_thread();
         thread.docs.insert(preview_key(), ViewDocument::default());
@@ -6966,6 +7288,45 @@ mod tests {
             live.pool.surfaces[third.pool_index as usize]
                 .iosurface
                 .read()
+        );
+    }
+
+    #[test]
+    fn pending_waveforms_keep_latest_generation_even_at_capacity() {
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        for index in 0..MAX_PEAKS_WAITING {
+            thread.audio_message(
+                key,
+                AudioMessage::PeaksWanted {
+                    asset: format!("clip-{index}"),
+                    request: Some(Seq::new(1).unwrap()),
+                },
+            );
+        }
+        thread.audio_message(
+            key,
+            AudioMessage::PeaksWanted {
+                asset: "clip-0".into(),
+                request: Some(Seq::new(2).unwrap()),
+            },
+        );
+        thread.audio_message(
+            key,
+            AudioMessage::PeaksWanted {
+                asset: "beyond-capacity".into(),
+                request: Some(Seq::new(3).unwrap()),
+            },
+        );
+        assert_eq!(thread.peaks_waiting.len(), MAX_PEAKS_WAITING);
+        assert_eq!(
+            thread.peaks_waiting[&(key, "clip-0".into())],
+            Some(Seq::new(2).unwrap())
+        );
+        assert!(
+            !thread
+                .peaks_waiting
+                .contains_key(&(key, "beyond-capacity".into()))
         );
     }
 

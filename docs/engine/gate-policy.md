@@ -28,12 +28,14 @@ difference in 8-bit code values (CV).
 | Class | Pixels | Rule |
 |---|---|---|
 | Interior | ≥ 2 px from any edge, no resampling | Within 1 CV of today (authored colors, blends, mattes) |
-| Edge | Partial coverage, grown by 2 px | Engine max, p99.9 and mean error each ≤ today's + the precision bound |
+| Edge | Partial coverage, grown by 2 px | Engine max, p99.9 and mean error each ≤ today's + the precision bound; per pixel, engine error − today's error within the previous bound |
 | Resampled | Drawn from a resampled source | As Edge |
 | Unreferenced | The reference does not model it yet | The gate's previous bound against today |
 
 Precision bounds (`Bounds`): 0.5 CV for 8-bit frames (`EIGHT_BIT`), 2⁻¹¹ ≈ 0.125 CV for
-half-float frames (`HALF_FLOAT`). A gate with other storage states its own. Geometry is
+half-float frames (`HALF_FLOAT`). The previous bound (`per_pixel_cv`) is ≤ 1 CV for 99.9%
+and ≤ 4 for any pixel at 8 bits, ≤ 1 at half float: no single pixel may regress under
+today's worst error elsewhere. A gate with other storage states its own. Geometry is
 exact: alpha area (relative) and centroid (px) within 1e-3 (`same_geometry`). Preview ==
 export: the paused viewer's frame and the export's are identical (`identical`).
 
@@ -45,14 +47,17 @@ widen a bound to pass it.
 `engine/crates/pm-reference` (tests only) computes in f64 from the standards and the
 authored formulas, never from the engine's rendering or color code: exact supersampled
 coverage of outlines (`coverage`), Porter-Duff and W3C blending (`composite`), the exact
-Gaussian (`gaussian`), sRGB, BT.709, PQ, HLG, H.273 matrices, ranges and primaries, and
-ICC matrix/TRC profiles (`color`). `tests/engine_formulas.rs` cross-checks it against
-pm-color. `pm-render/tests/support/reference.rs` builds a document's reference frame:
-authored values from pm-eval, all math from pm-reference. It models backgrounds and 2D
-solids today, leaves image boxes unreferenced, and anything else the whole frame.
+Gaussian (`gaussian`), sRGB, BT.709 and BT.1886, PQ, HLG, H.273 matrices, ranges and
+primaries, and ICC matrix/TRC profiles with optional unclipped conversion (`color`).
+`tests/engine_formulas.rs` cross-checks it against pm-color.
+`pm-render/tests/support/reference.rs` builds a document's reference frame: authored
+values from pm-eval, all math from pm-reference. It models backgrounds and 2D solids
+today, leaves image boxes unreferenced, and anything else the whole frame.
 
-`tests/corpus.rs` (G-C2) is the model conversion. Its one known exception is
-`PREVIEW_EXPORT_PENDING`: video end padding differs between viewer and export (M-R1).
+`tests/corpus.rs` (G-C2) is the model conversion; its gated frame must equal the export
+frame. Its one known exception is `PREVIEW_EXPORT_PENDING`: video end padding differs
+between viewer and export (M-R1). An entry fails once it passes or, on a full run, if it
+was not measured.
 
 ## Who converts what
 

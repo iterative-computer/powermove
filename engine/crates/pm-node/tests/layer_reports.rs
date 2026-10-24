@@ -413,6 +413,7 @@ fn child_engine() {
             encoding: PatchEncoding::CanonicalV1,
             patch_count: ops.len() as u32,
             body: Bytes(body),
+            provisional: false,
         })),
     );
     let (reports, second) = loop {

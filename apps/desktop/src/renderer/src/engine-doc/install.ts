@@ -324,8 +324,11 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       record(paths);
     },
     wroteObject(object) {
+      // A document replacement adopts every legacy keyframe it holds: finding
+      // each one's path walked the whole document per keyframe. The
+      // replacement's resync or whole diff has them.
       if (!barrier && object && typeof object === 'object') projectEpoch++;
-      if (!barrier || !object || typeof object !== 'object') return;
+      if (!barrier || !object || typeof object !== 'object' || barrier.coversDocument) return;
       const path = findPath(current, unwrap(object), 16);
       if (path) barrier.touched([path]);
     },

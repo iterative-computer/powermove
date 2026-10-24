@@ -38,6 +38,10 @@ async function settle(page: import('playwright').Page) {
   await page.waitForTimeout(250);
 }
 
+function selection(page: import('playwright').Page): Promise<string[]> {
+  return page.evaluate(() => [...(window as any).PM.sel.layers]);
+}
+
 for (const scheme of ['light', 'dark'] as const) {
   test(`captions surfaces in ${scheme} mode`, async ({ session }) => {
     const { page } = session;
@@ -74,14 +78,21 @@ for (const scheme of ['light', 'dark'] as const) {
     await expect(page.locator('.settings-row', { hasText: 'Caption file' })).toBeVisible();
     await page.locator('.settings-row', { hasText: 'Caption file' }).scrollIntoViewIfNeeded();
     await settle(page);
-    await page.locator('.export-modal').screenshot({ path: path.join(SHOTS, `export-dialog-${scheme}.png`) });
+    const exportDialog = page.getByRole('dialog', { name: 'Export', exact: true });
+    await exportDialog.screenshot({ path: path.join(SHOTS, `export-dialog-${scheme}.png`) });
+    // Escape after a pointer click in the dialog closes it and never reaches the editor's deselect.
     await page.keyboard.press('Escape');
+    await expect(exportDialog).toHaveCount(0);
+    expect(await selection(page)).toEqual([id]);
 
     await page.evaluate(() => (window as any).PM.cmd('exportCaptions'));
     await expect(page.locator('.captions-export .settings-row', { hasText: 'Format' })).toBeVisible();
     await settle(page);
-    await page.locator('.export-modal').screenshot({ path: path.join(SHOTS, `export-captions-${scheme}.png`) });
+    const captionsDialog = page.getByRole('dialog', { name: 'Export Captions', exact: true });
+    await captionsDialog.screenshot({ path: path.join(SHOTS, `export-captions-${scheme}.png`) });
     await page.keyboard.press('Escape');
+    await expect(captionsDialog).toHaveCount(0);
+    expect(await selection(page)).toEqual([id]);
   });
 }
 

@@ -77,6 +77,12 @@ describe('one patch batch per run', () => {
     ]);
   });
 
+  it('keeps a merged batch provisional only when its last batch is', () => {
+    const provisional = (b: ApplyPatches): ApplyPatches => ({ ...b, provisional: true });
+    expect(mergeBatches(provisional(batch(3, 4, x)), batch(4, 5, y)).provisional).toBeUndefined();
+    expect(mergeBatches(batch(3, 4, x), provisional(batch(4, 5, y))).provisional).toBe(true);
+  });
+
   it('sends a run\'s batches once, at its end, and before anything sent after them', async () => {
     const port = new Port();
     const connection = new EngineConnection(1, port, () => {});

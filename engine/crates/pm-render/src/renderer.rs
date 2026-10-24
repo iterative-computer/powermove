@@ -1238,6 +1238,17 @@ impl Renderer {
         }
     }
 
+    /// Compiles the pipelines every frame of `document` draws with at its
+    /// working format ([`Pipelines::prewarm`]). They are built on first use;
+    /// the presenter calls this when the viewer rests after an open, so the
+    /// next import, or the first layer of an empty project, does not.
+    pub fn prewarm(&self, document: &Document) {
+        let request =
+            RenderRequest::sized(pm_protocol::common::Size::new(1, 1), Precision::Float16);
+        self.pipelines
+            .prewarm(self.device_target_format(document, &request));
+    }
+
     /// Renders `composition` at `time` into a new texture.
     pub fn render(
         &mut self,
@@ -1376,6 +1387,34 @@ impl Renderer {
             target,
             Some(copy),
         )
+    }
+
+    /// Renders a pinned viewer canvas through the same top-down color pass
+    /// as a live viewer frame, then records its staging copy. Standard
+    /// snapshots normally skip this pass and reverse GL rows on the CPU.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_viewer_snapshot_into_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: &pm_gpu::readback::ReadbackCopy,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+            SnapshotRows::TopDown,
+            Some(copy),
+        )
+        .map(|rendered| (rendered, SnapshotRows::TopDown))
     }
 
     #[allow(clippy::too_many_arguments)]

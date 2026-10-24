@@ -114,15 +114,45 @@ test('the restored project keeps playing audio through quality changes', async (
   await session.page.evaluate(async id => (window as any).PM.openProjectHere(id), id);
   await session.page.waitForFunction(id => (window as any).PM.proj.id === id && [...(window as any).PM.assets.map.values()].some((a: any) => a.audioBlob?.size), id);
   await session.page.evaluate(() => { const PM = (window as any).PM; PM.setTime(0); PM.play(); });
-  await session.page.waitForFunction(() => (window as any).PM.Audio.inspect().voices.length > 0);
-  const result = await session.page.evaluate(() => {
-    const PM = (window as any).PM;
-    PM.bus.emit('quality');
-    const result = PM.Audio.inspect();
-    PM.pause();
-    return result;
-  });
-  expect(result.running).toBe(true);
-  expect(result.voices.length).toBeGreaterThan(0);
+  const native = await session.page.evaluate(() => Boolean((window as any).PM.EngineConnection));
+  if (native) {
+    const sounding = async (after: number, notBefore = 0) => {
+      const reading = await session.page.waitForFunction(({ after, notBefore }) => {
+        const PM = (window as any).PM;
+        const audio = PM.EngineConnection.audio;
+        const latest = audio.latest();
+        if (performance.now() < notBefore || audio.levelsReceived <= after || !latest || PM.EngineConnection.status().driving !== true || !PM.Audio.meters.running()
+          || !latest.levels.master.peak.some((peak: number) => peak > 0)) return false;
+        return { sequence: audio.levelsReceived, voices: PM.Audio.inspect().voices.length,
+          datasetVoices: Number(document.documentElement.dataset.audioVoices || 0) };
+      }, { after, notBefore });
+      const result = await reading.jsonValue();
+      if (!result) throw new Error('Native audio wait resolved without a meter reading');
+      expect(result.voices).toBe(0);
+      expect(result.datasetVoices).toBe(0);
+      return result.sequence;
+    };
+    const before = await sounding(0);
+    const notBefore = await session.page.evaluate(() => {
+      (window as any).PM.bus.emit('quality');
+      // Outlast the meter's 250 ms stale interval before accepting fresh levels.
+      return performance.now() + 350;
+    });
+    let sequence = await sounding(before, notBefore);
+    for (let index = 0; index < 2; index++) sequence = await sounding(sequence);
+    await session.page.evaluate(() => (window as any).PM.pause());
+    await session.page.waitForFunction(() => !(window as any).PM.Audio.meters.running());
+  } else {
+    await session.page.waitForFunction(() => (window as any).PM.Audio.inspect().voices.length > 0);
+    const result = await session.page.evaluate(() => {
+      const PM = (window as any).PM;
+      PM.bus.emit('quality');
+      const result = PM.Audio.inspect();
+      PM.pause();
+      return result;
+    });
+    expect(result.running).toBe(true);
+    expect(result.voices.length).toBeGreaterThan(0);
+  }
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

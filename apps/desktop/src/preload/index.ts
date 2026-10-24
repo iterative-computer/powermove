@@ -69,6 +69,13 @@ function snapshotRequest(request: EngineSnapshotRequest): EngineSnapshotRequest 
   if (Array.isArray(request?.fallbackPixels)) {
     plain.fallbackPixels = request.fallbackPixels.map((p) => ({ key: String(p?.key), width: Number(p?.width), height: Number(p?.height), rgba16f: bytes(p?.rgba16f) ?? new Uint8Array(0), ...(p?.rgba32f !== undefined ? { rgba32f: bytes(p.rgba32f) ?? new Uint8Array(0) } : {}) }));
   }
+  if (Array.isArray(request?.compatEvents)) {
+    plain.compatEvents = request.compatEvents.map(event => {
+      const copy = JSON.parse(JSON.stringify({ ...event, data: undefined }));
+      if ('data' in event) copy.data = bytes(event['data']) ?? new Uint8Array(0);
+      return copy;
+    });
+  }
   return plain;
 }
 
