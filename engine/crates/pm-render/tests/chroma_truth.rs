@@ -24,9 +24,6 @@ use std::path::PathBuf;
 
 const W: usize = 256;
 const H: usize = 128;
-// BT.709 (H.273 matrix 1).
-const KR: f64 = 0.2126;
-const KB: f64 = 0.0722;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -87,17 +84,22 @@ fn codes(path: &PathBuf) -> Codes {
         .unwrap()
 }
 
-/// E-encoded R′G′B′ in display codes from 8-bit limited BT.709 codes.
+/// E-encoded R′G′B′ in display codes from 8-bit limited BT.709 codes
+/// (`pm-reference`, H.273).
 fn rgb(y: f64, cb: f64, cr: f64) -> [f64; 3] {
-    let (y, u, v) = (
-        (y - 16.0) / 219.0,
-        (cb - 128.0) / 224.0,
-        (cr - 128.0) / 224.0,
-    );
-    let r = y + 2.0 * (1.0 - KR) * v;
-    let b = y + 2.0 * (1.0 - KB) * u;
-    let g = (y - KR * r - KB * b) / (1.0 - KR - KB);
-    [r, g, b].map(|c| c.clamp(0.0, 1.0) * 255.0)
+    use pm_reference::color::{
+        dequantize_chroma, dequantize_luma, matrix_coefficients, ycbcr_to_rgb,
+    };
+    let k = matrix_coefficients(1).unwrap().unwrap();
+    ycbcr_to_rgb(
+        [
+            dequantize_luma(y, 8, false),
+            dequantize_chroma(cb, 8, false),
+            dequantize_chroma(cr, 8, false),
+        ],
+        k,
+    )
+    .map(|c| c.clamp(0.0, 1.0) * 255.0)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -119,8 +121,8 @@ fn weights(kernel: Kernel, t: f64) -> [f64; 4] {
 }
 
 /// A chroma plane at luma resolution: `kernel` across at origin `ox`
-/// (luma pixels), linear down at the 4:2:0 row midpoint.
-fn upsample(p: &[u8], c: &Codes, kernel: Kernel, ox: f64) -> Vec<f64> {
+/// (luma pixels), `down` between rows at the 4:2:0 row midpoint.
+fn upsample(p: &[u8], c: &Codes, kernel: Kernel, down: Kernel, ox: f64) -> Vec<f64> {
     let (fx, fy) = (W / c.cw, H / c.ch);
     let at = |i: i64, j: i64| {
         f64::from(
@@ -145,7 +147,8 @@ fn upsample(p: &[u8], c: &Codes, kernel: Kernel, ox: f64) -> Vec<f64> {
             out.push(if fy == 1 {
                 row(x, y as i64)
             } else {
-                row(x, j as i64) * (1.0 - t) + row(x, j as i64 + 1) * t
+                let w = weights(down, t);
+                (0..4).map(|k| w[k] * row(x, j as i64 - 1 + k as i64)).sum()
             });
         }
     }
@@ -171,6 +174,23 @@ fn rms(ours: &[[f64; 3]], truth: &[[f64; 3]], edge: &[bool]) -> [f64; 4] {
         }
     }
     acc.map(|(s, n)| (s / n as f64).sqrt())
+}
+
+/// Per-pixel display-code error (largest channel): max, 99.9th percentile
+/// and mean, over the whole frame.
+fn stats(ours: &[[f64; 3]], truth: &[[f64; 3]]) -> [f64; 3] {
+    let mut e: Vec<f64> = ours
+        .iter()
+        .zip(truth)
+        .map(|(a, t)| (0..3).map(|c| (a[c] - t[c]).abs()).fold(0.0, f64::max))
+        .collect();
+    let mean = e.iter().sum::<f64>() / e.len() as f64;
+    e.sort_by(f64::total_cmp);
+    [
+        *e.last().unwrap(),
+        e[((e.len() - 1) as f64 * 0.999).round() as usize],
+        mean,
+    ]
 }
 
 fn engine(path: PathBuf) -> Vec<[f64; 3]> {
@@ -246,27 +266,32 @@ fn the_engine_reconstructs_chroma_closest_to_the_4_4_4_truth() {
     ] {
         let c = codes(&fixture(clip));
         assert_eq!(c.y, truth_codes.y, "{clip}: luma is the truth's");
-        let candidate = |kernel, ox| {
+        let candidate = |kernel, down, ox| {
             let (u, v) = (
-                upsample(&c.cb, &c, kernel, ox),
-                upsample(&c.cr, &c, kernel, ox),
+                upsample(&c.cb, &c, kernel, down, ox),
+                upsample(&c.cr, &c, kernel, down, ox),
             );
             let out: Vec<[f64; 3]> = (0..W * H)
                 .map(|i| rgb(f64::from(c.y[i]), u[i], v[i]))
                 .collect();
-            rms(&out, &truth, &edge)
+            (rms(&out, &truth, &edge), stats(&out, &truth))
         };
         // Left siting: chroma 0 on luma 0 across; today centers it.
         let centred = (W / c.cw) as f64 / 2.0 - 0.5;
-        let catmull_rom = candidate(Kernel::CatmullRom, 0.0);
-        let linear = candidate(Kernel::Linear, 0.0);
-        let today = candidate(Kernel::Linear, centred);
-        let ours = rms(&engine(fixture(clip)), &truth, &edge);
+        let (catmull_rom, _) = candidate(Kernel::CatmullRom, Kernel::Linear, 0.0);
+        let (linear, _) = candidate(Kernel::Linear, Kernel::Linear, 0.0);
+        let (today, today_stats) = candidate(Kernel::Linear, Kernel::Linear, centred);
+        // Catmull-Rom down as well (4:2:0 only): measured, and declined to
+        // keep the 4:2:0 export round trip exact.
+        let rows = (c.ch < H).then(|| candidate(Kernel::CatmullRom, Kernel::CatmullRom, 0.0).0);
+        let drawn = engine(fixture(clip));
+        let ours = rms(&drawn, &truth, &edge);
         println!(
             "CHROMA-TRUTH {}",
             json!({"clip": clip, "regions": ["natural", "graphics", "edges", "all"],
                 "engine": ours, "catmullRom": catmull_rom, "linear": linear,
-                "todayCenteredLinear": today})
+                "todayCenteredLinear": today, "catmullRomRows": rows,
+                "engineStats": stats(&drawn, &truth), "todayStats": today_stats})
         );
         for k in 0..4 {
             let best = catmull_rom[k].min(linear[k]).min(today[k]);

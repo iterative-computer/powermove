@@ -1,8 +1,8 @@
 //! The one video reading (docs/engine/video-parity.md) against an f64
 //! reference, QUALITY-1's proof for video.
 //!
-//! The reference shares no colour code with the engine
-//! (`support/standards.rs`): each clip's reading is written by hand in
+//! The reference shares no colour code with the engine (`pm-reference`,
+//! docs/engine/gate-policy.md): each clip's reading is written by hand in
 //! `cases.json` from its tags and the shared table's rules (and the probe
 //! must agree); raw decoded codes are normalized per H.273; chroma is
 //! reconstructed with Lanczos-3 at the tagged siting; the matrix comes from
@@ -20,8 +20,6 @@
 
 #[path = "support/doc.rs"]
 mod doc;
-#[path = "support/standards.rs"]
-mod standards;
 
 use pm_media::decode::service::{DecodeService, MediaSource, ServiceConfig};
 use pm_media::frame::{DecodedFrame, Layout};
@@ -175,7 +173,6 @@ struct Codes {
     chroma: (usize, usize),
     factors: (usize, usize),
     bits: u32,
-    full: bool,
 }
 
 fn codes(frame: &DecodedFrame) -> Codes {
@@ -252,7 +249,6 @@ fn codes(frame: &DecodedFrame) -> Codes {
                 chroma,
                 factors,
                 bits: u32::from(f.bits),
-                full: f.range == Range::Full,
             }
         })
         .unwrap()
@@ -262,8 +258,20 @@ fn codes(frame: &DecodedFrame) -> Codes {
 /// whether each pixel's chroma is constant across the reconstruction
 /// footprint.
 fn reference(r: &Reading, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<bool>) {
-    use standards::*;
+    use pm_reference::chroma::reconstruct_lanczos3;
+    use pm_reference::color::{
+        Primaries as P, Transfer as T, apply, dequantize_chroma, dequantize_luma, eetf_bt2390,
+        hlg_ootf, invert, matrix_coefficients, mul, ycbcr_to_rgb,
+    };
     let c = codes(frame);
+    // The range is the reading's, written by hand; the decoder's frame must
+    // say the same.
+    let full = r.range == "full";
+    assert_eq!(
+        frame.format.range == Range::Full,
+        full,
+        "the decoded frame's range"
+    );
     let (w, h) = (frame.format.width, frame.format.height);
     let (fx, fy) = c.factors;
     // Where chroma sample 0 sits on the luma grid (H.273 chroma location
@@ -275,16 +283,31 @@ fn reference(r: &Reading, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<bool>) {
         ("center", _) => ((fx as f64 - 1.0) / 2.0, (fy as f64 - 1.0) / 2.0),
         (other, _) => panic!("siting {other}"),
     };
-    let norm = |p: &[f64]| -> Vec<f64> {
-        p.iter()
-            .map(|&v| normalize(v, c.bits, c.full, true))
-            .collect()
+    let chroma = |p: &[f64]| -> Vec<f64> {
+        let p: Vec<f64> = p
+            .iter()
+            .map(|&v| dequantize_chroma(v, c.bits, full))
+            .collect();
+        reconstruct_lanczos3(&p, c.chroma, (w, h), c.factors, origin)
     };
-    let (cb, cr) = (norm(&c.cb), norm(&c.cr));
-    let cb = reconstruct(&cb, c.chroma, (w, h), c.factors, origin);
-    let cr = reconstruct(&cr, c.chroma, (w, h), c.factors, origin);
-    let k = kr_kb(&r.matrix);
-    let to709 = to_709(&r.primaries);
+    let (cb, cr) = (chroma(&c.cb), chroma(&c.cr));
+    let k = matrix_coefficients(match r.matrix.as_str() {
+        "bt709" => 1,
+        "bt601" => 6,
+        "bt2020" => 9,
+        other => panic!("matrix {other}"),
+    })
+    .unwrap()
+    .unwrap();
+    let primaries = match r.primaries.as_str() {
+        "bt709" => P::BT709,
+        "smpte170m" => P::BT601_525,
+        "bt470bg" => P::BT601_625,
+        "bt2020" => P::BT2020,
+        "p3" => P::P3_D65,
+        other => panic!("primaries {other}"),
+    };
+    let to709 = mul(&invert(&P::BT709.to_xyz()), &primaries.to_xyz());
     let at = |p: &[f64], i: i64, j: i64| {
         p[(j.clamp(0, c.chroma.1 as i64 - 1) as usize) * c.chroma.0
             + i.clamp(0, c.chroma.0 as i64 - 1) as usize]
@@ -304,9 +327,9 @@ fn reference(r: &Reading, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<bool>) {
                     at(&c.cb, ii, j) == at(&c.cb, i0, j0) && at(&c.cr, ii, j) == at(&c.cr, i0, j0)
                 })
             }));
-            let luma = normalize(c.y[i], c.bits, c.full, false);
+            let luma = dequantize_luma(c.y[i], c.bits, full);
             let alpha = c.alpha.as_ref().map_or(1.0, |a| a[i]);
-            let rgb = ycbcr_to_rgb(luma, cb[i], cr[i], k);
+            let rgb = ycbcr_to_rgb([luma, cb[i], cr[i]], k);
             // Colour is converted straight: a file tagged premultiplied is
             // divided by alpha first, except below section 9's 1/4096
             // floor, where it is kept as stored.
@@ -326,19 +349,23 @@ fn reference(r: &Reading, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<bool>) {
                 rgb
             };
             let rgb = match r.transfer.as_str() {
-                "srgb" if r.primaries == "bt709" => rgb,
-                "srgb" => apply(&to709, rgb.map(srgb_decode)).map(srgb_encode),
+                "srgb" => {
+                    apply(&to709, rgb.map(|v| T::Srgb.to_linear(v))).map(|l| T::Srgb.from_linear(l))
+                }
                 hdr => {
                     // PQ/HLG are defined on 0..1. No fixture carries
                     // mastering metadata: a 1000 cd/m² content peak.
                     let s = rgb.map(|v| v.clamp(0.0, 1.0));
                     let nits = if hdr == "pq" {
-                        s.map(pq_eotf)
+                        s.map(|v| T::Pq.to_linear(v) * 10_000.0)
                     } else {
-                        hlg_display(s)
+                        hlg_ootf(s.map(|v| T::Hlg.to_linear(v)), 1000.0).map(|v| v * 1000.0)
                     };
-                    let sdr = nits.map(|n| pq_eotf(eetf(pq_signal(n), 1000.0, 203.0)) / 203.0);
-                    apply(&to709, sdr).map(srgb_encode)
+                    let sdr = nits.map(|n| {
+                        let e = eetf_bt2390(T::Pq.from_linear(n / 10_000.0), 1000.0, 203.0);
+                        T::Pq.to_linear(e) * 10_000.0 / 203.0
+                    });
+                    apply(&to709, sdr).map(|l| T::Srgb.from_linear(l))
                 }
             };
             let k = alpha * 255.0;
@@ -351,30 +378,36 @@ fn reference(r: &Reading, frame: &DecodedFrame) -> (Vec<[f64; 4]>, Vec<bool>) {
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 struct Distance {
     max: f64,
+    p999: f64,
     mean: f64,
     flat_max: f64,
     flat_mean: f64,
 }
 
-/// Display code distance (both sides clamped to the codable range).
+/// Display code distance per pixel (largest channel, both sides clamped to
+/// the codable range): max, 99.9th percentile and mean, over all pixels
+/// and over flat ones.
 fn distance(actual: impl Fn(usize) -> [f64; 4], reference: &[[f64; 4]], flat: &[bool]) -> Distance {
-    let (mut d, mut n, mut flat_n) = (Distance::default(), 0.0, 0.0);
+    let mut errors = Vec::with_capacity(reference.len());
+    let (mut d, mut flat_n) = (Distance::default(), 0.0);
     for (p, (want, &flat)) in reference.iter().zip(flat).enumerate() {
         let got = actual(p);
-        for c in 0..4 {
-            let e = (got[c].clamp(0.0, 255.0) - want[c].clamp(0.0, 255.0)).abs();
-            d.max = d.max.max(e);
-            d.mean += e;
-            n += 1.0;
-            if flat {
-                d.flat_max = d.flat_max.max(e);
-                d.flat_mean += e;
-                flat_n += 1.0;
-            }
+        let e = (0..4)
+            .map(|c| (got[c].clamp(0.0, 255.0) - want[c].clamp(0.0, 255.0)).abs())
+            .fold(0.0, f64::max);
+        errors.push(e);
+        d.mean += e;
+        if flat {
+            d.flat_max = d.flat_max.max(e);
+            d.flat_mean += e;
+            flat_n += 1.0;
         }
     }
-    d.mean /= n;
+    d.mean /= errors.len() as f64;
     d.flat_mean /= f64::max(flat_n, 1.0);
+    errors.sort_by(f64::total_cmp);
+    d.max = *errors.last().unwrap();
+    d.p999 = errors[((errors.len() - 1) as f64 * 0.999).round() as usize];
     d
 }
 
@@ -635,77 +668,4 @@ fn superwhites_reach_effects_the_same_way_for_every_reading() {
         seen[1][4] > seen[1][3] + 0.03,
         "the superwhite band is recovered"
     );
-}
-
-/// The engine's colour constants against the standards: pm-color's
-/// primaries conversions against matrices derived from the published
-/// chromaticities (and BT.2087's published BT.2020 → BT.709 matrix), its
-/// EETF against BT.2390's equations, and the range normalization against
-/// H.273 at 8, 10, 12 and 16 bits.
-#[test]
-fn engine_colour_constants_follow_the_standards() {
-    use standards::*;
-    let bt2087 = [
-        [1.6605, -0.5876, -0.0728],
-        [-0.1246, 1.1329, -0.0083],
-        [-0.0182, -0.1006, 1.1187],
-    ];
-    let derived = to_709("bt2020");
-    for i in 0..3 {
-        for j in 0..3 {
-            assert!(
-                (derived[i][j] - bt2087[i][j]).abs() < 1e-4,
-                "BT.2087 [{i}][{j}]"
-            );
-        }
-    }
-    for (name, p) in [
-        ("bt709", Primaries::Bt709),
-        ("smpte170m", Primaries::Bt601_525),
-        ("bt470bg", Primaries::Bt601_625),
-        ("bt2020", Primaries::Bt2020),
-        ("p3", Primaries::DisplayP3),
-    ] {
-        let ours = pm_color::primaries::conversion(p, Primaries::Bt709).unwrap();
-        let want = to_709(name);
-        for i in 0..3 {
-            for j in 0..3 {
-                assert!((ours[i][j] - want[i][j]).abs() < 1e-6, "{name} [{i}][{j}]");
-            }
-        }
-    }
-    // BT.2390: identity below the knee, the source peak onto the target.
-    let (pw, pt) = (pq_signal(1000.0), pq_signal(203.0));
-    assert!((eetf(pw, 1000.0, 203.0) - pt).abs() < 1e-12);
-    assert_eq!(eetf(0.3, 1000.0, 203.0), 0.3);
-    for i in 0..=1000 {
-        let e = f64::from(i) / 1000.0;
-        let ours = pm_color::tonemap::eetf(e, 1000.0);
-        assert!((ours - eetf(e, 1000.0, 203.0)).abs() < 1e-12, "EETF at {e}");
-    }
-    for bits in [8u8, 10, 12, 16] {
-        for range in [Range::Limited, Range::Full] {
-            let alignment = if bits == 16 {
-                SampleAlignment::Full16
-            } else {
-                SampleAlignment::Lsb
-            };
-            let n = pm_protocol::color::normalization(bits, alignment, range);
-            let full = range == Range::Full;
-            for code in [0.0, 16.0, 64.0, 128.0, 235.0, 240.0, 255.0]
-                .map(|c| c * f64::from(1u32 << (bits - 8)))
-            {
-                let y = (code - n.luma_offset) / n.luma_scale;
-                let c = (code - n.chroma_offset) / n.chroma_scale;
-                assert!(
-                    (y - normalize(code, u32::from(bits), full, false)).abs() < 1e-12,
-                    "{bits} {range:?} Y′ {code}"
-                );
-                assert!(
-                    (c - normalize(code, u32::from(bits), full, true)).abs() < 1e-12,
-                    "{bits} {range:?} C {code}"
-                );
-            }
-        }
-    }
 }

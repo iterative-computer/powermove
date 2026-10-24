@@ -22,7 +22,9 @@ import type { ElectronApplication, Page } from 'playwright';
 import { expect, launchApp, test } from './helpers/app';
 import { ffmpegBinary } from './helpers/ffmpeg';
 
-const ON = { POWERMOVE_NEW_ENGINE: '1' };
+// The native presenter's bounded per-frame and render-thread traces are on
+// for every engine run here, so a cadence stall can always be attributed.
+const ON = { POWERMOVE_NEW_ENGINE: '1', POWERMOVE_BRIDGE_TRACE: '1' };
 
 /** A 480×270 composition with a typewriter text (scaled 150%, progress
  *  keyed 0 → 100 over 2 s) and a plain text, over #203040. */
@@ -202,6 +204,49 @@ const FIXTURE: Record<string, string> = {
   'shape-tint': 'fixtures/compat-corpus/shape-tint',
   'compat-typewriter': 'fixtures/compat-typewriter'
 };
+
+/**
+ * What every trace recorded during a cadence run's longest gap between
+ * presented frames, in ms from Play: native renders that started, finished
+ * or were sent in it (CPU and GPU time, timed or immediate), render-thread
+ * turns, the viewer's arrivals, drops (with their reason) and draws, the
+ * longest wait between animation frames, renderer stages and long tasks.
+ * A gap whose frames were drawn late, never drawn, dropped by the viewer, or
+ * held up by the window's thread or an answer shows where.
+ */
+function stallAttribution(run: any) {
+  const gap = run.longestGap, trace = run.trace;
+  if (!gap || !trace) return null;
+  const from = gap.from - 50, to = gap.to;
+  const round = (ms: number) => Math.round(ms * 10) / 10;
+  const page = (ms: number) => round(ms - trace.started);
+  const host = (us: number) => round((us - trace.hostOffsetUs) / 1000 - trace.started);
+  const inside = (...ms: number[]) => ms.some(t => t >= from && t <= to);
+  const native = (trace.native?.presentTrace ?? []).map((p: any) => ({ seq: p.seq, k: p.k, timed: p.timed, revision: p.revision, start: host(p.start), cpuMs: round(p.cpu_us / 1000), gpuDone: host(p.gpu_done), sent: host(p.sent) }))
+    .filter((p: any) => inside(p.start, p.gpuDone, p.sent));
+  const turns = (trace.native?.presenter?.turnTrace ?? []).map((t: any) => ({ what: t.what, k: t.k, at: host(t.at), ms: round(t.us / 1000) }))
+    .filter((t: any) => inside(t.at, t.at + t.ms));
+  const viewer = trace.viewer ?? {};
+  const rafs = (viewer.rafs ?? []).map(page).filter((t: number) => inside(t));
+  const stages: Record<string, { count: number; maxMs: number }> = {};
+  for (const e of trace.stages ?? []) {
+    if (!inside(page(e.at), page(e.at + e.ms))) continue;
+    const s = (stages[e.stage] ??= { count: 0, maxMs: 0 });
+    s.count++; s.maxMs = Math.max(s.maxMs, round(e.ms));
+  }
+  return {
+    gap: { ...gap, from: round(gap.from), to: round(gap.to), ms: round(gap.to - gap.from) },
+    native,
+    turns: turns.filter((t: any) => t.ms >= 1 || t.what !== 'render').slice(0, 40),
+    arrivals: (viewer.arrivals ?? []).filter((a: any) => inside(page(a[2]))).map((a: any) => ({ seq: a[0], at: page(a[2]), timed: a[4] })),
+    drops: (viewer.drops ?? []).filter((d: any) => inside(page(d[2]))).map((d: any) => ({ seq: d[0], reason: d[1], at: page(d[2]) })),
+    draws: (viewer.draws ?? []).filter((d: any) => inside(page(d[0]))).map((d: any) => ({ seq: d[1], revision: d[2], raf: page(d[0]), arrived: page(d[4]), submitted: page(d[5]) })),
+    longestRafWait: rafs.length > 1 ? round(Math.max(...rafs.slice(1).map((t: number, i: number) => t - rafs[i]!))) : null,
+    stages,
+    longTasks: (run.longTasks ?? []).filter((t: any) => inside(t.at, t.at + t.ms)),
+    presenter: (({ lateSkipped, stalls, stallUsMax, lastStall, slowTurns, turnUsMax, gpuUsMax, composeUsMax, compatWaits }: any) => ({ lateSkipped, stalls, stallUsMax, lastStall, slowTurns, turnUsMax, gpuUsMax, composeUsMax, compatWaits }))(trace.native?.presenter ?? {})
+  };
+}
 
 /** Today's app: a fresh profile with `extension` installed and "Use New Engine" off. */
 async function flagOffApp(extension: string | null) {
@@ -528,7 +573,7 @@ test.describe('Use New Engine: existing extensions', () => {
       const PM = (window as any).PM;
       const api = PM.Kernel.api('cadence-probe');
       const at: number[] = [], times: number[] = [];
-      // Diagnostics (PM_COMPAT_TRACE=1): the lookahead's state at each
+      // Diagnostics (engine runs): the lookahead's state at each
       // presented frame, joined with the native and viewer traces below.
       const lookaheadTrace: number[][] = [];
       let wrapped = false;
@@ -565,6 +610,8 @@ test.describe('Use New Engine: existing extensions', () => {
       observer.disconnect();
       const gaps = at.slice(1).map((v, i) => v - at[i]!);
       const sorted = [...gaps].sort((a, b) => a - b);
+      const longest = gaps.indexOf(Math.max(...gaps));
+      const longestGap = longest < 0 ? null : { from: at[longest]! - started, to: at[longest + 1]! - started, frames: [Math.round(times[longest]! * 30), Math.round(times[longest + 1]! * 30)] };
       const firstFrameMs = Math.round(at.length ? at[0]! - started : 3000);
       // The run's first advancing frame: the first presented time past the
       // one presented first (a re-presentation of the start frame is not
@@ -592,8 +639,8 @@ test.describe('Use New Engine: existing extensions', () => {
       const shown = [...new Set(times)].map((t) => PM.EngineRender?.answeredAt?.(run.layer, Math.round(t * 705_600_000)) ?? null)
         .filter((a: any) => a && (revision === null || a.revision >= revision));
       const answeredShown = shown.length, rasterShown = shown.filter((a: any) => a.kind !== 'native').length;
-      const trace = traced ? { started, hostOffsetUs: PM.EngineConnection?.status?.()?.hostOffsetUs ?? null, lookahead: lookaheadTrace, viewer: await PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.().catch(() => null) ?? null } : undefined;
-      return { answeredShown, rasterShown, trace, longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, firstAdvanceMs, repeatCount, wrap, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
+      const trace = traced ? { started, hostOffsetUs: PM.EngineConnection?.status?.()?.hostOffsetUs ?? null, stages: PM.EngineRender?.trace?.take(), lookahead: lookaheadTrace, viewer: await PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.().catch(() => null) ?? null } : undefined;
+      return { answeredShown, rasterShown, trace, longestGap, longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, firstAdvanceMs, repeatCount, wrap, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
     }, { traced, run });
     const { page } = session;
     await page.waitForFunction((id) => (window as any).PM?.Kernel?.loader?.activeIds?.().includes(id) && Boolean((window as any).PM?.EngineRender), extension);
@@ -603,26 +650,30 @@ test.describe('Use New Engine: existing extensions', () => {
     const profileDirectory = process.env.PM_COMPAT_CPU_PROFILE_DIR;
     const profiler = profileDirectory ? await page.context().newCDPSession(page) : null;
     if (profiler) { await profiler.send('Profiler.enable'); await profiler.send('Profiler.start'); }
-    // Per-frame diagnostics: the viewer presenter's trace (arrivals, draws,
-    // drops), the native presenter's (POWERMOVE_BRIDGE_TRACE=1: schedule,
-    // render, GPU and send times), and the lookahead at each presented frame.
-    const traced = process.env.PM_COMPAT_TRACE === '1';
+    // Per-frame diagnostics on every engine run: the viewer presenter's
+    // trace (arrivals, draws, drops), the native presenter's (schedule,
+    // render, GPU and send times, render-thread turns), renderer stages and
+    // the lookahead at each presented frame. `stallAttribution` joins them
+    // over the longest gap; the full traces are attached to the test.
     const nativeReport = () => session.app.evaluate(async () => {
       const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
       return { presentTrace: report?.presentTrace ?? null, presenter: report?.presenter ?? null, loadavg: (process as any).getBuiltinModule?.('os')?.loadavg?.() ?? null };
     });
-    if (traced) {
-      await page.evaluate(() => (window as any).PM.EngineConnection.setTrace(true));
-      await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
-      await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.());
-      await nativeReport();
-    }
-    const engine: Awaited<ReturnType<typeof play>> & { nativeAfter?: Awaited<ReturnType<typeof nativeReport>> } = await play(page, traced);
-    if (traced) (engine as any).trace.native = await nativeReport();
-    // End-of-run status is sampled after the measured span, including on a
-    // non-traced cadence run. The window's last periodic stats can precede
-    // a late-frame burst and omit the native turn that caused it.
-    engine.nativeAfter = await nativeReport();
+    await page.evaluate(() => (window as any).PM.EngineConnection.setTrace(true));
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
+    await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.());
+    await nativeReport();
+    const engine: Awaited<ReturnType<typeof play>> & { nativeAfter?: Awaited<ReturnType<typeof nativeReport>> } = await play(page, true);
+    (engine as any).trace.native = await nativeReport();
+    const stall = stallAttribution(engine);
+    await test.info().attach(`${label} engine traces`, { body: JSON.stringify((engine as any).trace), contentType: 'application/json' });
+    delete (engine as any).trace;
+    // End-of-run status is sampled after the measured span: the window's
+    // last periodic stats can precede a late-frame burst and omit the
+    // native turn that caused it. (Its traces are in the attachment.)
+    const after = await nativeReport();
+    delete after.presenter?.turnTrace;
+    engine.nativeAfter = { ...after, presentTrace: null };
     if (profiler && profileDirectory) {
       const { profile } = await profiler.send('Profiler.stop');
       await mkdir(profileDirectory, { recursive: true });
@@ -647,13 +698,13 @@ test.describe('Use New Engine: existing extensions', () => {
       await rm(off.userData, { recursive: true, force: true });
     }
     // The machine's load during this run (the campaigns record it per run).
-    console.log(JSON.stringify({ cadence: label, load: os.loadavg(), engine, today }));
+    console.log(JSON.stringify({ cadence: label, load: os.loadavg(), engine, today, stall }));
     // The window answered for the override's layer at every presented time.
     expect(engine.answeredShown, 'presented times the window answered for').toBe(engine.uniqueTimes);
     // No stall (an unanswered need waits a second before it is asked again),
     // and no fewer frames than today's compositor presents.
     // Today's longest gap plus one frame at 30 fps, at most.
-    expect(engine.maxGap).toBeLessThanOrEqual(today.maxGap + Math.ceil(1000 / 30));
+    expect(engine.maxGap, `the longest gap: ${JSON.stringify(stall)}`).toBeLessThanOrEqual(today.maxGap + Math.ceil(1000 / 30));
     expect(engine.firstFrameMs).toBeLessThanOrEqual(today.firstFrameMs + Math.ceil(1000 / 30));
     expect(engine.firstAdvanceMs, 'the run\'s first advancing frame').toBeLessThanOrEqual(today.firstAdvanceMs + Math.ceil(1000 / 30));
     // Every presentation reaches extensions as `frame:rendered`: the engine
@@ -661,8 +712,8 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.repeatCount, `times presented again: ${JSON.stringify(engine.repeats)}`).toBeLessThanOrEqual(today.repeatCount);
     expect(engine.lastMs).toBeLessThanOrEqual(today.lastMs + Math.ceil(1000 / 30));
     // (The two sides can start one frame apart: one frame of alignment.)
-    expect(engine.frames).toBeGreaterThanOrEqual(today.frames - 1);
-    expect(engine.uniqueTimes).toBeGreaterThanOrEqual(today.uniqueTimes - 1);
+    expect(engine.frames, `the longest gap: ${JSON.stringify(stall)}`).toBeGreaterThanOrEqual(today.frames - 1);
+    expect(engine.uniqueTimes, `the longest gap: ${JSON.stringify(stall)}`).toBeGreaterThanOrEqual(today.uniqueTimes - 1);
     return { engine, today };
   }
 
@@ -835,12 +886,175 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.after).not.toEqual(engine.before);
   });
 
+  test('a paused edit is presented only whole: an unscoped write, or its override, changing another layer never shows half of it', async ({ session }) => {
+    test.setTimeout(180_000);
+    // A write without paths sends the layers it most likely wrote first, as
+    // a provisional revision the engine draws but does not present until the
+    // rest of the document is compared. Here the comparison finds more: the
+    // same write moved another layer. Then the raster override itself moves
+    // another layer and calls touch() while it draws the edit: it runs only
+    // after the whole comparison (it never sees a provisional document), and
+    // its own write is a later revision, presented whole.
+    await cp(path.join(__dirname, FIXTURE['shape-tint']!), path.join(session.userData, 'extensions', 'shape-tint'), { recursive: true });
+    await session.relaunch();
+    await session.openEditor();
+    const { page } = session;
+    await page.waitForFunction(() => (window as any).PM?.Kernel?.loader?.activeIds?.().includes('shape-tint') && Boolean((window as any).PM?.EngineRender));
+    await shapeTintProject(page);
+    await expect.poll(() => page.evaluate(() => (window as any).PM.EngineConnection.status().route), { timeout: 45_000 }).toBe('engine');
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
+    await page.evaluate(() => (window as any).PM.EngineConnection.setTrace(true));
+    await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.());
+    const result = await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      const api = PM.Kernel.api('provisional-proof');
+      const presentation = PM.Kernel.services.get('viewer').enginePresentation;
+      const items: { revision: number; provisional: boolean; confirmed: boolean }[] = [];
+      const off = PM.EngineDoc.subscribe((b: any) => items.push({ revision: b.revision, provisional: !!b.provisional, confirmed: !!b.confirmed }));
+      const layer = (id: string) => PM.proj.layers.find((l: any) => l.id === id);
+      const settled = async () => {
+        const barrier = PM.EngineDoc.barrier;
+        for (let i = 0; i < 300; i++) {
+          await new Promise((r) => requestAnimationFrame(r));
+          if (barrier.provisionalRevision === null && (presentation.latest?.revision ?? 0) >= barrier.revision) break;
+        }
+        await new Promise((r) => setTimeout(r, 200));
+      };
+      const edit = async (fn: () => void) => { fn(); PM.touch(); PM.invalidate(); await settled(); };
+      const drag = async (from: number) => { for (let i = 0; i < 4; i++) await edit(() => { layer('tinted').p['position.x'].v = from + i * 3; }); };
+      let registration: any = null;
+      let overrideSaw: { provisional: number | null; pending: boolean; whole: boolean; tinted: number } | null = null;
+      try {
+        await drag(100);
+        // 1. One unscoped write that also moved a layer it never moved before.
+        await edit(() => { layer('tinted').p['position.x'].v = 120; layer('plain').p['position.y'].v = 50; });
+        // 2. The override moves another layer and calls touch() while it draws the edit.
+        const original = api.services.get('raster');
+        let armed = false;
+        registration = api.services.register('raster', (l: any, ...rest: any[]) => {
+          if (armed && l?.id === 'tinted') {
+            armed = false;
+            // What the override can read: the document as compared, whole.
+            const barrier = PM.EngineDoc.barrier;
+            overrideSaw = { provisional: barrier.provisionalRevision, pending: barrier.pending, whole: barrier.shadowMatches().ok, tinted: layer('tinted').p['position.x'].v };
+            layer('plain').p['position.x'].v = 200; PM.touch();
+          }
+          return original(l, ...rest);
+        });
+        await drag(100);
+        await edit(() => { armed = true; layer('tinted').p['position.x'].v = 130; });
+      } finally {
+        registration?.dispose?.();
+        if (typeof off === 'function') off();
+      }
+      const trace = await presentation.takeTrace();
+      const confirmed = new Set(items.filter((i) => i.confirmed).map((i) => i.revision));
+      const provisional = items.filter((i) => i.provisional).map((i) => i.revision);
+      const superseded = provisional.filter((r) => !confirmed.has(r));
+      const drawn = (trace?.draws ?? []).map((d: any[]) => d[2] as number);
+      // The frame on screen at the end: both layers where the writes put them.
+      const url: string = await api.render.snapshotAsync(PM.time, 320);
+      const image = new Image();
+      await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; image.src = url; });
+      const cv = document.createElement('canvas'); cv.width = image.width; cv.height = image.height;
+      const ctx = cv.getContext('2d')!; ctx.drawImage(image, 0, 0);
+      const at = (x: number, y: number) => Array.from(ctx.getImageData(Math.round(x * image.width / 320), Math.round(y * image.height / 180), 1, 1).data.slice(0, 3));
+      return { overrideSaw, provisional, confirmed: [...confirmed], superseded, drawn, plain: [layer('plain').p['position.x'].v, layer('plain').p['position.y'].v], plainPixel: at(200, 50), oldPlainPixel: at(230, 90), revision: PM.EngineDoc.barrier.revision, shown: presentation.latest?.revision ?? null };
+    });
+    const native = await session.app.evaluate(async () => {
+      const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
+      const p = report?.presenter ?? {};
+      return { parked: p.provisionalParked ?? 0, confirmed: p.provisionalConfirmed ?? 0, dropped: p.provisionalDropped ?? 0 };
+    });
+    console.log(JSON.stringify({ provisionalProof: { ...result, native } }));
+    expect(session.diagnostics.pageErrors).toEqual([]);
+    // The provisional path ran, was confirmed for the plain drag moves, and
+    // the comparison superseded it in the adversarial write.
+    expect(result.confirmed.length).toBeGreaterThan(0);
+    expect(native.confirmed).toBeGreaterThan(0);
+    expect(result.superseded.length).toBeGreaterThanOrEqual(1);
+    // The override drew the edit from the whole, compared document: no
+    // provisional revision outstanding, nothing left to diff, the shadow
+    // equal to the live document, and the edit's own value in place.
+    expect(result.overrideSaw).toEqual({ provisional: null, pending: false, whole: true, tinted: 130 });
+    // No frame of a superseded revision was ever drawn.
+    expect(result.drawn.filter((r: number) => result.superseded.includes(r))).toEqual([]);
+    expect(result.drawn.length).toBeGreaterThan(0);
+    // The last frame shows the whole of both writes.
+    expect(result.plain).toEqual([200, 50]);
+    expect(result.shown).toBe(result.revision);
+    const blue = (rgb: number[]) => rgb.every((v, i) => Math.abs(v - [51, 102, 204][i]!) <= 1);
+    expect(blue(result.plainPixel), JSON.stringify(result.plainPixel)).toBe(true);
+    expect(blue(result.oldPlainPixel), JSON.stringify(result.oldPlainPixel)).toBe(false);
+
+    // 3. The engine draws before the comparison ends: in a document of
+    // 2,500 more layers the whole comparison outlasts the engine's frame,
+    // so the provisional frame is parked, and the extra change found then
+    // drops it. Each attempt changes a layer no earlier write changed. With
+    // an override the frame cannot finish first (its answer is made only
+    // after the comparison), so this runs with the override removed.
+    await page.evaluate(async () => {
+      const PM = (window as any).PM;
+      await PM.Kernel.loader.deactivate('shape-tint');
+      const extra = Array.from({ length: 2500 }, (_, i) => {
+        const l = PM.mkLayer('shape', { name: `Off ${i}`, from: 0, dur: 3, d: { shape: 'rect', w: 40, h: 30, color: '#3366CC', stroke: 0 } }, PM.proj);
+        l.id = `off-${i}`; l.on = false; l.p.rotation = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(3, i % 360)] });
+        return l;
+      });
+      PM.proj.layers.push(...extra);
+      PM.touch();
+    });
+    const nativeCounts = native;
+    const counts = () => session.app.evaluate(async () => {
+      const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
+      const p = report?.presenter ?? {};
+      return { parked: p.provisionalParked ?? 0, dropped: p.provisionalDropped ?? 0 };
+    });
+    let large = { superseded: [] as number[], drawn: [] as number[], attempts: 0 };
+    let after = await counts();
+    for (let attempt = 0; attempt < 6 && after.dropped === nativeCounts.dropped; attempt++) {
+      const outcome = await page.evaluate(async (attempt) => {
+        const PM = (window as any).PM;
+        const presentation = PM.Kernel.services.get('viewer').enginePresentation;
+        const items: { revision: number; provisional: boolean; confirmed: boolean }[] = [];
+        const off = PM.EngineDoc.subscribe((b: any) => items.push({ revision: b.revision, provisional: !!b.provisional, confirmed: !!b.confirmed }));
+        const layer = (id: string) => PM.proj.layers.find((l: any) => l.id === id);
+        const settled = async () => {
+          const barrier = PM.EngineDoc.barrier;
+          for (let i = 0; i < 300; i++) {
+            await new Promise((r) => requestAnimationFrame(r));
+            if (barrier.provisionalRevision === null && (presentation.latest?.revision ?? 0) >= barrier.revision) break;
+          }
+          await new Promise((r) => setTimeout(r, 200));
+        };
+        const edit = async (fn: () => void) => { fn(); PM.touch(); PM.invalidate(); await settled(); };
+        try {
+          for (let i = 0; i < 3; i++) await edit(() => { layer('tinted').p['position.x'].v = 140 + attempt * 10 + i; });
+          await presentation.takeTrace();
+          await edit(() => { layer('tinted').p['position.x'].v = 120; layer(`off-${attempt}`).p['position.x'].v = 77; });
+        } finally { if (typeof off === 'function') off(); }
+        const confirmed = new Set(items.filter((i) => i.confirmed).map((i) => i.revision));
+        const trace = await presentation.takeTrace();
+        return { superseded: items.filter((i) => i.provisional && !confirmed.has(i.revision)).map((i) => i.revision), drawn: (trace?.draws ?? []).map((d: any[]) => d[2] as number) };
+      }, attempt);
+      large = { superseded: [...large.superseded, ...outcome.superseded], drawn: [...large.drawn, ...outcome.drawn], attempts: attempt + 1 };
+      after = await counts();
+    }
+    console.log(JSON.stringify({ provisionalDrop: { ...large, before: nativeCounts, after } }));
+    // A provisional frame was parked and then dropped, and no frame of a
+    // superseded revision was drawn.
+    expect(after.dropped).toBeGreaterThan(nativeCounts.dropped);
+    expect(large.superseded.length).toBeGreaterThan(0);
+    expect(large.drawn.filter((r) => large.superseded.includes(r))).toEqual([]);
+  });
+
   test('editing a large document with a raster override that reads its base copies the document only to seed the raster worker', async ({ session }) => {
     test.setTimeout(360_000);
-    // Drags the overridden ellipse in a document of megabytes of JSON, one
-    // move per presented frame: each move is a revision whose base raster
-    // the override reads (a layer raster drawn by the engine's raster
-    // worker), on the engine and in today's app.
+    // Drags and resizes the overridden ellipse in a document of megabytes
+    // of JSON, one move per presented frame: each move is a revision whose
+    // new base raster the override reads (a layer raster drawn by the
+    // engine's raster worker; content-identical bases are reused, as
+    // today's raster cache reuses them), on the engine and in today's app.
     const drag = (page: Page) => page.evaluate(async () => {
       const PM = (window as any).PM;
       const api = PM.Kernel.api('drag-probe');
@@ -852,7 +1066,9 @@ test.describe('Use New Engine: existing extensions', () => {
           const began = performance.now();
           const shown = new Promise<boolean>((resolve) => { presented = () => resolve(true); setTimeout(() => resolve(false), 2000); });
           const before = PM.EngineDoc?.barrier?.revision ?? null;
-          PM.proj.layers.find((l: any) => l.id === 'tinted').p['position.x'].v = 200 + i * 4;
+          const tinted = PM.proj.layers.find((l: any) => l.id === 'tinted');
+          tinted.p['position.x'].v = 200 + i * 4;
+          tinted.d.w = 240 + i;
           // As the app's own edits do (anim.ts): the edit, then a redraw.
           PM.touch();
           PM.invalidate();

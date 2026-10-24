@@ -1,7 +1,9 @@
 # Parity corpus
 
-The parity corpus is what the legacy TypeScript engine produces today, captured so the
-native engine can be compared against it (plan section 25, appendix B, decision 13).
+The parity corpus is what the legacy TypeScript engine produces today (plan section 25,
+appendix B, decision 13). In the gates the captures are "today"
+([gate-policy.md](gate-policy.md)): the witness for authored intent, and the baseline the
+engine must be at least as close to the reference as.
 The tooling lives in `engine/corpus/`; captured data never enters the repository.
 
 - **Generator** (`src/generate.ts`, `src/projects/`): synthetic project documents, one or

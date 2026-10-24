@@ -91,6 +91,10 @@ pub fn all() -> Vec<Bench> {
         ("drag_500", drag_500),
         ("edit_playback_500", edit_playback_500),
         ("inspector_edit_500", inspector_edit_500),
+        (
+            "paused_edit_with_override_2500",
+            paused_edit_with_override_2500,
+        ),
         ("scrub_24", scrub_24),
         ("export_120", export_120),
         ("typing_60", typing_60),
@@ -399,6 +403,123 @@ pub fn inspector_edit_500(ctx: &Ctx) -> BenchReport {
         m,
         wall,
         json!({ "fixture": f.summary, "layer": layer }),
+    )
+}
+
+/// Native work after the window has answered a paused edit: a fresh canvas
+/// raster is uploaded and composited at every revision. The paired Electron
+/// harness measures the additional JS preparation, IPC and presentation.
+pub fn paused_edit_with_override_2500(ctx: &Ctx) -> BenchReport {
+    use pm_render::compat::{
+        CompatAnswer, CompatFormat, CompatRaster, CompatRasters, CompatSource,
+    };
+    use std::sync::Mutex;
+
+    struct Override {
+        layer: String,
+        raster: Mutex<Arc<CompatRaster>>,
+        asks: std::sync::atomic::AtomicU64,
+    }
+    impl CompatRasters for Override {
+        fn producing(&self, source: CompatSource) -> bool {
+            source == CompatSource::RasterOverride
+        }
+
+        fn answer(
+            &self,
+            _composition: &str,
+            layer: &str,
+            _time: f64,
+            _scale: f64,
+            _source: CompatSource,
+            _crop: Option<pm_protocol::common::PixelRect>,
+        ) -> CompatAnswer {
+            if layer == self.layer {
+                self.asks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                CompatAnswer::Raster(self.raster.lock().unwrap().clone())
+            } else {
+                CompatAnswer::Native
+            }
+        }
+    }
+
+    let layer = 0;
+    let mut layers = vec![fixtures::layer(
+        "overridden",
+        "shape",
+        json!({"shape":"ellipse", "w":240, "h":160, "color":"#33CC66", "stroke":0}),
+        200.0,
+        180.0,
+        10.0,
+    )];
+    for i in 0..2500 {
+        let mut l = fixtures::layer(
+            &format!("off-{i}"),
+            "shape",
+            json!({"shape":"rect", "w":40, "h":30, "color":"#3366CC"}),
+            0.0,
+            0.0,
+            10.0,
+        );
+        l["on"] = false.into();
+        layers.push(l);
+    }
+    let doc = fixtures::project(
+        640,
+        360,
+        30.0,
+        10.0,
+        fixtures::solid_fill("#203040"),
+        layers,
+    );
+    let media = std::collections::BTreeMap::new();
+    let raster = |edit: u8| {
+        Arc::new(CompatRaster {
+            width: 640,
+            height: 360,
+            format: CompatFormat::Rgba8Premultiplied,
+            anchor: [0.0, 0.0],
+            size: [240.0, 160.0],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            data: Arc::new([232, edit, 42, 255].repeat(640 * 360)),
+        })
+    };
+    let producer = Arc::new(Override {
+        layer: "overridden".into(),
+        raster: Mutex::new(raster(0)),
+        asks: Default::default(),
+    });
+    let mut v = Viewer::new(ctx, &doc, &media);
+    v.composer
+        .renderer()
+        .set_compat_rasters(Some(producer.clone()));
+    let at = ticks(1.0);
+    v.frame(at);
+    v.frame(at);
+    let scope = Scope::begin();
+    let wall = (0..60)
+        .map(|edit| {
+            let began = Instant::now();
+            v.patch(vec![leaf_set(
+                layer,
+                &["p", "position.x", "v"],
+                pm_model::Value::Number(200.0 + f64::from(edit) * 4.0),
+            )]);
+            *producer.raster.lock().unwrap() = raster(edit);
+            v.frame(at);
+            began.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    assert!(
+        producer.asks.load(std::sync::atomic::Ordering::Relaxed) >= 62,
+        "every edit must draw the override"
+    );
+    report(
+        "paused_edit_with_override_2500",
+        "edits",
+        measured(scope),
+        wall,
+        json!({"layers":2501,"off":2500,"raster":[640,360],"endpoint":"native patch, ready answer, composite and GPU completion; excludes window preparation, IPC and display"}),
     )
 }
 

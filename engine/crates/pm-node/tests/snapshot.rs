@@ -41,7 +41,9 @@ use pm_protocol::envelope::{
 use pm_protocol::error::{EngineProcess, ErrorCode};
 use pm_protocol::frame::{FrameRelease, MediaPreference, PreviewResolution, ViewerState};
 use pm_protocol::host::PortId;
-use pm_protocol::patch::{DocumentEncoding, Resync, ResyncSource};
+use pm_protocol::patch::{
+    ConfirmRevision, DocumentEncoding, PatchBatch, PatchEncoding, PatchOrigin, Resync, ResyncSource,
+};
 use pm_protocol::snapshot::{
     HostSnapshot, PixelPayload, SnapshotClass, SnapshotOutcome, SnapshotPixels, SnapshotRequest,
     SnapshotResult, SnapshotTarget,
@@ -109,6 +111,11 @@ fn run_child_with(child: &str, envs: &[(&str, &str)]) -> String {
 #[test]
 fn snapshots_render_the_session_document_at_its_revision() {
     run_child("child_snapshots");
+}
+
+#[test]
+fn snapshots_wait_while_a_revision_is_provisional() {
+    run_child("child_provisional_snapshots");
 }
 
 #[test]
@@ -2337,4 +2344,77 @@ fn child_svg_viewer_timeout() {
     assert_eq!(stats["externalWaitTimeouts"], json!(1), "{stats}");
     assert_eq!(stats["svgFailedFrames"], json!(1), "{stats}");
     println!("CHILD-OK svg viewer timeout (drawn after {waited:?})");
+}
+
+#[test]
+#[ignore = "run by snapshots_wait_while_a_revision_is_provisional"]
+fn child_provisional_snapshots() {
+    if std::env::var(CHILD_ENV).is_err() {
+        return;
+    }
+    let mut c = Child::start();
+    let session = c.session;
+    c.resync(2, 1, &project(100.0));
+    let small = Size::new(320, 180);
+    // The window's batch from `from` to `to`: provisional while the rest of
+    // the document is still being compared.
+    let batch = |c: &mut Child, base: u64, from: &Value, to: &Value, provisional: bool| {
+        let parse = |v: &Value| pm_model::json::parse(&v.to_string()).unwrap();
+        let ops = pm_model::ops::diff_ops(Some(&parse(from)), Some(&parse(to)));
+        c.event(Event::ApplyPatches(PatchBatch {
+            document: "Psnap".into(),
+            base_revision: Revision::new(base).unwrap(),
+            revision: Revision::new(base + 1).unwrap(),
+            origin: PatchOrigin::StructuralDiff,
+            encoding: PatchEncoding::CanonicalV1,
+            patch_count: ops.len() as u32,
+            body: Bytes(pm_model::binary::encode(&ops).unwrap()),
+            provisional,
+        }));
+    };
+    let capture = |c: &mut Child, id: u64, at: u64| {
+        c.snapshot(
+            id,
+            frame_request(SnapshotClass::Async, small, SnapshotPixels::Opaque, 5_000),
+            Some(at),
+            WINDOW,
+            session,
+        );
+    };
+
+    // A capture asked at revision 1 while revision 2 is provisional waits:
+    // 2 may be part of an edit. The rest of the edit supersedes it (3), and
+    // the capture draws the whole edit, never 2.
+    batch(&mut c, 1, &project(100.0), &project(150.0), true);
+    capture(&mut c, 30, 1);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(300), &mut answer(30))
+            .is_none(),
+        "drew a provisional revision"
+    );
+    batch(&mut c, 2, &project(150.0), &project(200.0), false);
+    let result = rendered(c.inbox.wait(Duration::from_secs(20), answer(30)));
+    assert_eq!(result.revision.get(), 3);
+    let px = pixels_of(&result);
+    assert_eq!(at(&px, 320, 220, 70), BOX);
+    assert_eq!(at(&px, 320, 170, 70), BACKGROUND);
+
+    // Confirmed: the capture asked below it draws the provisional revision.
+    batch(&mut c, 3, &project(200.0), &project(120.0), true);
+    capture(&mut c, 31, 3);
+    assert!(
+        c.inbox
+            .try_wait(Duration::from_millis(300), &mut answer(31))
+            .is_none(),
+        "drew a provisional revision"
+    );
+    c.event(Event::ConfirmRevision(ConfirmRevision {
+        document: "Psnap".into(),
+        revision: Revision::new(4).unwrap(),
+    }));
+    let result = rendered(c.inbox.wait(Duration::from_secs(20), answer(31)));
+    assert_eq!(result.revision.get(), 4);
+    assert_eq!(at(&pixels_of(&result), 320, 140, 70), BOX);
+    println!("CHILD-OK provisional snapshots");
 }

@@ -1033,9 +1033,10 @@ WebGL output itself moves by that much when its input moves one binary16
 step. In the app the engine's input to these effects (the layer buffer:
 pm-render's sampling and compositing) equals today's within 1 CV everywhere
 but not bit for bit, so isolated pixels whose input sits on a boundary land
-on the other level. They are not drawn "as today" bit for bit, and under
-amendment 22 they are a visible difference on existing projects: escalated
-with side-by-sides (`PM_RENDER_DIFFS` now also writes review frames:
+on the other level. They are not drawn "as today" bit for bit. Under the
+earlier amendment 22 (any visible difference a blocker) they were escalated
+with side-by-sides; the current one judges them against an f64 reference
+instead (gate-policy.md, lane L6) (`PM_RENDER_DIFFS` now also writes review frames:
 engine, legacy, and a map of the differing pixels). Measured 2026-10-18 on
 `effects-20261017-060101-ca4d364f`: `render/fx-posterize` t = 0, 1, 2 differ
 at 0.10%, 0.05%, 0.02% of pixels, max 16, 27, 85 CV (float 15.9, 26.9,
@@ -1249,7 +1250,7 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
 - **The per-program budget records only** (2026-10-19): plan section 8 and
   issue A2 ask for a budget that turns an overrunning program off, but
   today's compositor (`legacy/gl/gpu-timing.ts`) only records GPU time, and
-  amendment 22 forbids the visible difference. The engine now records
+  turning a program off breaks its effect (a blocker under amendment 22). The engine now records
   (`Watchdog::measured_ms`) and enforces nothing; the hang guard's 10 s
   (Chromium's) is the only thing that turns a program off. Enforcing a
   budget (`Watchdog::set_budget`, user programs only) needs Jude's call

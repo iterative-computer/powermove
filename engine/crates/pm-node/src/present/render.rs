@@ -303,6 +303,13 @@ pub enum Command {
         key: Key,
         update: DocumentUpdate,
         posted: i64,
+        /// Frames of the update's revision wait for [`Command::Confirm`].
+        provisional: bool,
+    },
+    /// The provisional update that made `revision` was the whole change.
+    Confirm {
+        key: Key,
+        revision: Revision,
     },
     /// The session's definitions (contract 10), and those a delta
     /// registered again.
@@ -620,6 +627,12 @@ pub struct Stats {
     pub compat_asked: u64,
     /// Viewer frames that waited for producer answers.
     pub compat_waits: u64,
+    /// Frames of provisional revisions: parked until confirmed, confirmed
+    /// revisions, and parked frames dropped because a later update
+    /// superseded their revision (never presented).
+    pub provisional_parked: u64,
+    pub provisional_confirmed: u64,
+    pub provisional_dropped: u64,
     /// Layer rasters the worker drew off this thread ([`super::rasters`]).
     pub layer_rasters_off_thread: u64,
     /// Times the worker's document mirror was seeded (a session's first
@@ -1169,6 +1182,12 @@ struct Thread {
     work_start: i64,
     /// Sends frames shown at the next refresh once their GPU work is done.
     completer: Option<super::complete::Completer>,
+    /// Per session, the revision of a provisional update not yet confirmed
+    /// or superseded: its frames are parked, not sent.
+    provisional: BTreeMap<Key, Revision>,
+    /// A finished paused frame of a provisional revision, waiting for
+    /// [`Command::Confirm`] (sent then) or the next update (dropped).
+    parked: BTreeMap<Key, super::complete::Pending>,
     /// Level 1 SVG rasters asked of the renderers (decision S1).
     svg: super::svg::SvgState,
     /// GPU work seen last (frames and snapshots) and when; the idle
@@ -1382,6 +1401,8 @@ pub fn run(
         doc_trace: BTreeMap::new(),
         work_start: 0,
         completer,
+        provisional: BTreeMap::new(),
+        parked: BTreeMap::new(),
         svg: super::svg::SvgState::default(),
         rest: Rest::default(),
         rasters,
@@ -1392,7 +1413,16 @@ pub fn run(
     let mut last_inventory_us = 0;
     loop {
         let timeout = thread.next_wake();
-        match rx.recv_timeout(timeout) {
+        let waiting_at = thread.config.trace.then(now);
+        let received = rx.recv_timeout(timeout);
+        if let Some(waiting_at) = waiting_at {
+            let woke_at = now();
+            let late_us = wake_lateness_us(waiting_at, woke_at, timeout);
+            if late_us >= 2_000 {
+                thread.trace_event("render wake late", woke_at - late_us, late_us, -1);
+            }
+        }
+        match received {
             Ok(Command::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
             Ok(command) => {
                 let started = now();
@@ -1401,7 +1431,10 @@ pub fn run(
                     break;
                 }
                 thread.note_turn(what, started);
+                let drain_started = thread.config.trace.then(now);
+                let mut drained = 0;
                 while let Ok(command) = rx.try_recv() {
+                    drained += 1;
                     let started = now();
                     let what = command_name(&command);
                     if matches!(command, Command::Shutdown)
@@ -1411,6 +1444,12 @@ pub fn run(
                         return;
                     }
                     thread.note_turn(what, started);
+                }
+                if let Some(drain_started) = drain_started {
+                    let drain_us = now() - drain_started;
+                    if drain_us >= 2_000 {
+                        thread.trace_event("command drain", drain_started, drain_us, drained);
+                    }
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -1434,6 +1473,15 @@ pub fn run(
 /// status report and a warning in the engine log).
 pub const STALL_US: i64 = 250_000;
 
+/// Time the render thread woke after its requested deadline, distinct from
+/// work it did on that turn. A loaded OS can suspend an otherwise idle
+/// thread; attributing that gap to the next raster would be misleading.
+fn wake_lateness_us(started: i64, woke: i64, timeout: Duration) -> i64 {
+    (woke - started)
+        .saturating_sub(timeout.as_micros().min(i64::MAX as u128) as i64)
+        .max(0)
+}
+
 /// The lower bounds of the slow-turn bands in [`Stats::slow_turns`].
 pub const SLOW_TURN_BANDS_US: [i64; 4] = [50_000, 100_000, STALL_US, 1_000_000];
 
@@ -1454,6 +1502,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Close { .. } => "close",
         Command::ClosePort { .. } => "close port",
         Command::Document { .. } => "document",
+        Command::Confirm { .. } => "confirm",
         Command::Definitions { .. } => "definitions",
         Command::Media { .. } => "media",
         Command::ShaderFallback { .. } => "shader fallback",
@@ -2313,10 +2362,36 @@ impl Thread {
                 key,
                 update,
                 posted,
+                provisional,
             } => {
+                let revision = update.revision();
                 let mirrored = self.raster_mirrors.contains(&key).then(|| update.clone());
                 self.document(key, update, posted, audio_forwarded);
                 self.mirror_update(key, mirrored);
+                // Any update ends the previous provisional revision: a frame
+                // parked for it showed a state the renderer superseded.
+                self.drop_parked(key);
+                if provisional {
+                    self.provisional.insert(key, revision);
+                } else {
+                    self.provisional.remove(&key);
+                }
+            }
+            Command::Confirm { key, revision } => {
+                if self.provisional.get(&key) == Some(&revision) {
+                    self.provisional.remove(&key);
+                    self.stats().provisional_confirmed += 1;
+                    match (self.parked.remove(&key), self.completer.as_ref()) {
+                        (Some(pending), Some(completer)) => completer.submit(pending),
+                        // Not drawn yet (or held without a completion
+                        // thread): draw it now.
+                        _ => {
+                            if let Some(view) = self.views.get_mut(&key) {
+                                view.dirty = true;
+                            }
+                        }
+                    }
+                }
             }
             Command::FrameSent {
                 key,
@@ -2777,7 +2852,38 @@ impl Thread {
         super::wait::Bounds::new(self.config.external_wait_cap_us)
     }
 
+    /// Drops the frame parked for `key`'s provisional revision: a later
+    /// update superseded that revision, so it is never presented.
+    fn drop_parked(&mut self, key: Key) {
+        if let Some(pending) = self.parked.remove(&key) {
+            self.stats().provisional_dropped += 1;
+            self.release_parked(pending);
+        }
+    }
+
+    /// Returns a parked frame's surface to the pool (the viewer never got
+    /// it) and draws the view again.
+    fn release_parked(&mut self, pending: super::complete::Pending) {
+        let super::complete::Pending { key, meta, .. } = pending;
+        self.preview_candidates.remove(&(key, meta.seq));
+        if let Some(view) = self.views.get_mut(&key) {
+            if let (Some(live), Ok(seq)) = (view.pool.as_mut(), Seq::new(meta.seq))
+                && live.spec.generation == meta.generation
+            {
+                let _ = live.ledger.release(FrameRelease {
+                    pool_index: meta.index,
+                    seq,
+                });
+            }
+            view.dirty = true;
+        }
+    }
+
     fn forget_session(&mut self, key: Key) {
+        self.provisional.remove(&key);
+        if let Some(pending) = self.parked.remove(&key) {
+            self.release_parked(pending);
+        }
         self.prepared.forget(key);
         self.preview_controls.forget(key);
         self.preview_candidates.retain(|(k, _), _| *k != key);
@@ -4804,10 +4910,22 @@ impl Thread {
             // At most `MAX_IN_FLIGHT` frames wait on the GPU; the completion
             // thread sends this one (its descriptor is not sent here).
             let deferred = self.completer.is_some();
+            // Without the completion thread nothing can hold a frame: a
+            // provisional revision is drawn once it is confirmed.
+            let held = !deferred
+                && self
+                    .views
+                    .get(&key)
+                    .is_some_and(|v| self.provisional.get(&key) == Some(&v.revision));
             if let Some(view) = self.views.get_mut(&key) {
                 view.render_failed = false;
             }
-            if let Some(descriptor) = self.render(key, media, -1, None, deferred, true) {
+            if held {
+                // The confirmation draws it (`Command::Confirm`).
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = false;
+                }
+            } else if let Some(descriptor) = self.render(key, media, -1, None, deferred, true) {
                 let seq = descriptor.seq;
                 self.queue_auto_preview(key, seq);
                 if let Some(view) = self.views.get_mut(&key) {
@@ -4831,7 +4949,13 @@ impl Thread {
             view.dirty = false;
         }
         // Playback: render ahead while frames are due and slots are free.
+        // Never at a provisional revision: the renderer confirms or
+        // supersedes it before it plays (its frames could show a partial
+        // edit).
         loop {
+            if self.provisional.contains_key(&key) {
+                break;
+            }
             let Some(view) = self.views.get_mut(&key) else {
                 return;
             };
@@ -5618,13 +5742,23 @@ impl Thread {
             if timing.is_none() {
                 self.last_interactive = Some(now());
             }
-            completer.submit(super::complete::Pending {
+            let pending = super::complete::Pending {
                 key,
                 device: gpu.device.clone(),
                 submission,
                 bytes,
                 meta,
-            });
+            };
+            let replaced = if self.provisional.get(&key) == Some(&descriptor.revision) {
+                self.stats().provisional_parked += 1;
+                self.parked.insert(key, pending)
+            } else {
+                completer.submit(pending);
+                None
+            };
+            if let Some(old) = replaced {
+                self.release_parked(old);
+            }
             return Some(descriptor);
         }
         let done = gpu.device.poll(wgpu::PollType::Wait {
@@ -5802,12 +5936,16 @@ impl Thread {
         loop {
             let pressure = self.pressure();
             let docs = &self.docs;
+            let provisional = &self.provisional;
             // A document whose media the host has not answered yet is not
             // ready: the snapshot waits (within its wait) rather than draw
-            // media missing that is on its way.
+            // media missing that is on its way. Nor is a provisional one: a
+            // capture asked earlier must not draw a partial edit.
             let revision = |key: Key| {
                 docs.get(&key)
-                    .filter(|d| d.has_document() && d.media_ready())
+                    .filter(|d| {
+                        d.has_document() && d.media_ready() && !provisional.contains_key(&key)
+                    })
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
@@ -5873,9 +6011,12 @@ impl Thread {
             }
             let pressure = self.pressure();
             let docs = &self.docs;
+            let provisional = &self.provisional;
             let revision = |key: Key| {
                 docs.get(&key)
-                    .filter(|d| d.has_document() && d.media_ready())
+                    .filter(|d| {
+                        d.has_document() && d.media_ready() && !provisional.contains_key(&key)
+                    })
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
@@ -5947,11 +6088,23 @@ impl Thread {
             self.snapshots.published(name, length);
         }
         let t = now();
+        self.trace_event(
+            "layer raster queue",
+            done.started - done.queued_us,
+            done.queued_us,
+            done.time,
+        );
         if let Some(render_us) = done.render_us {
             let costs = self.snapshot_costs.entry(done.key).or_default();
             costs.0 += 1;
             costs.1 = costs.1.max(render_us);
-            self.trace_event("layer raster", t - render_us, render_us, done.time);
+            self.trace_event("layer raster", done.started, render_us, done.time);
+            self.trace_event(
+                "layer raster completion delivery",
+                done.started + render_us,
+                (t - done.started - render_us).max(0),
+                done.time,
+            );
         } else {
             self.trace_event("layer raster failed", t, 0, done.time);
         }
@@ -6667,6 +6820,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wake_lateness_excludes_the_requested_wait_and_early_commands() {
+        let wait = Duration::from_micros(1_000);
+        assert_eq!(wake_lateness_us(10, 510, wait), 0);
+        assert_eq!(wake_lateness_us(10, 1_010, wait), 0);
+        assert_eq!(wake_lateness_us(10, 330_010, wait), 329_000);
+    }
+
+    #[test]
     fn snapshot_target_cache_policy_accounts_for_format_and_resize() {
         use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
 
@@ -6676,6 +6837,37 @@ mod tests {
         assert!(cache_snapshot_target(4096, 4096, Rgba8Unorm));
         assert!(!cache_snapshot_target(4096, 4096, Rgba16Float));
         assert!(!cache_snapshot_target(4096, 2048, Rgba32Float));
+    }
+
+    #[test]
+    fn raster_trace_uses_worker_timestamps_and_separates_queue_and_delivery() {
+        let (mut thread, _) = preview_thread();
+        thread.config.trace = true;
+        thread.raster_done(super::super::rasters::RasterDone {
+            key: preview_key(),
+            bytes: 0,
+            published: None,
+            render_us: Some(300),
+            queued_us: 200,
+            started: 1_000,
+            time: 42,
+        });
+        let stats = thread.stats();
+        let events: Vec<_> = stats.turn_trace.iter().collect();
+        assert_eq!(
+            (events[0].what, events[0].at, events[0].us),
+            ("layer raster queue", 800, 200)
+        );
+        assert_eq!(
+            (events[1].what, events[1].at, events[1].us),
+            ("layer raster", 1_000, 300)
+        );
+        assert_eq!(
+            (events[2].what, events[2].at),
+            ("layer raster completion delivery", 1_300)
+        );
+        assert!(events[2].us > 0);
+        assert!(events.iter().all(|event| event.k == 42));
     }
 
     fn preview_thread() -> (Thread, Arc<Mutex<Vec<PreviewStatus>>>) {
@@ -6747,6 +6939,8 @@ mod tests {
             doc_trace: BTreeMap::new(),
             work_start: 0,
             completer: None,
+            provisional: BTreeMap::new(),
+            parked: BTreeMap::new(),
             svg: super::super::svg::SvgState::default(),
             rest: Rest::default(),
             rasters: None,

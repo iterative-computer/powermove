@@ -37,9 +37,10 @@ pub struct VideoReading {
 /// export, for every codec: tags win field by field; an untagged matrix is
 /// BT.601 when the frame is at most 576 lines tall and under 1280 wide,
 /// otherwise BT.709 (the mpv/FFmpeg heuristic); untagged primaries follow
-/// the line count of the system an SD frame comes from (owner decision
-/// VIDEO-SD-1, mpv's rule): 576 lines are 625-line BT.470BG (EBU), other SD
-/// sizes 525-line SMPTE 170M, HD and above BT.709; an untagged transfer is
+/// the BT.601 system an SD frame comes from (owner decision VIDEO-SD-1):
+/// 576 active lines are the 625-line system's BT.470 System B/G (EBU)
+/// primaries, other SD sizes the 525-line system's SMPTE 170M, HD and above
+/// BT.709; an untagged transfer is
 /// BT.709, read as the sRGB curve; the range is limited unless tagged full.
 pub fn video_reading(tagged: &TaggedColor, width: u32, height: u32) -> VideoReading {
     let sd = height <= 576 && width < 1280;

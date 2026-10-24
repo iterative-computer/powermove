@@ -23,8 +23,9 @@ departs from the standard, the standard wins. Cleanups against today are rows in
    for untagged and partly tagged video, shared with the source monitor:
    tags win field by field; matrix BT.601 for at most 576 lines and under
    1280 wide, else BT.709; transfer the sRGB curve; primaries at those SD
-   sizes by line count, 576 lines BT.470BG and others SMPTE 170M, else
-   Rec.709 (owner decision VIDEO-SD-1, mpv's rule); range limited. Interpret Footage overrides, then the host's per-file
+   sizes by BT.601 system, 576 active lines the 625-line system's BT.470BG
+   and others the 525-line system's SMPTE 170M, else Rec.709 (owner
+   decision VIDEO-SD-1); range limited. Interpret Footage overrides, then the host's per-file
    override, replace it. Image-sequence renditions keep their authored
    BT.601 matrix and Rec.709 primaries (`frame_reading`).
 4. **Convert.** The source pass (`shaders/source.wgsl`) reconstructs chroma
@@ -70,10 +71,10 @@ gamut SDR, PQ/HLG, ProRes) at 8, 16 and 32 bits, and compares it with an
 f64 conversion of the decoded Y′CbCr and with today's paused and playing
 captures. The engine must be within its stated bound at each depth and
 at least as close as both captures, on average and on flat-chroma pixels.
-The reference shares no colour code with the engine
-(`tests/support/standards.rs`): readings are written by hand in
-`cases.json`, and a cross-check ties pm-color's matrices, EETF and range
-constants to the standards. `tests/video_compositing.rs` proves video
+The reference shares no colour code with the engine (`pm-reference`,
+docs/engine/gate-policy.md): readings are written by hand in `cases.json`,
+and `pm-reference/tests/engine_formulas.rs` ties pm-color's matrices, EETF
+and range constants to it. `tests/video_compositing.rs` proves video
 reaches effects, blend modes and masks exactly as a still does.
 The shift from today's paused composition is reported for the ledger.
 

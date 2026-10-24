@@ -3,9 +3,9 @@
 #![allow(dead_code)]
 
 pub mod doc;
+pub mod reference;
 pub mod reference_substitutions;
 pub mod text;
-pub mod text_residuals;
 
 use std::path::{Path, PathBuf};
 

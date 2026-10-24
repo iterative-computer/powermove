@@ -43,6 +43,8 @@ pm-text = { path = "../pm-text", default-features = false, features = ["render",
 
 [dev-dependencies]
 pm-export = { path = "../pm-export", features = ["test-sinks"] }
+# f64 reference renders for the quality gates (docs/engine/gate-policy.md).
+pm-reference = { path = "../pm-reference" }
 # Anchor edits on level 2 text (the semantic gate runs the edit kernels).
 pm-edit = { path = "../pm-edit" }
 pm-text = { path = "../pm-text", features = ["system", "render", "coretext-reference"] }

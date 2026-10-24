@@ -2,6 +2,7 @@ import type { compositorPixels } from './raster-pixels';
 
 type Pixels = ReturnType<typeof compositorPixels>;
 type Source = Parameters<typeof compositorPixels>[0];
+export type ReadbackTrace = (stage: string, began: number, computeMs?: number) => void;
 
 export interface RasterReadbackStats {
   bitmapCaptures: number;
@@ -20,10 +21,10 @@ export interface RasterReadbackStats {
 export function createRasterReadback(stats: RasterReadbackStats = {
   bitmapCaptures: 0, bitmapMs: 0, bitmapMsMax: 0,
   workerReplies: 0, workerMs: 0, workerMsMax: 0, workerComputeMs: 0, workerComputeMsMax: 0
-}): { readonly stats: RasterReadbackStats; read(source: Source): Promise<Pixels>; dispose(): void } {
+}): { readonly stats: RasterReadbackStats; read(source: Source, trace?: ReadbackTrace): Promise<Pixels>; dispose(): void } {
   let worker: Worker | null = null;
   let serial = 0, disposed = false;
-  const pending = new Map<number, { resolve(value: Pixels): void; reject(error: Error): void; started: number }>();
+  const pending = new Map<number, { resolve(value: Pixels): void; reject(error: Error): void; started: number; trace?: ReadbackTrace }>();
   const fail = (message: string) => {
     for (const job of pending.values()) job.reject(new Error(message));
     pending.clear();
@@ -31,7 +32,7 @@ export function createRasterReadback(stats: RasterReadbackStats = {
   };
   return {
     stats,
-    async read(source) {
+    async read(source, trace) {
       if (disposed) throw new Error('Raster readback was disposed.');
       if (typeof Worker === 'undefined' || typeof createImageBitmap === 'undefined') throw new Error('This renderer cannot prepare raster pixels asynchronously.');
       // ImageBitmap uploads ignore WebGL UNPACK_PREMULTIPLY_ALPHA_WEBGL;
@@ -42,6 +43,7 @@ export function createRasterReadback(stats: RasterReadbackStats = {
       finally {
         const ms = performance.now() - beganCapture;
         stats.bitmapCaptures++; stats.bitmapMs += ms; stats.bitmapMsMax = Math.max(stats.bitmapMsMax, ms);
+        trace?.('bitmap capture', beganCapture);
       }
       if (disposed) { bitmap.close(); throw new Error('Raster readback was disposed.'); }
       if (!worker) {
@@ -54,6 +56,7 @@ export function createRasterReadback(stats: RasterReadbackStats = {
           const ms = performance.now() - job.started;
           stats.workerReplies++; stats.workerMs += ms; stats.workerMsMax = Math.max(stats.workerMsMax, ms);
           const computeMs = event.data.computeMs;
+          job.trace?.('readback worker round trip', job.started, computeMs);
           if (typeof computeMs === 'number' && Number.isFinite(computeMs) && computeMs >= 0) {
             stats.workerComputeMs += computeMs; stats.workerComputeMsMax = Math.max(stats.workerComputeMsMax, computeMs);
           }
@@ -64,7 +67,7 @@ export function createRasterReadback(stats: RasterReadbackStats = {
       }
       const id = ++serial;
       return new Promise<Pixels>((resolve, reject) => {
-        pending.set(id, { resolve, reject, started: performance.now() });
+        pending.set(id, { resolve, reject, started: performance.now(), trace });
         try { worker!.postMessage({ id, bitmap }, [bitmap]); }
         catch (error) { pending.delete(id); bitmap.close(); reject(error); }
       });

@@ -729,13 +729,13 @@
       "code": "PM?.Edit?.mutate?.(...args)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:590",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:592",
       "class": "doc.touched",
       "scope": "makeUIState > setLayerCollapsed",
       "code": "touchedDocument(PM, [['layers', index, 'collapsed']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/kernel/install.ts:1175",
+      "site": "apps/desktop/src/renderer/src/kernel/install.ts:1178",
       "class": "extension-layer-refresh",
       "scope": "installKernel > kernel.layerTypes.onChange(callback)",
       "code": "writeDocument(PM, [['layers'], ['comps']], () => { for (const container of containers) for (const layer of container?.layers ?? []) { if ..."

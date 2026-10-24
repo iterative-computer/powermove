@@ -36,6 +36,7 @@
 import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, PixelRect, SnapshotPixels, SnapshotRequest, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
 import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAnswer, type EngineCompatAsk, type EngineCompatEvent, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
+import { RenderPerfTrace } from './perf-trace';
 import { SnapshotSlots } from './snapshot-slots';
 
 /** Repetitions of the same unresolved dependency set before a snapshot fails. */
@@ -265,6 +266,9 @@ export function intoLoop(time: number, loop: PlaybackLoop | null): number {
  *  is known. */
 type AheadEntry = { need: CompatNeed; session: TransportSession; step: number; cursor: number; posted: number; sent: Set<number>; pending: Set<number>; required: Set<number>; prefetched: Set<number>; revision: number | null; clockCursor: number | null; loop?: PlaybackLoop | null };
 
+export type CompatPrepareOptions = { urgent?: boolean };
+export type CompatPreparer = (need: CompatNeed, revision: number, options?: CompatPrepareOptions) => Promise<void>;
+
 export type CompatAnswerer = (need: CompatNeed, revision: number, options?: CompatAnswerOptions) => CompatAnswerResult;
 
 /** `fresh`: never `reuse` (an export frame, or a need asked again after a
@@ -371,10 +375,11 @@ export const VANISHING_RASTER_SCALE = 1e-9;
 export const ANSWER_LOG_LIMIT = 4096;
 
 export class EngineRenderTransport {
+  readonly trace = new RenderPerfTrace();
   private readonly producers = new Map<CompatSource, CompatProducer>();
   /** Producers of viewer frames' and snapshots' compatibility answers. */
   private readonly answerers = new Map<CompatSource, CompatAnswerer>();
-  private readonly preparers = new Map<CompatSource, (need: CompatNeed, revision: number) => Promise<void>>();
+  private readonly preparers = new Map<CompatSource, CompatPreparer>();
   private aheadInFlight = 0;
   private prefetchInFlight = 0;
   /** Needs answered with `reuse`, so a repeated ask gets pixels instead
@@ -394,6 +399,7 @@ export class EngineRenderTransport {
   /** Clock-driven, bounded playback lookahead. Answers are keyed by the
    * layer's exact need (including scale/crop) and document revision. */
   private readonly ahead = new Map<string, AheadEntry>();
+  private pausedEditRevision: number | null = null;
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private aheadTurn = 0;
   private pumpingAhead = false;
@@ -415,6 +421,7 @@ export class EngineRenderTransport {
     if (this.aheadTimer !== null) clearTimeout(this.aheadTimer);
     this.aheadTimer = null;
     this.ahead.clear();
+    this.pausedEditRevision = null;
     this.producers.clear();
     this.answerers.clear();
     this.preparers.clear();
@@ -446,7 +453,7 @@ export class EngineRenderTransport {
    * `needsRenderer` rounds). The session learns which producers it has; the
    * engine asks none without one. Returns an unregister.
    */
-  answerCompat(source: CompatSource, answerer: CompatAnswerer, prepare?: (need: CompatNeed, revision: number) => Promise<void>): () => void {
+  answerCompat(source: CompatSource, answerer: CompatAnswerer, prepare?: CompatPreparer): () => void {
     for (const [key, entry] of this.ahead) if (entry.need.source === source) this.ahead.delete(key);
     this.answerers.set(source, answerer);
     if (prepare) this.preparers.set(source, prepare); else this.preparers.delete(source);
@@ -574,7 +581,11 @@ export class EngineRenderTransport {
         ? Math.min(COMPAT_LOOKAHEAD, Math.ceil((this.prepareMs * Math.abs(clock.rate)) / frameMs)) : 0;
       let done = 0, pending = 0;
       const outside = (entry: AheadEntry, time: number) => time < 0 || (!!span && entry.need.composition === this.options.composition() && (time < span.start || time >= span.end));
-      for (let offset = 0; offset <= COMPAT_LOOKAHEAD; offset++) {
+      // An edit needs its current pixels first. Preparing an entire paused
+      // playback horizon at every revision competes with the next pointer
+      // move, and those future answers are invalidated by that move anyway.
+      const horizon = !this.options.playing?.() && revision === this.pausedEditRevision ? 0 : COMPAT_LOOKAHEAD;
+      for (let offset = 0; offset <= horizon; offset++) {
         for (let i = 0; i < entries.length; i++) {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
           // Past the loop's end, the frames after the wrap.
@@ -628,7 +639,7 @@ export class EngineRenderTransport {
   /** Prepares one frame's compatibility work ahead; the answer horizon reaching
    *  that frame finds them ready (raster-compat `prepare`). A failure is
    *  reported when that frame's own preparation repeats it. */
-  private prefetchAhead(need: CompatNeed, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>): void {
+  private prefetchAhead(need: CompatNeed, time: number, revision: number, prepare: CompatPreparer): void {
     this.prefetchInFlight++;
     this.lookaheadStats.prefetched++;
     this.lookaheadStats.maxPrefetchInFlight = Math.max(this.lookaheadStats.maxPrefetchInFlight, this.prefetchInFlight);
@@ -638,14 +649,16 @@ export class EngineRenderTransport {
     });
   }
 
-  private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: (need: CompatNeed, revision: number) => Promise<void>, warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
+  private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: CompatPreparer, warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
     const need = { ...entry.need, time };
     entry.pending.add(time);
     this.aheadInFlight++;
     this.lookaheadStats.inFlight = this.aheadInFlight;
     this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
     const began = performance.now();
-    void Promise.resolve().then(() => prepare(need, revision)).then(() => {
+    this.trace.record('prepare dispatched', revision, time);
+    void Promise.resolve().then(() => prepare(need, revision, { urgent: !this.options.playing?.() && (time === entry.cursor || entry.required.has(time)) })).then(() => {
+      this.trace.record('prepare ready', revision, time, began);
       const ms = performance.now() - began;
       this.prepareMs = this.prepareMs === null ? ms : this.prepareMs * 0.75 + ms * 0.25;
       this.lookaheadStats.prepareMs = Math.round(this.prepareMs * 10) / 10;
@@ -774,6 +787,7 @@ export class EngineRenderTransport {
    *  new revision at once (the paused warm-up the engine's ask would start). */
   prepareShown(): void {
     if (this.options.playing?.() || !this.ahead.size || !this.preparers.size) return;
+    this.pausedEditRevision = this.options.revision();
     this.presentedWhilePlaying(true);
   }
 
@@ -834,6 +848,7 @@ export class EngineRenderTransport {
       posted = this.postRaster(session, { ...id, key: answer.key }, revision, need.scale, answer, need.crop ?? undefined);
     }
     if (posted) {
+      this.trace.record(`answer posted: ${answer.kind}`, revision, need.time, began);
       this.logAnswer(need, revision, answer.kind, answer.kind === 'native' ? undefined : answer.key);
       this.postedFor.delete(tag);
       this.postedFor.set(tag, answer.kind === 'native' ? 'native' : `raster:${answer.key}`);
@@ -1214,7 +1229,14 @@ export class EngineRenderTransport {
       for (let round = 0; round < MAX_DEPENDENCY_PHASES; round++) {
         const request = this.request(options, cls, uploaded);
         request.snapshot.compatUploaded = compatUploaded;
+        const began = performance.now();
         const reply = await this.admitted(cls, () => native.snapshot!(request));
+        this.trace.record('snapshot round trip', Number(request.revision ?? 0), request.snapshot.time, began);
+        if (reply.status === 'rendered') {
+          this.trace.record('snapshot main', reply.revision, request.snapshot.time, began, Math.round(reply.mainMs * 1000));
+          this.trace.record('snapshot native wait', reply.revision, request.snapshot.time, began, reply.waitedUs);
+          this.trace.record('snapshot native render', reply.revision, request.snapshot.time, began, reply.renderUs);
+        }
         if (reply.status === 'rendered') {
           if (cls === 'idle') this.stats.idle++;
           else this.stats.async++;

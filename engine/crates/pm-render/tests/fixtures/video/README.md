@@ -21,6 +21,23 @@ edged graphics (shapes, one- and two-pixel lines, glyph strokes), converted
 in f64 to 8-bit limited BT.709 Y′CbCr 4:4:4. `chroma-dec420` and
 `chroma-dec422` decimate its f64 chroma with the co-sited (left) [1 2 1] / 4
 filter across and the two-row average down (4:2:0); `chroma-sws420` and
-`chroma-sws422` are FFmpeg's swscale (`scale=out_chroma_loc=left`, bicubic)
-from the 4:4:4 codes. All are two-frame lossless H.264 (`-qp 0`) tagged BT.709 with
-chroma location 0 through `h264_metadata`.
+`chroma-sws422` are FFmpeg's swscale from the 4:4:4 codes. Regenerate, in an
+empty scratch directory:
+
+```sh
+python3 chroma-gen.py .   # truth444.yuv, dec420.yuv, dec422.yuv
+for f in 420 422; do
+  ffmpeg -f rawvideo -pix_fmt yuv444p -s 256x128 -i truth444.yuv \
+    -vf "scale=out_chroma_loc=left:flags=bicubic,format=yuv${f}p" \
+    -f rawvideo -pix_fmt yuv${f}p sws$f.yuv
+done
+TAG=h264_metadata=colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1:video_full_range_flag=0:chroma_sample_loc_type=0
+for spec in "truth444 yuv444p" "dec420 yuv420p" "dec422 yuv422p" "sws420 yuv420p" "sws422 yuv422p"; do
+  set -- $spec; cat $1.yuv $1.yuv > two.yuv
+  ffmpeg -f rawvideo -pix_fmt $2 -s 256x128 -r 30 -i two.yuv -c:v libx264 -qp 0 \
+    -pix_fmt $2 -bsf:v $TAG chroma-$1.mp4
+done
+```
+
+Each is two identical lossless frames (a video needs two); decoding frame 0
+returns the raw planes exactly.

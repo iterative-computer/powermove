@@ -137,7 +137,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // returns their pool slots. An import can arrive after its descriptor.
   const pendingCompatFrames = new Map<string, FrameDescriptor>();
   const captureCompatFrame = (desc: FrameDescriptor): boolean => {
-    if (!PM.CompatContext?.active) return true;
+    if (!PM.CompatContext?.capturesFrames) return true;
     const frame = source.videoFrame(desc.poolGeneration, desc.poolIndex);
     if (!frame) return false;
     try { PM.CompatContext.captureFrame(desc, frame); } finally { frame.close(); }
@@ -208,6 +208,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         catch (error) { log('error', `native 3D scene synchronization: ${error instanceof Error ? error.message : String(error)}`); }
       }
       PM.CompatContext?.selectFrame?.(frame);
+      renderTransport.trace.record('frame event', frame.revision, frame.pts);
       emitPresented(PM.bus, frame, quality, { viewport: () => PM.GL?.previewViewport ?? null, versions, project: () => PM.proj });
     },
     (fn) => target.requestAnimationFrame(fn)
@@ -277,15 +278,40 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     queueMicrotask(() => {
       flushQueued = false;
       if (!sessions.size) return;
+      const barrier = PM.EngineDoc?.barrier;
       flushing = true;
+      const began = performance.now();
       try {
-        const before = PM.EngineDoc?.barrier?.revision ?? null;
-        PM.EngineDoc?.barrier?.flush();
+        const before = barrier?.revision ?? null;
+        // A paused write without paths: the layers it most likely wrote
+        // leave first, as a provisional revision the engine draws but does
+        // not present while the rest of the document is compared. That
+        // comparison confirms the revision or supersedes it; it runs before
+        // anything else here, so every answer (and every query a raster
+        // override makes) sees the whole document. During playback the
+        // comparison would follow at once anyway: no provisional batch.
+        if (!PM.playing && barrier?.flushProvisional()) {
+          noteVersion();
+          connection?.sendPatches();
+          renderTransport.trace.record('provisional sent', barrier.revision, ticks(PM.time ?? 0), began);
+        }
+        try {
+          barrier?.flush();
+        } catch (error) {
+          // A comparison that fails must still end a provisional revision:
+          // a resync supersedes it (and releases or drops its frame).
+          log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
+          if (barrier?.provisionalRevision != null) {
+            barrier.markResync();
+            barrier.flush();
+          }
+        }
         noteVersion();
+        renderTransport.trace.record('edit flushed', barrier?.revision ?? 0, ticks(PM.time ?? 0), began);
         // An edit while paused: the producers prepare the frame on screen at
         // the new revision now, beside the engine's render that will ask
         // for it (today draws an edit in the frame it happens).
-        if (before !== null && (PM.EngineDoc?.barrier?.revision ?? null) !== before) renderTransport.prepareShown();
+        if (before !== null && (barrier?.revision ?? null) !== before) renderTransport.prepareShown();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
@@ -360,6 +386,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       // Replace a seek queued on the home screen before any old clock can
       // overwrite the replacement document's requested UI position.
       onLoading: () => transport.seek(Number(PM.time) || 0, false),
+      onOpened: () => renderTransport.syncProducers(session),
       onLoaded: () => {
         if (session.headless) session.sendHeadless(openComposition());
         PM.bus?.emit?.('layout');
@@ -377,7 +404,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     current = session;
     transport.resetLoop();
     session.sendHeadless(openComposition());
-    sessionReady = session.start().then(() => renderTransport.syncProducers(session)).catch((error: unknown) => {
+    sessionReady = session.start().catch((error: unknown) => {
       log('warn', `engine session: ${error instanceof Error ? error.message : String(error)}`);
       session.close();
       sessions.delete(session);
@@ -392,20 +419,22 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   };
   let lastProducerFailure = -Infinity;
   const documentEncoder = new TextEncoder();
+  // The window's revision once every pending edit is flushed to the engine.
+  const flushedRevision = (): number | null => {
+    const barrier = PM.EngineDoc?.barrier;
+    if (!barrier) return null;
+    barrier.flush();
+    // A snapshot may block this thread until the engine has the revision:
+    // the batches this run holds (patch-coalesce.ts) leave now.
+    connection?.sendPatches();
+    noteVersion();
+    return barrier.revision;
+  };
   const renderTransport = new EngineRenderTransport({
     native,
     session: snapshotSession,
     sessions: () => [...sessions],
-    revision: () => {
-      const barrier = PM.EngineDoc?.barrier;
-      if (!barrier) return null;
-      barrier.flush();
-      // A snapshot may block this thread until the engine has the revision:
-      // the batches this run holds (patch-coalesce.ts) leave now.
-      connection?.sendPatches();
-      noteVersion();
-      return barrier.revision;
-    },
+    revision: flushedRevision,
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     document: () => documentId(PM.proj?.id),
     viewSeq: () => current?.viewSeq ?? null,
@@ -603,6 +632,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     // per animation frame for the newest frame on screen, as today's frame
     // loop emits them once per frame it draws.
     presented: (frame, quality) => {
+      renderTransport.trace.record('viewer submitted', frame.revision, frame.pts);
       sceneMetadata.apply(frame, current);
       if (current) preview.receiveFrame(current, frame);
       presentedEvents.push(frame, quality);
@@ -705,6 +735,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       reconcileHomePresentation();
     },
     setTrace: (on) => {
+      renderTransport.trace.enabled = on;
+      const barrier = PM.EngineDoc?.barrier;
+      if (barrier) barrier.trace = on ? (stage: string, began: number) => renderTransport.trace.record(stage, barrier.revision, ticks(PM.time ?? 0), began) : null;
       if (on === trace) return;
       trace = on;
       registration.dispose();

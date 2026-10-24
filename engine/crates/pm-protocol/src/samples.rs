@@ -57,8 +57,8 @@ use crate::host::{
 use crate::interop::{PlatformSurface, SurfaceDescriptor, SurfaceFormat, SurfacePool};
 use crate::lease::{Lease, LeaseCategories, LeaseReason, LeaseRequest, LeaseUsage};
 use crate::patch::{
-    ConsistencyCheck, ConsistencyResult, DocumentEncoding, EngineFact, PatchBatch, PatchEncoding,
-    PatchOrigin, PatchesApplied, RelinkReason, Resync, ResyncSource,
+    ConfirmRevision, ConsistencyCheck, ConsistencyResult, DocumentEncoding, EngineFact, PatchBatch,
+    PatchEncoding, PatchOrigin, PatchesApplied, RelinkReason, Resync, ResyncSource,
 };
 use crate::priority::{
     AgentFrame, AgentFrameOutcome, AgentFrameRequest, AgentFrameResult, AlphaOutput, AudioCoding,
@@ -1280,6 +1280,11 @@ pub fn events() -> Vec<Envelope> {
             encoding: PatchEncoding::CanonicalV1,
             patch_count: 2,
             body: Bytes(vec![0x92, 0x01, 0x02]),
+            provisional: false,
+        })),
+        event(Event::ConfirmRevision(ConfirmRevision {
+            document: "doc-1".into(),
+            revision: rev(42),
         })),
         event(Event::PatchesApplied(PatchesApplied {
             document: "doc-1".into(),
@@ -1835,32 +1840,33 @@ pub const RESPONSE_VARIANTS: usize = 26;
 pub const fn event_index(event: &Event) -> usize {
     match event {
         Event::ApplyPatches(_) => 0,
-        Event::PatchesApplied(_) => 1,
-        Event::Frame(_) => 2,
-        Event::ReleaseFrame(_) => 3,
-        Event::SurfacePool(_) => 4,
-        Event::Viewer(_) => 5,
-        Event::Transport(_) => 6,
-        Event::Clock(_) => 7,
-        Event::Deadline(_) => 8,
-        Event::Slicing(_) => 9,
-        Event::Failure(_) => 10,
-        Event::Crash(_) => 11,
-        Event::LeaseUsage(_) => 12,
-        Event::JobStatus(_) => 13,
-        Event::BlenderProgress(_) => 14,
-        Event::BlenderSurface(_) => 15,
-        Event::Fact(_) => 16,
-        Event::InFlight(_) => 17,
-        Event::Audio(_) => 18,
-        Event::ShaderFallback(_) => 19,
-        Event::Compat(_) => 20,
-        Event::RenderStats(_) => 21,
-        Event::PreviewControl(_) => 22,
-        Event::PreviewStatus(_) => 23,
+        Event::ConfirmRevision(_) => 1,
+        Event::PatchesApplied(_) => 2,
+        Event::Frame(_) => 3,
+        Event::ReleaseFrame(_) => 4,
+        Event::SurfacePool(_) => 5,
+        Event::Viewer(_) => 6,
+        Event::Transport(_) => 7,
+        Event::Clock(_) => 8,
+        Event::Deadline(_) => 9,
+        Event::Slicing(_) => 10,
+        Event::Failure(_) => 11,
+        Event::Crash(_) => 12,
+        Event::LeaseUsage(_) => 13,
+        Event::JobStatus(_) => 14,
+        Event::BlenderProgress(_) => 15,
+        Event::BlenderSurface(_) => 16,
+        Event::Fact(_) => 17,
+        Event::InFlight(_) => 18,
+        Event::Audio(_) => 19,
+        Event::ShaderFallback(_) => 20,
+        Event::Compat(_) => 21,
+        Event::RenderStats(_) => 22,
+        Event::PreviewControl(_) => 23,
+        Event::PreviewStatus(_) => 24,
     }
 }
-pub const EVENT_VARIANTS: usize = 24;
+pub const EVENT_VARIANTS: usize = 25;
 
 /// A sample color description for a 10-bit 4:2:2 ProRes source.
 pub fn prores_422_color() -> ColorDescription {
