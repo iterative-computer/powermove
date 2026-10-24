@@ -2,7 +2,10 @@
 
 The consumer lane uses the bridge's snapshot, presentation and stats contracts
 (RFC 16). The flag-off compositor remains available. No consumer change removes
-an unsupported reason or approves a visible difference.
+an unsupported reason. QUALITY-1 permits a rendering cleanup only with a
+high-precision reference proving the engine is no worse at every sample;
+authored and UI intent remain exact. No C3 residual is approved; the one
+open raw-frame row is in the [quality ledger](quality-ledger.md).
 
 The orchestrator's current scope decisions (2026-10-23) transfer C4/C19
 (Assets posters, filmstrips and inline media), C5 (the source monitor), and
@@ -38,10 +41,11 @@ Transient session, resync and timeout errors retry at most three attempts,
 250 ms apart, while the pinned capture is still current; readiness waits for
 the result. Permanent errors propagate, without a resampled fallback.
 
-Playback, cropped and 3D views retain the native presented-image copy. Playback
-never waits for an idle capture; opening the Library keeps playback running. The snapshot
-contract currently carries neither their crop nor their view override; the
-remaining C3 blocker and the required API are specified below.
+Paused cropped and 3D views use the same backing-size snapshot path with a
+pinned editor view and composition crop. Playback retains the native
+presented-image copy and never waits for an idle capture; opening the
+Library keeps playback running. The pinned contract and remaining C3
+qualification are specified below.
 Section and Look thumbnails retain the synchronous compatibility API already
 backed by engine snapshots. Frozen render APIs retain their existing option and
 pixel semantics.
@@ -191,7 +195,7 @@ its presentation canvas with today's canvas box (1.2.10, below).
   overlay drawing is caught again; the exact hash still compares two fresh
   drawings.
 
-### Appendix C test matrix (round 5)
+### Appendix C test matrix
 
 Each row in both themes, with the current viewer, a fork of it, and forks of
 the viewers shipped in desktop v1.1.0 (1.0.8) and v1.2.0 (1.0.18), run with
@@ -220,48 +224,7 @@ the engine on and off (`e2e/helpers/viewer-fork.ts`):
 
 Every case of the 1.0.18 fork fails at activation on this branch (above).
 
-## Historical C3 blockers (rounds 5–6)
-
-- C3, measured by `e2e/library-card-parity.spec.ts` (each case launches the
-  app with the engine off, then on, and compares the card images exactly; side
-  by sides with a difference mask are under
-  `/tmp/ne-w5/consumers-r5/evidence/`, outside the repository):
-  - Round 5, historical: identical 2D at 200% panned in light and dark with
-    the current viewer, a fork of it and the fork of shipped viewer 1.0.8; 2D at Fit
-    with the 1.0.8 fork.
-  - Round 5's 2D-at-Fit blocker (566/570 pixels, at most 5 levels) came
-    from scaling the stage presentation back to the composition backing size.
-    Round 6 replaces that copy with the backing-size snapshot described above;
-    exact on/off measurements are recorded in the validation section below.
-  - 3D model through its camera and in the right orthographic view, current
-    viewer and its fork: 240 to 365 pixels differ, at most 2 to 46 levels,
-    along the cube's edges (same double-scaling signature; the maximum varies
-    run to run). The 1.0.8 fork through the camera: 1 pixel, 1 level.
-  - 3D right orthographic view with the fork of shipped viewer 1.0.8: 7,880
-    pixels, up to 227 levels. Engine off, today's compositor draws the
-    kernel's 3D editor view (right orthographic) into the fork's canvas;
-    engine on, the presentation bound to that canvas
-    (`engine-connection/canvas-binding.ts`, `resize`) sends view parameters
-    without the 3D editor view, so the engine draws the scene camera. A user
-    whose old fork has no 3D controls reaches the editor view only through
-    the kernel's 3D keys or an agent, but the difference is real. Owner: the
-    `render.gl.init` binding (extension compatibility / bridge); escalated.
-  - In the round 5 captures, the grid and orange 3D selection outline were
-    missing from the card with the engine on and off alike
-    (`core/scene3d/overlay.ts` renders without
-    `preserveDrawingBuffer`); measured on/off right-view cards differ only as
-    above, so this is not an engine-on regression (3D lane).
-    Round 6 also records an on-only missing 3D navigation/label/cursor
-    overlay in the current viewer's dark camera card (8,012 differing
-    pixels, maximum 255). That is a separate visible blocker, beyond the
-    cube-edge scaling differences. The final image pair and difference
-    panel are `consumers-r6/evidence/round6-on-3d-in-dark-current-viewer.png`
-    under `/tmp/ne-w5/`, outside Git.
-  - The fork of shipped viewer 1.0.18 fails to activate on this branch (see
-    the round 5 notes); its cases fail until `feat/ne-mainmerge` lands.
-  - Private-corpus customized forks remain unqualified by this lane.
-
-### Round 7 pinned C3 view snapshots
+## Pinned viewer snapshots (C3)
 
 `SnapshotRequest.viewer` and `EngineSnapshotOptions.viewer` now carry an
 immutable `{ view: ViewOverride | null, canvas: ViewerCanvas, viewSeq }`.
@@ -287,9 +250,36 @@ coverage, mapped from the inner canvas stage to the outer overlay stage.
 The WebGL overlay retains a bitmap synchronously after its final draw;
 the Library copies it before its drawing buffer can be discarded. Screen
 navigation, labels and cursor update independently of native plane arrival.
-A card waits for its overlay's matching revision/view sequence before taking
-an engine snapshot. These changes preserve one interactive presentation
-channel per viewer.
+A card waits for its overlay’s matching revision, view sequence and frame
+sequence before taking an engine snapshot. It captures that identity as an
+immutable key and rejects a snapshot if another frame is presented while
+waiting, even when revision and view sequence stay unchanged. These changes
+preserve one interactive presentation channel per viewer.
+
+Bound canvases and Library captures read editor-only view overrides. They do
+not ask for native render-camera facts during document startup. Coalesced
+viewport/settings/render notifications and document readiness refresh the
+existing presentation only. A view refresh cannot activate a dormant binding
+after its self-presenting viewer has unloaded; an explicit caller resize
+creates the binding presentation. Native evaluation errors elsewhere remain visible.
+
+The shared native 3D color pass now mirrors ANGLE Metal’s explicit WebGL
+resolve: add the four normalized samples in order as `f32`, divide by four,
+and write directly to RGBA8. Hardware resolve rounded 21 controlled
+three-sample red codes one level higher than WebGL. The production-pipeline
+GPU test checks all 1,024 measured color/coverage combinations exactly. This
+removes all 19 raw composition differences in the current camera probe. The
+shipped 1.0.8 raw probe retains one interior pixel at `(799, 448)`: red
+151 versus 150, with the other channels equal. Its complete Library card is
+exact; this does not establish an exact raw fork frame. The 74-output 3D sweep passes its unchanged bar.
+Whole-card C3 targets remain zero pixels; that sweep bar grants no C3 exception.
+
+The C3 spec recreates the card clone's compositor layers (`display: none`,
+then restored) before each screenshot, with the engine off and on. Chromium
+tiles keep their raster history: eight engine-off launches of the same card
+differed by 1–7 pixels, up to 36 levels, at header SVG icon samples, and were
+identical after that fresh raster. The gate compares the same final DOM and
+pixels, still with zero tolerance and no mask.
 
 Rust tests cover wire validation, cropped pixels, selected sequence, an
 unchanged subsequent live frame, editor camera and Local View. TypeScript
