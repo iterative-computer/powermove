@@ -539,7 +539,7 @@ impl TextContext {
                     None
                 },
                 viewport: Some(viewport),
-                path_rasterizer: Some(&pm_vector::canvas2d::text::RASTERIZER),
+                path_rasterizer: Some(&pm_vector::render::glyphs::GLYPH_PATHS),
                 profile: self.profile.clone(),
                 unsupported: Vec::new(),
             },
