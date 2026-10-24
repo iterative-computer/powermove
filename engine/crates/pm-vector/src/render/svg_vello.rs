@@ -23,6 +23,7 @@ use vello::peniko::{
     BlendMode, Brush, ColorStop, Compose, Extend, Fill, Gradient, InterpolationAlphaSpace, Mix,
 };
 
+use super::scene::FLATTEN_TOLERANCE;
 use super::svg::{SvgDocument, affine, bez};
 use super::svg_depth::with_stack;
 
@@ -83,6 +84,15 @@ pub(crate) fn clip_to_rect(poly: &[Point], rect: Rect) -> Vec<Point> {
             }
         }
     }
+    out
+}
+
+/// `path` under `t`, flattened to [`FLATTEN_TOLERANCE`] in device pixels:
+/// Vello flattens curves to a quarter pixel itself, which erodes curved
+/// edges (`crate::render::scene::CoverageItem::device_outline`).
+fn device(path: &BezPath, t: Affine) -> BezPath {
+    let mut out = BezPath::new();
+    kurbo::flatten((t * path.clone()).iter(), FLATTEN_TOLERANCE, |el| out.push(el));
     out
 }
 
@@ -161,9 +171,11 @@ impl Encoder<'_> {
         ])
     }
 
-    /// The brush of `paint` at `opacity`, and its transform (user space of
-    /// the path to the gradient's space). `None` for patterns.
-    fn brush(&self, paint: &usvg::Paint, opacity: f32) -> Option<(Brush, Option<Affine>)> {
+    /// The brush of `paint` at `opacity` for a path drawn under `t`, and
+    /// its transform (device pixels to the gradient's space; paths are
+    /// encoded in device pixels). `None` for patterns, or a singular
+    /// transform.
+    fn brush(&self, paint: &usvg::Paint, opacity: f32, t: Affine) -> Option<(Brush, Option<Affine>)> {
         let base = |g: &usvg::BaseGradient, gradient: Gradient| {
             let stops: Vec<ColorStop> = g
                 .stops()
@@ -182,27 +194,64 @@ impl Encoder<'_> {
                         .with_interpolation_alpha_space(InterpolationAlphaSpace::Unpremultiplied)
                         .with_stops(stops.as_slice()),
                 ),
-                Some(affine(g.transform())),
+                Some(t * affine(g.transform())),
             )
         };
         Some(match paint {
             usvg::Paint::Color(c) => (Brush::Solid(self.color(*c, opacity)), None),
-            usvg::Paint::LinearGradient(g) => base(
-                g,
-                Gradient::new_linear(
-                    (f64::from(g.x1()), f64::from(g.y1())),
-                    (f64::from(g.x2()), f64::from(g.y2())),
-                ),
-            ),
-            usvg::Paint::RadialGradient(g) => base(
-                g,
-                Gradient::new_two_point_radial(
-                    (f64::from(g.fx()), f64::from(g.fy())),
-                    g.fr().get(),
-                    (f64::from(g.cx()), f64::from(g.cy())),
-                    g.r().get(),
-                ),
-            ),
+            usvg::Paint::LinearGradient(g) => {
+                // Vello maps a linear gradient's end points through the
+                // transform, which keeps the gradient's lines perpendicular
+                // to it: wrong under a non-uniform scale or a skew (an
+                // `objectBoundingBox` gradient, a stretched image). The
+                // gradient is placed in device space instead: t ∘ G maps
+                // gradient space to device pixels, the position along the
+                // gradient is affine in the device point, and the line it
+                // varies along is G's direction under the inverse transpose.
+                let f = t * affine(g.transform());
+                let (p1, p2) = (
+                    kurbo::Point::new(f64::from(g.x1()), f64::from(g.y1())),
+                    kurbo::Point::new(f64::from(g.x2()), f64::from(g.y2())),
+                );
+                let d = p2 - p1;
+                let [a, b, c, e, _, _] = f.as_coeffs();
+                let det = a * e - b * c;
+                if det.abs() < 1e-12 || d.hypot2() == 0.0 {
+                    return None;
+                }
+                // (F⁻¹)ᵀ d / |d|²: the device gradient of the position.
+                let grad = kurbo::Vec2::new(e * d.x - b * d.y, -c * d.x + a * d.y) / (det * d.hypot2());
+                // Vello evaluates gradients at pixel corners: half a pixel
+                // back, they are evaluated at pixel centers.
+                let q1 = f * p1 - kurbo::Vec2::new(0.5, 0.5);
+                let q2 = q1 + grad / grad.hypot2();
+                let (brush, _) = base(g, Gradient::new_linear(q1, q2));
+                (brush, None)
+            }
+            usvg::Paint::RadialGradient(g) => {
+                // Vello solves the two-point conical gradient in f32 and
+                // nudges coincident centers by 1/4096 of a gradient unit:
+                // in `objectBoundingBox` units (radius 0.5) that collapses
+                // the middle of a plain radial gradient to its first stop.
+                // The gradient is scaled to device pixels first.
+                let f = t * affine(g.transform());
+                let [a, b, c, d, _, _] = f.as_coeffs();
+                let k = (a * d - b * c).abs().sqrt();
+                if k < 1e-12 {
+                    return None;
+                }
+                let (brush, _) = base(
+                    g,
+                    Gradient::new_two_point_radial(
+                        (f64::from(g.fx()) * k, f64::from(g.fy()) * k),
+                        g.fr().get() * k as f32,
+                        (f64::from(g.cx()) * k, f64::from(g.cy()) * k),
+                        g.r().get() * k as f32,
+                    ),
+                );
+                // Evaluated at pixel centers (see the linear gradient).
+                (brush, Some(Affine::translate((-0.5, -0.5)) * f * Affine::scale(1.0 / k)))
+            }
             usvg::Paint::Pattern(_) => return None,
         })
     }
@@ -240,8 +289,8 @@ impl Encoder<'_> {
                 *rule,
                 blend,
                 g.opacity().get(),
-                t * affine(c.transform()),
-                &bez(p.data()),
+                Affine::IDENTITY,
+                &device(&bez(p.data()), t * affine(c.transform())),
             ),
             None => self.scene.push_layer(
                 Fill::NonZero,
@@ -330,20 +379,25 @@ impl Encoder<'_> {
         if b.width() == 0.0 || b.height() == 0.0 {
             return;
         }
-        let Some((brush, brush_transform)) = self.brush(f.paint(), f.opacity().get()) else {
+        let Some((brush, brush_transform)) = self.brush(f.paint(), f.opacity().get(), t) else {
             return;
         };
         let rule = match f.rule() {
             usvg::FillRule::NonZero => Fill::NonZero,
             usvg::FillRule::EvenOdd => Fill::EvenOdd,
         };
-        self.scene
-            .fill(rule, t, &brush, brush_transform, &bez(p.data()));
+        self.scene.fill(
+            rule,
+            Affine::IDENTITY,
+            &brush,
+            brush_transform,
+            &device(&bez(p.data()), t),
+        );
     }
 
     fn stroke(&mut self, p: &usvg::Path, t: Affine) {
         let Some(s) = p.stroke() else { return };
-        let Some((brush, brush_transform)) = self.brush(s.paint(), s.opacity().get()) else {
+        let Some((brush, brush_transform)) = self.brush(s.paint(), s.opacity().get(), t) else {
             return;
         };
         let join = match s.linejoin() {
@@ -363,8 +417,23 @@ impl Encoder<'_> {
         if let Some(dashes) = s.dasharray() {
             style = style.with_dashes(f64::from(s.dashoffset()), dashes.iter().map(|d| f64::from(*d)));
         }
-        self.scene
-            .stroke(&style, t, &brush, brush_transform, &bez(p.data()));
+        // The outline is expanded here (kurbo, the stroke in user space)
+        // finely enough to stay within the tolerance once transformed.
+        let c = t.as_coeffs();
+        let scale = c[0].hypot(c[1]).max(c[2].hypot(c[3])).max(1e-9);
+        let outline = kurbo::stroke(
+            bez(p.data()).iter(),
+            &style,
+            &kurbo::StrokeOpts::default(),
+            FLATTEN_TOLERANCE / scale / 4.0,
+        );
+        self.scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &brush,
+            brush_transform,
+            &device(&outline, t),
+        );
     }
 
     fn path(&mut self, p: &usvg::Path, t: Affine) {
