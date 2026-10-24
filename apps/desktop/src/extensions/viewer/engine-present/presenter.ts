@@ -161,7 +161,16 @@ export type TraceRecord = {
   drops: [seq: number, reason: string, ms: number][];
   releases: [seq: number, submitMs: number, doneMs: number][];
   rafs: number[];
+  /** Per refresh: the fitted refresh grid and the decision it made. */
+  decisions: [rafMs: number, vsyncMs: number, periodMs: number, jumped: number, offsetUs: number, decisionMs: number][];
+  /** Each vsync hint sent to the engine. */
+  hints: [rafMs: number, hostTime: number, periodUs: number][];
 };
+
+/** Empties a trace into a copy (the S1 harness and the rig read it). */
+export function drainTrace(t: TraceRecord): TraceRecord {
+  return { arrivals: t.arrivals.splice(0), draws: t.draws.splice(0), drops: t.drops.splice(0), releases: t.releases.splice(0), rafs: t.rafs.splice(0), decisions: t.decisions.splice(0), hints: t.hints.splice(0) };
+}
 
 const PARK_TIMEOUT_MS = 1000;
 
@@ -244,7 +253,7 @@ export class EnginePresenter implements Presenter {
   constructor(private readonly options: PresenterOptions) {
     this.vsync = new VsyncEstimator(options.displayHz ?? null);
     this.now = options.now ?? (() => performance.now());
-    this.trace = options.trace ? { arrivals: [], draws: [], drops: [], releases: [], rafs: [] } : null;
+    this.trace = options.trace ? { arrivals: [], draws: [], drops: [], releases: [], rafs: [], decisions: [], hints: [] } : null;
     this.generation = options.generation ?? 0;
     this.stats.generation = this.generation;
     this.unsubscribe = options.source.onSurface((generation, poolIndex) => this.unpark(generation, poolIndex));
@@ -464,6 +473,7 @@ export class EnginePresenter implements Presenter {
     this.updateHint(rafMs, fit);
     this.expireParked(rafMs);
     const { decisionMs, displayMs } = this.decision(rafMs, fit);
+    this.trace?.decisions.push([rafMs, fit?.vsyncMs ?? 0, fit?.periodMs ?? 0, fit?.jumped ? 1 : 0, this.offsetUs, decisionMs]);
     const atUs = this.hostUs(decisionMs);
     if (atUs === null && this.clock && this.clock.state !== 'stopped') return;
     const { show, drop } = this.buffer.pick(atUs ?? 0, this.clock);
@@ -480,7 +490,7 @@ export class EnginePresenter implements Presenter {
 
   takeTrace(): Promise<TraceRecord | null> {
     const t = this.trace;
-    return Promise.resolve(t && { arrivals: t.arrivals.splice(0), draws: t.draws.splice(0), drops: t.drops.splice(0), releases: t.releases.splice(0), rafs: t.rafs.splice(0) });
+    return Promise.resolve(t && drainTrace(t));
   }
 
   /** The refresh grid on the host clock, for the engine (amendment 18). */
@@ -498,6 +508,7 @@ export class EnginePresenter implements Presenter {
     if (!hintChanged(this.hint, next)) return;
     if (this.hint && !fit.jumped && rafMs - this.hintSentMs < HINT_INTERVAL_MS) return;
     this.hint = next;
+    this.trace?.hints.push([rafMs, next.hostTime, next.periodUs]);
     this.hintSentMs = rafMs;
     this.options.onVsync(next);
   }
@@ -515,13 +526,24 @@ export class EnginePresenter implements Presenter {
     const decision = displayMs + (this.options.nearestRefresh ? periodMs / 2 : 0);
     const clock = this.clock;
     const head = this.buffer.frameTicks() ?? this.lastFrameTicks;
-    if (fit && clock && head) {
-      const key = `${clock.epoch}:${fit.periodMs.toFixed(4)}:${fit.vsyncMs.toFixed(1)}:${fit.jumped}:${resizing}`;
-      const host = this.hostUs(decision);
-      if (key !== this.offsetKey && host !== null) {
-        this.offsetKey = key;
-        this.offsetUs = decisionOffsetUs(periodMs * 1000, host, clock, head);
+    const host = this.hostUs(decision);
+    if (fit && clock && head && host !== null) {
+      // Within a run the offset follows the grid continuously: a grid that
+      // moves (the lock tracking jitter, a display-link phase change) moves
+      // the decisions with it instead of flipping them by a refresh near the
+      // half-refresh mark, which skipped or repeated a frame. It is centred
+      // again only beyond five eighths of a refresh (clock drift).
+      const run = `${clock.epoch}:${fit.periodMs.toFixed(4)}:${resizing}`;
+      const next = decisionOffsetUs(periodMs * 1000, host, clock, head);
+      const periodUs = periodMs * 1000;
+      if (run !== this.offsetKey) this.offsetUs = next;
+      else {
+        let step = (((next - this.offsetUs) % periodUs) + periodUs) % periodUs;
+        if (step > periodUs / 2) step -= periodUs;
+        this.offsetUs += step;
+        if (Math.abs(this.offsetUs) > periodUs * 0.625) this.offsetUs = next;
       }
+      this.offsetKey = run;
     }
     return { decisionMs: decision + this.offsetUs / 1000, displayMs };
   }

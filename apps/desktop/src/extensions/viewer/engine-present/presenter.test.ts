@@ -555,6 +555,44 @@ describe('EnginePresenter', () => {
 });
 
 
+it('draws every frame once when the frame boundaries sit at the decisions and the BeginFrames jitter (an idle machine)', () => {
+  // The worst phase for the decision offset: frame boundaries exactly where
+  // the undecided decisions fall, BeginFrames jittered and a third of them
+  // up to 2 ms early. Re-centring the offset at every grid update flipped
+  // it by a refresh, skipping or repeating a frame.
+  let now = 0;
+  const P = 1000 / 120;
+  const F120 = TICKS_PER_SECOND / 120;
+  const source = new Source(), painter = new Painter(), link = new Link();
+  const latency = 1.5 * P + 3.2;
+  const presenter = new EnginePresenter({ link, source, painter, displayHz: 120, now: () => now,
+    latencyRefreshes: 1.5, presentOffsetMs: 3.2, nearestRefresh: true });
+  // Host µs = page ms × 1000; frame k starts where the decision of refresh k lands.
+  presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 1, state: 'playing', hostTime: Math.round((latency + P / 2) * 1000), mediaTime: 0,
+    rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, 0);
+  // A sample that arrived as it was made: host µs = page ms × 1000.
+  presenter.receive({ type: 'clock', sample: { epoch: 1, seq: 2, state: 'playing', hostTime: Math.round((latency + P / 2) * 1000), mediaTime: 0,
+    rate: { num: 1, den: 1 }, outputLatencyUs: 0, sampleRate: 48000, loopRange: null } }, latency + P / 2);
+  const shown: number[] = [];
+  presenter.onPresented((f) => shown.push(Math.round(f.pts / F120)));
+  let seed = 11;
+  for (let i = 0; i < 2400; i++) {
+    seed = (seed * 1103515245 + 12345) % 2 ** 31;
+    const u = seed / 2 ** 31;
+    // The display link wanders by ±0.6 ms over eight seconds.
+    const raf = i * P + 0.6 * Math.sin((2 * Math.PI * i) / 960) + (u < 0.33 ? -2 * u * 3 : (u - 0.66) * 0.6);
+    const k = i + 6;
+    source.arrive(1, k % 12);
+    presenter.receive({ type: 'frame', frame: desc(k + 1, { poolIndex: k % 12, pts: k * F120, duration: F120 }) }, raf - 1);
+    now = raf;
+    presenter.refresh(Math.round(raf * 10) / 10);
+    painter.finishGpu();
+  }
+  const steady = shown.slice(60);
+  const steps = steady.slice(1).map((k, i) => k - steady[i]!);
+  expect(steps.filter((d) => d !== 1)).toEqual([]);
+});
+
 it('draws each refresh\'s timed frame inside its animation frame, one per refresh at 120 Hz', () => {
   // A worker canvas sends what the animation frame drew as the callback
   // returns; a draw deferred past it waits for the next BeginFrame.

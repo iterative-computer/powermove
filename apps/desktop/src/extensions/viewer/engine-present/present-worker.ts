@@ -29,7 +29,7 @@
  */
 import type { FramePainter, FramePainterMemory, PaintTarget } from './gpu';
 import { createFramePainter } from './painter';
-import { EnginePresenter, type PresentedFrame, type PresenterMemory, type PresenterStats, type TraceRecord } from './presenter';
+import { drainTrace, EnginePresenter, type PresentedFrame, type PresenterMemory, type PresenterStats, type TraceRecord } from './presenter';
 import type { ClockSample, FrameDescriptor, FrameRelease, SurfacePool, VsyncHint } from './protocol';
 
 /** Page → worker. */
@@ -292,7 +292,7 @@ export function servePresenter(scope: WorkerScope, options: ServeOptions = {}): 
           type: 'trace',
           session: message.session,
           id: message.id,
-          trace: trace && { arrivals: trace.arrivals.splice(0), draws: trace.draws.splice(0), drops: trace.drops.splice(0), releases: trace.releases.splice(0), rafs: trace.rafs.splice(0) }
+          trace: trace && drainTrace(trace)
         });
         return;
       }
