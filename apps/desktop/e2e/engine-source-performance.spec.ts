@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import type { CDPSession } from 'playwright';
 import { expect, launchApp, repoRoot, test } from './helpers/app';
 import { fixturePath, importFixture } from './helpers/media';
+import { startSourceTimeline } from './helpers/source-timeline';
 
 test('source filmstrip and monitor scrub cost no more than the current app', async () => {
   test.setTimeout(540_000);
@@ -31,8 +32,14 @@ test('source filmstrip and monitor scrub cost no more than the current app', asy
       const record = (chunk: Buffer) => { if (nativeTrace.length < 2 * 1024 * 1024) nativeTrace += chunk.toString(); };
       const child = session.app.process();
       let cpu: CDPSession | null = null;
+      let timeline: CDPSession | null = null;
+      let stopTimeline: (() => Promise<{ events: number; bytes: number; truncated: boolean }>) | null = null;
       child.stdout?.on('data', record); child.stderr?.on('data', record);
       try {
+        if (process.env.PM_SOURCE_TIMELINE === '1') {
+          timeline = await session.page.context().newCDPSession(session.page);
+          stopTimeline = await startSourceTimeline(timeline, path.join(directory, `${enabled ? 'native' : 'legacy'}-${round}.trace.json`));
+        }
         if (process.env.PM_SOURCE_CPU_PROFILE === '1') {
           cpu = await session.page.context().newCDPSession(session.page);
           await cpu.send('Profiler.enable'); await cpu.send('Profiler.start');
@@ -41,70 +48,143 @@ test('source filmstrip and monitor scrub cost no more than the current app', asy
         await importFixture(session.page, 'h264-aac.mp4');
         await session.page.waitForFunction(() => [...(window as any).PM.assets.map.values()].some((a: any) => a.name === 'h264-aac.mp4'));
         if (enabled) await session.page.waitForFunction(() => !!(window as any).PM.EngineRender?.ready);
-        const measured = await session.page.evaluate(async ({ enabled, profile }) => {
+        const measured = await session.page.evaluate(async ({ enabled, profile, timeline, round }) => {
           const PM = (window as any).PM;
           const id = Object.values<any>(PM.proj.assets).find(a => a.name === 'h264-aac.mp4')!.id;
           const viewer = PM.Kernel.services.get('viewer');
-          const frameTrace: Record<string, number | null>[] = [];
+          const frameTrace: Record<string, number | string | null>[] = [];
+          const scrubTrace: Record<string, number | null>[] = [];
+          const canvasTrace: { began: number; ended: number; scrub: number | null }[] = [];
+          const longTasks: { began: number; duration: number }[] = [];
+          const prefix = `pm-source:${enabled ? 'native' : 'legacy'}:${round}`;
+          const mark = (name: string) => { if (timeline) performance.mark(`${prefix}:${name}`); };
+          let activeScrub: number | null = null;
+          let frameNumber = 0;
+          const observer = timeline && PerformanceObserver.supportedEntryTypes.includes('longtask')
+            ? new PerformanceObserver(list => {
+              for (const entry of list.getEntries()) longTasks.push({ began: entry.startTime, duration: entry.duration });
+            }) : null;
+          observer?.observe({ type: 'longtask' });
+          let restoreFrame = () => {};
           if (enabled && profile) {
-            const source = PM.EngineSourceMedia, frame = source.frame.bind(source);
+            const source = PM.EngineSourceMedia, frame = source.frame;
+            restoreFrame = () => { source.frame = frame; };
             source.frame = async (...args: any[]) => {
-              const began = performance.now(), value = await frame(...args);
-              frameTrace.push({ began, time: args[1], width: args[2], height: args[3], elapsedMs: performance.now() - began,
-                mainMs: value.mainMs ?? null, waitedUs: value.waitedUs ?? null, renderUs: value.renderUs ?? null, revision: value.revision ?? null });
-              return value;
+              const began = performance.now(), number = frameNumber++, scrub = activeScrub;
+              const sample: Record<string, number | string | null> = { number, scrub, began, time: args[1], width: args[2], height: args[3] };
+              frameTrace.push(sample);
+              mark(`frame:${number}:start`);
+              try {
+                const value = await Reflect.apply(frame, source, args) as {
+                  mainMs?: number; waitedUs?: number; renderUs?: number; revision?: number;
+                };
+                Object.assign(sample, { ended: performance.now(), elapsedMs: performance.now() - began,
+                  mainMs: value.mainMs ?? null, waitedUs: value.waitedUs ?? null, renderUs: value.renderUs ?? null, revision: value.revision ?? null });
+                mark(`frame:${number}:done`);
+                return value;
+              } catch (error) {
+                Object.assign(sample, { ended: performance.now(), error: error instanceof Error ? error.name : String(error) });
+                mark(`frame:${number}:failed`);
+                throw error;
+              }
             };
           }
           const ticks = 705_600_000;
           const times = (scattered: boolean) => Array.from({ length: 24 }, (_, k) => Math.round(((scattered ? (k * 7) % 24 : k) * 1.9 / 24 + 1 / 60) * ticks) / ticks);
           const painted = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-          const wait = (source: any, event: string, time: number) => new Promise<void>((resolve, reject) => {
-            const done = () => { if (Math.abs(source.currentTime - time) < .00001) { clearTimeout(timer); source.removeEventListener(event, done); resolve(); } };
-            const timer = setTimeout(() => { source.removeEventListener(event, done); reject(new Error(`${event} timed out at ${time}`)); }, 15_000);
-            source.addEventListener(event, done); source.currentTime = time;
+          const paintedAt = () => new Promise<number>(resolve => requestAnimationFrame(() => resolve(performance.now())));
+          const wait = (source: any, event: string, time: number, sample?: Record<string, number | null>, index?: number) => new Promise<void>((resolve, reject) => {
+            const done = () => { if (Math.abs(source.currentTime - time) < .00001) {
+              if (sample) { sample.eventAt = performance.now(); mark(`scrub:${index}:event`); }
+              clearTimeout(timer); source.removeEventListener(event, done); resolve();
+            } };
+            const timer = setTimeout(() => {
+              source.removeEventListener(event, done);
+              const state = enabled ? { error: source.error?.message ?? null, rendering: source.rendering, paintAgain: source.paintAgain,
+                currentTime: source.currentTime, stats: PM.EngineSourceMedia.stats } : { readyState: source.readyState, currentTime: source.currentTime };
+              reject(new Error(`${event} timed out at ${time}: ${JSON.stringify(state)}`));
+            }, 15_000);
+            source.addEventListener(event, done);
+            if (sample) { sample.setAt = performance.now(); mark(`scrub:${index}:set`); }
+            source.currentTime = time;
+            if (sample) { sample.setDoneAt = performance.now(); mark(`scrub:${index}:setDone`); }
           });
-          viewer.preview.show(id);
-          const root = document.querySelector<HTMLElement>('#source-preview')!;
-          root.style.width = `${320 / devicePixelRatio}px`; root.style.height = `${180 / devicePixelRatio}px`;
-          root.style.right = root.style.bottom = 'auto';
-          const monitor = enabled ? PM.EngineSourceMedia.monitorValue : root.querySelector('video');
-          const until = performance.now() + 15_000;
-          while (enabled ? monitor.canvas.width !== 320 || monitor.canvas.height !== 180 : monitor.readyState < 2) {
-            if (performance.now() > until) throw new Error('Source monitor did not reach its measured size');
-            await painted();
-          }
-          await painted();
-          const scrubMs: number[] = [];
-          for (const time of times(true)) {
-            const began = performance.now();
-            await wait(monitor, enabled ? 'loadeddata' : 'seeked', time);
-            await painted(); // Both paths include the next presentation opportunity.
-            scrubMs.push(performance.now() - began);
-          }
-          viewer.preview.clear();
-          const filmstripMs: number[] = [];
-          for (let run = 0; run < 3; run++) {
-            const began = performance.now();
-            if (enabled) {
-              const frames = await PM.EngineSourceMedia.filmstrip(id, times(false), 160, 90);
-              if (frames.length !== 24 || frames.some((frame: Uint8Array) => frame.length !== 160 * 90 * 4)) throw new Error('Incomplete measured filmstrip');
-            } else {
-              const video = PM.assets.get(id).el;
-              const canvas = document.createElement('canvas'); canvas.width = 160; canvas.height = 90;
-              const context = canvas.getContext('2d')!;
-              const frames: Uint8Array[] = [];
-              for (const time of times(false)) {
-                await wait(video, 'seeked', time);
-                context.clearRect(0, 0, 160, 90); context.drawImage(video, 0, 0, 160, 90);
-                frames.push(new Uint8Array(context.getImageData(0, 0, 160, 90).data));
+          const canvasPrototype = CanvasRenderingContext2D.prototype;
+          const putImageData = canvasPrototype.putImageData;
+          let canvas: HTMLCanvasElement | null = null;
+          let previewCleared = false;
+          try {
+            viewer.preview.show(id);
+            const root = document.querySelector<HTMLElement>('#source-preview')!;
+            root.style.width = `${320 / devicePixelRatio}px`; root.style.height = `${180 / devicePixelRatio}px`;
+            root.style.right = root.style.bottom = 'auto';
+            const monitor = enabled ? PM.EngineSourceMedia.monitorValue : root.querySelector('video');
+            canvas = enabled && timeline ? monitor.canvas as HTMLCanvasElement : null;
+            if (canvas) canvasPrototype.putImageData = function(this: CanvasRenderingContext2D, ...args: any[]) {
+              if (this.canvas !== canvas) return Reflect.apply(putImageData, this, args);
+              const began = performance.now();
+              mark(`canvas:${canvasTrace.length}:start`);
+              try { return Reflect.apply(putImageData, this, args); }
+              finally {
+                canvasTrace.push({ began, ended: performance.now(), scrub: activeScrub });
+                mark(`canvas:${canvasTrace.length - 1}:done`);
               }
-              if (frames.length !== 24) throw new Error('Incomplete current filmstrip');
+            };
+            const until = performance.now() + 15_000;
+            while (enabled ? monitor.canvas.width !== 320 || monitor.canvas.height !== 180 : monitor.readyState < 2) {
+              if (performance.now() > until) throw new Error('Source monitor did not reach its measured size');
+              await painted();
             }
-            filmstripMs.push(performance.now() - began);
+            await painted();
+            const scrubMs: number[] = [];
+            for (const [index, time] of times(true).entries()) {
+              activeScrub = index;
+              const began = performance.now();
+              const sample = timeline ? { index, time, began, revisionAtSet: enabled ? PM.EngineDoc?.barrier?.revision ?? null : null } : undefined;
+              if (sample) { scrubTrace.push(sample); mark(`scrub:${index}:start`); }
+              await wait(monitor, enabled ? 'loadeddata' : 'seeked', time, sample, index);
+              // Both paths include the next presentation opportunity.
+              let rafAt: number | null = null;
+              if (sample) rafAt = await paintedAt(); else await painted();
+              if (sample) {
+                Object.assign(sample, { rafAt, revisionAtRaf: enabled ? PM.EngineDoc?.barrier?.revision ?? null : null });
+                mark(`scrub:${index}:raf`);
+              }
+              scrubMs.push(performance.now() - began);
+              activeScrub = null;
+            }
+            viewer.preview.clear(); previewCleared = true;
+            const filmstripMs: number[] = [];
+            for (let run = 0; run < 3; run++) {
+              const began = performance.now();
+              if (enabled) {
+                const frames = await PM.EngineSourceMedia.filmstrip(id, times(false), 160, 90);
+                if (frames.length !== 24 || frames.some((frame: Uint8Array) => frame.length !== 160 * 90 * 4)) throw new Error('Incomplete measured filmstrip');
+              } else {
+                const video = PM.assets.get(id).el;
+                const canvas = document.createElement('canvas'); canvas.width = 160; canvas.height = 90;
+                const context = canvas.getContext('2d')!;
+                const frames: Uint8Array[] = [];
+                for (const time of times(false)) {
+                  await wait(video, 'seeked', time);
+                  context.clearRect(0, 0, 160, 90); context.drawImage(video, 0, 0, 160, 90);
+                  frames.push(new Uint8Array(context.getImageData(0, 0, 160, 90).data));
+                }
+                if (frames.length !== 24) throw new Error('Incomplete current filmstrip');
+              }
+              filmstripMs.push(performance.now() - began);
+            }
+            return { scrubMs, filmstripMs, width: 320, height: 180,
+              sourceStats: enabled ? { ...PM.EngineSourceMedia.stats } : null, frameTrace, scrubTrace, canvasTrace, longTasks };
+          } finally {
+            if (canvas) canvasPrototype.putImageData = putImageData;
+            for (const entry of observer?.takeRecords() ?? []) longTasks.push({ began: entry.startTime, duration: entry.duration });
+            observer?.disconnect();
+            restoreFrame();
+            if (!previewCleared) viewer.preview.clear();
           }
-          return { scrubMs, filmstripMs, width: 320, height: 180,
-            sourceStats: enabled ? { ...PM.EngineSourceMedia.stats } : null, frameTrace };
-        }, { enabled, profile: process.env.PM_SOURCE_PROFILE === '1' });
+        }, { enabled, profile: process.env.PM_SOURCE_PROFILE === '1' || process.env.PM_SOURCE_TIMELINE === '1',
+          timeline: process.env.PM_SOURCE_TIMELINE === '1', round });
         results.push({ enabled, round, ...measured });
         expect(session.diagnostics.pageErrors).toEqual([]);
       } finally {
@@ -113,7 +193,18 @@ test('source filmstrip and monitor scrub cost no more than the current app', asy
             const { profile } = await cpu.send('Profiler.stop');
             await writeFile(path.join(directory, `${enabled ? 'native' : 'legacy'}-${round}.cpuprofile`), JSON.stringify(profile));
           }
-        } finally { await cpu?.detach().catch(() => {}); await session.close(); }
+        } finally {
+          try {
+            if (stopTimeline) {
+              const meta = await stopTimeline();
+              await writeFile(path.join(directory, `${enabled ? 'native' : 'legacy'}-${round}-timeline.json`), JSON.stringify(meta));
+            }
+          } finally {
+            await cpu?.detach().catch(() => {});
+            await timeline?.detach().catch(() => {});
+            await session.close();
+          }
+        }
         child.stdout?.off('data', record); child.stderr?.off('data', record);
         await writeFile(path.join(directory, `${enabled ? 'native' : 'legacy'}-${round}-stages.log`),
           nativeTrace.split('\n').filter(line => /source-job-timing|pm source (?:filmstrip|job|frame|batch)|pm job renderer/.test(line)).join('\n'));

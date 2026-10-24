@@ -46,17 +46,19 @@ export async function decodedRenditionIdentity(directory: string, name: string, 
   return { byteEqual: Buffer.from(reference).equals(Buffer.from(actual)), picture, audio };
 }
 
+/** A captured PNG's stored RGBA code values; its ICC profile is not applied. */
+export async function decodeCapturedPng(file: string): Promise<{ size: number[]; pixels: Buffer }> {
+  const png = await readFile(file);
+  const size = [png.readUInt32BE(16), png.readUInt32BE(20)];
+  const result = await exec(sourceFfmpeg(), ['-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '2', '-i', file,
+    '-frames:v', '1', '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1'],
+  { timeout: 60_000, encoding: 'buffer', maxBuffer: 128 * 1024 * 1024 });
+  return { size, pixels: result.stdout };
+}
+
 /** Compare captured app surfaces after PNG decoding, without compression differences. */
 export async function capturedPixelDelta(referenceFile: string, actualFile: string) {
-  const decode = async (file: string) => {
-    const png = await readFile(file);
-    const size = [png.readUInt32BE(16), png.readUInt32BE(20)];
-    const result = await exec(sourceFfmpeg(), ['-hide_banner', '-loglevel', 'error', '-nostdin', '-threads', '2', '-i', file,
-      '-frames:v', '1', '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1'],
-    { timeout: 60_000, encoding: 'buffer', maxBuffer: 128 * 1024 * 1024 });
-    return { size, pixels: result.stdout };
-  };
-  const expected = await decode(referenceFile), actual = await decode(actualFile);
+  const expected = await decodeCapturedPng(referenceFile), actual = await decodeCapturedPng(actualFile);
   const sameSize = expected.size.every((v, i) => v === actual.size[i]) && expected.pixels.length === actual.pixels.length;
   let max = 0, changed = 0;
   let left = Infinity, top = Infinity, right = -1, bottom = -1;

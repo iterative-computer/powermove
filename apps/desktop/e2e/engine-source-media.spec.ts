@@ -223,11 +223,21 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         expect.soft(result.rmsResidualDbfs, JSON.stringify(result)).toBeLessThanOrEqual(-85);
       }
 
-      // Guard the consumers after taking references: source viewing must not play a browser element.
+      // Only URL-backed media decodes count as browser source playback. The
+      // native track presenter intentionally calls play() on its private video.
       await page.evaluate(() => {
         (window as any).__sourceBrowserPlays = 0;
+        (window as any).__sourceNativePlays = 0;
+        (window as any).__sourceInvalidNativePlays = 0;
         const play = HTMLMediaElement.prototype.play;
-        HTMLMediaElement.prototype.play = function () { (window as any).__sourceBrowserPlays++; return play.call(this); };
+        HTMLMediaElement.prototype.play = function () {
+          if (this instanceof HTMLVideoElement && this.dataset.nativeSource === 'true') {
+            if (this.srcObject instanceof MediaStream && !this.getAttribute('src') && !this.currentSrc)
+              (window as any).__sourceNativePlays++;
+            else (window as any).__sourceInvalidNativePlays++;
+          } else (window as any).__sourceBrowserPlays++;
+          return play.call(this);
+        };
       });
       await expect(page.locator('.toast')).toHaveCount(0, { timeout: 15_000 });
       for (const theme of ['light', 'dark']) {
@@ -276,7 +286,8 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         const source = enabled ? PM.EngineSourceMedia.monitorValue : root.querySelector('video');
         const painted = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         const until = performance.now() + 15_000;
-        while (enabled ? source.canvas.width !== 320 || source.canvas.height !== 180 : source.readyState < 2) {
+        while (enabled ? source.canvas.width !== 320 || source.canvas.height !== 180 ||
+          !(source.surface instanceof HTMLVideoElement) || source.surface.readyState < 2 || source.rendering : source.readyState < 2) {
           if (performance.now() > until) throw new Error('Source monitor did not reach its comparison size');
           await painted();
         }
@@ -308,11 +319,31 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
           (window as any).__sourceGuard.references = true;
           try { context.drawImage(video, (320 - width) / 2, (180 - height) / 2, width, height); }
           finally { (window as any).__sourceGuard.references = false; }
+          // Compare like for like in Canvas2D. The independent CSS-video
+          // screenshots in engine-source-compositor remain the colour oracle.
           const expected = context.getImageData(0, 0, 320, 180).data;
-          const actual = enabled ? source.canvas.getContext('2d').getImageData(0, 0, 320, 180).data : expected;
+          const native = document.createElement('canvas'); native.width = 320; native.height = 180;
+          const nativeContext = native.getContext('2d')!;
+          if (enabled) {
+            const monitorVideo = source.surface as HTMLVideoElement;
+            if (monitorVideo.dataset.nativeSource !== 'true' || !(monitorVideo.srcObject instanceof MediaStream)
+                || monitorVideo.getAttribute('src') || monitorVideo.currentSrc)
+              throw new Error('The native source surface is not the private MediaStream video');
+            const readyUntil = performance.now() + 10_000;
+            while (monitorVideo.readyState < 2 || source.rendering) {
+              if (source.error) throw source.error;
+              if (performance.now() > readyUntil) throw new Error('Native source video did not paint after scrub');
+              await painted();
+            }
+            await painted();
+            (window as any).__sourceGuard.references = true;
+            try { nativeContext.drawImage(monitorVideo, 0, 0, 320, 180); }
+            finally { (window as any).__sourceGuard.references = false; }
+          }
+          const actual = enabled ? nativeContext.getImageData(0, 0, 320, 180).data : expected;
           let max = 0, changed = 0;
           for (let i = 0; i < expected.length; i++) { const d = Math.abs(expected[i]! - actual[i]!); max = Math.max(max, d); if (d) changed++; }
-          pixels.push({ time, max, changed, reference: reference.toDataURL('image/png'), native: enabled ? source.canvas.toDataURL('image/png') : null });
+          pixels.push({ time, max, changed, reference: reference.toDataURL('image/png'), native: enabled ? native.toDataURL('image/png') : null });
         }
         PM.Kernel.services.get('viewer').preview.clear();
         return { samples, pixels };
@@ -333,7 +364,8 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         }, { id: ids[name], enabled });
         await expect.poll(() => page.locator('#source-preview .sp-scrub').getAttribute('aria-valuenow')).not.toBe('0');
         if (enabled) {
-          await expect(page.locator('#source-preview video, #source-preview audio')).toHaveCount(0);
+          await expect(page.locator('#source-preview video[data-native-source="true"]')).toHaveCount(name === 'tone.wav' ? 0 : 1);
+          await expect(page.locator('#source-preview audio')).toHaveCount(0);
           if (name !== 'prores422.mov') await expect.poll(() => page.evaluate(() => (window as any).PM.EngineSourceMedia.monitorValue.levels.peak.some((p: number) => p > .001))).toBe(true);
         }
         await page.evaluate(() => {
@@ -351,7 +383,12 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
       }
       await writeFile(path.join(directory, 'source-monitor-lifecycle.json'), JSON.stringify(lifecycle, null, 2));
       for (const result of lifecycle) expect.soft(result.ended, JSON.stringify(result)).toBe(true);
-      expect(await page.evaluate(() => (window as any).__sourceBrowserPlays)).toBe(enabled ? 0 : 4);
+      const plays = await page.evaluate(() => ({ url: (window as any).__sourceBrowserPlays,
+        native: (window as any).__sourceNativePlays, invalidNative: (window as any).__sourceInvalidNativePlays }));
+      await writeFile(path.join(directory, 'source-browser-plays.json'), JSON.stringify(plays, null, 2));
+      expect(plays.url).toBe(enabled ? 0 : 4);
+      expect(plays.invalidNative).toBe(0);
+      if (enabled) expect(plays.native).toBeGreaterThan(0);
 
       const code = await page.evaluate(async ({ enabled, id, still }) => {
         const PM = (window as any).PM;
