@@ -49,7 +49,18 @@ export interface PatchBatch {
   /** Whether the batch changes the project's assets (or its id, or the
    *  whole document): listeners that only follow assets skip the rest. */
   assets: boolean;
+  /** Made before the rest of the document was compared (`flushProvisional`):
+   *  its frames wait for a `confirmed` item naming its revision, and the
+   *  next batch supersedes it. */
+  provisional?: boolean;
+  /** No operations: the provisional batch that made `revision` was the
+   *  whole change (`baseRevision === revision`, an empty body). */
+  confirmed?: boolean;
 }
+
+/** Layers whose writes a provisional batch carries first: those the latest
+ *  unscoped diffs found changed (a drag writes the same layer each time). */
+const HOT_LAYERS = 4;
 
 export interface ConsistencyResult {
   ok: boolean;
@@ -185,6 +196,12 @@ export class DocumentBarrier {
   private dirty = new Map<string, PathPart[]>();
   private structural = false;
   private resyncPending = false;
+  /** The open document's layers that recent diffs found changed, newest last. */
+  private hot: Array<{ comp: string; id: string }> = [];
+  /** The revision of a provisional batch not yet confirmed or superseded. */
+  provisionalRevision: number | null = null;
+  /** Inside `provisionalQueries`: queries read the provisional mirror. */
+  private provisionalReads = 0;
   private origin: IncrementalOrigin = 'metadata';
   private subscribers = new Set<(batch: PatchBatch) => void>();
   /** Told when the barrier goes from nothing pending to something pending. */
@@ -282,6 +299,7 @@ export class DocumentBarrier {
 
   /** Replaces the mirror with the live document. */
   resync(): void {
+    this.provisionalRevision = null;
     const json = JSON.stringify(canonicalProject(this.project()));
     this.revision += 1;
     this.shadow = json === undefined ? undefined : JSON.parse(json);
@@ -333,9 +351,57 @@ export class DocumentBarrier {
     return ops;
   }
 
+  /**
+   * The first half of a `touch()` without paths: diffs only the paths
+   * written by name and the layers recent diffs found changed, and sends
+   * them as a provisional batch, so the engine starts on the edit while the
+   * rest of the document is compared. The structural diff stays pending:
+   * the next `flush` (soon after, or any query's) compares everything, then
+   * confirms the provisional revision or supersedes it with the rest.
+   * Returns whether it sent one. Exact by construction: frames of a
+   * provisional revision are only presented once confirmed.
+   */
+  flushProvisional(): boolean {
+    if (this.flushing || this.provisionalRevision !== null || this.resyncPending || !this.structural || !this.hot.length || !isRecord(this.shadow)) return false;
+    this.beforeFlush();
+    const live = canonicalProject(this.project());
+    const paths = [...this.dirty.values()];
+    for (const { comp, id } of this.hot) {
+      const before = this.shadow.comps?.[comp]?.layers, after = live?.comps?.[comp]?.layers;
+      if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) return false;
+      const index = after.findIndex((layer: any) => layer?.id === id);
+      if (index < 0 || before[index]?.id !== id) return false;
+      paths.push(['comps', comp, 'layers', index]);
+    }
+    this.flushing = true;
+    try {
+      const diffStarted = this.trace ? performance.now() : 0;
+      const ops = this.diff(live, paths);
+      this.trace?.('provisional diff', diffStarted);
+      this.dirty.clear();
+      if (!ops.length) return false;
+      this.send(ops, this.origin, true);
+      return this.provisionalRevision !== null;
+    } finally {
+      this.flushing = false;
+    }
+  }
+
+  /**
+   * Runs `fn` with queries answered by the provisional mirror: while a
+   * provisional revision waits, `flush` leaves the rest of the diff for
+   * later. Only for work tagged with that revision (a paused edit's own
+   * raster answers): it counts only if the revision is confirmed, when the
+   * provisional mirror was the whole document.
+   */
+  provisionalQueries<T>(fn: () => T): T {
+    this.provisionalReads++;
+    try { return fn(); } finally { this.provisionalReads--; }
+  }
+
   /** Flushes dirty paths into pm-wasm (section 6, item 2: before every query). */
   flush(): void {
-    if (this.flushing) return;
+    if (this.flushing || (this.provisionalReads > 0 && this.provisionalRevision !== null)) return;
     if (this.shadow !== undefined) this.beforeFlush();
     if (!this.pending) return;
     this.flushing = true;
@@ -359,8 +425,8 @@ export class DocumentBarrier {
       const diffStarted = this.trace ? performance.now() : 0;
       const ops = this.diff(live, paths);
       this.trace?.('document diff', diffStarted);
-      if (!ops.length) return;
-      this.send(ops, origin);
+      if (ops.length) this.send(ops, origin);
+      else if (this.provisionalRevision !== null) this.confirmProvisional();
     } finally {
       this.flushing = false;
       const ms = performance.now() - started;
@@ -369,7 +435,27 @@ export class DocumentBarrier {
     }
   }
 
-  private send(ops: PatchOp[], origin: IncrementalOrigin): void {
+  /** The provisional revision was the whole change: its frames may show. */
+  private confirmProvisional(): void {
+    const revision = this.provisionalRevision!;
+    this.provisionalRevision = null;
+    this.emit({ baseRevision: revision, revision, origin: 'metadata', count: 0, body: new Uint8Array(0), assets: false, confirmed: true });
+  }
+
+  /** Remembers the open document's layers that `ops` changed in place. */
+  private noteHot(ops: readonly PatchOp[]): void {
+    for (const op of ops) {
+      const [root, comp, layers, index] = op.path;
+      if (root !== 'comps' || layers !== 'layers' || typeof comp !== 'string' || typeof index !== 'number') continue;
+      const id = this.shadow?.comps?.[comp]?.layers?.[index]?.id;
+      if (typeof id !== 'string') continue;
+      this.hot = this.hot.filter(h => h.comp !== comp || h.id !== id);
+      this.hot.push({ comp, id });
+      if (this.hot.length > HOT_LAYERS) this.hot.shift();
+    }
+  }
+
+  private send(ops: PatchOp[], origin: IncrementalOrigin, provisional = false): void {
     let body: Uint8Array;
     const encodeStarted = this.trace ? performance.now() : 0;
     try {
@@ -401,9 +487,12 @@ export class DocumentBarrier {
     this.stats.batches += 1;
     this.stats.ops += ops.length;
     this.stats.bytes += body.length;
+    this.noteHot(ops);
+    // A later batch supersedes a provisional one.
+    this.provisionalRevision = provisional ? this.revision : null;
     const assets = ops.some(op => op.path.length === 0 || op.path[0] === 'assets' || op.path[0] === 'id');
     const postStarted = this.trace ? performance.now() : 0;
-    this.emit({ baseRevision: base, revision: base + 1, origin, count: ops.length, body, assets });
+    this.emit({ baseRevision: base, revision: base + 1, origin, count: ops.length, body, assets, ...(provisional ? { provisional: true } : {}) });
     this.trace?.('document patch dispatch', postStarted);
   }
 

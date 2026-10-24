@@ -199,6 +199,19 @@ describe('the engine connection', () => {
     const applied = port.events('applyPatches').map((e) => (e.message as { body: { baseRevision: number; revision: number } }).body);
     expect(applied.map((b) => [b.baseRevision, b.revision])).toEqual([[3, 4], [4, 5]]);
     expect(session.batches).toBe(2);
+    // A provisional batch, then its confirmation, on the same port in order;
+    // a confirmation for a revision the session moved past sends nothing.
+    doc.emit({ revision: 6, provisional: true });
+    doc.emit({ revision: 6, baseRevision: 6, count: 0, body: new Uint8Array(0), confirmed: true });
+    await flush();
+    doc.emit({ revision: 7, provisional: true });
+    doc.emit({ revision: 8 });
+    doc.emit({ revision: 7, baseRevision: 7, count: 0, body: new Uint8Array(0), confirmed: true });
+    await flush();
+    const order = port.sent.flatMap((e) => (e.message.kind === 'event' ? [e.message.body as { type: string; revision?: number; provisional?: boolean }] : []))
+      .filter((b) => b.type === 'applyPatches' || b.type === 'confirmRevision').slice(2)
+      .map((b) => [b.type, b.revision, b.provisional ?? false]);
+    expect(order).toEqual([['applyPatches', 6, true], ['confirmRevision', 6, false], ['applyPatches', 7, true], ['applyPatches', 8, false]]);
 
     // A frame says the engine draws the composition; an `unsupported`
     // failure routes it to the legacy viewer. The report names the newest

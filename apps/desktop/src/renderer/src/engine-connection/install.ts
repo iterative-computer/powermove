@@ -273,17 +273,51 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     queueMicrotask(() => {
       flushQueued = false;
       if (!sessions.size) return;
+      const barrier = PM.EngineDoc?.barrier;
       flushing = true;
       const began = performance.now();
       try {
-        const before = PM.EngineDoc?.barrier?.revision ?? null;
-        PM.EngineDoc?.barrier?.flush();
+        const before = barrier?.revision ?? null;
+        // A write without paths: the layers it most likely wrote leave
+        // first, as a provisional revision the engine draws but does not
+        // present; the rest of the document is compared after the paused
+        // edit's own answers are made (they overlap the engine's work), and
+        // that comparison confirms the revision or supersedes it.
+        if (barrier?.flushProvisional()) {
+          noteVersion();
+          connection?.sendPatches();
+          renderTransport.trace.record('provisional sent', barrier.revision, ticks(PM.time ?? 0), began);
+          const preparing = renderTransport.prepareShown();
+          let compared = false;
+          const compare = (): void => {
+            if (compared) return;
+            compared = true;
+            const provisional = barrier.revision;
+            const started = performance.now();
+            try {
+              barrier.flush();
+              noteVersion();
+            } catch (error) {
+              log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            renderTransport.trace.record('edit flushed', barrier.revision, ticks(PM.time ?? 0), started);
+            if (barrier.revision !== provisional) renderTransport.prepareShown();
+          };
+          if (preparing) {
+            void preparing.finally(compare);
+            // A preparation that waits on the engine (a base it draws) must
+            // not hold the comparison back.
+            setTimeout(compare, 0);
+          } else compare();
+          return;
+        }
+        barrier?.flush();
         noteVersion();
-        renderTransport.trace.record('edit flushed', PM.EngineDoc?.barrier?.revision ?? 0, ticks(PM.time ?? 0), began);
+        renderTransport.trace.record('edit flushed', barrier?.revision ?? 0, ticks(PM.time ?? 0), began);
         // An edit while paused: the producers prepare the frame on screen at
         // the new revision now, beside the engine's render that will ask
         // for it (today draws an edit in the frame it happens).
-        if (before !== null && (PM.EngineDoc?.barrier?.revision ?? null) !== before) renderTransport.prepareShown();
+        if (before !== null && (barrier?.revision ?? null) !== before) renderTransport.prepareShown();
       } catch (error) {
         log('warn', `flushing the document for the engine failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
@@ -389,19 +423,28 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   };
   let lastProducerFailure = -Infinity;
   const documentEncoder = new TextEncoder();
+  // The window's revision once every pending edit is flushed to the engine.
+  const flushedRevision = (): number | null => {
+    const barrier = PM.EngineDoc?.barrier;
+    if (!barrier) return null;
+    barrier.flush();
+    // A snapshot may block this thread until the engine has the revision:
+    // the batches this run holds (patch-coalesce.ts) leave now.
+    connection?.sendPatches();
+    noteVersion();
+    return barrier.revision;
+  };
   const renderTransport = new EngineRenderTransport({
     native,
     session: snapshotSession,
     sessions: () => [...sessions],
-    revision: () => {
+    revision: flushedRevision,
+    // While a provisional revision waits for its comparison, the window's
+    // own answers are made at it (`answerRevision`); a superseded one's
+    // answers never count.
+    answerRevision: () => {
       const barrier = PM.EngineDoc?.barrier;
-      if (!barrier) return null;
-      barrier.flush();
-      // A snapshot may block this thread until the engine has the revision:
-      // the batches this run holds (patch-coalesce.ts) leave now.
-      connection?.sendPatches();
-      noteVersion();
-      return barrier.revision;
+      return barrier && barrier.provisionalRevision !== null ? barrier.revision : flushedRevision();
     },
     composition: () => String(PM.proj?.compId ?? PM.proj?.id ?? ''),
     document: () => documentId(PM.proj?.id),

@@ -1001,6 +1001,7 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
       return engine ? engineRasterBase(PM, engine, [layer as Layer, scale, time, undefined, crop as RasterWindow | undefined]) : null;
     },
     rasterKey: (layer, scale, time, crop) => rasterContentKey(PM, layer, scale, time, crop),
+    atRevision: (fn) => (PM.EngineDoc?.barrier ? PM.EngineDoc.barrier.provisionalQueries(fn) : fn()),
     engineRasterAsync: async (layer, scale, time, crop) => {
       const engine = engineRender(PM);
       if (!engine) return null;

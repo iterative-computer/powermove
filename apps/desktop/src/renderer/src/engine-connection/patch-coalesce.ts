@@ -52,7 +52,9 @@ export function mergeBatches(prev: ApplyPatches, next: ApplyPatches): ApplyPatch
   new DataView(body.buffer).setUint32(PATCH_BINARY_MAGIC.length, count, true);
   body.set(prev.body.subarray(HEADER), HEADER);
   body.set(next.body.subarray(HEADER), prev.body.length);
-  return { ...prev, revision: next.revision, patchCount: prev.patchCount + next.patchCount, body };
+  // The merged batch ends at `next`'s revision: provisional only if `next` is.
+  const { provisional: _provisional, ...rest } = prev;
+  return { ...rest, revision: next.revision, patchCount: prev.patchCount + next.patchCount, body, ...(next.provisional ? { provisional: true } : {}) };
 }
 
 /** Held batches in the order they were sent, each session's contiguous runs merged. */

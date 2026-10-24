@@ -74,6 +74,9 @@ export interface RasterCompatOptions {
   engineRasterAsync?: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => Promise<any>;
   /** Native-evaluated content identity for a base whose pixels are time independent. */
   rasterKey?: (layer: any, scale: number, time: number, crop?: RasterWindowLike) => string | null;
+  /** Runs a paused edit's own preparation with queries answered at its
+   *  (possibly provisional) revision (`DocumentBarrier.provisionalQueries`). */
+  atRevision?: <T>(fn: () => T) => T;
   /** Reads a surface's pixels as the compositor uploads them. */
   readPixels?: (source: CanvasImageSource & { width: number; height: number }) => { width: number; height: number; format: 'rgba8Premultiplied' | 'rgba8Straight'; data: Uint8Array } | null;
   /** Async playback readback; synchronous callers retain readPixels. */
@@ -527,7 +530,10 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
             let answer: CompatAnswerResult = null;
             preparation = attempt;
             const beganCpu = performance.now();
-            try { answer = handle.answer(need, revision, { fresh: true }); }
+            try {
+              const attempt = () => handle.answer(need, revision, { fresh: true });
+              answer = prepareOptions?.urgent && options.atRevision ? options.atRevision(attempt) : attempt();
+            }
             catch (error) { if (!attempt.missing) throw error; }
             finally {
               preparation = null;

@@ -42,7 +42,7 @@ export interface DocumentStream {
   snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; hash: string } | null;
 }
 
-export type StreamBatch = { baseRevision: number; revision: number; origin: PatchOrigin; count: number; body: Uint8Array };
+export type StreamBatch = { baseRevision: number; revision: number; origin: PatchOrigin; count: number; body: Uint8Array; provisional?: boolean; confirmed?: boolean };
 
 /** Stages a large resync document with main (`nativeEngine.stageDocument`). */
 export type StageDocument = (session: number, bytes: Uint8Array) => Promise<{ handle: string; length: number }>;
@@ -190,6 +190,8 @@ export class DocumentSession {
   private offClose: (() => void) | null = null;
   /** Batches that wait for a resync in flight (a staged file resyncs asynchronously). */
   private queued: StreamBatch[] = [];
+  /** The last batch forwarded was provisional and is not confirmed yet. */
+  private provisionalForwarded = false;
   private resyncing: Promise<void> | null = null;
   private fallbackRunner: FallbackRunner | null = null;
   /** Effect and transition requests waiting for their textures, by key. */
@@ -329,6 +331,7 @@ export class DocumentSession {
     }
     // Batches after the snapshot follow it; earlier ones are in it.
     this.streamRevision = snapshot.revision;
+    this.provisionalForwarded = false;
     this.queued = this.queued.filter((b) => b.revision > snapshot.revision);
     const request = { type: 'resync', document: this.document, revision: snapshot.revision, encoding: 'canonicalJsonV1', source, hash: hexBytes(snapshot.hash) } as Request;
     try {
@@ -347,11 +350,29 @@ export class DocumentSession {
     // Batches that came while a staged resync was read follow it now.
     const queued = this.queued;
     this.queued = [];
-    for (const batch of queued) this.forward(batch);
+    for (const batch of queued) {
+      if (batch.confirmed) this.confirm(batch.revision);
+      else this.forward(batch);
+    }
+  }
+
+  /** A provisional batch this session forwarded was the whole change: the
+   *  engine may present its frames (after the batch: the same port). A
+   *  session that moved past it (a resync, a later batch) has nothing to do. */
+  private confirm(revision: number): void {
+    const id = this.id;
+    if (id === null || this.closed || revision !== this.streamRevision || !this.provisionalForwarded) return;
+    this.provisionalForwarded = false;
+    this.options.connection.event({ type: 'confirmRevision', document: this.document, revision }, id);
   }
 
   private onBatch(batch: StreamBatch): void {
     if (this.closed || this.id === null) return;
+    if (batch.confirmed) {
+      if (this.resyncing) this.queued.push(batch);
+      else this.confirm(batch.revision);
+      return;
+    }
     if (batch.origin === 'load') {
       this.options.onLoading?.();
       const loaded = (): void => {
@@ -384,11 +405,12 @@ export class DocumentSession {
       return;
     }
     this.streamRevision = batch.revision;
+    this.provisionalForwarded = !!batch.provisional;
     this.batches++;
     // Held until the run ends, merged with the run's other batches (one
     // render per edit; patch-coalesce.ts).
     this.options.connection.patches(
-      { type: 'applyPatches', document: this.document, baseRevision: batch.baseRevision, revision: batch.revision, origin: batch.origin, encoding: 'canonicalV1', patchCount: Math.max(1, batch.count), body: batch.body },
+      { type: 'applyPatches', document: this.document, baseRevision: batch.baseRevision, revision: batch.revision, origin: batch.origin, encoding: 'canonicalV1', patchCount: Math.max(1, batch.count), body: batch.body, ...(batch.provisional ? { provisional: true } : {}) },
       id,
       MAX_PATCH_BODY_BYTES
     );
