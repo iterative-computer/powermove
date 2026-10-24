@@ -1770,8 +1770,9 @@ P5) now belong to the perf3 lane.
 
 ## Pacing at 120 Hz
 
-Playback at the display's rate presents every frame the engine renders. Three
-rules keep it so; the 120 Hz rig's `playing` row checks them
+Playback at the display's rate presents every frame the engine renders, from
+the first refresh after Play. Five rules keep it so; the 120 Hz rig's
+`playing` row checks them
 (`docs/engine/perfbench.md`, with `PM_PERFBENCH_RIG_TRACE` for the per-frame
 trace).
 
@@ -1801,11 +1802,30 @@ trace).
    emission per page animation frame, inside it (decision EXT-TIMING-1 keeps
    that timing).
 
+4. **Play starts the picture and the sound on one line**
+   (`Thread::start_time`, pm-audio `Playback::command_at`). The line's
+   first media shows at the earliest instant both can make: for the
+   picture, the first refresh the first new frame can be ready for (what
+   is left of its render, then the viewer's display latency, which the
+   vsync hint carries as `latencyUs`); for the sound, the device's latency
+   and one of its buffers. pm-audio presents the run's first sample at that
+   host time, partway into a device buffer (silence before it), or, when
+   its audio was not queued in time, passes over what should already have
+   played: what is heard is on the line either way, and its first clock
+   sample only confirms the line (`TransportClock::follow` adopts it). A
+   device that never confirms leaves the line on the host clock. Without
+   the viewer's timing the line starts after `PREROLL_US`.
+5. **The first new frames are rendered while paused** (`Thread::arm`).
+   Once the paused frame has stayed 50 ms, the next frames of a forward
+   1× run go into the paused pool's free slots (one slot stays free); any
+   change gives them back. A Play sends them at once, before the playing
+   pool replaces the paused one (`BridgePresenter::transport` sends the
+   Play first), and the viewer keeps drawing frames of a pool whose
+   surfaces match the new one's (`presenter.ts` `onPool`). Sessions with
+   compatibility producers start through the native preroll instead.
+
 Open, outside the bridge:
 
-- **Start.** The line starts `PREROLL_US` (50 ms) after Play; today's viewer
-  advances at the next animation frame, so a fixed window from Play shows
-  about five fewer engine frames.
 - **viz's latch.** viz draws a refresh as soon as every client has submitted;
   with the page and the worker canvas that is about 1.4 ms after BeginFrame.
   Under load BeginFrames come up to 2 ms early (on both paths) and a draw

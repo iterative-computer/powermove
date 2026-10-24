@@ -325,8 +325,9 @@ Rows that are not frame steps:
   360 a 120 Hz display would show, distinct frame times on the bus, frames
   missing between the first and last shown (`droppedFrames`), the gaps between
   presentations (longest, and their standard deviation as judder), the time
-  from `PM.play()` to the first later frame (`firstAdvanceMs`: the engine's
-  50 ms preroll), the page's animation-frame rate (the hidden test window's
+  from `PM.play()` to the bus event of the first frame after the playhead's
+  position at Play (`firstAdvanceMs`; with the trace, also when the display
+  showed it, `display.firstAdvanceShownMs`), the page's animation-frame rate (the hidden test window's
   display link), and per presented frame the page's main thread and the
   engine's compose CPU, GPU-only and span. It retains bus-event counts/gaps and
   counts engine direct callbacks, GPU draw completions, bus emissions,
@@ -339,7 +340,9 @@ Rows that are not frame steps:
   done, sent, the time it shows from; `POWERMOVE_BRIDGE_TRACE`); and viz's
   presentation feedback for each submitted canvas frame
   (`e2e/helpers/compositor-timing.ts`: which display frame showed it, and
-  submissions another one superseded). `PM_PERFBENCH_RIG_ORDER=engine` runs
+  submissions another one superseded). `PM_PERFBENCH_RIG_AUDIO=1` puts the
+  public tone under the project, so the engine's audio device drives the
+  line. `PM_PERFBENCH_RIG_ORDER=engine` runs
   the engine first, for paired runs that alternate;
 - **open**: the 2,000-layer project saved to a `.pmv` by today's app, then
   opened three times on each path through `PM.openProject`, each in a fresh app
