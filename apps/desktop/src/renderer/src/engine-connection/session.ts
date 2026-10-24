@@ -196,6 +196,8 @@ export class DocumentSession {
   private queued: StreamBatch[] = [];
   /** The last batch forwarded was provisional and is not confirmed yet. */
   private provisionalForwarded = false;
+  /** A provisional revision that was not forwarded (`holdProvisional`). */
+  private heldProvisional: number | null = null;
   private resyncing: Promise<void> | null = null;
   private fallbackRunner: FallbackRunner | null = null;
   /** Effect and transition requests waiting for their textures, by key. */
@@ -350,7 +352,7 @@ export class DocumentSession {
         // already queued here may duplicate it; forward skips older revisions.
         const pending = [...resume.batches, ...this.queued];
         this.queued = [];
-        for (const batch of pending) this.forward(batch);
+        this.replay(pending);
         return;
       } catch (error) {
         // The process restarted, the bounded checkpoint expired, or its
@@ -375,7 +377,7 @@ export class DocumentSession {
           this.resyncs++; this.resumes++;
           this.documentAccepted = true;
           const pending = [...fresh.batches, ...this.queued]; this.queued = [];
-          for (const batch of pending) this.forward(batch);
+          this.replay(pending);
           return;
         }
       }
@@ -395,6 +397,7 @@ export class DocumentSession {
     // Batches after the snapshot follow it; earlier ones are in it.
     this.streamRevision = snapshot.revision;
     this.provisionalForwarded = false;
+    this.heldProvisional = null;
     this.queued = this.queued.filter((b) => b.revision > snapshot.revision);
     const request = { type: 'resync', document: this.document, revision: snapshot.revision, encoding: 'canonicalJsonV1', source, hash: hexBytes(snapshot.hash) } as Request;
     try {
@@ -413,16 +416,39 @@ export class DocumentSession {
     // Batches that came while a staged resync was read follow it now.
     const queued = this.queued;
     this.queued = [];
-    for (const batch of queued) {
-      if (batch.confirmed) this.confirm(batch.revision);
-      else this.forward(batch);
+    this.replay(queued);
+  }
+
+  /** Stream items that waited for a resync (or bridge a reconnect: the
+   *  journal), in order: batches and the confirmations of provisional ones. */
+  private replay(items: StreamBatch[]): void {
+    for (const item of items) {
+      if (item.confirmed) this.confirm(item.revision);
+      else this.forward(item);
     }
+  }
+
+  /**
+   * A provisional batch this session cannot forward (too large, or after a
+   * gap) is not a reason to resync now: the document would be read in a
+   * state that never existed. Its confirmation, or the next batch (a gap),
+   * resyncs from the settled document instead.
+   */
+  private holdProvisional(batch: StreamBatch): boolean {
+    if (!batch.provisional) return false;
+    this.heldProvisional = batch.revision;
+    return true;
   }
 
   /** A provisional batch this session forwarded was the whole change: the
    *  engine may present its frames (after the batch: the same port). A
    *  session that moved past it (a resync, a later batch) has nothing to do. */
   private confirm(revision: number): void {
+    if (revision === this.heldProvisional) {
+      this.heldProvisional = null;
+      void this.resync('provisional batch not forwarded');
+      return;
+    }
     const id = this.id;
     if (id === null || this.closed || revision !== this.streamRevision || !this.provisionalForwarded) return;
     this.provisionalForwarded = false;
@@ -448,7 +474,7 @@ export class DocumentSession {
       return;
     }
     if (batch.body.length > MAX_PATCH_BODY_BYTES || batch.body.length === 0) {
-      void this.resync('large batch');
+      if (!this.holdProvisional(batch)) void this.resync('large batch');
       return;
     }
     if (this.resyncing) {
@@ -464,7 +490,7 @@ export class DocumentSession {
     if (batch.revision <= this.streamRevision) return;
     if (batch.baseRevision !== this.streamRevision) {
       // A batch we never saw sits between: the engine needs the document.
-      void this.resync('gap');
+      if (!this.holdProvisional(batch)) void this.resync('gap');
       return;
     }
     this.streamRevision = batch.revision;
