@@ -82,7 +82,10 @@ private generated video track, so the CSS video-element compositor scales
 and colour-manages them as it did for the old source monitor. NV12 and I420A
 frames are buffer-backed, transferring the request-owned ArrayBuffer; NV16
 and P010 use an immutable IOSurface imported by Electron's shared-texture API,
-held until the element presents the frame. The element has no URL, has no
+held until the element presents the frame. The presenter keeps its latest
+frame and writes it again (at most three times) when the element's
+requestVideoFrameCallback media time shows it was not presented within
+50 ms, which happens when two frames arrive in one vsync (resize, then seek). The element has no URL, has no
 audio track, and is muted; decoding, seeking, frame selection and audible
 playback remain in the native engine. No browser decoder supplies the source
 frames. Opaque alpha planes are removed only after checking every visible
