@@ -10,6 +10,9 @@
  */
 const QUIET_MS = 500;
 const IDLE_TIMEOUT_MS = 1_000;
+/** Background publication never waits longer than this, even while a
+ * source keeps playing or a timeline loops. */
+export const MAX_DEFER_MS = 2_000;
 let last = -Infinity;
 let listening = false;
 
@@ -25,15 +28,19 @@ function listen(): void {
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-/** Resolves once media has been quiet for `quietMs` and the renderer is idle. */
+/** Resolves once media has been quiet for `quietMs` and the renderer is
+ * idle, or after `MAX_DEFER_MS` whatever is playing. */
 export async function whenMediaIdle(PM: { playing?: boolean } | null | undefined, quietMs = QUIET_MS): Promise<void> {
   listen();
+  const deadline = performance.now() + MAX_DEFER_MS;
   for (;;) {
-    const wait = last + quietMs - performance.now();
-    if (PM?.playing) await sleep(quietMs);
-    else if (wait > 0) await sleep(wait);
-    else break;
+    const left = deadline - performance.now();
+    if (left <= 0) return;
+    const wait = PM?.playing ? quietMs : last + quietMs - performance.now();
+    if (wait <= 0) break;
+    await sleep(Math.min(wait, left));
   }
   const idle = (globalThis as { requestIdleCallback?: (cb: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
-  await new Promise<void>(resolve => idle ? idle(() => resolve(), { timeout: IDLE_TIMEOUT_MS }) : setTimeout(resolve, 0));
+  const timeout = Math.max(1, Math.min(IDLE_TIMEOUT_MS, deadline - performance.now()));
+  await new Promise<void>(resolve => idle ? idle(() => resolve(), { timeout }) : setTimeout(resolve, 0));
 }

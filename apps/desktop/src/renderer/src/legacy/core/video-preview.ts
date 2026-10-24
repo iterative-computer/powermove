@@ -51,16 +51,20 @@ export function prepareVideoPreview(PM: any, asset: any, source: Blob, disposed:
         else ready();
         void el.play().catch(error => { clearTimeout(timer); reject(error); });
       });
-      // Publishing re-lays out every asset consumer. With the new engine,
-      // keep it out of source scrubs; setting-off timing stays as shipped.
-      if (PM.EngineSourceMedia) await whenMediaIdle(PM);
+    } catch (error) { el.removeAttribute('src'); el.load(); URL.revokeObjectURL(url); throw error; }
+    const publish = () => {
       if (disposed()) { el.removeAttribute('src'); el.load(); URL.revokeObjectURL(url); return; }
       asset.preview = { el, url, deferred: !!PM.playing };
       if (previewVideoElement(PM, asset) === el) {
         cancelPreviewVideoSeek(asset.el); asset.el.pause();
       }
       PM.bus.emit('assets', { runtimeOnly: true }); PM.invalidate('render');
-    } catch (error) { el.removeAttribute('src'); el.load(); URL.revokeObjectURL(url); throw error; }
+    };
+    // Publishing re-lays out every asset consumer. With the new engine it
+    // waits (boundedly) for source scrubs to rest, off the import's await and
+    // the conversion queue; setting-off timing stays as shipped.
+    if (PM.EngineSourceMedia) void whenMediaIdle(PM).then(publish);
+    else publish();
   };
   // A cached preview bypasses the conversion queue entirely. Older alpha clips
   // also bypass optional 4K work when they need their first conversion.

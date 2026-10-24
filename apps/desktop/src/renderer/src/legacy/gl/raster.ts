@@ -1292,7 +1292,11 @@ PM.assets = {
       }
       PM.assets.errors.delete(id);
       if (kind === 'audio' && PM.Audio) PM.Audio.rebalanceCache();
-      nextPoster = await persistSourcePoster(PM, prepared, setPoster) || nextPoster;
+      // The replacement never waits for the engine poster (it waits for
+      // scrubs and playback to rest); redo picks it up once it is stored.
+      void persistSourcePoster(PM, prepared, setPoster).then(blob => {
+        if (blob) { nextPoster = blob; nextMeta.poster = true; }
+      });
       if (nextPoster) nextMeta.poster = true;
       return { asset: prepared, previous: previousRuntime, previousName: currentMeta.name, meta: nextMeta, persisted: true };
     } catch (error) {
