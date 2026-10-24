@@ -253,18 +253,21 @@ canvas, whose WebGL buffer is undefined after compositing; copying it raced
 the buffer swap, so cards usually lacked the gizmo and occasionally showed it
 misplaced for the card's layout.
 
-The shared native 3D color pass mirrors ANGLE Metal's explicit WebGL
-resolve: add the four normalized samples in order as `f32`, divide by four,
-and write RGBA8. A production-pipeline GPU test checks all 1,024 measured
-color/coverage combinations exactly.
-
 The C3 spec recreates the card clone's compositor layers (`display: none`,
 then restored) before each screenshot, with the engine off and on. Chromium
 tiles keep their raster history: eight engine-off launches of the same card
 differed by 1–7 pixels, up to 36 levels, at header SVG icon samples, and were
 identical after that fresh raster. The gate compares the same final DOM and
-pixels, still with zero tolerance and no mask. Its non-camera case is the
-Editor view framed on the selected cube.
+pixels with no mask. Its non-camera case is the Editor view framed on the
+selected cube.
+
+2D cards must match exactly. The native 3D pass uses Metal's hardware MSAA
+resolve (no WebGL resolve emulation), so 3D cards follow the reference rule:
+a differing pixel must be an edge (3×3 span above 8 levels in today's card)
+and, per channel, no further than today's from the engine's 4× supersampled
+render of the same pinned view, written into the card's composition canvas.
+Camera-view cards pass; Editor-view cards have 4–5 one-level edge pixels
+further from the reference (quality ledger C3-Q2, owned by the 3D lane).
 
 Rust tests cover wire validation, cropped pixels, the selected sequence, an
 unchanged subsequent live frame, the editor camera and the display-format

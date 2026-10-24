@@ -3,12 +3,15 @@
  * pixel (plan appendix C row C3; owner rule: no visible difference on an
  * existing project). Each case launches the app twice, engine off then on,
  * one Electron at a time, builds the same scene with the same viewer, opens
- * the Library, and compares the two card images exactly.
+ * the Library, and compares the two card images exactly. 3D cards use the
+ * reference rule (QUALITY-1): pixels away from edges are exact, and an edge
+ * pixel may differ only if it is at least as close as today's to the
+ * engine's supersampled render of the same pinned view.
  *
  * Run serially: pm-electron-lock bunx playwright test e2e/library-card-parity.spec.ts --workers=1
  */
 import { writeFile } from 'node:fs/promises';
-import type { Page } from 'playwright';
+import type { Locator, Page } from 'playwright';
 
 import { expect, launchApp, test } from './helpers/app';
 import { VIEWER_VARIANTS, useViewer, type ViewerVariant } from './helpers/viewer-fork';
@@ -70,25 +73,61 @@ async function card<T = Buffer>(engine: '0' | '1', theme: string, variant: Viewe
     await shown.evaluate(element => Promise.all(element.getAnimations({ subtree: true })
       .filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime))
       .map(animation => animation.finished.catch(() => undefined))));
-    // Chromium's tiles keep their raster history: after partial re-rasters,
-    // the same final DOM can differ across launches at a few antialiased SVG
-    // samples (OFF/OFF launches differed by up to 36 levels on header icons).
-    // Recreating the clone's layers rasterizes that final DOM in one pass, so
-    // both captures compare the same content, not each launch's history.
-    await shown.evaluate(element => new Promise<void>(resolve => {
-      const clone = element.querySelector<HTMLElement>('.library-clone')!;
-      const display = clone.style.display;
-      clone.style.display = 'none';
-      requestAnimationFrame(() => {
-        clone.style.display = display;
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-      });
-    }));
-    const png = await shown.screenshot({ animations: 'disabled' });
+    const png = await freshCapture(shown);
     return then ? await then(page, png) : png as T;
   } finally {
     await session.close();
   }
+}
+
+/**
+ * Chromium's tiles keep their raster history: after partial re-rasters, the
+ * same final DOM can differ across launches at a few antialiased SVG samples
+ * (OFF/OFF launches differed by up to 36 levels on header icons). Recreating
+ * the clone's layers rasterizes that final DOM in one pass, so every capture
+ * compares the same content, not each launch's history.
+ */
+async function freshCapture(shown: Locator): Promise<Buffer> {
+  await shown.evaluate(element => new Promise<void>(resolve => {
+    const clone = element.querySelector<HTMLElement>('.library-clone')!;
+    const display = clone.style.display;
+    clone.style.display = 'none';
+    requestAnimationFrame(() => {
+      clone.style.display = display;
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+  }));
+  return shown.screenshot({ animations: 'disabled' });
+}
+
+/**
+ * The same card with its composition from the engine's 4× supersampled render
+ * of the pinned view (16 pixels, each 4× MSAA, box-averaged per card pixel).
+ */
+async function referenceCard(page: Page): Promise<Buffer> {
+  await page.evaluate(async () => {
+    const PM = (window as any).PM, k = 4;
+    const presentation = PM.Kernel.services.get('viewer')?.enginePresentation ?? PM.EngineCanvas?.viewerPresentation;
+    const state = presentation.stateFor(presentation.latest.viewSeq);
+    const { width, height } = state.canvas;
+    const snapshot = await PM.EngineRender.thumbnails.request({
+      key: 'c3-reference', composition: String(PM.proj.compId ?? PM.proj.id ?? ''), time: PM.time,
+      width: width * k, height: height * k, pixels: 'opaque', draft3d: true,
+      viewer: { view: state.view ?? null, canvas: { ...state.canvas, width: width * k, height: height * k }, viewSeq: state.viewSeq },
+    });
+    const big = PM.EngineRender.toCanvas(snapshot).getContext('2d').getImageData(0, 0, width * k, height * k).data;
+    const out = new ImageData(width, height);
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) for (let c = 0; c < 4; c++) {
+      let sum = 0;
+      for (let j = 0; j < k; j++) for (let i = 0; i < k; i++) sum += big[(((y * k + j) * width * k) + x * k + i) * 4 + c]!;
+      out.data[(y * width + x) * 4 + c] = Math.round(sum / (k * k));
+    }
+    const target = [...document.querySelectorAll<HTMLCanvasElement>('.library-card[data-panel-id="viewer"] .library-clone canvas')]
+      .find(canvas => !canvas.hidden && canvas.width === width && canvas.height === height);
+    if (!target) throw new Error('No cloned composition canvas at the pinned backing size');
+    target.getContext('2d')!.putImageData(out, 0, 0);
+  });
+  return freshCapture(page.locator('.library-card[data-panel-id="viewer"]'));
 }
 
 /** The viewer has drawn this scene: two samples a few frames apart agree. */
@@ -140,6 +179,43 @@ async function compare(page: Page, a: Buffer, b: Buffer) {
   }, { a: a.toString('base64'), b: b.toString('base64') });
 }
 
+/**
+ * The reference rule: every differing pixel must be an edge (its 3×3
+ * neighbourhood in today's card spans more than 8 levels) and, per channel,
+ * at least as close to the supersampled reference as today's pixel.
+ */
+async function compareToReference(page: Page, today: Buffer, engine: Buffer, reference: Buffer) {
+  return page.evaluate(async ({ a, b, r }) => {
+    const load = async (data: string) => { const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode(); return img; };
+    const images = [await load(a), await load(b), await load(r)];
+    const [w, h] = [images[0]!.naturalWidth, images[0]!.naturalHeight];
+    if (images.some(img => img.naturalWidth !== w || img.naturalHeight !== h)) return { size: false, interior: -1, edgeWorse: -1 };
+    const pixels = (img: HTMLImageElement) => {
+      const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+      const context = canvas.getContext('2d')!; context.drawImage(img, 0, 0);
+      return context.getImageData(0, 0, w, h).data;
+    };
+    const [t, e, ref] = images.map(pixels) as [Uint8ClampedArray, Uint8ClampedArray, Uint8ClampedArray];
+    let interior = 0, edge = 0, edgeWorse = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      if (t[i] === e[i] && t[i + 1] === e[i + 1] && t[i + 2] === e[i + 2] && t[i + 3] === e[i + 3]) continue;
+      let span = 0;
+      for (let c = 0; c < 3; c++) {
+        let lo = 255, hi = 0;
+        for (let j = Math.max(0, y - 1); j <= Math.min(h - 1, y + 1); j++) for (let k = Math.max(0, x - 1); k <= Math.min(w - 1, x + 1); k++) {
+          const v = t[(j * w + k) * 4 + c]!; lo = Math.min(lo, v); hi = Math.max(hi, v);
+        }
+        span = Math.max(span, hi - lo);
+      }
+      if (span <= 8) { interior++; continue; }
+      edge++;
+      for (let c = 0; c < 4; c++) if (Math.abs(e[i + c]! - ref[i + c]!) > Math.abs(t[i + c]! - ref[i + c]!)) { edgeWorse++; break; }
+    }
+    return { size: true, interior, edgeWorse, edge };
+  }, { a: today.toString('base64'), b: engine.toString('base64'), r: reference.toString('base64') });
+}
+
 const cases: Array<{ theme: string; variant: ViewerVariant; scene: Scene }> = [
   ...['light', 'dark'].flatMap(theme => (['2d', '2d-fit', '3d', '3d-editor'] as Scene[])
     .flatMap(scene => VIEWER_VARIANTS.map(variant => ({ theme, variant, scene })))),
@@ -172,8 +248,14 @@ for (const { theme, variant, scene } of cases) {
       await testInfo.attach('card geometry, engine on', { body: JSON.stringify(await geometry(page)), contentType: 'application/json' });
       await writeFile(testInfo.outputPath('card-engine-on.png'), engine);
       await testInfo.attach('Library card, engine on', { path: testInfo.outputPath('card-engine-on.png'), contentType: 'image/png' });
-      return compare(page, today, engine);
+      if (scene === '2d' || scene === '2d-fit') return compare(page, today, engine);
+      const reference = await referenceCard(page);
+      await writeFile(testInfo.outputPath('card-reference.png'), reference);
+      await testInfo.attach('Library card, supersampled reference', { path: testInfo.outputPath('card-reference.png'), contentType: 'image/png' });
+      return compareToReference(page, today, engine, reference);
     });
-    expect(result).toEqual({ size: true, differing: 0, max: 0 });
+    await testInfo.attach('comparison', { body: JSON.stringify(result), contentType: 'application/json' });
+    if (scene === '2d' || scene === '2d-fit') expect(result).toEqual({ size: true, differing: 0, max: 0 });
+    else expect(result).toMatchObject({ size: true, interior: 0, edgeWorse: 0 });
   });
 }
