@@ -72,12 +72,13 @@ export interface RasterCompatOptions {
    *  today's crop window applied: `sourceWindow` for text, `uv` for shapes), or null. */
   engineRaster: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => any;
   /** Prepare the same base surface without blocking the renderer's event loop. */
-  engineRasterAsync?: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => Promise<any>;
+  engineRasterAsync?: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => Promise<{ surface: any; revision: number } | null>;
   /** Native-evaluated content identity for a base whose pixels are time independent. */
-  rasterKey?: (layer: any, scale: number, time: number, crop?: RasterWindowLike) => string | null;
-  /** Runs a paused edit's own preparation with queries answered at its
-   *  (possibly provisional) revision (`DocumentBarrier.provisionalQueries`). */
-  atRevision?: <T>(fn: () => T) => T;
+  /** The content identity of a layer's base raster, and whether it holds
+   *  across document revisions; null when the base is not cached. */
+  rasterKey?: (layer: any, scale: number, time: number, crop?: RasterWindowLike) => { key: string; persistent: boolean } | null;
+  /** The window's document revision (the one `rasterKey` read). */
+  documentRevision?: () => number | null;
   /** Reads a surface's pixels as the compositor uploads them. */
   readPixels?: (source: CanvasImageSource & { width: number; height: number }) => { width: number; height: number; format: 'rgba8Premultiplied' | 'rgba8Straight'; data: Uint8Array } | null;
   /** Async playback readback; synchronous callers retain readPixels. */
@@ -282,7 +283,9 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
   /** The key last posted per layer, time and density (for `reuse`). */
   const posted = new Map<string, string>();
   const ready = new Map<string, { layer: unknown; answer: CompatAnswerResult; bytes: number; retained: boolean }>();
-  type Dependency = { key: string; layer: any; scale: number; time: number; crop?: RasterWindowLike };
+  type BaseKey = { key: string; persistent: boolean };
+  /** A base the wrapper asked for: its content key and the revision that key was read at. */
+  type Dependency = { key: string; content: BaseKey | null; revision: number | null; layer: any; scale: number; time: number; crop?: RasterWindowLike };
   // A missing base unwinds only this preparation attempt. Retry with its
   // real pixels; never hand a wrapper a placeholder it could cache.
   const suspended = Symbol('raster preparation suspended');
@@ -315,14 +318,15 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
     generation++;
   };
   const clearReady = () => { ready.clear(); preparing.clear(); bases.clear(); baseBytes = 0; readyRevision = null; generation++; };
-  const rememberBase = (key: string | null, layer: any, surface: any) => {
-    if (!key || !surface) return;
+  const rememberBase = (content: BaseKey | null, surface: any) => {
+    if (!content || !surface) return;
+    const key = content.key;
     const bytes = Number(surface.cv?.width) * Number(surface.cv?.height) * 4;
     if (!(bytes > 0 && bytes <= BASE_CACHE_BYTES)) return;
     const old = bases.get(key);
     if (old) baseBytes -= old.bytes;
     bases.delete(key);
-    bases.set(key, { surface, bytes, persistent: layer?.type === 'shape' && !layer.d?.paths?.length }); baseBytes += bytes;
+    bases.set(key, { surface, bytes, persistent: content.persistent }); baseBytes += bytes;
     while (bases.size > BASE_CACHE_ENTRIES || baseBytes > BASE_CACHE_BYTES) {
       const first = bases.keys().next().value!;
       baseBytes -= bases.get(first)!.bytes; bases.delete(first);
@@ -367,7 +371,8 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
       // Content identity covers the answered layer and the detached copies a
       // wrapper rasterizes through the service (a typed prefix, an outline).
       const load = () => {
-        const key = options.rasterKey?.(layer, s, t, crop ?? undefined) ?? null;
+        const content = options.rasterKey?.(layer, s, t, crop ?? undefined) ?? null;
+        const key = content?.key ?? null;
         const cached = cachedBase(key);
         if (cached) { stats.cacheHits++; return cached.surface; }
         if (preparation) {
@@ -376,14 +381,14 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
             stats.prepared++;
             return preparation.samples.get(dependencyKey);
           }
-          preparation.missing = { key: dependencyKey, layer, scale: s, time: t, crop: crop ?? undefined };
+          preparation.missing = { key: dependencyKey, content, revision: options.documentRevision?.() ?? null, layer, scale: s, time: t, crop: crop ?? undefined };
           throw suspended;
         }
         stats.syncLoads++;
         stats.syncLoadSites.push(String(new Error().stack ?? '').split('\n').slice(2, 9).map(line => line.trim()).join(' < '));
         if (stats.syncLoadSites.length > 4) stats.syncLoadSites.shift();
         const surface = options.engineRaster(layer, s, t, crop ?? undefined);
-        rememberBase(key, layer, surface);
+        rememberBase(content, surface);
         return surface;
       };
       // A captions layer between cues is null today: decide it now.
@@ -533,10 +538,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
             let answer: CompatAnswerResult = null;
             preparation = attempt;
             const beganCpu = performance.now();
-            try {
-              const attempt = () => handle.answer(need, revision, { fresh: true });
-              answer = prepareOptions?.urgent && options.atRevision ? options.atRevision(attempt) : attempt();
-            }
+            try { answer = handle.answer(need, revision, { fresh: true }); }
             catch (error) { if (!attempt.missing) throw error; }
             finally {
               preparation = null;
@@ -564,14 +566,16 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
             }
             stats.asyncLoads++;
             const began = performance.now();
-            const surface = await options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop);
+            const loaded = await options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop);
             transport?.trace?.record('base dependency', revision, need.time, began);
             const ms = performance.now() - began;
             stats.asyncMs += ms; stats.asyncMsMax = Math.max(stats.asyncMsMax, ms);
             if (!valid()) return;
-            samples.set(missing.key, surface);
-            const baseKey = options.rasterKey?.(missing.layer, missing.scale, missing.time, missing.crop) ?? null;
-            rememberBase(baseKey, missing.layer, surface);
+            samples.set(missing.key, loaded?.surface ?? null);
+            // Cached under the key read when it was asked for, only if the
+            // engine drew it at that same revision: a document edited while
+            // it was on its way keeps it for this preparation alone.
+            if (loaded && loaded.revision === missing.revision) rememberBase(missing.content, loaded.surface);
           }
           if (valid()) throw new Error('The raster override did not converge after 64 asynchronous base dependencies.');
         } catch (error) {

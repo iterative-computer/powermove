@@ -20,7 +20,9 @@ function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: 
     cv: { width: Math.round(48 * scale), height: Math.round(24 * scale) }, w: 48, h: 24, anchorX: 4, anchorY: 18, layer, scale, time, key: `engine:${layer.id}`
   });
   const engineRaster = vi.fn(surface);
-  const engineRasterAsync = vi.fn(async (layer: any, scale: number, time: number) => surface(layer, scale, time));
+  // The window's document revision, and the engine's (what an async base is drawn at).
+  const revisions = { document: 1, engine: 1 };
+  const engineRasterAsync = vi.fn(async (layer: any, scale: number, time: number) => ({ surface: surface(layer, scale, time), revision: revisions.engine }));
   const readPixels = vi.fn((source: { width: number; height: number }) => ({ width: source.width, height: source.height, format: 'rgba8Premultiplied' as const, data: new Uint8Array(source.width * source.height * 4).fill(7) }));
   let base: any;
   const compat = createRasterCompat(PM, {
@@ -29,7 +31,12 @@ function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: 
     onChainChange: (fn) => services.onChange('raster', fn),
     engineRaster,
     engineRasterAsync: withAsync ? engineRasterAsync : undefined,
-    rasterKey,
+    // A plain shape's base holds across revisions (kernel/install.ts rasterContentKey).
+    rasterKey: rasterKey && ((layer, scale, time, crop) => {
+      const key = rasterKey(layer, scale, time, crop);
+      return key === null ? null : { key, persistent: layer?.type === 'shape' };
+    }),
+    documentRevision: () => revisions.document,
     readPixels,
     readPixelsAsync,
     log: () => {}
@@ -38,7 +45,7 @@ function setup(withAsync = false, rasterKey?: (layer: any, scale: number, time: 
   services.register('raster', base);
   const need = (layer: string, time = 0.5, scale = 2, composition = 'P-root'): CompatNeed =>
     ({ composition, layer, time: Math.round(time * TICKS_PER_SECOND), source: 'rasterOverride', scale });
-  return { PM, services, compat, engineRaster, engineRasterAsync, readPixels, base, need };
+  return { PM, services, compat, engineRaster, engineRasterAsync, readPixels, base, need, revisions };
 }
 
 describe('the raster override producer', () => {
@@ -139,6 +146,29 @@ describe('the raster override producer', () => {
     compat.reset();
     await compat.prepare(need('box', 1.5), 6);
     expect(engineRasterAsync).toHaveBeenCalledTimes(2);
+    compat.dispose();
+  });
+
+  it('keeps an async base under its content key only if the engine drew it at the revision the key was read at', async () => {
+    const { PM, services, compat, engineRasterAsync, need, revisions } = setup(true, (layer, scale, _time, crop) => JSON.stringify([layer.d, scale, crop]));
+    const original = services.get<any>('raster');
+    services.register('raster', (...args: any[]) => ({ ...original(...args), key: 'tinted' }));
+    // The shape is edited while its base is on its way: the engine draws the
+    // base at the newer revision, the content the key was read for is gone.
+    revisions.engine = 2;
+    await compat.prepare(need('box', 1), 4);
+    expect(compat.answer(need('box', 1), 4, { prepared: true })).toMatchObject({ key: 'tinted' });
+    expect(engineRasterAsync).toHaveBeenCalledTimes(1);
+    // Not cached: the next preparation of the same content asks again.
+    await compat.prepare(need('box', 1.5), 5);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(2);
+    // Drawn at the key's revision: cached, and reused by the next edit.
+    revisions.document = revisions.engine = 3;
+    PM.proj.layers = PM.proj.layers.map((l: any) => l.id === 'box' ? { ...l, d: { ...l.d, w: 43 } } : l);
+    await compat.prepare(need('box', 1.5), 6);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(3);
+    await compat.prepare(need('box', 2), 7);
+    expect(engineRasterAsync).toHaveBeenCalledTimes(3);
     compat.dispose();
   });
 
