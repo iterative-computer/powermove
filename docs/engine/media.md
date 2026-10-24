@@ -1,188 +1,72 @@
 # pm-media: design notes
 
-## Source media surfaces (mediaframes lane)
-
-`SnapshotTarget::Source` draws a frozen asset independently of the project
-composition. `time` is source time in ticks, `outputSize` is the RGBA pixel
-size, and `fit` is stretch, contain, or cover. The source monitor's video-only
-`compositor` request instead returns the original coded YUV planes with
-`SnapshotResult.video` colour metadata; Chromium owns its final fit and colour
-conversion. It requires an async request with straight samples. RGBA `display`
-and `interpreted` snapshots, jobs, and composition rendering keep their
-existing encodings. `display` reads the host's
-`SourceRead` capability, which resolves the browser-playable rendition when
-the asset's binding selects it. A stale cached rendition never replaces a
-browser-playable original. Window bindings and frozen job bindings carry
-this choice; conflicting window choices cannot mint one source capability.
-`interpreted` reads the frozen original `MediaRead` path and
-applies its source interpretation. A non-default SVG interpretation currently
-fails with a named error because Chromium's raster exchange does not carry the
-source transform. A required rendition that has not reached the store is a
-named error. The interactive path reuses the renderer's media
-decoder/cache and source GPU pass. Source snapshots use a separate exact
-Export-purpose decode worker: it preserves the existing VideoToolbox pixel
-format, keeps its decoder session warm, and uses bounded neighbouring-frame
-prefetch during drags. After a jump it may fill up to 64 contiguous frames
-within the same GOP, capped by half its share of the decoded-frame lease;
-new exact requests preempt that work. It never returns a scrub stand-in. Composition's
-Display worker and job filmstrips keep their existing decode purposes.
-Snapshot cancellation removes queued work; a decode/readback already running
-on the render thread completes before the next command is handled. Small
-source output targets and staging buffers are reused; each retained target
-and staging category is bounded to 16 MiB. Large one-off interactive
-snapshots are still allowed.
-
-Untagged VP9 display renditions use Chromium's existing I420-to-RGBA8
-conversion before fitting. The source-display cache identity is separate
-from composition frames; explicit colour tags and interpretations retain
-their existing conversion paths. This preserves the browser's clipped
-8-bit source pixels without changing composition colour conversion.
-
-Source SVGs use the existing Chromium SVG raster exchange. Source keys add
-the fit mode and final output size: Chromium draws the frozen SVG once into
-that canvas at the fitted, potentially fractional rectangle and returns
-straight `getImageData` pixels. The engine returns those bytes without a
-second fit/filter or unpremultiplication. The interactive snapshot returns
-`NeedsRenderer.svg` until the window supplies the raster; source filmstrip
-jobs fetch it through `CompatFrame`. Composition SVG buckets retain their
-existing premultiplied GPU path. The native SVG decoder is deliberately not
-used for these display pixels.
-
-`AudioMessage::SourceMonitor` runs on a separate `pm-audio` link from project
-playback. Its generation-tagged `SourceStatus` reports heard time and levels,
-or a host-clock position for a silent video, and reports natural end or a
-named output failure. Closing the source monitor drops its link. Source
-audio uses the frozen display path, including a stored browser rendition,
-with unity source and master gain. `pm-audio` copies a mono channel to both
-stereo outputs without pan-law attenuation. A direct heard-PCM comparison
-against `HTMLMediaElement` is still unmeasured; the existing audio corpus
-gate compares composition exports instead. Source filmstrip jobs write one
-tightly packed, top-down, straight-alpha RGBA8 file
-with frames in requested order. Browser-rendition jobs run the existing
-FFmpeg/sips conversion flags against the frozen original and commit the
-result through host output capabilities; cancellation kills the converter.
-
-Targeted native checks: source render tests cover fit, alpha, SVG raster
-upload, video decoder reuse, and an end-time held frame. On a 64×48 VP9
-test clip, six source seeks took 40.716 ms with three media-cache hits, six
-draw calls, and six readbacks (one run on the development Mac; no legacy
-comparison implied). Job tests compare decoded WebM video and audio, and
-decoded TIFF-to-PNG pixels, against the existing converter flags. The app
-parity and relative-performance gates are tracked by the integration lane.
-
-The renderer registers `engine.source` only with Use New Engine enabled.
-Assets live posters and inline thumbnails use its source pixels; import,
-replacement, and restore backfill persist the same WebP/JPEG poster format.
-The source viewer keeps its existing controls and keyboard interactions,
-using native source frames and an engine audio voice. Stills present through
-an image element, matching the original compositor layer beneath the
-transport shadow; its lossless PNG is encoded from engine pixels. Video
-presents the engine's decoded planes through WebCodecs VideoFrames on a
-private generated video track, so the CSS video-element compositor scales
-and colour-manages them as it did for the old source monitor. NV12 and I420A
-frames are buffer-backed, transferring the request-owned ArrayBuffer; NV16
-and P010 use an immutable IOSurface imported by Electron's shared-texture API,
-held until the element presents the frame. The presenter keeps its latest
-frame and writes it again (at most three times) when the element's
-requestVideoFrameCallback media time shows it was not presented within
-50 ms, which happens when two frames arrive in one vsync (resize, then seek). The element has no URL, has no
-audio track, and is muted; decoding, seeking, frame selection and audible
-playback remain in the native engine. No browser decoder supplies the source
-frames. Opaque alpha planes are removed only after checking every visible
-alpha sample; true alpha travels as I420A. Code
-export sends frozen originals to browser-rendition jobs. Setting-off branches
-retain their current browser capture and conversion behavior.
-
-Source frame jobs reuse bounded, frozen, source-only sessions across poster
-saves and unrelated edits; source replacements retain separate bindings for
-in-flight requests. A real frame prepare warms the user job lane from poster
-or monitor use. Filmstrips use bounded GPU chunks and one packed RGBA8 IPC
-reply. There is no PNG encoding or per-frame IPC in that path. Session and
-scratch-output ownership, revision advancement, cancellation and cache bounds
-are specified in RFC 12. Browser renditions keep per-request isolation.
-The monitor measures its CSS size in ResizeObserver, preserving client-size
-rounding and override padding without forcing layout on every seek. Its
-ImageData view for stills borrows the received RGBA buffer when it has
-ArrayBuffer storage, avoiding another full-frame copy.
-
-Monitor video never passes through an intermediate RGBA conversion,
-canvas colour transform, image encoding, or GPU readback. The buffer-backed
-route carries packed source planes in the existing structured-clone IPC reply;
-it does not encode a file. The IOSurface route copies the packed rows once
-in main and transfers an import to the owning window. Each surface is immutable.
-Electron retains the imported IOSurface independently of the native CoreVideo
-buffer, and each VideoFrame retains its shared image. Source preload releases
-the import without a JavaScript GPU-completion callback, then sends its bookkeeping
-notice from the preload's JavaScript sequence. This avoids Electron 44 invoking
-a V8 callback from the VideoFrameCompositor thread when a generated track drops
-a frame. Main releases its CoreVideo ownership after the import bookkeeping
-reports all references released; Chromium's remaining VideoFrame/shared-image
-references continue to own their immutable IOSurface. Main accounts actual padded IOSurface allocations,
-with a 512 MiB aggregate budget and eight outstanding surfaces per window.
-Packed source frames are capped at 128 MiB before allocation; the aggregate
-budget can hold at least three maximum-size frames.
-The preload consumes each token once and expires unused imports after ten
-seconds; navigation and disposal release the associated imports.
-
-Monitor frames carry the reading of the shared video colour table,
-`pm_media::probe::color::video_reading`, which composition and export also
-use: tags win field by field; an untagged matrix is BT.601 at most 576 lines
-tall and under 1280 wide, otherwise BT.709 (every codec); an untagged
-transfer is BT.709, rendered as the sRGB curve (section 9); untagged
-primaries are Rec.709 unless `UNTAGGED_SD_PRIMARIES` (decision VIDEO-SD-1);
-the range is limited unless tagged full. Chromium's compositor then applies
-those tags. The planes come from the exact Export decoder at the stream's own
-range; there is no source-only VideoToolbox purpose. Where today's CSS
-monitor reads a stream differently, `quality-ledger.md` has the row.
-
-Default poster persistence and poster URL consumers share one in-flight
-native frame and WebP encode. The source service's 64 MiB cache budget is
-split across RGBA frames (40 MiB), ordered filmstrips (16 MiB) and poster blobs
-(8 MiB, at most 128 entries). Source identity changes and cancellation prevent
-stale results from entering the cache. Import commits without waiting for the
-engine poster, which needs the committed binding; the poster then persists
-in the background and schedules an autosave without an `assets` broadcast
-(live cards already show it). With the new engine, the poster's store and
-document writes and the legacy editing preview's publication wait for media
-to be quiet (no seek, play or time update for 500 ms, `media/activity.ts`)
-and then for an idle callback, so they never land inside a source scrub. Transient import progress updates coalesce
-within one animation frame; start and completion remain immediate.
-
-`e2e/engine-source-media.spec.ts` is the app gate for both settings: exact
-source, encoded-poster, actual inline-image and monitor Canvas2D comparisons,
-fractional SVG fits, ordered video/SVG filmstrips, both-theme media previews,
-decoded/mixed PCM, source audio levels and natural end, silent video, keyboard
-controls and decoded picture/audio identity for code renditions.
-`engine-source-compositor.spec.ts` compares full-size and intrinsic monitor
-captures in both themes, including a neutral ramp, colour bars and 10-bit
-HEVC, against today's CSS video and against a double-precision reference
-built from the screenshot's ICC profile
-(`e2e/helpers/source-colour-reference.ts`) for the shared table's reading.
-Streams today already reads that way must match today exactly; the rest
-must be at least as close to the reference as today, and within a code.
-`engine-source-guard.spec.ts`
-independently rejects browser video capture, URL-backed playback and host
-export conversion; it permits only the native private video-track presenter
-and verifies that its frames came through the source service. `engine-source-performance.spec.ts`
-pairs alternating app sessions with native `pm-perfbench` counters on one
-24-frame fixture/grid. Each session imports three distinct remuxes, so each
-mode yields six genuinely cold first filmstrips per run. One spec runs five
-alternating off/on/on/off cycles and gates on medians across runs of each
-per-run statistic (scrub P50 and P95, filmstrip median, cold filmstrip
-median) with zero slack, and fails any native run whose scrub P95 exceeds
-today's worst run (`e2e/helpers/source-performance-gate.ts`). Build `source_monitor_pcm` and `source_media` release
-examples before running these specs under `pm-electron-lock`; no build runs
-inside the lock. Targeted Rust and unit passes do not certify app parity,
-relative performance or direct device/DAC output.
-Direct device/DAC output, the broader private corpus and non-default
-interpreted SVG colour remain unmeasured or unsupported as above.
-
 Production media I/O for plan section 13, built from the S6 spike
 (`docs/engine/spikes/S6.md`, `engine/spikes/s6-decode`). Crates:
 `engine/crates/pm-media` (probe, index, decode, images, cache, hashing) and the
 decode-in half of `engine/crates/pm-gpu` (zero-copy import, normalization,
 deinterlacing). This file records how the code meets the plan and where it
 departs from the spike; the plan stays the authority.
+
+## Source media surfaces
+
+`SnapshotTarget::Source` (RFC 16) draws one frozen asset at a source time,
+independent of the composition, with `stretch`, `contain` or `cover` fit.
+`display` reads the host's `SourceRead` capability (the stored browser
+rendition when the binding selects it), `interpreted` reads the frozen
+original with its source interpretation, and `compositor` is the source
+monitor's video request. Source jobs (filmstrips, browser renditions) and
+their frozen sessions are specified in RFC 12.
+
+Decoding uses an exact Export-purpose worker that keeps its session warm,
+prefetches neighbouring frames during drags and fills at most 64 frames of
+the same GOP after a jump, within half its decoded-frame lease. It never
+returns a stand-in frame; new requests preempt prefetch. Source SVGs use the
+Chromium raster exchange at the final output size and fractional fit
+rectangle, without a second filter. Monitor audio is a separate `pm-audio`
+link (`AudioMessage::SourceMonitor`) at unity gain; `source_monitor_pcm`
+renders its decoded mix offline for comparison with Chromium.
+
+The monitor presents video without a browser decoder or an RGBA readback. The
+engine sends the exact decoder's coded planes with H.273 tags; the renderer
+writes them as WebCodecs `VideoFrame`s to a private generated track on a
+muted, URL-less `<video>`, and Chromium's compositor scales and converts
+them. NV12 and I420A travel as buffers; NV16 and P010 as immutable IOSurfaces
+(Electron shared textures), released once the window reports every
+reference gone. The presenter writes a frame only after
+`requestVideoFrameCallback` reports the previous one presented (at most
+250 ms for an element that never reports), so two frames never compete for
+one vsync; a paint resolves once its frame is written. Stills present
+through an `<img>` holding a lossless PNG of engine pixels.
+
+Colour has one function, `pm_media::probe::color::frame_reading` (over
+`video_reading`): tags win field by field; untagged matrices are BT.601 up to
+576 lines and under 1280 wide, else BT.709; untagged transfer is BT.709,
+shown with the sRGB curve; untagged SD primaries are SMPTE 170M
+(`UNTAGGED_SD_PRIMARIES`, VIDEO-SD-1 resolved as a fix); range is limited
+unless tagged full. Image sequences (encoded BT.601 by `media-proxy.ts`,
+which now also tags them) read BT.601 at any size. Composition and export
+adopt the same function with the videoparity lane; until then they differ
+from the monitor where `quality-ledger.md` says. When Chromium can express
+a reading exactly (Rec.709, 170M and 470BG primaries; BT.709 or linear
+transfer; BT.709, 601 and BT.2020 NCL matrices) the monitor sends tags.
+Otherwise (BT.2020 or other primaries, PQ, HLG, other curves, and sources
+composition draws only as interpreted: rotation, fields, pixel aspect,
+cropping) the engine draws the source and sends sRGB RGBA, so the monitor
+never fails on a tag. The monitor ignores Interpret Footage overrides,
+as today's monitor does (RFC 16 `display`): for an interpreted asset the
+monitor and the composition differ by that interpretation.
+
+Posters, filmstrips and the monitor share a 64 MiB renderer cache (40 MiB
+frames, 16 MiB filmstrips, 8 MiB posters). Import commits without waiting for
+the engine poster. With the new engine, poster store writes and the legacy
+editing preview's publication wait for media to be quiet for 500 ms and an
+idle callback, at most 2 s (`media/activity.ts`); nothing the user or an agent
+awaits (import, replace, restore) waits on that publication.
+
+Limits: the colour reference clips the signal to [0, 1] before the EOTF,
+which equals composition for Rec.709-gamut sources but not for wide-gamut
+sources that composition linearises unclipped. Heard-PCM equality is gated
+on decoded mixes, not device output.
 
 ## Building
 
