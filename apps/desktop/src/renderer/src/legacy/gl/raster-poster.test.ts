@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../registry';
 import { makePM } from '../__tests__/make-pm';
+import { MAX_DEFER_MS } from '../../media/activity';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -74,9 +75,11 @@ describe('raster media posters', () => {
           await vi.runAllTimersAsync();
         }
       }
-      expect(poster).toHaveBeenCalledWith(id);
+      await vi.waitFor(() => expect(poster).toHaveBeenCalledWith(id));
+      // Import and replace resolve without the poster; its store and
+      // document writes follow once media rests (at most MAX_DEFER_MS).
+      await vi.waitFor(() => expect(PM.proj.assets[id].poster).toBe(true), { timeout: MAX_DEFER_MS + 1_500 });
       expect(drawImage).not.toHaveBeenCalled();
-      expect(PM.proj.assets[id].poster).toBe(true);
       expect(put).toHaveBeenCalledWith(expect.stringMatching(/:poster$/), posterBlob, expect.objectContaining({ type: 'image/webp' }));
     } finally { PM.hist.clear(); PM.assets.clear(); }
   });

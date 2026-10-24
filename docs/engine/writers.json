@@ -1809,25 +1809,25 @@
       "code": "PM.hist.external( `Replace ${currentMeta.name || 'media'}`, () => applyVersion(previousMeta, previousRuntime, previousPoster), () => appl..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1460",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1464",
       "class": "touch.paths",
       "scope": "install > restoreProject",
       "code": "PM.touch(metadataPaths)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1472",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1476",
       "class": "touch.paths",
       "scope": "install > restoreProject",
       "code": "PM.touch?.(metadataPaths)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1501",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1505",
       "class": "touch.paths",
       "scope": "install > restoreProject > setTimeout(callback) > (anonymous)",
       "code": "PM.touch(available.map(({ id }: any) => ['assets', id, 'poster']))"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1521",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1525",
       "class": "doc.write",
       "scope": "install > gradient",
       "code": "writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = { id, name, kind: 'image', w: 1280, h: 720 }; })"
