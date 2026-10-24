@@ -30,7 +30,7 @@ func fail(_ message: String) -> Never {
   exit(1)
 }
 
-// MARK: Color math (as engine/spikes/s2-precision/src/color.rs)
+// MARK: Color math (as spike S2's color.rs, docs/engine/spikes/S2.md)
 
 func lin709ToXYZ(_ c: [Double]) -> [Double] {
   [

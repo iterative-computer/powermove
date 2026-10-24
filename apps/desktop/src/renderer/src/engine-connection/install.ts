@@ -45,7 +45,6 @@ import { ViewerPresentation } from '../../../extensions/viewer/engine-present/pr
 import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
 import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
 import { SvgRasters } from './svg-rasters';
-import { BlenderPngs } from './blender-png';
 import { EngineTransport, ticks } from './transport';
 import { EnginePreview, documentWake } from './preview';
 import { EngineSceneMetadata } from './scene-metadata';
@@ -473,8 +472,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // The job engine's export and agent frames ask this window for the SVG
   // rasters of the document it has open (main's `compatFrame`).
   const unprovideSvg = renderTransport.provideCompat('svgImage', (request) => svgRasters.produce(request));
-  const blenderPngs=new BlenderPngs({meta:id=>(PM as any).proj.assets[id]??null,blob:meta=>(PM as any).MediaStore.get(meta),image:id=>PM.assets.get(id),canvas:()=>document.createElement('canvas'),decode:blob=>createImageBitmap(blob)});
-  const unprovideBlenderPng=renderTransport.provideCompat('blenderPng',request=>blenderPngs.produce(request));
   (PM as any).EngineSvgRasters = svgRasters;
   // The app's own still captures (the Library's section thumbnails, the
   // agent's look and observe) draw through the engine too: with the new
@@ -750,7 +747,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offAssets();
       follower.dispose();
       unprovideSvg();
-      unprovideBlenderPng();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);

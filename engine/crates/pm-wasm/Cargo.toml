@@ -30,6 +30,3 @@ ryu-js.workspace = true
 # expression results equal the legacy evaluator's (docs/engine/expressions.md).
 [target.'cfg(target_family = "wasm")'.dependencies]
 pm-expr = { path = "../pm-expr", features = ["js-pow"] }
-
-[dev-dependencies]
-flate2 = "1.1"

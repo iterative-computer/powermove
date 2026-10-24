@@ -7,7 +7,7 @@
 //! `yuv420p` and `yuva420p` for libvpx, and full-range RGBA for PNG. This is the
 //! reference the GPU encoder-input pass is checked against and the fallback when
 //! no GPU pass runs. It follows S2's prototype pass
-//! (`engine/spikes/s2-precision/src/pipeline.wgsl`) exactly, in f64:
+//! (spike S2's `pipeline.wgsl`, docs/engine/spikes/S2.md) exactly, in f64:
 //!
 //! * alpha: opaque outputs take premultiplied values (compositing over black);
 //!   straight outputs unpremultiply, guarded below α = 1/4096; premultiplied outputs

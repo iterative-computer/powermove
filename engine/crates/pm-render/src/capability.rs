@@ -55,8 +55,6 @@ pub enum Feature {
     ProjectColor,
     /// A project that requires native-engine features.
     RequiresEngine,
-    /// Blender-rendered 3D (`render3d.enabled`).
-    Blender,
     /// `compat` level 2 SVG images with `<text>` (level 1 SVG images are
     /// Chromium's rasters, decision S1).
     SvgImage,
@@ -111,7 +109,6 @@ impl fmt::Display for Feature {
             Feature::CompatLevel2 => write!(f, "compat level 2 content"),
             Feature::ProjectColor => write!(f, "non-default project color settings"),
             Feature::RequiresEngine => write!(f, "native-engine features"),
-            Feature::Blender => write!(f, "Blender-rendered 3D"),
             Feature::SvgImage => write!(f, "level 2 SVG images with text"),
             Feature::ImageSequence => write!(f, "animated images and image sequences"),
             Feature::Media(m) => write!(f, "media: {m}"),
@@ -481,17 +478,6 @@ fn check_composition(
                 composition: Some(comp_id.to_owned()),
                 layer,
                 feature,
-            });
-        }
-        if !crate::blender::retired()
-            && node::member(Some(comp), "render3d")
-                .and_then(|r| node::member(Some(r), "enabled"))
-                .is_some_and(|e| node::truthy(Some(e)))
-        {
-            out.insert(Unsupported {
-                composition: Some(comp_id.to_owned()),
-                layer: None,
-                feature: Feature::Blender,
             });
         }
     }

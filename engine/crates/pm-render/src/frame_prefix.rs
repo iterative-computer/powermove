@@ -14,7 +14,7 @@
 //! pixels are a function of the draw alone and whose sources resolved
 //! without a failure: solids, stills, vector scenes, and nested
 //! compositions and groups of those (no effects or other compositing
-//! nodes, video, text, shaders, 3D, Blender, or motion-blur samples). The
+//! nodes, video, text, shaders, 3D, or motion-blur samples). The
 //! depth and id surface, exports, and plans with compositing nodes at the
 //! top level always draw in one pass.
 

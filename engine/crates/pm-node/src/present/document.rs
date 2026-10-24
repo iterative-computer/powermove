@@ -324,14 +324,9 @@ impl ViewDocument {
             {
                 continue;
             }
-            // The viewer never draws final Blender frames: it draws native
-            // shading, and Blender surfaces while paused in Material
-            // Preview or Rendered (`super::blender`), as today. Its renderer
-            // also runs the decision 19 fallback runner: programs only it
-            // can draw render through it.
-            if u.feature == pm_render::Feature::Blender
-                || matches!(u.feature, pm_render::Feature::ShaderFallback(_))
-            {
+            // The viewer's renderer runs the decision 19 fallback runner:
+            // programs only it can draw render through it.
+            if matches!(u.feature, pm_render::Feature::ShaderFallback(_)) {
                 continue;
             }
             reasons.push(describe(&u));
@@ -362,7 +357,6 @@ pub fn describe(u: &pm_render::Unsupported) -> String {
         Feature::CompatLevel2 => "compat level 2 content".into(),
         Feature::ProjectColor => "project color settings".into(),
         Feature::RequiresEngine => "native-only features".into(),
-        Feature::Blender => "Blender rendering".into(),
         Feature::SvgImage => "level 2 SVG images with text".into(),
         Feature::ImageSequence => "animated images or sequences".into(),
         Feature::Media(m) => format!("media: {m}"),
@@ -495,10 +489,9 @@ mod tests {
         // Blender is retired (main 2b1fa379a): `render3d` is inert, so the
         // static check never lists it, and the viewer routes the
         // composition exactly as the same scene without.
-        assert!(
-            !pm_render::unsupported(blender.document(), "c")
-                .iter()
-                .any(|u| u.feature == pm_render::Feature::Blender)
+        assert_eq!(
+            pm_render::unsupported(blender.document(), "c"),
+            pm_render::unsupported(native.document(), "c")
         );
         assert_eq!(blender.route("c"), native.route("c"));
         if let Route::Legacy(reasons) = blender.route("c") {

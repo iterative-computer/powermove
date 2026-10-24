@@ -18,7 +18,7 @@ import { describe, expect, it } from 'vitest';
 import { makePM } from '../legacy/__tests__/make-pm';
 import { installEngineDoc, type EngineDoc } from './install';
 import { parseMode } from './flags';
-import { LAYER3D_DEFINITIONS, compositionScene } from '../core/scene3d/layers';
+import { LAYER3D_DEFINITIONS } from '../core/scene3d/layers';
 import { createScene, parseScene, SCENE3D_DEFINITION } from '../core/scene3d/schema';
 import { editScene } from '../core/scene3d/operations';
 import { applyViewportPose, setViewportMode, viewportPose } from '../core/scene3d/viewport';
@@ -159,7 +159,7 @@ function populate(PM: any, random: () => number, models: string[]) {
     const source = roll < 0.45 ? { primitive: pick(PRIMITIVES) }
       : roll < 0.55 ? { lathe: [[0, -0.5], [0.4, -0.3], [0.5, 0.2], [0.1, 0.6]], segments: 24 }
         : roll < 0.62 ? { extrude: [[-0.5, -0.5], [0.5, -0.5], [0.3, 0.4], [-0.4, 0.5]], depth: 0.4, bevel: random() < 0.5 ? 0.05 : 0 }
-          : roll < 0.68 ? { mesh: { positions: [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0], indices: [0, 1, 2, 0, 2, 3], groups: [{ start: 0, count: 3, materialIndex: 0 }, { start: 3, count: 3, materialIndex: 1 }] } }
+          : roll < 0.68 ? { mesh: { positions: [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0], indices: [0, 1, 2, 0, 2, 3] } }
             : { assetId: pick([...models, 'missing-asset']) };
     const ok = editScene(PM, { operation: 'add_object', object: { id, source, p: { x: (random() - 0.5) * 6, y: (random() - 0.5) * 3, z: (random() - 0.5) * 4, ry: random() * 90 } } });
     expect(ok.ok, ok.message).toBe(true);
@@ -170,7 +170,6 @@ function populate(PM: any, random: () => number, models: string[]) {
     const object = L.d.data.object;
     if (random() < 0.15) object.material.p.opacity.v = 0;
     if (random() < 0.3) object.material.doubleSided = true;
-    if ('mesh' in source && random() < 0.7) object.slots = [0, 1].slice(0, random() < 0.85 ? 2 : 1).map(k => ({ id: `s${k}`, name: `S${k}`, material: JSON.parse(JSON.stringify(object.material)) }));
     if ('assetId' in source && random() < 0.4) object.useSourceMaterials = true;
     if (random() < 0.1) L.on = false;
     if (random() < 0.15) L.p.opacity.v = random() < 0.5 ? 0 : 50;
@@ -178,7 +177,7 @@ function populate(PM: any, random: () => number, models: string[]) {
   }
   editScene(PM, { operation: 'add_light', light: { id: 'sun', type: 'sun', p: { x: 1, y: 4, z: 3 } } });
   if (random() < 0.6) editScene(PM, { operation: 'add_camera', id: 'cam', camera: { p: { x: (random() - 0.5) * 4, y: 1 + random() * 2, z: 6 + random() * 3, fov: 30 + random() * 40 } } });
-  // A 2D barrier between depth sets, and groups (plain and model groups).
+  // A 2D barrier between depth sets, and a plain group.
   if (random() < 0.7) {
     const barrier = PM.mkLayer('solid', { name: 'Barrier' });
     barrier.d.w = PM.P(320);
@@ -249,61 +248,6 @@ function exercise(PM: any, doc: EngineDoc, random: () => number, picks = 120) {
 }
 
 let lastKhronos: string[] = [];
-/** Animated model-group recipes: a rocket and a staircase whose parts are stored at the recipe's parameters. */
-function addModelGroups(PM: any) {
-  const zero = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 };
-  const part = (id: string, groupId: string, partId: string, source: any, base: any, x: number) => {
-    const ok = editScene(PM, { operation: 'add_object', object: { id, source, p: { x: base.x + x, y: base.y, z: base.z } } });
-    expect(ok.ok, ok.message).toBe(true);
-    PM.L(id).d.data.object.generation = { groupId, partId };
-    return { layerId: id, base };
-  };
-  const radius = 0.6, length = 2.8, nose = 1;
-  const rocketParts: Record<string, any> = {
-    body: part('rbody', 'rocket', 'body', { primitive: 'cylinder', parameters: { radius, height: length } }, zero, -1.6),
-    nose: part('rnose', 'rocket', 'nose', { primitive: 'cone', parameters: { radius, height: nose } }, { ...zero, y: length / 2 + nose / 2 }, -1.6),
-    engine: part('rengine', 'rocket', 'engine', { primitive: 'cylinder', parameters: { radiusTop: radius * 0.75, radiusBottom: radius * 0.55, height: radius * 0.7 } }, { ...zero, y: -length / 2 - radius * 0.35 }, -1.6),
-    fin_01: part('rfin1', 'rocket', 'fin_01', { primitive: 'box', parameters: { width: 0.1, height: 0.5, depth: 0.5 } }, zero, -1.6)
-  };
-  const rocket = PM.groupLayers(['rbody', 'rnose', 'rengine', 'rfin1'], 'Rocket');
-  rocket.id = 'rocket';
-  for (const l of PM.proj.layers) if (l.group === rocket.id || ['rbody', 'rnose', 'rengine', 'rfin1'].includes(l.id)) l.group = 'rocket';
-  rocket.d = { ...(rocket.d || {}), modeling: { version: 1, recipe: { kind: 'rocket', parameters: { length, radius, nose, fins: 4, finSize: 0.8 }, modifiers: [] },
-    p: { length: PM.P(length, { kf: [PM.KF(0, length), PM.KF(3, 4.2)] }), nose: PM.P(nose, { kf: [PM.KF(1, nose), PM.KF(3, 1.6)] }), finSize: PM.P(0.8, { kf: [PM.KF(0, 0.8), PM.KF(2, 1.4)] }) },
-    parts: rocketParts, retired: [] } };
-  const stairs: Record<string, any> = {};
-  const ids: string[] = [];
-  for (let i = 0; i < 4; i++) {
-    const angle = i * 30 * Math.PI / 180, id = `step${i}`;
-    stairs[`step_00${i}`] = part(id, 'stairs', `step_00${i}`, { primitive: 'box', parameters: { width: 1, height: 0.132, depth: 0.45 } }, { ...zero, x: 1.2 * Math.cos(angle), y: i * 0.22, z: 1.2 * Math.sin(angle) }, 1.6);
-    ids.push(id);
-  }
-  const group = PM.groupLayers(ids, 'Staircase');
-  for (const l of PM.proj.layers) if (l.group === group.id) l.group = 'stairs';
-  group.id = 'stairs';
-  group.d = { ...(group.d || {}), modeling: { version: 1, recipe: { kind: 'staircase', parameters: { steps: 4, radius: 1.2, rise: 0.22, turn: 30, width: 1, depth: 0.45 }, modifiers: [] },
-    p: { rise: PM.P(0.22, { kf: [PM.KF(0, 0.22), PM.KF(3, 0.32)] }), turn: PM.P(30, { kf: [PM.KF(0, 30), PM.KF(3, 45)] }) },
-    parts: stairs, retired: [] } };
-  PM.ProjectIndex?.invalidate?.();
-  PM.touch();
-}
-
-/** Structural difference with exact numbers (key order ignored), or null. */
-function sceneDiff(a: any, b: any, path = ''): string | null {
-  if (typeof a === 'number' && typeof b === 'number') return Object.is(a, b) || a === b ? null : `${path}: ${a} != ${b}`;
-  if (Array.isArray(a) || Array.isArray(b)) {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return `${path}: array shape`;
-    for (let i = 0; i < a.length; i++) { const d = sceneDiff(a[i], b[i], `${path}[${i}]`); if (d) return d; }
-    return null;
-  }
-  if (a && b && typeof a === 'object' && typeof b === 'object') {
-    const keys = new Set([...Object.keys(a), ...Object.keys(b)].filter(k => a[k] !== undefined || b[k] !== undefined));
-    for (const k of keys) { const d = sceneDiff(a[k], b[k], `${path}.${k}`); if (d) return d; }
-    return null;
-  }
-  return a === b ? null : `${path}: ${JSON.stringify(a)} != ${JSON.stringify(b)}`;
-}
-
 const mismatches = (doc: EngineDoc) => doc.dual!.stats.samples;
 const fellBack = (doc: EngineDoc) => Object.entries(doc.api!.stats.fallbacks).filter(([k]) => /^(gl\.pick|gl\.bounds|groups\.bounds|objectBoxes3d):/.test(k));
 
@@ -374,7 +318,7 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
 
   it('answer like the three.js runtime on random compositions, in the camera and editor views', async () => {
     let compared = 0;
-    for (const seed of [1, 2, 3, 4, 5]) {
+    for (const seed of [1, 2, 3, 4, 5, 6]) {
       const { PM, doc } = await editor();
       const random = rng(seed);
       const models = await addModels(PM);
@@ -439,31 +383,6 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
     if (process.env.PM_GEOMETRY_REPORT) writeFileSync(`${process.env.PM_GEOMETRY_REPORT}.boxes`, JSON.stringify({ compared, worst, inexact }));
   }, 300_000);
 
-  it('evaluates animated model-group recipes like compositionScene and picks their parts', async () => {
-    const { PM, doc } = await editor();
-    await addModels(PM);
-    addModelGroups(PM);
-    editScene(PM, { operation: 'add_light', light: { id: 'sun', type: 'sun', p: { x: 1, y: 4, z: 3 } } });
-    // A material saved before `doubleSided` existed: parseScene's default (double).
-    delete PM.L('rbody').d.data.object.material.doubleSided;
-    PM.touch();
-    doc.barrier!.flush();
-    const c = (doc.api as any).comps();
-    for (const t of [0, 0.5, 1.25, 2, 3]) {
-      const native = doc.wasm!.query({ op: 'compositionScene', comp: c.comp, open: c.open, t });
-      expect(native.ok, JSON.stringify(native)).toBeDefined();
-      const legacy = JSON.parse(JSON.stringify(compositionScene(PM, t)));
-      expect(sceneDiff(native.ok, legacy), `t ${t}`).toBeNull();
-    }
-    exercise(PM, doc, rng(21), 200);
-    setViewportMode(PM, 'editor');
-    applyViewportPose(PM, orbitView(viewportPose(PM), -25, 10));
-    exercise(PM, doc, rng(22), 120);
-    expect(mismatches(doc)).toEqual([]);
-    expect(fellBack(doc)).toEqual([]);
-    expect(hits.object).toBeGreaterThan(0);
-  }, 300_000);
-
   it('answers a pick within a frame on a scene with skinned models', async () => {
     const { PM, doc } = await editor('on');
     const models = await addModels(PM);
@@ -519,7 +438,6 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
       const models = await addModels(PM);
       populate(PM, random, ['cube', 'wedge', ...models]);
       for (const name of models.slice(0, 3)) editScene(PM, { operation: 'add_object', object: { source: { assetId: name }, p: { x: random() * 3 - 1.5 } } });
-      if (seed === 33 || seed === 37) addModelGroups(PM);
       const objects = PM.proj.layers.filter((l: any) => l.d?.data?.object && !l.group).map((l: any) => l.id);
       if (objects.length > 2) PM.groupLayers(objects.slice(0, 2), 'Flat');
       PM.touch();
@@ -563,7 +481,6 @@ describe.skipIf(!built)('3D picks and bounds with pm-wasm', () => {
       const models = await addModels(PM);
       const ids = populate(PM, random, ['cube', 'wedge', ...models]);
       for (const name of models) editScene(PM, { operation: 'add_object', object: { source: { assetId: name }, p: { x: random() * 3 - 1.5, z: random() } } });
-      if (seed === 44) addModelGroups(PM);
       PM.touch();
       const objects = PM.proj.layers.filter((l: any) => l.d?.data?.object).map((l: any) => l.id);
       for (const t of [0, 1.3, 2.6]) {

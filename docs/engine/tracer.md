@@ -336,7 +336,7 @@ Kept small; listed for the owning lanes.
 - Tests of other lanes adapted to this lane's behavior:
   `engine/crates/pm-node/tests/present.rs` (the first playing sample names
   the run's start), `e2e/native-engine.spec.ts` (the kernel's connection
-  negotiates the interactive port itself), `docs/engine/writers.json`
+  negotiates the interactive port itself), `apps/desktop/scripts/engine-writers.json`
   (regenerated: the synthetic project builder writes the document).
 - `engine/crates/pm-engine/src/engine.rs`: the integration branch's
   `viewer_transport` (deadline signals for viewer playback) replaced this

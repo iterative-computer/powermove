@@ -219,8 +219,6 @@ pub enum Source {
     Comp(Box<CompPlan>),
     /// The 3D scene pass output for one object layer.
     Object3d(Box<Object3dPlan>),
-    /// A Blender surface of one 3D object layer (`crate::blender`).
-    Blender(Box<crate::blender::BlenderSource>),
     /// Shape content (`crate::vector`).
     Vector(Box<crate::vector::VectorSource>),
     /// A shader layer or an extension fragment layer
@@ -260,8 +258,6 @@ pub struct Build<'r> {
     shader_fallback: bool,
     /// Text layout and glyph caches (`None`: text layers are unsupported).
     text: Option<&'r mut crate::text::TextContext>,
-    /// Blender surfaces of 3D object layers (`crate::blender`).
-    pub(crate) blender: crate::blender::PlanState,
     /// Motion blur for layers with their switch on; `None` when the request
     /// has it off or inside a group's samples (today's `mblur: false`).
     pub(crate) blur: Option<crate::motion::Blur>,
@@ -418,17 +414,15 @@ pub fn build_with<'r>(
     options: BuildOptions,
     compat: Option<&'r dyn crate::compat::CompatRasters>,
 ) -> (CompPlan, Build<'r>) {
-    let blender = crate::blender::PlanState::new(options3d.blender.clone());
-    build_blender(
+    build_reusing(
         ev, root_comp, project, time, width, height, scale, assets, effects, options3d, text,
-        options, blender, compat, None,
+        options, compat, None,
     )
 }
 
-/// [`build_with`] with the Blender state of the build (collecting the
-/// snapshots a frame needs, `Renderer::blender_snapshots`).
+/// [`build_with`] with the renderer's draw reuse.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn build_blender<'r>(
+pub(crate) fn build_reusing<'r>(
     ev: &mut Evaluator,
     root_comp: &Comp<'_>,
     project: &Comp<'_>,
@@ -441,7 +435,6 @@ pub(crate) fn build_blender<'r>(
     options3d: crate::scene3d::Options3d,
     text: Option<&'r mut crate::text::TextContext>,
     options: BuildOptions,
-    blender: crate::blender::PlanState,
     compat: Option<&'r dyn crate::compat::CompatRasters>,
     reuse: Option<&'r mut crate::reuse::DrawReuse>,
 ) -> (CompPlan, Build<'r>) {
@@ -474,7 +467,6 @@ pub(crate) fn build_blender<'r>(
         forced_on: None,
         shader_fallback: options.shader_fallback,
         text,
-        blender,
         blur: options.blur,
         video_center: None,
         sampling: options.sampling,
@@ -1555,7 +1547,6 @@ fn native_content_quad<'d>(
             // preview viewport applies only to the open composition's
             // canvas).
             let outer_origin = std::mem::replace(&mut b.origin, (0.0, 0.0));
-            b.blender.path.push(scope.comp.id().to_string_lossy());
             let project = scope.project;
             let inner = {
                 let mut inner_scope = Scope::new(&mut *scope.ev, &sub, project);
@@ -1573,7 +1564,6 @@ fn native_content_quad<'d>(
             };
             b.precomp_depth -= 1;
             b.origin = outer_origin;
-            b.blender.path.pop();
             b.video_center = outer_center;
             Ok(Some(Quad::Texture {
                 source: Source::Comp(Box::new(inner)),
@@ -1619,34 +1609,6 @@ fn native_content_quad<'d>(
             }
             match pm_eval::parenting::Role3d::of(layer) {
                 Some(pm_eval::parenting::Role3d::Object) => {
-                    match crate::blender::plan_object(
-                        scope,
-                        &mut b.blender,
-                        b.assets,
-                        layer,
-                        time,
-                        width,
-                        height,
-                        b.video_center.is_some(),
-                    )? {
-                        Some(crate::blender::Planned::Draw(mut source, rect)) => {
-                            source.scene_metadata =
-                                b.pass3d.last().and_then(|p| p.metadata_scene());
-                            return Ok(Some(Quad::Device {
-                                source: Source::Blender(Box::new(source)),
-                                rect,
-                            }));
-                        }
-                        Some(crate::blender::Planned::Fail(message)) => {
-                            b.failures.push(LayerFailure {
-                                composition: comp_id,
-                                layer: js::layer_id(layer),
-                                message,
-                            });
-                            return Ok(None);
-                        }
-                        None => {}
-                    }
                     match crate::scene3d::plan_layer(b.pass3d.last(), layer) {
                         Ok(plan) => Ok(Some(Quad::Screen {
                             source: Source::Object3d(Box::new(plan)),

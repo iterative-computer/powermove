@@ -538,5 +538,3 @@ export async function instantiate(module: WebAssembly.Module): Promise<PmWasm> {
   return new PmWasm(instance);
 }
 
-/** For tests: forget the compiled module. */
-export function resetCompiled(): void { compiled = null; compileTiming = null; }
