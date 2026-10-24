@@ -184,6 +184,9 @@ pub struct Synthetic {
     pub h: u32,
     pub dur: f64,
     pub seed: u32,
+    /// Leaf layers are shape layers (rect, ellipse, polygon, star; some
+    /// stroked) instead of solids.
+    pub shapes: bool,
 }
 
 impl Synthetic {
@@ -196,12 +199,14 @@ impl Synthetic {
             h: 1080,
             dur: 10.0,
             seed: 1,
+            shapes: false,
         }
     }
 }
 
 struct Gen {
     rng: Random,
+    shapes: bool,
     fps: f64,
     dur: f64,
     by_type: std::collections::BTreeMap<String, usize>,
@@ -252,6 +257,21 @@ impl Gen {
                 dur,
             );
             l["name"] = json!(format!("Image {index}"));
+            l
+        } else if self.shapes {
+            let color = *self.rng.pick(&PALETTE);
+            let shape = *self.rng.pick(&["rect", "ellipse", "polygon", "star"]);
+            let stroke = if self.rng.next() < 0.4 { 2 + (self.rng.next() * 6.0) as u32 } else { 0 };
+            let mut l = layer(
+                &id,
+                "shape",
+                json!({ "shape": shape, "w": size, "h": size, "color": color, "radius": size / 8,
+                        "stroke": stroke, "strokeColor": "#F2F2F2", "points": 5 }),
+                0.0,
+                0.0,
+                dur,
+            );
+            l["name"] = json!(format!("Shape {index}"));
             l
         } else {
             let color = *self.rng.pick(&PALETTE);
@@ -324,6 +344,7 @@ pub fn synthetic(o: Synthetic) -> Fixture {
     }
     let mut g = Gen {
         rng: Random(o.seed),
+        shapes: o.shapes,
         fps,
         dur,
         by_type: Default::default(),

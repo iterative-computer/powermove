@@ -88,6 +88,7 @@ pub fn correlation() -> Vec<(String, BoxedBench)> {
 pub fn all() -> Vec<Bench> {
     vec![
         ("playback_500", playback_500),
+        ("playback_shapes_200", playback_shapes_200),
         ("drag_500", drag_500),
         ("edit_playback_500", edit_playback_500),
         ("inspector_edit_500", inspector_edit_500),
@@ -305,6 +306,25 @@ pub fn playback(ctx: &Ctx, name: &str, layers: usize, frames: u32) -> BenchRepor
         .collect();
     let m = measured(scope);
     report(name, "frames", m, wall, f.summary.clone())
+}
+
+/// Playback: 60 consecutive frames of 200 animated shape layers (the
+/// synthetic project with shapes for solids).
+pub fn playback_shapes_200(ctx: &Ctx) -> BenchReport {
+    let f = fixtures::synthetic(Synthetic {
+        shapes: true,
+        ..Synthetic::new(200)
+    });
+    let mut v = Viewer::new(ctx, &f.doc, &f.media);
+    v.composer.set_playing(true);
+    let fps = 30.0;
+    for k in 0..2 {
+        v.frame(ticks(f64::from(k) / fps));
+    }
+    let scope = Scope::begin();
+    let wall = (2..62).map(|k| v.frame(ticks(f64::from(k) / fps))).collect();
+    let m = measured(scope);
+    report("playback_shapes_200", "frames", m, wall, f.summary.clone())
 }
 
 /// A layer drag, paused: 60 moves of one solid, each a new revision drawn
