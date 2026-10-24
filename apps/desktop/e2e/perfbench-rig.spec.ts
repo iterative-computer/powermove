@@ -65,11 +65,14 @@ import type { CDPSession, Page } from 'playwright';
 
 import { buildSyntheticProject } from '../src/main/engine/integration/synthetic-project';
 import { expect, launchApp, test, type LaunchedApp } from './helpers/app';
+import { compositorTiming } from './helpers/compositor-timing';
 import { ffmpegBinary } from './helpers/ffmpeg';
 
 test.skip(!process.env.PM_PERFBENCH_RIG, 'the 120 Hz rig runs on request (PM_PERFBENCH_RIG=1)');
 
 const OUT = process.env.PM_PERFBENCH_RIG_OUT ?? path.join(os.tmpdir(), 'powermove-perfbench-rig.jsonl');
+/** Per-frame trace of the `playing` row (JSON lines, outside the repository): every stage's times, see `playing`. */
+const TRACE_OUT = process.env.PM_PERFBENCH_RIG_TRACE ?? null;
 const STEPS = Number(process.env.PM_PERFBENCH_RIG_STEPS ?? 240);
 const BUDGET_MS = 1000 / 120;
 /** pm-protocol ticks per second. */
@@ -77,7 +80,10 @@ const TICKS = 705_600_000;
 const repoRoot = path.resolve(__dirname, '..');
 type Mode = 'today' | 'engine';
 const ENV: Record<Mode, Record<string, string>> = { today: { POWERMOVE_NEW_ENGINE: '0' }, engine: { POWERMOVE_NEW_ENGINE: '1' } };
-const MODES: Mode[] = ['today', 'engine'];
+/** `PM_PERFBENCH_RIG_ORDER=engine` runs the engine first (paired runs alternate the order). */
+const MODES: Mode[] = process.env.PM_PERFBENCH_RIG_ORDER === 'engine' ? ['engine', 'today'] : ['today', 'engine'];
+/** The `playing` row's composition rate (120 by default; 60 checks a rate below the display's). */
+const PLAY_FPS = Number(process.env.PM_PERFBENCH_RIG_PLAY_FPS ?? 120);
 
 /** Page hooks: WebGL calls, messages and their clone bytes, media seeks. Installed before the app's scripts run. */
 function installHooks(): void {
@@ -260,11 +266,15 @@ const diff = (a: Record<string, number>, b: Record<string, number>): Record<stri
   return out;
 };
 
+/** The native per-frame trace (POWERMOVE_BRIDGE_TRACE) each report drained, kept for `TRACE_OUT`. */
+let nativeTrace: unknown[] = [];
 async function engineReport(session: LaunchedApp): Promise<any> {
-  return session.app.evaluate(async () => {
+  const { presenter, trace } = await session.app.evaluate(async () => {
     const report = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive');
-    return report?.presenter ?? null;
+    return { presenter: report?.presenter ?? null, trace: report?.presentTrace ?? null };
   });
+  if (Array.isArray(trace)) nativeTrace.push(...trace);
+  return presenter;
 }
 
 /** The engine's render-thread time between two reports (ms). `span`: compose start to GPU done (it contains the compose). */
@@ -626,7 +636,7 @@ async function record(value: Record<string, unknown>): Promise<void> {
 
 /** Launches with the hooks installed before the app's scripts (an init script and a reload). */
 async function launch(mode: Mode): Promise<LaunchedApp> {
-  const session = await launchApp({ env: ENV[mode] });
+  const session = await launchApp({ env: { ...ENV[mode], ...(TRACE_OUT ? { POWERMOVE_BRIDGE_TRACE: '1' } : {}) } });
   await session.page.context().addInitScript(installHooks);
   await session.page.reload();
   await session.page.waitForFunction(() => Boolean((window as any).__pmRig && (window as any).PM?.ProjectsScreen));
@@ -719,11 +729,22 @@ test.describe('120 Hz rig', () => {
     const seconds = 3;
     for (const mode of MODES) {
       const session = await launch(mode);
+      let traceDir: string | null = null;
       try {
-        const summary = await synthetic(session, mode, 500, 120);
+        const summary = await synthetic(session, mode, 500, PLAY_FPS);
         // Warm the playing path once.
         await session.page.evaluate(async () => { const PM = (window as any).PM; PM.setTime(0); PM.play(); await new Promise((r) => setTimeout(r, 1000)); PM.pause(); PM.setTime(0); });
         await new Promise((r) => setTimeout(r, 500));
+        if (TRACE_OUT && mode === 'engine') {
+          await session.page.evaluate(() => (window as any).PM.EngineConnection.setTrace(true));
+          await expectEngine(session.page, mode);
+          await session.page.evaluate(() => (window as any).PM.Kernel.services.get('viewer').enginePresentation.takeTrace());
+          await engineReport(session);
+        }
+        nativeTrace = [];
+        if (TRACE_OUT) traceDir = await mkdtemp(path.join(os.tmpdir(), 'pm-rig-trace-'));
+        const tracePath = traceDir && path.join(traceDir, 'trace.json');
+        if (tracePath) await session.app.evaluate(({ contentTracing }) => contentTracing.startRecording({ included_categories: ['blink.user_timing', 'graphics.pipeline', 'viz'], excluded_categories: ['*'] }));
         const counts0 = await session.page.evaluate(() => (window as any).__pmRig.counts());
         const m = await measureAction(session, mode, () => session.page.evaluate(async ({ ms, mode }) => {
           const PM = (window as any).PM;
@@ -740,12 +761,11 @@ test.describe('120 Hz rig', () => {
           const shown = (_gpuDoneAt: number, shownAt: number) => { if (run) at.push(shownAt); };
           const events = PM.EnginePresentedEvents;
           const emitted0 = events?.emitted ?? 0;
-          const pendingAtStart = Boolean(events?.pending);
+          const coalesced0 = events?.coalesced ?? 0;
+          const pendingAtStart = events?.pending ?? 0;
           const push = events?.push;
           if (mode === 'engine') {
-            // Count replacements of a pending bus emission, rather than
-            // attributing every rendered-minus-emitted frame to merging.
-            events.push = function (...args: any[]) { emissionPushes++; if (this.pending) coalesced++; return push.apply(this, args); };
+            events.push = function (...args: any[]) { emissionPushes++; return push.apply(this, args); };
             offs.push(() => { events.push = push; });
             offs.push(rig.watchEngine(() => { directCallbacks++; }, (_f: any, gpuDoneAt: number) => {
               gpuCompletions++;
@@ -753,36 +773,67 @@ test.describe('120 Hz rig', () => {
               offs.push(() => cancelAnimationFrame(raf));
             }));
           }
+          // The page's side of the per-frame trace: its animation frames,
+          // each bus emission (when, which time), and each presented report.
+          const pageRafs: number[] = [];
+          const emits: [number, number][] = [];
+          const reports: [number, number, number, number][] = [];
+          if (mode === 'engine') offs.push(PM.Kernel.services.get('viewer').enginePresentation.onPresented((f: any) => { if (run) reports.push([performance.now(), f.seq, f.pts, f.rafMs]); }));
           offs.push(PM.bus.on('preview:presented', (e: any) => {
             oldAt.push(performance.now()); times.add(Number(e?.time));
+            if (run) emits.push([performance.now(), Number(e?.time)]);
             if (mode === 'today') offs.push(rig.afterWebGL(shown));
           }));
           let rafs = 0;
-          const tick = () => { if (!run) return; rafs++; requestAnimationFrame(tick); };
+          const tick = (t: number) => { if (!run) return; rafs++; pageRafs.push(t); requestAnimationFrame(tick); };
           requestAnimationFrame(tick);
           const start = performance.now();
+          performance.mark('pm-rig-origin');
           PM.play();
           await new Promise((r) => setTimeout(r, ms));
           PM.pause();
           run = false;
           const emissions = (events?.emitted ?? 0) - emitted0;
-          const pendingAtEnd = Boolean(events?.pending);
+          coalesced = (events?.coalesced ?? 0) - coalesced0;
+          const pendingAtEnd = events?.pending ?? 0;
           offs.forEach((off) => off());
           const elapsed = performance.now() - start;
-          return { at, oldAt, distinct: times.size, rafs, elapsed, directCallbacks, gpuCompletions, coalesced, emissionPushes, emissions, pendingAtStart, pendingAtEnd };
+          return { at, oldAt, distinct: times.size, frames: [...times].sort((a, b) => a - b), rafs, elapsed, directCallbacks, gpuCompletions, coalesced, emissionPushes, emissions, pendingAtStart, pendingAtEnd, page: { start, pageRafs, emits, reports } };
         }, { ms: seconds * 1000, mode }));
         const counts1 = await session.page.evaluate(() => (window as any).__pmRig.counts());
         const p = m.value;
+        if (TRACE_OUT) {
+          const viewer = mode === 'engine' ? await session.page.evaluate(async () => {
+            const PM = (window as any).PM;
+            return { trace: await PM.Kernel.services.get('viewer').enginePresentation.takeTrace(), hostOffsetUs: PM.EngineConnection.hostClock.offsetUs() };
+          }) : null;
+          const presenterStats = mode === 'engine' ? await engineReport(session) : null;
+          const native = mode === 'engine' ? nativeTrace : null;
+          // Which display frame showed each submitted canvas frame (viz's
+          // presentation feedback): the worker's timed draws, or today's draws.
+          await session.app.evaluate(({ contentTracing }, file) => contentTracing.stopRecording(file), tracePath!);
+          const end = p.page.start + p.elapsed;
+          const submits = mode === 'engine'
+            ? ((viewer?.trace?.draws ?? []) as number[][]).filter((d) => d[7] === 1 && d[5]! >= p.page.start && d[5]! <= end).map((d) => d[5]!)
+            : p.oldAt;
+          const display = await compositorTiming(tracePath!, submits, 'pm-rig-origin').catch((error) => ({ error: String(error) }));
+          await appendFile(TRACE_OUT, `${JSON.stringify({ at: new Date().toISOString(), mode, load: os.loadavg()[0], page: p.page, presented: p.at, viewer, native, presenterStats, display })}\n`);
+        }
         if (mode === 'engine') {
-          expect(p.emissionPushes + Number(p.pendingAtStart)).toBe(p.emissions + p.coalesced + Number(p.pendingAtEnd));
+          expect(p.emissionPushes + p.pendingAtStart).toBe(p.emissions + p.coalesced + p.pendingAtEnd);
         }
         const gaps = p.at.slice(1).map((t, i) => t - p.at[i]!);
         const presented = p.at.length;
-        const expected = Math.floor((p.elapsed / 1000) * 120);
+        const expected = Math.floor((p.elapsed / 1000) * PLAY_FPS);
+        // Composition frames between the first and last shown that never were.
+        const shownFrames = p.frames.map((t) => Math.round(t * PLAY_FPS));
+        const dropped = shownFrames.length ? shownFrames.at(-1)! - shownFrames[0]! + 1 - new Set(shownFrames).size : 0;
+        const mean = gaps.reduce((a, b) => a + b, 0) / Math.max(1, gaps.length);
+        const advance = p.page.emits.find((e) => e[1] > (p.frames[0] ?? Infinity));
         await record({
-          row: 'synthetic-500-playing',
+          row: PLAY_FPS === 120 ? 'synthetic-500-playing' : `synthetic-500-playing-${PLAY_FPS}fps`,
           mode,
-          rateHz: 120,
+          rateHz: PLAY_FPS,
           seconds: +(p.elapsed / 1000).toFixed(3),
           expectedFrames: expected,
           presented,
@@ -799,7 +850,12 @@ test.describe('120 Hz rig', () => {
           distinctTimes: p.distinct,
           pageAnimationFramesPerSecond: +(p.rafs / (p.elapsed / 1000)).toFixed(1),
           presentGapMs: dist(gaps),
-          gapsOverBudget: gaps.filter((g) => g > BUDGET_MS * 1.5).length,
+          /** Judder: the standard deviation of the intervals between presentations. */
+          presentGapStdMs: +Math.sqrt(gaps.reduce((a, g) => a + (g - mean) ** 2, 0) / Math.max(1, gaps.length)).toFixed(3),
+          droppedFrames: dropped,
+          /** From PM.play() to the first presentation of a later frame than the paused one. */
+          firstAdvanceMs: advance ? +(advance[0] - p.page.start).toFixed(1) : null,
+          gapsOverBudget: gaps.filter((g) => g > (1000 / PLAY_FPS) * 1.5).length,
           mainThreadMsPerPresented: +(m.mainMs / Math.max(1, presented)).toFixed(3),
           layoutsPerPresented: +(m.layouts / Math.max(1, presented)).toFixed(2),
           engineCpuMsPerFrame: mode === 'engine' ? +(m.engine.cpuMs / Math.max(1, m.engine.frames)).toFixed(3) : null,
@@ -812,6 +868,7 @@ test.describe('120 Hz rig', () => {
         });
       } finally {
         await session.close();
+        if (traceDir) await rm(traceDir, { recursive: true, force: true });
       }
     }
   });

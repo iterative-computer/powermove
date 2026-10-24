@@ -3,10 +3,10 @@ import { readFile } from 'node:fs/promises';
 /** Same Graphics.Pipeline receive -> DrawAndSwap presentation feedback as S1.
  * Apply it to both canvas sinks; submission/worker prediction times are never
  * compared with one another as though they were display feedback. */
-export async function compositorTiming(tracePath: string, submits: number[]) {
+export async function compositorTiming(tracePath: string, submits: number[], originMark = 'pm-mask-origin') {
   const data = JSON.parse(await readFile(tracePath, 'utf8'));
   const events: any[] = Array.isArray(data) ? data : data.traceEvents;
-  const origin = events.find(e => e.name === 'pm-mask-origin' && e.cat === 'blink.user_timing' && e.args?.data?.startTime != null);
+  const origin = events.find(e => e.name === originMark && e.cat === 'blink.user_timing' && e.args?.data?.startTime != null);
   if (!origin) throw new Error('Missing renderer time-origin mark');
   const offset = origin.ts - origin.args.data.startTime * 1000;
   const first = (xs: any[], value: number, key = (x: any) => x): number => {
@@ -29,13 +29,15 @@ export async function compositorTiming(tracePath: string, submits: number[]) {
     if (e.ph === 'b') { const swap = { begin: e.ts, end: null }; swaps.push(swap); open.set(id, swap); }
     else if (e.ph === 'e' && open.has(id)) { open.get(id).end = e.ts; open.delete(id); }
   }
+  // The canvas's own sink receives each submission soonest: another sink
+  // that commits every refresh (the page's, beside a worker canvas) matches
+  // as many submissions, only later.
   let sink: string | null = null, best = Infinity;
   for (const [id,xs] of receives) {
-    const hits = submits.filter(ms => { const t = offset + ms*1000 - 2000; const i = first(xs,t); return i < xs.length && xs[i]-t <= 12000; }).length;
-    if (hits < submits.length*.9) continue;
-    const active = xs.filter(t => t >= offset+submits[0]*1000-2000 && t <= offset+submits.at(-1)!*1000+12000).length;
-    const excess = Math.abs(active-submits.length);
-    if (excess < best) { best = excess; sink = id; }
+    const lags = submits.flatMap(ms => { const t = offset + ms*1000 - 2000; const i = first(xs,t); return i < xs.length && xs[i]-t <= 12000 ? [xs[i]-t] : []; });
+    if (lags.length < submits.length*.9) continue;
+    const lag = lags.sort((a,b) => a-b)[lags.length >> 1]!;
+    if (lag < best) { best = lag; sink = id; }
   }
   if (!sink) throw new Error(`No compositor sink matches ${submits.length} submissions (${receives.size} sinks)`);
   const xs = receives.get(sink)!;
