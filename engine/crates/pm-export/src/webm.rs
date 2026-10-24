@@ -20,6 +20,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::time::{Duration, Instant};
 
 use pm_media::sys::ffmpeg as ff;
 
@@ -197,6 +198,34 @@ pub(crate) fn canvas_rgba_to_i420(
         height,
         planes,
     })
+}
+
+/// The WebCodecs path consumes premultiplied canvas bytes for opaque video.
+/// For straight-alpha WebM, divide working RGB by alpha before the REC709
+/// conversion; premultiplied alpha keeps its requested encoding. Carry the
+/// alpha byte separately. There is no legacy alpha-WebM byte boundary.
+fn canvas_bytes(
+    frame: &WorkingFrame,
+    working: crate::settings::WorkingEncoding,
+    alpha: AlphaOutput,
+) -> Vec<u8> {
+    if alpha == AlphaOutput::None {
+        return crate::render::to_rgba8(frame.rgba);
+    }
+    let mut rgba = Vec::with_capacity(frame.rgba.len());
+    for pixel in frame.rgba.chunks_exact(4) {
+        let (rgb, a) =
+            crate::convert::output_rgba([pixel[0], pixel[1], pixel[2], pixel[3]], working, alpha);
+        for value in [rgb[0], rgb[1], rgb[2], a] {
+            let value = if value.is_nan() {
+                0.0
+            } else {
+                value.clamp(0.0, 1.0)
+            };
+            rgba.push((value * 255.0).round_ties_even() as u8);
+        }
+    }
+    rgba
 }
 
 /// Opt-in parity capture of the exact native boundaries fed to the encoders.
@@ -709,7 +738,7 @@ impl Sink for WebmSink {
     type Output = Delivered;
 
     fn video_rgba(&mut self, index: u64, frame: &WorkingFrame) -> Result<bool, Error> {
-        let rgba = crate::render::to_rgba8(frame.rgba);
+        let rgba = canvas_bytes(frame, self.spec.working, self.spec.alpha);
         if let Some(capture) = self.capture.as_mut() {
             capture
                 .rgba
@@ -832,6 +861,33 @@ fn open_decoder(st: *mut ff::AVStream, name: Option<&str>) -> Result<Decoder, Er
 }
 
 fn frame_input(f: &ff::AVFrame, alpha: bool) -> Result<EncoderInput, Error> {
+    let (w, h, strides) = frame_layout(f, alpha)?;
+    let dims = [(w, h), (w / 2, h / 2), (w / 2, h / 2), (w, h)];
+    let planes = dims
+        .iter()
+        .enumerate()
+        .take(if alpha { 4 } else { 3 })
+        .map(|(k, &(pw, ph))| copy_frame_plane(f, k, strides[k], 0, 0, pw, ph))
+        .collect();
+    Ok(EncoderInput {
+        format: if alpha {
+            InputFormat::I420a
+        } else {
+            InputFormat::I420
+        },
+        width: w as u32,
+        height: h as u32,
+        planes,
+    })
+}
+
+fn frame_layout(f: &ff::AVFrame, alpha: bool) -> Result<(usize, usize, [usize; 4]), Error> {
+    if f.width <= 0 || f.height <= 0 {
+        return Err(Error::Verify(format!(
+            "invalid decoded frame dimensions {}x{}",
+            f.width, f.height
+        )));
+    }
     let (w, h) = (f.width as usize, f.height as usize);
     let want = if alpha {
         ff::AV_PIX_FMT_YUVA420P
@@ -845,32 +901,133 @@ fn frame_input(f: &ff::AVFrame, alpha: bool) -> Result<EncoderInput, Error> {
             pix_name(want)
         )));
     }
-    let dims = [(w, h), (w / 2, h / 2), (w / 2, h / 2), (w, h)];
-    let mut planes = vec![];
-    for (k, &(pw, ph)) in dims.iter().enumerate().take(if alpha { 4 } else { 3 }) {
-        let stride = f.linesize[k] as usize;
-        let mut v = Vec::with_capacity(pw * ph);
-        for y in 0..ph {
-            v.extend_from_slice(unsafe {
-                std::slice::from_raw_parts(f.data[k].add(y * stride), pw)
+    let widths = [w, w / 2, w / 2, w];
+    let heights = [h, h / 2, h / 2, h];
+    let mut strides = [0; 4];
+    for k in 0..if alpha { 4 } else { 3 } {
+        let stride = usize::try_from(f.linesize[k]).unwrap_or(0);
+        if (widths[k] != 0 && heights[k] != 0 && f.data[k].is_null())
+            || (heights[k] != 0 && stride < widths[k])
+        {
+            return Err(Error::Verify(format!(
+                "invalid decoded plane {k} (stride {}, width {})",
+                f.linesize[k], widths[k]
+            )));
+        }
+        strides[k] = stride;
+    }
+    Ok((w, h, strides))
+}
+
+fn copy_frame_plane(
+    f: &ff::AVFrame,
+    k: usize,
+    stride: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Plane {
+    let mut bytes = Vec::with_capacity(width * height);
+    if width != 0 {
+        for row in y..y + height {
+            bytes.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(f.data[k].add(row * stride + x), width)
             });
         }
-        planes.push(Plane {
-            data: PlaneData::U8(v),
-            row_samples: pw,
-            rows: ph,
-        });
     }
-    Ok(EncoderInput {
-        format: if alpha {
-            InputFormat::I420a
-        } else {
-            InputFormat::I420
-        },
-        width: w as u32,
-        height: h as u32,
-        planes,
-    })
+    Plane {
+        data: PlaneData::U8(bytes),
+        row_samples: width,
+        rows: height,
+    }
+}
+
+#[derive(Default)]
+struct SampledPixelTimes {
+    crop: Duration,
+    means: Duration,
+}
+
+fn frame_blocks(
+    f: &ff::AVFrame,
+    alpha: bool,
+    frame: u64,
+    expected_size: (u32, u32),
+    mut times: Option<&mut SampledPixelTimes>,
+) -> Result<Vec<BlockSample>, Error> {
+    let started = times.as_ref().map(|_| Instant::now());
+    let means_before = times.as_ref().map_or(Duration::ZERO, |t| t.means);
+    let (w, h, strides) = frame_layout(f, alpha)?;
+    if (w as u32, h as u32) != expected_size {
+        return Err(Error::Verify(format!(
+            "decoded frame dimensions {}x{}, expected {}x{}",
+            w, h, expected_size.0, expected_size.1
+        )));
+    }
+    // The existing full-plane conversion handles dimensions for which chroma
+    // crops cannot keep the original 4:2:0 addressing and block geometry.
+    if w < verify::BLOCK as usize
+        || h < verify::BLOCK as usize
+        || !w.is_multiple_of(2)
+        || !h.is_multiple_of(2)
+    {
+        let input = frame_input(f, alpha)?;
+        let means_started = times.as_ref().map(|_| Instant::now());
+        let blocks = verify::block_means(&input, frame);
+        if let (Some(times), Some(means_started)) = (times.as_deref_mut(), means_started) {
+            times.means += means_started.elapsed();
+        }
+        if let (Some(times), Some(started)) = (times, started) {
+            times.crop += started.elapsed().saturating_sub(times.means - means_before);
+        }
+        return Ok(blocks);
+    }
+    let mut blocks = Vec::with_capacity(9);
+    for region in verify::block_regions(w as u32, h as u32) {
+        let x = region.x as usize;
+        let y = region.y as usize;
+        let width = region.width as usize;
+        let height = region.height as usize;
+        let planes = (0..if alpha { 4 } else { 3 })
+            .map(|k| {
+                let divisor = if k == 1 || k == 2 { 2 } else { 1 };
+                copy_frame_plane(
+                    f,
+                    k,
+                    strides[k],
+                    x / divisor,
+                    y / divisor,
+                    width / divisor,
+                    height / divisor,
+                )
+            })
+            .collect();
+        let crop = EncoderInput {
+            format: if alpha {
+                InputFormat::I420a
+            } else {
+                InputFormat::I420
+            },
+            width: region.width,
+            height: region.height,
+            planes,
+        };
+        let means_started = times.as_ref().map(|_| Instant::now());
+        let mut block = verify::block_means(&crop, frame)
+            .pop()
+            .expect("a cropped block has one region");
+        if let (Some(times), Some(means_started)) = (times.as_deref_mut(), means_started) {
+            times.means += means_started.elapsed();
+        }
+        block.x = region.x;
+        block.y = region.y;
+        blocks.push(block);
+    }
+    if let (Some(times), Some(started)) = (times, started) {
+        times.crop += started.elapsed().saturating_sub(times.means - means_before);
+    }
+    Ok(blocks)
 }
 
 fn pix_name(f: c_int) -> String {
@@ -891,10 +1048,13 @@ pub fn verify_webm(
     blocks: &[BlockSample],
     audio_pushed: u64,
 ) -> Result<VerifyReport, Error> {
+    let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
+    let verify_started = profiling.then(Instant::now);
     pm_media::ff::init();
     let mut problems: Vec<String> = vec![];
     let alpha = spec.alpha != AlphaOutput::None;
     let p = cstr(&path.to_string_lossy());
+    let open_started = profiling.then(Instant::now);
     let input = unsafe {
         let mut fmt: *mut ff::AVFormatContext = ptr::null_mut();
         check(
@@ -910,6 +1070,8 @@ pub fn verify_webm(
         .map_err(|e| Error::Verify(e.to_string()))?;
         d
     };
+    let open_ms = open_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e3);
+    let scan_started = profiling.then(Instant::now);
     let fmt = input.0;
     let streams: Vec<*mut ff::AVStream> = unsafe {
         (0..(*fmt).nb_streams as usize)
@@ -1099,9 +1261,35 @@ pub fn verify_webm(
             })
         }
     };
-    // Sampled pixels, decoded by libvpx (which also decodes the alpha stream).
-    let decoded = decode_sampled(fmt, vst, spec, alpha)?;
-    let pixels: Vec<PixelCheck> = verify::check_pixels(spec.codec, blocks, &decoded, &mut problems);
+    let scan_ms = scan_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e3);
+    // Sampled pixels: native VP9 for opaque I420; libvpx retains alpha decoding.
+    let mut sampled_pixels = SampledPixelTimes::default();
+    let decode_started = profiling.then(Instant::now);
+    let decoded = decode_sampled(
+        fmt,
+        vst,
+        spec,
+        alpha,
+        profiling.then_some(&mut sampled_pixels),
+    )?;
+    let sampled_total = decode_started.map_or(Duration::ZERO, |started| started.elapsed());
+    let decode_ms = sampled_total
+        .saturating_sub(sampled_pixels.crop + sampled_pixels.means)
+        .as_secs_f64()
+        * 1e3;
+    let pixel_check_started = profiling.then(Instant::now);
+    let pixels: Vec<PixelCheck> =
+        verify::check_pixel_blocks(spec.codec, blocks, decoded, &mut problems);
+    let pixel_check_ms =
+        pixel_check_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e3);
+    if let Some(started) = verify_started {
+        eprintln!(
+            "[export timing] webm_verify_open_ms={open_ms:.3} webm_verify_scan_audio_ms={scan_ms:.3} webm_verify_sample_decode_ms={decode_ms:.3} webm_verify_crop_ms={:.3} webm_verify_means_ms={:.3} webm_verify_pixel_check_ms={pixel_check_ms:.3} webm_verify_total_ms={:.3}",
+            sampled_pixels.crop.as_secs_f64() * 1e3,
+            sampled_pixels.means.as_secs_f64() * 1e3,
+            started.elapsed().as_secs_f64() * 1e3,
+        );
+    }
     if !problems.is_empty() {
         return Err(Error::Verify(problems.join("; ")));
     }
@@ -1126,17 +1314,49 @@ pub fn verify_webm(
     })
 }
 
-/// Decodes the sampled frames: seek to the keyframe before each, decode up to it.
+/// Decodes the sampled frames. Nearby samples share the decoder cursor; distant
+/// samples seek to a keyframe so verification stays bounded for long exports.
 fn decode_sampled(
     fmt: *mut ff::AVFormatContext,
     vst: *mut ff::AVStream,
     spec: &ExportSpec,
     alpha: bool,
-) -> Result<Vec<(u64, EncoderInput)>, Error> {
-    let name = match spec.codec {
-        Codec::Vp9 { .. } => "libvpx-vp9",
-        _ => "libvpx",
+    mut times: Option<&mut SampledPixelTimes>,
+) -> Result<Vec<BlockSample>, Error> {
+    let key_interval = (2.0 * spec.rate.to_f64()).round().max(1.0) as u64;
+    // The opaque native VP9 decoder reproduces libvpx's complete planes and
+    // sampled frame IDs and is faster in the sampled-verifier benchmark.
+    // Alpha and VP8 retain their existing libvpx decoders.
+    let decoder = match spec.codec {
+        Codec::Vp9 { .. } if !alpha => Some("vp9"),
+        _ => None,
     };
+    let sampled = decode_sampled_with_gap_map(fmt, vst, spec, key_interval, decoder, |f, n| {
+        frame_blocks(f, alpha, n, (spec.width, spec.height), times.as_deref_mut())
+    })?;
+    Ok(sampled.into_iter().flat_map(|(_, blocks)| blocks).collect())
+}
+
+fn decode_sampled_with_gap_map<T>(
+    fmt: *mut ff::AVFormatContext,
+    vst: *mut ff::AVStream,
+    spec: &ExportSpec,
+    max_sequential_gap: u64,
+    decoder_name: Option<&str>,
+    mut map: impl FnMut(&ff::AVFrame, u64) -> Result<T, Error>,
+) -> Result<Vec<(u64, T)>, Error> {
+    let (libvpx, native) = match spec.codec {
+        Codec::Vp9 { .. } => ("libvpx-vp9", "vp9"),
+        _ => ("libvpx", "vp8"),
+    };
+    // None selects the libvpx reference. Native vp8/vp9 are allowed only
+    // for opaque video: libvpx is needed for WebM's alpha stream.
+    let name = decoder_name.unwrap_or(libvpx);
+    if name != libvpx && (spec.alpha != AlphaOutput::None || name != native) {
+        return Err(Error::Verify(
+            "native verifier trial requires matching opaque VP8/VP9 I420".into(),
+        ));
+    }
     let dec = open_decoder(vst, Some(name))?;
     let codec_tb = rational(spec.rate.den(), spec.rate.num());
     let (vtb, vindex) = unsafe { ((*vst).time_base, (*vst).index) };
@@ -1144,58 +1364,70 @@ fn decode_sampled(
     let mut frame = unsafe { ff::av_frame_alloc() };
     let mut out = vec![];
     let result = (|| -> Result<(), Error> {
+        let mut previous = None;
+        let mut eof = false;
         for n in verify::sampled_frames(spec.frames) {
             let target = unsafe { ff::av_rescale_q(n as i64, codec_tb, vtb) };
-            unsafe {
-                check(
-                    "seek",
-                    ff::av_seek_frame(fmt, vindex, target, ff::AVSEEK_FLAG_BACKWARD as c_int),
-                )
-                .map_err(|e| Error::Verify(e.to_string()))?;
-                ff::avcodec_flush_buffers(dec.0);
+            if previous.is_none_or(|p: u64| n - p > max_sequential_gap) {
+                unsafe {
+                    check(
+                        "seek",
+                        ff::av_seek_frame(fmt, vindex, target, ff::AVSEEK_FLAG_BACKWARD as c_int),
+                    )
+                    .map_err(|e| Error::Verify(e.to_string()))?;
+                    ff::avcodec_flush_buffers(dec.0);
+                }
+                eof = false;
             }
             let mut found = None;
-            let mut eof = false;
             while found.is_none() {
                 unsafe {
-                    let sent = if eof {
-                        ff::avcodec_send_packet(dec.0, ptr::null_mut())
-                    } else if ff::av_read_frame(fmt, packet) >= 0 {
+                    // A packet can yield more than one frame. Drain pending
+                    // output before feeding the next packet, including after
+                    // the previous sampled frame ended this loop early.
+                    let r = ff::avcodec_receive_frame(dec.0, frame);
+                    if r == 0 {
+                        if (*frame).best_effort_timestamp == target {
+                            found = Some(map(&*frame, n)?);
+                        }
+                        continue;
+                    }
+                    if r == ff::AVERROR_EOF || eof && r == -EAGAIN {
+                        return Err(Error::Verify(format!("frame {n} is missing")));
+                    }
+                    if r != -EAGAIN {
+                        check("decode", r).map_err(|e| Error::Verify(e.to_string()))?;
+                    }
+                    let sent = loop {
+                        let read = ff::av_read_frame(fmt, packet);
+                        if read < 0 {
+                            if read != ff::AVERROR_EOF {
+                                return Err(Error::Verify(format!(
+                                    "read frame {n}: {}",
+                                    pm_media::ff::err_str(read)
+                                )));
+                            }
+                            eof = true;
+                            break ff::avcodec_send_packet(dec.0, ptr::null_mut());
+                        }
                         if (*packet).stream_index != vindex {
                             ff::av_packet_unref(packet);
                             continue;
                         }
-                        let r = ff::avcodec_send_packet(dec.0, packet);
+                        let sent = ff::avcodec_send_packet(dec.0, packet);
                         ff::av_packet_unref(packet);
-                        r
-                    } else {
-                        eof = true;
-                        ff::avcodec_send_packet(dec.0, ptr::null_mut())
+                        break sent;
                     };
-                    if sent < 0 && sent != ff::AVERROR_EOF {
+                    if sent < 0 {
                         return Err(Error::Verify(format!(
                             "decode frame {n}: {}",
                             pm_media::ff::err_str(sent)
                         )));
                     }
-                    loop {
-                        let r = ff::avcodec_receive_frame(dec.0, frame);
-                        if r == -EAGAIN {
-                            break;
-                        }
-                        if r == ff::AVERROR_EOF {
-                            return Err(Error::Verify(format!("frame {n} is missing")));
-                        }
-                        check("decode", r).map_err(|e| Error::Verify(e.to_string()))?;
-                        let pts = (*frame).best_effort_timestamp;
-                        if pts == target {
-                            found = Some(frame_input(&*frame, alpha)?);
-                            break;
-                        }
-                    }
                 }
             }
             out.push((n, found.expect("set above")));
+            previous = Some(n);
         }
         Ok(())
     })();
@@ -1211,6 +1443,53 @@ mod canvas_conversion_tests {
     use super::*;
 
     #[test]
+    fn alpha_webm_stores_straight_rgb_with_zero_half_and_full_alpha() {
+        // Working RGB is premultiplied. The translucent red must retain its
+        // full red value when a decoder composites it using the alpha stream.
+        let pixels = [
+            0.1, 0.2, 0.3, 0.0, // transparent, with hidden RGB to test the alpha guard
+            0.5, 0.0, 0.0, 0.5, // translucent red
+            0.0, 1.0, 0.0, 1.0, // opaque green
+            0.5, 0.0, 0.0, 0.5, // translucent red
+        ];
+        let frame = WorkingFrame {
+            width: 2,
+            height: 2,
+            rgba: &pixels,
+        };
+        let rgba = canvas_bytes(
+            &frame,
+            crate::settings::WorkingEncoding::Standard,
+            AlphaOutput::Straight,
+        );
+        assert_eq!(
+            rgba,
+            [0, 0, 0, 0, 255, 0, 0, 128, 0, 255, 0, 255, 255, 0, 0, 128,]
+        );
+        let input = canvas_rgba_to_i420(&rgba, 2, 2, true).unwrap();
+        assert_eq!(input.planes[0].u8().unwrap()[1], 63); // REC709 red, not premultiplied red
+        assert_eq!(input.planes[3].u8().unwrap(), &[0, 128, 255, 128]);
+    }
+
+    #[test]
+    fn opaque_webm_keeps_premultiplied_canvas_bytes() {
+        let pixels = [0.5, 0.0, 0.0, 0.5];
+        let frame = WorkingFrame {
+            width: 1,
+            height: 1,
+            rgba: &pixels,
+        };
+        assert_eq!(
+            canvas_bytes(
+                &frame,
+                crate::settings::WorkingEncoding::Standard,
+                AlphaOutput::None,
+            ),
+            [128, 0, 0, 128]
+        );
+    }
+
+    #[test]
     fn chromium_canvas_matrix_uses_rgba_bytes_and_bt709_codes() {
         let rgba = [255, 0, 0, 77].repeat(4);
         let input = canvas_rgba_to_i420(&rgba, 2, 2, true).unwrap();
@@ -1224,5 +1503,334 @@ mod canvas_conversion_tests {
         assert_eq!(input.planes[0].u8().unwrap(), &[100; 4]);
         assert_eq!(input.planes[1].u8().unwrap(), &[126]);
         assert_eq!(input.planes[2].u8().unwrap(), &[203]);
+    }
+}
+
+#[cfg(test)]
+mod sampled_decode_tests {
+    use super::*;
+    use crate::settings::{ColorTags, Dither, WorkingEncoding};
+    use pm_time::Rate;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "pm-webm-samples-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn with_video_stream<T>(
+        path: &Path,
+        run: impl FnOnce(*mut ff::AVFormatContext, *mut ff::AVStream) -> T,
+    ) -> T {
+        let p = cstr(&path.to_string_lossy());
+        let input = unsafe {
+            let mut fmt = ptr::null_mut();
+            check(
+                "open test WebM",
+                ff::avformat_open_input(&mut fmt, p.as_ptr(), ptr::null(), ptr::null_mut()),
+            )
+            .unwrap();
+            let input = Demuxer(fmt);
+            check(
+                "read test WebM",
+                ff::avformat_find_stream_info(input.0, ptr::null_mut()),
+            )
+            .unwrap();
+            input
+        };
+        let vst = unsafe {
+            (0..(*input.0).nb_streams as usize)
+                .map(|i| *(*input.0).streams.add(i))
+                .find(|&st| (*(*st).codecpar).codec_type == ff::AVMEDIA_TYPE_VIDEO)
+                .unwrap()
+        };
+        run(input.0, vst)
+    }
+
+    fn decoded_samples_with<T>(
+        path: &Path,
+        spec: &ExportSpec,
+        max_sequential_gap: u64,
+        decoder_name: Option<&str>,
+        map: impl FnMut(&ff::AVFrame, u64) -> Result<T, Error>,
+    ) -> Vec<(u64, T)> {
+        with_video_stream(path, |fmt, vst| {
+            decode_sampled_with_gap_map(fmt, vst, spec, max_sequential_gap, decoder_name, map)
+                .unwrap()
+        })
+    }
+
+    fn decoded_samples_named(
+        path: &Path,
+        spec: &ExportSpec,
+        max_sequential_gap: u64,
+        decoder_name: Option<&str>,
+    ) -> Vec<(u64, EncoderInput)> {
+        decoded_samples_with(path, spec, max_sequential_gap, decoder_name, |f, _| {
+            frame_input(f, spec.alpha != AlphaOutput::None)
+        })
+    }
+
+    fn decoded_samples(
+        path: &Path,
+        spec: &ExportSpec,
+        max_sequential_gap: u64,
+    ) -> Vec<(u64, EncoderInput)> {
+        decoded_samples_named(path, spec, max_sequential_gap, None)
+    }
+
+    #[test]
+    fn cursor_reuse_matches_seek_each_sample_for_vp8_vp9_and_alpha() {
+        // At 30 fps the forced keyframe interval is 60 frames. The 60-frame
+        // cases share a GOP, while the 100-frame cases cross the keyframe at 60.
+        let scratch = Scratch::new();
+        for (name, codec, alpha, frames) in [
+            (
+                "vp8",
+                Codec::Vp8 {
+                    bitrate_bps: 2_000_000,
+                },
+                false,
+                60,
+            ),
+            (
+                "vp9-alpha",
+                Codec::Vp9 {
+                    bitrate_bps: 2_000_000,
+                },
+                true,
+                60,
+            ),
+            (
+                "vp8-alpha",
+                Codec::Vp8 {
+                    bitrate_bps: 2_000_000,
+                },
+                true,
+                100,
+            ),
+            (
+                "vp9",
+                Codec::Vp9 {
+                    bitrate_bps: 2_000_000,
+                },
+                false,
+                100,
+            ),
+        ] {
+            let spec = ExportSpec {
+                width: 64,
+                height: 48,
+                rate: Rate::FPS_30,
+                frames,
+                codec,
+                container: Container::Webm,
+                tags: if alpha {
+                    ColorTags::Rec709Broadcast
+                } else {
+                    ColorTags::Rec709QuickTime
+                },
+                alpha: if alpha {
+                    AlphaOutput::Straight
+                } else {
+                    AlphaOutput::None
+                },
+                working: WorkingEncoding::Standard,
+                dither: Dither::Default,
+                audio: None,
+                timecode: None,
+                destination: scratch.0.join(format!("{name}.webm")),
+                overwrite: Overwrite::Fail,
+                mode: None,
+            };
+            let mut sink = WebmSink::new(&spec).unwrap();
+            for n in 0..frames {
+                let mut rgba = Vec::with_capacity((spec.width * spec.height * 4) as usize);
+                for y in 0..spec.height {
+                    for x in 0..spec.width {
+                        let a = if alpha {
+                            ((x + y + n as u32) % 25) as f32 / 24.0
+                        } else {
+                            1.0
+                        };
+                        rgba.extend([
+                            ((x + n as u32) % 32) as f32 / 31.0 * a,
+                            ((y + n as u32) % 32) as f32 / 31.0 * a,
+                            (x ^ y) as f32 / 63.0 * a,
+                            a,
+                        ]);
+                    }
+                }
+                sink.video_rgba(
+                    n,
+                    &WorkingFrame {
+                        width: spec.width,
+                        height: spec.height,
+                        rgba: &rgba,
+                    },
+                )
+                .unwrap();
+            }
+            let delivered = sink.finish().unwrap();
+            let gap = (2.0 * spec.rate.to_f64()).round().max(1.0) as u64;
+            let reused = decoded_samples(&delivered.path, &spec, gap);
+            let sought = decoded_samples(&delivered.path, &spec, 0);
+            assert_eq!(reused, sought, "{name}");
+            if alpha {
+                assert!(
+                    reused.iter().all(|(_, input)| {
+                        input.format == InputFormat::I420a && input.planes.len() == 4
+                    }),
+                    "alpha remains on libvpx's four-plane decoder: {name}"
+                );
+            } else {
+                // Both explicit native decoders must reproduce every byte of
+                // libvpx's Y, U and V planes, not merely pass block tolerances.
+                let native_name = match codec {
+                    Codec::Vp9 { .. } => "vp9",
+                    Codec::Vp8 { .. } => "vp8",
+                    _ => unreachable!(),
+                };
+                for decode_gap in [gap, 0] {
+                    let native = decoded_samples_named(
+                        &delivered.path,
+                        &spec,
+                        decode_gap,
+                        Some(native_name),
+                    );
+                    assert_eq!(
+                        native.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+                        verify::sampled_frames(frames),
+                        "{name} native frame IDs with gap {decode_gap}"
+                    );
+                    assert_eq!(
+                        native, reused,
+                        "{name} native full YUV planes with gap {decode_gap}"
+                    );
+                }
+            }
+            let expected: Vec<_> = reused
+                .iter()
+                .flat_map(|(n, input)| verify::block_means(input, *n))
+                .collect();
+            assert_eq!(expected.len(), verify::sampled_frames(frames).len() * 9);
+            for decode_gap in [gap, 0] {
+                let cropped: Vec<_> =
+                    decoded_samples_with(&delivered.path, &spec, decode_gap, None, |f, n| {
+                        frame_blocks(f, alpha, n, (spec.width, spec.height), None)
+                    })
+                    .into_iter()
+                    .flat_map(|(_, blocks)| blocks)
+                    .collect();
+                assert_eq!(cropped, expected, "{name} with gap {decode_gap}");
+            }
+            assert_eq!(
+                reused.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+                verify::sampled_frames(frames),
+                "{name}"
+            );
+        }
+    }
+
+    /// Manual comparison of the exact verifier decode path on a saved opaque
+    /// 1920×1080, 60-frame, 30000/1001 VP9 export. The file is read only.
+    #[test]
+    #[ignore = "set PM_WEBM_VERIFY_BENCH_INPUT to the saved large VP9 WebM"]
+    fn opaque_vp9_decoder_timing_on_saved_large_export() {
+        let path = PathBuf::from(
+            std::env::var_os("PM_WEBM_VERIFY_BENCH_INPUT")
+                .expect("PM_WEBM_VERIFY_BENCH_INPUT must name a saved opaque VP9 WebM"),
+        );
+        let spec = ExportSpec {
+            width: 1920,
+            height: 1080,
+            rate: Rate::FPS_29_97,
+            frames: 60,
+            codec: Codec::Vp9 {
+                bitrate_bps: 16_000_000,
+            },
+            container: Container::Webm,
+            tags: ColorTags::Rec709QuickTime,
+            alpha: AlphaOutput::None,
+            working: WorkingEncoding::Standard,
+            dither: Dither::Default,
+            audio: None,
+            timecode: None,
+            destination: path.clone(),
+            overwrite: Overwrite::Fail,
+            mode: None,
+        };
+        let gap = (2.0 * spec.rate.to_f64()).round().max(1.0) as u64;
+        let libvpx = decoded_samples_named(&path, &spec, gap, Some("libvpx-vp9"));
+        let native = decoded_samples_named(&path, &spec, gap, Some("vp9"));
+        assert_eq!(
+            libvpx.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            verify::sampled_frames(spec.frames)
+        );
+        assert_eq!(native, libvpx, "native and libvpx full YUV planes");
+        let expected: Vec<_> = libvpx
+            .iter()
+            .flat_map(|(n, input)| verify::block_means(input, *n))
+            .collect();
+        for round in 0..6 {
+            let names = if round % 2 == 0 {
+                ["libvpx-vp9", "vp9"]
+            } else {
+                ["vp9", "libvpx-vp9"]
+            };
+            for name in names {
+                let (elapsed, pixels, blocks) = with_video_stream(&path, |fmt, vst| {
+                    let mut pixels = SampledPixelTimes::default();
+                    let started = Instant::now();
+                    let sampled = decode_sampled_with_gap_map(
+                        fmt,
+                        vst,
+                        &spec,
+                        gap,
+                        Some(name),
+                        |frame, n| {
+                            frame_blocks(
+                                frame,
+                                false,
+                                n,
+                                (spec.width, spec.height),
+                                Some(&mut pixels),
+                            )
+                        },
+                    )
+                    .unwrap();
+                    (started.elapsed(), pixels, sampled)
+                });
+                let got: Vec<_> = blocks.into_iter().flat_map(|(_, v)| v).collect();
+                assert_eq!(got, expected, "{name} verifier blocks on pass {round}");
+                let decode = elapsed.saturating_sub(pixels.crop + pixels.means);
+                eprintln!(
+                    "webm verifier decoder={name} pass={round} decode_ms={:.3} total_ms={:.3}",
+                    decode.as_secs_f64() * 1e3,
+                    elapsed.as_secs_f64() * 1e3,
+                );
+            }
+        }
     }
 }

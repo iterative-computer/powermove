@@ -5,6 +5,7 @@ import path from 'node:path';
 import { expect, test, type TestInfo } from '@playwright/test';
 
 import { launchApp, type LaunchedApp } from './helpers/app';
+import { requestJobEngine } from './helpers/job-engine';
 import { compareCapture, compareExports, installLegacyWebmCapture, saveLegacyWebmCapture,
   type ParityReport } from './helpers/export-encoding-parity';
 import { importFixture } from './helpers/media';
@@ -21,7 +22,7 @@ import { importFixture } from './helpers/media';
 type Format = { id: string; format: 'prores' | 'mp4' | 'webm'; alpha: boolean; extension: string };
 type Mode = 'legacy' | 'native';
 type Fixture = { name: 'basic' | 'automation' | 'advanced' | 'large'; width: number; height: number; fps: number; dur: number; capture: boolean };
-type Exported = { file: string; captures: Record<string, string>; elapsedMs: number; statuses: Array<{ state: string; routed?: boolean; error?: string }> };
+type Exported = { file: string; captures: Record<string, string>; elapsedMs: number; load?: { before: number[]; after: number[] }; statuses: Array<{ state: string; routed?: boolean; error?: string }> };
 
 const FORMATS: Format[] = [
   { id: 'prores', format: 'prores', alpha: false, extension: '.mov' },
@@ -47,6 +48,8 @@ const captureNames = (mode: Mode, format: Format): string[] => {
 };
 
 async function engineReady(session: LaunchedApp): Promise<void> {
+  // The job utility starts on first demand (enginemem).
+  await requestJobEngine(session.app);
   await expect.poll(() => session.app.evaluate(() => {
     const processes = (globalThis as any).__powermoveNativeEngine?.engine?.status();
     return processes ? `${processes.interactive?.state}/${processes.job?.state}` : 'missing';
@@ -115,6 +118,7 @@ async function project(session: LaunchedApp, fixture: Fixture): Promise<void> {
 
 async function runExport(session: LaunchedApp, mode: Mode, format: Format, fixture: Fixture, serial: number,
   root: string, captureDir: string | null): Promise<Exported> {
+  const loadBefore = os.loadavg();
   const basename = `${mode}-${format.id}-${serial}`;
   const file = path.join(root, basename + format.extension);
   const names = captureNames(mode, format);
@@ -158,7 +162,7 @@ async function runExport(session: LaunchedApp, mode: Mode, format: Format, fixtu
   const statuses = mode === 'native'
     ? await session.page.evaluate(() => (window as any).__parityStatuses as Exported['statuses'])
     : [];
-  return { file, captures, elapsedMs: run!.elapsedMs, statuses };
+  return { file, captures, elapsedMs: run!.elapsedMs, load: { before: loadBefore, after: os.loadavg() }, statuses };
 }
 
 function softReport(label: string, report: ParityReport, all: Record<string, unknown>): void {
@@ -223,6 +227,10 @@ for (const fixture of FIXTURES) {
       await legacy.close(); legacy = undefined;
 
       native = await launchApp({ userData: path.join(root, 'native-profile'), env: env('1') });
+      if (process.env.PM_EXPORT_PROFILE === '1') {
+        const log = (bytes: Buffer) => { const message = bytes.toString(); if (message.includes('[export timing]')) process.stdout.write(message); };
+        native.app.process().stdout?.on('data', log); native.app.process().stderr?.on('data', log);
+      }
       await engineReady(native);
       await project(native, fixture);
       await native.page.evaluate(() => {
@@ -245,12 +253,15 @@ for (const fixture of FIXTURES) {
           expect.soft(String(error), `native ${format.id} export ${serial}`).toBe('completed');
         }
       }
+      const encoderFrames = await native.app.evaluate(() => (globalThis as any).__powermoveNativeEngine?.exportEncoders?.frames);
+      evidence.encoderFrames = encoderFrames;
+      expect.soft(encoderFrames, 'desktop WebM must use GPU frames without CPU pixel transport').toEqual({ cpu: 0, gpu: frames(fixture) * nativeRuns });
       for (const format of FORMATS) {
         const pair = old.get(format.id) ?? [], candidates = current.get(format.id) ?? [];
         if (pair.length < 2 || !candidates.length) continue;
         await comparePair(`${format.id}.today-repeat`, pair[0]!, pair[1]!, format, fixture, evidence);
         await comparePair(`${format.id}.engine`, pair[0]!, candidates[0]!, format, fixture, evidence);
-        const times = { todayMs: pair.map(e => Math.round(e.elapsedMs)), engineMs: candidates.map(e => Math.round(e.elapsedMs)) };
+        const times = { todayMs: pair.map(e => Math.round(e.elapsedMs)), engineMs: candidates.map(e => Math.round(e.elapsedMs)), todayLoad: pair.map(e => e.load), engineLoad: candidates.map(e => e.load) };
         evidence[`${format.id}.time`] = times;
         if (!fixture.capture) {
           // Export time must not get slower than today: the engine's best

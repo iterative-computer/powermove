@@ -12,7 +12,7 @@ import type { EncoderWindow } from './export-encoder';
 /** How long the page may take to load and answer `ready`. */
 const READY_MS = 30_000;
 
-export function openEncoderWindow(options: { preload: string; url: string; log?: (level: 'info' | 'warn', message: string) => void }): Promise<EncoderWindow> {
+export function openEncoderWindow(options: { preload: string; url: string; log?: (level: 'info' | 'warn', message: string) => void; receiverGone?: (owner: number) => void }): Promise<EncoderWindow> {
   const window = new BrowserWindow({
     show: false,
     width: 64,
@@ -34,6 +34,11 @@ export function openEncoderWindow(options: { preload: string; url: string; log?:
   const replies: Array<(reply: EncoderReply) => void> = [];
   const gone: Array<(reason: string) => void> = [];
   let ended = false;
+  const owner = window.webContents.id;
+  const receiverGone = () => options.receiverGone?.(owner);
+  window.webContents.on('did-start-navigation', (details) => { if (details.isMainFrame && !details.isSameDocument) receiverGone(); });
+  window.webContents.on('render-process-gone', receiverGone);
+  window.webContents.on('destroyed', receiverGone);
   const end = (reason: string) => {
     if (ended) return;
     ended = true;
@@ -47,6 +52,8 @@ export function openEncoderWindow(options: { preload: string; url: string; log?:
   window.on('closed', () => end('the encoder window closed'));
   const encoder: EncoderWindow = {
     post: (command) => port1.postMessage(command),
+    get receiver() { return { frame: window.webContents.mainFrame, owner: window.webContents.id }; },
+    retire: (generation) => { if (!window.isDestroyed()) window.webContents.send('export-encoder:retire', generation); },
     onReply: (listener) => { replies.push(listener); },
     onGone: (listener) => { gone.push(listener); },
     close: () => {

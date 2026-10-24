@@ -613,6 +613,11 @@ export class NativeEngine {
     return this.outputs.chooseDestination(file, job, session, launch.hostPort, overwrite);
   }
 
+  /** Prepare only Chromium's hidden WebM window while the snapshot opens. */
+  warmExportEncoder(): void {
+    this.options.exportEncoders?.warm();
+  }
+
   /** Marks a job session as a draft render: offline media resolves to proxies. */
   setDraftSession(session: number, draft: boolean): void {
     this.services.setDraftSession(session, draft);

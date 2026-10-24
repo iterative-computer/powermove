@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -130,6 +132,15 @@ export function compareExports(reference: string, candidate: string, expectedFra
   add(checks, 'video.candidate_decoded_frames', expectedFrames, Number(videoB?.nb_read_frames));
   for (const field of ['start_time', 'duration'] as const) {
     add(checks, `container.${field}`, old.format[field] ?? null, current.format[field] ?? null);
+  }
+  // The shared WebM muxer has no random IDs or wall-clock metadata. Prove
+  // complete byte parity, including video packets and container framing.
+  if (String(old.format.format_name).split(',').includes('webm')) {
+    const a = readFileSync(reference), b = readFileSync(candidate);
+    const hash = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+    metrics.encodedWebm = { legacyBytes: a.length, candidateBytes: b.length, legacyHash: hash(a), candidateHash: hash(b) };
+    add(checks, 'webm.file_bytes', a.length, b.length);
+    add(checks, 'webm.file_identical', true, a.equals(b));
   }
   const frameBytes = Number(videoA?.width) * Number(videoA?.height) * 4;
   if (videoA && videoB && expectedFrames * frameBytes > LARGE_BYTES) {

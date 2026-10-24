@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { HostEncode } from '../../shared/engine-protocol';
 import type { EncoderCommand, EncoderReply } from '../../shared/export-encoder';
@@ -18,6 +18,7 @@ class FakeWindow implements EncoderWindow {
   }
   onReply(listener: (reply: EncoderReply) => void): void { this.replies.push(listener); }
   onGone(listener: (reason: string) => void): void { this.gone.push(listener); }
+  reply(reply: EncoderReply): void { for (const listener of this.replies) listener(reply); }
   crash(): void { for (const listener of this.gone) listener('the encoder process crashed'); }
   close(): void { this.closed = true; }
 }
@@ -51,6 +52,80 @@ function harness(answer: (command: EncoderCommand) => EncoderReply | null = ack)
 }
 
 describe('ExportEncoders', () => {
+  it('warms one window without an encoder session and reuses it for the real open', async () => {
+    const { encoders, windows, context, timers } = harness();
+    encoders.warm();
+    encoders.warm();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(windows).toHaveLength(1);
+    expect(windows[0]!.commands).toEqual([]);
+    expect(timers.filter(t => t.ms === 15_000 && !t.cancelled)).toHaveLength(1);
+    await encoders.serve(open(), context);
+    expect(windows).toHaveLength(1);
+    expect(windows[0]!.commands.map(c => c.type)).toEqual(['open']);
+    expect(timers.filter(t => t.ms === 15_000 && !t.cancelled)).toHaveLength(0);
+    encoders.dispose();
+  });
+
+  it('shares an opening warm window with an encode submitted before it is ready', async () => {
+    const { context } = harness();
+    let resolveWindow!: (window: EncoderWindow) => void;
+    const opening = new Promise<EncoderWindow>(resolve => { resolveWindow = resolve; });
+    const openWindow = vi.fn(() => opening);
+    const window = new FakeWindow(ack);
+    const encoders = new ExportEncoders({ openWindow, writeOutput: async () => undefined });
+    encoders.warm();
+    const serving = encoders.serve(open(), context);
+    await Promise.resolve();
+    expect(openWindow).toHaveBeenCalledTimes(1);
+    resolveWindow(window);
+    await serving;
+    expect(window.commands.map(c => c.type)).toEqual(['open']);
+    encoders.dispose();
+  });
+
+  it('closes an unused warm window after the normal idle interval', async () => {
+    const { encoders, windows, timers } = harness();
+    encoders.warm();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const idle = timers.find(t => t.ms === 15_000 && !t.cancelled)!;
+    idle.fn();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(windows).toHaveLength(1);
+    expect(windows[0]!.commands).toEqual([]);
+    expect(windows[0]!.closed).toBe(true);
+  });
+
+  it('contains a rejected warm and allows a later real open', async () => {
+    const { context } = harness();
+    const window = new FakeWindow(ack);
+    let attempts = 0;
+    const encoders = new ExportEncoders({
+      openWindow: () => ++attempts === 1 ? Promise.reject(new Error('window failed to start')) : Promise.resolve(window),
+      writeOutput: async () => undefined
+    });
+    encoders.warm();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await encoders.serve(open(), context);
+    expect(attempts).toBe(2);
+    expect(window.commands.map(c => c.type)).toEqual(['open']);
+    encoders.dispose();
+  });
+
+  it('retires a warm window that finishes opening after disposal', async () => {
+    let resolveWindow!: (window: EncoderWindow) => void;
+    const opening = new Promise<EncoderWindow>(resolve => { resolveWindow = resolve; });
+    const window = new FakeWindow(ack);
+    const encoders = new ExportEncoders({ openWindow: () => opening, writeOutput: async () => undefined });
+    encoders.warm();
+    await Promise.resolve();
+    encoders.dispose();
+    resolveWindow(window);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(window.closed).toBe(true);
+    expect(window.commands).toEqual([]);
+  });
+
   it('runs an encode in order and writes the muxed file into the output', async () => {
     const { encoders, windows, written, context, taken, timers } = harness();
     await encoders.serve(open(), context);
@@ -108,6 +183,26 @@ describe('ExportEncoders', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(windows[0]!.commands.filter((c) => c.type === 'video')).toHaveLength(MAX_IN_FLIGHT + 1);
     expect(fifth).toBe(false);
+  });
+
+  it('passes GPU descriptors without taking CPU pixels and waits before a slot can be reused', async () => {
+    const { encoders, context, windows, taken } = harness(command => command.type === 'videoSurface' ? null : ack(command));
+    await encoders.serve(open(), context);
+    const frame = (index: number) => encoders.serve({ job: 'job-1', step: 'videoSurface', index, generation: 17, poolIndex: index % 5 }, context);
+    for (let i = 0; i < MAX_IN_FLIGHT; i++) await frame(i);
+    let fifthDone = false;
+    const fifth = frame(MAX_IN_FLIGHT).then(() => { fifthDone = true; });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(fifthDone).toBe(false);
+    expect(taken).toEqual([]);
+    const commands = windows[0]!.commands.filter(c => c.type === 'videoSurface');
+    expect(commands).toHaveLength(5);
+    expect(commands[0]).toMatchObject({ generation: 17, poolIndex: 0, index: 0 });
+    windows[0]!.reply({ type: 'ack', seq: commands[0]!.seq });
+    await fifth;
+    expect(fifthDone).toBe(true);
+    // Once the first GPU copy completed, the engine may overwrite slot 0.
+    encoders.dispose();
   });
 
   it('fails every waiting step when the window goes, and opens a new one for the next encode', async () => {

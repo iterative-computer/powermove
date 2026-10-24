@@ -36,8 +36,10 @@ pub(crate) mod compat;
 mod compile;
 mod definitions;
 mod encode;
+mod encode_gpu;
 mod fallback;
 pub mod gate;
+mod qos;
 mod svg;
 
 use std::collections::{HashMap, VecDeque};
@@ -197,6 +199,7 @@ struct Shared {
     work: Condvar,
     answers: Condvar,
     gate: Arc<Gate>,
+    playback: Arc<AtomicBool>,
     wake: Wake,
     gpu: Mutex<Option<(wgpu::Device, wgpu::Queue)>>,
     /// The engine's font service: lanes' renderers lay text out through it.
@@ -319,6 +322,7 @@ impl Shared {
         (self.wake)();
         let mut st = self.lock();
         loop {
+            pm_export::render::refresh_current_worker_qos();
             if let Some(answer) = st.answers.remove(&token) {
                 return Some(answer);
             }
@@ -472,6 +476,10 @@ impl JobEngineService {
         wake: Wake,
         fonts: Option<Arc<crate::fonts::hub::FontHub>>,
     ) -> Result<JobEngineService, String> {
+        // Check in before the bridge's startup deadline. A failed optional
+        // bridge is cached and reported by GPU WebM, without disabling other
+        // job formats or agent snapshots.
+        let _ = encode_gpu::connect();
         let state = State {
             user: Some(Scheduler::new(EngineProcess::Job)),
             ..State::default()
@@ -481,6 +489,7 @@ impl JobEngineService {
             work: Condvar::new(),
             answers: Condvar::new(),
             gate: Arc::new(Gate::new()),
+            playback: Arc::new(AtomicBool::new(false)),
             wake,
             gpu: Mutex::new(None),
             fonts,
@@ -531,6 +540,7 @@ impl JobEngineService {
             wake,
             gpu: Mutex::new(None),
             fonts: None,
+            playback: Arc::new(AtomicBool::new(false)),
         });
         JobEngineService {
             shared,
@@ -558,6 +568,35 @@ impl JobEngineService {
 pub struct StatsHandle(Arc<Shared>);
 
 impl StatsHandle {
+    /// QoS for the shared JavaScript/host thread, based on live service state.
+    pub(crate) fn runtime_qos(&self) -> pm_engine::qos::JobQos {
+        let playing = self.0.playback.load(Ordering::Acquire);
+        let running_user = self.0.lock().jobs.values().any(|record| {
+            record.class == PriorityClass::UserJob && record.state == JobState::Running
+        });
+        qos::runtime_qos(running_user, playing)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_job(&self, id: &str, class: PriorityClass, state: JobState) {
+        self.0.lock().jobs.insert(
+            JobId::from(id),
+            JobRecord {
+                class,
+                run: None,
+                host: PortId(1),
+                state,
+                progress: 0.0,
+                cancel: Arc::new(AtomicBool::new(false)),
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_set_playback(&self, playing: bool) {
+        self.0.playback.store(playing, Ordering::Release);
+    }
+
     pub fn json(&self) -> serde_json::Value {
         let gpu = self.0.gpu.lock().unwrap_or_else(|e| e.into_inner());
         let gpu_created = gpu.is_some();
@@ -822,6 +861,11 @@ impl JobService for JobEngineService {
     }
 
     fn signal(&mut self, signal: &DeadlineSignal) {
+        if matches!(signal, DeadlineSignal::PlaybackStarted { .. }) {
+            self.shared.playback.store(true, Ordering::Release);
+        } else if matches!(signal, DeadlineSignal::PlaybackStopped { .. }) {
+            self.shared.playback.store(false, Ordering::Release);
+        }
         self.shared.gate.signal(signal);
         if let DeadlineSignal::PlaybackStarted { .. } | DeadlineSignal::PlaybackStopped { .. } =
             signal
@@ -958,6 +1002,13 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
     let mut renderer: Option<Renderer> = None;
     let mut definitions = definitions::LaneDefinitions::default();
     while let Some(work) = next_work(shared, lane) {
+        let export_qos = match &work {
+            Work::Export { submit, .. } if qos::follows_playback(submit.class) => {
+                Some(Arc::new(qos::UserExportQos::new(shared.playback.clone())))
+            }
+            _ => None,
+        };
+        let _qos_scope = export_qos.as_ref().map(|qos| qos.enter());
         if renderer.is_none() {
             match shared.renderer() {
                 Ok(r) => renderer = Some(r),
@@ -1031,7 +1082,22 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
                 submit,
                 document,
                 cancel,
-            } => run_job(shared, r, &gate, &job, host, &submit, &document, &cancel),
+            } => {
+                let export_gate = qos::ExportGate {
+                    lane: gate.clone(),
+                    qos: export_qos.clone(),
+                };
+                run_job(
+                    shared,
+                    r,
+                    &export_gate,
+                    &job,
+                    host,
+                    &submit,
+                    &document,
+                    &cancel,
+                );
+            }
         }
         r.set_svg_source(None);
         // Keep the pool small between work items (lease pressure).
@@ -1372,7 +1438,7 @@ fn destination(
 fn run_job(
     shared: &Arc<Shared>,
     renderer: &mut Renderer,
-    gate: &LaneGate,
+    gate: &qos::ExportGate,
     job: &JobId,
     host: PortId,
     submit: &SubmitJob,
@@ -1539,13 +1605,24 @@ fn run_job(
     };
     // Opaque WebM goes to the host's WebCodecs encoders, as today's
     // exporter encodes it (decision EXPORT-1).
-    let encoder: Box<dyn pm_export::webcodecs::EncodeHost> = Box::new(encode::HostEncoder::new(
-        shared.clone(),
-        session,
-        job.clone(),
-        cancel.clone(),
-        dest.handle.clone(),
-    ));
+    let encoder: Box<dyn pm_export::webcodecs::EncodeHost> = Box::new(
+        encode::HostEncoder::new(
+            shared.clone(),
+            session,
+            job.clone(),
+            cancel.clone(),
+            dest.handle.clone(),
+        )
+        .with_gpu(
+            renderer.device().clone(),
+            renderer.queue().clone(),
+            Arc::new(gate.clone()),
+            pm_export::render::pass_key(
+                export.seed ^ 0x5745_424d_5247_4241,
+                plan.request.output_size,
+            ),
+        ),
+    );
     let sink = match sink_for_with(&plan, Some(encoder)) {
         Ok(s) => s,
         Err(e) => {

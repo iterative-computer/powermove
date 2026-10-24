@@ -12,6 +12,7 @@ publish.workspace = true
 test-sinks = []
 
 [dependencies]
+pm-gpu = { path = "../pm-gpu" }
 pm-time = { path = "../pm-time" }
 pm-protocol = { path = "../pm-protocol", default-features = false }
 pm-model = { path = "../pm-model" }

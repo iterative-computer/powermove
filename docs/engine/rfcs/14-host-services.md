@@ -163,3 +163,24 @@ because main's TypeScript implementation must follow.
    directly (host → engine) or always through the renderer's session.
    Section 11 says the kernel pushes to every session; jobs and `pm-cli` use
    `HostServices::definition_snapshots`.
+
+## GPU WebCodecs export frames (EXPORT-1)
+
+`hostEncode.videoSurface` names a completed export bridge generation and slot
+(index 0–4), with the frame index. The job engine checks in at startup on a
+separate per-launch authenticated Mach connection (`POWERMOVE_EXPORT_BRIDGE`),
+using the same audit-token and signature policy as viewer surfaces. Each
+five-slot BGRA8 pool is sent/imported once; the host forwards descriptors to
+its hidden encoder window. Working values are byte-quantized on the GPU with
+no display transform or dither. The window copies a shared-texture
+`VideoFrame` into the same WebGL canvas used by the CPU transport, then uses
+the same WebCodecs configuration.
+
+At most four earlier steps remain unacknowledged. A fifth step waits for the
+first Chromium GPU copy to complete before the engine may overwrite that
+slot. `VideoFrame.close()` alone is insufficient: the WebGL copy completes
+before the window answers. Pools are retired on success, failure and cancel;
+receiver navigation/crash/close uses the bridge's existing delayed reclaim.
+The conversion pass has its own slicing key and 16-row units under contract
+13. Bare CLI exports have no Chromium host and retain their explicit
+libvpx/libopus implementation.

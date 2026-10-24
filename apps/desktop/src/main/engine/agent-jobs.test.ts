@@ -23,6 +23,7 @@ class FakeEngine implements AgentJobsEngine {
   releases: string[] = [];
   holdJobRun(run: string): void { this.holds.push(run); }
   releaseJobRun(run: string): void { this.releases.push(run); }
+  warmExportEncoder = vi.fn();
   private nextSession = 10;
   private listeners: Array<{ jobStatus?(s: JobStatus): void; status?(s: unknown): void }> = [];
   /** How submitJob, agentFrames answer. */
@@ -598,6 +599,29 @@ describe('Phase 3b delivery through the job engine', () => {
     expect(mp4).toMatchObject({ format: { kind: 'h264' }, dither: true, delivery: { timecode: null, audioCoding: null } });
     expect(() => userExportSettings(project(), sheet({ format: 'hevc', alpha: true }))).toThrow('transparency');
     expect(() => userExportSettings(project(), sheet({ format: 'json' }))).toThrow(AgentJobError);
+  });
+
+  it('warms only opaque user and queue WebM before opening their snapshots', async () => {
+    const engine = new FakeEngine();
+    const originalRequest = engine.request.bind(engine);
+    engine.request = async (...args) => {
+      if (args[1].type === 'openSession') {
+        const expected = engine.of('openSession').length + 1;
+        expect(engine.warmExportEncoder).toHaveBeenCalledTimes(expected);
+      }
+      return originalRequest(...args);
+    };
+    const jobs = new AgentJobs({ engine });
+    await jobs.exportUser(5, project(), sheet({ format: 'webm-vp9' }), '/Users/x/Web.webm');
+    await jobs.exportQueued(project(), sheet({ format: 'webm-vp8' }), '/Users/x/Queued.webm', 'replace');
+    expect(engine.warmExportEncoder).toHaveBeenCalledTimes(2);
+
+    // Other formats, alpha WebM, and the agent export lane do not warm it.
+    engine.request = originalRequest;
+    await jobs.exportUser(5, project(), sheet({ format: 'mp4' }), '/Users/x/Cut.mp4');
+    await jobs.exportUser(5, project(), sheet({ format: 'webm-vp9', alpha: true }), '/Users/x/Alpha.webm');
+    await jobs.exportVideo(5, 'agent', project(), { format: 'webm-vp9', range: 'all', audio: false, motionBlur: false, alpha: false, mode: 'async' });
+    expect(engine.warmExportEncoder).toHaveBeenCalledTimes(2);
   });
 
   it('streams previews and offline waits to the window, marks draft sessions, and closes them', async () => {

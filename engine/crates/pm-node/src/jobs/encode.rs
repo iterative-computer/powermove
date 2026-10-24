@@ -32,12 +32,6 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(120);
 /// exporter encodes it after the frames), muxes and writes the file.
 const FINISH_TIMEOUT: Duration = Duration::from_secs(1800);
 
-/// Splits interleaved audio into messages of whole frames.
-fn audio_chunks(interleaved: &[f32], channels: usize) -> impl Iterator<Item = &[f32]> {
-    let per = (MAX_AUDIO_BYTES / 4 / channels).max(1) * channels;
-    interleaved.chunks(per)
-}
-
 pub(crate) struct HostEncoder<P: HostPort + ?Sized> {
     port: Arc<P>,
     session: SessionId,
@@ -45,6 +39,14 @@ pub(crate) struct HostEncoder<P: HostPort + ?Sized> {
     cancel: Arc<AtomicBool>,
     output: CapabilityHandle,
     channels: usize,
+    gpu: Option<super::encode_gpu::GpuEncoder>,
+    gpu_ns: u128,
+    host_video_ns: u128,
+    /// Exact little-endian PCM bytes, held until one protocol-sized chunk is
+    /// full or the encode finishes. Video steps do not consume this buffer.
+    pending_audio: Vec<u8>,
+    host_audio_ns: u128,
+    audio_steps: u64,
 }
 
 impl<P: HostPort + ?Sized> HostEncoder<P> {
@@ -62,7 +64,30 @@ impl<P: HostPort + ?Sized> HostEncoder<P> {
             cancel,
             output,
             channels: 2,
+            gpu: None,
+            gpu_ns: 0,
+            host_video_ns: 0,
+            pending_audio: Vec::new(),
+            host_audio_ns: 0,
+            audio_steps: 0,
         }
+    }
+
+    pub(crate) fn with_gpu(
+        mut self,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        gate: Arc<dyn pm_export::render::GpuGate>,
+        pass: u64,
+    ) -> Self {
+        if std::env::var_os(super::encode_gpu::ENV).is_some() {
+            self.gpu = Some(super::encode_gpu::GpuEncoder::new(device, queue).with_gate(
+                gate,
+                self.cancel.clone(),
+                pass,
+            ));
+        }
+        self
     }
 
     fn step(&self, step: EncodeStep, timeout: Duration) -> Result<(), Error> {
@@ -87,6 +112,27 @@ impl<P: HostPort + ?Sized> HostEncoder<P> {
                 timeout.as_secs()
             ))),
         }
+    }
+
+    fn flush_audio(&mut self) -> Result<(), Error> {
+        if self.cancel.load(Ordering::Relaxed) {
+            self.pending_audio.clear();
+            return Err(Error::Cancelled);
+        }
+        if self.pending_audio.is_empty() {
+            return Ok(());
+        }
+        let bytes = std::mem::take(&mut self.pending_audio);
+        let started = Instant::now();
+        let result = self.step(
+            EncodeStep::Audio {
+                samples: Bytes(bytes),
+            },
+            STEP_TIMEOUT,
+        );
+        self.host_audio_ns += started.elapsed().as_nanos();
+        self.audio_steps += 1;
+        result
     }
 }
 
@@ -135,6 +181,31 @@ impl<P: HostPort + ?Sized + 'static> EncodeHost for HostEncoder<P> {
         )
     }
 
+    fn gpu_frames(&self) -> bool {
+        self.gpu.is_some()
+    }
+
+    fn video_gpu(&mut self, index: u64, texture: &wgpu::Texture) -> Result<(), Error> {
+        let gpu = self
+            .gpu
+            .as_mut()
+            .ok_or_else(|| Error::Encode("GPU transport unavailable".into()))?;
+        let started = Instant::now();
+        let (generation, pool_index) = gpu.frame(index, texture)?;
+        self.gpu_ns += started.elapsed().as_nanos();
+        let started = Instant::now();
+        let result = self.step(
+            EncodeStep::VideoSurface {
+                index: count(index)?,
+                generation,
+                pool_index,
+            },
+            STEP_TIMEOUT,
+        );
+        self.host_video_ns += started.elapsed().as_nanos();
+        result
+    }
+
     fn video(&mut self, index: u64, rgba: Vec<u8>) -> Result<(), Error> {
         let index = count(index)?;
         if rgba.len() <= INLINE_PIXEL_BYTES {
@@ -167,23 +238,57 @@ impl<P: HostPort + ?Sized + 'static> EncodeHost for HostEncoder<P> {
     }
 
     fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error> {
-        for chunk in audio_chunks(interleaved, self.channels) {
-            let bytes: Vec<u8> = chunk.iter().flat_map(|s| s.to_le_bytes()).collect();
-            self.step(
-                EncodeStep::Audio {
-                    samples: Bytes(bytes),
-                },
-                STEP_TIMEOUT,
-            )?;
+        if self.cancel.load(Ordering::Relaxed) {
+            self.pending_audio.clear();
+            return Err(Error::Cancelled);
+        }
+        let frame_bytes = self.channels * 4;
+        if frame_bytes == 0
+            || frame_bytes > MAX_AUDIO_BYTES
+            || !interleaved.len().is_multiple_of(self.channels)
+        {
+            return Err(Error::InvalidFrame(
+                "audio samples are not a whole frame".into(),
+            ));
+        }
+        let chunk_bytes = MAX_AUDIO_BYTES / frame_bytes * frame_bytes;
+        for frame in interleaved.chunks(self.channels) {
+            if self.cancel.load(Ordering::Relaxed) {
+                self.pending_audio.clear();
+                return Err(Error::Cancelled);
+            }
+            if self.pending_audio.capacity() == 0 {
+                self.pending_audio.reserve_exact(chunk_bytes);
+            }
+            for sample in frame {
+                self.pending_audio.extend_from_slice(&sample.to_le_bytes());
+            }
+            if self.pending_audio.len() == chunk_bytes {
+                self.flush_audio()?;
+            }
         }
         Ok(())
     }
 
     fn finish(&mut self) -> Result<(), Error> {
+        self.flush_audio()?;
+        if let Some(gpu) = &self.gpu {
+            gpu.log_profile();
+        }
+        if std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1") {
+            eprintln!(
+                "[export timing] gpu_conversion_ms={:.3} host_video_ms={:.3} host_audio_ms={:.3} audio_steps={}",
+                self.gpu_ns as f64 / 1e6,
+                self.host_video_ns as f64 / 1e6,
+                self.host_audio_ns as f64 / 1e6,
+                self.audio_steps
+            );
+        }
         self.step(EncodeStep::Finish, FINISH_TIMEOUT)
     }
 
     fn abort(&mut self) {
+        self.pending_audio.clear();
         // Best effort even when the job was cancelled: the host frees the
         // encoders and the window; its own job cleanup covers a lost answer.
         let _ = self.port.call_until(
@@ -208,6 +313,7 @@ mod tests {
     struct Port {
         steps: Mutex<Vec<HostEncode>>,
         fail_on_video: Option<u64>,
+        fail_on_audio: Option<usize>,
     }
 
     impl HostPort for Port {
@@ -230,7 +336,7 @@ mod tests {
                 panic!("not an encode step")
             };
             let job = step.job.clone();
-            let fail = matches!(&step.step, EncodeStep::Video { index, .. }
+            let fail_video = matches!(&step.step, EncodeStep::Video { index, .. }
                 if Some(index.get()) == self.fail_on_video);
             if let EncodeStep::Video {
                 pixels: PixelPayload::SharedMemory { name, length },
@@ -241,12 +347,25 @@ mod tests {
                 let bytes = pm_bridge::shm::take(name, length.get() as usize).unwrap();
                 assert!(bytes.iter().all(|&b| b == 7));
             }
-            self.steps.lock().unwrap().push(step);
-            Some(if fail {
+            let mut steps = self.steps.lock().unwrap();
+            let fail_audio = matches!(&step.step, EncodeStep::Audio { .. })
+                && self.fail_on_audio
+                    == Some(
+                        steps
+                            .iter()
+                            .filter(|s| matches!(&s.step, EncodeStep::Audio { .. }))
+                            .count(),
+                    );
+            steps.push(step);
+            Some(if fail_video || fail_audio {
                 Err(EngineError::new(
                     ErrorCode::ExportFailed,
                     ErrorScope::Job { job },
-                    "VideoEncoder: closed",
+                    if fail_audio {
+                        "AudioEncoder: closed"
+                    } else {
+                        "VideoEncoder: closed"
+                    },
                 ))
             } else {
                 Ok(Response::Ack)
@@ -262,6 +381,24 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             CapabilityHandle::from_random_bytes([4; 16]),
         )
+    }
+
+    fn open_audio(e: &mut HostEncoder<Port>) {
+        e.open(&EncodeOpen {
+            codec: Codec::Vp9 {
+                bitrate_bps: 4_000_000,
+            },
+            width: 32,
+            height: 32,
+            rate: pm_time::Rate::FPS_30,
+            frames: 120,
+            audio: Some(AudioSpec::default_for(
+                pm_export::settings::Container::Webm,
+                48_000,
+                2,
+            )),
+        })
+        .unwrap();
     }
 
     #[test]
@@ -300,6 +437,11 @@ mod tests {
                     index.get(),
                     matches!(pixels, PixelPayload::SharedMemory { .. })
                 ),
+                EncodeStep::VideoSurface {
+                    index,
+                    generation,
+                    pool_index,
+                } => format!("surface {} {generation}:{pool_index}", index.get()),
                 EncodeStep::Audio { samples } => format!("audio {}", samples.0.len()),
                 EncodeStep::Finish => "finish".into(),
                 EncodeStep::Abort => "abort".into(),
@@ -328,5 +470,102 @@ mod tests {
         let mut e = encoder(port);
         let error = e.video(0, vec![7; 2 * 1024 * 1024]).unwrap_err();
         assert!(matches!(&error, Error::Encode(m) if m.contains("VideoEncoder")));
+    }
+
+    #[test]
+    fn small_audio_calls_batch_exact_sample_bits_in_order() {
+        let port = Arc::new(Port::default());
+        let mut e = encoder(port.clone());
+        open_audio(&mut e);
+        let bits = [0u32, 0x8000_0000, 0x7fc0_1234, 0xff80_0000, 0x3e80_0000];
+        let mut expected = Vec::new();
+        for call in 0..100 {
+            let samples: Vec<f32> = (0..2_000)
+                .map(|i| f32::from_bits(bits[(call * 2_000 + i) % bits.len()]))
+                .collect();
+            expected.extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+            e.audio(&samples).unwrap();
+        }
+        assert_eq!(
+            e.audio_steps, 1,
+            "only the full chunk is sent before finish"
+        );
+        assert_eq!(e.pending_audio.len(), expected.len() - MAX_AUDIO_BYTES);
+        e.finish().unwrap();
+        assert_eq!(e.audio_steps, 2);
+        let steps = port.steps.lock().unwrap();
+        let audio: Vec<&[u8]> = steps
+            .iter()
+            .filter_map(|s| match &s.step {
+                EncodeStep::Audio { samples } => Some(samples.0.as_slice()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            audio.iter().map(|b| b.len()).collect::<Vec<_>>(),
+            [MAX_AUDIO_BYTES, 32_000]
+        );
+        assert_eq!(audio.concat(), expected);
+        assert!(matches!(&steps.last().unwrap().step, EncodeStep::Finish));
+    }
+
+    #[test]
+    fn exact_audio_boundary_sends_no_empty_tail_and_later_tail_precedes_finish() {
+        let port = Arc::new(Port::default());
+        let mut e = encoder(port.clone());
+        open_audio(&mut e);
+        e.audio(&vec![0.25; MAX_AUDIO_BYTES / 4]).unwrap();
+        assert_eq!(e.audio_steps, 1);
+        assert!(e.pending_audio.is_empty());
+        e.audio(&[-0.0, f32::from_bits(0x7fc0_1234)]).unwrap();
+        e.finish().unwrap();
+        let steps = port.steps.lock().unwrap();
+        let tail = match &steps[steps.len() - 2].step {
+            EncodeStep::Audio { samples } => &samples.0,
+            other => panic!("expected audio tail, got {other:?}"),
+        };
+        assert_eq!(tail, &[0, 0, 0, 128, 0x34, 0x12, 0xc0, 0x7f]);
+        assert!(matches!(&steps.last().unwrap().step, EncodeStep::Finish));
+        assert_eq!(e.audio_steps, 2);
+    }
+
+    #[test]
+    fn failed_audio_step_and_cancel_discard_unsent_pcm() {
+        let port = Arc::new(Port {
+            fail_on_audio: Some(0),
+            ..Port::default()
+        });
+        let mut e = encoder(port.clone());
+        open_audio(&mut e);
+        let error = e.audio(&vec![0.25; MAX_AUDIO_BYTES / 4]).unwrap_err();
+        assert!(matches!(&error, Error::Encode(m) if m.contains("AudioEncoder")));
+        assert!(e.pending_audio.is_empty());
+        e.abort();
+        let steps = port.steps.lock().unwrap();
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|s| matches!(&s.step, EncodeStep::Audio { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(&steps.last().unwrap().step, EncodeStep::Abort));
+        drop(steps);
+
+        let port = Arc::new(Port::default());
+        let mut e = encoder(port.clone());
+        open_audio(&mut e);
+        e.audio(&[0.25, -0.0]).unwrap();
+        e.cancel.store(true, Ordering::Relaxed);
+        assert!(matches!(e.finish(), Err(Error::Cancelled)));
+        assert!(e.pending_audio.is_empty());
+        e.abort();
+        let steps = port.steps.lock().unwrap();
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(&s.step, EncodeStep::Audio { .. } | EncodeStep::Finish))
+        );
+        assert!(matches!(&steps.last().unwrap().step, EncodeStep::Abort));
     }
 }
