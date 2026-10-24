@@ -526,3 +526,28 @@ fn cached_canonical_digest_survives_clones_and_invalidates_on_partial_failure() 
     );
     assert!(hasher.reused > 0);
 }
+
+#[test]
+fn every_new_value_and_change_takes_a_new_edition() {
+    let mut d = doc(r#"{"comps":{"C":{"layers":[{"id":"a","p":{}}]}}}"#);
+    let mut seen = std::collections::BTreeSet::from([d.edition()]);
+    let mut fresh = |e: u64| assert!(seen.insert(e), "edition {e} seen before");
+    let copy = d.clone();
+    fresh(copy.edition());
+    assert_eq!(copy, d, "the edition is not part of the value");
+    fresh(Document::default().edition());
+    d.apply(&[Patch::set(vec![PathPart::Key("x".into())], v("1"))])
+        .unwrap();
+    fresh(d.edition());
+    let revision = d.revision() + 1;
+    d.apply_ops_at(&[], revision).unwrap();
+    fresh(d.edition());
+    let value = d.to_value();
+    let revision = d.revision() + 1;
+    d.resync(value, revision);
+    fresh(d.edition());
+    // Reading never changes it.
+    let e = d.edition();
+    let _ = (d.root(), d.to_value(), d.canonical_hash());
+    assert_eq!(d.edition(), e);
+}

@@ -23,6 +23,18 @@ use crate::math;
 use crate::node;
 use crate::scope::{Scope, clamp, flag, is_type, same};
 
+/// Every channel `localMatrix` reads.
+const LOCAL_CHANNELS: [&str; 8] = [
+    "position.x",
+    "position.y",
+    "anchor.x",
+    "anchor.y",
+    "scale.x",
+    "scale.y",
+    "rotation",
+    "skew",
+];
+
 /// A 2×3 affine matrix, `[a, b, c, d, e, f]`.
 pub type Mat2d = [f64; 6];
 
@@ -75,13 +87,23 @@ impl<'d> Scope<'_, 'd> {
         {
             return Ok(m);
         }
+        // A matrix whose channels are all time-independent is the same at
+        // every time while the document is unchanged (`channel_memo`).
+        let kept = self.ev.kept_local_matrix(self.comp, layer);
+        if let Some(Some(m)) = kept {
+            return Ok(m);
+        }
         let m = self.local_matrix_uncached(layer, time)?;
+        if kept.is_none() {
+            self.ev.keep_local_matrix(self.comp, layer, &LOCAL_CHANNELS, m);
+        }
         if let Some(memo) = self.local_memo.as_mut() {
             memo.insert(layer, time, m);
         }
         Ok(m)
     }
 
+    /// The channels [`Scope::local_matrix`] reads, and nothing else.
     fn local_matrix_uncached(&mut self, layer: &'d Node, time: f64) -> JsResult<Mat2d> {
         let px = self.num(layer, "position.x", time)?;
         let py = self.num(layer, "position.y", time)?;

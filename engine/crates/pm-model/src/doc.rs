@@ -563,16 +563,66 @@ pub struct ApplyOutcome {
 
 /// The engine's mirror of the document: an optional root (an `undefined`
 /// document is `None`) and its revision.
-#[derive(Clone, Debug, Default)]
+///
+/// # Editions
+///
+/// [`Document::edition`] names one document value in one state: every
+/// constructor, clone, and mutation takes a new, process-unique edition. While
+/// the edition is the same, no node of the tree was created, dropped, moved,
+/// or changed, so a node's address names one node with one content. Caches
+/// keyed by node address (a renderer's per-document memo across frames,
+/// `pm_eval`) are valid exactly while the edition they were filled at holds.
+/// The edition is not part of the document's value (`==` ignores it).
 pub struct Document {
     root: Option<Node>,
     revision: u64,
     digest: OnceLock<Option<[u8; 32]>>,
+    edition: u64,
+}
+
+/// The next process-unique [`Document::edition`].
+fn next_edition() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static EDITIONS: AtomicU64 = AtomicU64::new(1);
+    EDITIONS.fetch_add(1, Ordering::Relaxed)
+}
+
+impl Clone for Document {
+    /// A copy is other nodes: it takes its own edition.
+    fn clone(&self) -> Document {
+        Document {
+            root: self.root.clone(),
+            revision: self.revision,
+            // The same content: its canonical digest holds for the copy.
+            digest: self.digest.clone(),
+            edition: next_edition(),
+        }
+    }
+}
+
+impl Default for Document {
+    fn default() -> Document {
+        Document {
+            root: None,
+            revision: 0,
+            digest: OnceLock::new(),
+            edition: next_edition(),
+        }
+    }
 }
 
 impl PartialEq for Document {
-    fn eq(&self, other: &Self) -> bool {
+    fn eq(&self, other: &Document) -> bool {
         self.revision == other.revision && self.root == other.root
+    }
+}
+
+impl std::fmt::Debug for Document {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Document")
+            .field("root", &self.root)
+            .field("revision", &self.revision)
+            .finish()
     }
 }
 
@@ -583,6 +633,7 @@ impl Document {
             root: root.map(|v| Node::from_value(v, revision)),
             revision,
             digest: OnceLock::new(),
+            edition: next_edition(),
         }
     }
 
@@ -593,6 +644,7 @@ impl Document {
             root,
             revision,
             digest: OnceLock::new(),
+            edition: next_edition(),
         }
     }
 
@@ -607,6 +659,12 @@ impl Document {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// This value's edition (see "Editions" above): unique to this document
+    /// value in its current state.
+    pub fn edition(&self) -> u64 {
+        self.edition
     }
 
     pub fn root(&self) -> Option<&Node> {
@@ -649,6 +707,7 @@ impl Document {
         self.revision = revision;
         // A failed batch may have applied an earlier operation.
         self.digest.take();
+        self.edition = next_edition();
         let mut changed = false;
         for (index, patch) in patches.iter().enumerate() {
             changed |= patch::apply_one(&mut self.root, patch, index, revision)?;
@@ -677,6 +736,7 @@ impl Document {
         self.revision = revision;
         // A failed batch may have applied an earlier operation.
         self.digest.take();
+        self.edition = next_edition();
         let mut changed = false;
         for (index, op) in ops.iter().enumerate() {
             changed |= ops::apply_op(&mut self.root, op, index, revision)?;
@@ -698,6 +758,7 @@ impl Document {
         let mut document = base.clone();
         document.revision = revision;
         document.digest.take();
+        document.edition = next_edition();
         match (document.root.as_mut(), root) {
             (Some(node), Some(value)) => {
                 node.reconcile(value, revision);
@@ -718,6 +779,7 @@ impl Document {
         let mut document = base.clone();
         document.revision = revision;
         document.digest.take();
+        document.edition = next_edition();
         match (document.root.as_mut(), root) {
             (Some(node), Some(new)) => {
                 node.reconcile_node(new, revision);
@@ -736,6 +798,7 @@ impl Document {
         );
         self.revision = revision;
         self.digest.take();
+        self.edition = next_edition();
         let changed = match (self.root.as_mut(), root) {
             (Some(node), Some(new)) => node.reconcile_node(new, revision),
             (None, Some(new)) => {
@@ -761,6 +824,7 @@ impl Document {
         );
         self.revision = revision;
         self.digest.take();
+        self.edition = next_edition();
         let changed = match (self.root.as_mut(), root) {
             (Some(node), Some(value)) => node.reconcile(value, revision),
             (None, Some(value)) => {

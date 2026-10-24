@@ -327,163 +327,163 @@
       "code": "api.history.do(remove ? 'Remove keyframe' : 'Add keyframe', () => { for (const target of targets) { const at = api.anim.hasKeyAt(target.l..."
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3279",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3287",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > applySelectedValueKeys",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3314",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3322",
       "class": "history.transaction",
       "scope": "createTimelineRuntime > dragPropertyValue > move",
       "code": "api.history.begin(label)"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3326",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3334",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > dragPropertyValue > cancel",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3371",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3379",
       "class": "history.do",
       "scope": "createTimelineRuntime > editPropertyValue > finish",
       "code": "api.history.do(`Edit ${row.label}`, () => axes.forEach((axis, index) => applySelectedValueKeys(keyed, all.findIndex(item => item.key === ..."
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3477",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3485",
       "class": "edit.mutate",
       "scope": "createTimelineRuntime > gutterDown > up",
       "code": "api.edit.mutate('Move layers', () => { const changing = roots.filter((layer: any) => (layer.group || null) !== drop.group); if (changing...."
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3488",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3496",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > gutterDown > up > api.edit.mutate(callback)",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3700",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3708",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > applyKeyframeGesture",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3736",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3744",
       "class": "history.transaction",
       "scope": "createTimelineRuntime > keyDown > move",
       "code": "api.history.begin(label)"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3767",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3775",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > keyDown > cancel",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3842",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3850",
       "class": "history.transaction",
       "scope": "createTimelineRuntime > dragGraphSelection > move",
       "code": "api.history.begin(entries.length > 1 ? 'Edit keyframes' : 'Edit curve')"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3851",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3859",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > dragGraphSelection > move",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3860",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3868",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > dragGraphSelection > cancel",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3904",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3912",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > applyGraphKeyframeScale",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3928",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3936",
       "class": "history.transaction",
       "scope": "createTimelineRuntime > dragGraphTransform > move",
       "code": "api.history.begin('Scale keyframes')"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3961",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:3969",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > dragGraphTransform > cancel",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4018",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4026",
       "class": "history.transaction",
       "scope": "createTimelineRuntime > dragHandle",
       "code": "api.history.begin('Adjust easing')"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4048",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4056",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > dragHandle > move",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4056",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4064",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > dragHandle > cancel",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4310",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4318",
       "class": "history.do",
       "scope": "createTimelineRuntime > editKeyframeValues > run",
       "code": "api.history.do(single ? 'Edit keyframe' : 'Edit keyframes', () => { if (nextValue != null) entries.forEach((entry: any) => { entry.key.v ..."
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4316",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4324",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > editKeyframeValues > run > api.history.do(callback)",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4339",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4347",
       "class": "history.do",
       "scope": "createTimelineRuntime > pushKeyframeMenu > (call)(callback) > run",
       "code": "api.history.do(multiple ? 'Ease keyframes' : 'Ease', () => api.anim.applyEaseTo(keys, name))"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4344",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4352",
       "class": "history.do",
       "scope": "createTimelineRuntime > pushKeyframeMenu > run",
       "code": "api.history.do(multiple ? 'Hold keyframes' : 'Hold', () => { keys.forEach((target: any) => { target.hold = !allHold; }); api.anim.touch()..."
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4346",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4354",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > pushKeyframeMenu > run > api.history.do(callback)",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4357",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4365",
       "class": "history.do",
       "scope": "createTimelineRuntime > pushKeyframeMenu > run",
       "code": "api.history.do(multiple ? 'Delete keyframes' : 'Delete keyframe', () => { const values = new Map<any, any>(); for (const layer of api.pro..."
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4407",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4415",
       "class": "history.do",
       "scope": "createTimelineRuntime > onCtx > run",
       "code": "api.history.do('Add keyframe', () => { const values = trackChannels(r).map(axis => ({ ...axis, value: api.anim.evP(r.L, axis.prop, x2t(x)..."
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4412",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4420",
       "class": "anim.touch",
       "scope": "createTimelineRuntime > onCtx > run > api.history.do(callback)",
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4412",
+      "site": "apps/desktop/src/extensions/timeline/timeline.ts:4420",
       "class": "history.do",
       "scope": "createTimelineRuntime > onCtx > run",
       "code": "api.history.do('Clear keys', () => { trackChannels(r).forEach(axis => { axis.prop.v = api.anim.evP(r.L, axis.prop, api.transport.time(), ..."

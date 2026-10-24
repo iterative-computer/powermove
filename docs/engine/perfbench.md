@@ -361,6 +361,14 @@ and paired wall-clock, and ratcheted.
 | **Composition passes' bind groups kept across frames** (`pm-render` `binds.rs`) | `playback_500` bind group creations 11,760 → 480 (98 → 4 a frame); heap −1,384 a frame | playback total −1.5% (5 alternating pairs, after faster in 4) |
 | **Each media file's stamp read once per frame and per routing check** (`media::StampFrame`) | `engine.file_stats` (a stat each): `playback_500` 4,320 → 240 (36 → 2 a frame), `drag_500` 3,372 → 240, `open_large_2000` 224 → 4 | after faster in 12 of 12 alternating pairs (playback −2% to −21%, drag −2% to −5%, inspector edit −2% to −8%; load 16) |
 | **Export pixel buffers circulate between render and encoder** (`Renderer::give_rgba`, three buffers) | `export_120` heap bytes 4.32 GB → 0.44 GB (−32.4 MB a frame) | total −5.3% (5 alternating pairs, after faster in 4; load 26–30) |
+| **The timeline's timecode changes its text in place** (`timeline.ts` `syncTime`; the node was replaced each tick, and a child list change rechecks the page's `:has()` rules) | Chromium trace of 44 playback steps: the forced `UpdateLayoutTree` under the timeline's size read, 1,236 elements and about 7.6 ms each, gone | rig playback, page main thread p50 today 11.11 → 4.96 ms (fit 3 → 236 of 244), engine 11.03 → 4.69 ms (load 49–56) |
+| **The titlebar keeps its tab list while its tabs show the same** (`Titlebar.svelte`; every edit rebuilt the keyed list, whose `animate:flip` measured each tab twice) | shell test: 5 unchanging edits measure no tab (20 before) | rig paused edit, page main thread p50 today 35.84 → 19.88 ms, engine 32.14 → 19.76 ms (load 42–45) |
+| **The home and settings screens' `body:has()` rules look at body's children only** (`app.css`, `settings.css`: `body:has(> #…-screen.on)`) | trace of 44 paused edits: `UpdateLayoutTree` 247.0 → 13.6 ms (1,257 → 4 elements each); no body subtree invalidation | rig paused edit, engine page main p50 19.76 → 17.58 ms (load 42 → 66) |
+| **Channel memo** (`pm-eval` `channel_memo`: a channel's static value or prepared track kept across an unchanged document's frames, by layer address, valid while `pm_model::Document::edition` holds) | `playback_500` heap allocs 4,549,081 → 4,342,681 (release, −1,720 a frame); plans identical | `playback_500` p50 median 8.82 → 7.16 ms (4 rounds, load 13–20); 6.05 → 5.25 ms (load 10) |
+| **Group ancestry kept by the same memo** | `playback_500` heap allocs 4,342,681 → 3,704,281 (−5,320 a frame) | median 12.48 → 11.60 ms (3 rounds, load 37–40) |
+| **Static local matrices kept by the same memo** (all eight channels static) | `playback_500` heap allocs 3,704,281 → 3,408,001 (−2,470 a frame) | within noise (6 pairs, load 10: medians 4.79 → 4.61 ms) |
+| **A nested composition planned the same twice renders once a frame** (`exec.rs` `comp_twins`: twins found before drawing, targets keyed by plan address, no plan copies; dropped when a motion-blur sample gives its targets back) | `playback_500` render passes 32 → 27 a frame, draws 548 → 498, uploads 32 → 27; heap 28,400 → 28,235 a frame | after faster in 5 of 6 pairs (median 6.93 → 6.64 ms, load 13) |
+| **Compositing nodes give back each accumulator a node replaced** (`composite/exec.rs` `take_scoped`/`release`, as today's compositor frees one after its last use; to the frame's end with the depth and id surface) | `blend_stack_cold` (new): textures 15 → 11, 141.1 → 100.8 MB; target pool misses 13 → 9 | cold counts |
 
 The export reuse is held only while an export runs: `render_frame` (agent
 stills, parity frames, any one-off frame) releases the staging buffer, target
@@ -482,6 +490,25 @@ next-rAF endpoint (against A2's 35) also show substantial playback variation
 under contention.
 
 ## What remains
+
+- **Cold texture bytes (colordepth lane's counter comparison).** Two cold
+  benches ratchet `gpu.texture_alloc_bytes`: `blend_stack_cold` (six
+  blend-mode layers' first frame, 1920 × 1080: 11 textures, 100.8 MB after the
+  accumulator fix; today's compositor holds three) and `text_cold` (a 96 px
+  title: 12 textures, 24.6 MB, a 2048 × 2048 glyph atlas page among them).
+  The remaining blend-stack targets are layer images and their content
+  targets, which `layer_node` puts in `taken` (giving them back needs the node
+  loop to own them; the depth and id surface reads them). The atlas could
+  start at one 512² plot and grow in powers of two (texel coordinates times a
+  power-of-two inverse size are exact), sampling past a small page's edge as
+  zero with a clamp-to-border sampler (`ADDRESS_MODE_CLAMP_TO_BORDER`, an
+  optional device feature), which is what the full page's unused, zeroed
+  plots read; growth copies the page through its own submitted encoder, and
+  each draw's `atlasSizeInv` is read after `locate`. Not yet done.
+- **Instanced solids.** Encoding is about 20% of a playback frame; per draw,
+  `set_bind_group` with a dynamic offset and `draw`. Consecutive solids in a
+  pass could be one instanced draw reading the same quad data from a storage
+  array (primitive order is kept within a draw).
 
 The remaining gaps and uncertainties from the corrected rig (Results):
 
