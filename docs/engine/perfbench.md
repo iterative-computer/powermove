@@ -37,9 +37,9 @@ The counters are always on, in release builds too. A `Scope` diffs a thread's
 | `gpu.copies`, `gpu.texture_to_buffer_bytes` | every recorded copy; the bytes of texture-to-buffer copies |
 | `cpu.heap_allocs` / `cpu.heap_alloc_bytes` | `pm_perf::CountingAlloc`, installed by bench and test binaries (growing `realloc`s count their new size) |
 | `engine.glsl_compiles` | GLSL programs through glslang (`pm-gpu` `glsl.rs`) |
-| `engine.raster_requests` / `engine.raster_answers` | level 1 SVG rasters asked of the window and put back; fallback runner jobs and their pixels |
+| `engine.raster_requests` / `engine.raster_answers` | fallback runner jobs and their pixels |
 | `engine.layers_planned`, `engine.comp_passes` | layers planned from scratch; composition passes built (`pm-render` `plan.rs`) |
-| `cache.{pipeline,program,media,vector,text,svg,draw_reuse,frame_prefix,bind_group,target_pool}.{hits,misses}` | effect pipelines per format, effect programs, media textures (stills and decoded frames), vector rasters, text rasters, SVG rasters, layer draw reuse, the kept frame bottom, kept bind groups, pooled targets |
+| `cache.{pipeline,program,media,vector,text,draw_reuse,frame_prefix,bind_group,target_pool}.{hits,misses}` | effect pipelines per format, effect programs, media textures (stills and decoded frames), vector textures (shapes, masks, paths, SVG images), text rasters, layer draw reuse, the kept frame bottom, kept bind groups, pooled targets |
 
 **GPU calls without call-site edits.** `engine/third_party/wgpu` is wgpu
 30.0.1's front crate, vendored unchanged except one marked counter line in each
