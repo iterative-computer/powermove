@@ -139,7 +139,10 @@ split across RGBA frames (40 MiB), ordered filmstrips (16 MiB) and poster blobs
 stale results from entering the cache. Import commits without waiting for the
 engine poster, which needs the committed binding; the poster then persists
 in the background and schedules an autosave without an `assets` broadcast
-(live cards already show it). Transient import progress updates coalesce
+(live cards already show it). With the new engine, the poster's store and
+document writes and the legacy editing preview's publication wait for media
+to be quiet (no seek, play or time update for 500 ms, `media/activity.ts`)
+and then for an idle callback, so they never land inside a source scrub. Transient import progress updates coalesce
 within one animation frame; start and completion remain immediate.
 
 `e2e/engine-source-media.spec.ts` is the app gate for both settings: exact
@@ -160,8 +163,11 @@ export conversion; it permits only the native private video-track presenter
 and verifies that its frames came through the source service. `engine-source-performance.spec.ts`
 pairs alternating app sessions with native `pm-perfbench` counters on one
 24-frame fixture/grid. Each session imports three distinct remuxes, so each
-mode yields six genuinely cold first filmstrips; the gate compares their
-medians and reports P90 and per-session scrub distributions. Build `source_monitor_pcm` and `source_media` release
+mode yields six genuinely cold first filmstrips per run. One spec runs five
+alternating off/on/on/off cycles and gates on medians across runs of each
+per-run statistic (scrub P50 and P95, filmstrip median, cold filmstrip
+median) with zero slack, and fails any native run whose scrub P95 exceeds
+today's worst run (`e2e/helpers/source-performance-gate.ts`). Build `source_monitor_pcm` and `source_media` release
 examples before running these specs under `pm-electron-lock`; no build runs
 inside the lock. Targeted Rust and unit passes do not certify app parity,
 relative performance or direct device/DAC output.
