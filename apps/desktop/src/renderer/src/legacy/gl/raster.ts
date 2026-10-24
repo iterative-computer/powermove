@@ -1108,7 +1108,11 @@ async function ingestAsset(file: any, { silent = false, layerDefinition, onStage
     if (relinkedLayers) PM.bus.emit('layers');
   }
   await PM.HostMedia?.flushBindings?.(targetProject);
-  await persistSourcePoster(PM, asset, setPoster);
+  // Today's poster is captured before commit, so the import finishes in one
+  // task. The engine poster needs the committed binding; persist it after
+  // the import instead of holding layer placement and the import's UI
+  // updates behind a frame render, encode and store.
+  void persistSourcePoster(PM, asset, setPoster);
   // The import committed above and touched the document. The caller's
   // pre-import revision is now stale because of this successful write.
   // Keep the project/epoch guard across the binding await; pre-commit

@@ -15,7 +15,10 @@ export async function persistSourcePoster(PM: any, asset: any, publish: (id: str
     if (!stored || PM.proj !== project || project.assets[asset.id] !== meta || PM.assets.get(asset.id) !== asset) return null;
     asset.poster = true;
     writeDocument(PM, [['assets', asset.id, 'poster']], () => { meta.poster = true; });
-    publish(asset.id, blob); PM.bus.emit('assets');
+    // Live cards already show this capture through EngineSourceMedia.posterUrl.
+    // Persist the flag without an 'assets' broadcast, which re-lays out every
+    // asset consumer for a field only the offline card and a reload read.
+    publish(asset.id, blob); PM.autosave?.();
     return blob;
   } catch (error) {
     console.warn('Could not capture the engine source poster', error);
