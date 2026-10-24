@@ -93,12 +93,18 @@ impl DeviceSide {
     /// Fills one device buffer (interleaved, `channels` wide) whose first
     /// frame reaches the device output at host time `host_us`.
     pub fn callback(&mut self, out: &mut [f32], channels: usize, host_us: u64) {
-        let heard = self.consumer.fill(out, channels);
+        let latency = self.shared.latency_us.load(Ordering::Relaxed);
+        let rate = self.shared.device_rate;
+        let heard = self
+            .consumer
+            .fill_from(out, channels, host_us + u64::from(latency), rate);
         if let Some(h) = heard {
+            // Where the heard frame is in this buffer (a scheduled start
+            // begins partway through it).
+            let host_us = host_us + (h.at_frame as f64 * 1e6 / f64::from(rate)).round() as u64;
             self.shared
                 .start_timing
                 .heard(h.tag.epoch, host_us, out.len() / channels.max(1));
-            let latency = self.shared.latency_us.load(Ordering::Relaxed);
             if self.shared.reanchor.swap(false, Ordering::Relaxed) {
                 self.core.invalidate();
             }
@@ -131,9 +137,12 @@ impl DeviceSide {
 type DeviceWatch = Box<dyn FnMut() -> Option<(u32, u32)> + Send>;
 
 enum Control {
+    /// A command, its reply, when it was requested, and the host µs a Play
+    /// starts presenting (0: as soon as its audio is queued).
     Command(
         TransportCommand,
         std::sync::mpsc::SyncSender<Result<()>>,
+        u64,
         u64,
     ),
     Project(
@@ -276,12 +285,20 @@ impl ErrorLog {
 
 /// A read-only view of a [`Playback`]'s clock, for another thread.
 #[derive(Clone)]
-pub struct ClockHandle(Arc<Shared>);
+pub struct ClockHandle(Arc<Shared>, Arc<Ring>);
 
 impl ClockHandle {
     /// The latest clock sample.
     pub fn latest(&self) -> Option<ClockSample> {
         self.0.clock.latest()
+    }
+
+    /// How far ahead of now a Play's first frame can be presented: the
+    /// device's presentation latency and one of its buffers (the callback
+    /// that plays it must find the run's audio queued).
+    pub fn start_lead_us(&self) -> u64 {
+        let callback = self.1.callback_frames() as f64 * 1e6 / f64::from(self.0.device_rate.max(1));
+        u64::from(self.0.latency_us.load(Ordering::Relaxed)) + callback.ceil() as u64
     }
 
     /// Bumped whenever a new clock sample is published.
@@ -497,9 +514,17 @@ impl Playback {
     /// Applies a transport command (contract 6). Returns once the render
     /// thread has applied it; the clock samples that follow are the answer.
     pub fn command(&self, command: TransportCommand) -> Result<()> {
+        self.command_at(command, 0)
+    }
+
+    /// [`Self::command`] for a Play whose first frame is presented at host
+    /// µs `start_at` (0: as soon as its audio is ready): the video line
+    /// that starts there and the audio share one start
+    /// ([`crate::ring::Consumer::fill_from`]).
+    pub fn command_at(&self, command: TransportCommand, start_at: u64) -> Result<()> {
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
         self.tx
-            .send(Control::Command(command, reply, host_now_us()))
+            .send(Control::Command(command, reply, host_now_us(), start_at))
             .map_err(|_| AudioError::Device("playback stopped".into()))?;
         answer
             .recv_timeout(Duration::from_secs(5))
@@ -527,7 +552,7 @@ impl Playback {
     /// The clock for another thread (the viewer presenter follows it while
     /// a control thread owns the playback).
     pub fn clock_handle(&self) -> ClockHandle {
-        ClockHandle(self.shared.clone())
+        ClockHandle(self.shared.clone(), self.ring.clone())
     }
 
     /// Bumped whenever a new clock sample is published.
@@ -1153,7 +1178,7 @@ impl RenderThread {
             .unwrap_or_else(|e| e.into_inner())
             .clear();
         match c {
-            Control::Command(cmd, reply, requested_us) => {
+            Control::Command(cmd, reply, requested_us, start_at) => {
                 // A pause, a step, a play around, or a new J/K/L rate while
                 // running starts from what is heard.
                 if self.transport.is_running()
@@ -1176,7 +1201,12 @@ impl RenderThread {
                             .begin(self.transport.epoch(), requested_us);
                         self.epoch_start =
                             Some((self.transport.epoch(), self.transport.position()));
-                        self.ring.set_epoch(self.transport.epoch());
+                        let at = if matches!(cmd, TransportCommand::Play { .. }) {
+                            start_at
+                        } else {
+                            0
+                        };
+                        self.ring.set_epoch_at(self.transport.epoch(), at);
                         self.stopped_published = false;
                         self.stop_pending = false;
                         true

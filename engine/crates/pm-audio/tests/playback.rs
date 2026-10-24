@@ -291,6 +291,74 @@ fn the_clock_predicts_what_the_device_presents() {
     }
 }
 
+/// A Play scheduled at a host time ([`Playback::command_at`]) presents its
+/// first frame then, partway through a device buffer, and its clock line
+/// starts there; one scheduled in the past joins its line late, passing
+/// over what should already have played, rather than moving the line.
+#[test]
+fn a_scheduled_play_is_heard_on_the_line_that_starts_at_its_time() {
+    let dir = temp_dir("scheduled");
+    let file = ramp_file(&dir, 4);
+    // Into the device's 12th buffer, a third of a buffer in; and 30 ms late.
+    for late in [false, true] {
+        let (playback, mut dev, _rig) = setup(&file, 4.0, SR, 0.0);
+        playback
+            .command(TransportCommand::Seek {
+                time: ticks(1.0),
+                mode: SeekMode::Exact,
+            })
+            .unwrap();
+        dev.run(2);
+        let at = if late {
+            dev.host_of(2 * BUFFER as u64) + LATENCY_US as u64 - 30_000
+        } else {
+            dev.host_of(11 * BUFFER as u64 + BUFFER as u64 / 3) + LATENCY_US as u64
+        };
+        playback
+            .command_at(
+                TransportCommand::Play {
+                    rate: PlaybackRate::NORMAL,
+                },
+                at,
+            )
+            .unwrap();
+        dev.run(40);
+        // The first frame that plays media, and when the device presents it.
+        let (presented, position) = dev
+            .log
+            .iter()
+            .find_map(|(host, buf)| {
+                (0..BUFFER).find(|&i| buf[i * 2 + 1] == 0.5).map(|i| {
+                    (
+                        *host + LATENCY_US as u64 + (i as f64 * 1e6 / SR as f64).round() as u64,
+                        position_of(buf[i * 2]),
+                    )
+                })
+            })
+            .expect("media played");
+        let clock = playback.clock().unwrap();
+        // The line: media 1 s at `at`, wherever the first frame fell.
+        let on_line = clock.media_time_at(HostMicros::new(at).unwrap()).get();
+        assert!(
+            (on_line - ticks(1.0).get()).abs() <= TICKS_PER_SECOND / 48_000,
+            "late {late}: line {on_line}"
+        );
+        let expected =
+            SR as i64 + ((presented as f64 - at as f64) * SR as f64 / 1e6).round() as i64;
+        assert!(
+            (position - expected).abs() <= 1,
+            "late {late}: heard {position} at {presented}, expected {expected}"
+        );
+        if !late {
+            assert!(
+                presented.abs_diff(at) <= 21,
+                "first frame at {presented}, scheduled {at}"
+            );
+            assert_eq!(position, SR as i64);
+        }
+    }
+}
+
 /// Every clock sample, applied to the buffers it covers, predicts them to
 /// within a microsecond plus the drift since its anchor.
 #[test]
