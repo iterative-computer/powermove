@@ -1035,7 +1035,7 @@ directly, without full-output multisampled RGBA storage.
 Reproduce with the opt-in `scope-bench.test.ts`, `engine-doc-boot.spec.ts` and
 `path-mask-playback-measure.spec.ts` (`PM_FIXUPS2_MEASURE=1`,
 `PM_FIXUPS2_EVIDENCE=<outside-repo-dir>`); Electron specs under pm-electron-lock.
-Rust selections: pm-wasm tests; pm-vector canvas2d/mask_coverage and unit tests;
+Rust selections: pm-wasm tests; pm-vector canvas2d and unit tests;
 pm-render path_masks plus corpus with `PM_RENDER_ONLY=composite/path-masks`,
 and text_corpus with `PM_TEXT_ONLY=composite/path-masks`.
 
