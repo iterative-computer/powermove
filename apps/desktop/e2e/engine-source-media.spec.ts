@@ -223,10 +223,15 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         expect.soft(result.rmsResidualDbfs, JSON.stringify(result)).toBeLessThanOrEqual(-85);
       }
 
-      // Only URL-backed media decodes count as browser source playback. The
-      // native track presenter intentionally calls play() on its private video.
+      // URL-backed media played by the source preview count as browser source
+      // playback. The native track presenter intentionally calls play() on its
+      // private video. Composition internals (the legacy editing preview's
+      // warm-up, the legacy idle preview's detached decoders) play their own
+      // videos in the background; they are counted apart and are not source
+      // consumers (engine-source-guard.spec.ts attributes those).
       await page.evaluate(() => {
         (window as any).__sourceBrowserPlays = 0;
+        (window as any).__backgroundPlays = 0;
         (window as any).__sourceNativePlays = 0;
         (window as any).__sourceInvalidNativePlays = 0;
         const play = HTMLMediaElement.prototype.play;
@@ -235,7 +240,8 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
             if (this.srcObject instanceof MediaStream && !this.getAttribute('src') && !this.currentSrc)
               (window as any).__sourceNativePlays++;
             else (window as any).__sourceInvalidNativePlays++;
-          } else (window as any).__sourceBrowserPlays++;
+          } else if (this.closest('#source-preview')) (window as any).__sourceBrowserPlays++;
+          else (window as any).__backgroundPlays++;
           return play.call(this);
         };
       });
@@ -384,7 +390,7 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
       await writeFile(path.join(directory, 'source-monitor-lifecycle.json'), JSON.stringify(lifecycle, null, 2));
       for (const result of lifecycle) expect.soft(result.ended, JSON.stringify(result)).toBe(true);
       const plays = await page.evaluate(() => ({ url: (window as any).__sourceBrowserPlays,
-        native: (window as any).__sourceNativePlays, invalidNative: (window as any).__sourceInvalidNativePlays }));
+        background: (window as any).__backgroundPlays, native: (window as any).__sourceNativePlays, invalidNative: (window as any).__sourceInvalidNativePlays }));
       await writeFile(path.join(directory, 'source-browser-plays.json'), JSON.stringify(plays, null, 2));
       expect(plays.url).toBe(enabled ? 0 : 4);
       expect(plays.invalidNative).toBe(0);
