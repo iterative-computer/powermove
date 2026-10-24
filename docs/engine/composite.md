@@ -128,7 +128,8 @@ sampled at each output pixel, through the inverse plane composed with the world
 matrix for a 3D layer, zero outside the canvas.
 
 The engine (`composite/path_masks.rs`, `path_masks.wgsl`, `gaussian.rs`,
-`gaussian.wgsl`), all on the GPU but the outline:
+`gaussian.wgsl`, and `coverage.rs`, `coverage.wgsl`, shared with vector
+shapes), all on the GPU but the outline:
 
 - **Coverage.** The outline is flattened to 10⁻⁴ px, clipped to its pixel
   bounds in the output and fixed to 1/16384 px. Each edge adds its exact signed

@@ -648,8 +648,8 @@ mod tests {
         times.extend(text.probe_all());
         // 18 2D, 12 composite and 12 resample (rgba16float, rgba32float and
         // colordepth's rgba8unorm), path masks and text.
-        assert_eq!(times.len(), 63);
-        assert_eq!(built(), 63);
+        assert_eq!(times.len(), 64);
+        assert_eq!(built(), 64);
         for (name, duration) in times {
             eprintln!("lazy pipeline first use: {name}={duration:?}");
         }
