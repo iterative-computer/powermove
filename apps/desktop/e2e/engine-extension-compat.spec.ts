@@ -891,8 +891,10 @@ test.describe('Use New Engine: existing extensions', () => {
     // A write without paths sends the layers it most likely wrote first, as
     // a provisional revision the engine draws but does not present until the
     // rest of the document is compared. Here the comparison finds more: the
-    // same write moved another layer, and then the raster override itself
-    // moves another layer and calls touch() while it draws the edit.
+    // same write moved another layer. Then the raster override itself moves
+    // another layer and calls touch() while it draws the edit: it runs only
+    // after the whole comparison (it never sees a provisional document), and
+    // its own write is a later revision, presented whole.
     await cp(path.join(__dirname, FIXTURE['shape-tint']!), path.join(session.userData, 'extensions', 'shape-tint'), { recursive: true });
     await session.relaunch();
     await session.openEditor();
@@ -921,6 +923,7 @@ test.describe('Use New Engine: existing extensions', () => {
       const edit = async (fn: () => void) => { fn(); PM.touch(); PM.invalidate(); await settled(); };
       const drag = async (from: number) => { for (let i = 0; i < 4; i++) await edit(() => { layer('tinted').p['position.x'].v = from + i * 3; }); };
       let registration: any = null;
+      let overrideSaw: { provisional: number | null; pending: boolean; whole: boolean; tinted: number } | null = null;
       try {
         await drag(100);
         // 1. One unscoped write that also moved a layer it never moved before.
@@ -929,7 +932,13 @@ test.describe('Use New Engine: existing extensions', () => {
         const original = api.services.get('raster');
         let armed = false;
         registration = api.services.register('raster', (l: any, ...rest: any[]) => {
-          if (armed && l?.id === 'tinted') { armed = false; layer('plain').p['position.x'].v = 200; PM.touch(); }
+          if (armed && l?.id === 'tinted') {
+            armed = false;
+            // What the override can read: the document as compared, whole.
+            const barrier = PM.EngineDoc.barrier;
+            overrideSaw = { provisional: barrier.provisionalRevision, pending: barrier.pending, whole: barrier.shadowMatches().ok, tinted: layer('tinted').p['position.x'].v };
+            layer('plain').p['position.x'].v = 200; PM.touch();
+          }
           return original(l, ...rest);
         });
         await drag(100);
@@ -950,7 +959,7 @@ test.describe('Use New Engine: existing extensions', () => {
       const cv = document.createElement('canvas'); cv.width = image.width; cv.height = image.height;
       const ctx = cv.getContext('2d')!; ctx.drawImage(image, 0, 0);
       const at = (x: number, y: number) => Array.from(ctx.getImageData(Math.round(x * image.width / 320), Math.round(y * image.height / 180), 1, 1).data.slice(0, 3));
-      return { provisional, confirmed: [...confirmed], superseded, drawn, plain: [layer('plain').p['position.x'].v, layer('plain').p['position.y'].v], plainPixel: at(200, 50), oldPlainPixel: at(230, 90), revision: PM.EngineDoc.barrier.revision, shown: presentation.latest?.revision ?? null };
+      return { overrideSaw, provisional, confirmed: [...confirmed], superseded, drawn, plain: [layer('plain').p['position.x'].v, layer('plain').p['position.y'].v], plainPixel: at(200, 50), oldPlainPixel: at(230, 90), revision: PM.EngineDoc.barrier.revision, shown: presentation.latest?.revision ?? null };
     });
     const native = await session.app.evaluate(async () => {
       const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
@@ -960,10 +969,14 @@ test.describe('Use New Engine: existing extensions', () => {
     console.log(JSON.stringify({ provisionalProof: { ...result, native } }));
     expect(session.diagnostics.pageErrors).toEqual([]);
     // The provisional path ran, was confirmed for the plain drag moves, and
-    // the comparison superseded it in both adversarial edits.
+    // the comparison superseded it in the adversarial write.
     expect(result.confirmed.length).toBeGreaterThan(0);
     expect(native.confirmed).toBeGreaterThan(0);
-    expect(result.superseded.length).toBeGreaterThanOrEqual(2);
+    expect(result.superseded.length).toBeGreaterThanOrEqual(1);
+    // The override drew the edit from the whole, compared document: no
+    // provisional revision outstanding, nothing left to diff, the shadow
+    // equal to the live document, and the edit's own value in place.
+    expect(result.overrideSaw).toEqual({ provisional: null, pending: false, whole: true, tinted: 130 });
     // No frame of a superseded revision was ever drawn.
     expect(result.drawn.filter((r: number) => result.superseded.includes(r))).toEqual([]);
     expect(result.drawn.length).toBeGreaterThan(0);
@@ -977,9 +990,12 @@ test.describe('Use New Engine: existing extensions', () => {
     // 3. The engine draws before the comparison ends: in a document of
     // 2,500 more layers the whole comparison outlasts the engine's frame,
     // so the provisional frame is parked, and the extra change found then
-    // drops it. Each attempt changes a layer no earlier write changed.
-    await page.evaluate(() => {
+    // drops it. Each attempt changes a layer no earlier write changed. With
+    // an override the frame cannot finish first (its answer is made only
+    // after the comparison), so this runs with the override removed.
+    await page.evaluate(async () => {
       const PM = (window as any).PM;
+      await PM.Kernel.loader.deactivate('shape-tint');
       const extra = Array.from({ length: 2500 }, (_, i) => {
         const l = PM.mkLayer('shape', { name: `Off ${i}`, from: 0, dur: 3, d: { shape: 'rect', w: 40, h: 30, color: '#3366CC', stroke: 0 } }, PM.proj);
         l.id = `off-${i}`; l.on = false; l.p.rotation = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(3, i % 360)] });
