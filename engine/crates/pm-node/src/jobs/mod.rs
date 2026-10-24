@@ -1013,17 +1013,7 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
     // starts. Other lanes stay lazy; a transient device failure is retried
     // when actual work arrives.
     let mut renderer = if lane == USER_LANE {
-        let init_started = Instant::now();
-        let result = shared.renderer();
-        if std::env::var_os("PM_SOURCE_PROFILE").is_some() {
-            eprintln!(
-                "pm job renderer lane={} eager=true init_ms={:.3} ready={}",
-                lane,
-                init_started.elapsed().as_secs_f64() * 1000.0,
-                result.is_ok()
-            );
-        }
-        result.ok()
+        shared.renderer().ok()
     } else {
         None
     };
@@ -1038,16 +1028,8 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
         };
         let _qos_scope = export_qos.as_ref().map(|qos| qos.enter());
         if renderer.is_none() {
-            let init_started = Instant::now();
             match shared.renderer() {
                 Ok(r) => {
-                    if std::env::var_os("PM_SOURCE_PROFILE").is_some() {
-                        eprintln!(
-                            "pm job renderer lane={} eager=false init_ms={:.3}",
-                            lane,
-                            init_started.elapsed().as_secs_f64() * 1000.0
-                        );
-                    }
                     renderer = Some(r);
                 }
                 Err(message) => {
@@ -1486,7 +1468,9 @@ fn run_job(
     blender: &mut LaneBlender,
 ) {
     if !matches!(&submit.spec, JobSpec::Export { .. }) {
-        source::run(shared, renderer, &gate.lane, job, host, submit, document, cancel);
+        source::run(
+            shared, renderer, &gate.lane, job, host, submit, document, cancel,
+        );
         return;
     }
     let JobSpec::Export {
