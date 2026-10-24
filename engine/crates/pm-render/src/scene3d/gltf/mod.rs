@@ -790,36 +790,6 @@ pub(crate) fn short_attribute_blocks_draw(mesh: &Mesh3d, params: &Parameters) ->
     })
 }
 
-/// The posed vertices of every triangle drawable of an instance, in world
-/// space (tests and Blender snapshots).
-pub fn posed_triangles(asset: &GltfAsset, world: &Mat4, time: f64) -> Vec<(String, Vec<[f64; 3]>)> {
-    let model = &asset.model;
-    let (parent, pose) = pose::placed(model, pose::Pose::at(model, time), world);
-    let worlds = pose::world(model, &pose, Some(&parent));
-    let mut out = Vec::new();
-    for i in model.traversal() {
-        let ObjectKind::Drawable(d) = &model.objects[i].kind else {
-            continue;
-        };
-        let gm = &model.geometries[d.geometry];
-        if gm.mode != Mode::Triangles {
-            continue;
-        }
-        let poser = pose::Poser::new(model, i, d, &pose.influences[i], &worlds);
-        let to_world = if d.skin.is_some() {
-            // `bindMatrixInverse × matrixWorld` cancels for skinned meshes.
-            worlds[i]
-        } else {
-            worlds[i]
-        };
-        let list = (0..gm.vertex_count())
-            .map(|v| g::math::apply(&to_world, poser.vertex(v)))
-            .collect();
-        out.push((model.objects[i].name.clone(), list));
-    }
-    out
-}
-
 #[cfg(test)]
 mod short_morph_tests {
     use super::*;

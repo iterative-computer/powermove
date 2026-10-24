@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { flip } from 'svelte/animate';
   import Icon from '../panels/Icon.svelte';
   import { readProjectLoading } from '../overlays/project-ghost';
@@ -34,9 +34,38 @@
      as a ghost; let go there, it moves to another window or one of its own. */
   let tear = $state<{ x: number; y: number } | null>(null);
 
+  /* The strip's tabs, re-read when project metadata changes. Every edit
+     emits `project`, and a new array reconciles the keyed list, where
+     `animate:flip` measures every tab before and after
+     (getBoundingClientRect): a style and layout pass forced on each edit.
+     A re-read that finds the same tabs showing the same names, dirty marks,
+     and selection as at the last refresh reconciles to nothing that moves,
+     so it keeps the array (no reconcile). Anything a tab shows that changed
+     reconciles and animates as before. */
+  let lastTabs: { ids: string[]; shown: string; metadata: number } | null = null;
+  const tabShown = (ids: string[]): string => ids.map((id) => {
+    // As the strip's `{#each}` below reads them.
+    const opening = pending?.id === id;
+    const file = opening ? null : fileStateFor(id);
+    const dirty = !opening && (id === documentId ? (file?.dirty ?? appDirty) : !!file?.dirty);
+    return `${nameFor(id)}\u0000${dirty}\u0000${opening}\u0000${id === activeProjectId}\u0000${homeOpen}\u0000${file?.path ?? ''}`;
+  }).join('\u0001');
   const tabIds = $derived.by(() => {
-    metadataToken;
-    return [...(PM.Tabs?.list?.() ?? (PM.proj?.id && !PM.isHomeProject?.() ? [PM.proj.id] : []))] as string[];
+    const metadata = metadataToken;
+    // What the tabs show is read at every refresh, so the comparison is
+    // with what the last refresh put on screen.
+    refreshToken;
+    const previous = lastTabs;
+    if (previous && previous.metadata === metadata) {
+      // A refresh alone never re-read the tab list.
+      previous.shown = untrack(() => tabShown(previous.ids));
+      return previous.ids;
+    }
+    const ids = [...(PM.Tabs?.list?.() ?? (PM.proj?.id && !PM.isHomeProject?.() ? [PM.proj.id] : []))] as string[];
+    const shown = untrack(() => tabShown(ids));
+    const same = previous && previous.ids.length === ids.length && previous.ids.every((id, i) => id === ids[i]) && previous.shown === shown;
+    lastTabs = { ids: same ? previous.ids : ids, shown, metadata };
+    return lastTabs.ids;
   });
   const names = $derived.by(() => {
     metadataToken;

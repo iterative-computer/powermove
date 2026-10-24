@@ -33,7 +33,7 @@ NTSC30=30000/1001
 NTSC60=60000/1001
 SMALL=320x180
 
-# ── S6 corpus (gen-corpus.sh in engine/spikes/s6-decode) ─────────────────────
+# ── S6 corpus (spike S6's gen-corpus.sh) ─────────────────────────────────────
 
 ff -f lavfi -i "$(src $NTSC30 $SMALL)" -frames:v 150 -c:v libx264 -profile:v high \
   -x264-params "bframes=3:b-pyramid=normal:keyint=48:min-keyint=48:scenecut=0" -pix_fmt yuv420p h264-bpyramid.mp4

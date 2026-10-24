@@ -299,6 +299,8 @@ pub struct Renderer {
     /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
     reuse: crate::reuse::DrawReuse,
     reuse_enabled: bool,
+    /// [`Renderer::set_channel_memo`].
+    channel_memo: bool,
     /// The bottom of the last reusing frame kept on the GPU
     /// (`crate::frame_prefix`).
     prefix: crate::frame_prefix::FramePrefix,
@@ -413,6 +415,7 @@ impl Renderer {
             compat: None,
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
+            channel_memo: true,
             prefix: Default::default(),
             svg_wait: false,
             svg_skip_failed: false,
@@ -440,10 +443,33 @@ impl Renderer {
         self.reuse_enabled = enabled;
     }
 
+    /// Whether frames plan with the channels found in the same unchanged
+    /// document on earlier frames (`pm_eval` `channel_memo`; on by default).
+    /// Every plan is the one planned without it; tests turn it off to
+    /// compare.
+    pub fn set_channel_memo(&mut self, enabled: bool) {
+        self.channel_memo = enabled;
+        if !enabled {
+            self.evaluator.clear_channel_memo();
+        }
+    }
+
+    /// Opens the channel memo for a plan of `document` when it is on.
+    fn open_channel_memo(&mut self, document: &Document) {
+        if self.channel_memo {
+            self.evaluator.open_channel_memo(document);
+        }
+    }
+
     /// Drops the kept layer draws and the kept bottom of the last frame.
     pub fn clear_draw_reuse(&mut self) {
         self.reuse.clear();
         self.prefix.clear(&mut self.pool);
+    }
+
+    /// The channel memo's hits and misses so far (`pm_eval` `channel_memo`).
+    pub fn channel_memo_stats(&self) -> (u64, u64) {
+        self.evaluator.channel_memo_stats()
     }
 
     /// The draw reuse's counters (with the frames drawn from a kept bottom
@@ -1736,8 +1762,10 @@ impl Renderer {
             return Err(RenderError::Watchdog(why.to_owned()));
         }
         let options3d = self.options3d.for_request(request);
-        let blender = crate::blender::PlanState::new(options3d.blender.clone());
-        let (mut plan, build) = plan::build_blender(
+        // Channels found in this document are kept across its frames while
+        // it is unchanged (`pm_eval` `channel_memo`).
+        self.open_channel_memo(document);
+        let (mut plan, build) = plan::build_reusing(
             &mut self.evaluator,
             &comp,
             &project,
@@ -1750,10 +1778,10 @@ impl Renderer {
             options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
-            blender,
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
+        self.evaluator.close_channel_memo();
         if !request.background {
             plan.background = Background::Transparent;
         }
@@ -1841,6 +1869,8 @@ impl Renderer {
                 pyramids: &mut self.pyramids,
                 failures: Vec::new(),
                 unsupported: Vec::new(),
+                twins: crate::exec::comp_twins(&plan),
+                comps: Vec::new(),
             };
             // Generic renders flip GL rows into the caller's top-down target.
             // Standard snapshots draw directly into their readback target.
@@ -2286,63 +2316,6 @@ impl Renderer {
         )?)
     }
 
-    /// The Blender snapshots a frame needs (section 17's Blender stage):
-    /// the frame is planned without drawing, and every composition pass
-    /// with `render3d.enabled` (every one with 3D objects for `preview`)
-    /// gives the snapshot of its frame, at the plan's own times and sizes.
-    /// A frame whose snapshot cannot be built answers why
-    /// ([`crate::blender::BlenderSnapshots::errors`]).
-    #[allow(clippy::too_many_arguments)]
-    pub fn blender_snapshots(
-        &mut self,
-        document: &Document,
-        composition: &str,
-        time: Ticks,
-        request: &RenderRequest,
-        assets: &dyn AssetResolver,
-        preview: bool,
-        options: crate::blender::SnapshotOptions,
-    ) -> Result<crate::blender::BlenderSnapshots, RenderError> {
-        request.validate()?;
-        let comp = Comp::resolve(document, composition)
-            .map_err(|_| RenderError::Composition(composition.to_owned()))?;
-        let root = document
-            .root()
-            .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
-        let open = capability::open_composition_id(root);
-        let project = open
-            .as_deref()
-            .and_then(|id| Comp::resolve(document, id).ok())
-            .unwrap_or_else(|| comp.clone());
-        let seconds = comp.seconds_at(time.get());
-        let (w, h) = (request.output_size.width, request.output_size.height);
-        let scale = request
-            .scale
-            .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
-        // Planned exactly as `render` plans it (effects, transitions, text,
-        // motion blur), so every 3D pass the render reaches is collected:
-        // without the effect host a layer with effects would be refused
-        // before its content is planned.
-        let (_, build) = plan::build_blender(
-            &mut self.evaluator,
-            &comp,
-            &project,
-            seconds,
-            w,
-            h,
-            scale,
-            assets,
-            effect_host(&self.effect_host, &self.effects),
-            self.options3d.for_request(request),
-            Some(&mut self.text),
-            build_options(&comp, request, self.shaders.fallback_runner),
-            crate::blender::PlanState::collecting(preview, options),
-            self.compat.as_deref(),
-            None,
-        );
-        Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
-    }
-
     /// The plan of a frame without rendering it (tests, `pm-cli parity`),
     /// with the draw reuse when it is on ([`Renderer::set_draw_reuse`]).
     pub fn plan(
@@ -2367,8 +2340,8 @@ impl Renderer {
             .scale
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         let options3d = self.options3d.for_request(request);
-        let blender = crate::blender::PlanState::new(options3d.blender.clone());
-        let (plan, build) = plan::build_blender(
+        self.open_channel_memo(document);
+        let (plan, build) = plan::build_reusing(
             &mut self.evaluator,
             &comp,
             &project,
@@ -2381,10 +2354,10 @@ impl Renderer {
             options3d,
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
-            blender,
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
+        self.evaluator.close_channel_memo();
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
         }

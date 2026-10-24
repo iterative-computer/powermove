@@ -508,6 +508,32 @@ describe.skipIf(!existsSync(MODULE))('exact answers with the new engine on', () 
     expect(fallbacks(doc)).toEqual({});
   });
 
+  it.runIf(existsSync(BRIDGE))('warms fonts at the text\'s own key times, not at every baked transform key', async () => {
+    // C1: a project baked to a key per frame on seven transform properties
+    // made the prewarm lay out each text layer at every frame.
+    const { FontRegistry } = createRequire(import.meta.url)(BRIDGE) as any;
+    const registry = new FontRegistry();
+    const asked: string[] = [];
+    const { PM, doc } = await editor('on', true, {
+      sync: true, answer: q => { asked.push(q); return registry.answer(q); },
+      subset: (b, i) => registry.subset(b, i), whole: (b, i) => registry.whole(b, i),
+    });
+    const title = PM.mkLayer('text');
+    title.d.font = PM.P('Helvetica Neue', { kf: [PM.KF(0, 'Helvetica Neue'), PM.KF(3, 'Georgia')] });
+    for (const key of ['position.x', 'position.y', 'scale.x', 'rotation', 'opacity']) {
+      title.p[key] = PM.P(0, { kf: Array.from({ length: 300 }, (_, f) => PM.KF(f / 30, f)) });
+    }
+    PM.proj.layers = [title]; PM.touch();
+    const wasm = (doc as any).wasm;
+    const query = wasm.query.bind(wasm);
+    let layouts = 0;
+    wasm.query = (request: any) => { if (request?.op === 'textLayout') layouts++; return query(request); };
+    await doc.warmFonts();
+    expect(asked.join(' ')).toContain('Georgia');
+    // The layer start and the font key (a few rounds each), not 300 times.
+    expect(layouts).toBeLessThan(20);
+  });
+
   it('ignores worker evaluator environment overrides in production', () => {
     for (const override of ['audit', 'audit-proxy', 'strict', 'off', 'on', undefined]) {
       expect(workerMode(override, true, false)).toEqual(parseMode('on'));

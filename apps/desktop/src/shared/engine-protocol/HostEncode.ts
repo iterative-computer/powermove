@@ -11,4 +11,4 @@ import type { PixelPayload } from "./PixelPayload";
 /**
  * Job engine → host: one step of job `job`'s encode.
  */
-export type HostEncode = { job: JobId, } & ({ "step": "open", codec: EncodeVideoCodec, width: number, height: number, frameRate: FrameRate, bitrate: number, frames: Count, audio: EncodeAudio | null, output: CapabilityHandle, } | { "step": "video", index: Count, pixels: PixelPayload, } | { "step": "audio", samples: Bytes, } | { "step": "finish" } | { "step": "abort" });
+export type HostEncode = { job: JobId, } & ({ "step": "open", codec: EncodeVideoCodec, width: number, height: number, frameRate: FrameRate, bitrate: number, frames: Count, audio: EncodeAudio | null, output: CapabilityHandle, } | { "step": "video", index: Count, pixels: PixelPayload, } | { "step": "videoSurface", index: Count, generation: number, poolIndex: number, } | { "step": "audio", samples: Bytes, } | { "step": "finish" } | { "step": "abort" });

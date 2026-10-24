@@ -49,16 +49,18 @@ describe('external project open', () => {
     await vi.waitFor(() => expect(projects.close).toHaveBeenCalledWith(opened.token, false));
   });
 
-  it.each(['small PMV4', 'PMV3 or legacy'])('preserves the %s document in the bridge response', async format => {
+  it.each(['small PMV4', 'PMV3 or legacy'])('sends the %s document as its JSON text in the bridge response', async format => {
     const document = { proj: {}, history: { entries: [] } };
+    const documentJSON = JSON.stringify(document);
     const opened = { path: '/tmp/small.pmv', projectId: 'project-1', token: 'small-reader', size: FILE_CHUNK_BYTES + 100,
-      document, media: [], ...(format === 'small PMV4'
+      document, documentJSON, media: [], ...(format === 'small PMV4'
         ? { documentRange: { offset: 5, length: FILE_CHUNK_BYTES - 1, sha256: 'a'.repeat(64) } } : {}) };
     const projects = { open: vi.fn(async () => opened), close: vi.fn(async () => undefined) };
     const owner = sender();
     const result = await openProjectForWindow({ projects: projects as any }, owner as any, opened.path);
-    expect(result).toEqual({ ok: true, ...opened });
-    expect(result).toHaveProperty('document', document);
+    const { document: _parsed, ...reply } = opened;
+    expect(result).toEqual({ ok: true, ...reply });
+    expect(result).not.toHaveProperty('document');
     owner.destroy();
   });
 
@@ -66,13 +68,15 @@ describe('external project open', () => {
     const projects = {
       open: vi.fn(async (filePath: string) => ({
         path: filePath, projectId: 'project-1', token: 'reader-1', size: 42,
-        document: { proj: {} }, media: []
+        document: { proj: {} }, documentJSON: '{"proj":{}}', media: []
       })),
       close: vi.fn()
     };
     const result = await openProjectForWindow({ projects: projects as any }, sender() as any, '/tmp/example.pmv');
 
-    expect(result).toMatchObject({ ok: true, path: '/tmp/example.pmv', token: 'reader-1' });
+    expect(result).toMatchObject({ ok: true, path: '/tmp/example.pmv', token: 'reader-1', documentJSON: '{"proj":{}}' });
+    // The parsed document is not sent: the window parses the text (OPENWRITE-1).
+    expect('document' in result).toBe(false);
   });
 
   it('returns a structured failure when opening fails', async () => {

@@ -69,6 +69,7 @@ class FakeEngine implements ChildLike {
   readonly pid = FakeEngine.nextPid++;
   ports = new Map<number, { port: FakePort; peer: string }>();
   received: Envelope[] = [];
+  resyncRefusals = 0;
   private exitListeners: Array<(code: number) => void> = [];
   private messageListeners: Array<(message: unknown) => void> = [];
   dead = false;
@@ -184,6 +185,10 @@ class FakeEngine implements ChildLike {
         categories: { frameCache: 0, renderCache: 0, blenderSurfaces: 0, geometry3d: 0, surfacePool: 0, decoders: 0, pipelines: 0, other: 0 }
       };
       this.send(port, envelope(responseMessage(body.id, response)));
+    } else if (body.kind === 'request' && body.body.type === 'resync') {
+      this.send(port, this.resyncRefusals-- > 0
+        ? envelope({ kind: 'error', id: body.id, error: { code: 'budgetExceeded', scope: { kind: 'request', id: body.id }, message: 'reader busy', retry: { kind: 'after', ms: 1 }, detail: null } })
+        : envelope(responseMessage(body.id, { type: 'patchesApplied', document: body.body.document, revision: body.body.revision })));
     } else if (body.kind === 'request' && body.body.type === 'probeMedia') {
       // The engine resolves the handle through its own host port, then answers.
       const id = body.id;
@@ -266,26 +271,27 @@ describe('NativeEngine with fake engines', () => {
 
   const live = (process: EngineProcess) => engines.filter((e) => e.process === process && !e.dead).at(-1)!;
 
-  it('admits only interactive Blender PNG compatibility asks and preserves source identity', async () => {
-    const png: CompatFrameRequest = { document: 'doc-1', composition: 'blender', layer: 'blender',
-      time: 0, source: 'blenderPng', scale: 1, revision: 8,
-      blender: { asset: 'avif-map', content: new Uint8Array(32).fill(0xab) } };
-    const answer = await live('interactive').ask({ type: 'compatFrame', ...png }, 3);
-    expect(answer.message.kind === 'response' && answer.message.body.type).toBe('compatFrame');
-    expect(compatRequests).toHaveLength(1);
-    expect(compatRequests[0]).toMatchObject({ document: 'doc-1', revision: 8, source: 'blenderPng',
-      blender: { asset: 'avif-map', content: new Uint8Array(32).fill(0xab) } });
-
-    const { blender: _blender, ...base } = png;
-    for (const source of ['rasterOverride', 'compatContext', 'svgImage'] as const) {
+  it('admits compatibility asks only from the job engine', async () => {
+    const base: CompatFrameRequest = { document: 'doc-1', composition: 'c', layer: 'l',
+      time: 0, source: 'rasterOverride', scale: 1, revision: 8 };
+    for (const source of ['rasterOverride', 'compatContext', 'svgImage', 'blenderPng'] as const) {
       const refused = await live('interactive').ask({ type: 'compatFrame', ...base, source }, 3);
       expect(refused.message.kind === 'error' && refused.message.error.code).toBe('capabilityRejected');
     }
-    expect(compatRequests).toHaveLength(1);
+    expect(compatRequests).toHaveLength(0);
 
-    const job = await live('job').ask({ type: 'compatFrame', ...base, source: 'rasterOverride' }, 3);
+    const job = await live('job').ask({ type: 'compatFrame', ...base }, 3);
     expect(job.message.kind === 'response' && job.message.body.type).toBe('compatFrame');
-    expect(compatRequests).toHaveLength(2);
+    expect(compatRequests).toHaveLength(1);
+    expect(compatRequests[0]).toMatchObject({ document: 'doc-1', revision: 8, source: 'rasterOverride' });
+  });
+
+  it('retries document-reader backpressure on the same engine launch', async () => {
+    const engine = live('job');
+    engine.resyncRefusals = 2;
+    const response = await host.request('job', { type: 'resync', document: 'doc', revision: 1, encoding: 'canonicalJsonV1', source: { kind: 'inline', body: new Uint8Array([123, 125]) }, hash: new Uint8Array(32) }, 1);
+    expect(response).toMatchObject({ type: 'patchesApplied', revision: 1 });
+    expect(engine.received.filter(e => e.message.kind === 'request' && e.message.body.type === 'resync')).toHaveLength(3);
   });
 
   it('negotiates both engines, grants leases, sends the slicing policy, and links them', () => {
@@ -318,6 +324,27 @@ describe('NativeEngine with fake engines', () => {
     host.removeClient(1);
     await settle();
     expect([...live('job').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(0);
+  });
+
+  it('gives a page whose connection closed fresh ports to the same launches, replacing the old ones', async () => {
+    // The engine closed the window's connection (a message it refused) while
+    // its launch lives: the window asks again (`requestPorts`) and gets new
+    // ports of the same generation; the engines drop the old ones.
+    const delivered: ClientPortInfo[] = [];
+    host.addClient(1, (info) => delivered.push(info));
+    await settle();
+    const first = delivered.find((d) => d.process === 'interactive')!;
+    host.refreshPorts(1);
+    await settle();
+    const again = delivered.filter((d) => d.process === 'interactive');
+    expect(again.map((d) => d.generation)).toEqual([1, 1]);
+    expect(again[1]!.port).not.toBe(first.port);
+    expect(live('interactive').controls).toContainEqual({ type: 'disconnect', port: first.port });
+    expect([...live('interactive').ports.values()].filter((p) => p.peer === 'renderer')).toHaveLength(1);
+    // A window main does not know gets nothing.
+    host.refreshPorts(99);
+    await settle();
+    expect(delivered.filter((d) => d.process === 'interactive')).toHaveLength(2);
   });
 
   it('gives main\'s font client one font port to each interactive launch, and none to the job engine', async () => {
@@ -370,6 +397,19 @@ describe('NativeEngine with fake engines', () => {
     const pending = host.report('interactive');
     live('interactive').kill();
     expect(await pending).toBeNull();
+  });
+
+  it('forwards native document bytes separately and reports evaluator transport loss on exit', async () => {
+    const launch = host.supervisor('interactive').current!;
+    const bytes = new Uint8Array([0x50, 0x4d, 0x50, 1]);
+    const request = '{"op":"apply","args":{"base":1,"revision":2}}';
+    const pending = launch.documentKernel!(7, request, bytes);
+    await settle();
+    const control = live('interactive').controls.find(message => message.type === 'documentKernel');
+    expect(control).toMatchObject({ owner: 7, request, bytes });
+    expect(request).not.toContain('body');
+    live('interactive').kill();
+    expect(JSON.parse(await pending)).toMatchObject({ ok: false, code: 'unavailable' });
   });
 
   it("keeps the interactive engine's fallback texture bands for the snapshot answer they precede", async () => {

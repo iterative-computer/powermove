@@ -350,10 +350,10 @@ A Cargo workspace at `engine/`.
 | `pm-color` | Transfer functions (extended), tone mapping, chroma, gamut, OCIO bridge (after cutover) | native |
 | `pm-gpu` | wgpu device, pools, shader compilation, GLSL compatibility, interop trait, GPU time slicing | native |
 | `pm-render` | Render graph, 2D layers, 3D scene pass, effects, compositing, motion blur | native |
-| `pm-blender` | Blender job client: snapshots from the evaluated scene, protocol, surface import, cache keys | native |
+| (no `pm-blender`) | Removed with Blender (main 2b1fa379a): `render3d` is inert and 3D layers draw natively in every mode. Contract 11's messages remain in `pm-protocol` until a protocol bump | — |
 | `pm-media` | Probe, demux, decode, index, image readers, color and chroma metadata | native |
-| `pm-cache` | Frame cache, render cache, disk caches, leases | native |
-| `pm-proxy` | Representation policy, jobs, generated-media store | native |
+| (no `pm-cache`) | Frame, render, and disk caches and leases live with their owners: `pm-engine`, `pm-media`, `pm-render`, `pm-node` | native |
+| (no `pm-proxy`) | Representation policy, jobs, and the generated-media store live in `pm-media`, `pm-export`, and `pm-node` | native |
 | `pm-audio` | Device and clock, mixer, automation, stretch, waveforms, meters | native |
 | `pm-export` | Encoders, muxers, render queue, verification | native |
 | `pm-engine` | Sessions, scheduler, priority classes, playback, crash attribution | native |
@@ -453,7 +453,7 @@ while it is still selectable.
 | `fpsRational` | Exact composition rates | Ignored safely |
 | `minReaderVersion` (root) | Older builds refuse instead of overwriting | Read by the Phase 0 guard |
 | `requiresEngine: "native"` (root) | Set when a native-only feature is used | Legacy refuses the project |
-| Layer `compat` | 1 for layers created before cutover (today's text metrics, solid radius ignored, today's effect looks); 2 for new layers. Duplicate, paste, split, pre-compose, and clone keep the source's level | Ignored safely (level 1 behavior) |
+| Layer `compat` | 1 for layers created before cutover: their authored-intent choices (today's text layout and metrics; solid radius ignored, decision SOLID-RADIUS-1); 2 for new layers. Rendering quality is the same at both levels (amendment 22). Duplicate, paste, split, pre-compose, and clone keep the source's level | Ignored safely (level 1 behavior) |
 | Asset `link` | Linked-media reference | Requires native |
 | Asset `interpret` | Interpretation overrides | Requires native |
 | Asset `storage` | `copied` or `linked` | Requires native when `linked` |
@@ -1674,15 +1674,21 @@ Settled with counsel before the dependent work ships.
 
 - **Evaluation:** |a − b| ≤ 1e-9 + 1e-9·|b|; exact strings and booleans; text per section
   6; 3D picks identical; bounds within 1e-6.
-- **Render, Standard color:** per-channel 8-bit difference ≤ 1 for 99.9% of pixels and
-  ≤ 4 for any pixel, with these classes tested separately:
+- **Render:** the two-part rule of [gate-policy.md](engine/gate-policy.md). Authored
+  intent exactly: interior pixels within 1 CV of today's capture (authored colors,
+  blends, mattes), alpha area and centroid within 1e-3. Quality: edge and resampled
+  pixels at least as close to an f64 or supersampled reference as today's, within the
+  frames' rounding; the preview frame equals the export frame. Pixels without a reference
+  yet keep the previous bound against today (≤ 1 CV for 99.9%, ≤ 4 for any). Classes (each
+  row is the target its owning lane converts to; until then that gate keeps its current
+  rule):
 
   | Class | Test |
   |---|---|
-  | Video frames | Chromium comparison only for natively decoded sources, on patch interiors, within 2 CV; the engine within 1 CV of an FFmpeg plus zimg reference using the same chroma filter |
+  | Video frames | The engine within 1 CV of an f64 conversion of the decoded samples (H.273, BT.2100) using the declared chroma filter, at least as close as today's frame |
   | Text | Identical line breaks and advances within 0.25 px (level 1); SSIM ≥ 0.98; reviewed sheet |
-  | Edges (level 2) | Section 2 antialiasing reference |
-  | Blur (level 2) | Analytic Gaussian |
+  | Edges | Exact supersampled coverage of the document's outlines |
+  | Blur | Exact Gaussian at the authored σ |
   | Alpha | Within 1 CV of an f64 reference |
   | 3D shading | Section 2 3D bar |
   | Blender surfaces | Engine composite of the stored surfaces, exact |
@@ -1866,13 +1872,25 @@ allowed-difference and capability-routing text in sections 21, 25, and 30.
       falls back to the legacy engine.
     - Flag off keeps today's engine. The `requiresEngine` refusal and the
       on → off → on round trip stay.
-22. **Existing projects are unchanged.** Any visible difference on an existing project is
-    a blocker, not a DECISION.
-    - Appendix A fixes apply only to new layers or `compat` level 2.
-    - Tolerances in section 25 measure invisibility and are not permission for a
-      visible change. Each documented drift or allowed difference on level 1 content
-      (composite appendix A, text small sizes and synthesized bold, masked 3D layers)
-      is resolved to match today or escalated to Jude with a side-by-side comparison.
+22. **Existing projects keep their authored intent; rendering is correct.** An existing
+    project opens and means the same thing: geometry, layout and line breaks, timing,
+    user-picked colors, and each effect and blend formula with its parameters stay exact,
+    and every effect keeps rendering what its formula says (a broken effect is a blocker).
+    What today renders measurably wrong against the standard and an f64 reference
+    (precision loss, banding, sampling, seams, premultiplication, transfer, primaries,
+    range) is fixed even when the look shifts, with a row in
+    [docs/engine/quality-ledger.md](engine/quality-ledger.md). No code exists only to
+    reproduce a WebGL, Chromium or Skia artifact.
+    - Gates prove both parts ([docs/engine/gate-policy.md](engine/gate-policy.md)):
+      authored intent exactly, and closeness to a high-precision reference at least as
+      good as today's, with the preview equal to the export.
+    - Appendix A fixes that correct rendering apply at every level; one that would change
+      authored intent applies only to new layers (`compat` level 2).
+    - A correctness fix needs only its ledger row, with before/after evidence and the
+      standard it follows, even when it shifts the look of every project. Escalate only
+      what is genuinely ambiguous (no standard applies, or tags conflict).
+    - Nothing is slower than today where measured (open, first frame, scrub, playback,
+      export, edit latency, memory).
 23. **Deprecated compatibility APIs.** Every compatibility API keeps working fully at
     apiVersion 1 to 3. This covers the `render.gl.context` compatibility context;
     synchronous `render.snapshot`, `renderFrameTo`, and `raster` pixels; the
@@ -2062,7 +2080,7 @@ Drafted in Phase 0 as Rust types and RFCs; frozen when their consumer phase star
 | Model and evaluation | `pm-time`, `pm-model`, `pm-eval`, `pm-edit`, `pm-wasm`, editor-helper shims | 0, 1 |
 | Renderer write path | Write barrier, flush, identity registry, auditor, dual-answer mode, consistency check, writer-inventory script, frame-rate validator, `minReaderVersion` and `requiresEngine`, headless document host and its per-project instances | 0, 1, 2, 3c |
 | Text and vectors | `pm-text`, font registry, `pm-vector` | 0, 1, 2, 3a |
-| 3D | `pm-geom3d`, 3D scene pass, depth and ID surface, `pm-blender`, 3D viewport integration | 0, 1, 2, 3a, 3b, 3c |
+| 3D | `pm-geom3d`, 3D scene pass, depth and ID surface, 3D viewport integration | 0, 1, 2, 3a, 3b, 3c |
 | Media | `pm-media`, decoders, readers, index, chroma, content hashing | 0, 2, 3b |
 | GPU and render | `pm-gpu`, `pm-render` 2D, GLSL pipeline, definition snapshots, fallback runner | 0, 2, 3a |
 | Color | `pm-color`, invariants, interpretation, tone mapping | 0, 2, 3a, 3b |
@@ -2070,7 +2088,7 @@ Drafted in Phase 0 as Rust types and RFCs; frozen when their consumer phase star
 | Platform, CI, and compliance | Toolchain, hosted CI, local gate tooling, packaging, signing, FFmpeg build, crash reporting | 0 onward |
 | Audio | `pm-audio`, mixer, clock contract | 0, 2, 3b |
 | Export and agents | `pm-export`, `pm-cli`, render queue, agent export, save, and snapshots, `pm-host` CLI implementation, the hidden MCP host, CLI prebuilds | 2, 3b, 3c |
-| Proxies and storage | `pm-proxy`, `pm-cache`, media store, media management | 2, 4a, 4b |
+| Proxies and storage | `pm-media`, `pm-node`, media store, media management | 2, 4a, 4b |
 | Viewer and settings UI | Viewer, overlays, settings, appendices C and D, API mapping, sync compatibility path, extension docs | 2, 3c, 4a, 5 |
 | Parity and QA | Ledger, corpus, parity runner, conformance, performance gates, appendix A Phase 0 fixes | 0 onward |
 

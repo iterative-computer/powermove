@@ -108,9 +108,31 @@ sample identity. Under concurrent machine load, this native export took
 2,153 ms, versus 1,744 ms and 623 ms for the two legacy runs. Treat this
 as an observed speed regression for that run, not a stable performance ratio.
 
-Alpha needs a separate parity decision. The current WebCodecs call omits the
-`alpha` encoder option, and [Chromium 152 explicitly rejects alpha encoding
-and strips alpha-bearing frames before VPX](https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.54/third_party/blink/renderer/modules/webcodecs/video_encoder.cc).
-The native WebM muxer retains its existing libvpx alpha stream for an explicit
-alpha export. That capability does not prove parity with the legacy WebM path;
-a paired alpha export is required before treating it as matched.
+**Bare CLI parity limit.** `pm-cli` calls `sink_for` without an `EncodeHost`, so
+it always uses the FFmpeg libvpx/libopus sink for WebM. Opaque VP9 matched all
+video packets in the measured 320×180 fixtures, but that result does not extend
+to VP8, other sizes, gradients, transparency, or bitrates. Even captured legacy
+float PCM submitted unchanged to the bundled libopus produced 51 different
+Opus packets (23,454 bytes against Chromium's 20,851). The bundled Opus and VPX
+revisions differ from Chromium's pins, FFmpeg's VPX wrapper derives an optimal
+buffer fill of five sixths rather than Chromium's 600 of 1000 ms, and Chromium
+converts canvas frames through its GPU REC709 path. Pinning the codec sources,
+controlling libvpx/libopus directly, and reproducing that conversion might
+close specific differences, but byte identity across the export domain is
+unproved. A real bare CLI has no Chromium WebCodecs host; document its encoded
+output as its own codec path rather than claiming EXPORT-1 identity with the
+desktop's opaque WebM.
+
+**Alpha WebM has no legacy transparent output to match.** The current exporter
+passes `renderInto`'s canvas to `VideoEncoder` regardless of `opts.alpha`, its
+config omits the `alpha` encoder option, and [Chromium 152 rejects alpha
+encoding and strips alpha-bearing frames before VPX](https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.54/third_party/blink/renderer/modules/webcodecs/video_encoder.cc).
+The new alpha WebM keeps FFmpeg's Matroska `AlphaMode` and VPX alpha stream;
+opaque WebM alone uses the legacy EBML remux. Its premultiplied render-target
+RGB is now divided by alpha before REC709 conversion when straight alpha is
+requested, while the alpha plane keeps the 0–255 byte. Color under zero alpha
+is cleared. This uses `output_rgba`'s guarded straight-alpha conversion rather
+than the legacy PNG's truncation and Canvas2D round trip: that PNG boundary
+belongs to an existing format, while alpha WebM is new. The unit test checks
+transparent, half-alpha, and opaque pixels at the encoder input; a paired
+decode and composite check of exported VP8 and VP9 alpha remains necessary.

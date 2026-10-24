@@ -36,6 +36,7 @@
 import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQuality, RasterGeometry, ShaderFallbackRequest, SnapshotClass, PixelRect, SnapshotPixels, SnapshotRequest, SnapshotViewer, SvgRasterKey, SvgRasterRequest } from '../../../shared/engine-protocol';
 import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAnswer, type EngineCompatAsk, type EngineCompatEvent, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
+import { SnapshotSlots } from './snapshot-slots';
 
 /** Repetitions of the same unresolved dependency set before a snapshot fails. */
 export const MAX_ROUNDS = 3;
@@ -314,7 +315,7 @@ export type RenderTransportOptions = {
   /** The window's document for a sync snapshot its session cannot serve
    *  (none yet, the document not arrived, or a staged resync in flight):
    *  main serves it from a session of its own. `full` serializes it. */
-  windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null;
+  windowDocument?: () => { id: string; revision: number; nativeKernel?: true; full(): { json: Uint8Array; hash: string; revision: number } } | null;
   /** Whether the window's document has a composition Blender renders
    *  (`render3d.enabled`): only then does a capture that prepares its
    *  Blender frame ask the engine (and main) to wait for Blender. */
@@ -1057,8 +1058,12 @@ export class EngineRenderTransport {
     // (the resync's next step would need this thread). Otherwise main serves
     // it from a session of its own, with the document sent along.
     const session = this.options.session();
-    const direct = !!session && session.id !== null && !session.closed && !session.resyncPending && (session.applied ?? 1) > 0;
-    if (!direct && this.options.windowDocument?.()) {
+    const document = this.options.windowDocument?.();
+    // A native document reference also survives a killed utility before this
+    // blocked renderer has received its port-close notification. Main restores
+    // and adopts it independently of the stale viewer session.
+    const direct = !document?.nativeKernel && !!session && session.id !== null && !session.closed && !session.resyncPending && (session.applied ?? 1) > 0;
+    if (!direct && document) {
       // The window's own session (the standby) serves later ones.
       if (!session || session.closed) void this.options.wake?.();
       try {
@@ -1124,14 +1129,15 @@ export class EngineRenderTransport {
     let send = !(this.sentToMain && this.sentToMain.id === doc.id && this.sentToMain.revision === doc.revision);
     let body: { json: Uint8Array; hash: string; revision: number } | null = null;
     for (let round = 0; round < MAX_DEPENDENCY_PHASES + 1; round++) {
-      if (send && !body) body = doc.full();
+      if (send && !body && !doc.nativeKernel) body = doc.full();
       const request = this.request(options, 'sync', uploaded, true, revision);
       request.snapshot.compatUploaded = compatUploaded;
       const reply = native.snapshotSync!({
         ...request,
         session: null,
         revision,
-        document: body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
+        document: doc.nativeKernel ? { id: doc.id, revision: doc.revision, nativeKernel: true }
+          : body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
         ...(fallbackPixels.length ? { fallbackPixels } : {}),
         ...(compatEvents.length ? { compatEvents } : {}),
         ...(svgPixels.length ? { svgPixels } : {})
@@ -1181,6 +1187,24 @@ export class EngineRenderTransport {
     return this.snapshotAsyncAt(pinViewer(options), cls);
   }
 
+  /** This window's asynchronous snapshots, queued to what main admits (snapshot-slots.ts). */
+  private readonly slots = new SnapshotSlots();
+
+  /**
+   * One snapshot request through the window's slots. Main can still refuse
+   * one for the bytes every window has outstanding: that is a wait as well
+   * (today's capture waits for the GPU), retried as slots free up, within
+   * the class's own wait.
+   */
+  private async admitted(cls: SnapshotClass, ask: () => Promise<EngineSnapshotReply>): Promise<EngineSnapshotReply> {
+    const until = performance.now() + (cls === 'idle' ? IDLE_WAIT_MS : ASYNC_WAIT_MS);
+    for (let attempt = 0; ; attempt++) {
+      const reply = await this.slots.run(cls, ask);
+      if (reply.status !== 'failed' || reply.code !== 'refused' || performance.now() >= until) return reply;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(250, 10 * 2 ** attempt)));
+    }
+  }
+
   private async snapshotAsyncAt(options: EngineSnapshotOptions, cls: SnapshotClass): Promise<EngineSnapshot> {
     const native = this.options.native;
     if (!native.snapshot) throw this.fail(new EngineSnapshotError('unavailable', 'This host has no engine snapshots.'), 'snapshot');
@@ -1198,7 +1222,7 @@ export class EngineRenderTransport {
       for (let round = 0; round < MAX_DEPENDENCY_PHASES; round++) {
         const request = this.request(options, cls, uploaded);
         request.snapshot.compatUploaded = compatUploaded;
-        const reply = await native.snapshot(request);
+        const reply = await this.admitted(cls, () => native.snapshot!(request));
         if (reply.status === 'rendered') {
           if (cls === 'idle') this.stats.idle++;
           else this.stats.async++;

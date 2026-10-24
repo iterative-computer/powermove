@@ -136,6 +136,7 @@ it.each([
     expect(media.beginPreview).toHaveBeenCalledOnce();
     expect(store.get('media:original')).toBe(source);
     expect(PM.MediaStore.put).toHaveBeenCalledOnce();
+    expect(PM.bus.emit).toHaveBeenCalledTimes(2);
     expect(reloaded.imageSequence).toEqual(dimensions.imageSequence);
     URL.revokeObjectURL(first.preview.url); URL.revokeObjectURL(reloaded.preview.url);
   } finally { vi.unstubAllGlobals();

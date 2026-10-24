@@ -44,12 +44,6 @@ pub(crate) struct Pass3d {
     root_comp: bool,
 }
 
-impl Pass3d {
-    pub(crate) fn metadata_scene(&self) -> Option<Arc<Scene3d>> {
-        self.scene.as_ref().and_then(|s| s.as_ref().ok()).cloned()
-    }
-}
-
 /// The view override as the 3D pass applies it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct View3d {
@@ -722,7 +716,7 @@ pub(crate) fn legacy_scene<'d>(
     let mut channels: HashMap<String, &'d Node> = HashMap::new();
     let mut collect = |p: Option<&'d Node>, prefix: String| {
         if let Some(NodeKind::Object(map)) = p.map(Node::kind) {
-            for (k, v) in map {
+            for (k, v) in map.iter() {
                 channels.insert(format!("{prefix}.{}", k.to_string_lossy()), v);
             }
         }

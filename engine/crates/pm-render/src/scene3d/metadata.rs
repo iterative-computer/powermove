@@ -60,11 +60,6 @@ fn content(
                     None,
                 );
             }
-            Source::Blender(source) => {
-                if let Some(scene) = &source.scene_metadata {
-                    layers.insert((composition.into(), layer.into()), &scene.warnings, None);
-                }
-            }
             Source::Shader(source) => {
                 if let Some(error) = &source.scene_error {
                     layers.insert((composition.into(), layer.into()), &[], Some(error.clone()));

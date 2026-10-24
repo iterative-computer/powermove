@@ -67,6 +67,53 @@ describe('main’s snapshot sessions for windows', () => {
     expect(sessions.stats).toMatchObject({ opened: 1, resyncs: 2, definitions: 2, needsDocument: 1 });
   });
 
+  it('adopts the exact native revision after definitions without JSON, staging, or resync', async () => {
+    const f = fakeEngine();
+    const d = defs();
+    const order: string[] = [];
+    const request = f.engine.request;
+    f.engine.request = async (...args) => {
+      order.push(args[1].type);
+      return request(...args);
+    };
+    const adopt = vi.fn(async (owner: number, session: number, document: string, revision: number) => {
+      order.push('adoptNativeDocument');
+      expect([owner, session, document, revision]).toEqual([9, 40, 'doc', revision]);
+    });
+    f.engine.adoptNativeDocument = adopt;
+    const sessions = new WindowSnapshotSessions(f.engine, d.relay, () => {});
+
+    expect(await sessions.prepare(9, { id: 'doc', revision: 3, nativeKernel: true })).toEqual({ port: 3, session: 40 });
+    expect(order).toEqual(['openSession', 'pushDefinitions', 'adoptNativeDocument']);
+    expect(adopt).toHaveBeenCalledExactlyOnceWith(9, 40, 'doc', 3);
+    expect(f.staged).toEqual([]);
+    expect(f.sent.some(({ body }) => body.type === 'resync')).toBe(false);
+    await sessions.prepare(9, { id: 'doc', revision: 3, nativeKernel: true });
+    expect(adopt).toHaveBeenCalledTimes(1);
+
+    d.state.generation = 5;
+    await sessions.prepare(9, { id: 'doc', revision: 4, nativeKernel: true });
+    expect(order.slice(3)).toEqual(['pushDefinitions', 'adoptNativeDocument']);
+    expect(adopt).toHaveBeenLastCalledWith(9, 40, 'doc', 4);
+    expect(sessions.stats).toMatchObject({ definitions: 2, resyncs: 2, staged: 0 });
+  });
+
+  it('retries a stale native adoption instead of caching its rejected revision', async () => {
+    const f = fakeEngine();
+    const adopt = vi.fn(async (_owner: number, _session: number, _document: string, revision: number) => {
+      if (revision === 4 && adopt.mock.calls.filter((call) => call[3] === 4).length === 1) throw new Error('stale native root');
+    });
+    f.engine.adoptNativeDocument = adopt;
+    const sessions = new WindowSnapshotSessions(f.engine, defs().relay, () => {});
+    await sessions.prepare(9, { id: 'doc', revision: 3, nativeKernel: true });
+    await expect(sessions.prepare(9, { id: 'doc', revision: 4, nativeKernel: true })).rejects.toThrow('stale native root');
+    expect(await sessions.prepare(9, { id: 'doc', revision: 4 })).toBe('needsDocument');
+    expect(await sessions.prepare(9, { id: 'doc', revision: 4, nativeKernel: true })).toEqual({ port: 3, session: 40 });
+    expect(adopt.mock.calls.map((call) => call[3])).toEqual([3, 4, 4]);
+    expect(f.staged).toEqual([]);
+    expect(f.sent.some(({ body }) => body.type === 'resync')).toBe(false);
+  });
+
   it('waits for the originating window font seeds before sending its document, and forgets them on close', async () => {
     const f = fakeEngine();
     let release!: () => void;

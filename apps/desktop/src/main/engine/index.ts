@@ -2,6 +2,7 @@ import { persistShaderEnvironment } from './shader-environment';
 import { packAgentProject } from '../agent-tools/project-packer';
 import { ProfileDefinitionsWriter, profileDefinitionsPath } from './profile-definitions';
 import { installAgentFramesIpc } from './agent-frames';
+import { installDocumentKernelIpc } from './document-kernel';
 /*
  * Wires the native engine into the Electron app behind "Use New Engine".
  *
@@ -13,7 +14,7 @@ import { installAgentFramesIpc } from './agent-frames';
  * the engines' host requests (native-engine.ts).
  */
 import { existsSync, statSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { appendFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -32,7 +33,7 @@ import { startEngineFontSeeds } from '../engine-fonts-seeds';
 import { NativeEngine, type NativeEngineStatus } from './native-engine';
 import { CACHE_DIRS } from './services';
 import { AgentJobError, AgentJobs } from './agent-jobs';
-import { askAboutOfflineMedia, offlineClips } from './offline-media';
+import { askAboutOfflineMedia, offlineClips, offlineExportOptions } from './offline-media';
 import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
 import { SnapshotService } from './snapshots';
@@ -130,6 +131,7 @@ export type InstallNativeEngineOptions = {
 
 export type InstalledNativeEngine = {
   engine: NativeEngine | null;
+  exportEncoders?: ExportEncoders;
   /** Agent exports and frames through the job engine (agent-jobs.ts). */
   agentJobs: AgentJobs | null;
   /** The render queue (render-queue.ts). */
@@ -157,8 +159,12 @@ function statusMessage(enabled: boolean, status: NativeEngineStatus | null): Eng
   return { enabled, processes: { interactive: one('interactive'), job: one('job') } };
 }
 
-/** Largest staged resync document (the largest corpus history is 60 MB). */
-const MAX_STAGED_BYTES = 256 * 1024 ** 2;
+/** Largest staged resync document: the same bound as a document sent with
+ *  a synchronous snapshot (snapshots.ts MAX_DOCUMENT_BYTES). The renderer
+ *  now hands over pm-wasm's bytes, not a JavaScript string, so V8's string
+ *  ceiling (about 512 MiB, which bounds today's own save) no longer stops
+ *  it first; a real project's document is 180 MB (C1). */
+const MAX_STAGED_BYTES = 512 * 1024 ** 2;
 
 function validStageRequest(value: unknown): value is StageDocumentRequest {
   if (typeof value !== 'object' || value === null) return false;
@@ -330,13 +336,56 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // The job engine's WebM exports go through Chromium's WebCodecs encoders,
   // as today's exporter's do (decision EXPORT-1), in a hidden encoder window.
   const rendererUrl = !options.isPackaged ? env['ELECTRON_RENDERER_URL']?.replace(/\/$/, '') : undefined;
+  // Process-cumulative counters: overlapping/aborted exports must not reset
+  // another session's transport measurements. Compare snapshots for a run.
+  const exportImports = { process_surface_imports: 0, process_surface_import_sync_ms: 0,
+    process_surface_sends: 0, process_surface_send_ms: 0, process_surface_send_failures: 0 };
+  const textures = sharedTexture as unknown as SharedTextureLike;
+  const exportTextures: SharedTextureLike = env['PM_EXPORT_PROFILE'] === '1' ? {
+    importSharedTexture: (options) => {
+      const started = performance.now();
+      const texture = textures.importSharedTexture(options);
+      exportImports.process_surface_imports++;
+      exportImports.process_surface_import_sync_ms += performance.now() - started;
+      return texture;
+    },
+    sendSharedTexture: (options, ...args) => {
+      exportImports.process_surface_sends++;
+      const started = performance.now();
+      return textures.sendSharedTexture(options, ...args).then(() => {
+        exportImports.process_surface_send_ms += performance.now() - started;
+      }, (error: unknown) => {
+        exportImports.process_surface_send_ms += performance.now() - started;
+        exportImports.process_surface_send_failures++;
+        throw error;
+      });
+    }
+  } : textures;
   const exportEncoders = new ExportEncoders({
     openWindow: () => openEncoderWindow({
       preload: path.join(options.mainDirectory, '../preload/exportEncoder.js'),
       url: `${rendererUrl ?? 'app://powermove'}/export-encoder.html`,
+      receiverGone: (owner) => exportFrameBridge?.receiverGone(owner),
       log
     }),
-    writeOutput: (file, bytes) => writeFile(file, bytes)
+    writeOutput: (file, bytes) => writeFile(file, bytes),
+    ...(env['PM_EXPORT_PROFILE'] === '1' ? {
+      profile: (timings: Record<string, number>) => {
+        console.log('[export timing] host', JSON.stringify({ ...timings, ...exportImports }));
+      }
+    } : {}),
+    ...(env['POWERMOVE_BACKGROUND_TEST'] === '1' && env['PM_EXPORT_INPUT_CAPTURE_DIR'] ? {
+      capture: (rgba: Uint8Array) => appendFile(path.join(env['PM_EXPORT_INPUT_CAPTURE_DIR']!, 'native.rgba'), rgba)
+    } : {})
+  });
+  // Separate authenticated Mach connection for job encoders. Viewer and
+  // export pools have independent generations, receivers and lifetimes.
+  const exportFrameBridge = bridgeAddon ? new FrameBridge({
+    addon: bridgeAddon, sharedTexture: exportTextures,
+    allowUnsignedDev: !options.isPackaged, resolve: () => exportEncoders.receiver(), log,
+  }) : null;
+  exportFrameBridge?.listen((event) => {
+    if (event.kind === 'retire' && event.generation != null) exportEncoders.retireSurface(event.generation);
   });
   engine = new NativeEngine({
     // A measurement control only; packaged apps always start jobs on demand.
@@ -348,7 +397,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     exportEncoders,
     takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null,
     spawn: (process) => {
-      const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
+      const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : (exportFrameBridge?.prepareLaunch() ?? null);
       const child = utilityProcess.fork(script, [], {
         serviceName: process === 'interactive' ? 'Powermove Interactive Engine' : 'Powermove Job Engine',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -358,7 +407,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
         env: {
           POWERMOVE_ENGINE_FRAME_SOURCE: 'document',
           ...env,
-          ...(launch?.env ?? {}),
+          ...(process === 'interactive' ? (launch?.env ?? {}) : launch ? { POWERMOVE_EXPORT_BRIDGE: launch.env['POWERMOVE_FRAME_BRIDGE'] } : {}),
           POWERMOVE_ENGINE_PROCESS: process,
           POWERMOVE_ENGINE_ADDON: addon,
           // Invalidate first-use parity on every engine/browser/OS update.
@@ -402,7 +451,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // Sync snapshots a window's own session cannot serve (none yet, or a
   // staged resync in flight) come from a session main opens for the window.
   const windowSessions = new WindowSnapshotSessions(
-    { isReady: (p) => engine.isReady(p), hostPort: (p) => engine.hostPort(p), request: (p, body, session, revision) => engine.request(p, body, session, revision), stageDocument: (p, session, bytes) => engine.stageDocument(p, session, bytes), event: (p, body, session) => engine.event(p, body, session) },
+    { isReady: (p) => engine.isReady(p), hostPort: (p) => engine.hostPort(p), request: (p, body, session, revision) => engine.request(p, body, session, revision), stageDocument: (p, session, bytes) => engine.stageDocument(p, session, bytes), event: (p, body, session) => engine.event(p, body, session), adoptNativeDocument: (owner, session, document, revision) => engine.adoptNativeDocument(owner, session, document, revision) },
     engine.definitions,
     log,
     undefined,
@@ -414,6 +463,8 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     windowSessions,
     log
   });
+
+  const uninstallDocumentKernel = installDocumentKernelIpc({ ipc: options.ipc, cache: path.join(cacheDirectory, 'Documents'), trusted: options.isTrustedSender, call: (owner, request, bytes) => engine!.documentKernel(owner, request, bytes) });
 
   // The font registry and subsetting run in the interactive engine (plan
   // section 12, Phase 2): main relays pm-wasm's font requests over its own
@@ -431,7 +482,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // viewer's presentation) from the round trip with the least delay.
   options.ipc.on(ENGINE_IPC.requestPorts, (event) => {
     if (!options.isTrustedSender(event)) return;
-    engine!.reconnectClient(event.sender.id);
+    engine!.refreshPorts(event.sender.id);
   });
   options.ipc.handle(ENGINE_IPC.hostTime, (event) => {
     if (!options.isTrustedSender(event)) throw new Error('Unauthorized IPC sender');
@@ -504,6 +555,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       directory: options.automaticOutputDirectory ?? path.join(options.home, 'Powermove'),
       resolveAsset: asset => options.resolveAsset!(asset, { process: 'job', session })
     }, document) } : {}),
+    ...(options.resolveAsset ? { resolveAsset: options.resolveAsset } : {}),
     ...(options.bindMediaSession ? { bindMediaSession: options.bindMediaSession } : {}),
     log,
     // Each job renders its window's winning registrations (contract 10).
@@ -556,7 +608,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   /** The offline message before an interactive export (section 14.8).
    *  Resolves the options to export with, or the outcome to answer. */
   const checkOffline = async (window: BrowserWindow, sender: WebContents, project: Record<string, any>, request: EngineExportRequest): Promise<EngineExportRequest['options'] | EngineExportStart> => {
-    if (!options.resolveAsset || request.options.draft) return request.options;
+    if (!options.resolveAsset) return request.options;
     const clips = await offlineClips(project, (asset) => options.resolveAsset!(asset));
     if (!clips.length) return request.options;
     let proxies = !!options.resolveProxy;
@@ -564,7 +616,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       for (const clip of clips) if (!await options.resolveProxy!(clip.asset).catch(() => null)) proxies = false;
     }
     const choice = await askAboutOfflineMedia(window, clips, proxies);
-    if (choice === 'proxies') return { ...request.options, draft: true };
+    if (choice === 'proxies' || choice === 'without') return offlineExportOptions(request.options, choice);
     if (choice === 'locate') {
       const assets = clips.map((c) => c.asset);
       if (!sender.isDestroyed()) sender.send(ENGINE_IPC.locateMedia, assets);
@@ -708,6 +760,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     engine,
     agentJobs,
     renderQueue,
+    exportEncoders,
     frameBridge,
     snapshots,
     attachWindow,
@@ -715,7 +768,9 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       exportEncoders.dispose();
       removeExportWarmthIpc();
       removeAgentFramesIpc();
+      exportFrameBridge?.dispose();
       removeSnapshotIpc();
+      await uninstallDocumentKernel();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
       windowSessions.dispose();
       snapshots = null;

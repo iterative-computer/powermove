@@ -190,6 +190,8 @@ enum Today {
     /// Not covered (a time map that is not linear, a negative start, a
     /// source without a known length): the engine's readers play it.
     Off,
+    /// Today's audio walk omits this remapped precomposition or soundtrack.
+    Silent,
     On(Box<TodayVoice>),
 }
 
@@ -270,6 +272,8 @@ pub struct Mixer {
     /// prepared start identical to a fresh offline render at that point.
     prepared: HashMap<i64, Prepared>,
     standard_content: bool,
+    /// Export-only reproduction of legacy OfflineAudioContext source timing.
+    legacy_export: bool,
     /// Today's export range for linear voices ([`Self::set_today_range`]).
     today_range: crate::today::Range,
     /// Scratch: source frames a converted voice reads.
@@ -879,6 +883,7 @@ impl Mixer {
             reads: HashMap::new(),
             prepared: HashMap::new(),
             standard_content: false,
+            legacy_export: false,
             today_range: crate::today::Range::default(),
             today_src: vec![],
             bus: 0,
@@ -893,6 +898,22 @@ impl Mixer {
         m.glide_len = (m.format.sample_rate as usize * RETUNE_GLIDE_MS as usize / 1000).max(1);
         m.set_graph(m.doc.clone(), graph);
         m
+    }
+
+    /// Today's offline export mix. Audio clip speed (and sourceTime) is
+    /// ignored, while a remapped precomposition or embedded soundtrack is
+    /// absent, exactly as legacy `audioLayers` and `renderOffline` do.
+    /// Normal playback keeps the engine's time mapping.
+    pub fn new_legacy_export(
+        format: MixFormat,
+        doc: Arc<Document>,
+        graph: Arc<MixGraph>,
+        ev: Evaluator,
+        cache: Arc<SourceCache>,
+    ) -> Mixer {
+        let mut mixer = Self::new(format, doc, graph, ev, cache);
+        mixer.legacy_export = true;
+        mixer
     }
 
     pub fn format(&self) -> &MixFormat {
@@ -938,7 +959,9 @@ impl Mixer {
         }
         self.today_playhead = time;
         for voice in self.voices.iter_mut() {
-            if matches!(&voice.today, Today::On(t) if t.shape.precomp_trim_animated) {
+            if self.legacy_export
+                || matches!(&voice.today, Today::On(t) if t.shape.precomp_trim_animated)
+            {
                 voice.today = Today::Unbuilt;
             }
         }
@@ -1003,16 +1026,28 @@ impl Mixer {
         if !matches!(self.voices[vi].today, Today::Unbuilt) {
             return Ok(());
         }
-        if !today_candidate(plan) {
+        if !today_candidate(plan, self.legacy_export) {
             self.voices[vi].today = Today::Off;
             return Ok(());
         }
         let p = self.format.sample_rate;
         let root = self.doc.root();
         let t0 = self.today_playhead.unwrap_or(self.today_range.t0);
+        if self.legacy_export && crate::today::legacy_omits(plan, comps, &mut self.ev, t0)? {
+            self.voices[vi].today = Today::Silent;
+            return Ok(());
+        }
         let standard = self.standard_content;
         let shape = root
-            .and_then(|root| crate::today::Shape::new(plan, comps, root, Some((&mut self.ev, t0))))
+            .and_then(|root| {
+                crate::today::Shape::new(
+                    plan,
+                    comps,
+                    root,
+                    Some((&mut self.ev, t0)),
+                    self.legacy_export,
+                )
+            })
             .map(|mut shape| {
                 shape.standard = standard;
                 shape
@@ -1878,6 +1913,7 @@ impl Mixer {
                     };
                     spans.push((from, range.origin + clip.read.disconnected(), channels, vi));
                 }
+                Today::Silent => continue,
                 _ => {
                     // Time-mapped clips: connected while their window lasts.
                     let (a, b) = voice_bounds(&self.voices[vi].reader, plan, p);
@@ -2198,6 +2234,7 @@ impl Mixer {
                     mark(first, last, 1);
                     mark(last, q1, 2);
                 }
+                Today::Silent => continue,
                 _ => {
                     let (a, b) = voice_bounds(&voice.reader, plan, p);
                     mark(a, b, 1);
@@ -2228,6 +2265,9 @@ impl Mixer {
         options: &RenderOptions,
     ) -> Result<Option<bool>> {
         self.ensure_today(vi, plan, comps)?;
+        if matches!(self.voices[vi].today, Today::Silent) {
+            return Ok(None);
+        }
         if matches!(self.voices[vi].today, Today::On(_)) {
             let mut today = std::mem::replace(&mut self.voices[vi].today, Today::Off);
             let Today::On(t) = &mut today else {
@@ -2844,10 +2884,14 @@ impl Mixer {
             }
             // A primed first chunk already contains its input, including the
             // deterministic pre-roll. Do not evaluate its bounds a second time.
-            if frames <= crate::ring::CHUNK && self.voices[vi].preparing.is_some() {
+            if !self.legacy_export
+                && frames <= crate::ring::CHUNK
+                && self.voices[vi].preparing.is_some()
+            {
                 continue;
             }
-            if frames <= crate::ring::CHUNK
+            if !self.legacy_export
+                && frames <= crate::ring::CHUNK
                 && self.voices[vi].stretch.is_some()
                 && self
                     .prepared
@@ -2856,7 +2900,9 @@ impl Mixer {
             {
                 continue;
             }
-            if matches!(self.voices[vi].today, Today::Unbuilt) && !today_candidate(plan) {
+            if matches!(self.voices[vi].today, Today::Unbuilt)
+                && !today_candidate(plan, self.legacy_export)
+            {
                 self.voices[vi].today = Today::Off;
             }
             if matches!(self.voices[vi].today, Today::Unbuilt)
@@ -2864,6 +2910,9 @@ impl Mixer {
                 && self.ensure_today(vi, plan, &comps).is_err()
             {
                 self.voices[vi].today = Today::Off;
+            }
+            if matches!(self.voices[vi].today, Today::Silent) {
+                continue;
             }
             if let Some(span) = self.today_span(vi, start, end) {
                 if let Some((lo, hi)) = span {
@@ -3071,8 +3120,8 @@ fn blend(acc: &mut [Vec<f32>], next: &[Vec<f32>], done: usize, len: f32) {
 /// losing it to `ceil` (a clip at frame 7 of 29.97 fps, 11,211.2 samples).
 /// Whether today's export model can play a voice: a linear time map at
 /// the source's own rate (the cheap part of [`crate::today::Shape::new`]).
-fn today_candidate(plan: &VoicePlan) -> bool {
-    !plan.retimed && plan.source.length().is_some()
+fn today_candidate(plan: &VoicePlan, legacy_export: bool) -> bool {
+    (legacy_export || !plan.retimed) && plan.source.length().is_some()
 }
 
 /// Adds a voice's channels into its strip through its fold matrix, with the
@@ -3371,6 +3420,93 @@ mod prepared_tests {
             workers.wait(m, std::time::Duration::from_millis(10));
         }
         assert!(m.prepared_ready(&[start]), "worker preparation at {start}");
+    }
+
+    #[test]
+    fn legacy_export_ignores_nested_speed_without_changing_playback() {
+        let f = Fixture::new();
+        let build = |speed: f64| {
+            let json = r#"{"id":"P","compId":"C","fps":30,"dur":1,"layers":[{"id":"root","type":"audio","from":0.1,"dur":0.85,"on":true,"d":{"asset":"s","gain":{"v":0.25,"kf":[{"t":0,"v":0.25,"i":"a"},{"t":0.4,"v":0.9,"i":"b"}],"expr":null},"trim":0.05,"fadeIn":0.14,"fadeOut":0.2}},{"id":"P1","type":"precomp","from":0,"dur":1,"on":true,"d":{"comp":"X","audioGain":0.75,"trim":0}}],"comps":{"X":{"id":"X","fps":30,"dur":1,"audioGain":0.7,"layers":[{"id":"nested","type":"audio","from":0,"dur":1,"on":true,"d":{"asset":"s","gain":0.35,"trim":0.1,"speed":{"v":__SPEED__,"kf":[],"expr":null},"fadeIn":0.08,"fadeOut":0.1}}]}}}"#
+                .replace("__SPEED__", &speed.to_string());
+            let doc = Arc::new(Document::new(Some(parse(&json).unwrap()), 1));
+            let graph = Arc::new(
+                MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
+                    Some(f.dir.path().join("tone.wav"))
+                })
+                .unwrap(),
+            );
+            assert_eq!(graph.voices.len(), 2);
+            (doc, graph)
+        };
+        let render = |speed: f64, legacy: bool| {
+            let (doc, graph) = build(speed);
+            let mut mixer = if legacy {
+                Mixer::new_legacy_export(
+                    MixFormat::stereo(48_000),
+                    doc,
+                    graph,
+                    Evaluator::new(),
+                    f.cache.clone(),
+                )
+            } else {
+                Mixer::new(
+                    MixFormat::stereo(48_000),
+                    doc,
+                    graph,
+                    Evaluator::new(),
+                    f.cache.clone(),
+                )
+            };
+            mixer.set_today_range(0.0, 1.0, 0);
+            let mut pcm = Vec::new();
+            crate::offline::render(&mut mixer, 0, 48_000, 8192, |_, block| {
+                pcm.extend_from_slice(block);
+                Ok(())
+            })
+            .unwrap();
+            pcm.into_iter().map(f32::to_bits).collect::<Vec<_>>()
+        };
+        let reference = render(1.0, true);
+        let exported = render(1.2, true);
+        assert_eq!(exported.len(), 96_000);
+        assert_eq!(exported, reference, "legacy export keeps 1× source timing");
+        let playback = render(1.2, false);
+        assert!(
+            playback.iter().zip(&reference).any(|(a, b)| a != b),
+            "normal playback retains speed 1.2"
+        );
+    }
+
+    #[test]
+    fn legacy_export_omits_remapped_precomposition() {
+        let f = Fixture::new();
+        let doc = Arc::new(Document::new(
+            Some(parse(r#"{"id":"P","compId":"C","fps":30,"dur":1,"layers":[{"id":"P1","type":"precomp","from":0,"dur":1,"on":true,"d":{"comp":"X","trim":0,"timeRemap":{"v":1,"kf":[],"expr":null}}}],"comps":{"X":{"id":"X","fps":30,"dur":1,"layers":[{"id":"nested","type":"audio","from":0,"dur":1,"on":true,"d":{"asset":"s","gain":0.5,"trim":0,"speed":1.2,"fadeIn":0,"fadeOut":0}}]}}}"#).unwrap()),
+            1,
+        ));
+        let graph = Arc::new(
+            MixGraph::build(&doc, "C", &mut Evaluator::new(), &f.cache, &|_: &str| {
+                Some(f.dir.path().join("tone.wav"))
+            })
+            .unwrap(),
+        );
+        assert_eq!(graph.voices.len(), 1);
+        let mut mixer = Mixer::new_legacy_export(
+            MixFormat::stereo(48_000),
+            doc,
+            graph,
+            Evaluator::new(),
+            f.cache.clone(),
+        );
+        mixer.set_today_range(0.0, 1.0, 0);
+        let mut pcm = Vec::new();
+        crate::offline::render(&mut mixer, 0, 48_000, 8192, |_, block| {
+            pcm.extend_from_slice(block);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(pcm.len(), 96_000);
+        assert!(pcm.iter().all(|sample| *sample == 0.0));
     }
 
     #[cfg(feature = "test-hooks")]

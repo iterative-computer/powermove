@@ -29,6 +29,7 @@
     "src/shared/**/*.ts",
     "src/renderer/src/legacy/core/compositions.ts",
     "src/renderer/src/legacy/registry.ts",
+    "src/renderer/src/engine-doc/write.ts",
     "../../engine/crates/pm-model/tests/vectors/generate-patch-binary-vectors.ts"
   ],
   /* The frame bridge harness pages run in a renderer (tsconfig.web.json). */

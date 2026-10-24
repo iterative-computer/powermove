@@ -48,7 +48,7 @@ pub fn project_color(root: &Node) -> Result<ProjectColor, String> {
         Some(NodeKind::Object(map)) => Some(map),
         _ => return Err("the project color setting is not an object".into()),
     };
-    for (key, value) in map.into_iter().flatten() {
+    for (key, value) in map.into_iter().flat_map(|map| map.iter()) {
         let key = key.to_string_lossy();
         let text = node::string(Some(value)).map(|s| s.to_string_lossy());
         match (key.as_str(), text.as_deref(), value.kind()) {

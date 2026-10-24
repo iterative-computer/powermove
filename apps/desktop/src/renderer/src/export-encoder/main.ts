@@ -11,6 +11,7 @@
  * REC709 I420), and the same encoder settings (webm-video.ts), Opus
  * encoding (opus-encode.ts), and muxer (webm-mux.ts) follow.
  */
+import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { EncoderCommand, EncoderReply } from '../../../shared/export-encoder';
 import { EXPORT_ENCODER_PORT } from '../../../shared/export-encoder';
 import { encodeOpus } from '../legacy/core/opus-encode';
@@ -44,6 +45,11 @@ class Encode {
   private next = 0;
   private readonly audio: Float32Array[] = [];
   private audioFrames = 0;
+  readonly timings: Record<string, number> = {};
+  private clock(): number { return this.open.profile ? performance.now() : 0; }
+  private elapsed(name: string, started: number): void {
+    if (this.open.profile) this.timings[name] = (this.timings[name] ?? 0) + performance.now() - started;
+  }
 
   constructor(readonly open: Open) {
     this.fps = open.fps.num / open.fps.den;
@@ -96,14 +102,77 @@ class Encode {
     gl.bindTexture(gl.TEXTURE_2D, this.texture);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+    await this.encodeCanvas(index);
+  }
+
+  async videoSurface(index: number, generation: number, poolIndex: number): Promise<void> {
+    if (this.failure) throw this.failure;
+    if (index !== this.next) throw new Error(`frame ${index} arrived, frame ${this.next} expected`);
+    const frames = (window as any).exportEncoderFrames as FrameBridgeApi;
+    if (!frames) throw new Error('The export GPU receiver is unavailable.');
+    let started = this.clock();
+    // Mach imports and encoder commands arrive on independent channels.
+    if (!frames.has(generation, poolIndex)) await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => { stop(); reject(new Error('The export GPU surface did not arrive.')); }, 10_000);
+      const stop = frames.onSurface((g, i) => {
+        if (g === generation && i === poolIndex) { clearTimeout(timer); stop(); resolve(); }
+      });
+      if (frames.has(generation, poolIndex)) { clearTimeout(timer); stop(); resolve(); }
+    });
+    this.elapsed('surface_wait_ms', started);
+    started = this.clock();
+    const frame = frames.videoFrame(generation, poolIndex);
+    this.elapsed('get_video_frame_ms', started);
+    if (!frame) throw new Error('The export GPU surface could not be read.');
+    const gl = this.gl;
+    try {
+      gl.bindTexture(gl.TEXTURE_2D, this.texture);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+      started = this.clock();
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+      this.elapsed('texture_upload_ms', started);
+      // A slot cannot be reused until Chromium's GPU copy finished. Closing
+      // VideoFrame alone does not release the in-flight GPU read (S1).
+      started = this.clock();
+      gl.finish();
+      this.elapsed('copy_completion_ms', started);
+      if (gl.isContextLost() || gl.getError() !== gl.NO_ERROR) throw new Error('The export GPU copy failed.');
+    } finally { frame.close(); }
+    await this.encodeCanvas(index);
+  }
+
+  capture(): Uint8Array | undefined {
+    if (!this.open.capture) return;
+    const { width, height } = this.open;
+    const bottomUp = new Uint8Array(width * height * 4), rgba = new Uint8Array(bottomUp.length);
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+    gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, bottomUp);
+    const row = width * 4;
+    for (let y = 0; y < height; y++) rgba.set(bottomUp.subarray(y * row, (y + 1) * row), (height - y - 1) * row);
+    return rgba;
+  }
+
+  private async encodeCanvas(index: number): Promise<void> {
+    const { width, height } = this.open;
+    const gl = this.gl;
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.framebuffer);
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
-    // Row 0 is the top: the canvas shows its framebuffer bottom-up.
+    let started = this.clock();
     gl.blitFramebuffer(0, 0, width, height, 0, height, width, 0, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this.elapsed('blit_ms', started);
+    started = this.clock();
     const frame = new (window as any).VideoFrame(this.canvas, webmFrameTiming(index, this.fps));
+    this.elapsed('canvas_video_frame_ms', started);
+    started = this.clock();
     try { this.encoder.encode(frame, { keyFrame: webmKeyFrame(index, this.fps) }); } finally { frame.close(); }
+    this.elapsed('video_encode_ms', started);
     this.next++;
+    if (this.open.profile) this.timings.max_encode_queue = Math.max(this.timings.max_encode_queue ?? 0, this.encoder.encodeQueueSize);
+    started = this.clock();
     while (this.encoder.encodeQueueSize > WEBM_ENCODE_QUEUE_LIMIT && !this.failure) await sleep(6);
+    this.elapsed('encode_queue_wait_ms', started);
     if (this.failure) throw this.failure;
   }
 
@@ -118,12 +187,15 @@ class Encode {
   /** Today's order: flush the frames, encode the whole mix, mux. */
   async finish(): Promise<Uint8Array> {
     if (this.next !== this.open.frames) throw new Error(`${this.next} frames encoded, ${this.open.frames} expected`);
+    let started = this.clock();
     await this.encoder.flush();
+    this.elapsed('video_flush_ms', started);
     if (this.failure) throw this.failure;
     this.encoder.close();
     let audio: any = null;
     const spec = this.open.audio;
     if (spec && this.audioFrames > 0) {
+      started = this.clock();
       const buffer = new AudioBuffer({ length: this.audioFrames, numberOfChannels: spec.channels, sampleRate: spec.sampleRate });
       const planes = Array.from({ length: spec.channels }, (_, c) => buffer.getChannelData(c));
       let at = 0;
@@ -133,13 +205,21 @@ class Encode {
         at += frames;
       }
       this.audio.length = 0;
+      this.elapsed('audio_prepare_ms', started);
+      started = this.clock();
       audio = await encodeOpus(buffer);
+      this.elapsed('opus_ms', started);
       if (!audio) throw new Error('Could not encode the audio track');
     }
+    started = this.clock();
     const blob: Blob = muxWebM(this.chunks, {
       width: this.open.width, height: this.open.height, fps: this.fps, codecId: this.chosen!.id, audio,
     }, PM_VERSION);
-    return new Uint8Array(await blob.arrayBuffer());
+    this.elapsed('mux_ms', started);
+    started = this.clock();
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    this.elapsed('blob_ms', started);
+    return bytes;
   }
 
   close(): void {
@@ -175,6 +255,13 @@ function serve(port: MessagePort): void {
           reply({ type: 'ack', seq: command.seq });
           return;
         }
+        case 'videoSurface': {
+          const encode = encodes.get(command.id);
+          if (!encode) throw new Error('This export is not encoding.');
+          await encode.videoSurface(command.index, command.generation, command.poolIndex);
+          reply({ type: 'ack', seq: command.seq, rgba: encode.capture() });
+          return;
+        }
         case 'audio': {
           const encode = encodes.get(command.id);
           if (!encode) throw new Error('This export is not encoding.');
@@ -189,7 +276,7 @@ function serve(port: MessagePort): void {
           try {
             const bytes = await encode.finish();
             // Copied, not transferred: a MessagePortMain takes no transferred buffers.
-            reply({ type: 'file', seq: command.seq, bytes });
+            reply({ type: 'file', seq: command.seq, bytes, ...(encode.open.profile ? { profile: encode.timings } : {}) });
           } finally { encode.close(); }
           return;
         }

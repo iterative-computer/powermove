@@ -461,6 +461,35 @@ target are exact.
   on disk under a kept copy (the test fails with the stamp check removed); the
   parity corpus as above.
 
+### Channel memo
+
+Playback plans the same unchanged document at a new time each frame.
+`pm_eval`'s channel memo keeps what `PM.ev(L, key, T)` reads that does not
+depend on the time, per layer and channel, across those frames: the channel
+is falsy (`0`), static (`prop.v`), or a prepared temporal track (its value at
+`T - L.from`). It also keeps each layer's group ancestry and, when all eight
+channels it reads are static, a layer's local matrix. Anything else (an
+expression, a discrete or throwing track, a non-finite local time, channel
+hooks, pending expression errors) takes the ordinary path, which the memo
+mirrors read for read.
+
+- **Validity**: `pm_model::Document::edition`. Every constructor, clone, and
+  mutation (`apply*`, `resync`) takes a new process-unique edition, and the
+  document's fields are private, so no writer can change a node without one.
+  While the edition holds, a node address names one node with one content;
+  the memo drops every entry when the edition changes, and the first plan at
+  an edition only notes it (a document edited every frame pays nothing).
+- **Keys**: the layer node's address and the channel key, kept only for an
+  element of the evaluated composition's `layers` in the document the memo
+  was opened for (its root and revision), so nodes made during a plan never
+  reach it.
+- **Scope**: the renderer opens it around a frame's plan and closes it after
+  (`Renderer::set_channel_memo` turns it off).
+- **Tests** (`pm-render/tests/channel_memo.rs`): a renderer with the memo and
+  one without plan seeded sequences of times and edits of every input a
+  channel, an ancestry, or a local matrix reads; every plan identical, sampled
+  frames bit-identical (`PM_MEMO_FUZZ` lengthens it).
+
 `compose_bench` on the 500-layer project, a drag of one solid layer every frame
 (p50 ms, load 10 to 15; `PM_BENCH_LAYER=<n>` picks the n-th solid of the
 composition's list; the last column is the top-level draws the frame did not

@@ -40,6 +40,7 @@ pub mod address;
 pub mod anchor;
 pub mod bounds;
 pub mod captions;
+mod channel_memo;
 pub mod comp;
 pub mod easing;
 pub mod evaluator;

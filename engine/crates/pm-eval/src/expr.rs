@@ -169,7 +169,7 @@ impl<'a> ExprContext<'a> {
             return Err("comp.layers?.find is not a function".into());
         };
         let id = JsValue::String(layer_id.clone());
-        for item in items {
+        for item in items.iter() {
             if node::is_nullish(Some(item)) {
                 let base = if matches!(item.kind(), NodeKind::Null) {
                     "null"
@@ -270,7 +270,7 @@ impl<'a> ExprContext<'a> {
                 }
                 _ => return Err("prop.kf.map is not a function".into()),
             };
-            for k in items {
+            for k in items.iter() {
                 if node::is_nullish(Some(k)) {
                     return Err("Cannot read properties of null (reading 't')".into());
                 }

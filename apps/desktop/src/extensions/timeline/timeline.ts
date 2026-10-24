@@ -893,7 +893,15 @@ function buildHead(head: any) {
   }, undefined, headCleanups);
   const syncTime = () => {
     const text = api.util.tc(api.transport.time(), api.project.get().fps);
-    if (time.textContent !== text) time.textContent = text;
+    if (time.textContent === text) return;
+    /* Change the timecode's text node in place. Assigning textContent
+       replaces the node, and a child list change makes Chromium check the
+       page's :has() rules: on every playback and scrub frame that
+       invalidated the style of the whole document (1,236 elements, about
+       4 to 7 ms), which the draw's size read below then forced. */
+    const node = time.firstChild;
+    if (node && node === time.lastChild && node.nodeType === Node.TEXT_NODE && text) (node as Text).data = text;
+    else time.textContent = text;
   };
   const syncTransport = () => {
     /* Keep the icon node stable while playback frames update the timecode.

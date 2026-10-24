@@ -52,7 +52,8 @@ class FakePort implements PortLike {
 }
 
 /** An engine that welcomes, opens session 5, and acknowledges resyncs. */
-function engine(options: { refuseResync?: boolean | (() => boolean) } = {}): FakePort {
+function engine(options: { refuseResync?: boolean | (() => boolean); busyResyncs?: number; holdResync?: (message: Envelope, port: FakePort) => boolean } = {}): FakePort {
+  let busy = options.busyResyncs ?? 0;
   return new FakePort((message, port) => {
     const m = message.message;
     if (m.kind === 'hello') {
@@ -63,9 +64,12 @@ function engine(options: { refuseResync?: boolean | (() => boolean) } = {}): Fak
       const body = m.body as Request;
       if (body.type === 'openSession') queueMicrotask(() => port.deliver(envelope({ kind: 'response', id: m.id, body: { type: 'sessionOpened', session: 5 } } as never)));
       else if (body.type === 'resync') {
+        if (options.holdResync?.(message, port)) return;
         queueMicrotask(() =>
           port.deliver(
-            (typeof options.refuseResync === 'function' ? options.refuseResync() : options.refuseResync)
+            busy-- > 0
+              ? envelope({ kind: 'error', id: m.id, error: { code: 'budgetExceeded', scope: { kind: 'request', id: m.id }, message: 'reader busy', retry: { kind: 'after', ms: 1 }, detail: null } } as never)
+              : (typeof options.refuseResync === 'function' ? options.refuseResync() : options.refuseResync)
               ? envelope({ kind: 'error', id: m.id, error: { code: 'invalidMessage', scope: { kind: 'request', id: m.id }, message: 'no', retry: { kind: 'never' }, detail: null } } as never)
               : envelope({ kind: 'response', id: m.id, body: { type: 'patchesApplied', document: body.document, revision: body.revision } } as never, 5, body.revision)
           )
@@ -830,4 +834,151 @@ describe('the host clock', () => {
     expect(bestOffset([{ offsetUs: 1, rttUs: 5 }, { offsetUs: 2, rttUs: 1 }])).toEqual({ offsetUs: 2, rttUs: 1 });
     expect(clock.pageMs(clock.hostUs(10)!)).toBeCloseTo(10, 9);
   });
+});
+
+it('resumes a checkpoint and replays only the bounded patch suffix without taking a snapshot', async () => {
+  const { connection, port } = await connected();
+  const snapshot = vi.fn(() => ({ revision: 5, encoding: 'canonicalJsonV1' as const, json: '{"id":"P"}', hash: 'ab'.repeat(32) }));
+  const suffix: StreamBatch[] = [
+    { baseRevision: 3, revision: 4, origin: 'edit', count: 1, body: new Uint8Array([1]) },
+    { baseRevision: 4, revision: 5, origin: 'metadata', count: 1, body: new Uint8Array([2]) },
+  ];
+  const doc = { ...stream(), snapshot, resume: () => ({ revision: 3, hash: 'ab'.repeat(32), batches: suffix }) };
+  const session = new DocumentSession({ connection, stream: doc, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+  await session.start(); await flush();
+  expect(snapshot).not.toHaveBeenCalled();
+  const request = port.requests('resync')[0]!.message as any;
+  expect(request.body.source.body).toHaveLength(0);
+  expect(session.batches).toBe(2);
+  const patches = port.events('applyPatches').map(e => (e.message as any).body);
+  expect(patches.at(-1).revision).toBe(5);
+  session.close(); connection.close('test complete');
+});
+
+it.each(['refused', 'accepted'] as const)('replaces an obsolete blank resume with the prepared checkpoint when it is %s', async (answer) => {
+  let release!: () => void;
+  let paused!: () => void;
+  const firstResume = new Promise<void>((resolve) => { paused = resolve; });
+  let first = true;
+  const { connection, port } = await connected(engine({ holdResync(message, port) {
+    if (!first || message.message.kind !== 'request') return false;
+    first = false;
+    const request = message.message;
+    const body = request.body as Extract<Request, { type: 'resync' }>;
+    release = () => port.deliver(answer === 'refused'
+      ? envelope({ kind: 'error', id: request.id, error: { code: 'invalidMessage', scope: { kind: 'request', id: request.id }, message: 'blank checkpoint unavailable', retry: { kind: 'never' }, detail: null } } as never)
+      : envelope({ kind: 'response', id: request.id, body: { type: 'patchesApplied', document: body.document, revision: body.revision } } as never, 5, body.revision));
+    paused();
+    return true;
+  } }));
+  const doc = stream();
+  const snapshot = vi.fn(doc.snapshot);
+  let document = 'blank';
+  let checkpoint = { revision: 3, hash: 'ab'.repeat(32), batches: [] as StreamBatch[] };
+  const resume = vi.fn(() => checkpoint);
+  const session = new DocumentSession({ connection, stream: { ...doc, snapshot, resume }, documentId: () => document, log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+  try {
+    const starting = session.start();
+    await firstResume;
+    expect(port.requests('resync')).toHaveLength(1);
+    // Publishing the native project changes the stream while blank resume is
+    // paused. Its ready checkpoint must be read by the queued load attempt.
+    document = 'prepared';
+    checkpoint = { revision: 10, hash: 'cd'.repeat(32), batches: [] };
+    doc.emit({ revision: 10, origin: 'load' });
+    release();
+    await starting;
+    await flush();
+    expect(snapshot).not.toHaveBeenCalled();
+    expect(resume).toHaveBeenCalledTimes(2);
+    const requests = port.requests('resync').map((entry) => (entry.message as { body: Extract<Request, { type: 'resync' }> }).body);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ document: 'blank', revision: 3 });
+    expect(requests[1]).toMatchObject({ document: 'prepared', revision: 10, hash: hexBytes(checkpoint.hash) });
+    expect(requests.every((request) => request.source.kind === 'inline' && request.source.body.length === 0)).toBe(true);
+    expect(session.applied).toBe(10);
+    expect(session.resumes).toBe(1);
+    expect(session.failures).toEqual([]);
+  } finally { session.close(); connection.close('test complete'); }
+});
+
+it('falls back to the current snapshot when an unchanged checkpoint is refused', async () => {
+  const { connection, port } = await connected(engine({ refuseResync: true }));
+  const doc = stream();
+  const snapshot = vi.fn(doc.snapshot);
+  const session = new DocumentSession({ connection, stream: { ...doc, snapshot, resume: () => ({ revision: 3, hash: 'ab'.repeat(32), batches: [] }) }, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+  try {
+    await session.start();
+    expect(snapshot).toHaveBeenCalledOnce();
+    const requests = port.requests('resync').map((entry) => (entry.message as { body: Extract<Request, { type: 'resync' }> }).body);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]!.source).toMatchObject({ kind: 'inline', body: new Uint8Array() });
+    expect(requests[1]!.source).toMatchObject({ kind: 'inline', body: new TextEncoder().encode(doc.snapshot().json) });
+  } finally { session.close(); connection.close('test complete'); }
+});
+
+it('refreshes a refused native checkpoint without fetching or staging canonical JSON', async () => {
+  let first = true;
+  const { connection, port } = await connected(engine({ holdResync(message, port) {
+    if (!first || message.message.kind !== 'request') return false;
+    first = false;
+    const id = message.message.id;
+    queueMicrotask(() => port.deliver(envelope({ kind: 'error', id, error: { code: 'invalidMessage', scope: { kind: 'request', id }, message: 'expired', retry: { kind: 'never' }, detail: null } } as never)));
+    return true;
+  } }));
+  const doc = stream();
+  const snapshot = vi.fn(doc.snapshot), stage = vi.fn();
+  const old = { revision: 3, hash: 'ab'.repeat(32), batches: [] as StreamBatch[] };
+  const fresh = { revision: 5, hash: 'cd'.repeat(32), batches: [] as StreamBatch[] };
+  const refreshResume = vi.fn(async (force?: boolean) => force ? fresh : old);
+  const session = new DocumentSession({ connection, stream: { ...doc, snapshot, refreshResume }, stage, documentId: () => 'P', log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+  try {
+    await session.start();
+    expect(refreshResume.mock.calls).toEqual([[], [true]]);
+    expect(snapshot).not.toHaveBeenCalled(); expect(stage).not.toHaveBeenCalled();
+    const requests = port.requests('resync').map(entry => (entry.message as { body: any }).body);
+    expect(requests.map(request => request.revision)).toEqual([3, 5]);
+    expect(requests.every(request => request.source.body.length === 0)).toBe(true);
+    expect(session.applied).toBe(5);
+  } finally { session.close(); connection.close('test complete'); }
+});
+
+it('abandons a stale native refresh when another prepared document is published', async () => {
+  const { connection, port } = await connected();
+  const doc = stream(), snapshot = vi.fn(doc.snapshot);
+  let reject!: (error: Error) => void, entered!: () => void;
+  const pending = new Promise<void>(resolve => { entered = resolve; });
+  let document = 'old';
+  const refreshResume = vi.fn()
+    .mockImplementationOnce(() => { entered(); return new Promise((_resolve, fail) => { reject = fail; }); })
+    .mockResolvedValue({ revision: 10, hash: 'cd'.repeat(32), batches: [] });
+  const session = new DocumentSession({ connection, stream: { ...doc, snapshot, refreshResume }, documentId: () => document, log: () => {}, handlers: { message: () => {}, closed: () => {} } });
+  try {
+    const starting = session.start(); await pending;
+    document = 'replacement'; doc.emit({ revision: 10, origin: 'load' });
+    reject(new Error('The native document changed during checkpoint refresh'));
+    await starting; await flush();
+    expect(snapshot).not.toHaveBeenCalled();
+    expect(port.requests('resync')).toHaveLength(1);
+    expect((port.requests('resync')[0]!.message as { body: any }).body).toMatchObject({ document: 'replacement', revision: 10 });
+    expect(session.applied).toBe(10);
+    expect(session.failures).toEqual([]);
+  } finally { session.close(); connection.close('test complete'); }
+});
+
+it('waits out a busy document reader without snapshotting or staging again', async () => {
+  const { connection, port } = await connected(engine({ busyResyncs: 2 }));
+  const doc = stream();
+  const snapshot = vi.fn(doc.snapshot);
+  const stage = vi.fn(async (_session: number, bytes: Uint8Array) => ({ handle: 'f'.repeat(32), length: bytes.length }));
+  const session = new DocumentSession({ connection, stream: { ...doc, snapshot }, documentId: () => 'P', log: () => {}, stage, inlineLimit: 4, handlers: { message: () => {}, closed: () => {} } });
+  try {
+    await session.start();
+    expect(snapshot).toHaveBeenCalledOnce();
+    expect(stage).toHaveBeenCalledOnce();
+    expect(port.requests('resync')).toHaveLength(3);
+    expect(session.resyncs).toBe(1);
+    expect(session.applied).toBe(3);
+    expect(session.failures).toEqual([]);
+  } finally { session.close(); connection.close('test complete'); }
 });

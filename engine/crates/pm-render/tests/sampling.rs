@@ -9,7 +9,7 @@
 //!   during playback (trilinear), flicker energy at most 1.5× the
 //!   reference's.
 //! - Analytic coverage edges against the exact pixel-area coverage,
-//!   level 1 unchanged, continuous rasterization of level 2 precomps,
+//!   continuous rasterization of level 2 precomps,
 //!   regions and determinism.
 
 mod support;
@@ -651,27 +651,6 @@ fn level2_edges_are_the_exact_pixel_coverage() {
             assert!(worst < 1e-4, "rotation {rotation} {sampling:?}: {worst}");
         }
     }
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn level1_keeps_todays_sampling() {
-    let dir = scratch("level1_keeps_todays_sampling");
-    let path = dir.join("zone1.png");
-    write_rgb(&path, SOURCE, SOURCE, |x, y| {
-        zone(f64::from(x) + 0.5, f64::from(y) + 0.5)
-    });
-    let mut renderer = Renderer::headless().unwrap();
-    let (doc, resolver) = image_doc(&path, 1, 0.43, 17.0);
-    let mut request = RenderRequest::sized(Size::new(COMP, COMP), Precision::Float16);
-    let a = render(&mut renderer, &doc, &resolver, &request);
-    request.sampling = Sampling::Playback;
-    let b = render(&mut renderer, &doc, &resolver, &request);
-    assert_eq!(a, b, "level 1 ignores the resampler");
-    // A level 2 layer differs from it (mipmapped and filtered).
-    let (doc2, _) = image_doc(&path, 2, 0.43, 17.0);
-    request.sampling = Sampling::Final;
-    assert_ne!(render(&mut renderer, &doc2, &resolver, &request), a);
     let _ = std::fs::remove_dir_all(dir);
 }
 

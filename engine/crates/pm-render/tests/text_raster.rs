@@ -8,10 +8,8 @@
 //! Vello coverage, the float paint pass) and compared with the canvas the
 //! legacy code painted, as the compositor uploads it (premultiplied RGBA8).
 //!
-//! Gate: today's pixels exactly (amendment 22): every channel of every pixel
-//! within 1 code value of the capture. Refusals and any pixels beyond the
-//! bound fail, except the exact FONTS-R snapshots in fixtures/text-residuals.json.
-//! Regressions, new residuals and improvements with stale budgets fail. Reported besides:
+//! Gate: every channel of every pixel within 1 code value of the capture.
+//! Refusals and any pixels beyond the bound fail. Reported besides:
 //! SSIM (the mean of the four channels' maps, 11 × 11 Gaussian, σ = 1.5)
 //! over ink windows (pixels whose local mean alpha exceeds 1/512 in either
 //! image) and over the full canvas.
@@ -33,10 +31,7 @@
 //!   (`capture/transformed-project.ts`, then `source.ts --hide-layers`).
 //!
 //! Capture each with `pm-electron-lock bun engine/crates/pm-text/capture/...`.
-//! A full run (neither `PM_TEXT_RASTER` nor `PM_TEXT_ONLY`) on a machine
-//! with the corpus directory fails when any FONTS-R entry has no selected
-//! capture; without the corpus directory the test reports and passes
-//! vacuously. A narrowed run lists the entries it did not check.
+//! Without the corpus directory the test reports and passes vacuously.
 //!
 //! `PM_TEXT_ONLY=<prefix>` limits cases; `PM_TEXT_DIFFS=<dir>` writes
 //! reference / engine / difference PNGs of failing cases;
@@ -52,11 +47,8 @@ mod support;
 #[cfg(target_os = "macos")]
 fn main() {
     use std::path::PathBuf;
-    use support::text_residuals::{Gate, Ratchet};
     // `PM_TEXT_RASTER` names one capture (any set); otherwise the newest
     // capture of every set is gated.
-    let narrowed =
-        std::env::var_os("PM_TEXT_RASTER").is_some() || std::env::var_os("PM_TEXT_ONLY").is_some();
     let sets: Vec<PathBuf> = match std::env::var("PM_TEXT_RASTER") {
         Ok(p) => vec![PathBuf::from(p)],
         Err(_) => CAPTURE_SETS
@@ -70,37 +62,18 @@ fn main() {
             })
             .collect(),
     };
-    let mut ratchet = Ratchet::load();
-    let mut failed = 0;
-    for dir in &sets {
-        println!("\n== {}", dir.display());
-        failed += gate(dir, &mut ratchet);
-    }
-    // Every FONTS-R raster entry is measured by a full run: a missing or
-    // unselected capture cannot leave one unchecked.
-    let unmeasured = ratchet.unmeasured(Gate::Raster);
-    if narrowed {
-        if !unmeasured.is_empty() {
-            println!(
-                "\npartial run (PM_TEXT_RASTER or PM_TEXT_ONLY): {} FONTS-R entries not checked; this is not the gate",
-                unmeasured.len()
-            );
-        }
-    } else if support::corpus_root().is_none() {
-        eprintln!(
-            "no private corpus directory on this machine: text raster parity and FONTS-R not checked"
-        );
+    if sets.is_empty() && support::corpus_root().is_none() {
+        eprintln!("no private corpus directory on this machine: text raster parity not checked");
         return;
-    } else {
-        for line in &unmeasured {
-            println!("  FAILED {line}");
-        }
-        failed += unmeasured.len();
     }
-    assert!(
-        failed == 0,
-        "{failed} cases violate the strict 1-CV bound or FONTS-R ratchet, or were not measured"
-    );
+    let failed: usize = sets
+        .iter()
+        .map(|dir| {
+            println!("\n== {}", dir.display());
+            gate(dir)
+        })
+        .sum();
+    assert!(failed == 0, "{failed} cases violate the 1-CV bound");
 }
 
 /// The capture sets a full run gates, by directory prefix (newest of each).
@@ -113,16 +86,15 @@ const CAPTURE_SETS: [&str; 5] = [
     "text-transformed-",
 ];
 
-/// Strict 1-CV measurement plus the explicit FONTS-R snapshot ratchet.
+/// The 1-CV measurement of one capture set: the number of failed cases.
 #[cfg(target_os = "macos")]
-fn gate(dir: &std::path::Path, ratchet: &mut support::text_residuals::Ratchet) -> usize {
+fn gate(dir: &std::path::Path) -> usize {
     use pm_protocol::color::Precision;
     use pm_render::Renderer;
     use serde_json::{Value, json};
     use std::path::PathBuf;
     use support::doc::{layer, project};
     use support::text::{ink_ssim, png_rgba};
-    use support::text_residuals::{Key, Outcome};
 
     let cases: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("cases.json")).unwrap()).unwrap();
@@ -166,7 +138,6 @@ fn gate(dir: &std::path::Path, ratchet: &mut support::text_residuals::Ratchet) -
     let diffs = std::env::var("PM_TEXT_DIFFS").ok().map(PathBuf::from);
     let mut refused = 0;
     let mut exact = 0;
-    let mut ratcheted = 0;
     let mut rows = Vec::new();
     let mut failed = Vec::new();
     let started = std::time::Instant::now();
@@ -254,29 +225,17 @@ fn gate(dir: &std::path::Path, ratchet: &mut support::text_residuals::Ratchet) -
             max_diff = max_diff.max(d);
             off += usize::from(d > 1);
         }
-        let strict_pass = geometry.is_empty() && off == 0;
-        let decision = ratchet.check(Key::raster(id), off, max_diff);
-        let in_ratchet = matches!(&decision, Ok(Outcome::Ratcheted));
-        let pass = geometry.is_empty() && decision.is_ok();
-        let ratchet_error = decision.as_ref().err().cloned();
+        let pass = geometry.is_empty() && off == 0;
         exact += usize::from(off == 0);
-        ratcheted += usize::from(in_ratchet && geometry.is_empty());
         let line = format!(
             "{id:<26} {:>5}x{:<5} ink SSIM {ink:.4}  full {full:.4}  ink ratio {ratio:.3}  max Δ {max_diff:>3}  >1 CV {off:>6} {geometry}",
             cw, ch,
         );
-        let line = match &decision {
-            Ok(Outcome::Ratcheted) => format!("{line} [FONTS-R]"),
-            Err(error) => format!("{line} [{error}]"),
-            _ => line,
-        };
         println!("{line}");
-        // Keep review images for ratcheted residuals too.
-        let write_diff = !strict_pass;
         if !pass {
             failed.push(line);
         }
-        if write_diff && let Some(d) = &diffs {
+        if !pass && let Some(d) = &diffs {
             std::fs::create_dir_all(d).unwrap();
             let diff: Vec<u8> = reference
                 .chunks_exact(4)
@@ -302,19 +261,8 @@ fn gate(dir: &std::path::Path, ratchet: &mut support::text_residuals::Ratchet) -
             std::fs::write(d.join(format!("{id}.{cw}x{ch}.engine.rgba")), &ours).unwrap();
             std::fs::write(d.join(format!("{id}.{cw}x{ch}.legacy.rgba")), &reference).unwrap();
         }
-        rows.push(json!({"id": id, "group": case["group"], "inkSsim": ink, "fullSsim": full, "inkRatio": ratio, "maxDiff": max_diff, "over1": off, "pass": pass, "ratcheted": in_ratchet, "ratchetError": ratchet_error}));
+        rows.push(json!({"id": id, "group": case["group"], "inkSsim": ink, "fullSsim": full, "inkRatio": ratio, "maxDiff": max_diff, "over1": off, "pass": pass}));
     }
-    failed.extend(
-        ratchet.missing(
-            cases["cases"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|case| case["id"].as_str())
-                .filter(|id| only.as_deref().is_none_or(|prefix| id.starts_with(prefix)))
-                .map(Key::raster),
-        ),
-    );
     // Per group summary.
     let mut groups: std::collections::BTreeMap<String, (usize, f64, f64)> = Default::default();
     for r in &rows {
@@ -334,11 +282,10 @@ fn gate(dir: &std::path::Path, ratchet: &mut support::text_residuals::Ratchet) -
     }
     let stats = renderer.text_gpu().stats;
     println!(
-        "\n{} cases in {:.1} s; {} exact within 1 code value; {} FONTS-R ratcheted; {} refused (gaps); {} failed; pages {} (cpu {}); vello: {}",
+        "\n{} cases in {:.1} s; {} exact within 1 code value; {} refused (gaps); {} failed; pages {} (cpu {}); vello: {}",
         rows.len() + refused,
         started.elapsed().as_secs_f64(),
         exact,
-        ratcheted,
         refused,
         failed.len(),
         stats.pages,

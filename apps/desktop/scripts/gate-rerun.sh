@@ -13,7 +13,8 @@
 # never into the repository: playwright JSON results, native evaluator
 # reports, logs, and steps.tsv (step, start, end, load before, load after,
 # exit status). Harness summaries go where their scripts put them
-# (docs/engine/*-measurements/) under the tag $GATE_TAG (default regate).
+# (~/Library/Caches/powermove-engine/measurements/) under the tag $GATE_TAG
+# (default regate).
 set -u
 desktop="$(cd "$(dirname "$0")/.." && pwd)"
 repo="$(cd "$desktop/../.." && pwd)"

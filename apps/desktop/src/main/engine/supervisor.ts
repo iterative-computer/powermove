@@ -33,6 +33,7 @@ export type Launch = {
   /** The engine's status report, or null when it exits first or does not
    *  answer within `timeoutMs`. */
   report(timeoutMs?: number): Promise<unknown>;
+  documentKernel?(owner: number, request: string, bytes?: Uint8Array, flushDocumentUpdates?: boolean): Promise<string>;
 };
 
 export type SupervisorOptions = {
@@ -187,6 +188,8 @@ export class EngineSupervisor {
     const connection = new HostConnection(process, hostPort, port2, this.options.handler(launchRef), this.options.log);
     const reports = new Map<number, (value: unknown) => void>();
     let nextReport = 1;
+    const kernelCalls = new Map<number, (json: string) => void>();
+    let nextKernelCall = 1;
     const launch: Launch = {
       process,
       generation,
@@ -206,6 +209,14 @@ export class EngineSupervisor {
           });
           send({ type: 'status', id });
         }),
+      documentKernel: (owner, request, bytes, flushDocumentUpdates) => new Promise<string>((resolve) => {
+        const failed = JSON.stringify({ ok: false, code: 'unavailable', error: 'The document engine stopped.' });
+        if (exiting || this.child !== child) return resolve(failed);
+        const id = nextKernelCall++;
+        const timer = setTimeout(() => { kernelCalls.delete(id); resolve(JSON.stringify({ ok: false, code: 'unavailable', error: 'The document engine did not answer.' })); }, 30_000);
+        kernelCalls.set(id, json => { clearTimeout(timer); resolve(json); });
+        send({ type: 'documentKernel', id, owner, request, ...(bytes ? { bytes } : {}), ...(flushDocumentUpdates ? { flushDocumentUpdates: true } : {}) });
+      }),
       // Known once the process has spawned.
       get pid() {
         return child.pid;
@@ -219,7 +230,9 @@ export class EngineSupervisor {
     let fatal: string | null = null;
     child.on('message', (notice: unknown) => {
       if (!isEngineNotice(notice)) return;
-      if (notice.type === 'status') {
+      if (notice.type === 'documentKernel') {
+        const answer = kernelCalls.get(notice.id); kernelCalls.delete(notice.id); answer?.(notice.json);
+      } else if (notice.type === 'status') {
         const answer = reports.get(notice.id);
         reports.delete(notice.id);
         let value: unknown = null;
@@ -251,6 +264,8 @@ export class EngineSupervisor {
       exiting = true;
       for (const answer of reports.values()) answer(null);
       reports.clear();
+      for (const answer of kernelCalls.values()) answer(JSON.stringify({ ok: false, code: 'unavailable', error: 'The document engine stopped.' }));
+      kernelCalls.clear();
       controlPort.close();
       this.onExit(launch, code, fatal);
     });

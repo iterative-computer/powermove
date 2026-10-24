@@ -246,7 +246,7 @@ pub fn has_kf_array(node: Option<&Node>) -> bool {
     matches!(member(node, "kf").map(Node::kind), Some(NodeKind::Array(_)))
 }
 
-fn object_keys_in_js_order(map: &std::collections::BTreeMap<JsString, Node>) -> Vec<&JsString> {
+fn object_keys_in_js_order(map: &pm_model::json::ObjectMap<Node>) -> Vec<&JsString> {
     let mut integers: Vec<(usize, &JsString)> = Vec::new();
     let mut others: Vec<&JsString> = Vec::new();
     for key in map.keys() {

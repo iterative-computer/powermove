@@ -46,6 +46,15 @@ pub trait EncodeHost: Send {
     /// Frame `index`: top-down RGBA8, premultiplied (over black where
     /// transparent), `width × height × 4` bytes.
     fn video(&mut self, index: u64, rgba: Vec<u8>) -> Result<(), Error>;
+    /// GPU transport is negotiated by the desktop host at launch.
+    fn gpu_frames(&self) -> bool {
+        false
+    }
+    fn video_gpu(&mut self, _index: u64, _texture: &wgpu::Texture) -> Result<(), Error> {
+        Err(Error::Encode(
+            "the host has no GPU encoder transport".into(),
+        ))
+    }
     /// Interleaved samples of the mix, in order.
     fn audio(&mut self, interleaved: &[f32]) -> Result<(), Error>;
     /// Flushes the encoders and writes the muxed file to the destination.
@@ -109,6 +118,58 @@ fn canvas_bytes(frame: &WorkingFrame) -> Vec<u8> {
     out
 }
 
+/// The GPU encoder receives the whole texture; verification only reads the
+/// nine small, aligned blocks. Each block begins and ends on a 2×2 chroma
+/// boundary, so converting its crop yields exactly the same I420 samples as
+/// converting the entire frame before sampling that block.
+fn cropped_verification_blocks(
+    frame: &WorkingFrame,
+    index: u64,
+) -> Result<Vec<BlockSample>, Error> {
+    let regions = verify::block_regions(frame.width, frame.height);
+    // WebM validates even frame dimensions. Keep the original full-frame
+    // conversion if a malformed frame or future block placement crosses a
+    // 2×2 chroma boundary.
+    if !frame.width.is_multiple_of(2)
+        || !frame.height.is_multiple_of(2)
+        || frame.rgba.len() != frame.width as usize * frame.height as usize * 4
+        || regions.iter().any(|r| {
+            !r.x.is_multiple_of(2)
+                || !r.y.is_multiple_of(2)
+                || !r.width.is_multiple_of(2)
+                || !r.height.is_multiple_of(2)
+        })
+    {
+        let rgba = canvas_bytes(frame);
+        let input = crate::webm::canvas_rgba_to_i420(&rgba, frame.width, frame.height, false)?;
+        return Ok(verify::block_means(&input, index));
+    }
+    let mut blocks = Vec::new();
+    for region in regions {
+        let mut crop = Vec::with_capacity(region.width as usize * region.height as usize * 4);
+        for y in region.y..region.y + region.height {
+            let start = ((y as usize * frame.width as usize) + region.x as usize) * 4;
+            crop.extend_from_slice(&frame.rgba[start..start + region.width as usize * 4]);
+        }
+        let cropped = WorkingFrame {
+            width: region.width,
+            height: region.height,
+            rgba: &crop,
+        };
+        let rgba = canvas_bytes(&cropped);
+        let input = crate::webm::canvas_rgba_to_i420(&rgba, region.width, region.height, false)?;
+        // A region is at most 16×16, so its own grid has exactly one block.
+        let mut block = verify::block_means(&input, index)
+            .into_iter()
+            .next()
+            .expect("a nonempty verification crop has one block");
+        block.x = region.x;
+        block.y = region.y;
+        blocks.push(block);
+    }
+    Ok(blocks)
+}
+
 /// The sink: renders go to the host's encoders, then the file is verified.
 pub struct WebCodecsSink {
     host: Box<dyn EncodeHost>,
@@ -166,6 +227,29 @@ impl Drop for WebCodecsSink {
 impl Sink for WebCodecsSink {
     type Output = Delivered;
 
+    fn gpu_frames(&self) -> bool {
+        self.host.gpu_frames()
+    }
+
+    fn video_gpu(
+        &mut self,
+        index: u64,
+        texture: &wgpu::Texture,
+        frame: Option<&WorkingFrame>,
+    ) -> Result<(), Error> {
+        if self.sampled.contains(&index) {
+            let frame =
+                frame.ok_or_else(|| Error::InvalidFrame("missing verification sample".into()))?;
+            self.blocks
+                .extend(cropped_verification_blocks(frame, index)?);
+        }
+        // The GPU input capture is read from Chromium's actual encoder canvas,
+        // not a parallel CPU conversion of the working frame.
+        self.host
+            .video_gpu(index, texture)
+            .inspect_err(|_| self.close())
+    }
+
     fn video_rgba(&mut self, index: u64, frame: &WorkingFrame) -> Result<bool, Error> {
         let rgba = canvas_bytes(frame);
         if let Some(capture) = self.capture.as_mut() {
@@ -212,8 +296,11 @@ impl Sink for WebCodecsSink {
     }
 
     fn finish(mut self) -> Result<Delivered, Error> {
-        self.closed = true;
+        let started = std::time::Instant::now();
         self.host.finish()?;
+        self.closed = true;
+        let host_ms = started.elapsed().as_secs_f64() * 1e3;
+        let started = std::time::Instant::now();
         let path = self.spec.destination.clone();
         let mut report = crate::webm::verify_webm(
             &path,
@@ -221,6 +308,12 @@ impl Sink for WebCodecsSink {
             &std::mem::take(&mut self.blocks),
             self.audio_pushed,
         )?;
+        if std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1") {
+            eprintln!(
+                "[export timing] host_finish_ms={host_ms:.3} verify_ms={:.3}",
+                started.elapsed().as_secs_f64() * 1e3
+            );
+        }
         report.bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         Ok(Delivered { path, report })
     }
@@ -234,7 +327,7 @@ mod tests {
     #[derive(Default)]
     struct Log(Vec<String>);
 
-    struct Recorder(Arc<Mutex<Log>>);
+    struct Recorder(Arc<Mutex<Log>>, bool);
 
     impl EncodeHost for Recorder {
         fn open(&mut self, open: &EncodeOpen) -> Result<(), Error> {
@@ -265,7 +358,11 @@ mod tests {
         }
         fn finish(&mut self) -> Result<(), Error> {
             self.0.lock().unwrap().0.push("finish".into());
-            Ok(())
+            if self.1 {
+                Err(Error::Cancelled)
+            } else {
+                Ok(())
+            }
         }
         fn abort(&mut self) {
             self.0.lock().unwrap().0.push("abort".into());
@@ -299,7 +396,7 @@ mod tests {
         let log = Arc::new(Mutex::new(Log::default()));
         let s = spec(AlphaOutput::None);
         assert!(uses_host(&s));
-        let mut sink = WebCodecsSink::new(&s, Box::new(Recorder(log.clone()))).unwrap();
+        let mut sink = WebCodecsSink::new(&s, Box::new(Recorder(log.clone(), false))).unwrap();
         let rgba = [0.5f32, 0.25, 1.0, 1.0].repeat(16);
         let frame = WorkingFrame {
             rgba: &rgba,
@@ -324,6 +421,18 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_host_finish_aborts_the_open_encode_once() {
+        let log = Arc::new(Mutex::new(Log::default()));
+        let sink = WebCodecsSink::new(
+            &spec(AlphaOutput::None),
+            Box::new(Recorder(log.clone(), true)),
+        )
+        .unwrap();
+        assert!(matches!(sink.finish(), Err(Error::Cancelled)));
+        assert_eq!(log.lock().unwrap().0, ["open 4x4 2", "finish", "abort"]);
+    }
+
+    #[test]
     fn canvas_bytes_are_the_unorm_writes() {
         let rgba: Vec<f32> = (0..64 * 4)
             .map(|i| (i as f32 / 255.0) * 0.999 - 0.01)
@@ -337,13 +446,60 @@ mod tests {
     }
 
     #[test]
+    fn cropped_gpu_verification_matches_full_canvas_i420_blocks_exactly() {
+        // 2×2 has one block, 50×18 has an odd count of three, 18×34
+        // deduplicates placements, and the larger rectangles cover nine.
+        for (width, height, count) in [
+            (2, 2, 1),
+            (18, 34, 2),
+            (50, 18, 3),
+            (48, 70, 9),
+            (96, 64, 9),
+        ] {
+            let values = [
+                -0.25f32,
+                0.0,
+                0.5 / 255.0,
+                0.5,
+                127.5 / 255.0,
+                1.0,
+                1.25,
+                f32::NAN,
+            ];
+            let rgba: Vec<f32> = (0..width * height)
+                .flat_map(|i| {
+                    let x = i % width;
+                    let y = i / width;
+                    [
+                        values[((x * 3 + y * 5) as usize) % values.len()],
+                        values[((x * 7 + y * 11 + 3) as usize) % values.len()],
+                        values[((x * 13 + y * 17 + 5) as usize) % values.len()],
+                        [0.0, 0.125, 0.5, 1.0][((x + y * 3) % 4) as usize],
+                    ]
+                })
+                .collect();
+            let frame = WorkingFrame {
+                width,
+                height,
+                rgba: &rgba,
+            };
+            let full = canvas_bytes(&frame);
+            let full = crate::webm::canvas_rgba_to_i420(&full, width, height, false).unwrap();
+            let expected = verify::block_means(&full, 7);
+            assert_eq!(expected.len(), count, "{width}×{height} grid");
+            let actual = cropped_verification_blocks(&frame, 7).unwrap();
+            assert_eq!(actual, expected, "{width}×{height}");
+        }
+    }
+
+    #[test]
     fn alpha_and_new_files_keep_the_libvpx_sink() {
         assert!(!uses_host(&spec(AlphaOutput::Straight)));
         let mut s = spec(AlphaOutput::None);
         s.overwrite = Overwrite::Replace;
         assert!(!uses_host(&s));
         let log = Arc::new(Mutex::new(Log::default()));
-        assert!(WebCodecsSink::new(&s, Box::new(Recorder(log.clone()))).is_err());
+        assert!(WebCodecsSink::new(&s, Box::new(Recorder(log.clone(), false))).is_err());
         assert!(log.lock().unwrap().0.is_empty());
     }
 }

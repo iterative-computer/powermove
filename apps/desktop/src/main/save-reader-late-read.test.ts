@@ -48,7 +48,8 @@ it('does not rearm a closed reader timer when its in-flight native read returns'
   const pending = call(IPC.projectRead, { token: opened.token, offset: 0, length: bytes.length });
   try {
     await ready;
-    expect(vi.getTimerCount()).toBe(1);
+    // Idle expiry is suspended while a read is in flight.
+    expect(vi.getTimerCount()).toBe(0);
     await call(IPC.projectReadClose, opened.token);
     expect(handle.fd).toBe(-1);
     expect(vi.getTimerCount()).toBe(0);

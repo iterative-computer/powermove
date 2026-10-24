@@ -80,6 +80,15 @@ pub enum EncodeStep {
     /// premultiplied and over black where the picture is transparent (the
     /// compositor canvas's bytes).
     Video { index: Count, pixels: PixelPayload },
+    /// A completed BGRA8 IOSurface from the job engine's authenticated
+    /// export bridge. Five slots rotate with at most four earlier window
+    /// commands unanswered; before a slot is reused, Chromium has completed
+    /// its previous copy. The host may acknowledge earlier than that copy.
+    VideoSurface {
+        index: Count,
+        generation: u32,
+        pool_index: u32,
+    },
     /// The next interleaved little-endian `f32` samples of the mix.
     Audio { samples: Bytes },
     /// Flushes the encoders, muxes, and writes the output.
@@ -152,6 +161,13 @@ impl Validate for HostEncode {
                     )
                 }
             },
+            EncodeStep::VideoSurface {
+                generation,
+                pool_index,
+                ..
+            } => ensure(*generation > 0 && *pool_index < 5, c, || {
+                "invalid export surface slot".into()
+            }),
             EncodeStep::Audio { samples } => ensure(
                 !samples.0.is_empty()
                     && samples.0.len() <= MAX_AUDIO_BYTES
@@ -225,6 +241,27 @@ mod tests {
         assert!(audio(3841).validate().is_err(), "whole f32 samples");
         assert!(audio(0).validate().is_err());
         assert!(audio(MAX_AUDIO_BYTES + 4).validate().is_err());
+    }
+
+    #[test]
+    fn gpu_surface_steps_validate_and_round_trip() {
+        let surface = |generation, pool_index| HostEncode {
+            job: JobId::from("job-1"),
+            step: EncodeStep::VideoSurface {
+                index: Count::new(12).unwrap(),
+                generation,
+                pool_index,
+            },
+        };
+        assert!(surface(17, 4).validate().is_ok());
+        assert!(surface(0, 0).validate().is_err());
+        assert!(surface(17, 5).validate().is_err());
+        let value = surface(17, 2);
+        let bytes = rmp_serde::to_vec_named(&value).unwrap();
+        assert_eq!(rmp_serde::from_slice::<HostEncode>(&bytes).unwrap(), value);
+        let json = serde_json::to_value(value).unwrap();
+        assert_eq!(json["step"], "videoSurface");
+        assert_eq!(json["poolIndex"], 2);
     }
 
     #[test]

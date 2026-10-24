@@ -893,6 +893,7 @@ export class NativeApi {
   /** Drops every interned id (after the module is replaced). */
   reset(): void {
     this.generation += 1;
+    this.definitions.clear();
     this.props = new WeakMap();
     this.detached = new DetachedScopes();
     this.detachedProps = new WeakMap();
@@ -1042,7 +1043,7 @@ export class NativeApi {
         n = wasm.x.pm_ev(id, T);
         status = n === n ? 0 : wasm.x.pm_kind();
       }
-    } catch { wasm.dead = true; return MISS; }
+    } catch { if (!wasm.marksOwnFailures) wasm.dead = true; return MISS; }
     if ((status & 0x7f) !== 0) return MISS; // not a number, or a throw: ask the slow path
     this.stats.fastPath += 1;
     if (raw) {
@@ -1118,7 +1119,7 @@ export class NativeApi {
         const frame = entry.frame;
         if (rawProp.expr && frame && !frame.released && !entry.wasm.dead) {
           let status = -1;
-          try { status = this.expressionFrames.read(entry.wasm, frame, T, entry.revision); } catch { entry.wasm.dead = true; }
+          try { status = this.expressionFrames.read(entry.wasm, frame, T, entry.revision); } catch { if (!entry.wasm.marksOwnFailures) entry.wasm.dead = true; }
           if (status >= 0 && (status & 0x7f) === 0) {
             const value = this.expressionFrames.value;
             const message = (status & 0x80) ? entry.wasm.expressionError(entry.id) : null;
@@ -1598,35 +1599,53 @@ export class NativeApi {
     const proj = this.unwrap(this.PM.proj);
     if (!proj) return;
     const open = proj.compId ?? proj.id ?? '';
-    const visit = async (comp: any, address: string): Promise<void> => {
+    // Each question is a synchronous call to the utility. A project with
+    // hundreds of text layers asked them all in one task (1.4 s for the
+    // private PMV3 project, while its open was finishing): yield between
+    // layers, and stop if another project is shown meanwhile.
+    let slice = performance.now();
+    const pause = async (): Promise<boolean> => {
+      if (performance.now() - slice < 8) return true;
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      slice = performance.now();
+      return this.unwrap(this.PM.proj) === proj;
+    };
+    const visit = async (comp: any, address: string): Promise<boolean> => {
       const layers = Array.isArray(comp.layers) ? comp.layers : [];
       for (let index = 0; index < layers.length; index++) {
+        if (!await pause()) return false;
         const L = layers[index];
         if (L?.type !== 'text') continue;
-        // Visit every keyed time, including content/range font changes. The
-        // on-demand synchronous provider covers interpolated and expression faces.
+        // Visit every time the layer's text content keys a change, including
+        // content and range font changes. The on-demand synchronous provider
+        // covers interpolated and expression faces. Only the text's own
+        // members can change which faces it needs: transform properties
+        // (`p`), effects, and masks cannot, and a project baked to a key per
+        // frame (C1: 650 keys on seven properties of 62 text layers) made
+        // this ask pm-wasm for 50,000 layouts and their replies.
         const times = new Set<number>([Number(L.from) || 0]);
         const scan = (value: any) => {
           if (!value || typeof value !== 'object') return;
           if (Array.isArray(value.kf)) for (const key of value.kf) if (Number.isFinite(key.t)) times.add((Number(L.from) || 0) + key.t);
           for (const child of Object.values(value)) scan(child);
         };
-        scan(L);
+        for (const [key, value] of Object.entries(L)) if (key !== 'p' && key !== 'fx' && key !== 'masks') scan(value);
         for (const t of times) for (let round = 0; round < 6; round++) {
           const wasm = this.ready();
-          if (!wasm) return;
+          if (!wasm) return false;
           const ask = () => wasm.query({ op: 'textLayout', comp: address, open, layer: index, t });
           const reply: any = ask();
           if (!reply?.fonts) break;
           loader.resolve(wasm, ask, (r: any) => !!r?.fonts);
           await loader.whenIdle();
-          if (loader.disabled) return;
+          if (loader.disabled) return false;
         }
       }
       for (const child of Object.values(comp.comps ?? {})) {
         const address = this.address(proj, child);
-        if (address !== null) await visit(child, address);
+        if (address !== null && !await visit(child, address)) return false;
       }
+      return true;
     };
     await visit(proj, open);
   }

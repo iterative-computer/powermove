@@ -21,6 +21,7 @@ import { installHiddenCpu } from '../host/hidden-cpu';
  * With the flag off nothing here runs.
  */
 import type { PMRegistry } from '../legacy/registry';
+import { RemotePmWasm } from '../engine-doc/remote';
 import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { EngineBridge } from '../../../shared/engine-ipc';
 import { ENGINE_WINDOW_MESSAGE } from '../../../shared/engine-ipc';
@@ -28,6 +29,7 @@ import type { EngineViewerChannel, EngineViewerHandlers, EngineViewerService } f
 import type { ClockSample, FrameDescriptor } from '../../../shared/engine-protocol';
 import { EngineAudio, routeAudioPanels } from './audio';
 import { EngineConnection, type Log, type PortLike } from './connection';
+import { PortReconnector } from './reconnect';
 import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
 import { EngineRenderTransport, EngineSnapshotError } from './render-transport';
@@ -43,7 +45,6 @@ import { ViewerPresentation } from '../../../extensions/viewer/engine-present/pr
 import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
 import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
 import { SvgRasters } from './svg-rasters';
-import { BlenderPngs } from './blender-png';
 import { EngineTransport, ticks } from './transport';
 import { EnginePreview, documentWake } from './preview';
 import { EngineSceneMetadata } from './scene-metadata';
@@ -155,6 +156,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   hostClock.start();
   let connection: EngineConnection | null = null;
   let generation = 0;
+  let starting: { connection: EngineConnection; done: Promise<void>; finish(): void } | null = null;
   let connections = 0;
   const ready = new Set<() => void>();
   const sessions = new Set<DocumentSession>();
@@ -311,6 +313,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const snapshotSession = (): DocumentSession | null => current;
   /** Lazily opens a transport session for a snapshot, Play, or a viewer. */
   const openSession = (): DocumentSession | null => {
+    if (starting) return null;
     if (current && !current.closed) return current;
     const c = connection;
     if (!c?.ready || c.closed || !PM.EngineDoc?.enabled) return null;
@@ -393,9 +396,10 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     });
     return session;
   };
-  const wakeStandby = (): Promise<void> => {
+  const wakeStandby = async (): Promise<void> => {
+    while (starting) await starting.done;
     openSession();
-    return sessionReady ?? Promise.resolve();
+    await sessionReady;
   };
   let lastProducerFailure = -Infinity;
   const documentEncoder = new TextEncoder();
@@ -422,6 +426,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     // document to main's session for the window (main/engine/window-sessions.ts).
     windowDocument: () => {
       const doc = PM.EngineDoc;
+      const nativeDocument = doc?.ready && doc.wasm instanceof RemotePmWasm;
+      if (!nativeDocument && (starting || !connection?.ready || connection.closed)) return null;
       const barrier = doc?.barrier;
       if (!doc?.enabled || !barrier || typeof doc.snapshot !== 'function') return null;
       barrier.flush();
@@ -429,10 +435,12 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       return {
         id: documentId(PM.proj?.id),
         revision: barrier.revision,
+        ...(doc.wasm instanceof RemotePmWasm ? { nativeKernel: true as const } : {}),
         full: () => {
+          if (doc.wasm instanceof RemotePmWasm) throw new Error('Native snapshots use the owner-scoped document reference');
           const snapshot = doc.snapshot();
           if (!snapshot) throw new Error('the document mirror has no snapshot');
-          return { json: documentEncoder.encode(snapshot.json), hash: snapshot.hash, revision: snapshot.revision };
+          return { json: snapshot.bytes ?? documentEncoder.encode(snapshot.json), hash: snapshot.hash, revision: snapshot.revision };
         }
       };
     },
@@ -475,8 +483,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // The job engine's export and agent frames ask this window for the SVG
   // rasters of the document it has open (main's `compatFrame`).
   const unprovideSvg = renderTransport.provideCompat('svgImage', (request) => svgRasters.produce(request));
-  const blenderPngs=new BlenderPngs({meta:id=>(PM as any).proj.assets[id]??null,blob:meta=>(PM as any).MediaStore.get(meta),image:id=>PM.assets.get(id),canvas:()=>document.createElement('canvas'),decode:blob=>createImageBitmap(blob)});
-  const unprovideBlenderPng=renderTransport.provideCompat('blenderPng',request=>blenderPngs.produce(request));
   (PM as any).EngineSvgRasters = svgRasters;
   // The app's own still captures (the Library's section thumbnails, the
   // agent's look and observe) draw through the engine too: with the new
@@ -496,26 +502,59 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     wasPlaying = playing;
   });
 
+  // A connection that closes while its launch lives gets no new port from
+  // main (reconnect.ts): ask for one, with the supervisor's backoff, so the
+  // window's sessions reopen and resync.
+  const reconnector = new PortReconnector(() => {
+    log('info', 'asking main for a new interactive engine port');
+    native.requestPorts?.();
+  }, () => !!connection && !connection.closed);
+
   async function connect(nextGeneration: number, port: PortLike): Promise<void> {
     pendingCompatFrames.clear();
-    connection?.close('a new interactive engine launch');
+    // The old connection is replaced, not lost: its close asks for nothing.
+    const replaced = connection;
+    starting?.finish();
+    starting = null;
+    connection = null;
+    replaced?.close('a new interactive engine launch');
+    reconnector.portArrived();
     const next = new EngineConnection(nextGeneration, port, log);
     connection = next;
+    let finish!: () => void;
+    const startup = { connection: next, done: new Promise<void>(resolve => { finish = resolve; }), finish: () => finish() };
+    starting = startup;
     generation = nextGeneration;
     next.onClose((reason) => {
-      if (connection === next) connection = null;
-      log('info', `the interactive engine connection closed (${reason})`);
+      const current = connection === next;
+      if (current) {
+        connection = null;
+        if (starting === startup) { starting = null; startup.finish(); }
+      }
+      log(current ? 'warn' : 'info', `the interactive engine connection closed (${reason})`);
       transport.refresh();
+      if (current) reconnector.closed();
     });
     try {
       await next.open();
+      if (connection !== next) return;
+      // A fresh utility generation has lost its evaluator tree. Restore it
+      // before any ready listener, viewer, or transport can open a session.
+      const doc = PM.EngineDoc as typeof PM.EngineDoc & { reconnect?(generation: number): Promise<void> };
+      await doc?.reconnect?.(nextGeneration);
     } catch (error) {
-      log('warn', `the interactive engine did not connect: ${error instanceof Error ? error.message : String(error)}`);
-      next.close('handshake failed');
+      if (connection === next) {
+        log('warn', `the interactive engine did not connect: ${error instanceof Error ? error.message : String(error)}`);
+        next.close('document recovery or handshake failed');
+      }
       return;
+    } finally {
+      startup.finish();
     }
     if (connection !== next) return;
+    if (starting === startup) starting = null;
     connections++;
+    reconnector.opened();
     if (connections === 1) performance.mark?.('powermove:engine-connected');
     void hostClock.measure();
     log('info', `connected to the interactive engine (launch ${nextGeneration})`);
@@ -700,7 +739,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       return () => clockListeners.delete(listener);
     },
     status: () => ({
-      connected: !!connection?.ready && !connection.closed,
+      connected: !starting && !!connection?.ready && !connection.closed,
       generation,
       connections,
       sessions: sessions.size,
@@ -717,6 +756,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       clock: current?.clock ?? null
     }),
     dispose: () => {
+      reconnector.dispose();
       offCompatSurface();
       pendingCompatFrames.clear();
       preview.dispose();
@@ -729,7 +769,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offAssets();
       follower.dispose();
       unprovideSvg();
-      unprovideBlenderPng();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
@@ -754,6 +793,8 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       if ((PM as any).EngineCanvas === canvasBinding) (PM as any).EngineCanvas = null;
       connection?.close('the engine connection was removed');
       connection = null;
+      starting?.finish();
+      starting = null;
       hostClock.stop();
     }
   };

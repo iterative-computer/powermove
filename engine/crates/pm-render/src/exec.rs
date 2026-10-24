@@ -129,6 +129,60 @@ pub(crate) struct Exec<'a> {
     pub pyramids: &'a mut crate::sampling::gpu::PyramidCache,
     pub failures: Vec<LayerFailure>,
     pub unsupported: Vec<Unsupported>,
+    /// Nested compositions of this frame's plan whose plans are equal
+    /// ([`comp_twins`]): (a later one, the first), by plan address.
+    pub twins: Vec<(usize, usize)>,
+    /// Targets of the first of such compositions this frame rendered
+    /// (`resolve_content`): a composition drawn twice with the same plan (a
+    /// precomp used by two layers at one time) samples one target. An entry
+    /// lives as long as its target is in `taken` (a motion-blur sample gives
+    /// its targets back early and drops its entries).
+    pub comps: Vec<RenderedComp>,
+}
+
+/// A nested composition's target this frame, by its plan's address.
+pub(crate) struct RenderedComp {
+    first: usize,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+/// The nested compositions (not group passes) of `plan` whose plans equal an
+/// earlier one's: (its address, the earlier one's). The addresses are
+/// identities within the plan, which outlives the frame's `Exec`; they are
+/// never read through.
+pub(crate) fn comp_twins(plan: &CompPlan) -> Vec<(usize, usize)> {
+    fn content<'p>(c: &'p Content, out: &mut Vec<&'p CompPlan>) {
+        match c {
+            Content::Placed(p) => content(&p.content, out),
+            Content::Texture { source: Source::Comp(child), .. } => {
+                if !child.group {
+                    out.push(child);
+                }
+                walk(child, out);
+            }
+            Content::Texture { source: Source::Accumulate(child), .. } => walk(child, out),
+            _ => {}
+        }
+    }
+    fn walk<'p>(plan: &'p CompPlan, out: &mut Vec<&'p CompPlan>) {
+        for d in &plan.draws {
+            content(&d.content, out);
+        }
+    }
+    let mut comps = Vec::new();
+    walk(plan, &mut comps);
+    let mut twins = Vec::new();
+    for (j, later) in comps.iter().enumerate() {
+        if let Some(first) = comps[..j].iter().find(|first| ***first == **later) {
+            twins.push((plan_address(later), plan_address(first)));
+        }
+    }
+    twins
+}
+
+fn plan_address(plan: &CompPlan) -> usize {
+    std::ptr::from_ref(plan) as usize
 }
 
 /// `m3(M)`: a 2×3 matrix as the column-major mat3 uniform, in f32.
@@ -257,17 +311,62 @@ impl Exec<'_> {
                         // the region, drawn 1:1.
                         let group = child.group;
                         let child_region = if group { region } else { None };
+                        // The same composition planned the same way earlier
+                        // in this frame: its target holds exactly the pixels
+                        // rendering it again would draw (never a group pass:
+                        // `comp_twins` lists nested compositions only).
+                        let accumulate = matches!(source, Source::Accumulate(_));
+                        let address = plan_address(child);
+                        if !accumulate
+                            && !self.depth_id
+                            && let Some(&(_, first)) =
+                                self.twins.iter().find(|(later, _)| *later == address)
+                            && let Some(kept) = self.comps.iter().find(|c| c.first == first)
+                        {
+                            let texture = kept.texture.clone();
+                            r.view = Some(kept.view.clone());
+                            self.prepare_level2(encoder, r, &texture, false);
+                            r.from_fbo = true;
+                            return;
+                        }
                         let (w, h) = match child_region {
                             Some(g) => (g.width, g.height),
                             None => (child.width, child.height),
                         };
                         let target = self.pool.take_working(self.device, w, h, self.precision);
-                        let inner = if matches!(source, Source::Accumulate(_)) {
+                        // What the render reported: a render that failed a
+                        // layer, met something unsupported, or waits for
+                        // fallback pixels is not given to a second use.
+                        let reported = (
+                            self.failures.len(),
+                            self.unsupported.len(),
+                            self.fallback_pending.len(),
+                            self.effects.fallback.pending.len(),
+                        );
+                        let inner = if accumulate {
                             self.render_accumulation(encoder, child, child_region, &target);
                             Vec::new()
                         } else {
                             self.render_comp(encoder, child, child_region, &target)
                         };
+                        if !accumulate
+                            && !self.depth_id
+                            && !group
+                            && self.twins.iter().any(|(_, first)| *first == address)
+                            && reported
+                                == (
+                                    self.failures.len(),
+                                    self.unsupported.len(),
+                                    self.fallback_pending.len(),
+                                    self.effects.fallback.pending.len(),
+                                )
+                        {
+                            self.comps.push(RenderedComp {
+                                first: address,
+                                texture: target.texture.clone(),
+                                view: target.view.clone(),
+                            });
+                        }
                         r.view = Some(target.view.clone());
                         self.prepare_level2(encoder, r, &target.texture, false);
                         r.from_fbo = true;
@@ -433,18 +532,6 @@ impl Exec<'_> {
                         ));
                         r.encoded = true;
                     }
-                    Source::Blender(blender) => {
-                        r.view = Some(crate::blender::gpu::upload(
-                            self.device,
-                            self.queue,
-                            &blender.surface,
-                            self.precision,
-                            blender.compatibility,
-                        ));
-                        // Premultiplied E like the native 3D output: linear
-                        // light decodes it (section 9).
-                        r.encoded = true;
-                    }
                     Source::Shader(shader) => match self.shader_source(encoder, shader) {
                         Ok((target, pooled)) => {
                             // Level 2 shader output is resampled.
@@ -584,6 +671,7 @@ impl Exec<'_> {
         }
         for (i, draw) in plan.draws.iter().enumerate() {
             let mark = self.taken.len();
+            let comps = self.comps.len();
             self.render_draws(
                 encoder,
                 plan,
@@ -597,6 +685,10 @@ impl Exec<'_> {
             for t in done {
                 self.pool.give(t);
             }
+            // Compositions rendered for this sample lived in those targets,
+            // which the pool hands out again: they are no longer there to
+            // share.
+            self.comps.truncate(comps);
         }
     }
 

@@ -296,6 +296,17 @@ of the canonical project form, as 64 lowercase hex digits, and equals
 `tests/vectors/canonical-vectors.json`). The production consistency check
 (invariant 5) compares the two.
 
+### Incremental local integrity checks (2026-10-21)
+
+The canonical wire hash above is unchanged. The renderer's local check first
+compares live JSON semantics with its shadow (retained raw aliases included),
+then compares independent JS/Rust integrity digests of the shadow and pm-wasm.
+Changed containers invalidate ancestor digests; unchanged subtrees reuse them.
+Channels and bulk non-id arrays are hashed together to avoid one tiny hash per
+baked keyframe. `docs/engine/write-path.md` specifies this local encoding and its
+cache bounds. Protocol `ConsistencyCheck` and resync still carry canonical
+SHA-256, and a local mismatch still forces a checked canonical resync.
+
 ### The identity registry (Phase 1, `pm-wasm`)
 
 Specified by the renderer write path (`docs/engine/write-path.md`,

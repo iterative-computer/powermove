@@ -149,15 +149,6 @@ pub fn bool_keys(points: &[(f64, bool)]) -> String {
     )
 }
 
-pub struct LayerSpec<'a> {
-    pub id: &'a str,
-    pub ty: &'a str,
-    pub from: f64,
-    pub dur: f64,
-    pub d: String,
-    pub extra: String,
-}
-
 pub fn layer(id: &str, ty: &str, from: f64, dur: f64, d: &str, extra: &str) -> String {
     format!(
         r#"{{"id":"{id}","type":"{ty}","name":"{id}","from":{from},"dur":{dur},"on":true,"solo":false,"group":null,"parent":null,"p":{{}},"fx":[],"masks":[],"d":{d}{extra}}}"#

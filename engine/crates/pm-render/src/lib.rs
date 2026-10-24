@@ -22,7 +22,6 @@
 //!   Cube included), and the decision 19 fallback runner.
 
 pub mod assets;
-pub mod blender;
 pub mod capability;
 pub mod compat;
 pub mod compat_crop;

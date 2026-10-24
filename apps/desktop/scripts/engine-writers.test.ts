@@ -11,12 +11,12 @@ const lines = (...source: string[]) => source.join('\n');
 const summary = (entries: Entry[]) => entries.map(entry => `${entry.line} ${entry.class}`).sort();
 
 describe('engine writer inventory', () => {
-  it('matches the checked-in docs/engine/writers.json', async () => {
+  it('matches the checked-in engine-writers.json', async () => {
     const current = serialize(await collectWriters());
     const snapshot = await readFile(SNAPSHOT, 'utf8');
     // On failure: run `node scripts/engine-writers.mjs --write` from the repository
     // root, then review every new or moved writer and its class before committing.
-    expect(current, 'docs/engine/writers.json is stale; regenerate it with node scripts/engine-writers.mjs --write').toBe(snapshot);
+    expect(current, 'apps/desktop/scripts/engine-writers.json is stale; regenerate it with node scripts/engine-writers.mjs --write').toBe(snapshot);
   }, 60_000);
 
   it('classifies history entry points, touches, and direct writes', async () => {

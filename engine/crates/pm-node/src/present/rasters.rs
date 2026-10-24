@@ -608,7 +608,9 @@ mod tests {
 
     fn replace(revision: u64, title: &str) -> DocumentUpdate {
         DocumentUpdate::Replace {
-            root: doc(revision, title).to_value().map(Arc::new),
+            root: doc(revision, title)
+                .to_value()
+                .map(|value| pm_model::Node::from_value(value, revision)),
             revision: Revision::new(revision).unwrap(),
         }
     }

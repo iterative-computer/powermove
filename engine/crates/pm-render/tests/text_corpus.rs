@@ -4,11 +4,9 @@
 //! and compared with the capture's opaque frame.
 //!
 //! Classes: the *text pixels* are those our frame changes when its text and
-//! captions layers are hidden (opacity 0), grown by 3 pixels. Text matches
-//! today exactly (amendment 22): every text pixel within 2 code values of
-//! the capture. The exact FONTS-R snapshots are ratcheted separately; new or
-//! regressed residuals, and stale budgets after improvements, fail. SSIM over the text
-//! pixels is reported. Every other pixel keeps the Standard
+//! captions layers are hidden (opacity 0), grown by 3 pixels. Every text
+//! pixel is within 2 code values of the capture. SSIM over the text pixels
+//! is reported. Every other pixel keeps the Standard
 //! class (≤ 1 CV for 99.9%, ≤ 4 for any). `tests/corpus.rs` leaves these
 //! projects to this test.
 //!
@@ -53,7 +51,6 @@ fn main() {
     use pm_protocol::common::Size;
     use pm_render::parity::{dilate, ssim_map};
     use pm_render::{RenderRequest, Renderer};
-    use support::text_residuals::{Gate, Key, Outcome, Ratchet};
     use support::*;
 
     let narrowed = std::env::var_os("PM_ENGINE_CORPUS").is_some()
@@ -75,9 +72,6 @@ fn main() {
     // Projects compared in full or in isolation, by name.
     let mut covered = std::collections::BTreeSet::new();
     let mut exact = 0;
-    let mut ratcheted = 0;
-    let mut ratchet = Ratchet::load();
-    let mut expected = Vec::new();
     let mut level2 = text::Level2Routes::new();
     if captures.is_empty() && (narrowed || corpus_root().is_none()) {
         eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
@@ -150,13 +144,6 @@ fn main() {
             // at level 1): it is judged by the semantic gate, after the
             // routing check below, and never against this capture.
             let level2 = level2.route(&format!("{}{tag}", p.name), &p.name, &p.document);
-            if !level2 {
-                expected.extend(
-                    p.samples
-                        .iter()
-                        .map(|sample| Key::corpus(&p.name, in_isolation, sample.time)),
-                );
-            }
             if !level2 && !p.missing_media.is_empty() {
                 skipped.push((
                     format!("{}{tag}", p.name),
@@ -287,11 +274,7 @@ fn main() {
                 let rest_ok = !rest.contains(&true) || d.passes();
                 compared += 1;
                 covered.insert(p.name.clone());
-                let decision =
-                    ratchet.check(Key::corpus(&p.name, in_isolation, s.time), over2, tmax);
-                let text_ok = decision.is_ok();
                 exact += usize::from(over2 == 0);
-                ratcheted += usize::from(matches!(&decision, Ok(Outcome::Ratcheted)) && rest_ok);
                 let line = format!(
                     "{:<44} t={:<6} text px {:>7} SSIM {:.4} >2 CV {:>6} max {:>3} | rest ≤1 {:>7.3}% max {}",
                     format!("{}{tag}", p.name),
@@ -303,13 +286,8 @@ fn main() {
                     100.0 * d.fraction_within_one(),
                     d.max
                 );
-                let line = match &decision {
-                    Ok(Outcome::Ratcheted) => format!("{line} [FONTS-R]"),
-                    Err(error) => format!("{line} [{error}]"),
-                    _ => line,
-                };
                 println!("{line}");
-                let fails = !text_ok || !rest_ok;
+                let fails = over2 > 0 || !rest_ok;
                 if fails {
                     failed.push(line);
                 }
@@ -364,22 +342,8 @@ fn main() {
     }
     level2.report();
     failed.extend(level2.failures());
-    failed.extend(ratchet.missing(expected));
-    // A full run measures every FONTS-R corpus entry: a missing or
-    // unselected capture cannot leave one unchecked.
-    let unmeasured = ratchet.unmeasured(Gate::Corpus);
-    if narrowed {
-        if !unmeasured.is_empty() {
-            println!(
-                "\npartial run (PM_ENGINE_CORPUS or PM_TEXT_ONLY): {} FONTS-R entries not checked; this is not the gate",
-                unmeasured.len()
-            );
-        }
-    } else {
-        failed.extend(unmeasured);
-    }
     println!(
-        "\ncompared {compared} frames ({exact} exact within 2 code values, {ratcheted} FONTS-R ratcheted); {} failed",
+        "\ncompared {compared} frames ({exact} exact within 2 code values); {} failed",
         failed.len()
     );
     for f in &failed {
@@ -387,7 +351,7 @@ fn main() {
     }
     assert!(
         failed.is_empty(),
-        "{} frames violate the text class or FONTS-R ratchet",
+        "{} frames violate the text class",
         failed.len()
     );
 }

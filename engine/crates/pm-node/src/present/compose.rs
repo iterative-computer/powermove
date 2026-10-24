@@ -375,8 +375,6 @@ pub struct Composer {
     /// each view keeps its own programs and watchdog state, so views
     /// sharing the device never reset each other's.
     parked: HashMap<u64, (Effects, Option<(usize, u64)>)>,
-    /// How the next frames treat Blender compositions (`set_blender`).
-    blender: pm_render::blender::BlenderRender,
 }
 
 fn owner_hash(owner: impl std::hash::Hash) -> u64 {
@@ -528,7 +526,6 @@ impl Composer {
             canvas_layout,
             definitions: None,
             parked: HashMap::new(),
-            blender: pm_render::blender::BlenderRender::Native,
             playing: false,
             draw_reuse: true,
         }
@@ -674,12 +671,6 @@ impl Composer {
     /// Whether the next frames are playback frames (timed) or paused ones.
     pub fn set_playing(&mut self, playing: bool) {
         self.playing = playing;
-    }
-
-    /// Blender in the next frames: native shading, or the paused viewer's
-    /// Blender previews (`super::blender`).
-    pub fn set_blender(&mut self, blender: pm_render::blender::BlenderRender) {
-        self.blender = blender;
     }
 
     /// Places the rendered region (`source`) where `place` puts it in a
@@ -886,9 +877,8 @@ impl Composer {
                 background: true,
                 export: false,
                 // The viewer's override: editor camera, Wireframe and
-                // X-ray looks, Local View, and the shading Blender uses.
+                // X-ray looks, Local View, and shading.
                 view: state.view.clone(),
-                blender: self.blender.clone(),
                 // Today's viewer: 6 samples while playing, 12 when paused;
                 // the playback resampler while playing.
                 motion_blur: pm_render::motion::MotionBlur::Kind(if self.playing {

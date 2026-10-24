@@ -29,7 +29,7 @@ overwrite policy, and file mode (agent exports use `0o600`).
 | ProRes 4444, 4444 XQ | `y416` | 12-bit 16..4079 (256..65264); alpha full range | 16 units | off (opt-in) |
 | H.264 High | `420v` | 8-bit 1..254 | 1 code | on |
 
-`convert.rs` is S2's prototype pass (`engine/spikes/s2-precision/src/pipeline.wgsl`) in
+`convert.rs` is S2's prototype pass (`docs/engine/spikes/S2.md`) in
 f64 on the CPU: Rec.709 matrix, co-sited point decimation for 4:2:2, type-0 siting with
 a two-tap vertical average for 4:2:0, round half to even (WGSL `round`), then
 clipping. Opaque outputs take premultiplied values (over black); straight alpha

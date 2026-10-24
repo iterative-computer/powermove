@@ -107,7 +107,7 @@ themes.
   - a differing edge pixel (3×3 span above 8 levels) must be, per channel,
     no further than today's from the engine's 4× supersampled render of the
     same pin.
-- Editor-view cards currently fail that rule (quality ledger C3-Q2, owned by
+- Editor-view cards currently fail that rule (quality ledger, "3D Library cards"; owned by
   the 3D lane).
 
 `e2e/consumer-matrix.spec.ts` covers C1, C2, C17 and C21, and `mixer.spec.ts`
