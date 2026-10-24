@@ -417,7 +417,8 @@ fn accumulation_counts_covered_samples() {
     ] {
         let doc = slider(true, None, color_depth);
         for n in [1u32, 4, 7, 16, 20] {
-            let tolerance = per_sample * f64::from(n);
+            // Plus the analytic coverage's f32 arithmetic (within 2e-6).
+            let tolerance = per_sample * f64::from(n) + 2e-6;
             let mut request = RenderRequest::sized(Size::new(160, 40), precision);
             request.motion_blur = MotionBlur::Samples(n);
             let frame = renderer
@@ -427,17 +428,17 @@ fn accumulation_counts_covered_samples() {
             assert_eq!(frame.color.format(), format);
             let rgba = renderer.read_rgba(&frame).unwrap();
             for x in 0..160usize {
-                // The rasterizer covers a pixel center when it lies in
-                // [left, left + 20).
-                let center = x as f64 + 0.5;
-                let covered = (0..n)
-                    .filter(|&s| {
+                // Each sample covers the part of the pixel [x, x + 1) that
+                // lies in [left, left + 20).
+                let px = x as f64;
+                let covered: f64 = (0..n)
+                    .map(|s| {
                         let ts = t + pm_render::motion::sample_offset(s, n, 0.5, 30.0);
                         let left = 0.3 + 300.0 * ts;
-                        left <= center && center < left + 20.0
+                        ((left + 20.0).min(px + 1.0) - left.max(px)).max(0.0)
                     })
-                    .count();
-                let want = covered as f64 / f64::from(n);
+                    .sum();
+                let want = covered / f64::from(n);
                 let px = &rgba[(20 * 160 + x) * 4..(20 * 160 + x) * 4 + 4];
                 for (c, v) in px.iter().enumerate() {
                     assert!(
@@ -639,26 +640,40 @@ fn planes_cover_what_their_homography_covers() {
     };
     let plane = placed.plane.expect("a plane");
     let rgba = render(&mut renderer, &doc, 0.0, &request);
-    let mut inside = 0;
+    let (mut inside, mut partial) = (0, 0);
     for y in 0..120usize {
         for x in 0..200usize {
-            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
             let a = rgba[(y * 200 + x) * 4 + 3];
-            match unproject(&plane, px, py) {
-                Some((u, v)) => {
-                    let margin = 1e-3;
-                    if u > margin && u < 1.0 - margin && v > margin && v < 1.0 - margin {
-                        assert_eq!(a, 1.0, "inside at {x},{y} (u {u} v {v})");
-                        inside += 1;
-                    } else if u < -margin || u > 1.0 + margin || v < -margin || v > 1.0 + margin {
-                        assert_eq!(a, 0.0, "outside at {x},{y}");
-                    }
-                }
-                None => assert_eq!(a, 0.0, "behind the camera at {x},{y}"),
+            // The pixel square's corners on the plane: a pixel wholly on
+            // the plane is covered, one wholly off it is not, and one on its
+            // edge is partly covered.
+            let corners: Vec<Option<(f64, f64)>> = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+                .iter()
+                .map(|(dx, dy)| unproject(&plane, x as f64 + dx, y as f64 + dy))
+                .collect();
+            let margin = 1e-3;
+            let all_in = corners.iter().all(|c| {
+                c.is_some_and(|(u, v)| u > margin && u < 1.0 - margin && v > margin && v < 1.0 - margin)
+            });
+            let off = |f: &dyn Fn(f64, f64) -> bool| corners.iter().all(|c| c.is_some_and(|(u, v)| f(u, v)));
+            let all_out = off(&|u, _| u < -margin)
+                || off(&|u, _| u > 1.0 + margin)
+                || off(&|_, v| v < -margin)
+                || off(&|_, v| v > 1.0 + margin)
+                || corners.iter().all(Option::is_none);
+            if all_in {
+                assert_eq!(a, 1.0, "inside at {x},{y}");
+                inside += 1;
+            } else if all_out {
+                assert_eq!(a, 0.0, "outside at {x},{y}");
+            } else {
+                assert!((0.0..=1.0).contains(&a), "edge at {x},{y}: {a}");
+                partial += usize::from(a > 0.0 && a < 1.0);
             }
         }
     }
     assert!(inside > 2000, "{inside} covered pixels");
+    assert!(partial > 100, "{partial} antialiased edge pixels");
 }
 
 #[test]
@@ -696,12 +711,19 @@ fn planes_crossing_the_camera_plane_are_clipped() {
     for y in 0..120usize {
         for x in 0..200usize {
             let a = rgba[(y * 200 + x) * 4 + 3];
-            assert!(a == 0.0 || a == 1.0);
+            assert!((0.0..=1.0).contains(&a));
             if a == 1.0 {
                 drawn += 1;
                 let (u, v) = unproject(&plane, x as f64 + 0.5, y as f64 + 0.5)
-                    .expect("drawn pixels are in front of the camera");
+                    .expect("covered pixels are in front of the camera");
                 assert!((-1e-3..=1.0 + 1e-3).contains(&u) && (-1e-3..=1.0 + 1e-3).contains(&v));
+            } else if a > 0.0 {
+                // A partly covered pixel reaches the plane in front of the
+                // camera with part of its square.
+                let reaches = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)]
+                    .iter()
+                    .any(|(dx, dy)| unproject(&plane, x as f64 + dx, y as f64 + dy).is_some());
+                assert!(reaches, "{x},{y}: {a} behind the camera");
             }
         }
     }

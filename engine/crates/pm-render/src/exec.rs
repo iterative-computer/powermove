@@ -288,11 +288,13 @@ impl Exec<'_> {
         r: &mut Resolved,
     ) {
         match content {
-            Content::Solid(c) => {
+            Content::Solid(s) => {
                 r.solid = Some(crate::composite::color::premultiplied_to_working(
-                    *c,
+                    s.color,
                     self.working,
-                ))
+                ));
+                // `fs_solid` reads the box and radius from the UV slot.
+                r.uv = [s.size[0], s.size[1], s.radius, 0.0];
             }
             // Drawn by `composite::exec` (skipped by `resolve_draws`).
             Content::Composite(_) => {}
@@ -799,9 +801,14 @@ impl Exec<'_> {
         // Uniforms: one slot per draw plus the background quad.
         let slots = resolved.len() + 1;
         let mut data = vec![0u8; slots * UNIFORM_STRIDE as usize];
+        // A region's origin in the full frame's GL rows (`region_viewport`):
+        // solids compute coverage from full-frame pixel positions.
+        let region_origin = region.map_or([0.0, 0.0], |g| {
+            [g.x as f32, (fh - g.y - th) as f32]
+        });
         let quad = |m: [f64; 6], uv: [f64; 4], color: [f64; 4]| QuadUniform {
             m: m3(&m),
-            res: [fw as f32, fh as f32, 0.0, 0.0],
+            res: [fw as f32, fh as f32, region_origin[0], region_origin[1]],
             uv: uv.map(|v| v as f32),
             color: color.map(|v| v as f32),
         };

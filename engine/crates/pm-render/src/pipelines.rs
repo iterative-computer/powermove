@@ -254,7 +254,8 @@ impl Pipelines {
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
                         module: &composite,
-                        entry_point: Some("vs"),
+                        // Solids grow by their antialiased fringe.
+                        entry_point: Some(if entry == "fs_solid" { "vs_solid" } else { "vs" }),
                         compilation_options: Default::default(),
                         buffers: &[],
                     },
