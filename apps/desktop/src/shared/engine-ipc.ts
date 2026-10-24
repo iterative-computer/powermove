@@ -304,7 +304,9 @@ export type EngineSnapshotReply =
       height: number;
       pixels: import('./engine-protocol').SnapshotPixels;
       data: Uint8Array;
-      /** Decoded source planes (`data`) for a WebCodecs VideoFrame. */
+      /** Native video texture already transferred to this window's preload. */
+      videoSurface?: { token: string; width: number; height: number };
+      /** Native alpha planes use WebCodecs I420A; Electron has no alpha YUV import. */
       videoPlanes?: import('./engine-protocol').SourceVideoFrame;
       origin: [number, number];
       /** A layer raster's box in layer pixels (`RasterSurface` w, h). */

@@ -13,7 +13,8 @@ use pm_protocol::snapshot::SourceVideoFrame;
 use super::Renderer;
 use crate::media::source_platform_priority;
 
-/// Rejects a single coded frame before allocating its packed planes.
+/// The main-process source-surface pool's aggregate byte ceiling. Reject a
+/// single coded frame before allocating its packed planes.
 const MAX_PACKED_SOURCE_VIDEO_BYTES: usize = 128 << 20;
 
 impl Renderer {
@@ -87,7 +88,7 @@ fn vp9_coded_width(width: u32) -> Result<u32, String> {
     let bordered = aligned.checked_add(64).ok_or("VP9 coded width overflow")?;
     let coded = bordered.checked_add(31).ok_or("VP9 coded width overflow")? & !31;
     if coded > MAX_OUTPUT_DIMENSION {
-        return Err("The VP9 coded row exceeds the snapshot dimension limit".into());
+        return Err("The VP9 coded row exceeds the source-surface dimension limit".into());
     }
     Ok(coded)
 }
@@ -113,7 +114,7 @@ fn packed_format(frame: &DecodedFrame) -> Result<&'static str, String> {
                 && f.planes[0].format == PlaneFormat::R8
                 && f.planes[1].format == PlaneFormat::Rg8 =>
         {
-            Some("i422")
+            Some("nv16")
         }
         (Layout::Planar, 8, _, 1)
             if f.planes.len() == 3
@@ -134,19 +135,19 @@ fn packed_format(frame: &DecodedFrame) -> Result<&'static str, String> {
                 && !f.has_alpha()
                 && f.planes.iter().all(|p| p.format == PlaneFormat::R8) =>
         {
-            Some("i422")
+            Some("nv16")
         }
         (Layout::Biplanar, 10, SampleAlignment::MsbIn16, 1)
             if f.planes.len() == 2
                 && f.planes[0].format == PlaneFormat::R16
                 && f.planes[1].format == PlaneFormat::Rg16 =>
         {
-            Some("i420p10")
+            Some("p010le")
         }
         (Layout::Planar, 10, SampleAlignment::Lsb, 1)
             if f.planes.len() == 3 && f.planes.iter().all(|p| p.format == PlaneFormat::R16) =>
         {
-            Some("i420p10")
+            Some("p010le")
         }
         _ => None,
     };
@@ -158,9 +159,6 @@ fn packed_format(frame: &DecodedFrame) -> Result<&'static str, String> {
     })
 }
 
-/// Packs the decoded planes tightly in a WebCodecs buffer layout: `nv12`
-/// (Y, interleaved CbCr), or planar `i420a`, `i422` and `i420p10` (16-bit
-/// little-endian samples holding the low ten bits).
 fn pack_planes(
     source: &PixelFormat,
     planes: &[PlaneView<'_>],
@@ -174,19 +172,19 @@ fn pack_planes(
     let height = source.height;
     let chroma_width = width.div_ceil(2);
     let visible_chroma_width = source.width.div_ceil(2);
-    let chroma_height = if format == "i422" {
+    let chroma_height = if format == "nv16" {
         height
     } else {
         height.div_ceil(2)
     };
-    let sample_bytes = if format == "i420p10" { 2 } else { 1 };
+    let sample_bytes = if format == "p010le" { 2 } else { 1 };
     let y_bytes = width
         .checked_mul(height)
         .and_then(|n| n.checked_mul(sample_bytes))
         .ok_or("Source video is too large")?;
-    let chroma_bytes = chroma_width
+    let uv_bytes = chroma_width
         .checked_mul(chroma_height)
-        .and_then(|n| n.checked_mul(sample_bytes))
+        .and_then(|n| n.checked_mul(2 * sample_bytes))
         .ok_or("Source video is too large")?;
     let alpha_bytes = if format == "i420a" {
         if source.layout != Layout::Planar || source.alpha_bits != 8 {
@@ -197,61 +195,79 @@ fn pack_planes(
         0
     };
     let total = y_bytes
-        .checked_add(2 * chroma_bytes)
+        .checked_add(uv_bytes)
         .and_then(|n| n.checked_add(alpha_bytes))
         .ok_or("Source video is too large")?;
     if total > MAX_PACKED_SOURCE_VIDEO_BYTES {
-        return Err("The coded source video exceeds the source byte limit".into());
+        return Err("The coded source video exceeds the source-surface byte limit".into());
     }
     if source.has_alpha() && format != "i420a" && !alpha_is_opaque(planes, width, height)? {
         return Err("The source video has translucent alpha; it needs an I420A presenter".into());
     }
     let mut out = vec![0; total];
-    let (luma, rest) = out.split_at_mut(y_bytes);
-    copy_rows_padded(&planes[0], source.width * sample_bytes, width * sample_bytes, height, luma)?;
-    let (chroma, alpha) = rest.split_at_mut(2 * chroma_bytes);
-    let visible_bytes = visible_chroma_width * sample_bytes;
-    let row_bytes = chroma_width * sample_bytes;
-    match (format, source.layout) {
-        ("nv12", Layout::Biplanar) => {
-            copy_rows_padded(&planes[1], 2 * visible_bytes, 2 * row_bytes, chroma_height, chroma)?
+    copy_rows_padded(
+        &planes[0],
+        source.width * sample_bytes,
+        width * sample_bytes,
+        height,
+        &mut out[..y_bytes],
+    )?;
+    match source.layout {
+        Layout::Biplanar => copy_rows_padded(
+            &planes[1],
+            visible_chroma_width * 2 * sample_bytes,
+            chroma_width * 2 * sample_bytes,
+            chroma_height,
+            &mut out[y_bytes..],
+        )?,
+        Layout::Planar if format == "i420a" => {
+            let chroma_plane_bytes = chroma_width * chroma_height;
+            copy_rows_padded(
+                &planes[1],
+                visible_chroma_width,
+                chroma_width,
+                chroma_height,
+                &mut out[y_bytes..y_bytes + chroma_plane_bytes],
+            )?;
+            copy_rows_padded(
+                &planes[2],
+                visible_chroma_width,
+                chroma_width,
+                chroma_height,
+                &mut out[y_bytes + chroma_plane_bytes..y_bytes + uv_bytes],
+            )?;
+            copy_rows_padded(
+                &planes[3],
+                source.width,
+                width,
+                height,
+                &mut out[y_bytes + uv_bytes..],
+            )?;
         }
-        ("nv12", Layout::Planar) => {
+        Layout::Planar => {
             for row in 0..chroma_height {
-                let u = visible_row(&planes[1], row, visible_bytes)?;
-                let v = visible_row(&planes[2], row, visible_bytes)?;
-                let dst = &mut chroma[row * 2 * row_bytes..];
+                let u = visible_row(&planes[1], row, visible_chroma_width * sample_bytes)?;
+                let v = visible_row(&planes[2], row, visible_chroma_width * sample_bytes)?;
                 for col in 0..visible_chroma_width {
-                    dst[2 * col] = u[col];
-                    dst[2 * col + 1] = v[col];
-                }
-            }
-        }
-        (_, Layout::Planar) => {
-            let (u, v) = chroma.split_at_mut(chroma_bytes);
-            copy_rows_padded(&planes[1], visible_bytes, row_bytes, chroma_height, u)?;
-            copy_rows_padded(&planes[2], visible_bytes, row_bytes, chroma_height, v)?;
-        }
-        (_, Layout::Biplanar) => {
-            let (u, v) = chroma.split_at_mut(chroma_bytes);
-            for row in 0..chroma_height {
-                let uv = visible_row(&planes[1], row, 2 * visible_bytes)?;
-                for col in 0..visible_chroma_width {
-                    let (src, dst) = (2 * col * sample_bytes, row * row_bytes + col * sample_bytes);
-                    u[dst..dst + sample_bytes].copy_from_slice(&uv[src..src + sample_bytes]);
-                    v[dst..dst + sample_bytes]
-                        .copy_from_slice(&uv[src + sample_bytes..src + 2 * sample_bytes]);
+                    let dst = y_bytes + (row * chroma_width + col) * 2 * sample_bytes;
+                    let src = col * sample_bytes;
+                    if sample_bytes == 1 {
+                        out[dst] = u[src];
+                        out[dst + 1] = v[src];
+                    } else {
+                        let uc = u16::from_le_bytes([u[src], u[src + 1]]) << 6;
+                        let vc = u16::from_le_bytes([v[src], v[src + 1]]) << 6;
+                        out[dst..dst + 2].copy_from_slice(&uc.to_le_bytes());
+                        out[dst + 2..dst + 4].copy_from_slice(&vc.to_le_bytes());
+                    }
                 }
             }
         }
         _ => unreachable!("packed_format checked the plane layout"),
     }
-    if format == "i420a" {
-        copy_rows_padded(&planes[3], source.width, width, height, alpha)?;
-    }
-    if sample_bytes == 2 && source.alignment == SampleAlignment::MsbIn16 {
-        for sample in out.chunks_exact_mut(2) {
-            let code = u16::from_le_bytes([sample[0], sample[1]]) >> 6;
+    if sample_bytes == 2 && source.layout == Layout::Planar {
+        for sample in out[..y_bytes].chunks_exact_mut(2) {
+            let code = u16::from_le_bytes([sample[0], sample[1]]) << 6;
             sample.copy_from_slice(&code.to_le_bytes());
         }
     }
@@ -511,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn planar_10_bit_samples_stay_planar_i420p10() {
+    fn planar_10_bit_samples_are_shifted_losslessly_into_p010() {
         let descriptions = vec![
             PlaneDesc {
                 format: PlaneFormat::R16,
@@ -550,54 +566,16 @@ mod tests {
                 desc: &source.planes[2],
             },
         ];
-        let bytes = pack_planes(&source, &planes, "i420p10", source.width).unwrap();
+        let bytes = pack_planes(&source, &planes, "p010le", source.width).unwrap();
         let codes: Vec<u16> = bytes
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
             .collect();
-        assert_eq!(codes, [1, 2, 3, 1023, 512, 900]);
+        assert_eq!(codes, [64, 128, 192, 65472, 32768, 57600]);
     }
 
     #[test]
-    fn biplanar_p010_deinterleaves_and_shifts_into_i420p10() {
-        let descriptions = vec![
-            PlaneDesc {
-                format: PlaneFormat::R16,
-                width: 2,
-                height: 2,
-            },
-            PlaneDesc {
-                format: PlaneFormat::Rg16,
-                width: 1,
-                height: 1,
-            },
-        ];
-        let mut source = format(Layout::Biplanar, 10, 2, 2, descriptions);
-        source.alignment = SampleAlignment::MsbIn16;
-        let y = [1u16 << 6, 2 << 6, 3 << 6, 1023 << 6, 0xffff];
-        let uv = [512u16 << 6, 900 << 6];
-        let planes = [
-            PlaneView {
-                ptr: y.as_ptr().cast(),
-                stride: 4,
-                desc: &source.planes[0],
-            },
-            PlaneView {
-                ptr: uv.as_ptr().cast(),
-                stride: 4,
-                desc: &source.planes[1],
-            },
-        ];
-        let bytes = pack_planes(&source, &planes, "i420p10", source.width).unwrap();
-        let codes: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|b| u16::from_le_bytes([b[0], b[1]]))
-            .collect();
-        assert_eq!(codes, [1, 2, 3, 1023, 512, 900]);
-    }
-
-    #[test]
-    fn planar_422_keeps_every_chroma_row_as_i422() {
+    fn planar_422_interleaves_every_chroma_row_as_nv16() {
         let descriptions = vec![
             PlaneDesc {
                 format: PlaneFormat::R8,
@@ -638,8 +616,8 @@ mod tests {
             },
         ];
         assert_eq!(
-            pack_planes(&source, &planes, "i422", source.width).unwrap(),
-            [1, 2, 3, 4, 10, 11, 20, 21]
+            pack_planes(&source, &planes, "nv16", source.width).unwrap(),
+            [1, 2, 3, 4, 10, 20, 11, 21]
         );
     }
 
@@ -896,7 +874,7 @@ mod tests {
                 desc: &source.planes[1],
             },
         ];
-        let error = pack_planes(&source, &planes, "i420p10", source.width).unwrap_err();
+        let error = pack_planes(&source, &planes, "p010le", source.width).unwrap_err();
         assert!(error.contains("byte limit"), "{error}");
     }
 }

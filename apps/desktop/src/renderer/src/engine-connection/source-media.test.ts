@@ -3,9 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EngineSourceMedia, sourcePosterSize } from './source-media';
 import type { EngineSnapshot, EngineRenderTransport } from './render-transport';
 import type { EngineBridge } from '../../../shared/engine-ipc';
+import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { DocumentSession } from './session';
 
-function fixture() {
+function fixture(frameBridge?: FrameBridgeApi) {
   const project = { id: 'project', assets: { clip: { id: 'clip', kind: 'video', w: 1920, h: 1080, dur: 20, contentHash: 'original', rendition: false } } };
   const pixels = { width: 4, height: 2, data: new Uint8ClampedArray(32), revision: 1, pixels: 'straight' } as EngineSnapshot;
   const snapshot = vi.fn(async () => pixels);
@@ -18,6 +19,7 @@ function fixture() {
   const bind = vi.fn(async () => {});
   const changed = vi.fn(), error = vi.fn();
   const source = new EngineSourceMedia({ project: () => project, revision: () => 7,
+    frameBridge,
     render: { snapshot, toCanvas } as unknown as EngineRenderTransport,
     native: { browserRendition: rendition, sourceFilmstrip: strip, prepareSource: prepare, releasePreparedSources: release, cancelMediaJob: cancel } as unknown as EngineBridge,
     session: () => ({ audio } as unknown as DocumentSession), wake: async () => {}, bind,
@@ -186,6 +188,28 @@ describe('engine source consumers', () => {
     finish({ data: new Uint8ClampedArray(32) } as EngineSnapshot);
     await expect(stale).rejects.toMatchObject({ name: 'AbortError' });
     expect(f.source.stats.frames).toBe(0);
+    f.source.dispose();
+  });
+
+  it('releases a native surface delivered after its frame caller has aborted', async () => {
+    const discardSource = vi.fn();
+    const f = fixture({ discardSource } as unknown as FrameBridgeApi);
+    let finish!: (value: EngineSnapshot) => void;
+    f.snapshot.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const controller = new AbortController();
+    const cancelled = f.source.frame('clip', 1, 4, 2, { color: 'compositor', signal: controller.signal });
+    await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    finish({ width: 4, height: 2, data: new Uint8ClampedArray(),
+      videoSurface: { token: 'late-surface', width: 4, height: 2 } } as EngineSnapshot);
+    await vi.waitFor(() => expect(discardSource).toHaveBeenCalledOnce());
+    expect(discardSource).toHaveBeenCalledWith('late-surface');
+    expect(f.source.stats.frames).toBe(0);
+    expect(f.source.stats.hits).toBe(0);
+    await f.source.frame('clip', 1, 4, 2, { color: 'compositor' });
+    expect(f.snapshot).toHaveBeenCalledTimes(2);
+    expect(f.error).not.toHaveBeenCalled();
     f.source.dispose();
   });
 

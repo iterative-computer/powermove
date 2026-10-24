@@ -1,23 +1,20 @@
-/** Presents native decoded source planes through Chromium's video path. */
+/** Presents one-shot native source surfaces through Chromium's video path. */
 import type { SourceVideoFrame } from '../../../shared/engine-protocol';
+import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 
+type SourceBridge = Pick<FrameBridgeApi, 'sourceFrame' | 'discardSource'>;
 type GeneratorTrack = MediaStreamTrack & { readonly writable: WritableStream<VideoFrame> };
 type GeneratorConstructor = new (options: { kind: 'video' }) => GeneratorTrack;
 const STARTUP_REPLAY_MS = 16;
 const STARTUP_TIMEOUT_MS = 5_000;
-/** WebCodecs buffer formats of pm-protocol's SourceVideoFrame layouts.
- * Chromium accepts I420P10 although TypeScript's DOM lib omits it. */
-const FORMATS: Record<string, { format: VideoPixelFormat | 'I420P10'; chroma: 1 | 2; bytes: 1 | 2; alpha: boolean }> = {
-  nv12: { format: 'NV12', chroma: 2, bytes: 1, alpha: false },
-  i420a: { format: 'I420A', chroma: 2, bytes: 1, alpha: true },
-  i422: { format: 'I422', chroma: 1, bytes: 1, alpha: false },
-  i420p10: { format: 'I420P10', chroma: 2, bytes: 2, alpha: false }
-};
+/** Bounds the wait for a shared-texture frame to reach the video element. */
+const PRESENT_TIMEOUT_MS = 250;
 const releaseWriter = (writer: WritableStreamDefaultWriter<VideoFrame>): void => {
   try { writer.releaseLock(); } catch { /* A pending abort still owns the lock. */ }
 };
 
-export type SourceVideoDescriptor = { video: SourceVideoFrame; data: Uint8ClampedArray; width: number; height: number };
+export type SourceVideoDescriptor = { token: string; width: number; height: number }
+  | { video: SourceVideoFrame; data: Uint8ClampedArray; width: number; height: number };
 
 function rawColorSpace(video: SourceVideoFrame): VideoColorSpaceInit {
   const primaries = ({ p3: 'smpte432', 'smptest431-2': 'smpte431' } as Record<string, string>)[video.primaries] ?? video.primaries;
@@ -34,12 +31,39 @@ export class SourceVideoPresenter {
   private lastTimestamp = -1;
   private disposed = false;
   private readonly disposal = new AbortController();
+  private presented = 0;
+  private readonly presentation = new Set<() => void>();
 
-  constructor() {
+  constructor(private readonly bridge: SourceBridge | undefined) {
     this.surface.muted = true;
     this.surface.playsInline = true;
     this.surface.autoplay = true;
     this.surface.dataset.nativeSource = 'true';
+    if (typeof this.surface.requestVideoFrameCallback === 'function') {
+      const presented: VideoFrameRequestCallback = (_now, metadata) => {
+        if (this.disposed) return;
+        this.presented = metadata.presentedFrames;
+        for (const wake of this.presentation) wake();
+        this.surface.requestVideoFrameCallback(presented);
+      };
+      this.surface.requestVideoFrameCallback(presented);
+    }
+  }
+
+  /** Waits until the element presents a frame after `before`, or the bound. */
+  private presentedAfter(before: number, cancelled: Promise<void>): Promise<void> {
+    if (typeof this.surface.requestVideoFrameCallback !== 'function' || this.presented > before) return Promise.resolve();
+    let wake!: () => void;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const shown = new Promise<void>(resolve => {
+      wake = () => { if (this.presented > before) resolve(); };
+      timer = setTimeout(resolve, PRESENT_TIMEOUT_MS);
+    });
+    this.presentation.add(wake);
+    return Promise.race([shown, cancelled]).finally(() => {
+      this.presentation.delete(wake);
+      if (timer !== null) clearTimeout(timer);
+    });
   }
 
   private ensureWriter(): WritableStreamDefaultWriter<VideoFrame> {
@@ -65,6 +89,7 @@ export class SourceVideoPresenter {
   async paint(descriptor: SourceVideoDescriptor, signal?: AbortSignal): Promise<void> {
     if (this.disposed) throw new DOMException('Source video presenter is disposed.', 'AbortError');
     if (signal?.aborted) throw new DOMException('Source video presentation was cancelled.', 'AbortError');
+    if ('token' in descriptor && !this.bridge) throw new Error('Native source video bridge is unavailable.');
     if (!Number.isInteger(descriptor.width) || descriptor.width < 1 || descriptor.width > 16384
         || !Number.isInteger(descriptor.height) || descriptor.height < 1 || descriptor.height > 16384)
       throw new Error('Invalid native source video dimensions.');
@@ -80,26 +105,30 @@ export class SourceVideoPresenter {
     this.disposal.signal.addEventListener('abort', onAbort, { once: true });
     try {
       if (signal?.aborted || this.disposed) throw new DOMException('Source video presentation was cancelled.', 'AbortError');
-      const layout = FORMATS[descriptor.video.format];
-      if (!layout) throw new Error('Invalid raw source frame format.');
-      if (descriptor.video.visibleWidth !== undefined && (!Number.isInteger(descriptor.video.visibleWidth) || descriptor.video.visibleWidth < 1 || descriptor.video.visibleWidth > descriptor.width)) throw new Error('Invalid source visible width.');
-      const luma = descriptor.width * descriptor.height;
-      const expected = (luma + 2 * Math.ceil(descriptor.width / 2) * Math.ceil(descriptor.height / layout.chroma)) * layout.bytes + (layout.alpha ? luma : 0);
-      if (descriptor.data.byteLength !== expected) throw new Error('Invalid source video plane length.');
-      const data = descriptor.data.buffer instanceof ArrayBuffer ? descriptor.data as Uint8ClampedArray<ArrayBuffer> : new Uint8ClampedArray(descriptor.data);
-      // This request owns its uncached planes; transfer their buffer once.
-      const init: VideoFrameBufferInit & { transfer: ArrayBuffer[] } = { format: layout.format as VideoPixelFormat, codedWidth: descriptor.width, codedHeight: descriptor.height,
-        timestamp: Math.round(performance.now() * 1000), colorSpace: rawColorSpace(descriptor.video), transfer: [data.buffer],
-        ...(descriptor.video.visibleWidth !== undefined ? { visibleRect: { x: 0, y: 0, width: descriptor.video.visibleWidth, height: descriptor.height }, displayWidth: descriptor.video.visibleWidth, displayHeight: descriptor.height } : {}) };
-      sourceFrame = new VideoFrame(data, init);
+      if ('video' in descriptor) {
+        if (!['nv12', 'i420a'].includes(descriptor.video.format)) throw new Error('Invalid raw source frame format.');
+        if (descriptor.video.visibleWidth !== undefined && (!Number.isInteger(descriptor.video.visibleWidth) || descriptor.video.visibleWidth < 1 || descriptor.video.visibleWidth > descriptor.width)) throw new Error('Invalid source visible width.');
+        const expected = descriptor.width * descriptor.height * (descriptor.video.format === 'i420a' ? 2 : 1) + Math.ceil(descriptor.width / 2) * Math.ceil(descriptor.height / 2) * 2;
+        if (descriptor.data.byteLength !== expected) throw new Error('Invalid source video plane length.');
+        const data = descriptor.data.buffer instanceof ArrayBuffer ? descriptor.data as Uint8ClampedArray<ArrayBuffer> : new Uint8ClampedArray(descriptor.data);
+        // This request owns its uncached planes; transfer their buffer once.
+        const init: VideoFrameBufferInit & { transfer: ArrayBuffer[] } = { format: descriptor.video.format === 'i420a' ? 'I420A' : 'NV12', codedWidth: descriptor.width, codedHeight: descriptor.height,
+          timestamp: Math.round(performance.now() * 1000), colorSpace: rawColorSpace(descriptor.video), transfer: [data.buffer],
+          ...(descriptor.video.visibleWidth !== undefined ? { visibleRect: { x: 0, y: 0, width: descriptor.video.visibleWidth, height: descriptor.height }, displayWidth: descriptor.video.visibleWidth, displayHeight: descriptor.height } : {}) };
+        sourceFrame = new VideoFrame(data, init);
+      } else {
+        sourceFrame = this.bridge!.sourceFrame(descriptor.token);
+        if (!sourceFrame) throw new Error('Native source video surface was not delivered.');
+      }
       const writer = this.ensureWriter();
-      const visibleWidth = descriptor.video.visibleWidth ?? descriptor.width;
+      const visibleWidth = 'video' in descriptor ? descriptor.video.visibleWidth ?? descriptor.width : descriptor.width;
       if (this.surface.width !== visibleWidth) this.surface.width = visibleWidth;
       if (this.surface.height !== descriptor.height) this.surface.height = descriptor.height;
 
       // Chromium does not retain frames written before the video sink has
       // attached to this new MediaStream. Play is pending until that sink
       // receives a frame, so repeat this held frame until startup settles.
+      const before = this.presented;
       const playing = this.started ?? (this.started = Promise.resolve(this.surface.play()));
       let played = false;
       void playing.then(() => { played = true; }, () => {});
@@ -129,6 +158,10 @@ export class SourceVideoPresenter {
           finally { if (tickTimer !== null) clearTimeout(tickTimer); }
         }
         await Promise.race([playing, cancelled, timeout]);
+        // A shared-texture frame can reach the compositor after its write is
+        // accepted; releasing the import first could leave the previous frame
+        // on screen. Buffer-backed frames own their planes.
+        if ('token' in descriptor) await this.presentedAfter(before, cancelled);
       }
       catch (error) {
         // A rejected play or a detached sink can leave a write waiting for
@@ -149,6 +182,7 @@ export class SourceVideoPresenter {
       this.disposal.signal.removeEventListener('abort', onAbort);
       cancelResolve();
       sourceFrame?.close();
+      if ('token' in descriptor) this.bridge?.discardSource(descriptor.token);
     }
   }
 
@@ -156,6 +190,7 @@ export class SourceVideoPresenter {
     if (this.disposed) return;
     this.disposed = true;
     this.disposal.abort();
+    this.presentation.clear();
     const writer = this.writer;
     this.writer = null;
     if (writer) void writer.abort(new Error('Source video presenter disposed')).catch(() => {}).finally(() => releaseWriter(writer));

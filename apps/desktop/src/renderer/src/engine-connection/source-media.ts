@@ -1,4 +1,5 @@
 /** Source media consumers. Decoding, source color and audio belong to the engine. */
+import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import { SourceVideoPresenter } from './source-video-presenter';
 import type { AudioMessage } from '../../../shared/engine-protocol';
 import type { EngineBridge, EngineMediaJobRequest } from '../../../shared/engine-ipc';
@@ -18,6 +19,7 @@ type FrameOptions = { signal?: AbortSignal; fit?: Fit; color?: Color; idle?: boo
 type Host = {
   render: EngineRenderTransport;
   native: EngineBridge;
+  frameBridge?: FrameBridgeApi;
   project(): Record<string, any>;
   revision(): number;
   session(): DocumentSession | null;
@@ -133,11 +135,31 @@ export class EngineSourceMedia {
     await cancellable(this.bindSource(asset), options.signal);
     if (!this.sameSource(asset, identity, lifetime) || options.signal?.aborted) throw abort();
     const started = performance.now();
-    const snapshot = await cancellable(this.host.render.snapshot({ time, width, height, pixels: 'straight', signal: options.signal,
-      source: { asset, fit: options.fit, color: options.color } }, options.idle ? 'idle' : 'async'), options.signal);
-    if (!this.sameSource(asset, identity, lifetime) || options.signal?.aborted) throw abort();
+    let produced: EngineSnapshot | null = null;
+    let discarded = false;
+    const discard = (snapshot: EngineSnapshot): void => {
+      if (discarded || !snapshot.videoSurface) return;
+      discarded = true;
+      this.host.frameBridge?.discardSource(snapshot.videoSurface.token);
+    };
+    const stale = (): boolean => !this.sameSource(asset, identity, lifetime) || !!options.signal?.aborted;
+    // The outer cancellation can reject before native resolves. Keep cleanup
+    // on the inner promise so a late IOSurface token is still released.
+    const raw = this.host.render.snapshot({ time, width, height, pixels: 'straight', signal: options.signal,
+      source: { asset, fit: options.fit, color: options.color } }, options.idle ? 'idle' : 'async').then(snapshot => {
+      produced = snapshot;
+      if (stale()) { discard(snapshot); throw abort(); }
+      return snapshot;
+    });
+    let snapshot: EngineSnapshot;
+    try { snapshot = await cancellable(raw, options.signal); }
+    catch (error) { if (produced) discard(produced); throw error; }
+    if (stale()) {
+      discard(snapshot);
+      throw abort();
+    }
     this.stats.frames++; this.stats.frameMs += performance.now() - started;
-    if (options.color !== 'compositor' && snapshot.data.byteLength <= FRAME_CACHE_BYTES) {
+    if (options.color !== 'compositor' && !snapshot.videoSurface && snapshot.data.byteLength <= FRAME_CACHE_BYTES) {
       this.bytes -= this.cache.get(key)?.data.byteLength ?? 0;
       this.cache.set(key, snapshot); this.bytes += snapshot.data.byteLength;
       while (this.bytes > FRAME_CACHE_BYTES && this.cache.size) {
@@ -356,7 +378,7 @@ export class SourceMonitor extends EventTarget {
     // Still images used to paint as an <img> below the transport. A canvas
     // changes Chromium's shadow compositing even when its RGBA bytes match.
     // Keep that presentation while every pixel still comes from the engine.
-    this.videoPresenter = meta?.kind === 'video' ? new SourceVideoPresenter() : null;
+    this.videoPresenter = meta?.kind === 'video' ? new SourceVideoPresenter(host.frameBridge) : null;
     this.surface = this.videoPresenter?.surface ?? (meta?.kind === 'image' ? document.createElement('img') : this.canvas);
     if (this.surface instanceof HTMLImageElement) this.surface.alt = '';
     this.canvas.width = this.canvas.height = 1;
@@ -447,14 +469,17 @@ export class SourceMonitor extends EventTarget {
       const height = Math.max(1, Math.round((this.cssHeight || meta?.h || 1) * dpr));
       const video = meta?.kind === 'video';
       const snapshot = await this.source.frame(this.asset, this.currentTime, width, height, { fit: 'contain', color: video ? 'compositor' : 'display', signal });
-      if (this.disposed || this.requested !== generation) return;
+      if (this.disposed || this.requested !== generation) {
+        if (snapshot.videoSurface) this.host.frameBridge?.discardSource(snapshot.videoSurface.token);
+        return;
+      }
       if (!video) {
         if (this.canvas.width !== width) this.canvas.width = width;
         if (this.canvas.height !== height) this.canvas.height = height;
       }
       if (video) {
-        if (!this.videoPresenter || !snapshot.videoPlanes) throw new Error('The engine did not provide native video planes.');
-        await this.videoPresenter.paint({ video: snapshot.videoPlanes, data: snapshot.data, width: snapshot.width, height: snapshot.height }, signal);
+        if (!this.videoPresenter || (!snapshot.videoSurface && !snapshot.videoPlanes)) throw new Error('The engine did not provide a native video surface.');
+        await this.videoPresenter.paint(snapshot.videoSurface ?? { video: snapshot.videoPlanes!, data: snapshot.data, width: snapshot.width, height: snapshot.height }, signal);
         if (this.disposed || this.requested !== generation) return;
         this.source.stats.presented++;
         if (this.canvas.width !== width) this.canvas.width = width;

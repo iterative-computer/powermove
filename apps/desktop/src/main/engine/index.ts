@@ -39,6 +39,7 @@ import { askAboutOfflineMedia, offlineClips } from './offline-media';
 import { isId } from './protocol';
 import { RenderQueue } from './render-queue';
 import { SnapshotService } from './snapshots';
+import { SourceSurfaceService, type SourceVideoSurfaceConstructor, type SourceSharedTexture } from './source-surfaces';
 import { WindowSnapshotSessions } from './window-sessions';
 import { CompatFrames } from './compat-frames';
 import { ShaderFallbackRelay } from './shader-fallback-relay';
@@ -280,6 +281,12 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
   // The frame bridge (section 18): one per-launch rendezvous for every
   // interactive engine; surfaces go to the window owning the viewer's port.
   const bridgeAddon = loadBridgeAddon(bridgeAddonPath({ isPackaged: options.isPackaged, resourcesPath: options.resourcesPath, appPath: options.appPath, env }), log);
+  const sourceAddon = bridgeAddon as (BridgeAddon & { SourceVideoSurface?: SourceVideoSurfaceConstructor }) | null;
+  const sourceSurfaces = sourceAddon?.SourceVideoSurface ? new SourceSurfaceService({
+    addon: { SourceVideoSurface: sourceAddon.SourceVideoSurface },
+    sharedTexture: sharedTexture as unknown as SourceSharedTexture,
+    resolveFrame: id => options.windows().find(window => !window.isDestroyed() && window.webContents.id === id)?.webContents.mainFrame ?? null
+  }) : null;
   const frameBridge = bridgeAddon
     ? new FrameBridge({
         addon: bridgeAddon,
@@ -418,6 +425,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     engine,
     takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null,
     windowSessions,
+    sourceSurface: sourceSurfaces ? (id, width, height, video, data) => sourceSurfaces.present(id, width, height, video, data) : undefined,
     log
   });
 
@@ -678,6 +686,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       windowSessions.forget(id);
       snapshots?.forget(id);
       sourceJobs.forget(id);
+      sourceSurfaces?.windowGone(id);
       if (!engine) return;
       if (attached) engine.reconnectClient(id);
       else engine.addClient(id, deliver);
@@ -691,10 +700,11 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       compatFrames.windowGone(id);
       void agentJobs.forgetOwner(id);
       sourceJobs.forget(id);
+      sourceSurfaces?.windowGone(id);
     });
     // A page that goes away never reports its frame surfaces released.
     if (frameBridge) {
-      const gone = (): void => frameBridge.receiverGone(id);
+      const gone = (): void => { frameBridge.receiverGone(id); sourceSurfaces?.windowGone(id); };
       contents.on('did-start-navigation', (details) => {
         if (details.isMainFrame && !details.isSameDocument) gone();
       });
@@ -740,6 +750,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
       sourceJobs.dispose();
       await engine?.stop();
       frameBridge?.dispose();
+      sourceSurfaces?.dispose();
     }
   };
 }

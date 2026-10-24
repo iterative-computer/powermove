@@ -461,7 +461,7 @@ impl Validate for SnapshotOutcome {
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SourceVideoFrame {
-    // WebCodecs buffer layout: nv12, or planar i420a, i422, i420p10.
+    // Native plane format: nv12, nv16, p010le, or planar i420a.
     pub format: String,
     // gfx::ColorSpace / WebCodecs identifiers describing the decoded frame.
     pub primaries: String,
@@ -475,20 +475,19 @@ pub struct SourceVideoFrame {
 }
 
 impl SourceVideoFrame {
-    /// Y then interleaved (nv12) or planar chroma, then i420a's alpha; no
-    /// padding. i420p10 samples are 16-bit little-endian.
+    /// Packed Y plus interleaved UV, or planar Y,U,V,A for i420a; no padding.
     pub fn byte_len(&self, width: u32, height: u32) -> Option<u64> {
         if self.visible_width.is_some_and(|w| w == 0 || w > width) {
             return None;
         }
         let w = u64::from(width);
         let h = u64::from(height);
-        let chroma_h = if self.format == "i422" {
+        let chroma_h = if self.format == "nv16" {
             h
         } else {
             h.div_ceil(2)
         };
-        let bytes = if self.format == "i420p10" { 2 } else { 1 };
+        let bytes = if self.format == "p010le" { 2 } else { 1 };
         let alpha = if self.format == "i420a" { w * h } else { 0 };
         (w * h + w.div_ceil(2) * 2 * chroma_h)
             .checked_mul(bytes)?
@@ -501,7 +500,7 @@ impl Validate for SourceVideoFrame {
         let ok = self
             .visible_width
             .is_none_or(|w| w > 0 && w <= MAX_OUTPUT_DIMENSION)
-            && matches!(self.format.as_str(), "nv12" | "i420a" | "i422" | "i420p10")
+            && matches!(self.format.as_str(), "nv12" | "nv16" | "p010le" | "i420a")
             && matches!(
                 self.primaries.as_str(),
                 "unspecified"
@@ -1142,9 +1141,9 @@ mod tests {
         video.format = "i420a".into();
         assert_eq!(video.byte_len(160, 90), Some(36000));
         assert_eq!(video.byte_len(3, 3), Some(26));
-        video.format = "i420p10".into();
+        video.format = "p010le".into();
         assert_eq!(video.byte_len(160, 90), Some(43200));
-        video.format = "i422".into();
+        video.format = "nv16".into();
         assert_eq!(video.byte_len(160, 90), Some(28800));
         video.transfer = "guessed-profile".into();
         assert!(video.validate().is_err());
