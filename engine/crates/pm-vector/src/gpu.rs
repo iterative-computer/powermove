@@ -12,7 +12,7 @@ use peniko::Fill;
 use peniko::color::AlphaColor;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 
-use crate::render::scene::{AtlasLayout, CoverageScene, FillRule};
+use crate::render::scene::{AtlasLayout, CoverageScene};
 
 /// Why the GPU backend is unavailable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,12 +97,8 @@ impl GpuCoverage {
             );
             self.scene
                 .push_clip_layer(Fill::NonZero, Affine::IDENTITY, &cell_rect);
-            let (outline, rule) = item.device_outline();
-            let fill = match rule {
-                FillRule::NonZero => Fill::NonZero,
-                FillRule::EvenOdd => Fill::EvenOdd,
-            };
-            self.scene.fill(fill, to_cell, white, None, &outline);
+            // Disjoint contours: either fill rule covers them alike.
+            self.scene.fill(Fill::NonZero, to_cell, white, None, &item.device_outline());
             self.scene.pop_layer();
         }
         let params = RenderParams {

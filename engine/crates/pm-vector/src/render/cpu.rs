@@ -7,7 +7,7 @@ use peniko::Fill;
 use peniko::color::AlphaColor;
 use vello_cpu::{Pixmap, RenderContext, RenderSettings, Resources};
 
-use crate::render::scene::{AtlasLayout, CoverageScene, FillRule};
+use crate::render::scene::{AtlasLayout, CoverageScene};
 
 /// Coverage pages as 8-bit premultiplied RGBA (white × coverage), the format
 /// Vello's GPU backend writes.
@@ -49,13 +49,10 @@ pub fn render_coverage(scene: &CoverageScene, layout: &AtlasLayout) -> CoverageP
                 f64::from(cell.y + cell.device.height),
             );
             ctx.push_clip_layer(&kurbo::Shape::to_path(&cell_rect, 0.1));
-            let (outline, rule) = item.device_outline();
             ctx.set_transform(to_cell);
-            ctx.set_fill_rule(match rule {
-                FillRule::NonZero => Fill::NonZero,
-                FillRule::EvenOdd => Fill::EvenOdd,
-            });
-            ctx.fill_path(&outline);
+            // Disjoint contours: either fill rule covers them alike.
+            ctx.set_fill_rule(Fill::NonZero);
+            ctx.fill_path(&item.device_outline());
             ctx.set_transform(Affine::IDENTITY);
             ctx.pop_layer();
         }

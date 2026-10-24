@@ -79,17 +79,27 @@ impl CoverageItem {
         (finite && r.width() >= 0.0 && r.height() >= 0.0).then_some(r)
     }
 
-    /// The area the item covers as line segments in device pixels, with
-    /// its fill rule: fills are transformed and flattened, strokes expanded
-    /// in local space (Canvas2D strokes under the current transform), then
-    /// transformed and flattened, all within [`FLATTEN_TOLERANCE`].
+    /// The area the item covers as disjoint contours in device pixels:
+    /// fills are transformed and flattened, strokes expanded in local space
+    /// (Canvas2D strokes under the current transform), then transformed and
+    /// flattened, all within [`FLATTEN_TOLERANCE`]; then the fill rule is
+    /// resolved into contours that do not overlap.
     ///
     /// Both coverage backends rasterize this outline, so their results
-    /// differ only by their area arithmetic; left to themselves they flatten
+    /// differ only by their area arithmetic. Left to themselves they flatten
     /// curves with a quarter-pixel tolerance, which erodes every curved edge
     /// by about 0.1 px (measured: a circle of radius 50 lost 42 px², 0.5% of
-    /// its area, in `vello_cpu`, and Vello on the GPU lost as much).
-    pub fn device_outline(&self) -> (BezPath, FillRule) {
+    /// its area). And area coverage sums the winding number over a pixel
+    /// before applying the fill rule, so where overlapping pieces (a
+    /// stroke's inner join through its pivot, a self-intersecting fill)
+    /// meet an edge inside one pixel it covers too much: the inner corner
+    /// of a stroked rectangle drew 1 where it is 3/4.
+    pub fn device_outline(&self) -> BezPath {
+        let (flat, rule) = self.flattened();
+        resolve(&flat, rule)
+    }
+
+    fn flattened(&self) -> (BezPath, FillRule) {
         let (local, rule) = match &self.style {
             ItemStyle::Fill(rule) => (self.path.clone(), *rule),
             ItemStyle::Stroke(stroke) => {
@@ -117,6 +127,42 @@ impl CoverageItem {
         let [r, g, b, a] = self.color;
         [r * a, g * a, b * a, a]
     }
+}
+
+/// `flat` (line segments only) filled with `rule`, as disjoint contours:
+/// outer boundaries counterclockwise, holes clockwise, so the nonzero and
+/// even-odd fills of the result agree and no pixel sums overlapping area.
+fn resolve(flat: &BezPath, rule: FillRule) -> BezPath {
+    use i_overlay::core::fill_rule::FillRule as Rule;
+    use i_overlay::float::simplify::SimplifyShape;
+    let mut contours: Vec<Vec<[f64; 2]>> = Vec::new();
+    for el in flat.elements() {
+        match *el {
+            kurbo::PathEl::MoveTo(p) => contours.push(vec![[p.x, p.y]]),
+            kurbo::PathEl::LineTo(p) => {
+                if let Some(c) = contours.last_mut() {
+                    c.push([p.x, p.y]);
+                }
+            }
+            _ => {}
+        }
+    }
+    contours.retain(|c| c.len() > 2 && c.iter().flatten().all(|v| v.is_finite()));
+    let shapes = contours.simplify_shape(match rule {
+        FillRule::NonZero => Rule::NonZero,
+        FillRule::EvenOdd => Rule::EvenOdd,
+    });
+    let mut out = BezPath::new();
+    for contour in shapes.iter().flatten() {
+        let mut points = contour.iter();
+        let Some(first) = points.next() else { continue };
+        out.move_to((first[0], first[1]));
+        for p in points {
+            out.line_to((p[0], p[1]));
+        }
+        out.close_path();
+    }
+    out
 }
 
 /// An ordered list of items.

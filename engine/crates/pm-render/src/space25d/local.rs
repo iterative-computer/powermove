@@ -101,7 +101,7 @@ pub fn project_scene(
             transform: up * item.transform,
             ..item.clone()
         };
-        let (outline, rule) = scaled.device_outline();
+        let outline = scaled.device_outline();
         let down = up.inverse();
         let mut contours: Vec<Vec<[f64; 3]>> = Vec::new();
         for el in outline.iter() {
@@ -143,7 +143,8 @@ pub fn project_scene(
         out.items.push(CoverageItem {
             path,
             transform: Affine::IDENTITY,
-            style: ItemStyle::Fill(rule),
+            // Disjoint contours (`device_outline`).
+            style: ItemStyle::Fill(pm_vector::render::scene::FillRule::NonZero),
             color: item.color,
         });
     }
