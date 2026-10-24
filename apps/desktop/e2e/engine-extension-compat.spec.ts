@@ -22,7 +22,9 @@ import type { ElectronApplication, Page } from 'playwright';
 import { expect, launchApp, test } from './helpers/app';
 import { ffmpegBinary } from './helpers/ffmpeg';
 
-const ON = { POWERMOVE_NEW_ENGINE: '1' };
+// The native presenter's bounded per-frame and render-thread traces are on
+// for every engine run here, so a cadence stall can always be attributed.
+const ON = { POWERMOVE_NEW_ENGINE: '1', POWERMOVE_BRIDGE_TRACE: '1' };
 
 /** A 480×270 composition with a typewriter text (scaled 150%, progress
  *  keyed 0 → 100 over 2 s) and a plain text, over #203040. */
@@ -202,6 +204,49 @@ const FIXTURE: Record<string, string> = {
   'shape-tint': 'fixtures/compat-corpus/shape-tint',
   'compat-typewriter': 'fixtures/compat-typewriter'
 };
+
+/**
+ * What every trace recorded during a cadence run's longest gap between
+ * presented frames, in ms from Play: native renders that started, finished
+ * or were sent in it (CPU and GPU time, timed or immediate), render-thread
+ * turns, the viewer's arrivals, drops (with their reason) and draws, the
+ * longest wait between animation frames, renderer stages and long tasks.
+ * A gap whose frames were drawn late, never drawn, dropped by the viewer, or
+ * held up by the window's thread or an answer shows where.
+ */
+function stallAttribution(run: any) {
+  const gap = run.longestGap, trace = run.trace;
+  if (!gap || !trace) return null;
+  const from = gap.from - 50, to = gap.to;
+  const round = (ms: number) => Math.round(ms * 10) / 10;
+  const page = (ms: number) => round(ms - trace.started);
+  const host = (us: number) => round((us - trace.hostOffsetUs) / 1000 - trace.started);
+  const inside = (...ms: number[]) => ms.some(t => t >= from && t <= to);
+  const native = (trace.native?.presentTrace ?? []).map((p: any) => ({ seq: p.seq, k: p.k, timed: p.timed, revision: p.revision, start: host(p.start), cpuMs: round(p.cpu_us / 1000), gpuDone: host(p.gpu_done), sent: host(p.sent) }))
+    .filter((p: any) => inside(p.start, p.gpuDone, p.sent));
+  const turns = (trace.native?.presenter?.turnTrace ?? []).map((t: any) => ({ what: t.what, k: t.k, at: host(t.at), ms: round(t.us / 1000) }))
+    .filter((t: any) => inside(t.at, t.at + t.ms));
+  const viewer = trace.viewer ?? {};
+  const rafs = (viewer.rafs ?? []).map(page).filter((t: number) => inside(t));
+  const stages: Record<string, { count: number; maxMs: number }> = {};
+  for (const e of trace.stages ?? []) {
+    if (!inside(page(e.at), page(e.at + e.ms))) continue;
+    const s = (stages[e.stage] ??= { count: 0, maxMs: 0 });
+    s.count++; s.maxMs = Math.max(s.maxMs, round(e.ms));
+  }
+  return {
+    gap: { ...gap, from: round(gap.from), to: round(gap.to), ms: round(gap.to - gap.from) },
+    native,
+    turns: turns.filter((t: any) => t.ms >= 1 || t.what !== 'render').slice(0, 40),
+    arrivals: (viewer.arrivals ?? []).filter((a: any) => inside(page(a[2]))).map((a: any) => ({ seq: a[0], at: page(a[2]), timed: a[4] })),
+    drops: (viewer.drops ?? []).filter((d: any) => inside(page(d[2]))).map((d: any) => ({ seq: d[0], reason: d[1], at: page(d[2]) })),
+    draws: (viewer.draws ?? []).filter((d: any) => inside(page(d[0]))).map((d: any) => ({ seq: d[1], revision: d[2], raf: page(d[0]), arrived: page(d[4]), submitted: page(d[5]) })),
+    longestRafWait: rafs.length > 1 ? round(Math.max(...rafs.slice(1).map((t: number, i: number) => t - rafs[i]!))) : null,
+    stages,
+    longTasks: (run.longTasks ?? []).filter((t: any) => inside(t.at, t.at + t.ms)),
+    presenter: (({ lateSkipped, stalls, stallUsMax, lastStall, slowTurns, turnUsMax, gpuUsMax, composeUsMax, compatWaits }: any) => ({ lateSkipped, stalls, stallUsMax, lastStall, slowTurns, turnUsMax, gpuUsMax, composeUsMax, compatWaits }))(trace.native?.presenter ?? {})
+  };
+}
 
 /** Today's app: a fresh profile with `extension` installed and "Use New Engine" off. */
 async function flagOffApp(extension: string | null) {
@@ -528,7 +573,7 @@ test.describe('Use New Engine: existing extensions', () => {
       const PM = (window as any).PM;
       const api = PM.Kernel.api('cadence-probe');
       const at: number[] = [], times: number[] = [];
-      // Diagnostics (PM_COMPAT_TRACE=1): the lookahead's state at each
+      // Diagnostics (engine runs): the lookahead's state at each
       // presented frame, joined with the native and viewer traces below.
       const lookaheadTrace: number[][] = [];
       let wrapped = false;
@@ -565,6 +610,8 @@ test.describe('Use New Engine: existing extensions', () => {
       observer.disconnect();
       const gaps = at.slice(1).map((v, i) => v - at[i]!);
       const sorted = [...gaps].sort((a, b) => a - b);
+      const longest = gaps.indexOf(Math.max(...gaps));
+      const longestGap = longest < 0 ? null : { from: at[longest]! - started, to: at[longest + 1]! - started, frames: [Math.round(times[longest]! * 30), Math.round(times[longest + 1]! * 30)] };
       const firstFrameMs = Math.round(at.length ? at[0]! - started : 3000);
       // The run's first advancing frame: the first presented time past the
       // one presented first (a re-presentation of the start frame is not
@@ -593,7 +640,7 @@ test.describe('Use New Engine: existing extensions', () => {
         .filter((a: any) => a && (revision === null || a.revision >= revision));
       const answeredShown = shown.length, rasterShown = shown.filter((a: any) => a.kind !== 'native').length;
       const trace = traced ? { started, hostOffsetUs: PM.EngineConnection?.status?.()?.hostOffsetUs ?? null, stages: PM.EngineRender?.trace?.take(), lookahead: lookaheadTrace, viewer: await PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.().catch(() => null) ?? null } : undefined;
-      return { answeredShown, rasterShown, trace, longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, firstAdvanceMs, repeatCount, wrap, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
+      return { answeredShown, rasterShown, trace, longestGap, longTasks: longTasks.map(task => ({ at: Math.round(task.startTime - started), ms: Math.round(task.duration) })), basesBefore, firstFrameMs, firstAdvanceMs, repeatCount, wrap, frames: at.length, uniqueTimes: new Set(times).size, lastTime: times.at(-1), head: times.slice(0, 4).map((t, i) => [Math.round(t * 30 * 100) / 100, Math.round(at[i]! - started)]), repeats: times.flatMap((t, i) => i > 0 && times.indexOf(t) !== i ? [[i, Math.round(t * 30 * 100) / 100]] : []).slice(0, 6), skipped: times.flatMap((t, i) => i > 0 && Math.round((t - times[i - 1]!) * 30) > 1 ? [[i, Math.round(times[i - 1]! * 30), Math.round(t * 30)]] : []).slice(0, 6), lastMs: Math.round((at.at(-1) ?? started) - started), maxGap: Math.round(Math.max(0, ...gaps)), p95: Math.round(sorted[Math.floor(sorted.length * 0.95)] ?? 0), asked: (PM.EngineRender?.compatStats?.needs ?? 0) - needs, rasters: (PM.EngineRender?.compatStats?.rasters ?? 0) + (PM.EngineRender?.compatStats?.reuses ?? 0) - rasters, nativeStats: PM.EngineStats?.latest ?? null, presenter: PM.Kernel.services.get('viewer')?.enginePresentation?.stats?.() ?? null, snapshots: PM.EngineRender?.stats ?? null, lookahead: PM.EngineRender ? { ...PM.EngineRender.lookaheadStats } : null, bases: PM.RasterCompat?.stats ? { ...PM.RasterCompat.stats } : null };
     }, { traced, run });
     const { page } = session;
     await page.waitForFunction((id) => (window as any).PM?.Kernel?.loader?.activeIds?.().includes(id) && Boolean((window as any).PM?.EngineRender), extension);
@@ -603,26 +650,30 @@ test.describe('Use New Engine: existing extensions', () => {
     const profileDirectory = process.env.PM_COMPAT_CPU_PROFILE_DIR;
     const profiler = profileDirectory ? await page.context().newCDPSession(page) : null;
     if (profiler) { await profiler.send('Profiler.enable'); await profiler.send('Profiler.start'); }
-    // Per-frame diagnostics: the viewer presenter's trace (arrivals, draws,
-    // drops), the native presenter's (POWERMOVE_BRIDGE_TRACE=1: schedule,
-    // render, GPU and send times), and the lookahead at each presented frame.
-    const traced = process.env.PM_COMPAT_TRACE === '1';
+    // Per-frame diagnostics on every engine run: the viewer presenter's
+    // trace (arrivals, draws, drops), the native presenter's (schedule,
+    // render, GPU and send times, render-thread turns), renderer stages and
+    // the lookahead at each presented frame. `stallAttribution` joins them
+    // over the longest gap; the full traces are attached to the test.
     const nativeReport = () => session.app.evaluate(async () => {
       const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
       return { presentTrace: report?.presentTrace ?? null, presenter: report?.presenter ?? null, loadavg: (process as any).getBuiltinModule?.('os')?.loadavg?.() ?? null };
     });
-    if (traced) {
-      await page.evaluate(() => (window as any).PM.EngineConnection.setTrace(true));
-      await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
-      await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.());
-      await nativeReport();
-    }
-    const engine: Awaited<ReturnType<typeof play>> & { nativeAfter?: Awaited<ReturnType<typeof nativeReport>> } = await play(page, traced);
-    if (traced) (engine as any).trace.native = await nativeReport();
-    // End-of-run status is sampled after the measured span, including on a
-    // non-traced cadence run. The window's last periodic stats can precede
-    // a late-frame burst and omit the native turn that caused it.
-    engine.nativeAfter = await nativeReport();
+    await page.evaluate(() => (window as any).PM.EngineConnection.setTrace(true));
+    await expect.poll(() => page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.presenting === true), { timeout: 20_000 }).toBe(true);
+    await page.evaluate(() => (window as any).PM.Kernel.services.get('viewer')?.enginePresentation?.takeTrace?.());
+    await nativeReport();
+    const engine: Awaited<ReturnType<typeof play>> & { nativeAfter?: Awaited<ReturnType<typeof nativeReport>> } = await play(page, true);
+    (engine as any).trace.native = await nativeReport();
+    const stall = stallAttribution(engine);
+    await test.info().attach(`${label} engine traces`, { body: JSON.stringify((engine as any).trace), contentType: 'application/json' });
+    delete (engine as any).trace;
+    // End-of-run status is sampled after the measured span: the window's
+    // last periodic stats can precede a late-frame burst and omit the
+    // native turn that caused it. (Its traces are in the attachment.)
+    const after = await nativeReport();
+    delete after.presenter?.turnTrace;
+    engine.nativeAfter = { ...after, presentTrace: null };
     if (profiler && profileDirectory) {
       const { profile } = await profiler.send('Profiler.stop');
       await mkdir(profileDirectory, { recursive: true });
@@ -647,13 +698,13 @@ test.describe('Use New Engine: existing extensions', () => {
       await rm(off.userData, { recursive: true, force: true });
     }
     // The machine's load during this run (the campaigns record it per run).
-    console.log(JSON.stringify({ cadence: label, load: os.loadavg(), engine, today }));
+    console.log(JSON.stringify({ cadence: label, load: os.loadavg(), engine, today, stall }));
     // The window answered for the override's layer at every presented time.
     expect(engine.answeredShown, 'presented times the window answered for').toBe(engine.uniqueTimes);
     // No stall (an unanswered need waits a second before it is asked again),
     // and no fewer frames than today's compositor presents.
     // Today's longest gap plus one frame at 30 fps, at most.
-    expect(engine.maxGap).toBeLessThanOrEqual(today.maxGap + Math.ceil(1000 / 30));
+    expect(engine.maxGap, `the longest gap: ${JSON.stringify(stall)}`).toBeLessThanOrEqual(today.maxGap + Math.ceil(1000 / 30));
     expect(engine.firstFrameMs).toBeLessThanOrEqual(today.firstFrameMs + Math.ceil(1000 / 30));
     expect(engine.firstAdvanceMs, 'the run\'s first advancing frame').toBeLessThanOrEqual(today.firstAdvanceMs + Math.ceil(1000 / 30));
     // Every presentation reaches extensions as `frame:rendered`: the engine
@@ -661,8 +712,8 @@ test.describe('Use New Engine: existing extensions', () => {
     expect(engine.repeatCount, `times presented again: ${JSON.stringify(engine.repeats)}`).toBeLessThanOrEqual(today.repeatCount);
     expect(engine.lastMs).toBeLessThanOrEqual(today.lastMs + Math.ceil(1000 / 30));
     // (The two sides can start one frame apart: one frame of alignment.)
-    expect(engine.frames).toBeGreaterThanOrEqual(today.frames - 1);
-    expect(engine.uniqueTimes).toBeGreaterThanOrEqual(today.uniqueTimes - 1);
+    expect(engine.frames, `the longest gap: ${JSON.stringify(stall)}`).toBeGreaterThanOrEqual(today.frames - 1);
+    expect(engine.uniqueTimes, `the longest gap: ${JSON.stringify(stall)}`).toBeGreaterThanOrEqual(today.uniqueTimes - 1);
     return { engine, today };
   }
 
