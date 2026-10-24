@@ -248,7 +248,7 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         await expect(page.locator('#source-preview[data-open="true"]')).toBeVisible();
         if (enabled) await page.waitForFunction(() => {
           const monitor = (window as any).PM.EngineSourceMedia.monitorValue;
-          return monitor?.canvas.width > 1 && monitor.surface instanceof HTMLImageElement && monitor.surface.complete && monitor.surface.naturalWidth > 0;
+          return monitor?.paintedSize && monitor.surface instanceof HTMLImageElement && monitor.surface.complete && monitor.surface.naturalWidth > 0;
         });
         await page.locator('#source-preview').screenshot({ path: path.join(directory, `source-${theme}.png`), animations: 'disabled' });
         const composition = await page.evaluate(() => {
@@ -286,7 +286,7 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         const source = enabled ? PM.EngineSourceMedia.monitorValue : root.querySelector('video');
         const painted = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
         const until = performance.now() + 15_000;
-        while (enabled ? source.canvas.width !== 320 || source.canvas.height !== 180 ||
+        while (enabled ? source.paintedSize?.width !== 320 || source.paintedSize?.height !== 180 ||
           !(source.surface instanceof HTMLVideoElement) || source.surface.readyState < 2 || source.rendering : source.readyState < 2) {
           if (performance.now() > until) throw new Error('Source monitor did not reach its comparison size');
           await painted();

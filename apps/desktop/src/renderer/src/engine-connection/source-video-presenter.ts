@@ -7,11 +7,15 @@ type GeneratorTrack = MediaStreamTrack & { readonly writable: WritableStream<Vid
 type GeneratorConstructor = new (options: { kind: 'video' }) => GeneratorTrack;
 const STARTUP_REPLAY_MS = 16;
 const STARTUP_TIMEOUT_MS = 5_000;
-/** Bounds the wait for a shared-texture frame to reach the video element. */
-const PRESENT_TIMEOUT_MS = 250;
-/** A written frame the element has not presented by then is written again. */
-const CONFIRM_MS = 50;
-const CONFIRM_ATTEMPTS = 3;
+/** An element that should present but reports nothing (not rendered) cannot
+ * hold the monitor: the next frame is written after this many ms anyway. */
+const PRESENT_BOUND_MS = 250;
+/** WebCodecs buffer layouts of the planes the engine sends (`SourceVideoFrame`). */
+const FORMATS: Record<string, { format: VideoPixelFormat; bytes: (w: number, h: number) => number }> = {
+  nv12: { format: 'NV12', bytes: (w, h) => w * h + Math.ceil(w / 2) * Math.ceil(h / 2) * 2 },
+  i420a: { format: 'I420A', bytes: (w, h) => 2 * w * h + Math.ceil(w / 2) * Math.ceil(h / 2) * 2 },
+  rgba: { format: 'RGBA', bytes: (w, h) => 4 * w * h }
+};
 const releaseWriter = (writer: WritableStreamDefaultWriter<VideoFrame>): void => {
   try { writer.releaseLock(); } catch { /* A pending abort still owns the lock. */ }
 };
@@ -19,11 +23,11 @@ const releaseWriter = (writer: WritableStreamDefaultWriter<VideoFrame>): void =>
 export type SourceVideoDescriptor = { token: string; width: number; height: number }
   | { video: SourceVideoFrame; data: Uint8ClampedArray; width: number; height: number };
 
+/** The engine only sends tags WebCodecs names (pm-protocol validates them). */
 function rawColorSpace(video: SourceVideoFrame): VideoColorSpaceInit {
-  const primaries = ({ p3: 'smpte432', 'smptest431-2': 'smpte431' } as Record<string, string>)[video.primaries] ?? video.primaries;
-  const transfer = ({ srgb: 'iec61966-2-1', pq: 'smpte2084', hlg: 'arib-std-b67' } as Record<string, string>)[video.transfer] ?? video.transfer;
-  return { primaries: primaries === 'unspecified' ? null : primaries as VideoColorPrimaries, transfer: transfer === 'unspecified' ? null : transfer as VideoTransferCharacteristics,
-    matrix: video.matrix === 'unspecified' ? null : video.matrix as VideoMatrixCoefficients, fullRange: video.range === 'full' };
+  return { primaries: video.primaries as VideoColorPrimaries,
+    transfer: (video.transfer === 'srgb' ? 'iec61966-2-1' : video.transfer) as VideoTransferCharacteristics,
+    matrix: video.matrix as VideoMatrixCoefficients, fullRange: video.range === 'full' };
 }
 
 export class SourceVideoPresenter {
@@ -34,14 +38,12 @@ export class SourceVideoPresenter {
   private lastTimestamp = -1;
   private disposed = false;
   private readonly disposal = new AbortController();
-  private presented = 0;
   private presentedTime = -1;
   private readonly presentation = new Set<() => void>();
-  /** The last painted frame, kept until the element is seen presenting it. */
-  private latest: { frame: VideoFrame; timestamp: number; generation: number } | null = null;
-  private generation = 0;
+  /** Presentation of the last written frame while pending; the next write waits for it. */
+  private previous: Promise<void> | null = null;
 
-  constructor(private readonly bridge: SourceBridge | undefined, private readonly repaired: () => void = () => {}) {
+  constructor(private readonly bridge: SourceBridge | undefined) {
     this.surface.muted = true;
     this.surface.playsInline = true;
     this.surface.autoplay = true;
@@ -49,7 +51,6 @@ export class SourceVideoPresenter {
     if (typeof this.surface.requestVideoFrameCallback === 'function') {
       const presented: VideoFrameRequestCallback = (_now, metadata) => {
         if (this.disposed) return;
-        this.presented = metadata.presentedFrames;
         this.presentedTime = metadata.mediaTime;
         for (const wake of this.presentation) wake();
         this.surface.requestVideoFrameCallback(presented);
@@ -58,47 +59,29 @@ export class SourceVideoPresenter {
     }
   }
 
-  /** Waits until the element presents a frame after `before`, or the bound. */
-  private presentedAfter(before: number, cancelled: Promise<void>): Promise<void> {
-    if (typeof this.surface.requestVideoFrameCallback !== 'function' || this.presented > before) return Promise.resolve();
-    let wake!: () => void;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const shown = new Promise<void>(resolve => {
-      wake = () => { if (this.presented > before) resolve(); };
-      timer = setTimeout(resolve, PRESENT_TIMEOUT_MS);
+  /** Resolves once the element presents the frame stamped `timestamp` (µs)
+   * or a later one. The next paint writes only after this, so two frames
+   * never reach the generated track's sink within one vsync, where it can
+   * keep the older. A detached or hidden element presents nothing and does
+   * not wait (null). */
+  private presentedAt(timestamp: number): Promise<void> | null {
+    if (typeof this.surface.requestVideoFrameCallback !== 'function') return null;
+    const shown = () => this.disposed || this.presentedTime * 1e6 >= timestamp - 0.5 || !this.surface.isConnected || document.hidden;
+    if (shown()) return null;
+    const presented = new Promise<void>(resolve => {
+      const done = () => {
+        clearTimeout(timer);
+        this.presentation.delete(wake);
+        document.removeEventListener('visibilitychange', wake);
+        resolve();
+      };
+      const wake = () => { if (shown()) done(); };
+      const timer = setTimeout(done, PRESENT_BOUND_MS);
+      this.presentation.add(wake);
+      document.addEventListener('visibilitychange', wake);
     });
-    this.presentation.add(wake);
-    return Promise.race([shown, cancelled]).finally(() => {
-      this.presentation.delete(wake);
-      if (timer !== null) clearTimeout(timer);
-    });
-  }
-
-  /** A generated track's sink can keep showing the previous frame when two
-   * frames arrive within one vsync (resize then seek). Confirm through the
-   * presented media time that the latest frame reached the element, and
-   * write it again, a bounded number of times, if it did not. */
-  private async confirm(generation: number): Promise<void> {
-    if (typeof this.surface.requestVideoFrameCallback !== 'function') return;
-    for (let attempt = 0; attempt < CONFIRM_ATTEMPTS; attempt++) {
-      const shown = () => this.latest !== null && Math.abs(this.presentedTime * 1e6 - this.latest.timestamp) < 1;
-      if (!shown()) {
-        let wake!: () => void;
-        let timer: ReturnType<typeof setTimeout> | null = null;
-        await new Promise<void>(resolve => {
-          wake = () => { if (shown()) resolve(); };
-          timer = setTimeout(resolve, CONFIRM_MS);
-          this.presentation.add(wake);
-        }).finally(() => { this.presentation.delete(wake); if (timer !== null) clearTimeout(timer); });
-      }
-      const latest = this.latest;
-      if (this.disposed || !latest || latest.generation !== generation || !this.writer || shown()) return;
-      const timestamp = this.lastTimestamp = Math.max(this.lastTimestamp + 1, Math.round(performance.now() * 1000));
-      const again = new VideoFrame(latest.frame, { timestamp });
-      latest.timestamp = timestamp;
-      this.repaired();
-      void this.writer.write(again).catch(() => {}).finally(() => again.close());
-    }
+    void presented.then(() => { if (this.previous === presented) this.previous = null; });
+    return presented;
   }
 
   private ensureWriter(): WritableStreamDefaultWriter<VideoFrame> {
@@ -120,7 +103,9 @@ export class SourceVideoPresenter {
     }
   }
 
-  /** Resolves after the frame has been accepted by the video track. */
+  /** Resolves once the frame is written, after the element presented the
+   * previous one. A shared-texture import is held until its own frame is
+   * presented. */
   async paint(descriptor: SourceVideoDescriptor, signal?: AbortSignal): Promise<void> {
     if (this.disposed) throw new DOMException('Source video presenter is disposed.', 'AbortError');
     if (signal?.aborted) throw new DOMException('Source video presentation was cancelled.', 'AbortError');
@@ -130,6 +115,7 @@ export class SourceVideoPresenter {
       throw new Error('Invalid native source video dimensions.');
 
     let sourceFrame: VideoFrame | null = null;
+    let held: Promise<void> | null = null;
     let stampedFrame: VideoFrame | null = null;
     let startupTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelResolve!: () => void;
@@ -140,14 +126,16 @@ export class SourceVideoPresenter {
     this.disposal.signal.addEventListener('abort', onAbort, { once: true });
     try {
       if (signal?.aborted || this.disposed) throw new DOMException('Source video presentation was cancelled.', 'AbortError');
+      if (this.previous) await Promise.race([this.previous, cancelled]);
+      if (signal?.aborted || this.disposed) throw new DOMException('Source video presentation was cancelled.', 'AbortError');
       if ('video' in descriptor) {
-        if (!['nv12', 'i420a'].includes(descriptor.video.format)) throw new Error('Invalid raw source frame format.');
+        const layout = FORMATS[descriptor.video.format];
+        if (!layout) throw new Error('Invalid raw source frame format.');
         if (descriptor.video.visibleWidth !== undefined && (!Number.isInteger(descriptor.video.visibleWidth) || descriptor.video.visibleWidth < 1 || descriptor.video.visibleWidth > descriptor.width)) throw new Error('Invalid source visible width.');
-        const expected = descriptor.width * descriptor.height * (descriptor.video.format === 'i420a' ? 2 : 1) + Math.ceil(descriptor.width / 2) * Math.ceil(descriptor.height / 2) * 2;
-        if (descriptor.data.byteLength !== expected) throw new Error('Invalid source video plane length.');
+        if (descriptor.data.byteLength !== layout.bytes(descriptor.width, descriptor.height)) throw new Error('Invalid source video plane length.');
         const data = descriptor.data.buffer instanceof ArrayBuffer ? descriptor.data as Uint8ClampedArray<ArrayBuffer> : new Uint8ClampedArray(descriptor.data);
         // This request owns its uncached planes; transfer their buffer once.
-        const init: VideoFrameBufferInit & { transfer: ArrayBuffer[] } = { format: descriptor.video.format === 'i420a' ? 'I420A' : 'NV12', codedWidth: descriptor.width, codedHeight: descriptor.height,
+        const init: VideoFrameBufferInit & { transfer: ArrayBuffer[] } = { format: layout.format, codedWidth: descriptor.width, codedHeight: descriptor.height,
           timestamp: Math.round(performance.now() * 1000), colorSpace: rawColorSpace(descriptor.video), transfer: [data.buffer],
           ...(descriptor.video.visibleWidth !== undefined ? { visibleRect: { x: 0, y: 0, width: descriptor.video.visibleWidth, height: descriptor.height }, displayWidth: descriptor.video.visibleWidth, displayHeight: descriptor.height } : {}) };
         sourceFrame = new VideoFrame(data, init);
@@ -163,7 +151,6 @@ export class SourceVideoPresenter {
       // Chromium does not retain frames written before the video sink has
       // attached to this new MediaStream. Play is pending until that sink
       // receives a frame, so repeat this held frame until startup settles.
-      const before = this.presented;
       const playing = this.started ?? (this.started = Promise.resolve(this.surface.play()));
       let played = false;
       void playing.then(() => { played = true; }, () => {});
@@ -193,14 +180,11 @@ export class SourceVideoPresenter {
           finally { if (tickTimer !== null) clearTimeout(tickTimer); }
         }
         await Promise.race([playing, cancelled, timeout]);
+        this.previous = this.presentedAt(this.lastTimestamp);
         // A shared-texture frame can reach the compositor after its write is
         // accepted; releasing the import first could leave the previous frame
         // on screen. Buffer-backed frames own their planes.
-        if ('token' in descriptor) await this.presentedAfter(before, cancelled);
-        const generation = ++this.generation;
-        this.latest?.frame.close();
-        this.latest = { frame: new VideoFrame(sourceFrame), timestamp: this.lastTimestamp, generation };
-        void this.confirm(generation);
+        if ('token' in descriptor) held = this.previous;
       }
       catch (error) {
         // A rejected play or a detached sink can leave a write waiting for
@@ -220,8 +204,12 @@ export class SourceVideoPresenter {
       signal?.removeEventListener('abort', onAbort);
       this.disposal.signal.removeEventListener('abort', onAbort);
       cancelResolve();
-      sourceFrame?.close();
-      if ('token' in descriptor) this.bridge?.discardSource(descriptor.token);
+      const frame = sourceFrame;
+      const release = () => {
+        frame?.close();
+        if ('token' in descriptor) this.bridge?.discardSource(descriptor.token);
+      };
+      if (held) void held.then(release); else release();
     }
   }
 
@@ -229,8 +217,7 @@ export class SourceVideoPresenter {
     if (this.disposed) return;
     this.disposed = true;
     this.disposal.abort();
-    this.presentation.clear();
-    this.latest?.frame.close(); this.latest = null;
+    for (const wake of [...this.presentation]) wake();
     const writer = this.writer;
     this.writer = null;
     if (writer) void writer.abort(new Error('Source video presenter disposed')).catch(() => {}).finally(() => releaseWriter(writer));

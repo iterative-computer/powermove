@@ -304,7 +304,6 @@ describe('engine source consumers', () => {
     const f = fixture();
     try {
       const monitor = f.source.monitor('clip');
-      vi.spyOn(monitor.canvas, 'getContext').mockReturnValue(null);
       const width = vi.spyOn(monitor.surface, 'clientWidth', 'get').mockReturnValue(160);
       const height = vi.spyOn(monitor.surface, 'clientHeight', 'get').mockReturnValue(90);
       resized([{ target: monitor.surface } as unknown as ResizeObserverEntry], {} as ResizeObserver);
@@ -322,7 +321,6 @@ describe('engine source consumers', () => {
     const f = fixture(); f.project.assets.clip.kind = 'image';
     const monitor = f.source.monitor('clip');
     expect(monitor.surface).toBeInstanceOf(HTMLImageElement);
-    expect(monitor.surface).not.toBe(monitor.canvas);
     f.source.dispose();
   });
 });

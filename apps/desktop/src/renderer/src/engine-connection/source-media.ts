@@ -50,7 +50,7 @@ export function sourcePosterSize(asset: Record<string, any>, edge = 320): { widt
 }
 
 export class EngineSourceMedia {
-  readonly stats = { frames: 0, presented: 0, repaired: 0, hits: 0, filmstrips: 0, renditions: 0, cancelled: 0, frameMs: 0 };
+  readonly stats = { frames: 0, presented: 0, hits: 0, filmstrips: 0, renditions: 0, cancelled: 0, frameMs: 0 };
   private readonly cache = new Map<string, EngineSnapshot>();
   private bytes = 0;
   private readonly strips = new Map<string, Uint8Array[]>();
@@ -345,7 +345,10 @@ export class EngineSourceMedia {
 /** Media-element shaped state for the existing source monitor controls. */
 export class SourceMonitor extends EventTarget {
   error: Error | null = null;
-  readonly canvas = document.createElement('canvas');
+  /** Stages engine RGBA for stills and other non-video sources. */
+  private readonly canvas: HTMLCanvasElement | null;
+  /** Device size of the frame last presented (video) or painted (stills). */
+  paintedSize: { width: number; height: number } | null = null;
   readonly surface: HTMLCanvasElement | HTMLImageElement | HTMLVideoElement;
   private readonly videoPresenter: SourceVideoPresenter | null;
   readonly duration: number;
@@ -379,10 +382,10 @@ export class SourceMonitor extends EventTarget {
     // Still images used to paint as an <img> below the transport. A canvas
     // changes Chromium's shadow compositing even when its RGBA bytes match.
     // Keep that presentation while every pixel still comes from the engine.
-    this.videoPresenter = meta?.kind === 'video' ? new SourceVideoPresenter(host.frameBridge, () => { source.stats.repaired++; }) : null;
-    this.surface = this.videoPresenter?.surface ?? (meta?.kind === 'image' ? document.createElement('img') : this.canvas);
+    this.videoPresenter = meta?.kind === 'video' ? new SourceVideoPresenter(host.frameBridge) : null;
+    this.canvas = this.videoPresenter ? null : document.createElement('canvas');
+    this.surface = this.videoPresenter?.surface ?? (meta?.kind === 'image' ? document.createElement('img') : this.canvas!);
     if (this.surface instanceof HTMLImageElement) this.surface.alt = '';
-    this.canvas.width = this.canvas.height = 1;
     this.resize = new ResizeObserver(entries => {
       if (!entries.some(entry => entry.target === this.surface)) return;
       // Measure after layout, preserving client rounding and override CSS
@@ -476,24 +479,21 @@ export class SourceMonitor extends EventTarget {
         if (snapshot.videoSurface) this.host.frameBridge?.discardSource(snapshot.videoSurface.token);
         return;
       }
-      if (!video) {
-        if (this.canvas.width !== width) this.canvas.width = width;
-        if (this.canvas.height !== height) this.canvas.height = height;
-      }
-      if (video) {
-        if (!this.videoPresenter || (!snapshot.videoSurface && !snapshot.videoPlanes)) throw new Error('The engine did not provide a native video surface.');
+      if (this.videoPresenter) {
+        if (!snapshot.videoSurface && !snapshot.videoPlanes) throw new Error('The engine did not provide a native video surface.');
         await this.videoPresenter.paint(snapshot.videoSurface ?? { video: snapshot.videoPlanes!, data: snapshot.data, width: snapshot.width, height: snapshot.height }, signal);
         if (this.disposed || this.requested !== generation) return;
         this.source.stats.presented++;
-        if (this.canvas.width !== width) this.canvas.width = width;
-        if (this.canvas.height !== height) this.canvas.height = height;
       } else {
+        const canvas = this.canvas!;
+        if (canvas.width !== width) canvas.width = width;
+        if (canvas.height !== height) canvas.height = height;
         const pixels = snapshot.data.buffer instanceof ArrayBuffer
           ? snapshot.data as Uint8ClampedArray<ArrayBuffer> : new Uint8ClampedArray(snapshot.data);
-        this.canvas.getContext('2d', { colorSpace: 'srgb' })?.putImageData(new ImageData(pixels, width, height), 0, 0);
+        canvas.getContext('2d', { colorSpace: 'srgb' })?.putImageData(new ImageData(pixels, width, height), 0, 0);
       }
       if (this.surface instanceof HTMLImageElement) {
-        const blob = await new Promise<Blob | null>(resolve => this.canvas.toBlob(resolve, 'image/png'));
+        const blob = await new Promise<Blob | null>(resolve => this.canvas!.toBlob(resolve, 'image/png'));
         if (!blob) throw new Error('The source image could not be presented.');
         if (this.disposed || this.requested !== generation) return;
         const previous = this.imageUrl;
@@ -502,6 +502,7 @@ export class SourceMonitor extends EventTarget {
         finally { if (previous) URL.revokeObjectURL(previous); }
         if (this.disposed || this.requested !== generation) return;
       }
+      this.paintedSize = { width, height };
       this.dispatchEvent(new Event('loadeddata'));
     } catch (error) { if (!controller.signal.aborted) this.fail(error); }
     finally {
@@ -519,6 +520,6 @@ export class SourceMonitor extends EventTarget {
     if (this.imageUrl) { URL.revokeObjectURL(this.imageUrl); this.imageUrl = null; }
     if (this.surface instanceof HTMLImageElement) this.surface.removeAttribute('src');
     this.videoPresenter?.dispose();
-    this.canvas.width = this.canvas.height = 1;
+    if (this.canvas) this.canvas.width = this.canvas.height = 0;
   }
 }

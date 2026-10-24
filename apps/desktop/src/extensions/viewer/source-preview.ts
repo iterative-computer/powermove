@@ -26,7 +26,7 @@ interface SourceElement extends EventTarget {
   pause(): void;
   dispose?(): void;
 }
-interface NativeSourceMedia { monitor(asset: string): SourceElement & { canvas: HTMLCanvasElement; surface?: HTMLCanvasElement | HTMLImageElement | HTMLVideoElement } }
+interface NativeSourceMedia { monitor(asset: string): SourceElement & { surface: HTMLCanvasElement | HTMLImageElement | HTMLVideoElement } }
 
 const STYLES = `
   #source-preview{position:absolute;inset:0;z-index:6;display:none;background:var(--bg-panel-2);border-radius:inherit;overflow:hidden}
@@ -151,9 +151,14 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
     if (element && !element.paused) frame = window.requestAnimationFrame(follow);
   }
 
+  // Only the native monitor reports failures in the panel; today's media
+  // elements keep their existing (silent) behaviour.
+  let reportsFailure = false;
   function onLoaded(): void {
-    failure.hidden = !element?.error;
-    if (element?.error) failure.textContent = element.error.message;
+    if (reportsFailure) {
+      failure.hidden = !element?.error;
+      if (element?.error) failure.textContent = element.error.message;
+    }
     paint();
   }
   function onFailure(event: Event): void {
@@ -161,8 +166,8 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
     failure.hidden = false;
   }
 
-  function bindElement(next: SourceElement): void {
-    element = next;
+  function bindElement(next: SourceElement, native = false): void {
+    element = next; reportsFailure = native;
     next.addEventListener('play', onPlayState);
     next.addEventListener('pause', onPlayState);
     next.addEventListener('ended', onPlayState);
@@ -170,7 +175,7 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
     next.addEventListener('durationchange', paint);
     next.addEventListener('loadeddata', onLoaded);
     next.addEventListener('loadedmetadata', onLoaded);
-    next.addEventListener('error', onFailure);
+    if (native) next.addEventListener('error', onFailure);
   }
 
   function clear(): void {
@@ -215,8 +220,8 @@ export function installSourcePreview(api: PowermoveAPI, viewer: SourcePreviewHos
         const card = document.createElement('div'); card.className = 'sp-audio';
         const audioIcon = icon('music'); audioIcon.setAttribute('aria-hidden', 'true');
         card.append(audioIcon, name); media.append(card);
-      } else media.append(monitor.surface ?? monitor.canvas);
-      bindElement(monitor);
+      } else media.append(monitor.surface);
+      bindElement(monitor, true);
     } else if (kind === 'image' && url) {
       const img = document.createElement('img'); img.src = url; img.alt = '';
       media.append(img);

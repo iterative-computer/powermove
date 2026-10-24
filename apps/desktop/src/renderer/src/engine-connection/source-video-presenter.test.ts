@@ -113,44 +113,55 @@ describe('SourceVideoPresenter', () => {
   it('keeps a shared-texture import until the element presents its frame', async () => {
     const f = fixture();
     let presented!: VideoFrameRequestCallback;
-    let count = 0;
     Object.defineProperty(HTMLVideoElement.prototype, 'requestVideoFrameCallback', { configurable: true,
       value: (callback: VideoFrameRequestCallback) => { presented = callback; return 1; } });
     onTestFinished(() => { delete (HTMLVideoElement.prototype as Partial<HTMLVideoElement>).requestVideoFrameCallback; });
     const presenter = new SourceVideoPresenter(f.bridge);
-    const painting = presenter.paint({ token: 'surface', width: 4, height: 2 });
-    await new Promise(resolve => setTimeout(resolve, 0));
+    document.body.append(presenter.surface);
+    await presenter.paint({ token: 'surface', width: 4, height: 2 });
     expect(f.write).toHaveBeenCalledOnce();
     expect(f.discardSource).not.toHaveBeenCalled();
-    presented(0, { presentedFrames: ++count } as VideoFrameCallbackMetadata);
-    await painting;
+    presented(0, { presentedFrames: 1, mediaTime: f.created.at(-1)!.timestamp / 1e6 } as VideoFrameCallbackMetadata);
+    await new Promise(resolve => setTimeout(resolve, 0));
     expect(f.discardSource).toHaveBeenCalledWith('surface');
     presenter.dispose();
   });
 
-  it('writes the latest frame again when the element keeps presenting an older one', async () => {
+  it('writes a frame only after the element presented the previous one, and bounds a silent element', async () => {
     vi.useFakeTimers();
     const f = fixture();
     let presented!: VideoFrameRequestCallback;
     Object.defineProperty(HTMLVideoElement.prototype, 'requestVideoFrameCallback', { configurable: true,
       value: (callback: VideoFrameRequestCallback) => { presented = callback; return 1; } });
     onTestFinished(() => { delete (HTMLVideoElement.prototype as Partial<HTMLVideoElement>).requestVideoFrameCallback; });
-    const repaired = vi.fn();
-    const presenter = new SourceVideoPresenter(undefined, repaired);
-    await presenter.paint({ width: 4, height: 2, data: new Uint8ClampedArray(12),
-      video: { format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } });
-    expect(f.write).toHaveBeenCalledOnce();
+    const presenter = new SourceVideoPresenter(undefined);
+    document.body.append(presenter.surface);
+    const planes = (fill: number) => ({ width: 4, height: 2, data: new Uint8ClampedArray(12).fill(fill),
+      video: { format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } as const });
+    await presenter.paint(planes(1));
     const written = f.created.at(-1)!.timestamp;
+    let second = false;
+    const painting = presenter.paint(planes(2)).then(() => { second = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    // An earlier frame's presentation does not release the next write.
     presented(0, { presentedFrames: 1, mediaTime: (written - 40_000) / 1e6 } as VideoFrameCallbackMetadata);
-    await vi.advanceTimersByTimeAsync(60);
-    expect(repaired).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.write).toHaveBeenCalledOnce();
+    expect(second).toBe(false);
+    presented(0, { presentedFrames: 2, mediaTime: written / 1e6 } as VideoFrameCallbackMetadata);
+    await painting;
     expect(f.write).toHaveBeenCalledTimes(2);
-    const again = f.created.at(-1)!.timestamp;
-    expect(again).toBeGreaterThan(written);
-    presented(0, { presentedFrames: 2, mediaTime: again / 1e6 } as VideoFrameCallbackMetadata);
-    await vi.advanceTimersByTimeAsync(200);
-    expect(repaired).toHaveBeenCalledOnce();
+    const latest = f.created.at(-1)!.timestamp;
+    expect(latest).toBeGreaterThan(written);
+    // Never presented (the element is not rendered): the third write waits the bound, no longer.
+    const third = presenter.paint(planes(3));
+    await vi.advanceTimersByTimeAsync(249);
+    expect(f.write).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await third;
+    expect(f.write).toHaveBeenCalledTimes(3);
     presenter.dispose();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('bounds an unattachable video sink and tears down the failed stream', async () => {
