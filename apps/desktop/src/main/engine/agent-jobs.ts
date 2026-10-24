@@ -86,6 +86,8 @@ export interface AgentJobsEngine {
   /** A user-chosen destination as a write handle for `job` on `session`,
    *  placed under `overwrite` (the engine's default for chosen files is replace). */
   chooseOutput?(file: string, job: string, session: number, overwrite?: 'uniqueName' | 'replace' | 'fail'): string;
+  /** Starts only the hidden WebM encoder window while a user snapshot opens. */
+  warmExportEncoder?(): void;
   /** Marks a job session as a draft render (offline media from proxies). */
   setDraftSession?(session: number, draft: boolean): void;
 }
@@ -213,6 +215,7 @@ export function wireSettings(input: {
   start: number;
   end: number;
   audio: boolean;
+  audioIndexPlayhead?: number;
   motionBlur: boolean;
   hideCaptions?: boolean;
   draft?: boolean;
@@ -234,6 +237,7 @@ export function wireSettings(input: {
     frameRate: { num: input.rate.num, den: input.rate.den },
     range: { start: toTicks(Math.max(0, input.start)), end: toTicks(input.end) },
     audio: input.audio && !image,
+    ...(input.audioIndexPlayhead !== undefined ? { audioIndexPlayhead: toTicks(input.audioIndexPlayhead) } : {}),
     motionBlur: input.motionBlur,
     color: wireColor(format, delivery),
     precision: 'float32',
@@ -307,7 +311,7 @@ export function userExportSettings(projectValue: unknown, options: UserExportOpt
   return wireSettings({
     format, delivery, alpha: o.alpha, quality: o.quality, size, rate,
     start: o.start, end: format === 'still' ? Math.max(o.end, o.start + 1 / (rate.num / rate.den)) : o.end,
-    audio: o.audio, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
+    audio: o.audio, audioIndexPlayhead: o.audioIndexPlayhead, motionBlur: o.motionBlur, hideCaptions: o.hideCaptions === true, draft: o.draft === true,
     ...(Array.isArray(o.compat) ? { compat: compatSources(o.compat) } : {}),
     ...(extra.preview ? { preview: true } : {}),
     ...(extra.sequenceName ? { sequenceName: extra.sequenceName } : {})
@@ -724,6 +728,7 @@ export class AgentJobs {
     const sequenceName = format === 'png' ? path.basename(destination) : undefined;
     const settings = userExportSettings(project, options, { preview: !queue, ...(sequenceName ? { sequenceName } : {}) });
     if (!this.options.engine.chooseOutput) throw new AgentJobError('This host cannot write user exports.');
+    if (settings.format.kind === 'webm' && settings.alpha === 'none') this.options.engine.warmExportEncoder?.();
     const jobId = `${queue ? 'queue' : 'user'}-export-${randomUUID()}`;
     // Queue ownership is for status delivery; seed ownership follows the
     // window that queued this snapshot while that renderer still exists.

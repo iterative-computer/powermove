@@ -238,6 +238,7 @@ fn settings() -> ExportSettings {
             end: Ticks::from_whole_seconds(1),
         },
         audio: true,
+        audio_index_playhead: None,
         motion_blur: false,
         color: OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,

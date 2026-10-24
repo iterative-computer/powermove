@@ -13,6 +13,7 @@ import { installAgentFramesIpc } from './agent-frames';
  * the engines' host requests (native-engine.ts).
  */
 import { existsSync, statSync } from 'node:fs';
+import { appendFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,6 +39,8 @@ import { SnapshotService } from './snapshots';
 import { WindowSnapshotSessions } from './window-sessions';
 import { CompatFrames } from './compat-frames';
 import { ShaderFallbackRelay } from './shader-fallback-relay';
+import { ExportEncoders } from './export-encoder';
+import { openEncoderWindow } from './export-encoder-window';
 import { ExportJobWarmth, installExportJobWarmthIpc } from './export-job-warmth';
 import type { ChildLike, PortLike } from './ports';
 
@@ -127,6 +130,7 @@ export type InstallNativeEngineOptions = {
 
 export type InstalledNativeEngine = {
   engine: NativeEngine | null;
+  exportEncoders?: ExportEncoders;
   /** Agent exports and frames through the job engine (agent-jobs.ts). */
   agentJobs: AgentJobs | null;
   /** The render queue (render-queue.ts). */
@@ -324,6 +328,60 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     if (!options.isTrustedSender(event)) return;
     if (!compatFrames.answer(event.sender.id, answer)) log('warn', `window ${event.sender.id} sent a compatibility answer nobody asked for`);
   });
+  // The job engine's WebM exports go through Chromium's WebCodecs encoders,
+  // as today's exporter's do (decision EXPORT-1), in a hidden encoder window.
+  const rendererUrl = !options.isPackaged ? env['ELECTRON_RENDERER_URL']?.replace(/\/$/, '') : undefined;
+  // Process-cumulative counters: overlapping/aborted exports must not reset
+  // another session's transport measurements. Compare snapshots for a run.
+  const exportImports = { process_surface_imports: 0, process_surface_import_sync_ms: 0,
+    process_surface_sends: 0, process_surface_send_ms: 0, process_surface_send_failures: 0 };
+  const textures = sharedTexture as unknown as SharedTextureLike;
+  const exportTextures: SharedTextureLike = env['PM_EXPORT_PROFILE'] === '1' ? {
+    importSharedTexture: (options) => {
+      const started = performance.now();
+      const texture = textures.importSharedTexture(options);
+      exportImports.process_surface_imports++;
+      exportImports.process_surface_import_sync_ms += performance.now() - started;
+      return texture;
+    },
+    sendSharedTexture: (options, ...args) => {
+      exportImports.process_surface_sends++;
+      const started = performance.now();
+      return textures.sendSharedTexture(options, ...args).then(() => {
+        exportImports.process_surface_send_ms += performance.now() - started;
+      }, (error: unknown) => {
+        exportImports.process_surface_send_ms += performance.now() - started;
+        exportImports.process_surface_send_failures++;
+        throw error;
+      });
+    }
+  } : textures;
+  const exportEncoders = new ExportEncoders({
+    openWindow: () => openEncoderWindow({
+      preload: path.join(options.mainDirectory, '../preload/exportEncoder.js'),
+      url: `${rendererUrl ?? 'app://powermove'}/export-encoder.html`,
+      receiverGone: (owner) => exportFrameBridge?.receiverGone(owner),
+      log
+    }),
+    writeOutput: (file, bytes) => writeFile(file, bytes),
+    ...(env['PM_EXPORT_PROFILE'] === '1' ? {
+      profile: (timings: Record<string, number>) => {
+        console.log('[export timing] host', JSON.stringify({ ...timings, ...exportImports }));
+      }
+    } : {}),
+    ...(env['POWERMOVE_BACKGROUND_TEST'] === '1' && env['PM_EXPORT_INPUT_CAPTURE_DIR'] ? {
+      capture: (rgba: Uint8Array) => appendFile(path.join(env['PM_EXPORT_INPUT_CAPTURE_DIR']!, 'native.rgba'), rgba)
+    } : {})
+  });
+  // Separate authenticated Mach connection for job encoders. Viewer and
+  // export pools have independent generations, receivers and lifetimes.
+  const exportFrameBridge = bridgeAddon ? new FrameBridge({
+    addon: bridgeAddon, sharedTexture: exportTextures,
+    allowUnsignedDev: !options.isPackaged, resolve: () => exportEncoders.receiver(), log,
+  }) : null;
+  exportFrameBridge?.listen((event) => {
+    if (event.kind === 'retire' && event.generation != null) exportEncoders.retireSurface(event.generation);
+  });
   engine = new NativeEngine({
     // A measurement control only; packaged apps always start jobs on demand.
     eagerJobs: !options.isPackaged && env['POWERMOVE_ENGINE_EAGER_JOBS'] === '1',
@@ -331,8 +389,10 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     ...(!options.isPackaged && Number(env['POWERMOVE_ENGINE_JOB_IDLE_MS']) > 0 ? { jobIdleMs: Number(env['POWERMOVE_ENGINE_JOB_IDLE_MS']) } : {}),
     // The export's own snapshot of the layer goes with the ask (agent-jobs.ts).
     compatFrame: (request, session) => compatFrames.serve(request, agentJobsRef?.compatLayer(session, request) ?? null),
+    exportEncoders,
+    takePixels: bridgeAddon?.takePixels ? (name, length) => bridgeAddon.takePixels!(name, length) : null,
     spawn: (process) => {
-      const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : null;
+      const launch: BridgeLaunch | null = process === 'interactive' ? (frameBridge?.prepareLaunch() ?? null) : (exportFrameBridge?.prepareLaunch() ?? null);
       const child = utilityProcess.fork(script, [], {
         serviceName: process === 'interactive' ? 'Powermove Interactive Engine' : 'Powermove Job Engine',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -342,7 +402,7 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
         env: {
           POWERMOVE_ENGINE_FRAME_SOURCE: 'document',
           ...env,
-          ...(launch?.env ?? {}),
+          ...(process === 'interactive' ? (launch?.env ?? {}) : launch ? { POWERMOVE_EXPORT_BRIDGE: launch.env['POWERMOVE_FRAME_BRIDGE'] } : {}),
           POWERMOVE_ENGINE_PROCESS: process,
           POWERMOVE_ENGINE_ADDON: addon,
           // Invalidate first-use parity on every engine/browser/OS update.
@@ -692,12 +752,15 @@ export function installNativeEngine(options: InstallNativeEngineOptions): Instal
     engine,
     agentJobs,
     renderQueue,
+    exportEncoders,
     frameBridge,
     snapshots,
     attachWindow,
     dispose: async () => {
+      exportEncoders.dispose();
       removeExportWarmthIpc();
       removeAgentFramesIpc();
+      exportFrameBridge?.dispose();
       removeSnapshotIpc();
       options.ipc.removeAllListeners(ENGINE_IPC.compatAnswer);
       windowSessions.dispose();

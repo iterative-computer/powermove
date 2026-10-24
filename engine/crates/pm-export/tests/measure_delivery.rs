@@ -87,6 +87,7 @@ fn settings(
             end: Ticks::new(FRAMES as i64 * 1001 * TICKS_PER_SECOND / 24000).unwrap(),
         },
         audio: false,
+        audio_index_playhead: None,
         motion_blur: false,
         color: if image {
             OutputColor::SrgbImage

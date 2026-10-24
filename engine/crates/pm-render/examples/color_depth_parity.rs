@@ -50,6 +50,7 @@ fn export_png(
                 end: Ticks::new(start.get() + TICKS_PER_SECOND / 30).unwrap(),
             },
             audio: false,
+            audio_index_playhead: None,
             motion_blur: false,
             color: OutputColor::SrgbImage,
             precision: Precision::Float32,

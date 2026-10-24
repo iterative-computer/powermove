@@ -21,6 +21,7 @@
 //!
 //! See docs/rust-engine.md section 16 and docs/engine/pm-audio.md.
 
+pub mod chromium;
 pub mod clock;
 pub mod conform;
 pub mod device;
@@ -30,12 +31,16 @@ pub mod kernel;
 pub mod layout;
 pub mod meter;
 pub mod mixer;
+pub mod mp3;
 pub mod offline;
 pub mod playback;
+mod preparation;
+pub mod profile;
 pub mod ring;
 pub mod shuttle;
 pub mod source;
 pub mod stretch;
+pub mod today;
 pub mod transport;
 pub mod waveform;
 
@@ -43,3 +48,6 @@ pub use error::{AudioError, Result};
 pub use graph::{AssetResolver, MixGraph};
 pub use mixer::{MixFormat, Mixer, RETUNE_GLIDE_MS, RenderOptions};
 pub use source::SourceCache;
+
+mod priority;
+mod realtime;

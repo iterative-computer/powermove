@@ -350,3 +350,85 @@ fn waveforms() {
     assert_eq!(w.level_for(1000).samples_per_bucket, 1024);
     let _ = Arc::new(());
 }
+
+/// MP3 decodes through today's decoder (Symphonia 0.6.0, `src/mp3.rs`): a
+/// block decoded from its own seek equals the sequential decode from the
+/// start, sample for sample, and lines up with FFmpeg's decode of the same
+/// file (which differs only by float rounding).
+#[test]
+fn mp3_blocks_equal_todays_sequential_decode() {
+    let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../apps/desktop/e2e/fixtures/tone.mp3");
+    let cache = pm_audio::SourceCache::new(64 << 20, 0);
+    let source = cache.open(&file, None).unwrap();
+    let n = source.length().unwrap() as usize;
+    let ch = source.channels();
+    let mut blocks = vec![vec![0f32; n]; ch];
+    {
+        let mut views: Vec<&mut [f32]> = blocks.iter_mut().map(|c| &mut c[..]).collect();
+        // Second block first: nothing of the first may carry into it.
+        let b = pm_audio::source::BLOCK;
+        cache
+            .read(
+                &source,
+                b as i64,
+                n - b,
+                &mut views.iter_mut().map(|v| &mut v[b..]).collect::<Vec<_>>(),
+                true,
+            )
+            .unwrap();
+        cache
+            .read(
+                &source,
+                0,
+                b,
+                &mut views.iter_mut().map(|v| &mut v[..b]).collect::<Vec<_>>(),
+                true,
+            )
+            .unwrap();
+    }
+    let mut sequential = vec![Vec::new(); ch];
+    let mut mp3 = pm_audio::mp3::Mp3Decoder::open(&file, ch).unwrap();
+    mp3.read(&mut sequential, n).unwrap();
+    for c in 0..ch {
+        assert_eq!(blocks[c].len(), sequential[c].len());
+        let first = blocks[c]
+            .iter()
+            .zip(&sequential[c])
+            .position(|(a, b)| a.to_bits() != b.to_bits());
+        assert_eq!(first, None, "channel {c}");
+    }
+    let mut ffmpeg = pm_media::audio::AudioDecoder::open(&file, None).unwrap();
+    let mut reference = vec![Vec::new(); ch];
+    ffmpeg.read(&mut reference, n).unwrap();
+    let worst = (0..ch)
+        .flat_map(|c| {
+            blocks[c]
+                .iter()
+                .zip(&reference[c])
+                .map(|(a, b)| (a - b).abs())
+        })
+        .fold(0f32, f32::max);
+    assert!(worst < 1e-5, "aligned with FFmpeg's decode: {worst}");
+    cache.shutdown();
+}
+
+#[test]
+fn rebuilding_a_mix_releases_decoders_but_keeps_unchanged_sample_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("tone.wav");
+    std::fs::copy(fixtures().join("tone.wav"), &file).unwrap();
+    let cache = SourceCache::new(8 << 20, 0);
+    let first = cache.open(&file, None).unwrap();
+    let id = first.id();
+    cache.block(&first, 0, true).unwrap();
+    let released = std::sync::Arc::downgrade(&first);
+    drop(first);
+    assert!(released.upgrade().is_none(), "the registry must not retain a decoder");
+    let again = cache.open(&file, None).unwrap();
+    assert_eq!(again.id(), id, "a mix rebuild must keep warm block keys");
+    let hits = cache.stats().hits;
+    cache.block(&again, 0, true).unwrap();
+    assert_eq!(cache.stats().hits, hits + 1);
+    cache.shutdown();
+}

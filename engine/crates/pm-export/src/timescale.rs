@@ -1,10 +1,11 @@
 //! Movie and media timescales (section 17, "Muxers"; amendment 7).
 //!
-//! NTSC rates use the rate numerator (24000, 30000, 48000, 60000, 120000, 240000)
-//! with a frame duration of 1001; an integer rate f uses f × 1000 with a frame
-//! duration of 1000; audio tracks use the sample rate; the movie timescale matches the
-//! video's. AVAssetWriter's default of 600 cannot represent 1001/24000 and stores
-//! 23.976 fps as 24.000 fps (S2), so these are always set.
+//! Match the bundled FFmpeg MOV/MP4 muxer's default video-track timescale:
+//! begin with the reduced frame-rate numerator and double it (and the frame
+//! duration) until the timescale is at least 10,000. NTSC numerators already
+//! exceed that threshold. Audio tracks use the sample rate; the movie timescale
+//! matches the video's. AVAssetWriter's default of 600 cannot represent
+//! 1001/24000 and stores 23.976 fps as 24.000 fps (S2), so these are always set.
 
 use pm_time::Rate;
 
@@ -29,18 +30,20 @@ impl VideoTiming {
     }
 }
 
-/// The section 17 timing for `rate`. Rates that are neither NTSC nor integer use the
-/// reduced rational (`num` per second, `den` per frame) when it fits.
+/// The bundled FFmpeg MOV/MP4 muxer's timing for `rate`: the reduced rational,
+/// doubled until the track timescale reaches 10,000 ticks per second.
 pub fn video_timing(rate: Rate) -> Result<VideoTiming, Error> {
     let (num, den) = (rate.num(), rate.den());
-    let (timescale, frame_duration) = if den == 1 {
-        (num.checked_mul(1000), 1000)
-    } else if rate.is_ntsc() {
-        (Some(num), 1001)
-    } else {
-        (Some(num), den)
-    };
-    match timescale.and_then(|t| i32::try_from(t).ok()) {
+    let (mut timescale, mut frame_duration) = (num, den);
+    while timescale < 10_000 {
+        timescale = timescale.checked_mul(2).ok_or_else(|| {
+            Error::InvalidSpec(format!("frame rate {rate} has no QuickTime timescale"))
+        })?;
+        frame_duration = frame_duration.checked_mul(2).ok_or_else(|| {
+            Error::InvalidSpec(format!("frame rate {rate} has no QuickTime frame duration"))
+        })?;
+    }
+    match i32::try_from(timescale).ok() {
         Some(timescale) if timescale > 0 => Ok(VideoTiming {
             timescale,
             frame_duration,
@@ -61,24 +64,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn section_17_timescales_for_every_supported_rate() {
+    fn bundled_ffmpeg_timescales_for_every_supported_rate() {
         let want: [(Rate, i32, i64); 16] = [
             (Rate::FPS_23_976, 24_000, 1001),
-            (Rate::FPS_24, 24_000, 1000),
-            (Rate::FPS_25, 25_000, 1000),
+            (Rate::FPS_24, 12_288, 512),
+            (Rate::FPS_25, 12_800, 512),
             (Rate::FPS_29_97, 30_000, 1001),
-            (Rate::FPS_30, 30_000, 1000),
+            (Rate::FPS_30, 15_360, 512),
             (Rate::FPS_47_952, 48_000, 1001),
-            (Rate::FPS_48, 48_000, 1000),
-            (Rate::FPS_50, 50_000, 1000),
+            (Rate::FPS_48, 12_288, 256),
+            (Rate::FPS_50, 12_800, 256),
             (Rate::FPS_59_94, 60_000, 1001),
-            (Rate::FPS_60, 60_000, 1000),
-            (Rate::FPS_90, 90_000, 1000),
-            (Rate::FPS_100, 100_000, 1000),
+            (Rate::FPS_60, 15_360, 256),
+            (Rate::FPS_90, 11_520, 128),
+            (Rate::FPS_100, 12_800, 128),
             (Rate::FPS_119_88, 120_000, 1001),
-            (Rate::FPS_120, 120_000, 1000),
+            (Rate::FPS_120, 15_360, 128),
             (Rate::FPS_239_76, 240_000, 1001),
-            (Rate::FPS_240, 240_000, 1000),
+            (Rate::FPS_240, 15_360, 64),
         ];
         for (rate, timescale, frame_duration) in want {
             let t = video_timing(rate).unwrap();
@@ -103,10 +106,10 @@ mod tests {
     #[test]
     fn other_rationals_and_audio() {
         let t = video_timing(Rate::new(25, 2).unwrap()).unwrap();
-        assert_eq!((t.timescale, t.frame_duration), (25, 2));
+        assert_eq!((t.timescale, t.frame_duration), (12_800, 1024));
         assert!(
-            video_timing(Rate::new(3_000_000, 1).unwrap()).is_err(),
-            "f × 1000 overflows i32"
+            video_timing(Rate::new(3_000_000_000, 1001).unwrap()).is_err(),
+            "a video track timescale must fit i32"
         );
         assert_eq!(audio_timescale(48_000), 48_000);
     }

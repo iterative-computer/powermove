@@ -2106,6 +2106,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "libc",
+ "libm",
  "pm-audio",
  "pm-eval",
  "pm-media",
@@ -2117,6 +2118,11 @@ dependencies = [
  "rubato",
  "serde",
  "serde_json",
+ "sha2",
+ "symphonia",
+ "symphonia-bundle-mp3",
+ "symphonia-core",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -2169,6 +2175,7 @@ name = "pm-cli"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "pm-audio",
  "pm-blender",
  "pm-eval",
  "pm-export",
@@ -2257,6 +2264,7 @@ dependencies = [
  "pm-blender",
  "pm-eval",
  "pm-export",
+ "pm-gpu",
  "pm-media",
  "pm-model",
  "pm-protocol",
@@ -2359,6 +2367,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -2396,9 +2405,11 @@ dependencies = [
  "pm-protocol",
  "pm-render",
  "pm-text",
+ "pm-time",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "wgpu",
 ]
 
@@ -2846,6 +2857,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3248,6 +3265,56 @@ checksum = "695b5790b3131dafa99b3bbfd25a216edb3d216dad9ca208d4657bfb8f2abc3d"
 dependencies = [
  "kurbo",
  "siphasher",
+]
+
+[[package]]
+name = "symphonia"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1758d6c853020a7244de03cc3e0185eaea3f58715122422dd3cc7452e6d4c16a"
+dependencies = [
+ "lazy_static",
+ "symphonia-bundle-mp3",
+ "symphonia-core",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-bundle-mp3"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "350f1f2f2e19ad4dd315db94304d1eb361b29af070681f94e51b8fdaad769546"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-core"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95ec293b5f288383b72a7bffcade6b2860b642cf66f28b3bd5967349a49938b1"
+dependencies = [
+ "bitflags",
+ "bytemuck",
+ "lazy_static",
+ "log",
+ "num-complex",
+ "smallvec",
+]
+
+[[package]]
+name = "symphonia-metadata"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31acf5cd623398a6208e2225d18f4b20f761c55098a796a5247ad516a4a8681"
+dependencies = [
+ "lazy_static",
+ "log",
+ "regex-lite",
+ "smallvec",
+ "symphonia-core",
 ]
 
 [[package]]
