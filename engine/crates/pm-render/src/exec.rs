@@ -313,7 +313,8 @@ impl Exec<'_> {
                         let child_region = if group { region } else { None };
                         // The same composition planned the same way earlier
                         // in this frame: its target holds exactly the pixels
-                        // rendering it again would draw.
+                        // rendering it again would draw (never a group pass:
+                        // `comp_twins` lists nested compositions only).
                         let accumulate = matches!(source, Source::Accumulate(_));
                         let address = plan_address(child);
                         if !accumulate
@@ -326,16 +327,6 @@ impl Exec<'_> {
                             r.view = Some(kept.view.clone());
                             self.prepare_level2(encoder, r, &texture, false);
                             r.from_fbo = true;
-                            if let (true, Some(g)) = (group, region) {
-                                r.matrix = [
-                                    f64::from(g.width),
-                                    0.0,
-                                    0.0,
-                                    f64::from(g.height),
-                                    f64::from(g.x),
-                                    f64::from(g.y),
-                                ];
-                            }
                             return;
                         }
                         let (w, h) = match child_region {
