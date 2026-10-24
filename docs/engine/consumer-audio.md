@@ -97,12 +97,8 @@ RFC 16 ("Stats") documents the optional audio field.
     today's engine shows nothing, a dropped voice shows in both surfaces,
     and turning the engine off clears both
 
-## Open
+## Limits
 
-- The addon was rebuilt after the audio diagnostics wire change. The real
-  native transport gate passed four cases, including mixer levels and audio
-  scrub. The diagnostics surface has mounted component coverage; an injected
-  real device failure has not been exercised through Electron.
 - Counters and problems never reset while a session's audio link lives (the
   audio thread keeps them). Once a session drops audio, its status field
   stays until the session closes.
