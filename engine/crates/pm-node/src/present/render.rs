@@ -3210,6 +3210,15 @@ impl Thread {
                 .start_after(from.div_euclid(f) + armed.len() as i64);
         }
         view.sample_due = true;
+        // The viewer hears the run before its start frames: a timed frame
+        // of a line it believes stopped is dropped.
+        if !armed.is_empty() {
+            let t = now();
+            view.sample_due = false;
+            view.last_sample = Some(t);
+            let sample = view.clock.sample(t);
+            self.event(key, Event::Clock(sample), None);
+        }
         for descriptor in armed {
             let revision = descriptor.revision;
             self.event(key, Event::Frame(descriptor), Some(revision));

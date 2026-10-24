@@ -1814,7 +1814,12 @@ trace).
    played: what is heard is on the line either way, and its first clock
    sample only confirms the line (`TransportClock::follow` adopts it). A
    device that never confirms leaves the line on the host clock. Without
-   the viewer's timing the line starts after `PREROLL_US`.
+   the viewer's timing the line starts after `PREROLL_US`. When the
+   playhead's frame is on screen and current, the run renders from the
+   next frame, and the engine connection announces the frame on screen
+   again at the next animation frame (`PresentedEvents.replay`), as
+   today's Play draws it first; after a seek or an undrawn edit the run
+   renders it first and the start is planned for it.
 5. **The first new frames are rendered while paused** (`Thread::arm`).
    Once the paused frame has stayed 50 ms, the next frames of a forward
    1× run go into the paused pool's free slots (one slot stays free); any
