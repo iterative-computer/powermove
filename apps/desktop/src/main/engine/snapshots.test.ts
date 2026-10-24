@@ -57,6 +57,8 @@ describe('snapshot requests', () => {
   it('validates source identity, fit, color and source time', () => {
     const source = { kind: 'source' as const, asset: 'clip', fit: 'contain' as const, color: 'display' as const };
     expect(validSnapshotRequest(request({ target: source, time: 0 }))).toBe(true);
+    expect(validSnapshotRequest(request({ target: { ...source, color: 'compositor' }, time: 0, class: 'async', pixels: 'straight' }))).toBe(true);
+    expect(validSnapshotRequest(request({ target: { ...source, color: 'compositor' }, time: 0 }))).toBe(false);
     expect(validSnapshotRequest(request({ target: source, time: -1 }))).toBe(false);
     expect(validSnapshotRequest(request({ target: { ...source, asset: '' } }))).toBe(false);
     expect(validSnapshotRequest(request({ target: { ...source, fit: 'other' as never } }))).toBe(false);
@@ -118,6 +120,42 @@ describe('SnapshotService', () => {
     expect(reply).toMatchObject({ status: 'rendered', revision: 41, viewSeq: 3, width: 4, height: 2, pixels: 'opaque' });
     expect(reply.status === 'rendered' && reply.data).toEqual(pixels);
     expect(e.sent[0]).toMatchObject({ body: { type: 'snapshot', renderer: 33, session: 5 }, revision: 41 });
+  });
+
+  it('transfers native 4:2:2 source planes as a video surface without cloning them into renderer IPC', async () => {
+    const video = { format: 'nv16', primaries: 'smpte170m', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' };
+    const planes = new Uint8Array(8).fill(128);
+    const response = { ...rendered({ kind: 'inline', bytes: planes }, 2, 2), pixels: 'straight', video } as Response;
+    const present = vi.fn(async () => ({ token: 'native-surface', width: 2, height: 2 }));
+    const service = new SnapshotService({ engine: engine(async () => response), takePixels: null, sourceSurface: present, log: () => {} });
+    const reply = await service.snapshot(9, request({ target: { kind: 'source', asset: 'clip', fit: 'contain', color: 'compositor' }, pixels: 'straight', class: 'async' }));
+    expect(present).toHaveBeenCalledWith(9, 2, 2, video, planes);
+    expect(reply).toMatchObject({ status: 'rendered', videoSurface: { token: 'native-surface', width: 2, height: 2 }, data: new Uint8Array() });
+    const ordinary = await service.snapshot(9, request());
+    expect(ordinary).toMatchObject({ status: 'failed', code: 'invalidMessage' });
+    expect(present).toHaveBeenCalledOnce();
+  });
+
+  it('preserves native I420A planes for an alpha video frame without an RGB surface', async () => {
+    const video = { format: 'i420a', primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', range: 'limited' };
+    const planes = new Uint8Array(10);
+    const response = { ...rendered({ kind: 'inline', bytes: planes }, 2, 2), pixels: 'straight', video } as Response;
+    const present = vi.fn(async () => { throw new Error('Alpha must not enter the opaque IOSurface path'); });
+    const service = new SnapshotService({ engine: engine(async () => response), takePixels: null, sourceSurface: present, log: () => {} });
+    const reply = await service.snapshot(9, request({ target: { kind: 'source', asset: 'alpha', fit: 'contain', color: 'compositor' }, pixels: 'straight', class: 'async' }));
+    expect(reply).toMatchObject({ status: 'rendered', videoPlanes: video, data: planes });
+    expect(present).not.toHaveBeenCalled();
+  });
+
+  it('sends normal NV12 planes without a GPU import and preserves unspecified tags', async () => {
+    const video = { format: 'nv12', primaries: 'unspecified', transfer: 'unspecified', matrix: 'unspecified', range: 'limited' };
+    const planes = new Uint8Array(6);
+    const response = { ...rendered({ kind: 'inline', bytes: planes }, 2, 2), pixels: 'straight', video } as Response;
+    const present = vi.fn();
+    const service = new SnapshotService({ engine: engine(async () => response), takePixels: null, sourceSurface: present, log: () => {} });
+    const reply = await service.snapshot(9, request({ target: { kind: 'source', asset: 'clip', fit: 'contain', color: 'compositor' }, pixels: 'straight', class: 'async' }));
+    expect(reply).toMatchObject({ status: 'rendered', videoPlanes: video, data: planes });
+    expect(present).not.toHaveBeenCalled();
   });
 
   it('maps shared-memory results once through the bridge', async () => {

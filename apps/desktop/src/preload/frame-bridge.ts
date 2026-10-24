@@ -31,6 +31,7 @@
  * references when the notice does get through.
  */
 import { isFrameSurfaceArgs, type FrameBridgeApi, type FrameBridgeStats } from '../shared/frame-bridge';
+import { installSourceSurfaceReceiver, type SourceSurfaceReceiver } from './source-surfaces';
 
 /** Electron's `SharedTextureImported`, as the receiver uses it. */
 export interface ImportedLike {
@@ -39,9 +40,9 @@ export interface ImportedLike {
   release(): void;
   /** The texture's id in main (Electron 44's renderer wrapper). */
   readonly textureId?: string;
-  /** The renderer's reference alone: `release(callback)` lets go of it and
-   *  calls `callback` once the GPU no longer reads it. */
-  readonly subtle?: { release(callback: () => unknown): void };
+  /** The renderer's reference alone. Source video imports release without a
+   *  callback; a VideoFrame retains its own reference until consumption ends. */
+  readonly subtle?: { release(callback?: () => unknown): void };
 }
 
 /** Tells main that this renderer let go of the texture `id` (Electron's own
@@ -66,7 +67,12 @@ export type PageLifecycle = { addEventListener(type: 'pagehide', listener: () =>
  * `notify`: sends the release notice; without it (or for an import that
  * lacks Electron's renderer handle) `release()` sends it, unhandled.
  */
-export function installFrameBridgeReceiver(module: ReceiverModule, page: PageLifecycle | null = typeof window === 'undefined' ? null : window, notify: NotifyRelease | null = null): FrameBridgeApi {
+export function installFrameBridgeReceiver(
+  module: ReceiverModule,
+  page: PageLifecycle | null = typeof window === 'undefined' ? null : window,
+  notify: NotifyRelease | null = null,
+  sourceReceiver: SourceSurfaceReceiver = installSourceSurfaceReceiver(page, notify)
+): FrameBridgeApi {
   let launch = 0;
   const imports = new Map<string, ImportedLike>();
   const retired = new Set<number>();
@@ -113,6 +119,10 @@ export function installFrameBridgeReceiver(module: ReceiverModule, page: PageLif
 
   module.setSharedTextureReceiver(async ({ importedSharedTexture }, ...args) => {
     const info = args[0];
+    if (typeof info === 'object' && info !== null && (info as { kind?: unknown }).kind === 'powermove-source-surface') {
+      sourceReceiver.receive(importedSharedTexture, info);
+      return;
+    }
     if (!isFrameSurfaceArgs(info)) {
       // Not ours (or malformed): hold nothing.
       importedSharedTexture.release();
@@ -156,6 +166,8 @@ export function installFrameBridgeReceiver(module: ReceiverModule, page: PageLif
   });
 
   return {
+    sourceFrame: token => sourceReceiver.sourceFrame(token),
+    discardSource: token => sourceReceiver.discardSource(token),
     videoFrame(generation, poolIndex) {
       const imported = imports.get(key(generation, poolIndex));
       if (!imported) {

@@ -26,7 +26,7 @@ interface SourceElement extends EventTarget {
   pause(): void;
   dispose?(): void;
 }
-interface NativeSourceMedia { monitor(asset: string): SourceElement & { canvas: HTMLCanvasElement; surface?: HTMLCanvasElement | HTMLImageElement } }
+interface NativeSourceMedia { monitor(asset: string): SourceElement & { canvas: HTMLCanvasElement; surface?: HTMLCanvasElement | HTMLImageElement | HTMLVideoElement } }
 
 const STYLES = `
   #source-preview{position:absolute;inset:0;z-index:6;display:none;background:var(--bg-panel-2);border-radius:inherit;overflow:hidden}

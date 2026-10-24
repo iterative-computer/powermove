@@ -26,10 +26,11 @@
  * goes straight back to the (possibly blocked) caller.
  */
 import type { EngineSnapshotReply, EngineSnapshotRequest } from '../../shared/engine-ipc';
-import type { Request, Response, SnapshotOutcome, SnapshotRequest } from '../../shared/engine-protocol';
+import type { Request, Response, SnapshotOutcome, SnapshotRequest, SourceVideoFrame } from '../../shared/engine-protocol';
 import type { Log } from './connection';
 import { RemoteError } from './protocol';
 import type { WindowSnapshotSessions } from './window-sessions';
+import { sourceVideoByteLength } from './source-surfaces';
 
 /** What the service needs of the engine (NativeEngine). */
 export interface SnapshotEngine {
@@ -98,6 +99,7 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (w < 1 || h < 1 || w > MAX_EDGE || h > MAX_EDGE || w * h * 4 > 512 * 1024 ** 2) return false;
   if (!['opaque', 'premultiplied', 'straight'].includes(s['pixels'] as string)) return false;
   if (!['sync', 'async', 'idle'].includes(s['class'] as string)) return false;
+  if ((s['target'] as Record<string, unknown> | null)?.['color'] === 'compositor' && (s['class'] === 'sync' || s['pixels'] !== 'straight')) return false;
   if (s['viewSeq'] !== null && !safeUint(s['viewSeq'])) return false;
   if (!Number.isInteger(s['waitMs']) || (s['waitMs'] as number) < 1 || (s['waitMs'] as number) > MAX_WAIT_MS) return false;
   // A Blender wait (today's `snapshotAsync` prepares the frame): never for
@@ -116,7 +118,7 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (target['kind'] === 'source') {
     return id(target['asset']) && (s['time'] as number) >= 0
       && ['stretch', 'contain', 'cover'].includes(target['fit'] as string)
-      && ['display', 'interpreted'].includes(target['color'] as string);
+      && ['display', 'interpreted', 'compositor'].includes(target['color'] as string);
   }
   if (target['kind'] === 'layer') {
     const crop = target['crop'] as Record<string, unknown> | null;
@@ -189,6 +191,8 @@ export type SnapshotServiceOptions = {
   windowSessions?: Pick<WindowSnapshotSessions, 'prepare'> | null;
   /** Absent when the pm-bridge addon did not load (then shared-memory results fail). */
   takePixels: TakePixels | null;
+  /** Native source planes are imported and transferred without an RGBA readback. */
+  sourceSurface?: (windowId: number, width: number, height: number, video: SourceVideoFrame, data: Uint8Array) => Promise<{ token: string; width: number; height: number }>;
   log: Log;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -366,13 +370,27 @@ export class SnapshotService {
         ...(fallbackTextures.length ? { fallbackTextures } : {})
       };
     }
-    const expected = outcome.width * outcome.height * 4;
+    const video = outcome.video;
+    const compositor = snapshot.target.kind === 'source' && snapshot.target.color === 'compositor';
+    if (Boolean(video) !== compositor) {
+      this.discard(response);
+      return failed('invalidMessage', 'The engine source presentation format did not match its request.');
+    }
     let data: Uint8Array;
     try {
+      const expected = video ? sourceVideoByteLength(outcome.width, outcome.height, video) : outcome.width * outcome.height * 4;
       data = this.pixels(outcome.payload, expected);
     } catch (error) {
       this.stats.failed++;
       return failed('internal', error instanceof Error ? error.message : String(error));
+    }
+    let videoSurface: { token: string; width: number; height: number } | undefined;
+    if (video && !['nv12', 'i420a'].includes(video.format)) {
+      if (!this.options.sourceSurface) return failed('unavailable', 'Native source video presentation is unavailable.');
+      if (signal.aborted) return failed('cancelled', 'The source request was cancelled.');
+      try { videoSurface = await this.options.sourceSurface(windowId, outcome.width, outcome.height, video, data); }
+      catch (error) { return failed('internal', error instanceof Error ? error.message : String(error)); }
+      data = new Uint8Array(0);
     }
     this.stats.served++;
     return {
@@ -383,6 +401,8 @@ export class SnapshotService {
       height: outcome.height,
       pixels: outcome.pixels,
       data,
+      ...(videoSurface ? { videoSurface } : {}),
+      ...(video && !videoSurface ? { videoPlanes: video } : {}),
       origin: [outcome.origin[0], outcome.origin[1]],
       layerBox: outcome.layerBox ? [outcome.layerBox[0], outcome.layerBox[1]] : null,
       raster: outcome.raster ?? null,

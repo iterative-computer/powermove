@@ -22,6 +22,23 @@ export type FrameSurfaceArgs = {
   format: 'bgra' | 'rgbaf16';
 };
 
+/** A one-shot source-video import, distinct from the viewer's reusable pool. */
+export type SourceSurfaceArgs = {
+  kind: 'powermove-source-surface';
+  token: string;
+  width: number;
+  height: number;
+};
+
+export function isSourceSurfaceArgs(value: unknown): value is SourceSurfaceArgs {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return v['kind'] === 'powermove-source-surface'
+    && typeof v['token'] === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v['token'])
+    && typeof v['width'] === 'number' && Number.isInteger(v['width']) && v['width'] > 0 && v['width'] <= 16384
+    && typeof v['height'] === 'number' && Number.isInteger(v['height']) && v['height'] > 0 && v['height'] <= 16384;
+}
+
 export type FrameBridgeStats = {
   launch: number;
   held: number;
@@ -42,6 +59,11 @@ export interface FrameBridgeApi {
   /** A `VideoFrame` of a surface of the current launch, or null when its
    *  import has not arrived (or was retired). Close it after drawing. */
   videoFrame(generation: number, poolIndex: number): VideoFrame | null;
+  /** Takes one source VideoFrame. Close it, then call discardSource to release
+   *  its renderer import after presentation. Each token can be taken once. */
+  sourceFrame(token: string): VideoFrame | null;
+  /** Releases a consumed source import or one the monitor will not display. */
+  discardSource(token: string): void;
   has(generation: number, poolIndex: number): boolean;
   /** Called with (generation, poolIndex) whenever an import arrives. */
   onSurface(listener: (generation: number, poolIndex: number) => void): () => void;

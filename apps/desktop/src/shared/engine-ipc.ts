@@ -91,7 +91,7 @@ export type EngineAgentFramesReply = {
 export type EngineMediaJobRequest = { project: string; revision: number; asset: string; requestId: string };
 export type EngineSourceFilmstripRequest = EngineMediaJobRequest & {
   times: number[]; width: number; height: number;
-  fit: 'stretch' | 'contain' | 'cover'; color: 'display' | 'interpreted';
+  fit: 'stretch' | 'contain' | 'cover'; color: 'display' | 'interpreted' | 'compositor';
 };
 /** Starts a frozen source session and draws one real frame ahead of a strip. */
 export type EngineSourcePrepareRequest = Omit<EngineSourceFilmstripRequest, 'times'> & { time: number };
@@ -304,6 +304,10 @@ export type EngineSnapshotReply =
       height: number;
       pixels: import('./engine-protocol').SnapshotPixels;
       data: Uint8Array;
+      /** Native video texture already transferred to this window's preload. */
+      videoSurface?: { token: string; width: number; height: number };
+      /** Native alpha planes use WebCodecs I420A; Electron has no alpha YUV import. */
+      videoPlanes?: import('./engine-protocol').SourceVideoFrame;
       origin: [number, number];
       /** A layer raster's box in layer pixels (`RasterSurface` w, h). */
       layerBox: [number, number] | null;

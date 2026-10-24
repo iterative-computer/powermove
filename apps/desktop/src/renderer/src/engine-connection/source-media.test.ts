@@ -3,9 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EngineSourceMedia, sourcePosterSize } from './source-media';
 import type { EngineSnapshot, EngineRenderTransport } from './render-transport';
 import type { EngineBridge } from '../../../shared/engine-ipc';
+import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { DocumentSession } from './session';
 
-function fixture() {
+function fixture(frameBridge?: FrameBridgeApi) {
   const project = { id: 'project', assets: { clip: { id: 'clip', kind: 'video', w: 1920, h: 1080, dur: 20, contentHash: 'original', rendition: false } } };
   const pixels = { width: 4, height: 2, data: new Uint8ClampedArray(32), revision: 1, pixels: 'straight' } as EngineSnapshot;
   const snapshot = vi.fn(async () => pixels);
@@ -16,13 +17,15 @@ function fixture() {
   const prepare = vi.fn(async (_request: unknown) => {}), release = vi.fn(async () => {});
   const cancel = vi.fn(async () => {}), audio = vi.fn();
   const bind = vi.fn(async () => {});
+  const changed = vi.fn(), error = vi.fn();
   const source = new EngineSourceMedia({ project: () => project, revision: () => 7,
+    frameBridge,
     render: { snapshot, toCanvas } as unknown as EngineRenderTransport,
     native: { browserRendition: rendition, sourceFilmstrip: strip, prepareSource: prepare, releasePreparedSources: release, cancelMediaJob: cancel } as unknown as EngineBridge,
     session: () => ({ audio } as unknown as DocumentSession), wake: async () => {}, bind,
-    changed: vi.fn(), error: vi.fn()
+    changed, error
   });
-  return { project, source, snapshot, rendition, strip, prepare, release, cancel, bind, audio, encoded };
+  return { project, source, snapshot, toCanvas, rendition, strip, prepare, release, cancel, bind, audio, encoded, changed, error };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -53,6 +56,100 @@ describe('engine source consumers', () => {
     expect((await f.source.poster('clip'))?.type).toBe('image/webp');
     expect(f.snapshot).toHaveBeenCalledWith(expect.objectContaining({ time: .5, width: 320, height: 180, pixels: 'straight', source: { asset: 'clip', fit: undefined, color: undefined } }), 'async');
     expect(f.encoded).toEqual(['image/webp']);
+    f.source.dispose();
+  });
+
+  it('shares a default poster capture between persistence and inline URL consumers', async () => {
+    const create = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:poster');
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const f = fixture();
+    let finish!: (value: EngineSnapshot) => void;
+    f.snapshot.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const persisted = f.source.poster('clip');
+    expect(f.source.posterUrl('clip')).toBe('');
+    await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledOnce());
+    finish({ width: 320, height: 180, data: new Uint8ClampedArray(320 * 180 * 4) } as EngineSnapshot);
+    expect((await persisted)?.type).toBe('image/webp');
+    await vi.waitFor(() => expect(f.changed).toHaveBeenCalledOnce());
+    (f.project.assets.clip as any).poster = true;
+    await f.source.poster('clip');
+    expect(f.source.posterUrl('clip')).toBe('blob:poster');
+    expect(f.snapshot).toHaveBeenCalledOnce();
+    expect(f.toCanvas).toHaveBeenCalledOnce();
+    expect(f.encoded).toEqual(['image/webp']);
+    expect(create).toHaveBeenCalledOnce();
+    f.source.dispose();
+    expect(revoke).toHaveBeenCalledWith('blob:poster');
+  });
+
+  it('keeps a shared poster capture alive when one caller aborts', async () => {
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:poster');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const f = fixture();
+    let finish!: (value: EngineSnapshot) => void;
+    f.snapshot.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    const controller = new AbortController();
+    const persistence = f.source.poster('clip', 320, controller.signal);
+    const rejected = expect(persistence).rejects.toMatchObject({ name: 'AbortError' });
+    f.source.posterUrl('clip');
+    await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledOnce());
+    controller.abort();
+    await rejected;
+    finish({ width: 320, height: 180, data: new Uint8ClampedArray(320 * 180 * 4) } as EngineSnapshot);
+    await vi.waitFor(() => expect(f.changed).toHaveBeenCalledOnce());
+    expect(f.toCanvas).toHaveBeenCalledOnce();
+    expect(f.error).not.toHaveBeenCalled();
+    f.source.dispose();
+  });
+
+  it('aborts a replaced poster while its binding is unresolved and resets the new capture', async () => {
+    const f = fixture();
+    f.bind.mockImplementation(() => new Promise<void>(() => {}));
+    const old = f.source.poster('clip');
+    const oldAborted = expect(old).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(f.bind).toHaveBeenCalledOnce());
+    f.project.assets.clip.contentHash = 'replacement';
+    const next = f.source.poster('clip');
+    const nextAborted = expect(next).rejects.toMatchObject({ name: 'AbortError' });
+    // Neither binding resolves: the old promise must reject solely because
+    // replacing its identity aborts the controller before map replacement.
+    await oldAborted;
+    await vi.waitFor(() => expect(f.bind).toHaveBeenCalledTimes(2));
+    f.source.reset();
+    await nextAborted;
+    expect(f.snapshot).not.toHaveBeenCalled();
+    expect(f.toCanvas).not.toHaveBeenCalled();
+    f.source.dispose();
+  });
+
+  it('rejects stale poster captures after reset and preserves custom-edge rendering', async () => {
+    const create = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:poster');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const f = fixture();
+    const encoders: Array<(blob: Blob) => void> = [];
+    f.toCanvas.mockReturnValue({ toBlob: (answer: (blob: Blob) => void) => { encoders.push(answer); } });
+    const persisted = f.source.poster('clip');
+    const rejection = expect(persisted).rejects.toMatchObject({ name: 'AbortError' });
+    expect(f.source.posterUrl('clip')).toBe('');
+    await vi.waitFor(() => expect(encoders).toHaveLength(1));
+    f.source.reset();
+    expect(f.source.posterUrl('clip')).toBe('');
+    await vi.waitFor(() => expect(encoders).toHaveLength(2));
+    encoders[0]!(new Blob(['stale'], { type: 'image/webp' }));
+    await rejection;
+    await Promise.resolve(); await Promise.resolve();
+    expect(create).not.toHaveBeenCalled();
+    expect(f.changed).not.toHaveBeenCalled();
+    expect(f.error).not.toHaveBeenCalled();
+    expect(f.source.posterUrl('clip')).toBe('');
+    expect(f.toCanvas).toHaveBeenCalledTimes(2);
+    encoders[1]!(new Blob(['fresh'], { type: 'image/webp' }));
+    await vi.waitFor(() => expect(f.changed).toHaveBeenCalledOnce());
+    f.toCanvas.mockImplementation(() => ({ toBlob: (answer: (blob: Blob) => void, type: string) => answer(new Blob(['fresh'], { type })) }));
+    await f.source.poster('clip', 160);
+    await f.source.poster('clip', 160);
+    expect(f.snapshot).toHaveBeenCalledWith(expect.objectContaining({ width: 160, height: 90 }), 'async');
+    expect(f.toCanvas).toHaveBeenCalledTimes(4);
     f.source.dispose();
   });
 
@@ -92,6 +189,43 @@ describe('engine source consumers', () => {
     await expect(stale).rejects.toMatchObject({ name: 'AbortError' });
     expect(f.source.stats.frames).toBe(0);
     f.source.dispose();
+  });
+
+  it('releases a native surface delivered after its frame caller has aborted', async () => {
+    const discardSource = vi.fn();
+    const f = fixture({ discardSource } as unknown as FrameBridgeApi);
+    let finish!: (value: EngineSnapshot) => void;
+    f.snapshot.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const controller = new AbortController();
+    const cancelled = f.source.frame('clip', 1, 4, 2, { color: 'compositor', signal: controller.signal });
+    await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    finish({ width: 4, height: 2, data: new Uint8ClampedArray(),
+      videoSurface: { token: 'late-surface', width: 4, height: 2 } } as EngineSnapshot);
+    await vi.waitFor(() => expect(discardSource).toHaveBeenCalledOnce());
+    expect(discardSource).toHaveBeenCalledWith('late-surface');
+    expect(f.source.stats.frames).toBe(0);
+    expect(f.source.stats.hits).toBe(0);
+    await f.source.frame('clip', 1, 4, 2, { color: 'compositor' });
+    expect(f.snapshot).toHaveBeenCalledTimes(2);
+    expect(f.error).not.toHaveBeenCalled();
+    f.source.dispose();
+  });
+
+  it('never aliases compositor video colour with Canvas2D poster pixels', async () => {
+    const f = fixture();
+    try {
+      await f.source.frame('clip', 1, 4, 2, { color: 'display' });
+      await f.source.frame('clip', 1, 4, 2, { color: 'compositor' });
+      await f.source.frame('clip', 1, 4, 2, { color: 'compositor' });
+      expect(f.snapshot).toHaveBeenCalledTimes(3);
+      await f.source.frame('clip', 1, 4, 2, { color: 'display' });
+      expect(f.snapshot).toHaveBeenCalledTimes(3);
+      expect(f.snapshot).toHaveBeenNthCalledWith(1, expect.objectContaining({ source: expect.objectContaining({ color: 'display' }) }), 'async');
+      expect(f.snapshot).toHaveBeenNthCalledWith(2, expect.objectContaining({ source: expect.objectContaining({ color: 'compositor' }) }), 'async');
+      expect(f.source.stats.hits).toBe(1);
+    } finally { f.source.dispose(); }
   });
 
   it('freezes the original before waiting for bindings and cancels the owning job', async () => {

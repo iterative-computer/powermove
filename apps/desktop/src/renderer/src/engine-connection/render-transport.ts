@@ -92,7 +92,7 @@ export type EngineSnapshotOptions = {
    *  the document's own (a wrapper's modified copy). */
   layer?: { id: string; scale: number; crop?: { x: number; y: number; width: number; height: number } | null; content?: Uint8Array | null };
   /** Original media at source time, without composition effects or transforms. */
-  source?: { asset: string; fit?: 'stretch' | 'contain' | 'cover'; color?: 'display' | 'interpreted' };
+  source?: { asset: string; fit?: 'stretch' | 'contain' | 'cover'; color?: 'display' | 'interpreted' | 'compositor' };
 };
 
 /** A rendered snapshot. `data` is RGBA8, top-down, in `pixels`'s encoding. */
@@ -100,6 +100,8 @@ export type EngineSnapshot = {
   width: number;
   height: number;
   data: Uint8ClampedArray;
+  videoSurface?: { token: string; width: number; height: number };
+  videoPlanes?: import('../../../shared/engine-protocol').SourceVideoFrame;
   pixels: SnapshotPixels;
   revision: number;
   viewSeq: number | null;
@@ -289,7 +291,7 @@ export class EngineRenderTransport {
 
   private result(reply: Extract<EngineSnapshotReply, { status: 'rendered' }>): EngineSnapshot {
     const data = new Uint8ClampedArray(reply.data.buffer, reply.data.byteOffset, reply.data.byteLength);
-    return { width: reply.width, height: reply.height, data, pixels: reply.pixels, revision: reply.revision, viewSeq: reply.viewSeq, origin: reply.origin, layerBox: reply.layerBox ?? null, raster: reply.raster ?? null, quality: reply.quality, waitedUs: reply.waitedUs, renderUs: reply.renderUs, mainMs: reply.mainMs };
+    return { width: reply.width, height: reply.height, data, ...(reply.videoSurface ? { videoSurface: reply.videoSurface } : {}), ...(reply.videoPlanes ? { videoPlanes: reply.videoPlanes } : {}), pixels: reply.pixels, revision: reply.revision, viewSeq: reply.viewSeq, origin: reply.origin, layerBox: reply.layerBox ?? null, raster: reply.raster ?? null, quality: reply.quality, waitedUs: reply.waitedUs, renderUs: reply.renderUs, mainMs: reply.mainMs };
   }
 
   private fail(error: unknown, where: string): EngineSnapshotError {
@@ -608,6 +610,7 @@ export class EngineRenderTransport {
   }
 
   private canvas(snapshot: EngineSnapshot): HTMLCanvasElement {
+    if (snapshot.videoSurface || snapshot.videoPlanes) throw new EngineSnapshotError('invalidMessage', 'A native source video surface is presented through its video track.');
     const out = this.options.createCanvas?.(snapshot.width, snapshot.height) ?? document.createElement('canvas');
     out.width = snapshot.width;
     out.height = snapshot.height;
