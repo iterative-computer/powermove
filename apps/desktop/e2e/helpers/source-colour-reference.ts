@@ -5,7 +5,8 @@
  * transfers read as the sRGB curve, extended to all reals; Chromium makes the
  * same choice for BT.709/SMPTE 170M), a linear-light D65 primaries change,
  * Bradford adaptation to the ICC D50 PCS, and the capture's own display ICC
- * matrix/TRC. Values clip only at the display output.
+ * matrix/TRC. Video signal excursions clip to [0, 1] at the EOTF, as a
+ * display's decoder does (BT.1886's domain); the rest clips at the output.
  *
  * https://www.itu.int/rec/T-REC-H.273
  * https://www.color.org/specifications/
@@ -239,7 +240,7 @@ export function displayCodeToXyzD50(profile: MatrixTrcProfile, codes: ColourTrip
   ]);
 }
 
-/** Unrounded display code values (0–255, clipped only here) for one Y'CbCr sample. */
+/** Unrounded display code values (0–255) for one Y'CbCr sample. */
 export function referenceDisplayCodes(profile: MatrixTrcProfile, yuv: ColourTriple, tags: VideoTags, bits: 8 | 10 = 8): ColourTriple {
   const top = 2 ** bits - 1, scale = 2 ** (bits - 8);
   if (yuv.some(code => !Number.isInteger(code) || code < 0 || code > top)) throw new Error('Invalid YUV code');
@@ -253,7 +254,7 @@ export function referenceDisplayCodes(profile: MatrixTrcProfile, yuv: ColourTrip
     y - 2 * kb * (1 - kb) / kg * cb - 2 * kr * (1 - kr) / kg * cr,
     y + 2 * (1 - kb) * cb
   ];
-  const xyz = adaptBradford(multiply(deriveRgbToXyz(PRIMARIES[tags.primaries], D65), signal.map(srgbEotf) as unknown as ColourTriple));
+  const xyz = adaptBradford(multiply(deriveRgbToXyz(PRIMARIES[tags.primaries], D65), signal.map(value => srgbEotf(Math.min(1, Math.max(0, value)))) as unknown as ColourTriple));
   const display = multiply(inverse(profile.rgbToXyzD50), xyz);
   return display.map((channel, index) => {
     const trc = profile.trc[index]!;

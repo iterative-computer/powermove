@@ -1,10 +1,10 @@
 /** Source-monitor video colour against an independent legacy app profile and
- * a double-precision reference built from each stream's colour reading.
- * Software-decoded video stays exact against today's CSS video element.
- * Video Chromium decodes with VideoToolbox (360+ visible lines) is the one
- * cleanup: today's CSS video reads that decoder's CoreVideo 709 transfer as
- * a 1.961 gamma, while composition, export and section 9 use the sRGB curve.
- * There the monitor must be at least as close to the reference as today.
+ * a double-precision reference built from the shared video colour table
+ * (`pm_media::probe::color::video_reading`) that composition and export use.
+ * Where today's CSS video already reads a stream that way it stays exact.
+ * Elsewhere today differs (VideoToolbox's 1.961-gamma 709 curve, Chromium's
+ * Rec.601 default below 720 lines, SMPTE 170M primaries for untagged SD), and
+ * the monitor must be at least as close to the reference as today.
  * Run with the machine's DISPLAY profile (the normal Electron launch args).
  * Synthetic inputs and intermediate captures never enter the repository.
  */
@@ -26,33 +26,36 @@ const run = promisify(execFile);
 const WIDTH = 320, HEIGHT = 180;
 const MEDIA_EVENT_LIMIT = 1_000, MEDIA_BYTES_LIMIT = 2 * 1024 * 1024;
 const THEMES = ['light', 'dark'] as const;
-/** Half a code of 8-bit output rounding, plus half a video-range code
- * (255/219 full-range codes) where the source monitor, like Chromium's
- * VideoToolbox frame converter, decodes full-range streams to video range. */
-const REFERENCE_PRECISION = 0.5 + 0.5 * 255 / 219;
+/** Half a code of 8-bit output rounding, plus half a code for the 8-bit
+ * planes Chromium samples before converting. */
+const REFERENCE_PRECISION = 1;
 /** A toast's --shadow-float reaches about 100 device px below it. */
 const SHADOW_MARGIN = 128;
 const SIZES = ['full', 'intrinsic'] as const;
 type Fixture = { name: string; file: string; times: number[] };
-const SD601: VideoTags = { matrix: 'bt601', fullRange: false, primaries: 'smpte170m' };
+/** VIDEO-SD-1, mirroring pm_media::probe::color::UNTAGGED_SD_PRIMARIES. */
+const UNTAGGED_SD_PRIMARIES = 'bt709' as const;
+const SD601: VideoTags = { matrix: 'bt601', fullRange: false, primaries: UNTAGGED_SD_PRIMARIES };
 const HD709: VideoTags = { matrix: 'bt709', fullRange: false, primaries: 'bt709' };
 const FULL709: VideoTags = { matrix: 'bt709', fullRange: true, primaries: 'bt709' };
-/** Stream tags, or Chromium's and section 9's untagged defaults by height.
- * `platform` marks Chromium's VideoToolbox decode, the reference-gated cases. */
-const REFERENCE: Record<string, { tags: VideoTags; platform: boolean }> = {
-  'h264-aac.mp4': { tags: SD601, platform: false },
-  'bars-gradient-709-limited.mp4': { tags: HD709, platform: false },
-  'bars-gradient-untagged-sd.mp4': { tags: SD601, platform: false },
-  'bars-gradient-709-full.mp4': { tags: FULL709, platform: false },
-  'bars-gradient-709-full-hd.mp4': { tags: FULL709, platform: true },
-  'bars-gradient-untagged-hd.mp4': { tags: HD709, platform: true },
-  'bars-gradient-untagged-portrait.mp4': { tags: HD709, platform: true },
-  // 10-bit 4:2:0 HEVC: VideoToolbox P010, presented as a WebCodecs I420P10 frame.
-  'bars-gradient-709-main10-hd.mp4': { tags: HD709, platform: true }
+/** The shared table's reading of each fixture. `exact` where today's CSS
+ * video reads the stream the same way; the rest are reference-gated. */
+const REFERENCE: Record<string, { tags: VideoTags; exact: boolean }> = {
+  'h264-aac.mp4': { tags: SD601, exact: false },
+  'bars-gradient-709-limited.mp4': { tags: HD709, exact: true },
+  'bars-gradient-untagged-sd.mp4': { tags: SD601, exact: false },
+  'bars-gradient-709-full.mp4': { tags: FULL709, exact: true },
+  'bars-gradient-709-full-hd.mp4': { tags: FULL709, exact: false },
+  'bars-gradient-untagged-hd.mp4': { tags: HD709, exact: false },
+  'bars-gradient-untagged-portrait.mp4': { tags: HD709, exact: false },
+  // Partial tags: the tagged BT.709 matrix wins (Chromium drops it for Rec.601).
+  'bars-gradient-matrix-only-709.mp4': { tags: HD709, exact: false },
+  // 10-bit 4:2:0 HEVC: VideoToolbox P010 through the IOSurface route.
+  'bars-gradient-709-main10-hd.mp4': { tags: HD709, exact: false }
 };
 type Yuv420 = { width: number; height: number; bits: 8 | 10; data: Buffer };
 type Closeness = { pixels: number; max: number; mean: number; over1: number; worst: unknown };
-type Capture = { file: string; geometry: unknown; covered: number[][]; pngColor: ReturnType<typeof pngColorMetadata>; effectiveVideoFrameColorSpace?: unknown; legacyVideoFrameGeometry?: unknown; legacyCodedPlaneEdges?: unknown };
+type Capture = { file: string; geometry: unknown; covered: number[][]; monitorTime?: number | null; pngColor: ReturnType<typeof pngColorMetadata>; effectiveVideoFrameColorSpace?: unknown; legacyVideoFrameGeometry?: unknown; legacyCodedPlaneEdges?: unknown };
 
 function syntheticPpm(width = WIDTH, height = HEIGHT): Buffer {
   // Every neutral code value across the top, then eight saturated and mixed
@@ -394,7 +397,8 @@ async function capture(session: LaunchedApp, file: string, enabled: boolean): Pr
     return rects;
   });
   await session.page.locator('#source-preview').screenshot({ path: file, animations: 'disabled', scale: 'device' });
-  return { file, geometry, covered, pngColor: pngColorMetadata(await readFile(file)),
+  const monitorTime = enabled ? await session.page.evaluate(() => (window as any).PM.EngineSourceMedia.monitorValue?.currentTime ?? null) : null;
+  return { file, geometry, covered, monitorTime, pngColor: pngColorMetadata(await readFile(file)),
     effectiveVideoFrameColorSpace: legacyVideoFrame?.colorSpace,
     legacyVideoFrameGeometry: legacyVideoFrame?.geometry,
     legacyCodedPlaneEdges: legacyVideoFrame?.codedPlaneEdges };
@@ -574,6 +578,7 @@ test('source monitor video matches CSS video exactly, or the colour reference wh
     }
     const comparisons = [];
     const decoded = new Map<string, Yuv420>();
+    const measured = new Map<string, number>();
     for (const fixture of fixtures) for (const time of fixture.times) if (REFERENCE[fixture.name])
       decoded.set(`${fixture.name}-${time}`, await decodeYuv420(fixture.file, time, Number(probed[fixture.name]!.width), Number(probed[fixture.name]!.height),
         probed[fixture.name]!.pix_fmt === 'yuv420p10le' ? 10 : 8));
@@ -607,22 +612,25 @@ test('source monitor video matches CSS video exactly, or the colour reference wh
       if (reading) {
         const profile = readPngMatrixTrcProfile(await readFile(reference.file));
         const yuv = decoded.get(`${fixture.name}-${time}`)!, intrinsic = key.includes('-intrinsic-');
-        // `composition` reads the same samples with BT.709 primaries, as
-        // Chromium's Canvas2D upload, the composition and export do.
-        const composition = { ...reading.tags, primaries: 'bt709' as const };
+        // VIDEO-SD-1 evidence: the same samples read with SMPTE 170M primaries.
+        const sdPrimaries = { ...reading.tags, primaries: 'smpte170m' as const };
         const covered = [...reference.covered, ...actual.covered];
         colour = { legacy: await referenceCloseness(reference, covered, yuv, reading.tags, profile, intrinsic),
           native: await referenceCloseness(actual, covered, yuv, reading.tags, profile, intrinsic),
-          legacyToComposition: await referenceCloseness(reference, covered, yuv, composition, profile, intrinsic),
-          nativeToComposition: await referenceCloseness(actual, covered, yuv, composition, profile, intrinsic) };
+          ...(reading.tags.matrix === 'bt601' ? {
+            legacyToSdPrimaries: await referenceCloseness(reference, covered, yuv, sdPrimaries, profile, intrinsic),
+            nativeToSdPrimaries: await referenceCloseness(actual, covered, yuv, sdPrimaries, profile, intrinsic) } : {}) };
       }
-      const referenceGated = reading?.platform === true;
+      const referenceGated = reading?.exact === false;
       // Chromium's compositor keeps ~2 codes of error on 10-bit frames whether
       // they arrive as a P010 IOSurface or a WebCodecs I420P10 buffer (both
       // measured); 10-bit sources must still be at least as close as today.
       const precise = decoded.get(`${fixture.name}-${time}`)?.bits === 10 || colour?.native!.max! <= REFERENCE_PRECISION;
-      const closer = !colour || (colour.native!.pixels >= 1000 && colour.native!.max <= colour.legacy!.max && colour.native!.mean <= colour.legacy!.mean
+      // Small intrinsic monitors can be entirely under the transport; such a
+      // capture is unmeasured, and the fixture's full-size captures must be.
+      const closer = !colour || colour.native!.pixels === 0 || (colour.native!.max <= colour.legacy!.max && colour.native!.mean <= colour.legacy!.mean
         && precise);
+      if (colour?.native!.pixels) measured.set(fixture.name, (measured.get(fixture.name) ?? 0) + colour.native!.pixels);
       const pass = delta.sameSize && (referenceGated ? closer : delta.max === 0) && geometryEqual && pngColorEqual;
       comparisons.push({ key, ...delta, referenceGated, colour, geometryEqual, pngColorEqual,
         legacy: { ...reference, covered: reference.covered.length, file: path.basename(reference.file) },
@@ -640,6 +648,8 @@ test('source monitor video matches CSS video exactly, or the colour reference wh
       expect.soft(geometryEqual, `${key} geometry`).toBe(true);
       expect.soft(pngColorEqual, `${key} PNG colour metadata`).toBe(true);
     }
+    for (const name of Object.keys(REFERENCE))
+      expect.soft(measured.get(name) ?? 0, `${name}: reference-measured pixels`).toBeGreaterThanOrEqual(1000);
     for (const failure of caseErrors) expect.soft(false, `${failure.mode} ${failure.key}: ${failure.error}`).toBe(true);
     const report = { ...metadata, caseErrors, comparisons };
     if (evidence) await writeFile(path.join(captures, 'comparison.json'), JSON.stringify(report, null, 2));

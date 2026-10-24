@@ -126,7 +126,7 @@ describe('independent PNG ICC and video colour reference', () => {
     const tagged = referenceDisplayCodes(p3, red, { matrix: 'bt601', fullRange: false, primaries: 'smpte170m' });
     const compat = referenceDisplayCodes(p3, red, { matrix: 'bt601', fullRange: false, primaries: 'bt709' });
     // Today's CSS video showed 228,62,34 and the composition path 233,51,35.
-    expect(tagged.map(Math.round)).toEqual([228, 62, 33]);
+    expect(tagged.map(Math.round)).toEqual([228, 62, 34]);
     expect(compat.map(Math.round)).toEqual([233, 51, 35]);
   });
 
