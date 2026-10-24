@@ -67,6 +67,18 @@ describe('source job lifecycle', () => {
     expect(keyHash).toBe('replacement');
     jobs.dispose(); f.jobs.dispose();
   });
+  it('starts a retired on-demand job utility instead of waiting for someone else to', async () => {
+    const f = await fixture();
+    f.setReady(false);
+    f.engine.ensureReady = vi.fn(async () => { queueMicrotask(() => f.setReady(true)); });
+    expect(await f.jobs.run(1, request(), f.spec, 'webm')).toEqual(new Uint8Array([1, 2, 3, 4]));
+    f.setReady(false);
+    const prepared = { ...request(), requestId: 'pooled', width: 1, height: 1, time: .25, fit: 'stretch' as const, color: 'display' as const };
+    await f.jobs.prepare(1, prepared);
+    expect(f.engine.ensureReady).toHaveBeenCalledTimes(2);
+    expect(f.engine.ensureReady).toHaveBeenCalledWith('job');
+    f.jobs.dispose();
+  });
   it('binds frozen originals before resync, receives output and removes session and scratch files', async () => {
     const f = await fixture();
     expect(await f.jobs.run(1, request(), f.spec, 'webm')).toEqual(new Uint8Array([1, 2, 3, 4]));

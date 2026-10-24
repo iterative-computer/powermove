@@ -296,6 +296,8 @@ export class SourceSessionPool {
 
   private async waitReady(signal: AbortSignal): Promise<void> {
     if (this.options.engine.isReady('job')) return;
+    // The job utility starts on demand and retires when idle.
+    void this.options.engine.ensureReady?.('job').catch(() => {});
     await new Promise<void>((resolve, reject) => {
       const abort = () => finish(new Error('The source session was invalidated.'));
       const off = this.options.engine.listen({ status: () => {

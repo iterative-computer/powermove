@@ -142,6 +142,8 @@ export class SourceJobs {
       project = await this.options.snapshotMedia?.(project) ?? project;
       check();
       if (!this.options.engine.isReady('job')) {
+        // The job utility starts on demand and retires when idle.
+        void this.options.engine.ensureReady?.('job').catch(() => {});
         try {
           await new Promise<void>((resolve, reject) => {
             active.cancel = () => reject(new Error('The source job was cancelled.'));
