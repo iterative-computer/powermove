@@ -460,7 +460,7 @@ fn offline_export_matches_the_same_project_with_missing_layers_hidden() {
 }
 
 #[test]
-fn png_byte_compatibility_follows_the_frozen_document() {
+fn png_straight_colour_is_the_working_float_divided_by_alpha_at_every_level() {
     let mut renderer = Renderer::headless().unwrap();
     for compat in [1, 2] {
         let mut solid = layer(
@@ -495,14 +495,9 @@ fn png_byte_compatibility_follows_the_frozen_document() {
         .unwrap();
         let rgba = output.frames[0].planes[0].u8().unwrap();
         let center = ((H / 2 * W + W / 2) * 4) as usize;
-        assert_eq!(
-            &rgba[center..center + 4],
-            if compat == 1 {
-                &[0, 0, 0, 1]
-            } else {
-                &[51, 102, 153, 1]
-            }
-        );
+        // #336699 at 0.3% opacity: one alpha code, and the colour recovered
+        // from the float (no 8-bit truncation first).
+        assert_eq!(&rgba[center..center + 4], &[51, 102, 153, 1], "compat {compat}");
     }
 }
 

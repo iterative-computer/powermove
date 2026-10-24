@@ -322,6 +322,51 @@ pub fn ticks(seconds: f64) -> pm_protocol::common::Ticks {
         .unwrap()
 }
 
+/// Today's viewer's reading of a video where the engine corrects it
+/// (docs/engine/quality-ledger.md; each correction proven against an f64
+/// reference by tests/video_reading.rs): BT.601 primaries read as Rec.709
+/// (VIDEO-SD-1), chroma read as centered whatever its siting, and an SD
+/// H.264 stream without primaries and transfer tags read with BT.601
+/// coefficients even when it tags a matrix. Gates against legacy captures
+/// restate it so they keep judging everything else.
+pub fn restate_today(path: &Path, c: &mut pm_protocol::color::ColorDescription) {
+    use pm_protocol::color::{ChromaSiting, MatrixCoefficients, Primaries, Range};
+    c.siting = ChromaSiting::Center;
+    if matches!(c.primaries, Primaries::Bt601_525 | Primaries::Bt601_625) {
+        c.primaries = Primaries::Bt709;
+    }
+    let Ok(src) = pm_media::decode::service::MediaSource::open(path) else {
+        return;
+    };
+    let Some(v) = src.probe.video.as_ref() else {
+        return;
+    };
+    let t = &v.color.tagged;
+    if v.codec.codec == "h264"
+        && v.height <= 576
+        && v.codec.bit_depth == 8
+        && c.range == Range::Limited
+        && t.primaries.is_none()
+        && t.transfer.is_none()
+    {
+        c.matrix = MatrixCoefficients::Bt601;
+    }
+}
+
+/// [`restate_today`] for every video a project's resolver names.
+pub fn restate_today_for_videos(renderer: &mut pm_render::Renderer, resolver: &MapResolver) {
+    for path in resolver.paths.values() {
+        let Ok(read) = renderer.video_color(path) else {
+            continue;
+        };
+        let mut c = read;
+        restate_today(path, &mut c);
+        if c != read {
+            renderer.interpret(path, Some(c));
+        }
+    }
+}
+
 /// Pixels where the reference's 3×3 neighborhood is uniform within 1 CV
 /// (patch interiors, section 25's video class).
 pub fn interior(reference: &[u8], width: u32, height: u32) -> Vec<bool> {

@@ -125,15 +125,17 @@ fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
 }
 
 // The input transform: source encoding and primaries to the working encoding.
-// A reading that changes colour (a gamut conversion, a tone map) clips the
-// video signal to 0..1 before linearising it, as a display does; the
+// A reading that changes colour (a gamut conversion, a tone map) clips an
+// encoded signal to 0..1 before linearising it, as a display does; the
 // working-encoding change alone keeps superwhites.
 fn to_working(signal: vec3<f32>) -> vec3<f32> {
     let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
     if (identity) {
         return signal;
     }
-    let displayed = P.c.w == 1u || P.a.y >= 5u;
+    // Linear light (transfer 3: float images, rendered surfaces) is not a
+    // signal and keeps its range.
+    let displayed = (P.c.w == 1u && P.a.y != 3u) || P.a.y >= 5u;
     let c = select(signal, clamp(signal, vec3<f32>(0.0), vec3<f32>(1.0)), displayed);
     if (P.a.y == 5u || P.a.y == 6u) {
         let sdr = pm_hdr_to_sdr(c, P.a.y == 6u, P.hdr.x);

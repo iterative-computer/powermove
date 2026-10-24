@@ -63,6 +63,14 @@ const STILL_CLASSES: &[(&str, bool)] = &[
 /// MSAA pass's approx-fit viewport (docs/engine/vector.md, "Residuals").
 const KNOWN_RESIDUALS: &[(&str, usize, u8)] = &[];
 
+/// Video-class frames pinned to an explained largest difference. The video
+/// class compares today's colour reading (`support::restate_today`); what
+/// remains here is section 9's chroma filter (Catmull-Rom across 4:2:0,
+/// today bilinear), a sampling correction proven against an f64 reference
+/// by tests/video_reading.rs: under a minifying 3D projection, patch
+/// interiors sit within its footprint of a chroma edge.
+const VIDEO_FILTER_RESIDUALS: &[(&str, u8)] = &[("space25d/precomps", 6)];
+
 #[test]
 fn corpus_render_parity() {
     let captures = corpus_dirs();
@@ -189,7 +197,8 @@ fn corpus_render_parity() {
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or_default();
-                    let mut c = renderer.video_color(path).expect("video color");
+                    let read = renderer.video_color(path).expect("video color");
+                    let mut c = read;
                     match name {
                         // Encoded with straight alpha (its color is red where
                         // alpha is 0); the probe applies Apple's premultiplied
@@ -206,9 +215,15 @@ fn corpus_render_parity() {
                         "av1.mp4" | "vp9-opus.webm" => {
                             c.matrix = pm_protocol::color::MatrixCoefficients::Bt709;
                         }
-                        _ => continue,
+                        _ => {}
                     }
-                    renderer.interpret(path, Some(c));
+                    // Today's readings the engine corrects (SD primaries,
+                    // partly tagged SD H.264), restated so this gate keeps
+                    // judging everything else.
+                    support::restate_today(path, &mut c);
+                    if c != read {
+                        renderer.interpret(path, Some(c));
+                    }
                 }
             }
         }
@@ -218,6 +233,10 @@ fn corpus_render_parity() {
                 "the legacy frame shows a playback proxy (not a native decode)".into(),
             ));
             continue;
+        }
+        if video {
+            // Media reached without an asset record (generated corpus clips).
+            support::restate_today_for_videos(&mut renderer, &p.resolver);
         }
         for s in &p.samples {
             // The capture's motion blur: 16 samples opaque, 20 transparent.
@@ -272,7 +291,11 @@ fn corpus_render_parity() {
                     p.name, s.time, n, max
                 );
                 eprintln!("{line}");
-                if max > 2 || n == 0 {
+                let pinned = VIDEO_FILTER_RESIDUALS
+                    .iter()
+                    .find(|r| r.0 == p.name)
+                    .map_or(2, |r| r.1);
+                if max > pinned || n == 0 {
                     failed.push(line);
                     if let Some(dir) = &diffs {
                         std::fs::create_dir_all(dir).unwrap();

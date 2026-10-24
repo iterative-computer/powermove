@@ -372,10 +372,11 @@ fn transparency(
     doc["colorDepth"] = json!(32);
     let mut r = Renderer::headless().unwrap();
     // The corpus files are tagged BT.601 (`smpte170m`); read them as Rec.709
-    // so the source and the Rec.709 output share the matrix (the bar's
-    // "Rec.709 source exported to Rec.709").
+    // so the source and the Rec.709 output share matrix and primaries (the
+    // bar's "Rec.709 source exported to Rec.709").
     let mut c = r.video_color(&path).unwrap();
     c.matrix = MatrixCoefficients::Bt709;
+    c.primaries = pm_protocol::color::Primaries::Bt709;
     r.interpret(&path, Some(c));
     let mut request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32);
     request.export = true;
@@ -521,10 +522,12 @@ fn invariant_1_420(linear_light: bool) {
     let mut doc = if linear_light { linear(doc) } else { doc };
     doc["colorDepth"] = json!(32);
     let mut r = Renderer::headless().unwrap();
-    // Untagged SD reads as BT.601 (section 9); read it as Rec.709 to export
-    // to Rec.709 with the same matrix.
+    // Untagged SD reads as BT.601 with SMPTE 170M primaries (the shared
+    // table); read it as Rec.709 to export to Rec.709 with the same matrix
+    // and primaries.
     let mut c = r.video_color(&path).unwrap();
     c.matrix = MatrixCoefficients::Bt709;
+    c.primaries = pm_protocol::color::Primaries::Bt709;
     r.interpret(&path, Some(c));
     let mut request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32);
     request.export = true;

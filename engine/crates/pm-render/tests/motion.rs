@@ -148,6 +148,10 @@ fn motion_corpus_parity() {
             routed.push(format!("{}: {issues:?}", p.name));
         }
         let video = has_video(&p);
+        if video {
+            // Today's readings the engine corrects (support::restate_today).
+            support::restate_today_for_videos(&mut renderer, &p.resolver);
+        }
         let blur_video = p.name == "motion/blur-video";
         let fps = pm_eval::node::to_number(p.document.root().unwrap().get("fps"));
         for s in &p.samples {
