@@ -453,7 +453,7 @@ while it is still selectable.
 | `fpsRational` | Exact composition rates | Ignored safely |
 | `minReaderVersion` (root) | Older builds refuse instead of overwriting | Read by the Phase 0 guard |
 | `requiresEngine: "native"` (root) | Set when a native-only feature is used | Legacy refuses the project |
-| Layer `compat` | 1 for layers created before cutover (today's text metrics, solid radius ignored, today's effect looks); 2 for new layers. Duplicate, paste, split, pre-compose, and clone keep the source's level | Ignored safely (level 1 behavior) |
+| Layer `compat` | 1 for layers created before cutover: their authored-intent choices (today's text layout and metrics; solid radius ignored, decision SOLID-RADIUS-1); 2 for new layers. Rendering quality is the same at both levels (amendment 22). Duplicate, paste, split, pre-compose, and clone keep the source's level | Ignored safely (level 1 behavior) |
 | Asset `link` | Linked-media reference | Requires native |
 | Asset `interpret` | Interpretation overrides | Requires native |
 | Asset `storage` | `copied` or `linked` | Requires native when `linked` |
@@ -1674,15 +1674,19 @@ Settled with counsel before the dependent work ships.
 
 - **Evaluation:** |a − b| ≤ 1e-9 + 1e-9·|b|; exact strings and booleans; text per section
   6; 3D picks identical; bounds within 1e-6.
-- **Render, Standard color:** per-channel 8-bit difference ≤ 1 for 99.9% of pixels and
-  ≤ 4 for any pixel, with these classes tested separately:
+- **Render:** the two-part rule of [gate-policy.md](engine/gate-policy.md). Authored
+  intent exactly: interior pixels within 1 CV of today's capture (authored colors,
+  blends, mattes), alpha area and centroid within 1e-3. Quality: edge and resampled
+  pixels at least as close to an f64 or supersampled reference as today's, within the
+  frames' rounding; the preview frame equals the export frame. Pixels without a reference
+  yet keep the previous bound against today (≤ 1 CV for 99.9%, ≤ 4 for any). Classes:
 
   | Class | Test |
   |---|---|
-  | Video frames | Chromium comparison only for natively decoded sources, on patch interiors, within 2 CV; the engine within 1 CV of an FFmpeg plus zimg reference using the same chroma filter |
+  | Video frames | The engine within 1 CV of an f64 conversion of the decoded samples (H.273, BT.2100) using the declared chroma filter, at least as close as today's frame |
   | Text | Identical line breaks and advances within 0.25 px (level 1); SSIM ≥ 0.98; reviewed sheet |
-  | Edges (level 2) | Section 2 antialiasing reference |
-  | Blur (level 2) | Analytic Gaussian |
+  | Edges | Exact supersampled coverage of the document's outlines |
+  | Blur | Exact Gaussian at the authored σ |
   | Alpha | Within 1 CV of an f64 reference |
   | 3D shading | Section 2 3D bar |
   | Blender surfaces | Engine composite of the stored surfaces, exact |
@@ -1866,13 +1870,24 @@ allowed-difference and capability-routing text in sections 21, 25, and 30.
       falls back to the legacy engine.
     - Flag off keeps today's engine. The `requiresEngine` refusal and the
       on → off → on round trip stay.
-22. **Existing projects are unchanged.** Any visible difference on an existing project is
-    a blocker, not a DECISION.
-    - Appendix A fixes apply only to new layers or `compat` level 2.
-    - Tolerances in section 25 measure invisibility and are not permission for a
-      visible change. Each documented drift or allowed difference on level 1 content
-      (composite appendix A, text small sizes and synthesized bold, masked 3D layers)
-      is resolved to match today or escalated to Jude with a side-by-side comparison.
+22. **Existing projects keep their authored intent; rendering is correct.** An existing
+    project opens and means the same thing: geometry, layout and line breaks, timing,
+    user-picked colors, and each effect and blend formula with its parameters stay exact,
+    and every effect keeps rendering what its formula says (a broken effect is a blocker).
+    What today renders measurably wrong against the standard and an f64 reference
+    (precision loss, banding, sampling, seams, premultiplication, transfer, primaries,
+    range) is fixed even when the look shifts, with a row in
+    [docs/engine/quality-ledger.md](engine/quality-ledger.md). No code exists only to
+    reproduce a WebGL, Chromium or Skia artifact.
+    - Gates prove both parts ([docs/engine/gate-policy.md](engine/gate-policy.md)):
+      authored intent exactly, and closeness to a high-precision reference at least as
+      good as today's, with the preview equal to the export.
+    - Appendix A fixes that correct rendering apply at every level; one that would change
+      authored intent applies only to new layers (`compat` level 2).
+    - Escalate only what is genuinely ambiguous (no standard applies, or tags conflict);
+      a look shift across every project is an orchestrator decision.
+    - Nothing is slower than today where measured (open, first frame, scrub, playback,
+      export, edit latency, memory).
 23. **Deprecated compatibility APIs.** Every compatibility API keeps working fully at
     apiVersion 1 to 3. This covers the `render.gl.context` compatibility context;
     synchronous `render.snapshot`, `renderFrameTo`, and `raster` pixels; the
