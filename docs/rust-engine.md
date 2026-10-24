@@ -1679,7 +1679,9 @@ Settled with counsel before the dependent work ships.
   blends, mattes), alpha area and centroid within 1e-3. Quality: edge and resampled
   pixels at least as close to an f64 or supersampled reference as today's, within the
   frames' rounding; the preview frame equals the export frame. Pixels without a reference
-  yet keep the previous bound against today (≤ 1 CV for 99.9%, ≤ 4 for any). Classes:
+  yet keep the previous bound against today (≤ 1 CV for 99.9%, ≤ 4 for any). Classes (each
+  row is the target its owning lane converts to; until then that gate keeps its current
+  rule):
 
   | Class | Test |
   |---|---|
@@ -1884,8 +1886,9 @@ allowed-difference and capability-routing text in sections 21, 25, and 30.
       good as today's, with the preview equal to the export.
     - Appendix A fixes that correct rendering apply at every level; one that would change
       authored intent applies only to new layers (`compat` level 2).
-    - Escalate only what is genuinely ambiguous (no standard applies, or tags conflict);
-      a look shift across every project is an orchestrator decision.
+    - A correctness fix needs only its ledger row, with before/after evidence and the
+      standard it follows, even when it shifts the look of every project. Escalate only
+      what is genuinely ambiguous (no standard applies, or tags conflict).
     - Nothing is slower than today where measured (open, first frame, scrub, playback,
       export, edit latency, memory).
 23. **Deprecated compatibility APIs.** Every compatibility API keeps working fully at

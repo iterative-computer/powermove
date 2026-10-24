@@ -27,6 +27,8 @@ Then one row per correction:
 - Before/after side-by-sides stay outside Git, in the lane's evidence directory, linked
   from the lane report.
 - The corrected content renders the same in the preview and the export.
-- A correction that shifts every project's look cites the orchestrator's decision.
+- A correctness fix needs no decision, even when it shifts every project's look. Only
+  a correction where "correct" is genuinely ambiguous (no standard applies, or tags
+  conflict) cites the orchestrator's decision.
 
 Rewrite a row when its numbers change. Keep no round history here.

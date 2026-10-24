@@ -29,7 +29,7 @@ import { sameJsonAsync } from './json-diff-async';
 import { jsonCloneAsync } from '../../../shared/canonical-async';
 import type { PathPart } from '../../../shared/patch';
 import { applyOps, type PatchOp } from '../../../shared/patch-ids';
-import { diffJsonOps as diffOps, sameJson } from './json-diff';
+import { diffJsonOps as diffOps, JsonMemo, sameJson } from './json-diff';
 import { ConsistencyHash } from './consistency-hash';
 import { encodePatchOps } from '../../../shared/patch-binary';
 import { canonicalProject, canonicalStringify, jsonClone } from '../../../shared/canonical-json';
@@ -56,7 +56,18 @@ export interface PatchBatch {
   /** Whether the batch changes the project's assets (or its id, or the
    *  whole document): listeners that only follow assets skip the rest. */
   assets: boolean;
+  /** Made before the rest of the document was compared (`flushProvisional`):
+   *  its frames wait for a `confirmed` item naming its revision, and the
+   *  next batch supersedes it. */
+  provisional?: boolean;
+  /** No operations: the provisional batch that made `revision` was the
+   *  whole change (`baseRevision === revision`, an empty body). */
+  confirmed?: boolean;
 }
+
+/** Layers whose writes a provisional batch carries first: those the latest
+ *  unscoped diffs found changed (a drag writes the same layer each time). */
+const HOT_LAYERS = 4;
 
 export interface ConsistencyResult {
   ok: boolean;
@@ -192,6 +203,8 @@ export class DocumentBarrier {
   shapeRevision = 0;
   /** The canonical document exactly as pm-wasm has it. */
   shadow: any = undefined;
+  /** What unchanged shadow elements were last compared equal to. */
+  private memo = new JsonMemo();
   private dirty = new Map<string, PathPart[]>();
   private structural = false;
   private integrity = new ConsistencyHash();
@@ -199,6 +212,10 @@ export class DocumentBarrier {
   private journal: PatchBatch[] = [];
   private journalBytes = 0;
   private resyncPending = false;
+  /** The open document's layers that recent diffs found changed, newest last. */
+  private hot: Array<{ comp: string; id: string }> = [];
+  /** The revision of a provisional batch not yet confirmed or superseded. */
+  provisionalRevision: number | null = null;
   private origin: IncrementalOrigin = 'metadata';
   private subscribers = new Set<(batch: PatchBatch) => void>();
   /** Told when the barrier goes from nothing pending to something pending. */
@@ -232,6 +249,13 @@ export class DocumentBarrier {
 
   /** Whether anything waits to be flushed. */
   get pending(): boolean { return this.resyncPending || this.structural || this.dirty.size > 0; }
+
+  /** Whether the next flush covers every path anyway (a resync, or a diff
+   *  of the whole document): a write needs no path of its own. */
+  get coversDocument(): boolean { return this.resyncPending || this.dirty.has(pathKey([])); }
+
+  /** Optional page-clock attribution for interactive performance diagnostics. */
+  trace: ((stage: string, began: number) => void) | null = null;
 
   /** Resyncs at the next flush (the live document was replaced by another). */
   markResync(): void {
@@ -296,6 +320,7 @@ export class DocumentBarrier {
 
   /** Replaces the mirror with the live document. */
   resync(): void {
+    this.provisionalRevision = null;
     this.requireNativeAvailable();
     this.checkpoint = null; this.journal = []; this.journalBytes = 0;
     const canonical = canonicalProject(this.project());
@@ -394,11 +419,47 @@ export class DocumentBarrier {
     const anchored = coverPaths(paths.map(path => anchorPath(this.shadow, live, path)));
     for (const path of anchored) {
       const before = lookup(this.shadow, path), after = lookup(live, path);
-      if (before.exists && after.exists) diffOps(before.value, after.value, path, ops);
+      if (before.exists && after.exists) diffOps(before.value, after.value, path, ops, this.memo);
       else if (after.exists) ops.push({ path: [...path], exists: true, value: after.value === undefined ? undefined : JSON.parse(JSON.stringify(after.value) ?? 'null') });
       else if (before.exists) ops.push({ path: [...path], exists: false });
     }
     return ops;
+  }
+
+  /**
+   * The first half of a `touch()` without paths: diffs only the paths
+   * written by name and the layers recent diffs found changed, and sends
+   * them as a provisional batch, so the engine starts on the edit while the
+   * rest of the document is compared. The structural diff stays pending:
+   * the next `flush` (soon after, or any query's) compares everything, then
+   * confirms the provisional revision or supersedes it with the rest.
+   * Returns whether it sent one. Exact by construction: frames of a
+   * provisional revision are only presented once confirmed.
+   */
+  flushProvisional(): boolean {
+    if (this.flushing || this.provisionalRevision !== null || this.resyncPending || !this.structural || !this.hot.length || !isRecord(this.shadow)) return false;
+    this.beforeFlush();
+    const live = canonicalProject(this.project());
+    const paths = [...this.dirty.values()];
+    for (const { comp, id } of this.hot) {
+      const before = this.shadow.comps?.[comp]?.layers, after = live?.comps?.[comp]?.layers;
+      if (!Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) return false;
+      const index = after.findIndex((layer: any) => layer?.id === id);
+      if (index < 0 || before[index]?.id !== id) return false;
+      paths.push(['comps', comp, 'layers', index]);
+    }
+    this.flushing = true;
+    try {
+      const diffStarted = this.trace ? performance.now() : 0;
+      const ops = this.diff(live, paths);
+      this.trace?.('provisional diff', diffStarted);
+      this.dirty.clear();
+      if (!ops.length) return false;
+      this.send(ops, this.origin, true);
+      return this.provisionalRevision !== null;
+    } finally {
+      this.flushing = false;
+    }
   }
 
   /** Flushes dirty paths into pm-wasm (section 6, item 2: before every query). */
@@ -425,9 +486,11 @@ export class DocumentBarrier {
       this.dirty.clear();
       this.structural = false;
       this.origin = 'metadata';
+      const diffStarted = this.trace ? performance.now() : 0;
       const ops = this.diff(live, paths);
-      if (!ops.length) return;
-      this.send(ops, origin);
+      this.trace?.('document diff', diffStarted);
+      if (ops.length) this.send(ops, origin);
+      else if (this.provisionalRevision !== null) this.confirmProvisional();
     } finally {
       this.flushing = false;
       const ms = performance.now() - started;
@@ -436,11 +499,32 @@ export class DocumentBarrier {
     }
   }
 
-  private send(ops: PatchOp[], origin: IncrementalOrigin): void {
+  /** The provisional revision was the whole change: its frames may show. */
+  private confirmProvisional(): void {
+    const revision = this.provisionalRevision!;
+    this.provisionalRevision = null;
+    this.emit({ baseRevision: revision, revision, origin: 'metadata', count: 0, body: new Uint8Array(0), assets: false, confirmed: true });
+  }
+
+  /** Remembers the open document's layers that `ops` changed in place. */
+  private noteHot(ops: readonly PatchOp[]): void {
+    for (const op of ops) {
+      const [root, comp, layers, index] = op.path;
+      if (root !== 'comps' || layers !== 'layers' || typeof comp !== 'string' || typeof index !== 'number') continue;
+      const id = this.shadow?.comps?.[comp]?.layers?.[index]?.id;
+      if (typeof id !== 'string') continue;
+      this.hot = this.hot.filter(h => h.comp !== comp || h.id !== id);
+      this.hot.push({ comp, id });
+      if (this.hot.length > HOT_LAYERS) this.hot.shift();
+    }
+  }
+
+  private send(ops: PatchOp[], origin: IncrementalOrigin, provisional = false): void {
     const base = this.revision;
     const native = this.wasm instanceof RemotePmWasm;
     let body: Uint8Array;
     let result: ReturnType<PmWasm['apply']> | undefined;
+    const encodeStarted = this.trace ? performance.now() : 0;
     try {
       body = encodePatchOps(ops);
       // Native refusals must leave the JS shadow at its previous revision.
@@ -455,8 +539,10 @@ export class DocumentBarrier {
       }
       for (const op of ops) {
         this.integrity.invalidate(this.shadow, [op]);
+        this.memo.forgetAlong(this.shadow, op.path);
         this.shadow = applyOps(this.shadow, [op]);
       }
+      this.trace?.('document encode and shadow', encodeStarted);
     } catch (error) {
       if (native) this.nativeApplyFailed(ops, origin, error);
       // A value the format cannot carry (a lone surrogate in a key is fine;
@@ -465,7 +551,9 @@ export class DocumentBarrier {
       this.resync();
       return;
     }
+    const applyStarted = this.trace ? performance.now() : 0;
     result ??= this.wasm.apply(body, base, base + 1);
+    this.trace?.('document wasm apply', applyStarted);
     this.revision = base + 1;
     if (ops.some(op => changesShape(op.path))) this.shapeRevision = this.revision;
     if (result.code !== APPLY.ok) {
@@ -477,8 +565,13 @@ export class DocumentBarrier {
     this.stats.batches += 1;
     this.stats.ops += ops.length;
     this.stats.bytes += body.length;
+    this.noteHot(ops);
+    // A later batch supersedes a provisional one.
+    this.provisionalRevision = provisional ? this.revision : null;
     const assets = ops.some(op => op.path.length === 0 || op.path[0] === 'assets' || op.path[0] === 'id');
-    this.emit({ baseRevision: base, revision: base + 1, origin, count: ops.length, body, assets });
+    const postStarted = this.trace ? performance.now() : 0;
+    this.emit({ baseRevision: base, revision: base + 1, origin, count: ops.length, body, assets, ...(provisional ? { provisional: true } : {}) });
+    this.trace?.('document patch dispatch', postStarted);
   }
 
   private requireNativeAvailable(): void {
@@ -504,6 +597,8 @@ export class DocumentBarrier {
       }
     } catch { /* the recovery will replace the unavailable owner */ }
     this.checkpoint = null; this.journal = []; this.journalBytes = 0;
+    // Recovery resyncs: a provisional revision is superseded by it.
+    this.provisionalRevision = null;
     this.touchedCanonical(ops.map(op => op.path), origin, { announce: false });
     this.resyncPending = true;
     throw Object.assign(new Error('The native document apply failed; asynchronous recovery is required', { cause }), { code: 'unavailable' });
@@ -574,6 +669,9 @@ export class DocumentBarrier {
    */
   snapshot(options: { checkpoint?: boolean } = {}): { revision: number; encoding: 'canonicalJsonV1'; bytes: Uint8Array; readonly json: string; hash: string } {
     this.flush();
+    // Never a document state that did not exist: a snapshot asked from
+    // inside the flush that sent a provisional batch (its listeners) waits.
+    if (this.provisionalRevision !== null) throw new Error('The document is being compared; snapshot after the comparison');
     // pm-wasm holds this revision (the shadow equals it): its canonical JSON
     // comes out as bytes, outside the JavaScript heap, for a large document
     // the difference between opening and running out of memory.
@@ -591,6 +689,7 @@ export class DocumentBarrier {
    * No JSON serialization or staging is needed when the engine kept it. */
   resume(): { revision: number; hash: string; batches: PatchBatch[] } {
     this.flush();
+    if (this.provisionalRevision !== null) throw new Error('The document is being compared; resume after the comparison');
     if (!this.checkpoint) {
       this.checkpoint = { revision: this.revision, hash: this.wasm.hash() };
       this.journal = []; this.journalBytes = 0;

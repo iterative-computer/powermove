@@ -209,7 +209,11 @@ describe('preload bridge', () => {
       generation: 1, session: null, revision: 4,
       snapshot: { composition: 'c', time: 0, outputSize: { width: 8, height: 8 }, target: { kind: 'layer', layer: 'L1', scale: 1, crop: null, content }, pixels: 'premultiplied', class: 'sync', viewSeq: null, waitMs: 10, uploaded: [] },
       document: { id: 'doc', revision: 4, hash: 'ab'.repeat(32), json },
-      fallbackPixels: [{ key: 'k', width: 1, height: 1, rgba16f: new Uint8Array(8) }]
+      fallbackPixels: [{ key: 'k', width: 1, height: 1, rgba16f: new Uint8Array(8) }],
+      compatEvents: [
+        { type: 'compat', compat: 'producers', sources: ['rasterOverride'] },
+        { type: 'compat', compat: 'pixels', id: { source: 'rasterOverride', key: 'r' }, row: 0, rows: 1, data: new Uint8Array([1, 2, 3, 255]) }
+      ]
     });
     const sent = electronMocks.sendSync.mock.calls[0]![1] as any;
     expect(sent.snapshot.target.content).toBeInstanceOf(Uint8Array);
@@ -217,6 +221,9 @@ describe('preload bridge', () => {
     expect(sent.document).toMatchObject({ id: 'doc', revision: 4, hash: 'ab'.repeat(32) });
     expect(sent.document.json).toBeInstanceOf(Uint8Array);
     expect(sent.fallbackPixels[0].rgba16f).toBeInstanceOf(Uint8Array);
+    expect(sent.compatEvents[0]).toEqual({ type: 'compat', compat: 'producers', sources: ['rasterOverride'] });
+    expect(sent.compatEvents[1].data).toBeInstanceOf(Uint8Array);
+    expect([...sent.compatEvents[1].data]).toEqual([1, 2, 3, 255]);
     expect(sent.session).toBeNull();
   });
 

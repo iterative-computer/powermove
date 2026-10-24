@@ -631,6 +631,27 @@ describe('compatibility answers during playback', () => {
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 
+  it('prepares an edited paused frame urgently without warming obsolete future revisions', async () => {
+    vi.useFakeTimers();
+    const { t, session, state } = rig(false);
+    const prepare = vi.fn(async () => {});
+    t.answerCompat('rasterOverride', () => ({ kind: 'native' }), prepare);
+    try {
+      t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      prepare.mockClear();
+      state.revision++;
+      t.prepareShown();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepare).toHaveBeenCalledExactlyOnceWith(need(0), state.revision, { urgent: true });
+      expect(vi.getTimerCount()).toBe(0);
+      state.playing = true;
+      t.playbackStarted();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepare.mock.calls.length).toBeGreaterThan(1);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
   it('warms a bounded horizon from paused needs before Play without a continuing paused timer', async () => {
     vi.useFakeTimers();
     const { t, session, asked, state } = rig(false);

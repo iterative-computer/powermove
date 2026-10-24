@@ -290,7 +290,8 @@ pub struct Engine {
     patch_decoder: Option<Box<dyn PatchBodyDecoder>>,
     presenter: Option<Box<dyn FramePresenter>>,
     /// Document updates for the presenter, handed over after each input.
-    pending_updates: Vec<(SessionId, DocumentUpdate)>,
+    /// Document updates for the presenter, and whether each is provisional.
+    pending_updates: Vec<(SessionId, DocumentUpdate, bool)>,
     /// The job engine's render and export service (`jobs`).
     jobs: Option<Box<dyn JobService>>,
     /// Shared snapshots of session mirrors handed to the service, by revision.
@@ -386,6 +387,7 @@ fn request_name(request: &Request) -> &'static str {
 fn event_name(event: &Event) -> &'static str {
     match event {
         Event::ApplyPatches(_) => "applyPatches",
+        Event::ConfirmRevision(_) => "confirmRevision",
         Event::PatchesApplied(_) => "patchesApplied",
         Event::Frame(_) => "frame",
         Event::ReleaseFrame(_) => "releaseFrame",
@@ -1610,6 +1612,7 @@ impl Engine {
                     root,
                     revision: resync.revision,
                 },
+                false,
             ));
         }
         Ok(())
@@ -1630,11 +1633,13 @@ impl Engine {
             return;
         }
         let updates = std::mem::take(&mut self.pending_updates);
-        for (sid, update) in updates {
+        for (sid, update, provisional) in updates {
             let Some(port) = self.sessions.get(&sid).map(|s| s.port) else {
                 continue;
             };
-            self.with_presenter(out, |p, ctx| p.document(ctx, port, sid, update));
+            self.with_presenter(out, |p, ctx| {
+                p.document(ctx, port, sid, update, provisional)
+            });
             self.sync_media(sid, now, out);
         }
     }
@@ -1815,6 +1820,20 @@ impl Engine {
         match (body, kind) {
             (Event::ApplyPatches(batch), PeerKind::Renderer | PeerKind::Host) => {
                 self.apply_patches(port, session, batch, out)
+            }
+            (Event::ConfirmRevision(confirm), PeerKind::Renderer | PeerKind::Host) => {
+                let Some(sid) =
+                    session.filter(|sid| self.sessions.get(sid).is_some_and(|s| s.port == port))
+                else {
+                    out.log(
+                        LogLevel::Warn,
+                        format!("{name} for an unknown session on port {}", port.0),
+                    );
+                    return;
+                };
+                // After the update it confirms, which may still be queued.
+                self.flush_document_updates(now, out);
+                self.with_presenter(out, |p, ctx| p.confirm(ctx, port, sid, confirm.revision));
             }
             (Event::Slicing(policy), PeerKind::Host) => match self.slicer.as_mut() {
                 Some(slicer) => {
@@ -2093,7 +2112,7 @@ impl Engine {
                                 },
                                 Err(_) => unreachable!("applied"),
                             };
-                            self.pending_updates.push((sid, update));
+                            self.pending_updates.push((sid, update, batch.provisional));
                         }
                         let applied = PatchesApplied {
                             document: batch.document.clone(),
@@ -3082,6 +3101,7 @@ mod kernel_tests {
             _: PortId,
             _: SessionId,
             update: DocumentUpdate,
+            _: bool,
         ) {
             update.apply_to(&mut self.0.lock().unwrap()).unwrap();
         }

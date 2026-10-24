@@ -803,6 +803,7 @@ fn patch_batches_follow_the_applied_revision() {
                 encoding: PatchEncoding::CanonicalV1,
                 patch_count: 1,
                 body: Bytes(br#"[{"path":["name"],"exists":true,"value":"B"}]"#.to_vec()),
+                provisional: false,
             }),
             Some(session),
         )
@@ -945,6 +946,7 @@ fn reconnect_installs_a_verified_checkpoint_without_parsing_then_accepts_the_pat
             })])
             .unwrap(),
         ),
+        provisional: false,
     };
     engine.receive(
         WINDOW,

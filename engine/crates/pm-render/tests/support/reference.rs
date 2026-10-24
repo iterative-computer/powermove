@@ -4,7 +4,11 @@
 //! Authored values (keyframes, world matrices, anchors, opacity, blend
 //! names, colors, fills) are evaluated by `pm-eval`, whose own gates keep
 //! them exact. Coverage, compositing and color math come from
-//! `pm-reference`, never from the engine's renderer.
+//! `pm-reference`, never from the engine's renderer. The reading of the
+//! document is shared with the engine (`plan::derived_scale`,
+//! `normalize_fill`, `project_color`, `blend_mode`, `has_masks`,
+//! `vector::level2`): a bug there would be in both, which the interior
+//! check against today's capture still catches.
 //!
 //! Modelled so far: the composition background (solid, linear and radial
 //! gradients, none) and 2D solid layers (world matrix, size anchor,

@@ -2878,6 +2878,7 @@ mod tests {
                 encoding: PatchEncoding::CanonicalV1,
                 patch_count: 1,
                 body: Bytes(body),
+                provisional: false,
             }),
         })
         .with_session(sid);

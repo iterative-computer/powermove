@@ -67,6 +67,9 @@ pub struct ClassReport {
     pub engine_vs_reference: Stats,
     pub today_vs_reference: Stats,
     pub engine_vs_today: Stats,
+    /// Per pixel, the engine's error against the reference minus today's
+    /// (negative where the engine is closer).
+    pub excess: Stats,
 }
 
 /// The bounds a gate states (gate-policy.md).
@@ -77,26 +80,27 @@ pub struct Bounds {
     /// Edge and resampled pixels: how much each statistic of the engine's
     /// error may exceed today's, for the rounding of the compared frames.
     pub precision_cv: f64,
-    /// Unreferenced pixels: the gate's previous bound against today, as
-    /// (p99.9, max).
-    pub unreferenced_cv: (f64, f64),
+    /// The gate's previous per-pixel bound, as (p99.9, max): unreferenced
+    /// pixels against today, and each edge or resampled pixel's error
+    /// beyond today's (which `|engine − today|` within it implies).
+    pub per_pixel_cv: (f64, f64),
 }
 
 impl Bounds {
-    /// 8-bit frames: half a code of rounding in each; unreferenced pixels
-    /// keep section 25's Standard class (≤ 1 CV for 99.9%, ≤ 4 for any).
+    /// 8-bit frames: half a code of rounding in each; per pixel, section
+    /// 25's Standard class (≤ 1 CV for 99.9%, ≤ 4 for any).
     pub const EIGHT_BIT: Bounds = Bounds {
         interior_cv: 1.0,
         precision_cv: 0.5,
-        unreferenced_cv: (1.0, 4.0),
+        per_pixel_cv: (1.0, 4.0),
     };
     /// Half-float frames (transparent captures): one f16 rounding step
-    /// below 1.0 (2⁻¹¹ = 0.125 CV); unreferenced pixels keep the alpha
-    /// class (≤ 1 CV for any).
+    /// below 1.0 (2⁻¹¹ = 0.125 CV); per pixel, the alpha class (≤ 1 CV for
+    /// any).
     pub const HALF_FLOAT: Bounds = Bounds {
         interior_cv: 1.0,
         precision_cv: 255.0 / 2048.0,
-        unreferenced_cv: (1.0, 1.0),
+        per_pixel_cv: (1.0, 1.0),
     };
 }
 
@@ -115,9 +119,12 @@ impl Report {
     ///
     /// - Interior: every pixel within `interior_cv` of today.
     /// - Edge and resampled: the engine's max, p99.9 and mean error against
-    ///   the reference each at most today's plus `precision_cv`.
-    /// - Unreferenced: the gate's previous bound against today's capture.
+    ///   the reference each at most today's plus `precision_cv`; and per
+    ///   pixel, the engine's error beyond today's within `per_pixel_cv`, so
+    ///   no pixel can regress under today's worst error elsewhere.
+    /// - Unreferenced: `per_pixel_cv` against today's capture.
     pub fn failures(&self, bounds: &Bounds) -> Vec<String> {
+        let (p999, max) = bounds.per_pixel_cv;
         let mut out = Vec::new();
         let interior = &self.class(Class::Interior).engine_vs_today;
         if interior.max > bounds.interior_cv + 1e-9 {
@@ -140,9 +147,14 @@ impl Report {
                     ));
                 }
             }
+            let x = &r.excess;
+            if x.pixels > 0 && (x.p999 > p999 + 1e-9 || x.max > max + 1e-9) {
+                out.push(format!(
+                    "{class:?}: per pixel, the engine is further from the reference than today by {x} (bound p99.9 {p999}, max {max})"
+                ));
+            }
         }
         let u = &self.class(Class::Unreferenced).engine_vs_today;
-        let (p999, max) = bounds.unreferenced_cv;
         if u.p999 > p999 + 1e-9 || u.max > max + 1e-9 {
             out.push(format!("unreferenced: {u} from today (bound p99.9 {p999}, max {max})"));
         }
@@ -160,8 +172,8 @@ impl std::fmt::Display for Report {
             if *class != Class::Unreferenced {
                 write!(
                     f,
-                    " | vs reference: engine {} / today {}",
-                    r.engine_vs_reference, r.today_vs_reference
+                    " | vs reference: engine {} / today {} | per-pixel excess max {:.2} p99.9 {:.2}",
+                    r.engine_vs_reference, r.today_vs_reference, r.excess.max, r.excess.p999
                 )?;
             }
         }
@@ -182,7 +194,7 @@ fn pixel_error(a: &[f64], b: &[f64]) -> f64 {
 pub fn compare(engine: &[f64], today: &[f64], reference: &[f64], classes: &[Class]) -> Report {
     assert!(engine.len() == today.len() && today.len() == reference.len());
     assert_eq!(engine.len(), classes.len() * 4);
-    let mut errors: [[Vec<f64>; 3]; 4] = Default::default();
+    let mut errors: [[Vec<f64>; 4]; 4] = Default::default();
     for (i, class) in classes.iter().enumerate() {
         let px = |f: &[f64]| -> [f64; 4] { std::array::from_fn(|c| f[i * 4 + c]) };
         let (e, t, r) = (px(engine), px(today), px(reference));
@@ -194,15 +206,18 @@ pub fn compare(engine: &[f64], today: &[f64], reference: &[f64], classes: &[Clas
         let k = CLASSES.iter().position(|c| *c == class).unwrap();
         errors[k][2].push(pixel_error(&e, &t));
         if class != Class::Unreferenced {
-            errors[k][0].push(pixel_error(&e, &r));
-            errors[k][1].push(pixel_error(&t, &r));
+            let (er, tr) = (pixel_error(&e, &r), pixel_error(&t, &r));
+            errors[k][0].push(er);
+            errors[k][1].push(tr);
+            errors[k][3].push(er - tr);
         }
     }
     Report {
-        classes: errors.map(|[e, t, et]| ClassReport {
+        classes: errors.map(|[e, t, et, x]| ClassReport {
             engine_vs_reference: Stats::of(e),
             today_vs_reference: Stats::of(t),
             engine_vs_today: Stats::of(et),
+            excess: Stats::of(x),
         }),
     }
 }
@@ -314,12 +329,47 @@ mod tests {
         let classes = [Class::Interior, Class::Edge];
         let r = compare(&engine, &today, &reference, &classes);
         assert!(r.failures(&Bounds::EIGHT_BIT).is_empty(), "{:?}", r.failures(&Bounds::EIGHT_BIT));
-        // Swapped: today is closer, so the engine fails the edge rule.
+        // Swapped: today is closer, so the engine fails the edge rule (all
+        // three statistics, and per pixel: 25.5 CV beyond today's).
         let r = compare(&today, &engine, &reference, &classes);
-        assert_eq!(r.failures(&Bounds::EIGHT_BIT).len(), 3);
+        assert_eq!(r.failures(&Bounds::EIGHT_BIT).len(), 4);
         // NaN references are judged against today.
         let r = compare(&engine, &today, &[f64::NAN; 8], &classes);
         assert_eq!(r.class(Class::Unreferenced).engine_vs_today.pixels, 2);
+    }
+
+    /// The review's case (B1): an edge band shaped like a level 1 solid's,
+    /// where today's aliased edges are ~85 CV off the reference, and the
+    /// engine regresses 12 exact pixels to 80 CV. The class statistics stay
+    /// under today's; the per-pixel rule catches it.
+    #[test]
+    fn sparse_edge_regressions_fail() {
+        let n = 2175;
+        let bg = [0.1, 0.1, 0.1, 1.0];
+        let fg = [0.1 + 170.0 / 255.0, 0.1, 0.1, 1.0];
+        let mut reference = Vec::new();
+        let mut today = Vec::new();
+        for i in 0..n {
+            // 400 partial pixels: exact coverage k, today all or nothing.
+            let k = if i < 400 { (i % 20) as f64 / 20.0 + 0.025 } else { (i % 2) as f64 };
+            let mix = |a: f64| -> [f64; 4] { std::array::from_fn(|c| bg[c] + (fg[c] - bg[c]) * a) };
+            reference.extend(mix(k));
+            today.extend(mix(k.round()));
+        }
+        let mut engine = today.clone();
+        for i in (400..n).step_by(100).take(12) {
+            engine[i * 4] += 80.0 / 255.0;
+        }
+        let classes = vec![Class::Edge; n];
+        let r = *compare(&engine, &today, &reference, &classes).class(Class::Edge);
+        let (e, t) = (r.engine_vs_reference, r.today_vs_reference);
+        assert!(e.max <= t.max && e.p999 <= t.p999 + 0.5 && e.mean <= t.mean + 0.5);
+        let report = compare(&engine, &today, &reference, &classes);
+        let failures = report.failures(&Bounds::EIGHT_BIT);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("per pixel"));
+        // Improvements pass: the engine at the reference everywhere.
+        assert!(compare(&reference, &today, &reference, &classes).failures(&Bounds::EIGHT_BIT).is_empty());
     }
 
     #[test]

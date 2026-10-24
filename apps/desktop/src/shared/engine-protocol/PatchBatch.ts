@@ -21,4 +21,11 @@ revision: Revision, origin: PatchOrigin, encoding: PatchEncoding,
 /**
  * Number of leaf patches in `body` (for logging and budget checks).
  */
-patchCount: number, body: Bytes, };
+patchCount: number, body: Bytes, 
+/**
+ * Sent before the renderer finished comparing the rest of the document
+ * (an unscoped write's layers it wrote last): frames of `revision` are
+ * not presented until a `ConfirmRevision` names it. A later batch
+ * supersedes it, and its frames are never presented.
+ */
+provisional?: boolean, };

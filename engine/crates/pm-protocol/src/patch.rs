@@ -78,6 +78,13 @@ pub struct PatchBatch {
     /// Number of leaf patches in `body` (for logging and budget checks).
     pub patch_count: u32,
     pub body: Bytes,
+    /// Sent before the renderer finished comparing the rest of the document
+    /// (an unscoped write's layers it wrote last): frames of `revision` are
+    /// not presented until a `ConfirmRevision` names it. A later batch
+    /// supersedes it, and its frames are never presented.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub provisional: bool,
 }
 
 impl Validate for PatchBatch {
@@ -160,6 +167,16 @@ pub struct ConsistencyResult {
     pub revision: Revision,
     pub matches: bool,
     pub hash: ContentHash,
+}
+
+/// Renderer → engine: the provisional batch that made `revision` was the
+/// whole change; its frames may be presented.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmRevision {
+    pub document: DocumentId,
+    pub revision: Revision,
 }
 
 /// Acknowledges applied patches (sent at most once per frame, coalesced).
@@ -467,6 +484,7 @@ mod tests {
             encoding: PatchEncoding::CanonicalV1,
             patch_count: 1,
             body: Bytes(vec![1, 2, 3]),
+            provisional: false,
         }
     }
 
