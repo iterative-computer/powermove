@@ -174,7 +174,7 @@ impl<'a> Viewer<'a> {
         self.revision += 1;
         self.view
             .update(&pm_engine::document::DocumentUpdate::Replace {
-                root: Some(Arc::new(root)),
+                root: Some(pm_model::Node::from_value(root, self.revision)),
                 revision: Revision::new(self.revision).unwrap(),
             })
             .expect("a replace applies");

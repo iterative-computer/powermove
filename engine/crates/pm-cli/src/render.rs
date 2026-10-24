@@ -647,6 +647,8 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         mode: None,
         seed: 1,
     };
+    let missing_media =
+        pm_export::render::offline_media(&job.document, &job.composition, &job.media);
     install_interrupt();
     let Headless {
         mut renderer,
@@ -718,6 +720,9 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
     }
     Ok(serde_json::json!({
         "path": delivered.path,
+        "missingMedia": missing_media.iter().map(|clip| serde_json::json!({
+            "asset": clip.asset, "name": clip.name
+        })).collect::<Vec<_>>(),
         "approximateSvg": approximate,
         "audioDecoder": if decoder_notice.is_some() { "powermove-ffmpeg" } else { "today" },
         "audioDecoderNotice": decoder_notice,

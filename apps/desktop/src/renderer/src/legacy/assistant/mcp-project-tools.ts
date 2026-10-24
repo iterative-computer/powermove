@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { PMRegistry } from '../registry';
 import { readLocalMediaSource } from '../core/cloud-media';
 import { agentProjectSnapshot } from '../../../../shared/agent-project-snapshot';
+import { referencedClips } from '../../../../shared/offline-clips';
 
 const empty = z.object({}).strict();
 const creation = z.object({ name: z.string().trim().min(1).max(120), width: z.number().int().min(2).max(8192).default(1920), height: z.number().int().min(2).max(8192).default(1080), fps: z.number().finite().min(1).max(120).default(30), duration: z.number().finite().min(0.1).max(36000).default(10) }).strict();
@@ -69,10 +70,15 @@ export async function mcpProjectTool(PM: PMRegistry, tool: string, args: Record<
       if (input.alpha && input.format !== 'prores') throw new Error('Transparent video requires ProRes.');
       options = { ...input, mblur: input.motionBlur, fps: PM.proj.fps, scale: 1, reportPath: true };
     }
+    let missingMedia: ReturnType<typeof referencedClips> = [];
+    if (tool === '__mcp_export_video') {
+      await PM.projectAssetsReady;
+      missingMedia = referencedClips(PM.proj).filter((clip) => !PM.assets?.get(clip.asset));
+    }
     const result = await PM.Export.run(options);
     if (!result || result.error || result.cancelled || !result.path) throw new Error(result?.error || (result?.cancelled ? 'Export cancelled.' : 'Export produced no saved file.'));
     PM.Projects.put(PM.proj);
-    return { path: result.path, projectId: PM.proj.id, ...(tool === '__mcp_export_video' ? { width: PM.proj.w, height: PM.proj.h, fps: PM.proj.fps } : {}) };
+    return { path: result.path, projectId: PM.proj.id, ...(tool === '__mcp_export_video' ? { width: PM.proj.w, height: PM.proj.h, fps: PM.proj.fps, missingMedia } : {}) };
   }
   throw new Error('Unknown MCP project operation.');
 }

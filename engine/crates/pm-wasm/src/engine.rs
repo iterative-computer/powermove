@@ -243,6 +243,7 @@ pub struct Stats {
 }
 
 pub struct Engine {
+    consistency: pm_model::consistency::ConsistencyHash,
     doc: Document,
     ev: Evaluator,
     // A bounded resident scope cache. Each entry has its own evaluator so an
@@ -320,7 +321,7 @@ fn path_of(root: &Node, target: &Node, path: &mut Vec<Value>) -> bool {
     }
     match root.kind() {
         pm_model::NodeKind::Object(map) => {
-            for (k, child) in map {
+            for (k, child) in map.iter() {
                 path.push(Value::String(k.clone()));
                 if path_of(child, target, path) {
                     return true;
@@ -404,6 +405,7 @@ impl Engine {
     pub fn new() -> Engine {
         let labels = Arc::new(Labels::default());
         Engine {
+            consistency: Default::default(),
             doc: Document::new(None, 0),
             ev: evaluator(&labels),
             detached: HashMap::new(),
@@ -453,20 +455,52 @@ impl Engine {
         &self.doc
     }
 
+    /// Installs a tree and its warmed integrity cache prepared away from the
+    /// host event loop. Containers stay shared with native viewer sessions.
+    /// A replacement starts a new history, so no evaluator plan survives it.
+    pub fn adopt_document(
+        &mut self,
+        document: Document,
+        consistency: pm_model::consistency::ConsistencyHash,
+    ) {
+        self.doc = document;
+        self.consistency = consistency;
+        self.ev.reset();
+        self.detached.clear();
+        self.last = JsValue::Undefined;
+        self.last_kind = ValueKind::Number;
+        self.stats.resyncs += 1;
+    }
+
+    /// Refresh caches from a worker clone of this exact tree, without resetting
+    /// evaluator state. The native owner validates revision and root identity.
+    pub fn refresh_document(
+        &mut self,
+        document: Document,
+        consistency: pm_model::consistency::ConsistencyHash,
+    ) {
+        debug_assert_eq!(document.revision(), self.doc.revision());
+        self.doc = document;
+        self.consistency = consistency;
+    }
+
     /// Replaces the mirror with the canonical project JSON at `revision`
     /// (contract 5, `Resync` with `canonicalJsonV1`). The revision may be
     /// any value: a resync starts a new history (the evaluator notices a
     /// lower revision and drops its caches).
     pub fn resync(&mut self, json: &[u8], revision: u64) -> Result<(), String> {
+        self.consistency.clear();
+        // Parsed straight into the revisioned tree: wasm memory never shrinks,
+        // so an intermediate `Value` of a large document stays as a peak.
         let root = if json.is_empty() {
             None
         } else {
-            Some(parse_bytes(json).map_err(|e| e.to_string())?)
+            Some(pm_model::Node::parse_bytes(json, revision).map_err(|e| e.to_string())?)
         };
         if revision > self.doc.revision() {
-            self.doc.resync(root, revision);
+            self.doc.resync_node(root, revision);
         } else {
-            self.doc = Document::new(root, revision);
+            self.doc = Document::from_root(root, revision);
             self.ev.reset();
         }
         self.detached.clear();
@@ -495,8 +529,12 @@ impl Engine {
         Ok(ops.len())
     }
 
-    /// The canonical hash (contract 5, "Canonical hash"), or `None` for an
-    /// undefined document.
+    /// Incremental local integrity digest; the canonical wire hash is separate.
+    pub fn consistency_hash(&mut self) -> String {
+        self.consistency.digest(self.doc.root())
+    }
+
+    /// The canonical hash (contract 5), or `None` for an undefined document.
     pub fn hash(&self) -> Option<String> {
         self.doc.canonical_hash()
     }

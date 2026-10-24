@@ -163,7 +163,7 @@ it('binds export snapshot media before resync and releases it after success or s
   await tick();
   expect(bindMediaSession).toHaveBeenLastCalledWith(10, null);
   engine.submit = () => error('mediaOffline', 'offline');
-  await expect(jobs.exportVideo(1, 'run', project(), input)).rejects.toMatchObject({ code: 'mediaOffline' });
+  await expect(jobs.exportVideo(1, 'run', project(), input)).rejects.toMatchObject({ code: 'mediaOffline', message: 'offline' });
   expect(bindMediaSession).toHaveBeenLastCalledWith(11, null);
   jobs.dispose();
 });
@@ -180,6 +180,27 @@ it('packs a save through host services with its own media scope even when render
   packProject.mockRejectedValueOnce(new Error('mediaOffline: clip'));
   await expect(jobs.saveProject(project())).rejects.toThrow('mediaOffline');
   expect(bindMediaSession).toHaveBeenLastCalledWith(-2, null);
+  jobs.dispose();
+});
+
+it('reports offline clips in unattended agent export replies and status', async () => {
+  const engine = new FakeEngine();
+  const resolveAsset = vi.fn(async (asset: string) => asset === 'online' ? { path: '/media/online' } : null);
+  const jobs = new AgentJobs({ engine, resolveAsset });
+  const p = project({
+    layers: [
+      { type: 'video', d: { asset: 'gone' } },
+      { type: 'image', d: { asset: 'online' } }
+    ],
+    assets: { gone: { name: 'Missing.mov' }, online: { name: 'Online.png' } }
+  });
+  const input = { format: 'mp4', range: 'all' as const, audio: false, motionBlur: false, alpha: false, mode: 'async' as const };
+  const result = await jobs.exportVideo(1, 'run', p, input);
+  expect(result).toMatchObject({ status: 'queued', missingMedia: [{ asset: 'gone', name: 'Missing.mov' }] });
+  expect(resolveAsset).toHaveBeenCalledWith('gone', { process: 'job', session: 10 });
+  if (result.status !== 'queued') throw new Error('expected queued export');
+  engine.status(result.jobId, 'done', { path: '/tmp/export.mp4' });
+  expect(jobs.status(1, result.jobId)).toMatchObject({ state: 'done', missingMedia: [{ asset: 'gone', name: 'Missing.mov' }] });
   jobs.dispose();
 });
 
@@ -247,10 +268,10 @@ describe('agent exports through the job engine', () => {
     engine.status(body.job, 'running');
     expect(onStarted).toHaveBeenCalledTimes(1);
     engine.status(body.job, 'done', { path: '/x/Cut.mp4' });
-    await expect(result).resolves.toEqual({ status: 'done', jobId: body.job, path: '/x/Cut.mp4', width: 1280, height: 720, fps: 29.97 });
+    await expect(result).resolves.toEqual({ status: 'done', jobId: body.job, path: '/x/Cut.mp4', width: 1280, height: 720, fps: 29.97, missingMedia: [] });
     // The snapshot session closes once the job ends.
     expect(engine.of('closeSession').map((s) => s.session)).toEqual([10]);
-    expect(jobs.status(7, body.job)).toEqual({ jobId: body.job, state: 'done', progress: 1, path: '/x/Cut.mp4' });
+    expect(jobs.status(7, body.job)).toEqual({ jobId: body.job, state: 'done', progress: 1, path: '/x/Cut.mp4', missingMedia: [] });
     expect(() => jobs.status(8, body.job)).toThrow('No render job');
   });
 
@@ -267,6 +288,12 @@ describe('agent exports through the job engine', () => {
     await expect(jobs.exportVideo(1, 'r', project(), input)).rejects.toMatchObject({ code: 'mediaOffline', message: 'offline' });
     // Real failures are errors, with the engine's sentence.
     engine.submit = (body) => ({ type: 'jobAccepted', job: (body as { job: string }).job, state: 'queued', position: 0 });
+    const offline = jobs.exportVideo(1, 'r', project(), input);
+    await tick(); await tick();
+    const offlineId = (engine.of('submitJob').at(-1)!.body as { job: string }).job;
+    engine.status(offlineId, 'failed', { error: error('mediaOffline', 'offline after acceptance') });
+    await expect(offline).rejects.toMatchObject({ code: 'mediaOffline', message: 'offline after acceptance' });
+    // Real failures are errors, with the engine's sentence.
     const failing = jobs.exportVideo(1, 'r', project(), input);
     await tick(); await tick();
     const id = (engine.of('submitJob').at(-1)!.body as { job: string }).job;

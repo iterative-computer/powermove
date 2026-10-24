@@ -146,6 +146,41 @@ fn main() {
         "line runs follow the seeds"
     );
     println!("ok font cache seeds");
+
+    // A character the primary font lacks stays where it is in the text: its
+    // fallback run is shaped after the rest, and was placed after it ("⌘K"
+    // drew as "K⌘", C1). Each glyph's pen order must follow the text.
+    for font in ["Times New Roman", "Georgia", "Arial", "Helvetica Neue"] {
+        let mut fresh = Compat::new(CoreTextRegistry::new());
+        let face = TextContent {
+            font: Some(font.into()),
+            weight: Some(400.0),
+            size: Some(16.0),
+            ..Default::default()
+        };
+        let (runs, width) = fresh.text_runs(&face, "a⌘K", 0.0);
+        if runs.len() < 2 {
+            continue; // This font has ⌘: no fallback to order.
+        }
+        let xs: Vec<f64> = runs
+            .iter()
+            .flat_map(|r| r.glyphs.iter().map(|g| g.x))
+            .collect();
+        assert!(
+            xs.windows(2).all(|w| w[0] <= w[1]),
+            "{font}: glyphs placed out of text order: {xs:?} ({} runs, width {width})",
+            runs.len()
+        );
+        let symbol = runs
+            .iter()
+            .position(|r| r.face != runs[0].face)
+            .expect("a fallback run");
+        assert_eq!(symbol, 1, "{font}: the fallback run is the middle one");
+        assert_eq!(runs.len(), 3, "{font}: a, then ⌘, then K");
+        println!("ok fallback runs in text order ({font})");
+        return;
+    }
+    panic!("no installed test font lacks ⌘ to exercise fallback ordering");
 }
 
 #[cfg(not(all(target_os = "macos", feature = "system")))]

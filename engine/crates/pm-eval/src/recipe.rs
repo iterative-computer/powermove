@@ -394,7 +394,7 @@ impl<'d> Scope<'_, 'd> {
         if let Some(p) = node::member(modeling, "p")
             && let NodeKind::Object(map) = p.kind()
         {
-            for (k, prop) in map {
+            for (k, prop) in map.iter() {
                 let key = k.to_string_lossy();
                 let v = self.channel_p(group, Some(prop), time, &format!("model.{key}"))?;
                 let valid = match (field(&kind, &key), &v) {
@@ -446,7 +446,7 @@ impl<'d> Scope<'_, 'd> {
         // (`evaluatedRecipe`).
         let mut params: HashMap<String, JsValue> = HashMap::new();
         if let Some(NodeKind::Object(map)) = node::member(recipe, "parameters").map(Node::kind) {
-            for (k, v) in map {
+            for (k, v) in map.iter() {
                 params.insert(k.to_string_lossy(), node::js_value_opt(Some(v)));
             }
         }
@@ -454,7 +454,7 @@ impl<'d> Scope<'_, 'd> {
         if let Some(p) = node::member(modeling, "p")
             && let NodeKind::Object(map) = p.kind()
         {
-            for (k, prop) in map {
+            for (k, prop) in map.iter() {
                 let key = k.to_string_lossy();
                 let v = self.channel_p(group, Some(prop), time, &format!("model.{key}"))?;
                 // `recipeSchema`'s parameter checks (a ZodError today).

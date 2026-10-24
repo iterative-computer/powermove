@@ -2406,6 +2406,7 @@ dependencies = [
  "pm-render",
  "pm-text",
  "pm-time",
+ "pm-wasm",
  "serde",
  "serde_json",
  "sha2",

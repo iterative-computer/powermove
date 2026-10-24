@@ -7417,7 +7417,10 @@ mod tests {
             thread.audio.insert(key, link);
             let mut doc = ViewDocument::default();
             doc.update(&DocumentUpdate::Replace {
-                root: Some(Arc::new(pm_model::json::parse(text).unwrap())),
+                root: Some(pm_model::Node::from_value(
+                    pm_model::json::parse(text).unwrap(),
+                    1,
+                )),
                 revision: Revision::new(1).unwrap(),
             })
             .unwrap();
@@ -7481,7 +7484,10 @@ mod tests {
         thread.audio.insert(key, link);
         let mut doc = ViewDocument::default();
         doc.update(&DocumentUpdate::Replace {
-            root: Some(Arc::new(pm_model::json::parse(text).unwrap())),
+            root: Some(pm_model::Node::from_value(
+                pm_model::json::parse(text).unwrap(),
+                1,
+            )),
             revision: Revision::new(1).unwrap(),
         })
         .unwrap();

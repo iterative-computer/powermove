@@ -16,6 +16,8 @@ publish.workspace = true
 pm-engine = { path = "../pm-engine" }
 # Work counters in the render thread's stats (docs/engine/perfbench.md).
 pm-perf = { path = "../pm-perf" }
+pm-wasm = { path = "../pm-wasm" }
+pm-model = { path = "../pm-model" }
 pm-protocol = { path = "../pm-protocol", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
@@ -46,7 +48,6 @@ pm-render = { path = "../pm-render" }
 pm-media = { path = "../pm-media" }
 pm-audio = { path = "../pm-audio" }
 pm-eval = { path = "../pm-eval" }
-pm-model = { path = "../pm-model" }
 
 [features]
 node = ["dep:napi", "dep:napi-derive"]
