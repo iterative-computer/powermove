@@ -138,19 +138,16 @@ lane's surface-epoch presentation changes into the viewer's tree (1.2.9; the
 version lock failed `check:builtins` until the bump), and the viewer now tags
 its presentation canvas with today's canvas box (1.2.10, below).
 
-### Round 5 review fixes (2026-10-22)
+### Review fixes (2026-10-22)
 
 - Library cards for forks of shipped viewers: fixed as above. The fork matrix
   (`e2e/helpers/viewer-fork.ts`) copies the viewers of released builds by
   commit: 1.0.8 (desktop v1.1.0, `ded961354`) and 1.0.18 (desktop v1.2.0,
   `07ed5fa17`), beside the engine-era viewer (`8d772dac8`, a fork made after
   this update) and the current one.
-- The fork of viewer 1.0.18 does not activate on this branch, with the engine
-  on or off: `api.scene3d.getMode is not a function`. Desktop v1.2.0 shipped
-  from `main` after `feat/native-engine` branched, and its kernel API
-  (`scene3d.getMode` and the gizmo/navigation/view calls GizmoToolbar.svelte
-  uses) reaches the engine branch with `feat/ne-mainmerge`, not merged yet.
-  Every 1.0.18 case fails at activation until then, by design of the test.
+- The fork of viewer 1.0.18 needs main's kernel API (`scene3d.getMode` and
+  the gizmo/navigation/view calls GizmoToolbar.svelte uses). It activates
+  since the main merge reached this branch (2026-10-23).
 - Library cards of the current viewer differed from today's along the
   composition's edge. The built-in viewer's engine presentation covers the
   whole stage with the composition drawn inside it; scaled into the card, the
@@ -222,71 +219,59 @@ the engine on and off (`e2e/helpers/viewer-fork.ts`):
   playback restarts; the matrix relinks while paused, as the Replace dialog
   does. Owner: agents / media.
 
-Every case of the 1.0.18 fork fails at activation on this branch (above).
 
 ## Pinned viewer snapshots (C3)
 
-`SnapshotRequest.viewer` and `EngineSnapshotOptions.viewer` now carry an
+`SnapshotRequest.viewer` and `EngineSnapshotOptions.viewer` carry an
 immutable `{ view: ViewOverride | null, canvas: ViewerCanvas, viewSeq }`.
-The Library selects that pin from `presentation.stateFor(latest.viewSeq)`;
-its original backing size must equal `outputSize`. The engine renders the
-composition crop at per-axis scale `width / crop.width`,
-`height / crop.height`, using the same grid helper as live presentation.
-The result reports the pin's selected sequence. Conflicting top-level and
-pinned sequences, invalid cameras and invalid canvas boxes are rejected.
+The Library pins the presented frame's `presentation.stateFor(viewSeq)` for
+cropped views and compositions with 3D objects; its original backing size
+must equal `outputSize`. The engine renders the composition crop at per-axis
+scale `width / crop.width`, `height / crop.height`, with the same grid helper
+and `preview_canvas` rule as live presentation, and reports the pin's
+sequence. Conflicting top-level and pinned sequences, invalid cameras and
+invalid canvas boxes are rejected.
 
-The raw canvas is returned before stage scaling. It uses paused viewer
-motion blur, sampling, shading, X-ray, Local View, Blender preview selection
-and the live top-down color conversion. The display working target remains
-Float16 even when project intermediates use Float32. Export and agent capture
-defaults remain unchanged without the optional pin. Captures never change the live viewer
-state or open another presenter. The transport deep-copies the pin before
-waiting or retrying; the Library rejects superseded revision/time/view
-results and keeps the original cloned canvas hierarchy and `library.render`.
+The raw canvas is returned before stage scaling, with paused viewer motion
+blur, sampling, the editor camera and the live top-down color conversion.
+Like the live viewer, the pin lands in the F16 display working texture even
+when project intermediates use Float32. Export and agent captures are
+unchanged without a pin. Captures never change the live viewer state or open
+another presenter. The transport deep-copies the pin before waiting or
+retrying; the Library rejects superseded revision, time, view sequence or
+editor camera, and keeps the original cloned canvas hierarchy and
+`library.render`.
 
-Pre-engine forks now forward the editor view to their existing bound
-presenter. Their viewport controller uses that presenter's native depth and
-coverage, mapped from the inner canvas stage to the outer overlay stage.
-The WebGL overlay retains a bitmap synchronously after its final draw;
-the Library copies it before its drawing buffer can be discarded. Screen
-navigation, labels and cursor update independently of native plane arrival.
-A card waits for its overlay’s matching revision, view sequence and frame
-sequence before taking an engine snapshot. It captures that identity as an
-immutable key and rejects a snapshot if another frame is presented while
-waiting, even when revision and view sequence stay unchanged. These changes
-preserve one interactive presentation channel per viewer.
+Main's 3D editor (merged 2026-10-23) has a Camera view and a free Editor
+view; the override carries only the editor camera
+(`core/scene3d/viewport.ts`, read without any native query). Pre-engine forks
+bound through `render.gl.init` receive the same camera
+(`engine-connection/canvas-view.ts`), refreshed on each view change. The
+viewport chrome is DOM plus the WebGL transform gizmo. The gizmo renderer
+preserves its drawing buffer, so the Library card copies the gizmo the panel
+shows. Without that, the copy raced the browser's buffer swap: cards usually
+lost the gizmo and selection wire and sometimes kept them (one of 48 repeated
+engine-on captures differed by 1,931 pixels). The gizmo is engine-independent,
+so the engine-off and engine-on cards now match deterministically.
 
-Bound canvases and Library captures read editor-only view overrides. They do
-not ask for native render-camera facts during document startup. Coalesced
-viewport/settings/render notifications and document readiness refresh the
-existing presentation only. A view refresh cannot activate a dormant binding
-after its self-presenting viewer has unloaded; an explicit caller resize
-creates the binding presentation. Native evaluation errors elsewhere remain visible.
-
-The shared native 3D color pass now mirrors ANGLE Metal’s explicit WebGL
+The shared native 3D color pass mirrors ANGLE Metal's explicit WebGL
 resolve: add the four normalized samples in order as `f32`, divide by four,
-and write directly to RGBA8. Hardware resolve rounded 21 controlled
-three-sample red codes one level higher than WebGL. The production-pipeline
-GPU test checks all 1,024 measured color/coverage combinations exactly. This
-removes all 19 raw composition differences in the current camera probe. The
-shipped 1.0.8 raw probe retains one interior pixel at `(799, 448)`: red
-151 versus 150, with the other channels equal. Its complete Library card is
-exact; this does not establish an exact raw fork frame. The 74-output 3D sweep passes its unchanged bar.
-Whole-card C3 targets remain zero pixels; that sweep bar grants no C3 exception.
+and write RGBA8. A production-pipeline GPU test checks all 1,024 measured
+color/coverage combinations exactly.
 
 The C3 spec recreates the card clone's compositor layers (`display: none`,
 then restored) before each screenshot, with the engine off and on. Chromium
 tiles keep their raster history: eight engine-off launches of the same card
 differed by 1–7 pixels, up to 36 levels, at header SVG icon samples, and were
 identical after that fresh raster. The gate compares the same final DOM and
-pixels, still with zero tolerance and no mask.
+pixels, still with zero tolerance and no mask. Its non-camera case is the
+Editor view framed on the selected cube.
 
-Rust tests cover wire validation, cropped pixels, selected sequence, an
-unchanged subsequent live frame, editor camera and Local View. TypeScript
-tests cover input validation, immutable asynchronous retries, mismatched
-sequences, original backing sizes, bound camera refresh, overlay retention
-and chrome while native planes arrive. Exact C3 and full-suite qualification
-is recorded below; the zero-pixel assertions remain unchanged.
+Rust tests cover wire validation, cropped pixels, the selected sequence, an
+unchanged subsequent live frame, the editor camera and the display-format
+pin of a Float32 project. TypeScript tests cover input validation, immutable
+asynchronous retries, mismatched sequences, original backing sizes and the
+bound editor camera.
 
 ## Contracts transferred out of consumers
 
