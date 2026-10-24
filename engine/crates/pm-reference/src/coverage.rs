@@ -6,9 +6,18 @@
 //! flattened outline (signed area accumulation, the polygon-area method of
 //! scanline font rasterizers); the fill rule then applies per cell. For an
 //! outline whose contours do not overlap the result is the exact area at
-//! any `n`; where overlapping contours change the winding number inside one
-//! cell, the error is bounded by that cell's area, `1/n²` of the pixel.
-//! Gates use `n = 16` for paths and `n = 32` for glyph outlines.
+//! any `n`.
+//!
+//! Where overlapping contours meet inside a pixel (the winding number goes
+//! from one nonzero value to another, or from 0 to 2 across coincident
+//! edges), each cell that boundary crosses can be off by up to half its
+//! area, and a straight boundary crosses at most `2n` of the pixel's cells:
+//! the pixel's coverage is off by at most `1/n` per boundary segment in the
+//! pixel (`1/(2n)` for an axis-aligned one), i.e. 16 CV at `n = 16` and
+//! 8 CV at `n = 32` per segment for full contrast. Gates use `n = 16` for paths and `n = 32` for glyph
+//! outlines; outlines with overlapping or coincident contours (variable
+//! font glyphs, stroked joins) need a larger `n`, or their union first, when
+//! a gate's bound is tighter than that.
 
 use kurbo::{BezPath, PathEl, Point};
 
@@ -252,6 +261,22 @@ mod tests {
         assert!((total(&nz) - 64.0).abs() < 1e-12);
         assert!((total(&eo) - 48.0).abs() < 1e-12);
         assert_eq!(eo.at(5, 5), 0.0);
+    }
+
+    #[test]
+    fn coincident_contours_stay_within_the_stated_bound() {
+        // Two copies of one rectangle: winding 2 inside, coincident edges.
+        let r = Rect::new(1.3, 1.3, 6.7, 6.7).to_path(1e-9);
+        let mut p = r.clone();
+        p.extend(r.iter());
+        for n in [16, 32] {
+            let exact = fill(&r, FillRule::NonZero, n, 8, 8);
+            let doubled = fill(&p, FillRule::NonZero, n, 8, 8);
+            let worst = (exact.alpha.iter().zip(&doubled.alpha)).map(|(a, b)| (a - b).abs());
+            // Corner pixels hold two axis-aligned boundaries.
+            let worst = worst.fold(0.0, f64::max);
+            assert!(worst > 0.0 && worst <= 1.0 / n as f64 + 1e-12, "{n}: {worst}");
+        }
     }
 
     #[test]

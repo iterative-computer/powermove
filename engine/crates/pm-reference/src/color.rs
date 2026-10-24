@@ -32,8 +32,13 @@ pub enum Transfer {
     Linear,
     /// 13: IEC 61966-2-1 sRGB.
     Srgb,
-    /// 1, 6, 14, 15: the BT.709 OETF.
+    /// 1, 6, 14, 15: the BT.709 OETF (scene-referred). [`Self::from_h273`]
+    /// gives this; video displayed on a reference monitor is decoded with
+    /// [`Transfer::Bt1886`] instead.
     Bt709,
+    /// BT.1886 EOTF with a zero black level (γ 2.4): the display-referred
+    /// decode of BT.709 video.
+    Bt1886,
     /// 4 (2.2), 5 (2.8): a pure power law.
     Gamma(f64),
     /// 16: SMPTE ST 2084; linear is in units of 10,000 cd/m².
@@ -95,6 +100,7 @@ impl Transfer {
                 }
             }),
             Transfer::Gamma(g) => odd(v, |v| v.powf(g)),
+            Transfer::Bt1886 => odd(v, |v| v.powf(2.4)),
             Transfer::Pq => {
                 let p = v.max(0.0).powf(1.0 / PQ_M2);
                 ((p - PQ_C1).max(0.0) / (PQ_C2 - PQ_C3 * p)).powf(1.0 / PQ_M1)
@@ -129,6 +135,7 @@ impl Transfer {
                 }
             }),
             Transfer::Gamma(g) => odd(l, |l| l.powf(1.0 / g)),
+            Transfer::Bt1886 => odd(l, |l| l.powf(1.0 / 2.4)),
             Transfer::Pq => {
                 let y = l.max(0.0).powf(PQ_M1);
                 ((PQ_C1 + PQ_C2 * y) / (1.0 + PQ_C3 * y)).powf(PQ_M2)
@@ -332,18 +339,56 @@ impl Curve {
         }
     }
 
-    /// The inverse of a monotonic curve on 0…1.
-    pub fn invert(&self, y: f64) -> f64 {
-        if let Curve::Gamma(g) = self {
-            return y.max(0.0).powf(1.0 / g);
+    /// [`Self::eval`] for any real: odd-symmetric below 0; gamma and
+    /// parametric curves continue their formula above 1, tables their last
+    /// slope.
+    pub fn eval_extended(&self, x: f64) -> f64 {
+        match self {
+            _ if x < 0.0 => -self.eval_extended(-x),
+            Curve::Table(t) if x > 1.0 && t.len() > 1 => {
+                let n = t.len() - 1;
+                t[n] + (x - 1.0) * n as f64 * (t[n] - t[n - 1])
+            }
+            _ => self.eval(x),
         }
-        let (mut lo, mut hi) = (0.0f64, 1.0f64);
-        for _ in 0..64 {
+    }
+
+    /// The inverse of a monotonic curve: on 0…1 (`Extent::Clip`), or of
+    /// [`Self::eval_extended`] for any real (`Extent::Unclipped`).
+    pub fn invert(&self, y: f64, extent: Extent) -> f64 {
+        if extent == Extent::Unclipped && y < 0.0 {
+            return -self.invert(-y, extent);
+        }
+        if let Curve::Gamma(g) = self {
+            let x = y.max(0.0).powf(1.0 / g);
+            return if extent == Extent::Clip { x.min(1.0) } else { x };
+        }
+        let f = |x: f64| match extent {
+            Extent::Clip => self.eval(x),
+            Extent::Unclipped => self.eval_extended(x),
+        };
+        let mut hi = 1.0f64;
+        while extent == Extent::Unclipped && f(hi) < y && hi < 1e12 {
+            hi *= 2.0;
+        }
+        let mut lo = 0.0f64;
+        for _ in 0..80 {
             let mid = 0.5 * (lo + hi);
-            if self.eval(mid) < y { lo = mid } else { hi = mid }
+            if f(mid) < y { lo = mid } else { hi = mid }
         }
         0.5 * (lo + hi)
     }
+}
+
+/// What a conversion does with values outside 0…1 (out of gamut, above
+/// white).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Extent {
+    /// Curves are defined on 0…1 only (ICC.1 integer pipelines).
+    Clip,
+    /// Kept: curves extended odd-symmetrically and beyond 1, as float
+    /// pipelines keep such values until output.
+    Unclipped,
 }
 
 /// An RGB matrix/TRC profile: device RGB → TRC → linear RGB → XYZ (D50 PCS).
@@ -427,20 +472,26 @@ impl MatrixTrc {
         })
     }
 
-    pub fn to_pcs(&self, rgb: [f64; 3]) -> [f64; 3] {
-        apply(&self.to_pcs, std::array::from_fn(|i| self.trc[i].eval(rgb[i])))
+    pub fn to_pcs(&self, rgb: [f64; 3], extent: Extent) -> [f64; 3] {
+        apply(
+            &self.to_pcs,
+            std::array::from_fn(|i| match extent {
+                Extent::Clip => self.trc[i].eval(rgb[i].clamp(0.0, 1.0)),
+                Extent::Unclipped => self.trc[i].eval_extended(rgb[i]),
+            }),
+        )
     }
 
-    pub fn from_pcs(&self, xyz: [f64; 3]) -> [f64; 3] {
+    pub fn from_pcs(&self, xyz: [f64; 3], extent: Extent) -> [f64; 3] {
         let linear = apply(&invert(&self.to_pcs), xyz);
-        std::array::from_fn(|i| self.trc[i].invert(linear[i]))
+        std::array::from_fn(|i| self.trc[i].invert(linear[i], extent))
     }
 }
 
 /// `rgb` in profile `src` to profile `dst` (relative colorimetric through
-/// the PCS).
-pub fn convert(src: &MatrixTrc, dst: &MatrixTrc, rgb: [f64; 3]) -> [f64; 3] {
-    dst.from_pcs(src.to_pcs(rgb))
+/// the PCS), clipped to 0…1 or not.
+pub fn convert(src: &MatrixTrc, dst: &MatrixTrc, rgb: [f64; 3], extent: Extent) -> [f64; 3] {
+    dst.from_pcs(src.to_pcs(rgb, extent), extent)
 }
 
 #[cfg(test)]
@@ -452,6 +503,7 @@ mod tests {
         for t in [
             Transfer::Srgb,
             Transfer::Bt709,
+            Transfer::Bt1886,
             Transfer::Gamma(2.2),
             Transfer::Pq,
             Transfer::Hlg,
@@ -516,9 +568,25 @@ mod tests {
             }
         }
         let rgb = [0.25, 0.5, 0.75];
-        let back = convert(&p, &p, rgb);
+        let back = convert(&p, &p, rgb, Extent::Clip);
         assert!(rgb.iter().zip(back).all(|(a, b)| (a - b).abs() < 1e-12));
         assert!((Curve::srgb().eval(0.5) - Transfer::Srgb.to_linear(0.5)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn wide_gamut_converts_unclipped() {
+        // Display P3 red is outside sRGB: negative green and blue, kept
+        // unclipped, and it round-trips; clipped it does not.
+        let p3 = MatrixTrc::from_primaries(&Primaries::P3_D65, Curve::srgb());
+        let srgb = MatrixTrc::from_primaries(&Primaries::BT709, Curve::srgb());
+        let red = convert(&p3, &srgb, [1.0, 0.0, 0.0], Extent::Unclipped);
+        assert!(red[0] > 1.0 && red[1] < 0.0 && red[2] < 0.0, "{red:?}");
+        let back = convert(&srgb, &p3, red, Extent::Unclipped);
+        assert!(back.iter().zip([1.0, 0.0, 0.0]).all(|(a, b)| (a - b).abs() < 1e-9), "{back:?}");
+        let clipped = convert(&p3, &srgb, [1.0, 0.0, 0.0], Extent::Clip);
+        assert!(clipped.iter().all(|v| (0.0..=1.0).contains(v)));
+        let table = Curve::Table(vec![0.0, 0.25, 1.0]);
+        assert!((table.invert(table.eval_extended(1.5), Extent::Unclipped) - 1.5).abs() < 1e-9);
     }
 
     #[test]
@@ -553,7 +621,7 @@ mod tests {
         let p = MatrixTrc::parse_icc(&icc).unwrap();
         assert!((p.to_pcs[1][1] - 0.7169).abs() < 1e-4);
         assert_eq!(p.trc[0], Curve::Gamma(563.0 / 256.0));
-        let white = p.to_pcs([1.0; 3]);
+        let white = p.to_pcs([1.0; 3], Extent::Clip);
         assert!((white[1] - 1.0).abs() < 1e-3);
     }
 }
