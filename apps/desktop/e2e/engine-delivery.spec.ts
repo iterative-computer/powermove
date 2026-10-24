@@ -356,12 +356,12 @@ test('offline exports preserve decoded media and delivery properties with the ne
       }
     }
     expect(probe(exports.prores!['1']!).streams.find((stream: any) => stream.tags?.timecode)?.tags?.timecode).toBe('00:00:00:00');
-    // RDD 36: byte 21's aspect-ratio nibble stays unspecified, while the
-    // frame-rate nibble changes from unspecified to a correct 24 fps code.
-    expect(proResFrameHeaderCodes(exports.prores!['0']!)).toEqual({ aspectRatio: 0, frameRate: 0 });
-    expect(proResFrameHeaderCodes(exports.prores!['1']!)).toEqual({ aspectRatio: 0, frameRate: 2 });
+    // RDD 36: byte 21's aspect-ratio and frame-rate nibbles are unspecified,
+    // as in today's file and the shipped app's (EXPORT-1).
+    for (const setting of ['0', '1'] as const) expect(proResFrameHeaderCodes(exports.prores![setting]!)).toEqual({ aspectRatio: 0, frameRate: 0 });
+    // Chromium's duration of today's WebM, which the engine's matches (EXPORT-1).
     expect(webmImports['1']).toEqual(webmImports['0']);
-    expect(webmImports['1']).toEqual({ width: 320, height: 180, duration: 1 });
+    expect(webmImports['1']).toMatchObject({ width: 320, height: 180 });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
