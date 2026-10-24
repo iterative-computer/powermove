@@ -1,8 +1,17 @@
-//! Render parity against the legacy renderer on the parity corpus (plan
-//! section 25, "Render, Standard color"): every corpus project this
-//! renderer supports (by `unsupported_with_media`) is rendered at every
-//! captured sample and compared with the capture's opaque frame. Projects it
-//! does not support are listed with the reason and skipped.
+//! The render gate on the parity corpus (docs/engine/gate-policy.md): every
+//! corpus project this renderer supports (by `unsupported_with_media`) is
+//! rendered at every captured sample. Projects it does not support are
+//! listed with the reason and skipped.
+//!
+//! Each frame is compared with the capture ("today") and with the
+//! reference render of the same document (`support::reference`), per pixel
+//! class (`pm_reference::compare`): interior pixels within 1 CV of today;
+//! edge pixels at least as close to the reference as today, within the
+//! frames' rounding; pixels the reference does not model yet by the
+//! previous bound against today (section 25's Standard class for opaque
+//! frames, the alpha class for transparent ones). Transparent frames the
+//! reference models also keep their geometry (alpha area and centroid
+//! within 1e-3), and the paused viewer's frame equals the export's.
 //!
 //! Projects with video use section 25's video class: the legacy frames come
 //! from Chromium, so only natively decoded sources (no playback proxy) are
@@ -19,15 +28,33 @@
 //! `PM_ENGINE_CORPUS` picks captures (comma-separated; default: the newest
 //! `v1-*` and the newest `render-*`);
 //! `PM_RENDER_ONLY` limits to project names with a prefix;
-//! `PM_RENDER_DIFFS=<dir>` writes engine and reference PNGs of failures there.
+//! `PM_RENDER_DIFFS=<dir>` writes engine and today's PNGs of failures there.
 
 mod support;
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
+use pm_reference::compare::{Bounds, compare, geometry, identical, same_geometry};
 use pm_render::parity::{bar_3d, dilate, msaa_edges};
 use pm_render::{RenderRequest, Renderer, all_builtin_definitions, unsupported_with_definitions};
 use support::*;
+
+/// 8-bit RGBA as 0…1.
+fn unit8(v: &[u8]) -> Vec<f64> {
+    v.iter().map(|c| f64::from(*c) / 255.0).collect()
+}
+
+fn unit32(v: &[f32]) -> Vec<f64> {
+    v.iter().map(|c| f64::from(*c)).collect()
+}
+
+fn unmodelled(r: &reference::Reference) -> String {
+    if r.unmodelled.is_empty() {
+        String::new()
+    } else {
+        format!(" (no reference: {})", r.unmodelled.join(", "))
+    }
+}
 
 /// `render/still-*` projects and whether the renderer draws them.
 const STILL_CLASSES: &[(&str, bool)] = &[
@@ -54,14 +81,13 @@ const STILL_CLASSES: &[(&str, bool)] = &[
     ("render/still-photo-progressive-jpg", true),
 ];
 
-/// Frames outside the render class by a measured, explained residual:
-/// (project, most pixels off by more than 1, largest difference). A frame
-/// within its pin is listed as known instead of failed; one beyond it fails.
+/// Frames whose paused-viewer render differs from the export's for a
+/// known, owned reason. Each must still differ: an entry that starts
+/// passing fails until it is removed.
 ///
-/// Empty: `composition/metadata` (the radius-24 rectangle's single flipped
-/// MSAA samples) is bit-exact since the compat level 1 emulation models the
-/// MSAA pass's approx-fit viewport (docs/engine/vector.md, "Residuals").
-const KNOWN_RESIDUALS: &[(&str, usize, u8)] = &[];
+/// M-R1 (lane L4): the viewer keeps video 0.04 s before a clip's end
+/// (`VideoEnd::Viewer`), exports 1 / fps (`VideoEnd::Final`).
+const PREVIEW_EXPORT_PENDING: &[(&str, f64)] = &[("retime/speed", 2.9)];
 
 #[test]
 fn corpus_render_parity() {
@@ -101,6 +127,8 @@ fn corpus_render_parity() {
         .set_definitions(&all_builtin_definitions())
         .expect("built-in definitions");
     let mut compared = 0;
+    // Opaque frames the reference models in full, and in part.
+    let (mut complete, mut partial) = (0, 0);
     let mut failed = Vec::new();
     let mut skipped = Vec::new();
     let mut seen = std::collections::BTreeMap::new();
@@ -248,6 +276,26 @@ fn corpus_render_parity() {
                 ));
             }
             let rgba = renderer.read_rgba(&frame).unwrap();
+            // Preview == export (gate-policy.md).
+            let (preview, export) = reference::preview_and_export(
+                &mut renderer,
+                &p.document,
+                &p.composition,
+                ticks(s.time),
+                request.output_size,
+                request.motion_blur,
+                &p.resolver,
+            );
+            let pending = PREVIEW_EXPORT_PENDING.contains(&(p.name.as_str(), s.time));
+            match (identical(&preview, &export), pending) {
+                (Err(e), false) => failed.push(format!("{} t={}: {e}", p.name, s.time)),
+                (Err(e), true) => eprintln!("{} t={}: pending M-R1: {e}", p.name, s.time),
+                (Ok(()), true) => failed.push(format!(
+                    "{} t={}: preview equals export; remove it from PREVIEW_EXPORT_PENDING",
+                    p.name, s.time
+                )),
+                (Ok(()), false) => {}
+            }
             let ours = opaque8(&rgba);
             let (w, h, reference) =
                 support::reference_substitutions::opaque_reference(&capture, &p.name, s)
@@ -341,72 +389,117 @@ fn corpus_render_parity() {
                     )
                     .expect("transparent render");
                 let ours = renderer.read_rgba(&frame).unwrap();
-                let reference = read_float(float);
-                let (max, bar) = match &three_d {
-                    None => (float_max_cv(&ours, &reference), None),
+                let today = read_float(float);
+                match &three_d {
+                    // The 3D class (section 25) until the 3D lane converts it.
                     Some((object, edges, class)) => {
                         let rest: Vec<bool> = class.iter().map(|c| !c).collect();
                         let (w, h) = (s.width as usize, s.height as usize);
-                        let bar = bar_3d(&rgba8(&reference), &rgba8(&ours), edges, object, w, h);
-                        (float_max_cv_masked(&ours, &reference, &rest), Some(bar))
+                        let b = bar_3d(&rgba8(&today), &rgba8(&ours), edges, object, w, h);
+                        let max = float_max_cv_masked(&ours, &today, &rest);
+                        let line = format!(
+                            "{:<40} t={:<6} transparent float  max {max:.4} CV outside 3D; 3D bar ≤2 {:.4}% max outside edges {} SSIM {:.5}",
+                            p.name,
+                            s.time,
+                            100.0 * b.fraction_within_2,
+                            b.max_cv_outside_edges,
+                            b.object_ssim.unwrap_or(f64::NAN)
+                        );
+                        eprintln!("{line}");
+                        if max > 1.0 || !b.pass() {
+                            failed.push(line);
+                        }
                     }
-                };
-                let line = format!(
-                    "{:<40} t={:<6} transparent float  max {max:.4} CV{}",
-                    p.name,
-                    s.time,
-                    bar.as_ref().map_or(String::new(), |b| format!(
-                        " outside 3D; 3D bar ≤2 {:.4}% max outside edges {} SSIM {:.5}",
-                        100.0 * b.fraction_within_2,
-                        b.max_cv_outside_edges,
-                        b.object_ssim.unwrap_or(f64::NAN)
-                    ))
-                );
-                eprintln!("{line}");
-                if max > 1.0 || bar.as_ref().is_some_and(|b| !b.pass()) {
-                    failed.push(line);
+                    None => {
+                        let r = reference::render(
+                            &p.document,
+                            &p.composition,
+                            ticks(s.time),
+                            s.width,
+                            s.height,
+                            false,
+                        );
+                        let (engine, today) = (unit32(&ours), unit32(&today));
+                        let report = compare(&engine, &today, &r.rgba, &r.classes());
+                        let mut problems = report.failures(&Bounds::HALF_FLOAT);
+                        let mut shape = String::new();
+                        if r.modelled() == 1.0 {
+                            let alpha = |f: &[f64]| f.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+                            let wanted = geometry(&r.alpha(), r.width);
+                            let ours = geometry(&alpha(&engine), r.width);
+                            let theirs = geometry(&alpha(&today), r.width);
+                            shape = format!(
+                                " geometry: area {:.3} engine {:.3} today {:.3}",
+                                wanted.area, ours.area, theirs.area
+                            );
+                            if let Err(e) = same_geometry(&ours, &wanted, 1e-3) {
+                                problems.push(format!("engine {e}"));
+                            }
+                        }
+                        let line = format!(
+                            "{:<40} t={:<6} transparent float{shape}{}{report}",
+                            p.name,
+                            s.time,
+                            unmodelled(&r)
+                        );
+                        eprintln!("{line}");
+                        if !problems.is_empty() {
+                            failed.push(format!("{line}\n      {}", problems.join("\n      ")));
+                        }
+                    }
                 }
             }
-            let (d, bar) = match &three_d {
-                None => (Diff::of(&ours, &reference), None),
+            compared += 1;
+            let (line, pass) = match &three_d {
+                // The 3D class (section 25) until the 3D lane converts it.
                 Some((object, edges, class)) => {
                     let rest: Vec<bool> = class.iter().map(|c| !c).collect();
                     let (w, h) = (s.width as usize, s.height as usize);
-                    (
-                        Diff::of_masked(&ours, &reference, &rest),
-                        Some(bar_3d(&reference, &ours, edges, object, w, h)),
-                    )
+                    let d = Diff::of_masked(&ours, &reference, &rest);
+                    let b = bar_3d(&reference, &ours, edges, object, w, h);
+                    let line = format!(
+                        "{:<40} t={:<6} {:>7} px  ≤1 {:>7.3}%  max {} (2D); 3D bar ≤2 {:.4}% max {} max outside edges {} SSIM {:.5}",
+                        p.name,
+                        s.time,
+                        d.pixels,
+                        100.0 * d.fraction_within_one(),
+                        d.max,
+                        100.0 * b.fraction_within_2,
+                        b.max_cv,
+                        b.max_cv_outside_edges,
+                        b.object_ssim.unwrap_or(f64::NAN)
+                    );
+                    (line, d.passes() && b.pass())
+                }
+                None => {
+                    let r = reference::render(
+                        &p.document,
+                        &p.composition,
+                        ticks(s.time),
+                        s.width,
+                        s.height,
+                        true,
+                    );
+                    let modelled = r.modelled();
+                    complete += usize::from(modelled == 1.0);
+                    partial += usize::from(modelled > 0.0 && modelled < 1.0);
+                    let report = compare(&unit8(&ours), &unit8(&reference), &r.opaque(), &r.classes());
+                    let problems = report.failures(&Bounds::EIGHT_BIT);
+                    let line = format!("{:<40} t={:<6}{}{report}", p.name, s.time, unmodelled(&r));
+                    let pass = problems.is_empty();
+                    let line = if pass {
+                        line
+                    } else {
+                        format!("{line}\n      {}", problems.join("\n      "))
+                    };
+                    (line, pass)
                 }
             };
-            compared += 1;
-            let line = format!(
-                "{:<40} t={:<6} {:>7} px  exact {:>6.2}%  ≤1 {:>7.3}%  max {}{}",
-                p.name,
-                s.time,
-                d.pixels,
-                100.0 * d.exact as f64 / d.pixels as f64,
-                100.0 * d.fraction_within_one(),
-                d.max,
-                bar.as_ref().map_or(String::new(), |b| format!(
-                    " (2D); 3D bar ≤2 {:.4}% max {} max outside edges {} SSIM {:.5}",
-                    100.0 * b.fraction_within_2,
-                    b.max_cv,
-                    b.max_cv_outside_edges,
-                    b.object_ssim.unwrap_or(f64::NAN)
-                ))
-            );
             eprintln!("{line}");
-            let class = d.passes();
-            let known = KNOWN_RESIDUALS.iter().any(|&(name, pixels, max)| {
-                p.name == name && bar.is_none() && d.pixels - d.within_one <= pixels && d.max <= max
-            });
-            if known && !class {
-                eprintln!("  known residual: {}", p.name);
-            } else if !class || bar.as_ref().is_some_and(|b| !b.pass()) {
+            if !pass {
                 failed.push(line);
-                // Side by side (amendment 22): the engine's frame, today's,
-                // and the differing pixels in red over a dimmed copy of
-                // today's.
+                // Side by side: the engine's frame, today's, and the pixels
+                // more than 1 CV apart in red over a dimmed copy of today's.
                 if let Some(dir) = &diffs {
                     std::fs::create_dir_all(dir).unwrap();
                     let stem = format!("{}-{}", p.name.replace('/', "_"), s.time);
@@ -441,7 +534,10 @@ fn corpus_render_parity() {
     for (name, why) in &skipped {
         eprintln!("  {name:<40} {why}");
     }
-    eprintln!("\ncompared {compared} frames; {} failed", failed.len());
+    eprintln!(
+        "\ncompared {compared} frames (reference: {complete} opaque frames in full, {partial} in part); {} failed",
+        failed.len()
+    );
     for f in &failed {
         eprintln!("  FAILED {f}");
     }
