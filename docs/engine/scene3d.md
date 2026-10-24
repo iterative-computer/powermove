@@ -63,13 +63,8 @@ pass") into the full pass. The plan stays the authority.
    written as MSL with Metal's safe math mode (amendment 11), and cached on
    disk with their reflection. The prepass is recorded when the scene or the
    set changes; the color pass loads its depth and resolves 4× MSAA into an
-   RGBA8 target in GL row order. The resolve matches Blink’s offscreen WebGL
-   path through ANGLE Metal: load normalized samples as `f32`, add samples
-   0 through 3 in order, divide by four, and write directly to RGBA8. Metal’s
-   fixed-function resolve differs at some half-code boundaries. The retained
-   GPU test checks all 1,024 measured constant-color/coverage combinations,
-   including the 21 three-sample codes that resolve one level lower in WebGL.
-   The depth surface pass writes linear view depth.
+   RGBA8 target in GL row order. The depth surface pass writes linear view
+   depth.
 4. **Composite.** The executor draws the output as a screen-space quad (a
    legacy scene as a quad through the layer transform); with linear
    blending on, that draw decodes it (the compositing lane's quad shader).
