@@ -482,7 +482,7 @@ fn append_rgba8(half: &[u8], pixels: SnapshotPixels, out: &mut Vec<u8>) {
     }
 }
 
-/// [`encode_rgba8`] from premultiplied f32 RGBA (a text raster's readback).
+/// [`encode_rgba8`] from premultiplied f32 RGBA (a layer raster's readback).
 pub fn encode_rgba8_f32(rgba: &[f32], pixels: SnapshotPixels) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba.len());
     for px in rgba.chunks_exact(4) {
@@ -491,8 +491,10 @@ pub fn encode_rgba8_f32(rgba: &[f32], pixels: SnapshotPixels) -> Vec<u8> {
     out
 }
 
-/// [`encode_rgba8`] from premultiplied RGBA8 (a Canvas2D raster's pixels).
-pub fn encode_rgba8_unorm(rgba: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
+/// [`encode_rgba8`] from premultiplied RGBA8 (the tests' reference for
+/// mapped RGBA8 rows).
+#[cfg(test)]
+fn encode_rgba8_unorm(rgba: &[u8], pixels: SnapshotPixels) -> Vec<u8> {
     if pixels == SnapshotPixels::Premultiplied {
         return rgba.to_vec();
     }

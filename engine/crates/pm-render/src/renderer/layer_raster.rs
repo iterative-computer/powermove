@@ -7,11 +7,15 @@
 //!
 //! - captions layers: the caption showing at `T` (`rasterCaptions`; the
 //!   crop is ignored, as today);
-//! - layers with editable paths: `rasterPaths` (crop ignored);
+//! - layers with editable paths: `rasterPaths`'s canvas (crop ignored);
 //! - text layers: `rasterText`, or `rasterAnimatedText` with animators or
 //!   styles (the crop applies to plain text only, as today);
-//! - every other layer: `rasterShape` of its resolved content (the crop
-//!   applies).
+//! - every other layer: `rasterShape`'s canvas of its resolved content
+//!   (the crop applies).
+//!
+//! Canvas sizes, anchors and selections are today's; shapes and paths are
+//! painted with the engine's own coverage (`crate::vector`), as the layer
+//! draws them.
 //!
 //! The layer may be the document's (by id) or an object the caller passed
 //! (`content`: a wrapper's modified copy, `{ ...L, d: { ...L.d, text } }`),
@@ -27,12 +31,12 @@ use crate::error::RenderError;
 
 /// A layer raster's pixels.
 #[derive(Debug, Clone)]
-pub enum LayerPixels {
-    /// Premultiplied working values (top-down) of `crop` (`[x, y, w, h]`)
-    /// inside the canvas; the rest of the canvas is transparent (text).
-    Float { pixels: Vec<f32>, crop: [u32; 4] },
-    /// The whole canvas, premultiplied RGBA8, top-down (shapes, paths).
-    Rgba8(Vec<u8>),
+pub struct LayerPixels {
+    /// Premultiplied working values (top-down) of `crop`.
+    pub pixels: Vec<f32>,
+    /// `[x, y, w, h]` inside the canvas; the rest of the canvas is
+    /// transparent.
+    pub crop: [u32; 4],
 }
 
 /// One layer raster with today's geometry.
@@ -184,7 +188,7 @@ impl Renderer {
                     (placed.h * density).ceil().max(1.0) as u32,
                 );
                 return Ok(Some(LayerRaster {
-                    pixels: LayerPixels::Float {
+                    pixels: LayerPixels {
                         pixels: Vec::new(),
                         crop: [0, 0, 0, 0],
                     },
@@ -245,13 +249,13 @@ impl Renderer {
                     (quad.ax + x0 * sx, quad.ay + y0 * sy),
                 )
             });
-            // `LayerPixels::Float` places the painted crop by `[x, y, w, h]`;
+            // `LayerPixels` places the painted crop by `[x, y, w, h]`;
             // the text plan's crop is `[x0, y0, x1, y1]` (an ink crop away
             // from the canvas's corner read with the wrong stride drew
             // streaks in `render.raster()`).
             let [cx0, cy0, cx1, cy1] = crop;
             return Ok(Some(LayerRaster {
-                pixels: LayerPixels::Float {
+                pixels: LayerPixels {
                     pixels,
                     crop: [cx0, cy0, cx1.saturating_sub(cx0), cy1.saturating_sub(cy0)],
                 },
@@ -266,13 +270,19 @@ impl Renderer {
         if has_paths {
             let (_, colors, layer_paths) = crate::vector::paths(&mut scope, node, seconds)
                 .map_err(|e| RenderError::Request(e.to_string()))?;
-            let (bitmap, raster) =
-                pm_vector::canvas2d::shape::raster_paths(&layer_paths, &colors, scale)
-                    .map_err(|e| RenderError::Request(e.to_string()))?;
+            let raster = layer_paths.raster(scale);
+            let canvas = (raster.width as u32, raster.height as u32);
+            let scene = crate::vector::paths_scene(
+                &layer_paths,
+                &colors,
+                &layer_paths.layer_to_pixels(&raster).as_coeffs(),
+            );
+            drop(scope);
+            let pixels = self.paint_scene(scene, canvas, precision)?;
             let b = layer_paths.bounds;
             return Ok(Some(LayerRaster {
-                canvas: (bitmap.width, bitmap.height),
-                pixels: LayerPixels::Rgba8(bitmap.rgba),
+                canvas,
+                pixels,
                 box_size: (b.w, b.h),
                 anchor: (raster.anchor_x, raster.anchor_y),
                 selection: Some([b.x0, b.y0, b.x1, b.y1]),
@@ -284,19 +294,53 @@ impl Renderer {
             .ev
             .resolve_content(scope.comp, node, seconds)
             .map_err(|e| RenderError::Request(e.to_string()))?;
+        drop(scope);
         let (content, colors) = crate::vector::shape_content(&d);
         let g = pm_vector::shape::ShapeRaster::new(&content, scale);
-        let bitmap = pm_vector::canvas2d::shape::raster_shape(&content, &colors, scale)
+        let geometry = pm_vector::shape::shape_geometry(&content)
             .map_err(|e| RenderError::Request(e.to_string()))?;
+        let mut scene = pm_vector::render::scene::CoverageScene::default();
+        scene.push_shape(&geometry, g.shape_to_pixels(), &colors.color, &colors.stroke_color);
+        let canvas = (g.width as u32, g.height as u32);
+        let pixels = self.paint_scene(scene, canvas, precision)?;
         let s = g.selection;
         Ok(Some(LayerRaster {
-            canvas: (bitmap.width, bitmap.height),
-            pixels: LayerPixels::Rgba8(bitmap.rgba),
+            canvas,
+            pixels,
             box_size: (g.w, g.h),
             anchor: (g.pad, g.pad),
             selection: Some([s.x0, s.y0, s.x1, s.y1]),
             font_offset: None,
             crops: true,
         }))
+    }
+
+    /// A coverage scene painted into a `canvas`-sized raster at `precision`
+    /// (the same coverage and paint as the layer's own drawing), read back.
+    fn paint_scene(
+        &mut self,
+        scene: pm_vector::render::scene::CoverageScene,
+        canvas: (u32, u32),
+        precision: Precision,
+    ) -> Result<LayerPixels, RenderError> {
+        let crop = [0, 0, canvas.0, canvas.1];
+        let rect = pm_vector::render::scene::PixelRect::new(0, 0, canvas.0, canvas.1);
+        if scene.pixel_bounds(rect).is_none() {
+            return Ok(LayerPixels {
+                pixels: vec![0.0; canvas.0 as usize * canvas.1 as usize * 4],
+                crop,
+            });
+        }
+        let view = self
+            .vector
+            .resolve(
+                &self.device,
+                &self.queue,
+                &crate::vector::VectorSource::Scene { scene, rect },
+                precision,
+            )
+            .map_err(RenderError::Media)?;
+        let pixels = pm_gpu::readback::read_f32(&self.device, &self.queue, view.texture())?;
+        Ok(LayerPixels { pixels, crop })
     }
 }

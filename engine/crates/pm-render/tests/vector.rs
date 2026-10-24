@@ -1,10 +1,10 @@
-//! Vector layers (plan section 10; docs/engine/vector.md): `compat` level 2
-//! shapes at output resolution with analytic edges, Vello on the GPU
-//! against the `vello_cpu` fallback, the solid `radius` on level 2 only, and
-//! the vector cache's memory accounting.
+//! Vector layers (plan section 10; docs/engine/vector.md): shapes and
+//! solids at output resolution with analytic edges whatever their `compat`
+//! level, Vello on the GPU against the `vello_cpu` fallback, the solid
+//! `radius`, and the vector cache's memory accounting.
 //!
-//! Level 2 references are computed here, not captured: each pixel's exact
-//! coverage of the transformed geometry, estimated with 16 × 16 samples.
+//! References are computed here, not captured: each pixel's exact coverage
+//! of the transformed geometry, estimated with 16 × 16 samples.
 
 mod support;
 
@@ -139,7 +139,7 @@ fn star_polygon(w: f64, h: f64, points: u32) -> Vec<(f64, f64)> {
 }
 
 #[test]
-fn level2_edges_are_analytic() {
+fn shape_edges_are_analytic_at_every_compat_level() {
     let mut renderer = Renderer::headless().unwrap();
     let (rotation, scale) = (17.0, 130.0);
     let ellipse = json!({ "shape": "ellipse", "w": 150, "h": 96, "color": "#FFFFFF", "stroke": 0 });
@@ -186,29 +186,15 @@ fn level2_edges_are_analytic() {
             &mut renderer,
             vec![placed(name, "shape", d, 1, rotation, scale)],
         );
-        let e2 = edge_error(&level2, &reference);
-        let e1 = edge_error(&level1, &reference);
+        assert_eq!(level1, level2, "{name}: `compat` does not change vector pixels");
+        let e = edge_error(&level2, &reference);
         eprintln!(
-            "{name}: level 2 over {} edge pixels: rms {:.5} ({:.1} dB), max {:.4}; level 1 rms {:.5} ({:.1} dB), max {:.4}",
-            e2.edge_pixels, e2.rms, e2.psnr_db, e2.max_any, e1.rms, e1.psnr_db, e1.max_any
+            "{name}: {} edge pixels: rms {:.5} ({:.1} dB), max {:.4}",
+            e.edge_pixels, e.rms, e.psnr_db, e.max_any
         );
-        assert!(e2.edge_pixels > 300, "{name}: the shape has edges");
-        assert!(
-            e2.psnr_db >= 40.0,
-            "{name}: level 2 edges are analytic ({:.1} dB)",
-            e2.psnr_db
-        );
-        assert!(
-            e2.max_any <= 0.03,
-            "{name}: level 2 largest error {}",
-            e2.max_any
-        );
-        assert!(
-            e2.rms * 2.0 < e1.rms,
-            "{name}: level 2 is sharper than the level 1 raster ({:.5} vs {:.5})",
-            e2.rms,
-            e1.rms
-        );
+        assert!(e.edge_pixels > 300, "{name}: the shape has edges");
+        assert!(e.psnr_db >= 40.0, "{name}: edges are analytic ({:.1} dB)", e.psnr_db);
+        assert!(e.max_any <= 0.03, "{name}: largest error {}", e.max_any);
     }
 }
 
@@ -261,37 +247,22 @@ fn gpu_and_cpu_coverage_agree() {
     assert!(mean <= 1e-3, "mean difference {mean}");
 }
 
+/// SOLID-RADIUS-1: the inspector edits and animates a solid's corner
+/// radius, so every solid rounds its corners as authored.
 #[test]
-fn solid_radius_is_honored_on_level2_only() {
+fn solid_radius_is_honored() {
     let mut renderer = Renderer::headless().unwrap();
     let d = json!({ "color": "#FFFFFF", "w": 120, "h": 80, "radius": 30 });
-    let mut l1 = layer("solid", "solid", d.clone(), 60.0, 70.0, 2.0);
-    let level1 = render_alpha(&mut renderer, vec![l1.clone()]);
-    l1["compat"] = json!(2);
-    let level2 = render_alpha(&mut renderer, vec![l1]);
-    // The solid's box, as level 1 draws it (today's quad, radius ignored).
-    let opaque: Vec<(u32, u32)> = (0..H)
-        .flat_map(|y| (0..W).map(move |x| (x, y)))
-        .filter(|(x, y)| level1[(y * W + x) as usize] > 0.5)
-        .collect();
-    let (x0, y0) = (
-        opaque.iter().map(|p| p.0).min().unwrap(),
-        opaque.iter().map(|p| p.1).min().unwrap(),
-    );
-    let (x1, y1) = (
-        opaque.iter().map(|p| p.0).max().unwrap() + 1,
-        opaque.iter().map(|p| p.1).max().unwrap() + 1,
-    );
-    assert_eq!((x1 - x0, y1 - y0), (120, 80), "level 1 draws the full box");
-    let at = |a: &[f32], x: u32, y: u32| a[(y * W + x) as usize];
-    assert_eq!(at(&level1, x0, y0), 1.0, "level 1 ignores the radius");
-    assert_eq!(at(&level2, x0, y0), 0.0, "level 2 rounds the corner");
-    assert_eq!(
-        at(&level2, x0 + 60, y0),
-        1.0,
-        "level 2 keeps the straight edges"
-    );
-    // Level 2 against the exact rounded rectangle.
+    let mut l = layer("solid", "solid", d.clone(), 60.0, 70.0, 2.0);
+    let level1 = render_alpha(&mut renderer, vec![l.clone()]);
+    l["compat"] = json!(2);
+    assert_eq!(level1, render_alpha(&mut renderer, vec![l]), "`compat` does not change solids");
+    // The box, from its straight edges (the anchor is its top-left corner).
+    let (x0, y0, x1, y1) = opaque_bounds(&level1);
+    assert_eq!((x1 - x0, y1 - y0), (120, 80), "the full box");
+    let at = |x: u32, y: u32| level1[(y * W + x) as usize];
+    assert_eq!(at(x0, y0), 0.0, "the corner is rounded");
+    assert_eq!(at(x0 + 60, y0), 1.0, "the straight edges are kept");
     let (fx0, fy0) = (f64::from(x0), f64::from(y0));
     let reference = coverage(|x, y| {
         let (u, v) = (x - fx0, y - fy0);
@@ -302,7 +273,7 @@ fn solid_radius_is_honored_on_level2_only() {
         let cy = v.clamp(30.0, 50.0);
         (u - cx).powi(2) + (v - cy).powi(2) <= 900.0
     });
-    let e = edge_error(&level2, &reference);
+    let e = edge_error(&level1, &reference);
     eprintln!(
         "solid radius 30: {} edge pixels, rms {:.5} ({:.1} dB), max {:.4}",
         e.edge_pixels, e.rms, e.psnr_db, e.max_any
@@ -325,7 +296,7 @@ fn opaque_bounds(a: &[f32]) -> (u32, u32, u32, u32) {
 }
 
 #[test]
-fn level2_solids_without_radius_have_analytic_edges() {
+fn solids_without_radius_have_analytic_edges() {
     let mut renderer = Renderer::headless().unwrap();
     // Radius 0, a missing radius, and a negative one are plain rectangles.
     for d in [
@@ -346,6 +317,11 @@ fn level2_solids_without_radius_have_analytic_edges() {
             &mut renderer,
             vec![placed("solid", "solid", d.clone(), 2, rotation, scale)],
         );
+        assert_eq!(
+            ours,
+            render_alpha(&mut renderer, vec![placed("solid", "solid", d.clone(), 1, rotation, scale)]),
+            "{d}: `compat` does not change solids"
+        );
         let reference = coverage(|x, y| {
             let (u, v) = to_layer(x, y, rotation, scale);
             (bx..=bx + 120.0).contains(&u) && (by..=by + 80.0).contains(&v)
@@ -353,7 +329,7 @@ fn level2_solids_without_radius_have_analytic_edges() {
         let e = edge_error(&ours, &reference);
         let partial = ours.iter().filter(|a| **a > 0.02 && **a < 0.98).count();
         eprintln!(
-            "level 2 solid {d}: rotated {rotation} at {scale}%: {} edge pixels ({partial} partial), rms {:.5} ({:.1} dB), max {:.4}",
+            "solid {d}: rotated {rotation} at {scale}%: {} edge pixels ({partial} partial), rms {:.5} ({:.1} dB), max {:.4}",
             e.edge_pixels, e.rms, e.psnr_db, e.max_any
         );
         assert!(
@@ -368,22 +344,6 @@ fn level2_solids_without_radius_have_analytic_edges() {
             e.max_any
         );
     }
-    // For contrast: level 1 keeps today's single-sample quad.
-    let level1 = render_alpha(
-        &mut renderer,
-        vec![placed(
-            "solid",
-            "solid",
-            json!({ "color": "#FFFFFF", "w": 120, "h": 80 }),
-            1,
-            23.0,
-            115.0,
-        )],
-    );
-    assert!(
-        level1.iter().all(|a| *a == 0.0 || *a == 1.0),
-        "level 1 solids are aliased as today"
-    );
 }
 
 #[test]

@@ -2,9 +2,6 @@
 //! byte accounted (section 19 "Memory and GPU": the render cache category of
 //! the lease).
 //!
-//! - Level 1 rasters are computed on the CPU by `pm_vector::canvas2d` and
-//!   uploaded as premultiplied `Rgba8Unorm`, the texture today's compositor
-//!   samples (Standard color: the canvas's sRGB values are working values).
 //! - Level 1 SVG images are Chromium's rasters at today's buckets
 //!   (decision S1, [`super::svg_rasters`]), uploaded like level 1 rasters:
 //!   [`VectorCache::resolve_svg`].
@@ -19,9 +16,7 @@
 use std::collections::HashMap;
 
 use pm_protocol::color::Precision;
-use pm_vector::canvas2d::shape::{raster_paths, raster_shape};
 use pm_vector::gpu::GpuCoverage;
-use pm_vector::path::PathLayer;
 use pm_vector::render::cpu::render_coverage;
 use pm_vector::render::scene::{AtlasLayout, CoverageScene, PixelRect};
 
@@ -333,29 +328,6 @@ impl VectorCache {
         }
         pm_perf::bump(pm_perf::Counter::VectorCacheMisses);
         let (texture, bytes) = match source {
-            VectorSource::Shape {
-                content,
-                colors,
-                scale,
-            } => {
-                let b = raster_shape(content, colors, *scale).map_err(|e| e.to_string())?;
-                (
-                    upload_rgba8(device, queue, b.width, b.height, &b.rgba),
-                    u64::from(b.width) * u64::from(b.height) * 4,
-                )
-            }
-            VectorSource::Paths {
-                nodes,
-                colors,
-                scale,
-            } => {
-                let layer = PathLayer::new(nodes);
-                let (b, _) = raster_paths(&layer, colors, *scale).map_err(|e| e.to_string())?;
-                (
-                    upload_rgba8(device, queue, b.width, b.height, &b.rgba),
-                    u64::from(b.width) * u64::from(b.height) * 4,
-                )
-            }
             VectorSource::Scene { scene, rect } => {
                 self.render_scene(device, queue, scene, *rect, precision)?
             }

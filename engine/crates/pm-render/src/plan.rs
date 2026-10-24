@@ -150,8 +150,8 @@ pub struct Draw {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Content {
-    /// A premultiplied color.
-    Solid([f64; 4]),
+    /// A solid layer's rectangle.
+    Solid(Solid),
     /// A layer through its own target or an adjustment of the accumulator
     /// (masks, effects, matte, blend mode; `crate::composite`). Its draw's
     /// matrix covers the target.
@@ -166,6 +166,18 @@ pub enum Content {
         uv: [f64; 4],
         alpha: f64,
     },
+}
+
+/// A solid layer: its premultiplied color over its box (the draw's unit
+/// quad), with `radius` circular corners, covered analytically
+/// (`fs_solid`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Solid {
+    pub color: [f64; 4],
+    /// The box in layer units (`d.w || W`, `d.h || H`).
+    pub size: [f64; 2],
+    /// `min(radius, |w|/2, |h|/2)`; 0 for none, a negative or a missing one.
+    pub radius: f64,
 }
 
 /// Content with a projective placement or a level 2 resampler.
@@ -897,17 +909,24 @@ pub(crate) fn layer_draw<'d>(
             a,
             w,
             h,
+            radius,
             ax,
             ay,
         } => {
             let alpha = alpha * a;
             let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
                 .map(|p| plane_at_origin(p, b.origin));
+            // `NaN > 0` is false: a missing radius is none.
+            let radius = if radius > 0.0 { radius } else { 0.0 };
             Draw {
                 layer: id.clone(),
                 matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
                 content: placed(
-                    Content::Solid([rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha, alpha]),
+                    Content::Solid(Solid {
+                        color: [rgb[0] * alpha, rgb[1] * alpha, rgb[2] * alpha, alpha],
+                        size: [w, h],
+                        radius: radius.min(w.abs() / 2.0).min(h.abs() / 2.0),
+                    }),
                     plane,
                     None,
                 ),
@@ -1147,6 +1166,7 @@ enum Quad {
         a: f64,
         w: f64,
         h: f64,
+        radius: f64,
         ax: f64,
         ay: f64,
     },
@@ -1213,49 +1233,8 @@ fn native_content_quad<'d>(
     let (wf, hf) = (f64::from(width), f64::from(height));
     let d = scope.ev.resolve_content(scope.comp, layer, time)?;
     match ty.as_str() {
-        "solid" if crate::vector::level2(layer) => {
-            // Level 2 solids draw at output resolution with analytic edges
-            // (section 8), honoring `d.radius` (section 10); radius 0 is a
-            // plain rectangle.
-            let color = js::string(js::get(&d, "color"));
-            let c = pm_color::standard::parse_hex(&color);
-            let rgba = [
-                c.rgb[0] as f32,
-                c.rgb[1] as f32,
-                c.rgb[2] as f32,
-                c.alpha as f32,
-            ];
-            let (sw, sh) = (
-                js::or_number(js::get(&d, "w"), wf),
-                js::or_number(js::get(&d, "h"), hf),
-            );
-            let radius = js::get(&d, "radius").to_number();
-            let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
-                let scene = crate::vector::level2::solid_scene(sw, sh, radius, rgba, world);
-                Ok(scene
-                    .pixel_bounds(target)
-                    .map(|rect| crate::vector::VectorQuad::Device {
-                        source: crate::vector::VectorSource::Scene { scene, rect },
-                        rect,
-                    }))
-            };
-            if scope.is_3d_layer(layer)? {
-                return local_level2(
-                    scope,
-                    layer,
-                    time,
-                    scale,
-                    b.origin,
-                    pm_vector::render::scene::PixelRect::new(0, 0, width, height),
-                    &mut plan,
-                );
-            }
-            let world = vector_world(scope, layer, time, scale, b.origin)?;
-            let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
-            Ok(plan(scope, &world, target)?.map(device_quad))
-        }
         "shape" => {
-            if crate::vector::level2(layer) && scope.is_3d_layer(layer)? {
+            if scope.is_3d_layer(layer)? {
                 let mut plan = |scope: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     crate::vector::plan_shape(scope, layer, &d, time, world, target)
                 };
@@ -1275,6 +1254,8 @@ fn native_content_quad<'d>(
             Ok(quad.map(device_quad))
         }
         "solid" => {
+            // The inspector edits and animates `radius` on solids
+            // (SOLID-RADIUS-1): the corners are rounded as authored.
             let color = js::string(js::get(&d, "color"));
             let c = pm_color::standard::parse_hex(&color);
             Ok(Some(Quad::Solid {
@@ -1282,6 +1263,7 @@ fn native_content_quad<'d>(
                 a: c.alpha,
                 w: js::or_number(js::get(&d, "w"), wf),
                 h: js::or_number(js::get(&d, "h"), hf),
+                radius: js::get(&d, "radius").to_number(),
                 ax: 0.0,
                 ay: 0.0,
             }))
@@ -1946,16 +1928,10 @@ fn local_level2<'d>(
     plan: &mut PlanVector<'_, 'd>,
 ) -> JsResult<Option<Quad>> {
     let clip = crate::space25d::local::unbounded();
-    let rect_of = |q: &crate::vector::VectorQuad| match q {
-        crate::vector::VectorQuad::Device { rect, .. } => Some(*rect),
-        crate::vector::VectorQuad::Layer { .. } => None,
-    };
     let Some(first) = plan(scope, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], clip)? else {
         return Ok(None);
     };
-    let Some(r) = rect_of(&first) else {
-        return Ok(Some(device_quad(first)));
-    };
+    let crate::vector::VectorQuad::Device { rect: r, .. } = first;
     let bounds = [
         f64::from(r.x),
         f64::from(r.y),
@@ -1984,36 +1960,20 @@ fn local_level2<'d>(
     let Some(second) = plan(scope, &[dx, 0.0, 0.0, dy, 0.0, 0.0], clip)? else {
         return Ok(None);
     };
-    Ok(Some(match second {
-        crate::vector::VectorQuad::Device { source, rect } => Quad::Texture {
-            source: Source::Vector(Box::new(source)),
-            w: f64::from(rect.width) / dx,
-            h: f64::from(rect.height) / dy,
-            ax: -f64::from(rect.x) / dx,
-            ay: -f64::from(rect.y) / dy,
-            uv: [0.0, 0.0, 1.0, 1.0],
-        },
-        layer_quad => device_quad(layer_quad),
+    let crate::vector::VectorQuad::Device { source, rect } = second;
+    Ok(Some(Quad::Texture {
+        source: Source::Vector(Box::new(source)),
+        w: f64::from(rect.width) / dx,
+        h: f64::from(rect.height) / dy,
+        ax: -f64::from(rect.x) / dx,
+        ay: -f64::from(rect.y) / dy,
+        uv: [0.0, 0.0, 1.0, 1.0],
     }))
 }
 
 /// A planned vector quad as the render graph's quad.
 fn device_quad(q: crate::vector::VectorQuad) -> Quad {
     match q {
-        crate::vector::VectorQuad::Layer {
-            source,
-            w,
-            h,
-            ax,
-            ay,
-        } => Quad::Texture {
-            source: Source::Vector(Box::new(source)),
-            w,
-            h,
-            ax,
-            ay,
-            uv: [0.0, 0.0, 1.0, 1.0],
-        },
         crate::vector::VectorQuad::Device { source, rect } => Quad::Device {
             source: Source::Vector(Box::new(source)),
             rect: [

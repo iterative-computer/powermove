@@ -10,13 +10,9 @@ use crate::js;
 use crate::path::{PathLayer, PathRaster};
 use crate::shape::{ShapeContent, ShapeKind, ShapeRaster, STAR_INNER_RATIO};
 
-/// A rasterized canvas: premultiplied RGBA8, top-down.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bitmap {
-    pub width: u32,
-    pub height: u32,
-    pub rgba: Vec<u8>,
-}
+pub use crate::path::PathColors;
+pub use crate::render::Bitmap;
+pub use crate::shape::ShapeColors;
 
 /// Why a raster could not be produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,12 +40,6 @@ impl core::fmt::Display for RasterError {
 
 impl std::error::Error for RasterError {}
 
-/// The string-valued shape content (`d.color`, `d.strokeColor`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ShapeColors {
-    pub color: String,
-    pub stroke_color: String,
-}
 
 /// `rasterShape(d, scale)` without a preview crop.
 pub fn raster_shape(d: &ShapeContent, colors: &ShapeColors, scale: f64) -> Result<Bitmap, RasterError> {
@@ -142,12 +132,6 @@ fn finish(c: &Context) -> Bitmap {
     }
 }
 
-/// The string-valued path content (`path.fill`, `path.stroke`), per path.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PathColors {
-    pub fill: String,
-    pub stroke: String,
-}
 
 /// `rasterPaths(PM, layer, time, scale)`.
 pub fn raster_paths(layer: &PathLayer, colors: &[PathColors], scale: f64) -> Result<(Bitmap, PathRaster), RasterError> {
