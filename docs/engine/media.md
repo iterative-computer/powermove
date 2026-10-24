@@ -121,20 +121,16 @@ budget can hold at least three maximum-size frames.
 The preload consumes each token once and expires unused imports after ten
 seconds; navigation and disposal release the associated imports.
 
-Monitor frames carry the stream's CICP tags, or the defaults Chromium's
-demuxer applies to an unspecified or partial set: Rec.601 below 720 lines,
-Rec.709 otherwise (`media/ffmpeg/ffmpeg_common.cc`; VP9/AV1 keep unspecified
-fields, which the raw VideoFrame receives as explicit nulls). From 360
-visible lines, where Chromium prefers its platform decoder, the source-only
-decode requests video-range CoreVideo output and uses complete CoreVideo
-P/T/M attachments. Their 709 transfer is sent as CICP BT.709 (the sRGB
-curve, section 9), not Chromium's CSS-video BT709_APPLE 1.961 gamma, so HD
-monitor tones match composition and export; this is the one deliberate
-difference from today's monitor (`quality-ledger.md`). SD Rec.601 material
-keeps its SMPTE 170M primaries conversion, exactly as today's monitor; the
-composition and export read those primaries as Rec.709
-(`standard_video_primaries`), an open decision recorded in the ledger.
-Its independent decoder/cache purpose leaves composition Display/Export unchanged.
+Monitor frames carry the reading of the shared video colour table,
+`pm_media::probe::color::video_reading`, which composition and export also
+use: tags win field by field; an untagged matrix is BT.601 at most 576 lines
+tall and under 1280 wide, otherwise BT.709 (every codec); an untagged
+transfer is BT.709, rendered as the sRGB curve (section 9); untagged
+primaries are Rec.709 unless `UNTAGGED_SD_PRIMARIES` (decision VIDEO-SD-1);
+the range is limited unless tagged full. Chromium's compositor then applies
+those tags. The planes come from the exact Export decoder at the stream's own
+range; there is no source-only VideoToolbox purpose. Where today's CSS
+monitor reads a stream differently, `quality-ledger.md` has the row.
 
 Default poster persistence and poster URL consumers share one in-flight
 native frame and WebP encode. The source service's 64 MiB cache budget is
@@ -152,18 +148,20 @@ fractional SVG fits, ordered video/SVG filmstrips, both-theme media previews,
 decoded/mixed PCM, source audio levels and natural end, silent video, keyboard
 controls and decoded picture/audio identity for code renditions.
 `engine-source-compositor.spec.ts` compares full-size and intrinsic monitor
-captures in both themes, including a neutral ramp and colour bars, against
-today's CSS video and against a double-precision reference built from the
-stream's colour reading and the screenshot's ICC profile
-(`e2e/helpers/source-colour-reference.ts`). Software-decoded video must match
-today exactly; VideoToolbox-decoded HD must be at least as close to the
-reference as today everywhere it measures, and within output rounding.
+captures in both themes, including a neutral ramp, colour bars and 10-bit
+HEVC, against today's CSS video and against a double-precision reference
+built from the screenshot's ICC profile
+(`e2e/helpers/source-colour-reference.ts`) for the shared table's reading.
+Streams today already reads that way must match today exactly; the rest
+must be at least as close to the reference as today, and within a code.
 `engine-source-guard.spec.ts`
 independently rejects browser video capture, URL-backed playback and host
 export conversion; it permits only the native private video-track presenter
 and verifies that its frames came through the source service. `engine-source-performance.spec.ts`
 pairs alternating app sessions with native `pm-perfbench` counters on one
-24-frame fixture/grid. Build `source_monitor_pcm` and `source_media` release
+24-frame fixture/grid. Each session imports three distinct remuxes, so each
+mode yields six genuinely cold first filmstrips; the gate compares their
+medians and reports P90 and per-session scrub distributions. Build `source_monitor_pcm` and `source_media` release
 examples before running these specs under `pm-electron-lock`; no build runs
 inside the lock. Targeted Rust and unit passes do not certify app parity,
 relative performance or direct device/DAC output.
