@@ -531,6 +531,7 @@ pub fn export_settings() -> ExportSettings {
             end: ticks(7_056_000_000),
         },
         audio: true,
+        audio_index_playhead: None,
         motion_blur: true,
         color: OutputColor::Rec709Broadcast,
         precision: Precision::Float32,
@@ -855,6 +856,25 @@ pub fn requests() -> Vec<Envelope> {
                 output: "fallback-out.rgba16f".into(),
             }),
         ),
+        request(
+            id(30),
+            Request::HostEncode(crate::host_encode::HostEncode {
+                job: "job-7".into(),
+                step: crate::host_encode::EncodeStep::Open {
+                    codec: crate::host_encode::EncodeVideoCodec::Vp9,
+                    width: 1920,
+                    height: 1080,
+                    frame_rate: crate::common::FrameRate::new(30_000, 1001),
+                    bitrate: 16_000_000,
+                    frames: crate::common::Count::new(300).expect("safe"),
+                    audio: Some(crate::host_encode::EncodeAudio {
+                        sample_rate: 48_000,
+                        channels: 2,
+                    }),
+                    output: handle(15),
+                },
+            }),
+        ),
     ]
 }
 
@@ -932,6 +952,7 @@ fn fallback_effect_request() -> crate::shader_fallback::ShaderFallbackRequest {
         fragment: "#version 300 es\nprecision highp float;\nuniform sampler2D u_tex;\nuniform highp isampler2D u_lut;\nout vec4 o;\nvoid main(){ o = texture(u_tex, vec2(0.5)); }".into(),
         width: 2,
         height: 1,
+        color_depth: 16,
         calls: pass(0.0),
         stage: "bind".into(),
         message: "sampler `u_lut` (integer)".into(),
@@ -1341,6 +1362,7 @@ pub fn events() -> Vec<Envelope> {
                     fragment: "#version 300 es\nprecision highp float;\nuniform samplerCube u;\nout vec4 fragColor;\nvoid main(){ fragColor = texture(u, vec3(1.0)); }".into(),
                     width: 2,
                     height: 1,
+                    color_depth: 16,
                     calls: vec![crate::shader_fallback::ShaderFallbackCall {
                         function: "2f".into(),
                         name: "iResolution".into(),
@@ -1365,6 +1387,7 @@ pub fn events() -> Vec<Envelope> {
                     row: 0,
                     rows: 1,
                     rgba16f: crate::common::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 0x3c, 0, 0x3c, 0, 0, 0, 0, 0, 0x3c]),
+                    rgba32f: None,
                 },
             ),
         )),
@@ -1377,6 +1400,7 @@ pub fn events() -> Vec<Envelope> {
                     row: 0,
                     rows: 1,
                     rgba16f: crate::common::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 0x3c, 0, 0, 0, 0, 0, 0, 0, 0x3c]),
+                    rgba32f: None,
                 },
             ),
         )),
@@ -1774,9 +1798,10 @@ pub const fn request_index(request: &Request) -> usize {
         Request::Snapshot(_) => 26,
         Request::CompatFrame(_) => 27,
         Request::ShaderFallback(_) => 28,
+        Request::HostEncode(_) => 29,
     }
 }
-pub const REQUEST_VARIANTS: usize = 29;
+pub const REQUEST_VARIANTS: usize = 30;
 
 /// Exhaustive index of response variants.
 pub const fn response_index(response: &Response) -> usize {

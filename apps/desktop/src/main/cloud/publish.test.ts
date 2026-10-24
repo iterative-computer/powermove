@@ -168,6 +168,27 @@ function commitOf(stored: Map<string, Uploaded>, sha: string) {
 }
 
 describe('publish: prepare', () => {
+  it('returns complete queued plans after a failure and keeps preparation available for publish', async () => {
+    const { publisher, api } = await setup();
+    let unblock!: () => void, started!: () => void;
+    const gate = new Promise<void>(resolve => { unblock = resolve; });
+    const entered = new Promise<void>(resolve => { started = resolve; });
+    const failure = new Error('Synthetic registry failure');
+    api.detail.mockImplementationOnce(async () => { started(); await gate; throw failure; });
+    const first = publisher.prepare('glass-blur');
+    const rejected = expect(first).rejects.toBe(failure);
+    const retry = publisher.prepare('glass-blur');
+    await entered;
+    try { expect(api.detail).toHaveBeenCalledTimes(1); }
+    finally { unblock(); }
+    await rejected;
+    const plan = await retry;
+    expect(plan).toMatchObject({ coordinate: 'jude/glass-blur', fileCount: 3, firstPublish: true,
+      blockedFindings: [], permissionFindings: [], waivableFindings: [] });
+    expect(api.detail).toHaveBeenCalledTimes(2);
+    await expect(publisher.publish('glass-blur', firstForm)).resolves.toMatchObject({ published: true, coordinate: plan.coordinate });
+  });
+
   it('plans a folder made here as a first publish with no parent', async () => {
     const { publisher, stored, puts } = await setup();
     const plan = await publisher.prepare('glass-blur');

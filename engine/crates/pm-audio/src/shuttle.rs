@@ -76,10 +76,20 @@ fn err(e: pm_stretch::StretchError) -> AudioError {
     AudioError::Device(e.to_string())
 }
 
+extern "C" fn shuttle_checkpoint() {
+    crate::realtime::checkpoint_dsp_step();
+}
+
 impl Shuttle {
     pub fn new(channels: usize, rate: u32) -> Result<Shuttle> {
+        let stretcher = if crate::realtime::has_active_guard() {
+            Stretcher::new_with_checkpoint(channels, rate, shuttle_checkpoint)
+        } else {
+            Stretcher::new(channels, rate)
+        }
+        .map_err(err)?;
         Ok(Shuttle {
-            stretcher: Stretcher::new(channels, rate).map_err(err)?,
+            stretcher,
             channels,
             epoch: None,
             started: false,
@@ -214,8 +224,23 @@ impl Shuttle {
             }
             let n = self.take(need as usize);
             let views: Vec<&[f32]> = self.scratch.iter().map(|c| &c[..n]).collect();
-            self.stretcher.reset().map_err(err)?;
-            self.stretcher.output_seek(&views).map_err(err)?;
+            crate::realtime::checkpoint_phase_reserve("shuttle-reset", 1_000_000);
+            if crate::realtime::has_active_guard() {
+                self.stretcher
+                    .reset_with_checkpoint(shuttle_checkpoint)
+                    .map_err(err)?;
+            } else {
+                self.stretcher.reset().map_err(err)?;
+            }
+            crate::realtime::checkpoint_phase("shuttle-output-seek");
+            if crate::realtime::has_active_guard() {
+                self.stretcher
+                    .output_seek_with_checkpoint(&views, shuttle_checkpoint)
+                    .map_err(err)?;
+            } else {
+                self.stretcher.output_seek(&views).map_err(err)?;
+            }
+            crate::realtime::checkpoint_phase("shuttle-map");
             self.started = true;
         }
         // Frames whose input is all here: stream index 2k + lead.
@@ -237,18 +262,24 @@ impl Shuttle {
             let frames = (total.min(run_end).max(k + 1) - k) as usize;
             // Feed the input up to the frames' lead.
             let want = SPEED * (k + frames as u64) + lead;
+            crate::realtime::checkpoint_phase("shuttle-read");
             let feed = want.saturating_sub(self.pending_at) as usize;
             let fed = self.take(feed);
             let mut planar = vec![vec![0f32; frames]; self.channels];
             {
                 let input: Vec<&[f32]> = self.scratch.iter().map(|c| &c[..fed]).collect();
                 let mut output: Vec<&mut [f32]> = planar.iter_mut().map(|c| &mut c[..]).collect();
-                if fed == 0 {
-                    self.stretcher.process(&[], &mut output).map_err(err)?;
+                let input: &[&[f32]] = if fed == 0 { &[] } else { &input };
+                crate::realtime::checkpoint_phase("shuttle-process");
+                if crate::realtime::has_active_guard() {
+                    self.stretcher
+                        .process_with_checkpoint(input, &mut output, shuttle_checkpoint)
+                        .map_err(err)?;
                 } else {
-                    self.stretcher.process(&input, &mut output).map_err(err)?;
+                    self.stretcher.process(input, &mut output).map_err(err)?;
                 }
             }
+            crate::realtime::checkpoint_phase("shuttle-map");
             let into = (SPEED * k).saturating_sub(run.offset) as i64;
             out.push(Piece {
                 start: run.media + run.dir * into,

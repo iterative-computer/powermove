@@ -12,9 +12,9 @@ test('Settings › Project edits the live composition and its export settings', 
     const projectTab = settings.getByRole('button', { name: 'Project', exact: true });
     await expect(projectTab).toHaveAttribute('aria-current', 'location');
     expect(await settings.locator('[data-settings-tab]').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-settings-tab'))))
-      .toEqual(['project', 'general', 'accounts', 'extensions']);
+      .toEqual(['project', 'general', 'accounts', 'transcription', 'extensions']);
     expect(await settings.locator('[data-settings-page]').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-settings-page'))))
-      .toEqual(['project', 'general', 'accounts', 'extensions']);
+      .toEqual(['project', 'general', 'accounts', 'transcription', 'extensions']);
     await settings.screenshot({ path: info.outputPath('project-settings-first.png') });
 
     const panel = settings.getByRole('region', { name: 'Project', exact: true });
@@ -73,8 +73,8 @@ test('New project asks for the settings that matter before creating', async ({},
     await expect(colorPicker).toBeVisible();
     await colorPicker.screenshot({ path: info.outputPath('background-picker.png') });
     const geometry = await colorPicker.evaluate(element => {
-      const plane = element.querySelector('.fill-sv')!;
-      const hue = element.querySelector('.fill-hue')!;
+      const plane = element.querySelector('.cp-plane')!;
+      const hue = element.querySelector('.cp-hue')!;
       const planeRect = plane.getBoundingClientRect();
       const hueRect = hue.getBoundingClientRect();
       const bounds = element.getBoundingClientRect();
@@ -82,33 +82,36 @@ test('New project asks for the settings that matter before creating', async ({},
         planeBackground: getComputedStyle(plane).backgroundImage,
         hueHeight: hueRect.height,
         hueBesidePlane: hueRect.left >= planeRect.right && Math.abs(hueRect.top - planeRect.top) < 1,
-        channelsInside: [...element.querySelectorAll('.color-channel input')].every(input => {
+        channelCount: element.querySelectorAll('.cp-channel input').length,
+        channelsInside: [...element.querySelectorAll('.cp-channel input')].every(input => {
           const rect = input.getBoundingClientRect();
           return rect.width >= 30 && rect.height >= 20 && rect.left >= bounds.left && rect.right <= bounds.right;
         }),
-        swatchesVisible: [...element.querySelectorAll('.color-compare-swatch')].every(swatch => swatch.getBoundingClientRect().height >= 24)
+        swatchesVisible: [...element.querySelectorAll('.cp-previous, .cp-new')].every(swatch => swatch.getBoundingClientRect().height >= 24)
       };
     });
     expect(geometry.planeBackground).toContain('linear-gradient');
     expect(geometry.hueHeight).toBeGreaterThanOrEqual(148);
+    expect(geometry.channelCount).toBeGreaterThanOrEqual(3);
     expect(geometry).toMatchObject({ hueBesidePlane: true, channelsInside: true, swatchesVisible: true });
 
-    const originalBackground = await background.textContent();
-    await colorPicker.getByRole('button', { name: '#0A84FF', exact: true }).click();
-    await expect(colorPicker.getByLabel('Background hex value')).toHaveValue('#0A84FF');
+    const value = colorPicker.locator('.cp-value');
+    await value.fill('#0A84FF');
+    await value.blur();
+    await expect(background).toHaveAttribute('aria-label', 'Background · #0A84FF');
 
-    // Dismissing the picker must not send focus back through a native colour
+    // Committing outside the picker must not send focus back through a native colour
     // input and reopen it. The New project dialog remains in place.
     await page.mouse.click(8, 8);
     await expect(colorPicker).toHaveCount(0);
     await expect(dialog).toBeVisible();
-    await expect(background).toHaveText(originalBackground!);
+    await expect(background).toHaveAttribute('aria-label', 'Background · #0A84FF');
     await page.waitForTimeout(100);
     await expect(colorPicker).toHaveCount(0);
 
     await background.click();
-    await colorPicker.getByLabel('Background hex value').fill('#AABBCC');
-    await colorPicker.getByRole('button', { name: 'OK', exact: true }).click();
+    await colorPicker.locator('.cp-value').fill('#AABBCC');
+    await colorPicker.locator('.cp-value').press('Enter');
     await dialog.getByRole('button', { name: 'Create', exact: true }).click();
 
     await expect.poll(() => page.evaluate(() => ({

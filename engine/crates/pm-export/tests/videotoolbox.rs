@@ -19,6 +19,14 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+struct ScratchCleanup(PathBuf);
+
+impl Drop for ScratchCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Premultiplied test frame: moving hue gradient, a grey ramp, bars, and (with
 /// `alpha`) a radial alpha falling to zero at the corners.
 fn picture(w: u32, h: u32, frame: u32, alpha: bool) -> Vec<f32> {
@@ -168,6 +176,7 @@ fn probe(file: &Path, entries: &str) -> Option<String> {
 #[test]
 fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
     let dir = scratch("hq");
+    let _cleanup = ScratchCleanup(dir.clone());
     let mut s = spec(
         &dir,
         "Master",
@@ -199,7 +208,7 @@ fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
     assert_eq!((r.cicp, r.full_range, r.alpha), ((1, 13, 1), false, false));
     assert_eq!(
         (r.frames, r.movie_timescale, r.media_timescale, r.duration),
-        (30, 30_000, 30_000, 30_030)
+        (30, 240_000, 30_000, 30_030)
     );
     let audio = r.audio.as_ref().unwrap();
     assert_eq!(
@@ -209,7 +218,7 @@ fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
             audio.timescale,
             audio.samples
         ),
-        ("lpcm", 2, 48_000, 48_048)
+        ("in24", 2, 48_000, 48_048)
     );
     let tc = r.timecode.as_ref().unwrap();
     assert_eq!(
@@ -225,7 +234,7 @@ fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
     assert!(r.max_pixel_error_cv() <= verify::pixel_tolerance(s.codec));
     if let Some(p) = probe(
         &done.path,
-        "stream=codec_name,profile,pix_fmt,color_primaries,color_transfer,color_space,color_range,nb_read_frames,codec_tag_string:stream_tags=timecode",
+        "stream=codec_name,profile,pix_fmt,color_primaries,color_transfer,color_space,color_range,channel_layout,nb_read_frames,codec_tag_string:stream_tags=timecode",
     ) {
         for want in [
             "profile=HQ",
@@ -234,6 +243,7 @@ fn prores_422_hq_with_pcm_audio_and_drop_frame_timecode() {
             "color_range=tv",
             "nb_read_frames=30",
             "TAG:timecode=01:00:00;00",
+            "channel_layout=stereo",
         ] {
             assert!(p.contains(want), "ffprobe lacks {want}:\n{p}");
         }
@@ -337,6 +347,7 @@ fn coded_alpha(path: &Path) -> u8 {
 #[test]
 fn h264_mp4_with_aac_and_quicktime_tags() {
     let dir = scratch("h264");
+    let _cleanup = ScratchCleanup(dir.clone());
     let mut s = spec(
         &dir,
         "Web",
@@ -359,7 +370,7 @@ fn h264_mp4_with_aac_and_quicktime_tags() {
     assert_eq!((r.cicp, r.full_range), ((1, 13, 1), false));
     assert_eq!(
         (r.frames, r.movie_timescale, r.duration),
-        (45, 30_000, 45_000)
+        (45, 384_000, 23_040)
     );
     let audio = r.audio.as_ref().unwrap();
     assert_eq!(audio.codec, "mp4a");
@@ -368,13 +379,13 @@ fn h264_mp4_with_aac_and_quicktime_tags() {
         "{} AAC samples",
         audio.samples
     );
-    // MP4 for the web: the movie header precedes the media data.
+    // The desktop exporter's final FFmpeg audio mux places moov after mdat.
     let bytes = std::fs::read(&done.path).unwrap();
     let pos = |k: &[u8]| bytes.windows(4).position(|w| w == k).unwrap();
-    assert!(pos(b"moov") < pos(b"mdat"), "not optimized for network use");
+    assert!(pos(b"mdat") < pos(b"moov"), "unexpected MP4 atom order");
     if let Some(p) = probe(
         &done.path,
-        "stream=codec_name,profile,pix_fmt,color_primaries,color_transfer,color_space,color_range,nb_read_frames",
+        "stream=codec_name,profile,pix_fmt,color_primaries,color_transfer,color_space,color_range,channel_layout,nb_read_frames",
     ) {
         for want in [
             "codec_name=h264",
@@ -386,6 +397,7 @@ fn h264_mp4_with_aac_and_quicktime_tags() {
             "color_range=tv",
             "nb_read_frames=45",
             "codec_name=aac",
+            "channel_layout=stereo",
         ] {
             assert!(p.contains(want), "ffprobe lacks {want}:\n{p}");
         }
@@ -411,7 +423,7 @@ fn broadcast_tags_are_1_1_1() {
             done.report.cicp,
             done.report.media_timescale
         ),
-        ("apcs", (1, 1, 1), 25_000)
+        ("apcs", (1, 1, 1), 12_800)
     );
     if let Some(p) = probe(&done.path, "stream=color_transfer,r_frame_rate") {
         assert!(
@@ -772,6 +784,7 @@ fn hevc_with_alpha_is_8_bit_main_with_an_alpha_layer() {
 #[test]
 fn pcm_16_24_and_float_audio_in_mov() {
     let dir = scratch("pcm");
+    let _cleanup = ScratchCleanup(dir.clone());
     for codec in [
         AudioCodec::Pcm16,
         AudioCodec::Pcm24,

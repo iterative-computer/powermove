@@ -129,12 +129,14 @@ it.each([
   try {
     const first = makeAsset(); await prepareVideoPreview(PM, first, source, () => false);
     expect(first.preview).toBeDefined();
+    expect(PM.bus.emit).toHaveBeenCalledWith('assets', { runtimeOnly: true });
     expect(media.beginPreview).toHaveBeenCalledOnce();
     const reloaded = makeAsset(); await prepareVideoPreview(PM, reloaded, source, () => false);
     expect(reloaded.preview).toBeDefined();
     expect(media.beginPreview).toHaveBeenCalledOnce();
     expect(store.get('media:original')).toBe(source);
     expect(PM.MediaStore.put).toHaveBeenCalledOnce();
+    expect(PM.bus.emit).toHaveBeenCalledTimes(2);
     expect(reloaded.imageSequence).toEqual(dimensions.imageSequence);
     URL.revokeObjectURL(first.preview.url); URL.revokeObjectURL(reloaded.preview.url);
   } finally { vi.unstubAllGlobals();

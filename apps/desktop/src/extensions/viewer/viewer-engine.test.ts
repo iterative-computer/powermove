@@ -131,6 +131,36 @@ describe('viewer engine presentation hook', () => {
     expect(resize.mock.calls.length).toBe(calls);
   });
 
+  it('sends the 3D Editor view\'s camera, and sends it again at each view or pose change', () => {
+    const services = new Map<string, unknown>();
+    const camera = { view: Array.from({ length: 16 }, (_, i) => (i % 5 === 0 ? 1 : 0)), projection: { kind: 'perspective' as const, fovYDegrees: 40, near: 0.1, far: 100 } };
+    const service: EngineViewerService = {
+      source: { videoFrame: () => null, onSurface: () => () => {}, retire: () => 0 },
+      composition: () => 'comp-1',
+      open: vi.fn(() => null),
+      onReady: () => () => {},
+      editorCamera: vi.fn(() => camera)
+    };
+    services.set(ENGINE_VIEWER_SERVICE, service);
+    let view: 'camera' | 'editor' = 'camera';
+    let onView: (() => void) | null = null;
+    const offView = vi.fn();
+    const api = viewerApi(services, () => {}) as any;
+    api.scene3d = { getView: () => view, onViewChange: (listener: () => void) => { onView = listener; return { dispose: offView }; } };
+    const runtime = createViewerRuntime(api) as any;
+    mount(runtime);
+    runtime.layout();
+    const update = vi.spyOn(runtime.enginePresentation, 'update');
+    view = 'editor';
+    onView!();
+    expect(update.mock.lastCall![0]).toMatchObject({ camera });
+    view = 'camera';
+    onView!();
+    expect(update.mock.lastCall![0]).not.toHaveProperty('camera');
+    runtime.dispose();
+    expect(offView).toHaveBeenCalledOnce();
+  });
+
   it('attaches a presentation canvas under the overlay when the service is registered, and removes it on dispose', async () => {
     const services = new Map<string, unknown>();
     const logs: string[] = [];

@@ -3,6 +3,7 @@ import { flushSync, mount, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import Turn from './Turn.svelte';
+import { installBridgeForTests, resetBridgeForTests } from '../../kernel/bridge';
 import { WORD_REVEAL_SETTLE_MS } from './motion';
 import type { AgentMessage } from './agent-state.svelte';
 import { agentState, resetAgentState } from './agent-state.svelte';
@@ -11,7 +12,7 @@ let target: HTMLDivElement;
 let instance: Record<string, any> | undefined;
 
 function render(message: AgentMessage) {
-  instance = mount(Turn, { target, props: { PM: {}, message } }) as Record<string, any>;
+  instance = mount(Turn, { target, props: { PM: {ICONS:{aspectRatio:'<path d="M0 0"/>',plus:'<path d="M0 0"/>',rotate:'<path d="M0 0"/>',x:'<path d="M0 0"/>' }}, message } }) as Record<string, any>;
   flushSync();
 }
 
@@ -26,6 +27,7 @@ afterEach(() => {
   if (instance) unmount(instance);
   instance = undefined;
   target.remove();
+  resetBridgeForTests();
   vi.useRealTimers();
 });
 
@@ -222,4 +224,20 @@ it('formats user prose alongside inline attachments', () => {
   expect(target.querySelector('.agent-bubble .is-bold')?.textContent).toBe('Review');
   expect(target.querySelector('.agent-bubble .is-italic')?.textContent).toBe('trim');
   expect(target.querySelector('.agent-inline-attachment')?.textContent).toContain('clip');
+});
+
+
+it.each([1, 3])('keeps long assistant prose and %i compact attachments in the same reply', (count) => {
+  installBridgeForTests({versions:{electron:'test'}} as never);
+  (window as any).happyDOM.settings.disableIframePageLoading = true;
+  const text = Array.from({length:12},(_,i)=>`Paragraph ${i+1}: preserve the complete explanation.`).join('\n\n');
+  render({role:'assistant',text,visualReplies:Array.from({length:count},(_,i)=>({version:1,id:`visual-mixed-${i}`,runId:'run',title:`Chart ${i+1}`,html:'<h1>Chart</h1>',height:500}))});
+  expect(target.querySelector('.agent-reply')?.textContent).toContain('Paragraph 12: preserve the complete explanation.');
+  expect(target.querySelectorAll('[data-visual-reply]')).toHaveLength(count);
+  expect(target.querySelectorAll('.agent-visual-attachments')).toHaveLength(1);
+  const reply=target.querySelector('.agent-reply')!;
+  const attachments=target.querySelector('.agent-visual-attachments')!;
+  expect(reply.compareDocumentPosition(attachments)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(target.querySelector('dialog[open]')).toBeNull();
+  expect(target.querySelector('[aria-label^="Zoom"]')).toBeNull();
 });

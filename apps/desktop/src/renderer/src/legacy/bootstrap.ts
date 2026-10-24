@@ -199,9 +199,13 @@ if (NEW_ENGINE) {
         performance.measure('powermove:font-prewarm', { start, end: performance.now() });
       });
     };
-    // First leave a paint opportunity, then use otherwise idle time.
+    // First leave a paint opportunity, then use otherwise idle time. An open
+    // keeps the page busy for seconds after it shows the project (its
+    // checkpoint check and dirty fingerprints run in slices); the prewarm's
+    // synchronous questions waited behind and slowed them (PMV3: 1.5 s of
+    // them during its open), so it waits for idle time up to 10 s.
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 2000 });
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 10_000 });
       else setTimeout(run, 0);
     }));
   };

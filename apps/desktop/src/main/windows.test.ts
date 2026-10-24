@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { EditorWindows, restorableSessions, TAB_STRIP_BAND, windowUnderTabDrop } from './windows';
+import { EditorWindows, lastActiveSession, restorableSessions, TAB_STRIP_BAND, windowUnderTabDrop } from './windows';
 
 function fakeWindow(name: string) {
   return {
@@ -186,6 +186,21 @@ describe('restorableSessions', () => {
     expect(restorableSessions([{ tabs: many, active: 'p39' }], null, null, known, { tabs: 5 })).toEqual([
       { tabs: ['p0', 'p1', 'p2', 'p3', 'p4'], active: 'p4' }
     ]);
+  });
+});
+
+describe('lastActiveSession', () => {
+  const sessions = [{ tabs: ['a', 'b'], active: 'a' }, { tabs: ['c'], active: 'c' }];
+  const known = (id: string) => ['a', 'b', 'c'].includes(id);
+  it('reopens only the focused project, regardless of tab order or activity elsewhere', () => {
+    expect(lastActiveSession('a', sessions, known, () => 100)).toEqual({ tabs: ['a'], active: 'a' });
+  });
+  it('migrates old profiles using the last active project timestamp', () => {
+    expect(lastActiveSession(undefined, sessions, known, id => id === 'c' ? 20 : 10)).toEqual({ tabs: ['c'], active: 'c' });
+  });
+  it('does not replace a closed or deleted active project with an unrelated tab', () => {
+    expect(lastActiveSession(null, sessions, known, () => 0)).toBeNull();
+    expect(lastActiveSession('deleted', sessions, known, () => 0)).toBeNull();
   });
 });
 

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -77,6 +78,54 @@ const NATIVE_RUNTIME = [
   { dir: 'node_modules/@koromix/koffi-darwin-arm64/darwin_arm64', expect: ['koffi.node'] }
 ];
 const ENGINE_RUNTIME = { dir: 'native', expect: ['pm_node.node', 'pm_bridge.node'] };
+/* The evaluator module for the renderer and the headless document host
+   (engine/crates/pm-wasm/scripts/build.mjs writes it; electron-vite copies
+   it to out/renderer/engine/, which app.asar packs). */
+const WASM_SOURCE = path.join(repository, 'src/renderer/public/engine/pm_wasm.wasm');
+const WASM_PACKED = 'out/renderer/engine/pm_wasm.wasm';
+
+async function sha256(file) {
+  return createHash('sha256').update(await readFile(file)).digest('hex');
+}
+
+async function buildWasm() {
+  const before = existsSync(WASM_SOURCE) ? (await stat(WASM_SOURCE)).mtimeMs : -1;
+  await run('node', [path.resolve(repository, '../../engine/crates/pm-wasm/scripts/build.mjs')]);
+  if (!existsSync(WASM_SOURCE) || (await stat(WASM_SOURCE)).mtimeMs === before) {
+    throw new Error(`build:wasm did not write ${path.relative(repository, WASM_SOURCE)}.`);
+  }
+  return sha256(WASM_SOURCE);
+}
+
+/** A file's bytes from an asar archive (Chromium pickle header, then JSON). */
+export async function readAsarFile(archive, relative) {
+  const bytes = await readFile(archive);
+  const headerSize = bytes.readUInt32LE(4);
+  const header = JSON.parse(bytes.subarray(16, 16 + bytes.readUInt32LE(12)).toString('utf8'));
+  let node = header;
+  for (const part of relative.split('/')) {
+    node = node?.files?.[part];
+    if (!node) throw new Error(`${relative} is not in ${archive}.`);
+  }
+  if (node.unpacked || node.offset === undefined) throw new Error(`${relative} is not packed in ${archive}.`);
+  const start = 8 + headerSize + Number(node.offset);
+  return bytes.subarray(start, start + node.size);
+}
+
+/* The shipped engine must be the one just built: both addons export their
+   Node-API entry point (an LTO link once produced a 471 KB addon that loaded
+   nothing, docs/engine/release-build.md), and app.asar carries the fresh
+   evaluator module. */
+async function verifyEngine(app, wasmHash) {
+  const unpacked = path.join(app, 'Contents/Resources/app.asar.unpacked', ENGINE_RUNTIME.dir);
+  for (const name of ENGINE_RUNTIME.expect) {
+    const { stdout } = await execFileAsync('/usr/bin/nm', ['-gU', path.join(unpacked, name)], { maxBuffer: 64 * 1024 * 1024 });
+    if (!/\bnapi_register_module_v1\b/.test(stdout)) throw new Error(`${name} does not export napi_register_module_v1.`);
+  }
+  const packed = createHash('sha256').update(await readAsarFile(path.join(app, 'Contents/Resources/app.asar'), WASM_PACKED)).digest('hex');
+  if (packed !== wasmHash) throw new Error(`app.asar's ${WASM_PACKED} (${packed}) is not the module just built (${wasmHash}).`);
+  process.stdout.write(`Engine addons export napi_register_module_v1; app.asar carries pm_wasm.wasm ${wasmHash}.\n`);
+}
 
 async function nativeBinaries(root) {
   const found = [];
@@ -175,8 +224,22 @@ async function main() {
       throw new Error(`native/${file} is present but --with-engine was not given: electron-builder would ship it. Remove native/ or pass --with-engine.`);
     }
   }
+  if (!withEngine && existsSync(WASM_SOURCE)) {
+    throw new Error(`${path.relative(repository, WASM_SOURCE)} is present but --with-engine was not given: the renderer build would ship it. Remove it or pass --with-engine.`);
+  }
+  await run('node', [path.join(repository, 'scripts/clean-renderer.mjs')]);
+  // pm_wasm.wasm is gitignored and copied into the renderer bundle as is, so
+  // build it here: a release must never ship whatever build:wasm last wrote.
+  const wasmHash = withEngine ? await buildWasm() : null;
   await run('bun', ['run', 'build']);
-  if (withEngine) await run('node', [path.join(repository, 'scripts/build-engine-addon.mjs')]);
+  if (withEngine) {
+    const bundled = await sha256(path.join(repository, 'out/renderer/engine/pm_wasm.wasm'));
+    if (bundled !== wasmHash) throw new Error(`out/renderer/engine/pm_wasm.wasm (${bundled}) is not the module just built (${wasmHash}).`);
+    await run('node', [path.join(repository, 'scripts/build-engine-addon.mjs')]);
+  }
+  // Stage Powermove's FFmpeg from its build (as dist:mac does) rather than
+  // packaging whatever vendor/ffmpeg held; package.sh verifies it first.
+  await run('bun', ['run', 'stage:ffmpeg']);
   await run(path.join(repository, 'node_modules/.bin/electron-builder'), [
     '--mac', '--arm64', '--publish', 'never',
     '--config', 'electron-builder.yml',
@@ -191,6 +254,7 @@ async function main() {
   const app = await findPackagedApp();
   await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', '--verbose=2', app]);
   await verifyNativeAddons(app, { withEngine });
+  if (withEngine) await verifyEngine(app, wasmHash);
   await verifyFfmpeg(app);
   await run('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=4', app]);
   await run('/usr/bin/xcrun', ['stapler', 'validate', app]);
@@ -206,7 +270,7 @@ async function main() {
   process.stdout.write(`Verified signed and notarized release: ${app}\n`);
 }
 
-main().catch((error) => {
+if (process.argv[1] && path.resolve(process.argv[1]) === import.meta.filename) main().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

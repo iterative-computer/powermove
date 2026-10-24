@@ -889,17 +889,17 @@ impl Composer {
                 },
                 video_end: pm_render::VideoEnd::Preview,
             };
-            let reuse = self
-                .scratch
-                .as_ref()
-                .is_some_and(|t| t.width() == region.width && t.height() == region.height);
+            let format = self.renderer.device_target_format(doc, &request);
+            let reuse = self.scratch.as_ref().is_some_and(|t| {
+                t.width() == region.width && t.height() == region.height && t.format() == format
+            });
             if !reuse {
                 self.scratch = Some(Target::new(
                     &device,
                     "viewer region",
                     region.width,
                     region.height,
-                    WORKING_FORMAT,
+                    format,
                     pm_gpu::target::working_usage(),
                 ));
             }

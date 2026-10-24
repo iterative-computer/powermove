@@ -119,6 +119,8 @@ export type SheetExportOptions = {
   start: number;
   end: number;
   audio: boolean;
+  /** Seconds at the last audioLayers index build. */
+  audioIndexPlayhead?: number;
   motionBlur: boolean;
   quality: 'draft' | 'high' | 'max';
   delivery?: Partial<DeliveryOptions>;
@@ -136,6 +138,7 @@ export function validSheetExportOptions(value: unknown): value is SheetExportOpt
   if (!value || typeof value !== 'object') return false;
   const o = value as Record<string, unknown>;
   const finite = (k: string) => typeof o[k] === 'number' && Number.isFinite(o[k] as number);
+  if (o['audioIndexPlayhead'] !== undefined && (!finite('audioIndexPlayhead') || (o['audioIndexPlayhead'] as number) < 0)) return false;
   if (typeof o['format'] !== 'string' || migrateFormat(o['format'], 'web') === 'web' || o['format'] === 'json') return false;
   if (!['fps', 'scale', 'start', 'end'].every(finite)) return false;
   const fps = o['fps'] as number, scale = o['scale'] as number, start = o['start'] as number, end = o['end'] as number;
@@ -262,7 +265,7 @@ export type EngineSnapshotRequest = {
   document?: EngineSnapshotDocument;
   /** Shader fallback pixels drawn for an earlier `needsRenderer` answer of
    *  a `document` snapshot (a window's own session gets them on its port). */
-  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];
+  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array; rgba32f?: Uint8Array }[];
   /** The window's compatibility events for a `document` snapshot (its
    *  producers, and its answers to an earlier `needsRenderer` round's
    *  `compat` needs): main posts them on its session for the window before
@@ -278,7 +281,7 @@ export type EngineSnapshotRequest = {
 /** A `compat` session event (pm_protocol `CompatMessage`) a window sends. */
 export type EngineCompatEvent = { type: 'compat'; compat: 'producers' | 'native' | 'reuse' | 'pixels' } & Record<string, unknown>;
 
-export type EngineSnapshotDocument = { id: string; revision: number; hash?: string | null; json?: Uint8Array | null };
+export type EngineSnapshotDocument = { id: string; revision: number; nativeKernel?: true; hash?: string | null; json?: Uint8Array | null };
 
 /** What a snapshot came back with. `data` is RGBA8, rows top-down, in
  *  `pixels`'s encoding. `empty`: a layer target that draws nothing then
@@ -353,6 +356,7 @@ export type EngineCompatAnswer =
  *  (`ENGINE_WINDOW_MESSAGE`) because a `MessagePort` cannot cross the
  *  context bridge. */
 export interface EngineBridge {
+  documentKernel?: import('./document-kernel').DocumentKernelBridge;
   status(): Promise<EngineStatusMessage>;
   /** Whether this launch runs the new engine (read once at launch). */
   enabledSync(): boolean;
@@ -393,5 +397,5 @@ export interface EngineBridge {
   answerCompat?(answer: EngineCompatAnswer): void;
   /** Runs the job engine's fallback requests in this window's runner
    *  (`run` answers each); returns an unsubscribe. */
-  onShaderFallback?(run: (job: { request: import('./engine-protocol').ShaderFallbackRequest; textures: Uint16Array[] }) => Promise<Uint16Array>): () => void;
+  onShaderFallback?(run: (job: { request: import('./engine-protocol').ShaderFallbackRequest; textures: (Uint16Array | Float32Array)[] }) => Promise<{ rgba16f: Uint16Array; rgba32f?: Float32Array }>): () => void;
 }

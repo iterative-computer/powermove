@@ -444,7 +444,13 @@ fn parse_audio(d: &[u8], e: BoxRef) -> Option<Audio> {
         Some(Audio {
             channels: be16(d, s + 16)? as u32,
             sample_rate: be32(d, s + 24)? as f64 / 65536.0,
-            bits_per_channel: be16(d, s + 18)? as u32,
+            // FFmpeg's QuickTime `in24` entry retains the generic 16-bit
+            // SoundDescriptionV0 field; the tag identifies 24-bit samples.
+            bits_per_channel: if e.kind == *b"in24" {
+                24
+            } else {
+                be16(d, s + 18)? as u32
+            },
             float: false,
         })
     }

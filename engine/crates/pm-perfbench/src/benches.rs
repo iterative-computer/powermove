@@ -100,6 +100,8 @@ pub fn all() -> Vec<Bench> {
         ("typing_60", typing_60),
         ("open_large_2000", open_large_2000),
         ("import_3d_600k", import_3d_600k),
+        ("blend_stack_cold", blend_stack_cold),
+        ("text_cold", text_cold),
     ]
 }
 
@@ -178,7 +180,7 @@ impl<'a> Viewer<'a> {
         self.revision += 1;
         self.view
             .update(&pm_engine::document::DocumentUpdate::Replace {
-                root: Some(Arc::new(root)),
+                root: Some(pm_model::Node::from_value(root, self.revision)),
                 revision: Revision::new(self.revision).unwrap(),
             })
             .expect("a replace applies");
@@ -609,6 +611,7 @@ pub fn export(ctx: &Ctx, name: &str, layers: usize, frames: u32) -> BenchReport 
                 end: ticks(f64::from(frames) / 30.0),
             },
             audio: false,
+            audio_index_playhead: None,
             motion_blur: false,
             color: OutputColor::Rec709QuickTime {
                 candidate: QuickTimeTag::Cicp1_13_1,
@@ -776,6 +779,85 @@ pub fn open_large_2000(ctx: &Ctx) -> BenchReport {
             "fixture": f.summary, "bytes": text.len(), "first_frame_ms": draw
         }),
     );
+    r.units = 1;
+    r
+}
+
+/// The first frame of a composition that stacks six blend-mode layers over
+/// solids, drawn by a new composer (cold): the working targets the
+/// compositing nodes allocate (`composite::exec`).
+pub fn blend_stack_cold(ctx: &Ctx) -> BenchReport {
+    let blends = [
+        "multiply",
+        "screen",
+        "overlay",
+        "softlight",
+        "difference",
+        "add",
+    ];
+    let mut layers = Vec::new();
+    for i in 0..12 {
+        let x = 160.0 + 130.0 * f64::from(i);
+        let color = ["#E8553A", "#3AA0E8", "#F0C030", "#20C080"][i as usize % 4];
+        let mut l = fixtures::layer(
+            &format!("s{i}"),
+            "solid",
+            json!({ "color": color, "w": 640, "h": 480 }),
+            x,
+            540.0,
+            10.0,
+        );
+        if i % 2 == 1 {
+            l["blend"] = json!(blends[(i as usize / 2) % blends.len()]);
+        }
+        layers.push(l);
+    }
+    let doc = fixtures::project(
+        1920,
+        1080,
+        30.0,
+        10.0,
+        fixtures::solid_fill("#141821"),
+        layers,
+    );
+    cold_first_frame(
+        ctx,
+        "blend_stack_cold",
+        &doc,
+        json!({ "layers": 12, "blend_layers": 6 }),
+    )
+}
+
+/// The first frame of a text layer, drawn by a new composer (cold): the
+/// glyph atlas and text targets (`text`).
+pub fn text_cold(ctx: &Ctx) -> BenchReport {
+    let doc = fixtures::text_doc("Powermove");
+    let mut v = Viewer::new(ctx, &doc, &Default::default());
+    v.view.set_fonts(true);
+    v.composer
+        .renderer()
+        .set_text_fonts(Some(Box::new(Fonts::new())));
+    let scope = Scope::begin();
+    let draw = v.frame(ticks(0.0));
+    let m = measured(scope);
+    let mut r = report(
+        "text_cold",
+        "frames",
+        m,
+        vec![draw],
+        json!({ "font": "SF Pro Display 600, 96 px", "text": "Powermove" }),
+    );
+    r.units = 1;
+    r
+}
+
+/// `doc`'s first frame through a new viewer and composer.
+fn cold_first_frame(ctx: &Ctx, name: &str, doc: &Value, notes: Value) -> BenchReport {
+    let mut v = Viewer::new(ctx, doc, &Default::default());
+    let scope = Scope::begin();
+    let draw = v.frame(ticks(0.0));
+    let m = measured(scope);
+    let mut r = report(name, "frames", m, vec![draw], notes);
     r.units = 1;
     r
 }

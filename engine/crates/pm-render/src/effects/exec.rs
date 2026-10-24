@@ -103,44 +103,115 @@ fn runner_param_calls(params: &[Param], calls: &mut Vec<(String, Call)>) {
     }
 }
 
-/// A target's pixels as binary16 RGBA in its row order (GL order for
-/// every pm-render target).
+/// A target's pixels in GL row order, preserving the requested working depth.
 pub(crate) fn read_half(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     target: &Target,
+    color_depth: u8,
 ) -> Result<FallbackPixels, String> {
     let raw =
         pm_gpu::readback::read_raw(device, queue, &target.texture).map_err(|e| e.to_string())?;
-    let rgba16f: Vec<u16> = match target.format() {
-        wgpu::TextureFormat::Rgba16Float => crate::shader_layers::fallback::halves(&raw),
-        wgpu::TextureFormat::Rgba32Float => raw
-            .chunks_exact(4)
-            .map(|c| pm_gpu::readback::f32_to_half(f32::from_le_bytes([c[0], c[1], c[2], c[3]])))
-            .collect(),
-        other => return Err(format!("format {other:?}")),
+    let code8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u16;
+    let rgba32f = if color_depth == 32 {
+        Some(match target.format() {
+            wgpu::TextureFormat::Rgba32Float => crate::shader_layers::fallback::float_bits(&raw),
+            wgpu::TextureFormat::Rgba16Float => crate::shader_layers::fallback::halves(&raw)
+                .into_iter()
+                .map(|h| pm_gpu::readback::half_to_f32(h).to_bits())
+                .collect(),
+            wgpu::TextureFormat::Rgba8Unorm => raw
+                .iter()
+                .map(|b| (f32::from(*b) / 255.0).to_bits())
+                .collect(),
+            other => return Err(format!("format {other:?}")),
+        })
+    } else {
+        None
+    };
+    let rgba16f: Vec<u16> = if color_depth == 32 {
+        Vec::new()
+    } else {
+        match target.format() {
+            wgpu::TextureFormat::Rgba8Unorm => raw
+                .iter()
+                .map(|b| {
+                    if color_depth == 8 {
+                        u16::from(*b)
+                    } else {
+                        pm_gpu::readback::f32_to_half(f32::from(*b) / 255.0)
+                    }
+                })
+                .collect(),
+            wgpu::TextureFormat::Rgba16Float => crate::shader_layers::fallback::halves(&raw)
+                .into_iter()
+                .map(|h| {
+                    if color_depth == 8 {
+                        code8(pm_gpu::readback::half_to_f32(h))
+                    } else {
+                        h
+                    }
+                })
+                .collect(),
+            wgpu::TextureFormat::Rgba32Float => raw
+                .chunks_exact(4)
+                .map(|c| {
+                    let value = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                    if color_depth == 8 {
+                        code8(value)
+                    } else {
+                        pm_gpu::readback::f32_to_half(value)
+                    }
+                })
+                .collect(),
+            other => return Err(format!("format {other:?}")),
+        }
     };
     Ok(FallbackPixels {
         width: target.width(),
         height: target.height(),
         rgba16f,
+        rgba32f,
     })
 }
 
-/// Writes the runner's binary16 pixels into a working target (before the
+/// Writes the runner's pixels into a working target (before the
 /// rest of the frame's commands run: they are submitted after it).
 fn write_half(queue: &wgpu::Queue, target: &Target, pixels: &FallbackPixels) {
     let (bytes, texel): (Vec<u8>, u32) = match target.format() {
-        wgpu::TextureFormat::Rgba32Float => (
+        wgpu::TextureFormat::Rgba8Unorm => (
             pixels
                 .rgba16f
                 .iter()
-                .flat_map(|h| pm_gpu::readback::half_to_f32(*h).to_le_bytes())
+                .map(|code| u8::try_from(*code).expect("RGBA8 fallback code"))
                 .collect(),
+            4,
+        ),
+        wgpu::TextureFormat::Rgba32Float => (
+            pixels.rgba32f.as_ref().map_or_else(
+                || {
+                    pixels
+                        .rgba16f
+                        .iter()
+                        .flat_map(|h| pm_gpu::readback::half_to_f32(*h).to_le_bytes())
+                        .collect()
+                },
+                |bits| crate::shader_layers::fallback::float_bytes(bits),
+            ),
             16,
         ),
         _ => (
-            crate::shader_layers::fallback::half_bytes(&pixels.rgba16f),
+            pixels.rgba32f.as_ref().map_or_else(
+                || crate::shader_layers::fallback::half_bytes(&pixels.rgba16f),
+                |bits| {
+                    crate::shader_layers::fallback::half_bytes(
+                        &bits
+                            .iter()
+                            .map(|v| pm_gpu::readback::f32_to_half(f32::from_bits(*v)))
+                            .collect::<Vec<_>>(),
+                    )
+                },
+            ),
             8,
         ),
     };
@@ -335,7 +406,8 @@ impl<'c> Gpu<'c> {
         let device = self.device;
         let source = self
             .effects
-            .parity_source(DefinitionKind::Effect, &step.definition);
+            .parity_source(DefinitionKind::Effect, &step.definition)
+            .map(|source| super::parity::scoped_source(&source, self.precision));
         let probe = source
             .as_ref()
             .map(|source| self.effects.parity.verdict(source));
@@ -502,7 +574,8 @@ impl<'c> Gpu<'c> {
         let device = self.device;
         let source = self
             .effects
-            .parity_source(DefinitionKind::Transition, &step.definition);
+            .parity_source(DefinitionKind::Transition, &step.definition)
+            .map(|source| super::parity::scoped_source(&source, self.precision));
         let probe = source
             .as_ref()
             .map(|source| self.effects.parity.verdict(source));
@@ -765,6 +838,7 @@ impl<'c> Gpu<'c> {
             .and_then(|d| d.glsl.as_ref())
             .map(|g| g.source.clone())
             .unwrap_or_default();
+        let parity_source = super::parity::scoped_source(&source, self.precision);
         let program = super::fallback::program_id_of(pm_glsl::VERTEX, &source);
         let (w, h) = (textures[0].width(), textures[0].height());
         if let Some(why) = self.effects.fallback.failure(&program, w, h).cloned() {
@@ -772,9 +846,9 @@ impl<'c> Gpu<'c> {
             // learned from another request of the program): pinned, so
             // later frames take the runner's path without a native draw.
             if native.is_some()
-                && self.effects.parity.verdict(&source) == super::parity::Verdict::Unknown
+                && self.effects.parity.verdict(&parity_source) == super::parity::Verdict::Unknown
             {
-                self.effects.parity.pin(&source);
+                self.effects.parity.pin(&parity_source);
             }
             self.runner_failed(&span, &program, &why);
             return None;
@@ -825,7 +899,12 @@ impl<'c> Gpu<'c> {
         queue.submit([done.finish()]);
         let mut pixels = Vec::with_capacity(textures.len());
         for t in textures {
-            match read_half(device, queue, t) {
+            match read_half(
+                device,
+                queue,
+                t,
+                crate::shader_layers::fallback::color_depth(self.precision),
+            ) {
                 Ok(p) => pixels.push(Arc::new(p)),
                 Err(e) => {
                     self.effects.watchdog.report(EngineError::new(
@@ -847,23 +926,30 @@ impl<'c> Gpu<'c> {
             &pixels.iter().map(|p| p.as_ref()).collect::<Vec<_>>(),
             &failure,
         );
+        let request = crate::shader_layers::fallback::at_color_depth(
+            &request,
+            crate::shader_layers::fallback::color_depth(self.precision),
+        );
         if let Some(native) = native {
-            if let Some(probed_frame) = self.effects.parity.take_present(&request.fragment) {
+            if let Some(probed_frame) = self.effects.parity.take_present(&parity_source) {
                 if probed_frame != request.key {
                     // The caller returns the native target to the pool;
                     // keep a distinct lease for the chain's output.
                     return Some(self.copy_of(native));
                 }
-            } else if self.effects.parity.verdict(&request.fragment)
-                == super::parity::Verdict::Unknown
-                && !self.effects.parity.pending(&request.fragment)
+            } else if self.effects.parity.verdict(&parity_source) == super::parity::Verdict::Unknown
+                && !self.effects.parity.pending(&parity_source)
             {
-                match read_half(device, queue, native) {
-                    Ok(pixels) => {
-                        self.effects
-                            .parity
-                            .start(&request.key, &request.fragment, pixels)
-                    }
+                match read_half(
+                    device,
+                    queue,
+                    native,
+                    crate::shader_layers::fallback::color_depth(self.precision),
+                ) {
+                    Ok(pixels) => self
+                        .effects
+                        .parity
+                        .start(&request.key, &parity_source, pixels),
                     Err(error) => self.effects.watchdog.report(EngineError::new(
                         ErrorCode::Internal,
                         span_scope(&span),
@@ -872,12 +958,30 @@ impl<'c> Gpu<'c> {
                 }
             }
         }
+        if let Some(code) = self
+            .effects
+            .fallback
+            .result(&request.key)
+            .and_then(|result| result.invalid_rgba8_code(&request))
+        {
+            let message = format!(
+                "{id}: the fallback runner returned invalid RGBA8 channel code {code} (expected 0..=255)"
+            );
+            if self.effects.watchdog.policy() == super::watchdog::Policy::Job {
+                self.effects.fallback.fatal.get_or_insert(message.clone());
+            }
+            self.effects.watchdog.report(EngineError::new(
+                ErrorCode::InvalidMessage,
+                span_scope(&span),
+                message,
+            ));
+            return None;
+        }
         if let Some(result) = self.effects.fallback.result(&request.key)
-            && result.width == w
-            && result.height == h
+            && result.fits(&request)
         {
             self.effects.parity.answer(&request.key, &result);
-            self.effects.parity.take_present(&request.fragment);
+            self.effects.parity.take_present(&parity_source);
             let out = self.take(w, h);
             write_half(queue, &out, &result);
             return Some(out);

@@ -37,6 +37,7 @@ import type { CompatFormat, CompatFrameRequest, CompatNeed, CompatSource, FrameQ
 import { OTHER_DOCUMENT_OPEN, type EngineBridge, type EngineCompatAnswer, type EngineCompatAsk, type EngineCompatEvent, type EngineSnapshotReply, type EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import { ticks } from './transport';
 import { RenderPerfTrace } from './perf-trace';
+import { SnapshotSlots } from './snapshot-slots';
 
 /** Repetitions of the same unresolved dependency set before a snapshot fails. */
 export const MAX_ROUNDS = 3;
@@ -147,30 +148,31 @@ export interface TransportSession {
   readonly resyncPending: boolean;
   /** The revision the engine has applied (0: the document has not arrived). */
   readonly applied?: number;
-  uploadFallback(pixels: { key: string; width: number; height: number; rgba16f: Uint16Array }): void;
+  uploadFallback(pixels: { key: string; width: number; height: number; rgba16f: Uint16Array; rgba32f?: Float32Array }): void;
   post(event: Record<string, unknown> & { type: string }): boolean;
 }
 
 /** What draws fallback programs (ShaderFallbackRunner). `textures` are an
  *  effect's or a transition's (binary16 RGBA, GL row order). */
 export interface TransportFallbackRunner {
-  render(request: ShaderFallbackRequest, textures?: Uint16Array[]): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array }>;
-  renderSync(request: ShaderFallbackRequest, textures?: Uint16Array[]): { key: string; width: number; height: number; rgba16f: Uint16Array };
+  render(request: ShaderFallbackRequest, textures?: (Uint16Array | Float32Array)[]): Promise<{ key: string; width: number; height: number; rgba16f: Uint16Array; rgba32f?: Float32Array }>;
+  renderSync(request: ShaderFallbackRequest, textures?: (Uint16Array | Float32Array)[]): { key: string; width: number; height: number; rgba16f: Uint16Array; rgba32f?: Float32Array };
 }
 
 /** The textures a fallback request samples, from the answer that names it
  *  (main hands them back with `needsRenderer`; main/engine/fallback-inputs.ts). */
-export function fallbackTextures(reply: { fallbackTextures?: { key: string; textures: Uint8Array[] }[] }, request: ShaderFallbackRequest): Uint16Array[] {
+export function fallbackTextures(reply: { fallbackTextures?: { key: string; textures: Uint8Array[] }[] }, request: ShaderFallbackRequest): (Uint16Array | Float32Array)[] {
   const count = request.textures ?? 0;
   if (count === 0) return [];
   const found = reply.fallbackTextures?.find((t) => t.key === request.key);
-  const size = request.width * request.height * 8;
+  const stride = request.colorDepth === 32 ? 16 : 8;
+  const size = request.width * request.height * stride;
   if (!found || found.textures.length !== count || found.textures.some((t) => t.byteLength !== size)) {
     throw new EngineSnapshotError('internal', `The textures of program ${request.key.slice(0, 12)} did not arrive with the answer.`);
   }
   return found.textures.map((t) => {
     // Aligned copies: an IPC buffer may start at an odd offset.
-    const values = new Uint16Array(t.byteLength / 2);
+    const values = request.colorDepth === 32 ? new Float32Array(t.byteLength / 4) : new Uint16Array(t.byteLength / 2);
     new Uint8Array(values.buffer).set(t);
     return values;
   });
@@ -320,7 +322,7 @@ export type RenderTransportOptions = {
   /** The window's document for a sync snapshot its session cannot serve
    *  (none yet, the document not arrived, or a staged resync in flight):
    *  main serves it from a session of its own. `full` serializes it. */
-  windowDocument?: () => { id: string; revision: number; full(): { json: Uint8Array; hash: string; revision: number } } | null;
+  windowDocument?: () => { id: string; revision: number; nativeKernel?: true; full(): { json: Uint8Array; hash: string; revision: number } } | null;
   /** Whether the window's document has a composition Blender renders
    *  (`render3d.enabled`): only then does a capture that prepares its
    *  Blender frame ask the engine (and main) to wait for Blender. */
@@ -1080,8 +1082,12 @@ export class EngineRenderTransport {
     // (the resync's next step would need this thread). Otherwise main serves
     // it from a session of its own, with the document sent along.
     const session = this.options.session();
-    const direct = !!session && session.id !== null && !session.closed && !session.resyncPending && (session.applied ?? 1) > 0;
-    if (!direct && this.options.windowDocument?.()) {
+    const document = this.options.windowDocument?.();
+    // A native document reference also survives a killed utility before this
+    // blocked renderer has received its port-close notification. Main restores
+    // and adopts it independently of the stale viewer session.
+    const direct = !document?.nativeKernel && !!session && session.id !== null && !session.closed && !session.resyncPending && (session.applied ?? 1) > 0;
+    if (!direct && document) {
       // The window's own session (the standby) serves later ones.
       if (!session || session.closed) void this.options.wake?.();
       try {
@@ -1139,7 +1145,7 @@ export class EngineRenderTransport {
     const uploaded: string[] = [];
     let compatUploaded: CompatNeed[] = [];
     const dependencies = new SnapshotDependencies();
-    let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array }[] = [];
+    let fallbackPixels: { key: string; width: number; height: number; rgba16f: Uint8Array; rgba32f?: Uint8Array }[] = [];
     // The window's producers go with every request (main's session then
     // asks for those layers), and the answers to a round's needs with the next.
     let compatEvents: EngineCompatEvent[] = this.answerers.size ? [{ type: 'compat', compat: 'producers', sources: [...this.answerers.keys()] }] : [];
@@ -1147,14 +1153,15 @@ export class EngineRenderTransport {
     let send = !(this.sentToMain && this.sentToMain.id === doc.id && this.sentToMain.revision === doc.revision);
     let body: { json: Uint8Array; hash: string; revision: number } | null = null;
     for (let round = 0; round < MAX_DEPENDENCY_PHASES + 1; round++) {
-      if (send && !body) body = doc.full();
+      if (send && !body && !doc.nativeKernel) body = doc.full();
       const request = this.request(options, 'sync', uploaded, true, revision);
       request.snapshot.compatUploaded = compatUploaded;
       const reply = native.snapshotSync!({
         ...request,
         session: null,
         revision,
-        document: body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
+        document: doc.nativeKernel ? { id: doc.id, revision: doc.revision, nativeKernel: true }
+          : body && send ? { id: doc.id, revision: body.revision, hash: body.hash, json: body.json } : { id: doc.id, revision: doc.revision },
         ...(fallbackPixels.length ? { fallbackPixels } : {}),
         ...(compatEvents.length ? { compatEvents } : {}),
         ...(svgPixels.length ? { svgPixels } : {})
@@ -1190,7 +1197,9 @@ export class EngineRenderTransport {
       for (const r of reply.fallback) {
         if (uploaded.includes(r.key)) throw new EngineSnapshotError('internal', `The engine asked again for program ${r.key.slice(0, 12)}.`);
         const pixels = runner.renderSync(r, fallbackTextures(reply, r));
-        fallbackPixels.push({ key: pixels.key, width: pixels.width, height: pixels.height, rgba16f: new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength) });
+        fallbackPixels.push({ key: pixels.key, width: pixels.width, height: pixels.height,
+          rgba16f: new Uint8Array(pixels.rgba16f.buffer, pixels.rgba16f.byteOffset, pixels.rgba16f.byteLength),
+          ...(pixels.rgba32f ? { rgba32f: new Uint8Array(pixels.rgba32f.buffer, pixels.rgba32f.byteOffset, pixels.rgba32f.byteLength) } : {}) });
         uploaded.push(r.key);
       }
     }
@@ -1200,6 +1209,24 @@ export class EngineRenderTransport {
   /** The same, asynchronously (`async` or `idle` class). */
   async snapshot(options: EngineSnapshotOptions, cls: Exclude<SnapshotClass, 'sync'> = 'async'): Promise<EngineSnapshot> {
     return this.snapshotAsyncAt(options, cls);
+  }
+
+  /** This window's asynchronous snapshots, queued to what main admits (snapshot-slots.ts). */
+  private readonly slots = new SnapshotSlots();
+
+  /**
+   * One snapshot request through the window's slots. Main can still refuse
+   * one for the bytes every window has outstanding: that is a wait as well
+   * (today's capture waits for the GPU), retried as slots free up, within
+   * the class's own wait.
+   */
+  private async admitted(cls: SnapshotClass, ask: () => Promise<EngineSnapshotReply>): Promise<EngineSnapshotReply> {
+    const until = performance.now() + (cls === 'idle' ? IDLE_WAIT_MS : ASYNC_WAIT_MS);
+    for (let attempt = 0; ; attempt++) {
+      const reply = await this.slots.run(cls, ask);
+      if (reply.status !== 'failed' || reply.code !== 'refused' || performance.now() >= until) return reply;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(250, 10 * 2 ** attempt)));
+    }
   }
 
   private async snapshotAsyncAt(options: EngineSnapshotOptions, cls: SnapshotClass): Promise<EngineSnapshot> {
@@ -1220,7 +1247,7 @@ export class EngineRenderTransport {
         const request = this.request(options, cls, uploaded);
         request.snapshot.compatUploaded = compatUploaded;
         const began = performance.now();
-        const reply = await native.snapshot(request);
+        const reply = await this.admitted(cls, () => native.snapshot!(request));
         this.trace.record('snapshot round trip', Number(request.revision ?? 0), request.snapshot.time, began);
         if (reply.status === 'rendered') {
           this.trace.record('snapshot main', reply.revision, request.snapshot.time, began, Math.round(reply.mainMs * 1000));

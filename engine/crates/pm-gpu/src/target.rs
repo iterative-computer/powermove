@@ -1,7 +1,8 @@
 //! Render targets and their pool (plan section 8, "Working encoding and
 //! precision").
 //!
-//! Working storage is `rgba16float` by default and `rgba32float` at 32-bit
+//! Working storage is `rgba8unorm` at 8-bit, `rgba16float` by default,
+//! and `rgba32float` at 32-bit
 //! precision. Targets are pooled by size, format, and usage: a frame's
 //! intermediates are taken and returned as the graph walks, so a
 //! steady-state frame allocates nothing. The pool counts its bytes for the
@@ -12,6 +13,7 @@ use pm_protocol::color::Precision;
 /// The working format for a precision.
 pub const fn working_format(precision: Precision) -> wgpu::TextureFormat {
     match precision {
+        Precision::Unorm8 => wgpu::TextureFormat::Rgba8Unorm,
         Precision::Float16 => wgpu::TextureFormat::Rgba16Float,
         Precision::Float32 => wgpu::TextureFormat::Rgba32Float,
     }

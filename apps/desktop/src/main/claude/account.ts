@@ -1,5 +1,5 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
-import { query, type ModelInfo } from '@anthropic-ai/claude-agent-sdk';
+import type { ModelInfo } from '@anthropic-ai/claude-agent-sdk';
 import { spawnClaudeProcess } from './process';
 
 import type { ClaudeAccountStatus, ClaudeModelOption, ReasoningEffort } from '../../shared/ipc';
@@ -33,6 +33,7 @@ export function claudeModelsFromSdk(models: ModelInfo[]): ClaudeModelOption[] {
 }
 
 async function discoverClaudeModels(binary: string, home: string): Promise<ClaudeModelOption[]> {
+  const { query } = await import('@anthropic-ai/claude-agent-sdk');
   // Streaming input lets the SDK answer its control request without sending a user prompt.
   const session = query({
     prompt: (async function* () {})(),

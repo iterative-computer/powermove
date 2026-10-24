@@ -57,7 +57,8 @@ pub struct RenderRequest {
     /// `region` limits the pixels the engine needs to draw for presentation.
     /// Other viewer requests keep their region as the source clip window.
     pub preview_canvas: bool,
-    /// Intermediate storage: `rgba16float` or `rgba32float`.
+    /// Compatibility request hint. The project Color depth controls intermediate
+    /// storage (`rgba8unorm`, `rgba16float`, or `rgba32float`).
     pub precision: Precision,
     /// Also render the depth and object-id surface (contract 2).
     pub depth_id: bool,

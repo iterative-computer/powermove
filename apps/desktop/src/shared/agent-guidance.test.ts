@@ -35,7 +35,7 @@ describe('task guidance', () => {
     }]);
     expect(prompt).toContain('DEPRECATED COMPATIBILITY APIS');
     expect(prompt).toContain('grabber/index.ts:4: api.render.snapshot is a deprecated compatibility API.');
-    expect(prompt).toContain('Change the code only when the user agrees');
+    expect(prompt).toContain('Change it only when the user agrees');
     expect(prompt).toContain('do not change them in this verification pass');
     expect(resultVerificationPrompt('Trim', [], [], [])).not.toContain('DEPRECATED');
   });

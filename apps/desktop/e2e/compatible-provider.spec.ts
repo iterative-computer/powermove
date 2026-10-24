@@ -75,14 +75,20 @@ test('provider models, reasoning, and flat error actions remain usable in a narr
     await session.openEditor(); await session.openAgent();
     const { page } = session;
     const address = server.address() as { port: number };
-    await page.evaluate(async port => {
-      const config = await (window as any).__powermoveTestBridge.compatible.configure({ baseUrl: `http://127.0.0.1:${port}/v1`, model: 'gpt-6-astra', vision: false });
-      window.dispatchEvent(new CustomEvent('pm-provider-connected', { detail: config }));
+    await page.getByRole('button', { name: 'Open settings', exact: true }).click();
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await settings.getByRole('button', { name: 'Accounts', exact: true }).click();
+    await settings.getByRole('textbox', { name: 'API base URL', exact: true }).fill(`http://127.0.0.1:${address.port}/v1`);
+    await settings.getByRole('textbox', { name: 'Model name', exact: true }).fill('gpt-6-astra');
+    await settings.getByRole('checkbox', { name: 'This model supports images', exact: true }).uncheck();
+    await settings.getByRole('button', { name: 'Test and connect', exact: true }).click();
+    await expect(settings).toContainText('Connected model: gpt-6-astra');
+    await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
+    await session.openAgent();
+    await page.evaluate(() => {
       const PM = (window as any).PM;
-      PM.SpatialAssistant.open();
-      PM.AgentHarness.observe = async () => ({ state: {}, times: [], images: [] });
       PM.theme.apply('dark');
-    }, address.port);
+    });
     await expect(page.locator('select[aria-label="Model"] option')).toHaveCount(4);
     const panel = page.locator('#panel-agent');
     await panel.evaluate(el => {

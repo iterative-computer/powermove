@@ -1,35 +1,91 @@
 use core::borrow::Borrow;
 use core::cmp::Ordering;
 use core::fmt;
+use core::hash::{Hash, Hasher};
 
 /// A JavaScript string: a sequence of UTF-16 code units.
 ///
-/// Well-formed strings (the overwhelming majority) are stored as `String`.
+/// Well-formed strings fit inline when short, or on the heap behind a thin pointer.
 /// Strings holding lone surrogates, which JavaScript allows and `JSON.stringify`
 /// writes as `\udXXX` escapes, are stored as WTF-8: UTF-8 generalized to encode
 /// unpaired surrogate code points as three bytes. The two forms never overlap,
-/// so equality, ordering, and hashing work on the bytes.
+/// so equality, ordering, and hashing work on the bytes across representations.
 ///
 /// `Ord` is byte order, which equals code point order. JavaScript's default
 /// sort compares UTF-16 code units instead; use [`JsString::cmp_utf16`].
-#[derive(Clone, PartialEq, Eq, Hash)]
+///
+/// The value is two words. The inline length has only 16 valid values, so the
+/// heap variants and the document's `NodeKind` keep their discriminants in
+/// that byte. A document node is then
+/// three words instead of four: about 8 bytes for each of a large project's
+/// millions of keyframe members (docs/engine/host-processes.md).
+#[derive(Clone)]
 pub struct JsString(Repr);
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum Repr {
-    Utf8(String),
-    /// Contains at least one unpaired surrogate; never valid UTF-8.
-    Wtf8(Box<[u8]>),
+const INLINE_CAP: usize = 2 * core::mem::size_of::<usize>() - 1;
+
+/// An inline length, `0..=INLINE_CAP` (15 on 64-bit targets, 7 on wasm32).
+/// The byte's other values are the niche.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+#[rustfmt::skip]
+enum InlineLen { L0, L1, L2, L3, L4, L5, L6, L7, L8, L9, L10, L11, L12, L13, L14, L15 }
+
+impl InlineLen {
+    #[rustfmt::skip]
+    // Every variant on every target; 32-bit targets use the first eight.
+    const ALL: [InlineLen; 16] = [
+        InlineLen::L0, InlineLen::L1, InlineLen::L2, InlineLen::L3, InlineLen::L4, InlineLen::L5,
+        InlineLen::L6, InlineLen::L7, InlineLen::L8, InlineLen::L9, InlineLen::L10, InlineLen::L11,
+        InlineLen::L12, InlineLen::L13, InlineLen::L14, InlineLen::L15,
+    ];
+    fn new(len: usize) -> InlineLen {
+        debug_assert!(len <= INLINE_CAP);
+        InlineLen::ALL[len]
+    }
+    fn get(self) -> usize {
+        self as usize
+    }
 }
+
+#[derive(Clone)]
+enum Repr {
+    Inline {
+        len: InlineLen,
+        bytes: [u8; INLINE_CAP],
+    },
+    /// Valid UTF-8 longer than `INLINE_CAP`.
+    Utf8(Heap<str>),
+    /// Contains at least one unpaired surrogate; never valid UTF-8.
+    Wtf8(Heap<[u8]>),
+}
+
+/// Heap text behind one thin pointer. `Box<str>` alone is two words; the
+/// extra indirection only applies to strings longer than `INLINE_CAP`.
+type Heap<T> = Box<Box<T>>;
+
+// The document's memory depends on these sizes (see `JsString`).
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(core::mem::size_of::<JsString>() == 16);
+    assert!(core::mem::size_of::<Option<JsString>>() == 16);
+};
 
 impl JsString {
     pub fn new() -> JsString {
-        JsString(Repr::Utf8(String::new()))
+        JsString(Repr::Inline {
+            len: InlineLen::L0,
+            bytes: [0; INLINE_CAP],
+        })
     }
 
     /// The text when it is well-formed (no lone surrogates).
     pub fn as_str(&self) -> Option<&str> {
         match &self.0 {
+            Repr::Inline { len, bytes } => {
+                // Every inline constructor copies from a valid UTF-8 string.
+                Some(core::str::from_utf8(&bytes[..len.get()]).expect("inline UTF-8"))
+            }
             Repr::Utf8(s) => Some(s),
             Repr::Wtf8(_) => None,
         }
@@ -38,7 +94,7 @@ impl JsString {
     /// The text with lone surrogates replaced by U+FFFD.
     pub fn to_string_lossy(&self) -> String {
         match &self.0 {
-            Repr::Utf8(s) => s.clone(),
+            Repr::Inline { .. } | Repr::Utf8(_) => self.as_str().unwrap().to_owned(),
             Repr::Wtf8(_) => {
                 let mut out = String::new();
                 for cp in self.code_points() {
@@ -52,8 +108,19 @@ impl JsString {
     /// WTF-8 bytes (UTF-8 when well-formed).
     pub fn as_bytes(&self) -> &[u8] {
         match &self.0 {
+            Repr::Inline { len, bytes } => &bytes[..len.get()],
             Repr::Utf8(s) => s.as_bytes(),
             Repr::Wtf8(b) => b,
+        }
+    }
+
+    /// Owned text allocation, excluding the inline representation and allocator
+    /// rounding. Used for retained document storage estimates.
+    pub fn heap_bytes(&self) -> usize {
+        match &self.0 {
+            Repr::Inline { .. } => 0,
+            Repr::Utf8(text) => core::mem::size_of::<Box<str>>() + text.len(),
+            Repr::Wtf8(bytes) => core::mem::size_of::<Box<[u8]>>() + bytes.len(),
         }
     }
 
@@ -89,12 +156,12 @@ impl JsString {
 
     /// `string.length` in JavaScript.
     pub fn utf16_len(&self) -> usize {
-        match &self.0 {
-            Repr::Utf8(s) => s.chars().map(char::len_utf16).sum(),
-            Repr::Wtf8(_) => self
-                .code_points()
+        if let Some(s) = self.as_str() {
+            s.chars().map(char::len_utf16).sum()
+        } else {
+            self.code_points()
                 .map(|cp| if cp >= 0x1_0000 { 2 } else { 1 })
-                .sum(),
+                .sum()
         }
     }
 
@@ -122,7 +189,7 @@ impl JsString {
     /// four-byte sequence), so every string has exactly one byte form.
     pub fn from_wtf8(bytes: &[u8]) -> Option<JsString> {
         if let Ok(s) = core::str::from_utf8(bytes) {
-            return Some(JsString(Repr::Utf8(s.to_owned())));
+            return Some(JsString::from(s));
         }
         let cont = |i: usize| bytes.get(i).copied().filter(|b| b & 0xc0 == 0x80);
         let mut i = 0;
@@ -161,7 +228,7 @@ impl JsString {
             i += len;
         }
         // Not UTF-8 yet well-formed WTF-8: at least one unpaired surrogate.
-        Some(JsString(Repr::Wtf8(bytes.into())))
+        Some(JsString(Repr::Wtf8(Box::new(bytes.into()))))
     }
 
     /// Builds a string from UTF-16 code units, pairing surrogates where possible.
@@ -188,6 +255,20 @@ impl Default for JsString {
     }
 }
 
+impl PartialEq for JsString {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl Eq for JsString {}
+
+impl Hash for JsString {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_bytes().hash(state);
+    }
+}
+
 impl PartialOrd for JsString {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -208,19 +289,32 @@ impl Borrow<[u8]> for JsString {
 
 impl From<&str> for JsString {
     fn from(s: &str) -> JsString {
-        JsString(Repr::Utf8(s.to_owned()))
+        if s.len() <= INLINE_CAP {
+            let mut bytes = [0; INLINE_CAP];
+            bytes[..s.len()].copy_from_slice(s.as_bytes());
+            JsString(Repr::Inline {
+                len: InlineLen::new(s.len()),
+                bytes,
+            })
+        } else {
+            JsString(Repr::Utf8(Box::new(s.into())))
+        }
     }
 }
 
 impl From<String> for JsString {
     fn from(s: String) -> JsString {
-        JsString(Repr::Utf8(s))
+        if s.len() <= INLINE_CAP {
+            JsString::from(s.as_str())
+        } else {
+            JsString(Repr::Utf8(Box::new(s.into_boxed_str())))
+        }
     }
 }
 
 impl From<&String> for JsString {
     fn from(s: &String) -> JsString {
-        JsString(Repr::Utf8(s.clone()))
+        JsString::from(s.as_str())
     }
 }
 
@@ -239,7 +333,8 @@ impl PartialEq<&str> for JsString {
 impl fmt::Debug for JsString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
-            Repr::Utf8(s) => fmt::Debug::fmt(s, f),
+            Repr::Inline { .. } => fmt::Debug::fmt(self.as_str().unwrap(), f),
+            Repr::Utf8(s) => fmt::Debug::fmt(&**s, f),
             Repr::Wtf8(_) => {
                 f.write_str("\"")?;
                 for cp in self.code_points() {
@@ -257,6 +352,7 @@ impl fmt::Debug for JsString {
 impl fmt::Display for JsString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
+            Repr::Inline { .. } => f.write_str(self.as_str().unwrap()),
             Repr::Utf8(s) => f.write_str(s),
             Repr::Wtf8(_) => f.write_str(&self.to_string_lossy()),
         }
@@ -365,12 +461,12 @@ impl Wtf8Builder {
     pub(crate) fn finish(mut self) -> JsString {
         self.flush_high();
         if self.lone {
-            JsString(Repr::Wtf8(self.bytes.into_boxed_slice()))
+            JsString(Repr::Wtf8(Box::new(self.bytes.into_boxed_slice())))
         } else {
             match String::from_utf8(self.bytes) {
-                Ok(s) => JsString(Repr::Utf8(s)),
+                Ok(s) => JsString::from(s),
                 // Unreachable: without lone surrogates the bytes are UTF-8.
-                Err(e) => JsString(Repr::Wtf8(e.into_bytes().into_boxed_slice())),
+                Err(e) => JsString(Repr::Wtf8(Box::new(e.into_bytes().into_boxed_slice()))),
             }
         }
     }
@@ -400,6 +496,101 @@ fn encode_generalized(cp: u32, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, HashMap, hash_map::DefaultHasher};
+
+    #[test]
+    fn short_utf8_is_inline_and_the_representation_is_two_words() {
+        assert_eq!(
+            core::mem::size_of::<JsString>(),
+            2 * core::mem::size_of::<usize>()
+        );
+        // The document node's enum keeps its tag in the inline length's niche.
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(core::mem::size_of::<crate::NodeKind>(), 16);
+            assert_eq!(core::mem::size_of::<crate::Node>(), 24);
+        }
+        for text in ["", "v", "inEase", "é", "😀", &"x".repeat(INLINE_CAP)] {
+            let value = JsString::from(text);
+            assert!(matches!(&value.0, Repr::Inline { .. }), "{text:?}");
+            assert_eq!(value.as_str(), Some(text));
+            assert_eq!(value.clone().as_bytes(), text.as_bytes());
+            assert_eq!(value.to_string(), text);
+        }
+        let long = "x".repeat(INLINE_CAP + 1);
+        let value = JsString::from(long.clone());
+        assert!(matches!(&value.0, Repr::Utf8(_)));
+        assert_eq!(value.as_str(), Some(long.as_str()));
+        assert_eq!(JsString::from(&long), value);
+        assert_eq!(JsString::from_wtf8(long.as_bytes()), Some(value));
+    }
+
+    #[test]
+    fn heap_strings_clone_and_drop_independently() {
+        for len in [INLINE_CAP + 1, 64, 4096, 1 << 20] {
+            let text = "é".repeat(len / 2 + 1);
+            let value = JsString::from(text.as_str());
+            assert!(matches!(&value.0, Repr::Utf8(_)));
+            assert_eq!(
+                value.heap_bytes(),
+                2 * core::mem::size_of::<usize>() + text.len()
+            );
+            let copy = value.clone();
+            drop(value);
+            assert_eq!(copy.as_str(), Some(text.as_str()));
+            assert_eq!(format!("{copy}"), text);
+            assert_eq!(format!("{copy:?}"), format!("{text:?}"));
+        }
+        let lone = JsString::from_utf16_units(&[0x61, 0xd800, 0x62]);
+        assert!(matches!(&lone.0, Repr::Wtf8(_)));
+        let copy = lone.clone();
+        drop(lone);
+        assert_eq!(
+            copy.utf16_units().collect::<Vec<_>>(),
+            vec![0x61, 0xd800, 0x62]
+        );
+        assert_eq!(copy.heap_bytes(), 2 * core::mem::size_of::<usize>() + 5);
+        assert_eq!(JsString::from(String::new()), JsString::new());
+    }
+
+    #[test]
+    fn byte_equality_hash_and_order_ignore_utf8_storage() {
+        let inline = JsString::from("short");
+        let boxed = JsString(Repr::Utf8(Box::new("short".into())));
+        assert_eq!(inline, boxed);
+        let hash = |s: &JsString| {
+            let mut state = DefaultHasher::new();
+            s.hash(&mut state);
+            state.finish()
+        };
+        assert_eq!(hash(&inline), hash(&boxed));
+        assert_eq!(inline.cmp(&boxed), Ordering::Equal);
+        assert_eq!(inline.borrow() as &[u8], b"short");
+        let mut hashed = HashMap::from([(boxed.clone(), 1)]);
+        assert_eq!(hashed.get(b"short".as_slice()), Some(&1));
+        assert_eq!(hashed.insert(inline.clone(), 2), Some(1));
+        let ordered = BTreeMap::from([(boxed, 1), (JsString::from("second"), 2)]);
+        assert_eq!(ordered.get(&inline), Some(&1));
+    }
+
+    #[test]
+    fn escaped_utf8_and_lone_surrogates_keep_json_semantics() {
+        let value =
+            crate::json::parse(r#"{"short":"\u0061","lone":"\ud800","long":"abcdefghijklmnop"}"#)
+                .unwrap();
+        let object = value.as_object().unwrap();
+        let short = object.get("short").unwrap().as_js_string().unwrap();
+        assert!(matches!(&short.0, Repr::Inline { .. }));
+        assert_eq!(short.as_str(), Some("a"));
+        let lone = object.get("lone").unwrap().as_js_string().unwrap();
+        assert!(matches!(&lone.0, Repr::Wtf8(_)));
+        assert_eq!(lone.utf16_units().collect::<Vec<_>>(), vec![0xd800]);
+        let long = object.get("long").unwrap().as_js_string().unwrap();
+        assert!(matches!(&long.0, Repr::Utf8(_)));
+        assert_eq!(
+            crate::json::to_canonical_string(&value),
+            r#"{"lone":"\ud800","long":"abcdefghijklmnop","short":"a"}"#
+        );
+    }
 
     #[test]
     fn pairs_surrogates_and_keeps_lone_ones() {

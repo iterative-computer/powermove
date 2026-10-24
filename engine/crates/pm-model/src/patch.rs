@@ -55,7 +55,6 @@
 //!   serializes to that many `null`s.
 
 use core::fmt;
-use std::collections::BTreeMap;
 
 use crate::json::{self, JsString, Map, Value, number_to_js_string, string_to_number};
 
@@ -292,7 +291,7 @@ pub(crate) enum NodeMut<'a, T> {
     Number(f64),
     String(&'a JsString),
     Array(&'a mut Vec<T>),
-    Object(&'a mut BTreeMap<JsString, T>),
+    Object(&'a mut crate::json::ObjectMap<T>),
 }
 
 /// A JSON-shaped tree that patches can be applied to: plain [`Value`]s, and the
@@ -318,7 +317,7 @@ impl Tree for Value {
             Value::Number(n) => NodeMut::Number(*n),
             Value::String(s) => NodeMut::String(s),
             Value::Array(items) => NodeMut::Array(items),
-            Value::Object(map) => NodeMut::Object(map.as_btree_mut()),
+            Value::Object(map) => NodeMut::Object(map.as_members_mut()),
         }
     }
 

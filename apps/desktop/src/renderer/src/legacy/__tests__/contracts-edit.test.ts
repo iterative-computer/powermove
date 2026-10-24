@@ -8,17 +8,17 @@ import { makePM } from './make-pm';
 import { install as installTransitions } from '../gl/transitions';
 
 const OPERATIONS = [
-  'set_property', 'replace_keyframes', 'offset_property', 'set_easing', 'set_expression',
+  'set_property', 'replace_keyframes', 'simplify_keyframes', 'set_easing', 'set_expression',
   'set_content', 'set_layer', 'set_composition', 'add_layer',
   'delete_layers', 'reorder_layer', 'group_layers', 'ungroup_layers', 'move_to_group', 'add_effect', 'remove_effect',
-  'set_effect', 'set_transition', 'set_scene_parameter', 'add_marker', 'create_section',
+  'set_effect', 'set_transition', 'set_scene_parameter', 'add_marker', 'remove_marker', 'create_section',
   'update_section', 'transform_layers', 'add_captions', 'edit_captions',
 ];
 
 const OPERATION_CONTRACT = {
-  offset_property: {target:'layer',fields:['path','delta']},
   set_property: { target: 'layer', fields: ['path', 'value', 'time', 'mode', 'ease'] },
   replace_keyframes: { target: 'layer', fields: ['path', 'keyframes', 'replace', 'expression'] },
+  simplify_keyframes: { target: 'project', fields: ['scope', 'targets', 'properties'] },
   set_easing: { target: 'keyframes', fields: ['keyframes', 'curve'] },
   set_expression: { target: 'layer', fields: ['path', 'expression'] },
   set_content: { target: 'layer', fields: ['patch'] },
@@ -37,6 +37,7 @@ const OPERATION_CONTRACT = {
   set_transition: { target: 'layer', fields: ['layer', 'edge', 'transition'] },
   set_scene_parameter: { target: 'project', fields: ['name', 'value'] },
   add_marker: { target: 'project', fields: ['time', 'name'] },
+  remove_marker: { target: 'project', fields: ['index'] },
   create_section: { target: 'project', fields: ['section'] },
   update_section: { target: 'project', fields: ['sectionId', 'layers', 'thumb', 'version', 'at'] },
   transform_layers: { target: 'layer-collection', fields: ['transform', 'state'] },

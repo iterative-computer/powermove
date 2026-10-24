@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServicesRegistry } from '../../kernel/services';
 import type { PMRegistry } from '../registry';
 import { install } from './engine';
+import * as videoInstances from './video-instances';
 
 function delayedVideo(): any {
   let finishPlay: any;
@@ -90,10 +91,38 @@ function engine({ layer = null, media = null, work = [0, 10], audioStartupDelay 
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe('legacy engine install', () => {
+  it('keeps the current frame when a seek supplies a non-finite time', () => {
+    const { PM } = engine();
+    PM.setTime(2);
+    const changed = vi.fn(); PM.bus.on('time', changed);
+    for (const time of [NaN, Infinity, -Infinity, undefined]) PM.setTime(time);
+    expect(PM.time).toBe(2);
+    expect(changed).not.toHaveBeenCalled();
+    PM.setTime(3);
+    expect(PM.time).toBe(3);
+    expect(changed).toHaveBeenCalledExactlyOnceWith(3);
+  });
+  it.each(['1', '0.5', '0.25'])('keeps the selected %s preview resolution through slow playback and paused refinement', (resolution) => {
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    const { PM, runFrame } = engine();
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => true);
+    const qualityChanged = vi.fn(); PM.bus.on('quality', qualityChanged);
+    PM.setPreviewResolution(resolution);
+    expect(PM.quality).toBe(Number(resolution));
+    expect(PM.perf.auto).toBe(false);
+    expect(qualityChanged).toHaveBeenCalledTimes(1);
+    PM.play();
+    for (let frame = 1; frame < 100; frame++) runFrame(frame * 1000 / 12);
+    PM.pause(); PM.bus.emit('draw'); runFrame(10000);
+    expect(PM.quality).toBe(Number(resolution));
+    PM.setPreviewResolution('auto');
+    expect(PM.quality).toBe(1); expect(PM.perf.auto).toBe(true);
+  });
   it('updates paused scrub values without rebuilding structural UI', () => {
     const { PM } = engine();
     const invalidate = vi.spyOn(PM, 'invalidate'), time = vi.fn();
@@ -232,6 +261,21 @@ describe('legacy engine install', () => {
     expect(foreground.el.paused).toBe(true);
   });
 
+  it('abandons an unfinished synchronized frame when playback passes the overlap end', () => {
+    const foreground = delayedVideo(), background = delayedVideo();
+    const layer = { id: 'foreground', type: 'video', from: 0, dur: 1, d: { asset: 'asset-1', speed: 1, trim: 0, timeRemap: true } };
+    const { PM, assets, runFrame } = engine({ layer, media: foreground });
+    assets.set('asset-2', { el: background.el, dur: 10 });
+    PM.proj.layers.push({ ...layer, id: 'background', dur: 3, d: { ...layer.d, asset: 'asset-2', timeRemap: false } });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => false);
+    PM.play(); runFrame(100);
+    for (let now = 200; now <= 1200; now += 100) runFrame(now);
+    expect(PM.GL.render.mock.calls.at(-1)[0]).toBe(1.2);
+    expect(PM.videoFrameSync).toBe(false);
+    expect(background.el.playCalls).toBe(1);
+    expect(foreground.el.paused).toBe(true);
+  });
+
   it('starts the playback clock after synchronous audio device setup', () => {
     const { PM, runFrame, audioCalls } = engine({ audioStartupDelay: 250 });
     PM.time = 119 / 30;
@@ -292,6 +336,33 @@ describe('legacy engine install', () => {
     expect(PM.GL.render.mock.calls.at(-1)[0]).toBe(3);
   });
 
+  it.each([1.2, 2.2])('abandons an unfinished outgoing video when scrubbing to %s after its cut', (target) => {
+    const outgoing = delayedVideo(), incoming = delayedVideo();
+    const layer = { id: 'outgoing', type: 'video', from: 0, dur: 1, d: { asset: 'asset-1', speed: 1, trim: 0 } };
+    const { PM, assets, runFrame } = engine({ layer, media: outgoing });
+    assets.set('asset-2', { el: incoming.el, dur: 10 });
+    PM.proj.layers.push({ ...layer, id: 'incoming', from: 1, d: { ...layer.d, asset: 'asset-2' } });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => false);
+    PM.setTime(.8, { raw: true }); runFrame(16);
+    PM.setTime(target, { raw: true }); runFrame(32);
+    expect(PM.GL.render.mock.calls.at(-1)[0]).toBe(target);
+    expect(outgoing.el.currentTime).toBe(.8);
+    if (target < 2) expect(incoming.el.currentTime).toBeCloseTo(target - 1);
+  });
+
+  it('abandons an unfinished incoming video when scrubbing backwards across its cut', () => {
+    const outgoing = delayedVideo(), incoming = delayedVideo();
+    const layer = { id: 'outgoing', type: 'video', from: 0, dur: 1, d: { asset: 'asset-1', speed: 1, trim: 0 } };
+    const { PM, assets, runFrame } = engine({ layer, media: outgoing });
+    assets.set('asset-2', { el: incoming.el, dur: 10 });
+    PM.proj.layers.push({ ...layer, id: 'incoming', from: 1, d: { ...layer.d, asset: 'asset-2' } });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => false);
+    PM.setTime(1.2, { raw: true }); runFrame(16);
+    PM.setTime(.8, { raw: true }); runFrame(32);
+    expect(PM.GL.render.mock.calls.at(-1)[0]).toBe(.8);
+    expect(outgoing.el.currentTime).toBe(.8);
+  });
+
   it('does not render the same project frame twice on a high refresh display', () => {
     const { PM, runFrame } = engine();
     PM.GL.gl = {}; PM.GL.render = vi.fn(); PM.animVersion = () => 1;
@@ -320,6 +391,87 @@ describe('legacy engine install', () => {
     runFrame(40);
     expect(active.mock.calls.length).toBeGreaterThan(firstFrameChecks);
     expect(PM.GL.render).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps unchanged decoder ownership through playback, pause and scrubbing without repruning it', async () => {
+    const media = delayedVideo();
+    const layer = { id: 'video', type: 'video', from: 0, dur: 5, d: { asset: 'asset-1', speed: 1 } };
+    const { PM, runFrame } = engine({ layer, media });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => true);
+    PM.invalidate = () => PM.bus.emit('draw');
+    const prune = vi.spyOn(videoInstances, 'pruneVideoInstances');
+    PM.play(); media.finishPlay(); await Promise.resolve();
+    for (const time of [40, 80, 120]) runFrame(time);
+    PM.pause();
+    PM.setTime(1); runFrame(140);
+    PM.setTime(2); runFrame(160);
+    expect(media.el.paused).toBe(true);
+    expect(media.el.currentTime).toBe(2);
+    expect(prune).toHaveBeenCalledTimes(1);
+  });
+
+  it('updates decoder ownership for lookahead, cuts, gaps and loop entrance', () => {
+    const outgoing = delayedVideo(), incoming = delayedVideo();
+    const layer = { id: 'outgoing', type: 'video', from: 0, dur: 1, d: { asset: 'asset-1', speed: 1 } };
+    const { PM, assets, runFrame } = engine({ layer, media: outgoing, work: [0, 3] });
+    assets.set('asset-2', { el: incoming.el, dur: 10 });
+    PM.proj.layers.push({ ...layer, id: 'incoming', from: 1, d: { ...layer.d, asset: 'asset-2' } });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => true);
+    const prune = vi.spyOn(videoInstances, 'pruneVideoInstances');
+    const owned = () => prune.mock.calls.map(([asset, ids]: any[]) => ({
+      asset: asset === assets.get('asset-1') ? 'outgoing' : 'incoming', ids: [...ids],
+    }));
+    PM.play(); runFrame(100); runFrame(600); runFrame(700); runFrame(1100); runFrame(2100); runFrame(2600); runFrame(2700); runFrame(3100);
+    expect(owned()).toEqual([
+      { asset: 'outgoing', ids: ['outgoing'] },
+      { asset: 'incoming', ids: ['incoming'] },
+      { asset: 'outgoing', ids: [] },
+      { asset: 'incoming', ids: [] },
+      { asset: 'outgoing', ids: ['outgoing'] },
+    ]);
+    expect(outgoing.el.currentTime).toBe(0);
+    expect(incoming.el.paused).toBe(true);
+    expect(outgoing.el.playCalls).toBeGreaterThan(0);
+  });
+
+  it('replaces a decoder whose editing proxy changes while ownership stays the same', async () => {
+    const original = delayedVideo(), preview = delayedVideo();
+    const layer = { id: 'video', type: 'video', from: 0, dur: 5, d: { asset: 'asset-1', speed: 1 } };
+    const { PM, assets, runFrame } = engine({ layer, media: original });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => true);
+    const prune = vi.spyOn(videoInstances, 'pruneVideoInstances');
+    PM.play(); original.finishPlay(); await Promise.resolve(); runFrame(40);
+    assets.get('asset-1').preview = { el: preview.el, deferred: true };
+    runFrame(80);
+    expect(preview.el.playCalls).toBe(0);
+    PM.pause();
+    expect(original.el.paused).toBe(true);
+    expect(videoInstances.layerVideoElement(PM, assets.get('asset-1'), 'video')).toBe(preview.el);
+    expect(preview.el.currentTime).toBeCloseTo(PM.time, 6);
+    PM.play();
+    expect(preview.el.playCalls).toBe(1);
+    expect(prune).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases a shared media instance when scrubbing across cuts with the same decoder count', () => {
+    const media = delayedVideo();
+    const copy = Object.assign(new EventTarget(), delayedVideo().el, { load: vi.fn(), removeAttribute: vi.fn() });
+    vi.stubGlobal('document', { createElement: vi.fn(() => copy) });
+    const layer = { id: 'first', type: 'video', from: 0, dur: 1, d: { asset: 'asset-1', speed: 1 } };
+    const { PM, assets, runFrame } = engine({ layer, media });
+    PM.proj.layers.push({ ...layer, id: 'second', from: 1, d: { ...layer.d, trim: 2 } });
+    PM.GL.gl = {}; PM.GL.render = vi.fn(() => true);
+    PM.invalidate = () => PM.bus.emit('draw');
+    const prune = vi.spyOn(videoInstances, 'pruneVideoInstances');
+    PM.setTime(.5); runFrame(16);
+    PM.setTime(1.5); runFrame(32);
+    expect(videoInstances.layerVideoElement(PM, assets.get('asset-1'), 'second')).toBe(copy);
+    expect(copy.currentTime).toBe(2.5);
+    PM.setTime(.5); runFrame(48);
+    expect(videoInstances.layerVideoElement(PM, assets.get('asset-1'), 'first')).toBe(media.el);
+    expect(copy.removeAttribute).toHaveBeenCalledWith('src');
+    expect(copy.load).toHaveBeenCalledOnce();
+    expect(prune.mock.calls.map(([, ids]: any[]) => [...ids])).toEqual([['first'], ['second'], ['first']]);
   });
 
   it('retries an unfinished decode within the same project frame instead of skipping it', () => {

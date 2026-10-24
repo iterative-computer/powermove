@@ -137,9 +137,15 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
 export const MAX_DOCUMENT_BYTES = 512 * 1024 * 1024;
 /** Most fallback programs one request carries, and their bytes. */
 export const MAX_FALLBACK_PIXELS = 16;
+/** Binary16-equivalent budget: RGBA32F may occupy at most 2× physical bytes
+ * for the same pixel capacity, while 8/16-bit snapshots retain their limit. */
 export const MAX_FALLBACK_BYTES = 256 * 1024 * 1024;
 /** Compatibility events in one `document` snapshot request (bands included). */
 export const MAX_COMPAT_EVENTS = 4096;
+
+export function fallbackBudgetBytes(byteLength: number, colorDepth: 16 | 32): number {
+  return byteLength / (colorDepth === 32 ? 2 : 1);
+}
 /** Most SVG rasters one request carries, and their bytes (a material
  *  map may be three.js's largest texture, 16384 × 16384). */
 export const MAX_SVG_PIXELS = 64;
@@ -152,6 +158,7 @@ function validDocument(value: unknown): boolean {
   const d = value as Record<string, unknown>;
   if (!id(d['id']) || !safeUint(d['revision'])) return false;
   const json = d['json'];
+  if (d['nativeKernel'] !== undefined) return d['nativeKernel'] === true && json == null && d['hash'] == null;
   if (json === undefined || json === null) return d['hash'] === undefined || d['hash'] === null || (typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']));
   // A document's body comes with its canonical hash.
   return typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']) && json instanceof Uint8Array && json.byteLength > 0 && json.byteLength <= MAX_DOCUMENT_BYTES;
@@ -180,9 +187,14 @@ function validFallback(value: unknown): boolean {
   for (const p of value as Record<string, unknown>[]) {
     if (!p || typeof p !== 'object' || typeof p['key'] !== 'string' || p['key'].length === 0 || p['key'].length > 512) return false;
     if (!safeUint(p['width']) || !safeUint(p['height']) || (p['width'] as number) < 1 || (p['height'] as number) < 1) return false;
-    const data = p['rgba16f'];
-    if (!(data instanceof Uint8Array) || data.byteLength !== (p['width'] as number) * (p['height'] as number) * 8) return false;
-    bytes += data.byteLength;
+    const half = p['rgba16f'];
+    const float = p['rgba32f'];
+    const data = float === undefined ? half : float;
+    const stride = float === undefined ? 8 : 16;
+    if (!(half instanceof Uint8Array) || !(data instanceof Uint8Array)
+      || (float !== undefined && half.byteLength !== 0)
+      || data.byteLength !== (p['width'] as number) * (p['height'] as number) * stride) return false;
+    bytes += fallbackBudgetBytes(data.byteLength, stride === 16 ? 32 : 16);
   }
   return bytes <= MAX_FALLBACK_BYTES;
 }

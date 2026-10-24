@@ -10,7 +10,7 @@
   const {api,doc,transport,mixed}=inspectorContext();
   const {ColorField,ToggleField,SelectField,Row,RampField,PointField,Disclosure}=api.ui.controls;
   let {layer,params,properties,prefix,ui,extra}:{layer:any;params:EffectParamDefinition[];properties:Record<string,any>;prefix:string;ui?:ParameterWidget[];extra?:Snippet}=$props();
-  const layout=$derived(parameterLayout(params,ui));
+  const layout=$derived((doc.tick.structure,doc.tick.history,inspectorRefresh.version,parameterLayout(params.filter(p=>properties[p.k]!=null),ui)));
   const path=(key:string)=>`${prefix}.${key}`;
   const param=(key:string)=>params.find(p=>p.k===key)!;
   const value=(key:string)=>(doc.tick.history,doc.tick.values,doc.proj,transport.time,inspectorRefresh.version,api.anim.evP(layer,properties[key],transport.time,prefix==='u'?path(key):key));
@@ -42,12 +42,12 @@
   {:else if w.kind==='point'}
     {@const x=param(w.x) as any}{@const y=param(w.y) as any}
     <Row {api} label={w.label??'Position'}>
-      <PointField {api} label={w.label??'Position'} get={()=>[Number(value(w.x)),Number(value(w.y))]} xEdit={binding(w.x)} yEdit={binding(w.y)} xLabel={x.label} yLabel={y.label} minX={x.min} maxX={x.max} minY={y.min} maxY={y.max} step={x.step??1} unit={x.unit}
+      <PointField {api} label={w.label??'Position'} get={()=>[Number(value(w.x)),Number(value(w.y))]} xEdit={binding(w.x)} yEdit={binding(w.y)} xLabel={x.label} yLabel={y.label} minX={x.min} maxX={x.max} minY={y.min} maxY={y.max} stepX={x.step} stepY={y.step} unit={x.unit}
         edit={{mode:'command',label:`Move ${w.label??'position'}`,origin:'inspector',command:(next:any)=>[binding(w.x),binding(w.y)].map((b:any,index)=>b.command(next[index]))}}>
         {#snippet xAction()}<PropertyStopwatch {layer} path={path(w.x)} label={x.label} />{/snippet}
         {#snippet yAction()}<PropertyStopwatch {layer} path={path(w.y)} label={y.label} />{/snippet}
-        {#snippet xField()}<ChannelRow {layer} channel={path(w.x)} property={properties[w.x]} defaultValue={x.def} label={x.label} getValue={()=>value(w.x)} min={x.min} max={x.max} step={x.step} unit={x.unit} visual={false} compact prefix="X" />{/snippet}
-        {#snippet yField()}<ChannelRow {layer} channel={path(w.y)} property={properties[w.y]} defaultValue={y.def} label={y.label} getValue={()=>value(w.y)} min={y.min} max={y.max} step={y.step} unit={y.unit} visual={false} compact prefix="Y" />{/snippet}
+        {#snippet xField(increment:number)}<ChannelRow {layer} channel={path(w.x)} property={properties[w.x]} defaultValue={x.def} label={x.label} getValue={()=>value(w.x)} min={x.min} max={x.max} step={increment} unit={x.unit} visual={false} compact prefix="X" />{/snippet}
+        {#snippet yField(increment:number)}<ChannelRow {layer} channel={path(w.y)} property={properties[w.y]} defaultValue={y.def} label={y.label} getValue={()=>value(w.y)} min={y.min} max={y.max} step={increment} unit={y.unit} visual={false} compact prefix="Y" />{/snippet}
       </PointField>
     </Row>
   {/if}

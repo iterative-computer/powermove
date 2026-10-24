@@ -161,28 +161,68 @@ let nextMediaRequest = 0;
 
 /* ── the bridge ───────────────────────────────────────────── */
 
-function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Record<string, string>, initialProject: { projectId: string | null; taken: string[] }): PowermoveBridge {
-  // Keys another tab wrote arrive as names; the value is re-read before the
-  // shim is told, so its synchronous refill sees the fresh string.
+export function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Record<string, string>, initialProject: { projectId: string | null; taken: string[] }): PowermoveBridge {
+  // Keep heavy values lazy when another tab writes them. The shim refills
+  // only the requested key, through async IPC or the legacy HTTP reader.
   const serialized = new Map(Object.entries(storeSnapshot));
+  const lazyKeys = (snapshot: Record<string, string>): Set<string> => new Set(JSON.parse(snapshot.__powermoveLazyKeys ?? '[]'));
+  let lazy = lazyKeys(storeSnapshot);
+  const versions = new Map<string, number>();
+  const bump = (key: string) => versions.set(key, (versions.get(key) ?? 0) + 1);
+  const remember = (key: string, value: string | null) => {
+    lazy.delete(key);
+    if (value === null) serialized.delete(key); else serialized.set(key, value);
+  };
+  const readSync = (key: string): string | null => {
+    if (!lazy.has(key)) return serialized.get(key) ?? null;
+    const request = new XMLHttpRequest();
+    request.open('GET', `/__powermove/store?key=${encodeURIComponent(key)}`, false);
+    request.send();
+    if (request.status !== 200) throw new Error(`Store read failed (${request.status})`);
+    const value: string | null = JSON.parse(request.responseText);
+    remember(key, value);
+    return value;
+  };
+  const bootstrap = (): Record<string, string> => {
+    const snapshot: Record<string, string> = {}, names = new Set(lazy);
+    for (const [key, value] of serialized) {
+      if (/^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./.test(key)) names.add(key);
+      else if (key !== '__powermoveLazyKeys') snapshot[key] = value;
+    }
+    if (names.size) snapshot.__powermoveLazyKeys = JSON.stringify([...names]);
+    return snapshot;
+  };
   const storeChangedListeners = new Set<(keys: string[]) => void>();
   link.on(IPC.storeChanged, (payload) => {
     const keys = Array.isArray((payload as { keys?: unknown })?.keys) ? ((payload as { keys: unknown[] }).keys.filter((key): key is string => typeof key === 'string')) : [];
     if (!keys.length) return;
     void Promise.all(keys.map(async (key) => {
-      const value = await link.sync<string | null>(IPC.storeGetSync, { key }).catch(() => null);
-      if (value === null) serialized.delete(key); else serialized.set(key, value);
-    })).then(() => { for (const listener of storeChangedListeners) listener(keys); });
+      bump(key);
+      if (/^(project|projectHistory|projectState|projectJournal|agentThreads|agentAttachment)\./.test(key)) {
+        serialized.delete(key); lazy.add(key); return;
+      }
+      const version = versions.get(key);
+      const value = await link.sync<string | null>(IPC.storeGetSync, { key });
+      if (versions.get(key) === version) remember(key, value);
+    })).then(() => { for (const listener of storeChangedListeners) listener(keys); }).catch(() => undefined);
   });
 
   // After a reconnect the host may hold writes from other tabs made while this
   // one was away: adopt every key whose bytes differ, the way storeChanged does.
   link.on('__reconnected', () => {
     void link.sync<Record<string, string>>(IPC.storeSnapshotSerializedSync).then((fresh) => {
-      const changed: string[] = [];
-      for (const [key, value] of Object.entries(fresh)) if (serialized.get(key) !== value) { serialized.set(key, value); changed.push(key); }
-      for (const key of [...serialized.keys()]) if (!(key in fresh)) { serialized.delete(key); changed.push(key); }
-      if (changed.length) for (const listener of storeChangedListeners) listener(changed);
+      const freshLazy = lazyKeys(fresh);
+      const changed = new Set<string>();
+      for (const [key, value] of Object.entries(fresh)) if (serialized.get(key) !== value) { serialized.set(key, value); changed.add(key); }
+      // The host sends names for lazy values. Invalidate them for on-demand
+      // refill; absence of a body is not deletion. Missing names are deletions.
+      for (const key of new Set([...serialized.keys(), ...lazy])) {
+        if (freshLazy.has(key) || !(key in fresh)) { serialized.delete(key); changed.add(key); }
+      }
+      for (const key of freshLazy) changed.add(key);
+      lazy = freshLazy;
+      for (const key of changed) bump(key);
+      if (changed.size) for (const listener of storeChangedListeners) listener([...changed]);
     }).catch(() => undefined);
   });
 
@@ -299,6 +339,8 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
       const detail = request.detail ? `\n\n${request.detail}` : '';
       return window.confirm(`${request.message}${detail}`);
     },
+    // Browser and headless exports retain their unattended missing-media behavior.
+    offlineExport: async () => 'without',
     clipboardWriteText: (text) => navigator.clipboard.writeText(text),
 
     render: {
@@ -442,15 +484,25 @@ function createBridge(link: ReconnectingLink, hello: WebHello, storeSnapshot: Re
     captureWindow: () => Promise.resolve(null),
 
     store: {
-      snapshotSync: () => Object.fromEntries([...serialized].map(([key, value]) => [key, JSON.parse(value)])),
-      snapshotSerializedSync: () => Object.fromEntries(serialized),
+      snapshotSync: () => Object.fromEntries(Object.entries(bootstrap()).map(([key, value]) => [key, JSON.parse(value)])),
+      snapshotSerializedSync: bootstrap,
+      bootstrapSerializedSync: bootstrap,
       snapshot: () => link.invoke(IPC.storeSnapshot),
-      set: (key, value) => { serialized.set(key, JSON.stringify(value)); link.send(IPC.storeSet, { key, value }); },
-      setSerialized: async (key, value) => { serialized.set(key, value); await link.invoke(IPC.storeSetSerialized, { key, serialized: value }); },
-      delete: (key) => { serialized.delete(key); link.send(IPC.storeDelete, { key }); },
+      set: (key, value) => { bump(key); lazy.delete(key); serialized.set(key, JSON.stringify(value)); link.send(IPC.storeSet, { key, value }); },
+      setSerialized: async (key, value) => { bump(key); lazy.delete(key); serialized.set(key, value); await link.invoke(IPC.storeSetSerialized, { key, serialized: value }); },
+      appendJournal: async (key, value) => { bump(key); serialized.delete(key); lazy.add(key); await link.invoke(IPC.storeAppendJournal, { key, serialized: value }); },
+      delete: (key) => { bump(key); lazy.delete(key); serialized.delete(key); link.send(IPC.storeDelete, { key }); },
       flush: () => link.invoke(IPC.storeFlush),
       onError: (cb) => link.on(IPC.storeError, (error) => cb(error as StoreErrorEvent)),
-      getSync: (key) => serialized.get(key) ?? null,
+      getSync: readSync,
+      getEncodedSync: readSync,
+      getEncoded: async (key) => {
+        const version = versions.get(key);
+        const value = await link.invoke<string | null>(IPC.storeGetEncoded, { key });
+        if (versions.get(key) !== version) return readSync(key);
+        remember(key, value);
+        return value;
+      },
       onChanged: (cb) => { storeChangedListeners.add(cb); return () => { storeChangedListeners.delete(cb); }; }
     },
 

@@ -189,14 +189,16 @@ mod tests {
 
     #[test]
     fn finds_frames_and_gaps() {
-        let dir = std::env::temp_dir().join(format!("pm-media-seq-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("pm-media-seq-")
+            .tempdir()
+            .unwrap();
         for n in [1, 2, 3, 6, 7, 10] {
-            std::fs::write(dir.join(format!("shot.{n:04}.png")), b"x").unwrap();
+            std::fs::write(dir.path().join(format!("shot.{n:04}.png")), b"x").unwrap();
         }
-        std::fs::write(dir.join("shot.12.png"), b"x").unwrap(); // other padding
-        std::fs::write(dir.join("other.0004.png"), b"x").unwrap();
-        let s = detect(&dir.join("shot.0003.png")).unwrap().unwrap();
+        std::fs::write(dir.path().join("shot.12.png"), b"x").unwrap(); // other padding
+        std::fs::write(dir.path().join("other.0004.png"), b"x").unwrap();
+        let s = detect(&dir.path().join("shot.0003.png")).unwrap().unwrap();
         assert_eq!(
             s.frames.iter().map(|f| f.0).collect::<Vec<_>>(),
             vec![1, 2, 3, 6, 7, 10]
@@ -205,6 +207,5 @@ mod tests {
         assert_eq!(s.padding, 4);
         assert_eq!(s.file_for(5).unwrap().file_name().unwrap(), "shot.0003.png");
         assert_eq!(s.file_for(0), None);
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

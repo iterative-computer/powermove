@@ -1,11 +1,24 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { flip } from 'svelte/animate';
   import Icon from '../panels/Icon.svelte';
+  import { readProjectLoading } from '../overlays/project-ghost';
   import AgentLauncher from './AgentLauncher.svelte';
+  import TaskPill from './TaskPill.svelte';
   import ToolbarMount from './ToolbarMount.svelte';
 
   let { PM }: { PM: Record<string, any> } = $props();
+  let reducedMotion = $state(false);
+  onMount(() => {
+    const media = matchMedia('(prefers-reduced-motion: reduce)');
+    const sync = () => {
+      reducedMotion = media.matches;
+      if (reducedMotion) strip?.getAnimations({ subtree: true }).forEach(animation => animation.cancel());
+    };
+    sync();
+    media.addEventListener('change', sync);
+    return () => media.removeEventListener('change', sync);
+  });
   let refreshToken = $state(0);
   let metadataToken = $state(0);
   let strip = $state<HTMLDivElement>();
@@ -21,18 +34,57 @@
      as a ghost; let go there, it moves to another window or one of its own. */
   let tear = $state<{ x: number; y: number } | null>(null);
 
+  /* The strip's tabs, re-read when project metadata changes. Every edit
+     emits `project`, and a new array reconciles the keyed list, where
+     `animate:flip` measures every tab before and after
+     (getBoundingClientRect): a style and layout pass forced on each edit.
+     A re-read that finds the same tabs showing the same names, dirty marks,
+     and selection as at the last refresh reconciles to nothing that moves,
+     so it keeps the array (no reconcile). Anything a tab shows that changed
+     reconciles and animates as before. */
+  let lastTabs: { ids: string[]; shown: string; metadata: number } | null = null;
+  const tabShown = (ids: string[]): string => ids.map((id) => {
+    // As the strip's `{#each}` below reads them.
+    const opening = pending?.id === id;
+    const file = opening ? null : fileStateFor(id);
+    const dirty = !opening && (id === documentId ? (file?.dirty ?? appDirty) : !!file?.dirty);
+    return `${nameFor(id)}\u0000${dirty}\u0000${opening}\u0000${id === activeProjectId}\u0000${homeOpen}\u0000${file?.path ?? ''}`;
+  }).join('\u0001');
   const tabIds = $derived.by(() => {
-    metadataToken;
-    return [...(PM.Tabs?.list?.() ?? (PM.proj?.id && !PM.isHomeProject?.() ? [PM.proj.id] : []))] as string[];
+    const metadata = metadataToken;
+    // What the tabs show is read at every refresh, so the comparison is
+    // with what the last refresh put on screen.
+    refreshToken;
+    const previous = lastTabs;
+    if (previous && previous.metadata === metadata) {
+      // A refresh alone never re-read the tab list.
+      previous.shown = untrack(() => tabShown(previous.ids));
+      return previous.ids;
+    }
+    const ids = [...(PM.Tabs?.list?.() ?? (PM.proj?.id && !PM.isHomeProject?.() ? [PM.proj.id] : []))] as string[];
+    const shown = untrack(() => tabShown(ids));
+    const same = previous && previous.ids.length === ids.length && previous.ids.every((id, i) => id === ids[i]) && previous.shown === shown;
+    lastTabs = { ids: same ? previous.ids : ids, shown, metadata };
+    return lastTabs.ids;
   });
   const names = $derived.by(() => {
     metadataToken;
     return new Map<string, string>((PM.Projects?.list?.() ?? []).map((meta: { id: string; name?: string }) => [meta.id, meta.name || 'Untitled']));
   });
-  const activeProjectId = $derived.by(() => {
+  /* A project that is still opening is the active tab at once; the loaded
+     document (name, dirty state) stays with its own tab until it lands. The
+     opening tab skips its saved file state: that is what the load is reading. */
+  const pending = $derived.by(() => {
+    refreshToken;
+    return readProjectLoading(PM);
+  });
+  const documentId = $derived.by(() => {
     refreshToken;
     return PM.proj?.id as string | undefined;
   });
+  const activeProjectId = $derived(pending ? (pending.id ?? undefined) : documentId);
+  /* Nothing to select yet on a cold boot: one placeholder tab names what is opening. */
+  const pendingChip = $derived(pending && !(pending.id && tabIds.includes(pending.id)) ? pending : null);
   const activeName = $derived.by(() => {
     metadataToken;
     refreshToken;
@@ -65,7 +117,8 @@
   const selectedId = $derived(homeOpen || !activeProjectId || !tabIds.includes(activeProjectId) ? 'home' : activeProjectId);
 
   function nameFor(id: string): string {
-    return id === activeProjectId ? activeName : names.get(id) || 'Untitled';
+    if (pending?.id === id && pending.name) return pending.name;
+    return id === documentId ? activeName : names.get(id) || 'Untitled';
   }
 
   function tabIndex(id: string): 0 | -1 {
@@ -159,7 +212,7 @@
 
   function focusTab(event: KeyboardEvent): void {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-    const tabs = [...document.querySelectorAll<HTMLElement>('#tabs [role="tab"]')];
+    const tabs = [...document.querySelectorAll<HTMLElement>('#tabs [role="tab"]:not([aria-disabled="true"])')];
     if (!tabs.length) return;
     const current = Math.max(0, tabs.indexOf(event.currentTarget as HTMLElement));
     let next = current;
@@ -356,10 +409,10 @@
   }
 
   $effect(() => {
-    const events = ['projects:open', 'projects:screen', 'settings:screen', 'project', 'history'];
+    const events = ['projects:open', 'projects:screen', 'settings:screen', 'project', 'project:loading', 'history'];
     const offs = events.map((event) => PM.bus?.on?.(event, () => {
       if (!document.getElementById('tabs')?.contains(document.activeElement)) rovingId = '';
-      if (event === 'projects:open' || event === 'project') metadataToken++;
+      if (event === 'projects:open' || event === 'project' || event === 'project:loading') metadataToken++;
       refreshToken++;
     }));
     return () => offs.forEach((off) => off?.());
@@ -405,26 +458,29 @@
     >
       {#each tabIds as id (id)}
         {@const active = id === activeProjectId && !homeOpen}
-        {@const file = fileStateFor(id)}
-        {@const dirty = id === activeProjectId ? (file?.dirty ?? appDirty) : !!file?.dirty}
+        {@const opening = pending?.id === id}
+        {@const file = opening ? null : fileStateFor(id)}
+        {@const dirty = !opening && (id === documentId ? (file?.dirty ?? appDirty) : !!file?.dirty)}
         {@const tabName = nameFor(id)}
         <div
           class="project-doc"
           class:on={active}
           class:current={id === activeProjectId}
+          class:pending={opening}
           class:dirty
           class:renaming={renamingId === id}
           class:lifted={dragId === id && !tear}
           class:torn={dragId === id && !!tear}
           style:transform={dragId === id && !tear ? `translateX(${dragOffset}px)` : null}
-          title={file?.path ? `${tabName} — ${file.path}` : `${tabName} — Not saved to a file`}
+          title={opening ? `Opening ${tabName}` : file?.path ? `${tabName} — ${file.path}` : `${tabName} — Not saved to a file`}
           role="tab"
           data-tab-id={id}
           data-project-id={id}
           aria-selected={active}
-          aria-label={renamingId === id ? `Rename ${tabName}` : `${tabName}${dirty ? ', unsaved' : ''}`}
+          aria-busy={opening || undefined}
+          aria-label={renamingId === id ? `Rename ${tabName}` : `${tabName}${dirty ? ', unsaved' : ''}${opening ? ', opening' : ''}`}
           tabindex={tabIndex(id)}
-          animate:flip={{ duration: dragId === id ? 0 : 180 }}
+          animate:flip={{ duration: reducedMotion || dragId === id ? 0 : 180 }}
           onpointerdown={(event) => tabPointerDown(event, id)}
           onclick={(event) => tabClick(event, id)}
           oncontextmenu={(event) => tabMenu(event, id)}
@@ -472,6 +528,19 @@
           {/if}
         </div>
       {/each}
+      {#if pendingChip}
+        {@const chipName = pendingChip.name || 'Untitled'}
+        <div
+          class="project-doc pending"
+          class:on={!homeOpen}
+          role="tab"
+          aria-selected={!homeOpen}
+          aria-busy="true"
+          aria-disabled="true"
+          aria-label={`${chipName}, opening`}
+          tabindex="-1"
+        ><span class="project-doc-label">{chipName}</span></div>
+      {/if}
     </div>
   </div>
 
@@ -493,8 +562,11 @@
 <div class="titlebar-drag" aria-hidden="true"></div>
 
 <div class="tb-right" id="tb-right">
-  <AgentLauncher {PM} />
-  <ToolbarMount {PM} />
+  <div class="tb-project-controls" inert={!!pending}>
+    <TaskPill {PM} />
+    <AgentLauncher {PM} />
+    <ToolbarMount {PM} />
+  </div>
   {#if !homeOpen}
     <button class="iconbtn" type="button" title="Panel library" aria-label="Open panel library" onclick={() => PM.LibraryUI?.open?.()}>
       <Icon {PM} name="grid" />
@@ -512,7 +584,7 @@
     <Icon {PM} name="gear" />
   </button>
   {#if !homeOpen}
-    <button class="btn pri tb-export" type="button" title="Export… (⌘E)" aria-label="Export…" onclick={() => PM.Export?.dialog?.()}>
+    <button class="btn pri tb-export" type="button" disabled={!!pending} title="Export… (⌘E)" aria-label="Export…" onclick={() => PM.Export?.dialog?.()}>
       <Icon {PM} name="export" />Export
     </button>
   {/if}

@@ -63,9 +63,10 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   expect(new Set(icons).size).toBe(icons.length);
   expect(icons).not.toContain('missing');
   expect(icons).not.toContain('panel');
-  const panelCount = await page.evaluate(() => Object.keys((window as any).PM.PANELS).filter(id => id !== 'toolbar').length);
+  const panelCount = await page.evaluate(() => Object.values((window as any).PM.PANELS).filter((panel: any) => panel.id !== 'toolbar' && panel.library !== false).length);
   expect(await library.locator('.library-card').count()).toBe(panelCount);
   await expect(library.locator('[data-panel-id="toolbar"]')).toHaveCount(0);
+  await expect(library.locator('[data-panel-id="agent"]')).toHaveCount(0);
   await expect(library.getByRole('button', { name: 'Edit Tools', exact: true })).toHaveCount(0);
   await expect(library.locator('.library-panel-meta')).toHaveCount(0);
   const previewLayout = await library.locator('.library-card[data-panel-id]').evaluateAll((cards) => cards.map((card) => {
@@ -174,7 +175,7 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   await library.getByRole('searchbox', { name: 'Search panels' }).fill('');
   const dragId = await page.evaluate(() => {
     const PM = (window as any).PM;
-    return Object.keys(PM.PANELS).find(id => id !== 'toolbar' && !PM.Layout.findPanel(PM.WS.current, id));
+    return Object.keys(PM.PANELS).find(id => id !== 'toolbar' && PM.PANELS[id].library !== false && !PM.Layout.findPanel(PM.WS.current, id));
   });
   expect(dragId).toBeTruthy();
   await page.evaluate(async (id) => {

@@ -159,6 +159,7 @@ for (let round = 0; round < count; round++) {
         POWERMOVE_ENGINE_EAGER_JOBS: ['before', 'pipelines'].includes(variant) ? '1' : '0',
         POWERMOVE_ENGINE_RUNTIME_MEMORY: '1', POWERMOVE_ENGINE_ALLOCATION_INVENTORY: '1',
         POWERMOVE_USER_DATA: profile, POWERMOVE_BACKGROUND_TEST: '1', POWERMOVE_DEVTOOLS: '0',
+        POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
         CODEX_BINARY: path.join(desktop, 'src/main/codex/__fixtures__/fake-codex-app-server.sh'), POWERMOVE_FAKE_CHATGPT_STATUS: 'connected' };
       // `nativeBefore` isolates addon changes with the current renderer and
       // the same on-demand job policy; `before` retains the eager control.

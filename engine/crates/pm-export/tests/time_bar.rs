@@ -121,6 +121,7 @@ fn export_window(dir: &Path, num: u32, den: u32, first: u64, count: u64) -> (Vec
             end: ticks_of_frame(end_frame, num, den),
         },
         audio: false,
+        audio_index_playhead: None,
         motion_blur: false,
         color: OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,

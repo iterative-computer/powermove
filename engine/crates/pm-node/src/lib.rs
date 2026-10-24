@@ -28,6 +28,7 @@ pub mod jobs;
 mod memory;
 
 pub mod fonts;
+pub mod kernel;
 
 /// Parses `"interactive"` or `"job"`.
 pub fn parse_process(text: &str) -> Result<EngineProcess, String> {
@@ -94,6 +95,7 @@ pub struct EngineHost {
     /// Where the engine's rendering threads ask the font service for
     /// registry answers and full fonts (`fonts::render`).
     broker: fonts::render::FontBroker,
+    kernels: kernel::NativeKernels,
 }
 
 impl EngineHost {
@@ -184,6 +186,7 @@ impl EngineHost {
             font_ports: Default::default(),
             font_hub,
             broker,
+            kernels: kernel::NativeKernels::new(process),
         })
     }
 
@@ -277,6 +280,7 @@ impl EngineHost {
             return self.attach_fonts(port);
         }
         let actions = self.engine.attach(PortId(port), parse_peer(peer)?);
+        self.engine.set_document_owner(PortId(port), owner);
         self.font_hub.set_port_owner(port, owner);
         Ok(actions)
     }
@@ -314,14 +318,18 @@ impl EngineHost {
     }
 
     pub fn detach(&mut self, port: u32) -> Vec<Action> {
+        self.sync_runtime_qos();
         if self.font_ports.remove(&port) {
             return Vec::new();
         }
         self.font_hub.set_port_owner(port, None);
-        self.engine.detach(PortId(port))
+        let actions = self.engine.detach(PortId(port));
+        self.sync_runtime_qos();
+        actions
     }
 
     pub fn receive(&mut self, port: u32, bytes: &[u8]) -> Vec<Action> {
+        self.sync_runtime_qos();
         if self.font_ports.contains(&port) {
             let generation = pm_text::served::FontServer::generation(&*self.font_hub);
             let reply = match self.fonts.as_mut() {
@@ -354,8 +362,11 @@ impl EngineHost {
                 bytes: reply,
             }];
         }
-        self.engine
-            .receive(PortId(port), bytes, pm_engine::clock::host_now())
+        let actions = self
+            .engine
+            .receive(PortId(port), bytes, pm_engine::clock::host_now());
+        self.sync_runtime_qos();
+        actions
     }
 
     /// The font service, once main has attached a font port: the engine's
@@ -365,16 +376,39 @@ impl EngineHost {
     }
 
     pub fn tick(&mut self) -> Vec<Action> {
+        self.sync_runtime_qos();
         self.serve_fonts();
-        self.engine.tick(pm_engine::clock::host_now())
+        let actions = self.engine.tick(pm_engine::clock::host_now());
+        self.sync_runtime_qos();
+        actions
     }
 
     /// What the job service produced off this thread (`Engine::pump`), and
     /// the rendering threads' font asks.
     pub fn pump(&mut self) -> Vec<Action> {
+        self.sync_runtime_qos();
         self.serve_fonts();
-        self.engine.pump()
+        let actions = self.engine.pump();
+        self.sync_runtime_qos();
+        actions
     }
+
+    #[cfg(target_os = "macos")]
+    fn sync_runtime_qos(&self) {
+        if let Some(jobs) = &self.jobs {
+            let desired = jobs.runtime_qos();
+            let name = match desired {
+                pm_engine::qos::JobQos::Default => "default",
+                pm_engine::qos::JobQos::Utility => "utility",
+            };
+            if current_qos() != name {
+                pm_engine::qos::set_job_qos(desired).expect("valid Darwin job QoS class");
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn sync_runtime_qos(&self) {}
 
     pub fn status(&self) -> EngineStatus {
         self.engine.status()
@@ -383,6 +417,7 @@ impl EngineHost {
     /// Status as JSON, with the thread's QoS class and the presenter's
     /// counters added.
     pub fn status_json(&self) -> String {
+        self.sync_runtime_qos();
         let mut value = serde_json::to_value(self.status()).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
             #[cfg(target_os = "macos")]
@@ -430,12 +465,33 @@ impl EngineHost {
     pub fn engine_mut(&mut self) -> &mut Engine {
         &mut self.engine
     }
+
+    /// Owner-scoped synchronous evaluator RPC; large ingestion is queued on
+    /// the native document reader and adopted only by explicit activation.
+    pub fn document_kernel(&mut self, owner: u32, request: &str) -> String {
+        self.kernels.call(&mut self.engine, owner, request)
+    }
+
+    pub fn document_kernel_bytes(
+        &mut self,
+        owner: u32,
+        request: &str,
+        data: Option<&[u8]>,
+    ) -> String {
+        self.kernels
+            .call_bytes(&mut self.engine, owner, request, data)
+    }
 }
 
 impl Drop for EngineHost {
     /// Render threads waiting for fonts stop waiting before the presenter
     /// and the job lanes are joined (the engine drops after this).
     fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        if self.jobs.is_some() {
+            pm_engine::qos::set_job_qos(pm_engine::qos::JobQos::Utility)
+                .expect("valid Darwin job QoS class");
+        }
         self.broker.close();
         self.font_hub.shutdown();
     }
@@ -496,5 +552,57 @@ mod tests {
         if cfg!(target_vendor = "apple") {
             assert_eq!(qos, "utility");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn shared_job_runtime_follows_only_running_user_exports() {
+        use pm_protocol::priority::{JobState, PriorityClass};
+
+        std::thread::spawn(|| {
+            let sink: ActionSink = std::sync::Arc::new(|_| {});
+            let mut host = EngineHost::with_sink(EngineProcess::Job, Some(sink), |_| None).unwrap();
+            let jobs = host.jobs.clone().expect("job service started");
+            assert_eq!(current_qos(), "utility");
+
+            jobs.test_set_job("agent", PriorityClass::AgentExport, JobState::Running);
+            jobs.test_set_job("user", PriorityClass::UserJob, JobState::Queued);
+            host.pump();
+            assert_eq!(current_qos(), "utility");
+
+            jobs.test_set_job("user", PriorityClass::UserJob, JobState::Running);
+            host.pump();
+            assert_eq!(current_qos(), "default");
+            let worker = pm_engine::qos::spawn_engine_thread(
+                EngineProcess::Job,
+                "pm-test-agent-qos",
+                current_qos,
+            )
+            .unwrap();
+            assert_eq!(worker.join().unwrap(), "utility");
+
+            jobs.test_set_playback(true);
+            host.tick();
+            assert_eq!(current_qos(), "utility");
+            jobs.test_set_playback(false);
+            host.pump();
+            assert_eq!(current_qos(), "default");
+
+            jobs.test_set_job("second", PriorityClass::UserJob, JobState::Running);
+            jobs.test_set_job("user", PriorityClass::UserJob, JobState::Done);
+            host.pump();
+            assert_eq!(current_qos(), "default");
+            jobs.test_set_job("second", PriorityClass::UserJob, JobState::Cancelled);
+            host.pump();
+            assert_eq!(current_qos(), "utility");
+
+            jobs.test_set_job("user", PriorityClass::UserJob, JobState::Running);
+            host.pump();
+            assert_eq!(current_qos(), "default");
+            drop(host);
+            assert_eq!(current_qos(), "utility");
+        })
+        .join()
+        .unwrap();
     }
 }

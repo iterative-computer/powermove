@@ -22,7 +22,7 @@ describe('requiresEngine stamp', () => {
 
   it('stamps non-default project color settings', () => {
     const project: any = { assets: {} };
-    project.color = { mode: 'standard', linearBlending: false, precision: 'float16', blendDomain: 'hdrSafe' };
+    project.color = { mode: 'standard', linearBlending: false, blendDomain: 'hdrSafe' };
     expect(nativeOnlyFeatures(project)).toEqual([]);
     project.color.linearBlending = true;
     expect(nativeOnlyFeatures(project)).toEqual(['projectColor']);
@@ -31,6 +31,9 @@ describe('requiresEngine stamp', () => {
     delete project.color;
     expect(applyEngineStamp(project)).toBe(true);
     expect('requiresEngine' in project).toBe(false);
+    project.colorDepth = 32;
+    expect(nativeOnlyFeatures(project)).toEqual([]);
+    expect(applyEngineStamp(project)).toBe(false);
   });
 
   it('stamps a clip whose pitch follows its speed, in any composition', () => {

@@ -21,8 +21,10 @@ test('streamed text stays inline and keeps existing nodes as chunks arrive', asy
     };
   });
   await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).fill('Stream a reply');
-  await page.getByRole('button', { name: 'Send message', exact: true }).click(); await session.openAgent();
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
   await expect.poll(() => page.evaluate(() => typeof (window as any).__streamChunk)).toBe('function');
+  await expect(page.locator('#agent-popover #panel-agent')).toBeVisible();
+  await expect(page.locator('#agent-launcher')).toHaveAttribute('aria-expanded', 'true');
   await expect(page.locator('.agent-prompt')).toHaveText('Stream a reply');
   await page.evaluate(() => (window as any).__streamChunk('Hello '));
   const text = page.locator('.agent-trace-text');
@@ -42,4 +44,6 @@ test('streamed text stays inline and keeps existing nodes as chunks arrive', asy
   await page.evaluate(() => (window as any).__streamChunk(' again'));
   await expect(text).toHaveText('Hello world with care again');
   await expect.poll(() => text.evaluate((p) => p.getAnimations({ subtree: true }).length)).toBe(0);
+  await page.getByRole('textbox', { name: 'Message Powermove agent', exact: true }).press('Escape');
+  await expect(page.locator('#agent-popover')).toBeHidden();
 });

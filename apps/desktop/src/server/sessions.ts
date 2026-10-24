@@ -32,6 +32,7 @@ interface Session {
   members: Set<SessionMember>;
   saveTimer: ReturnType<typeof setTimeout> | null;
   dirty: boolean;
+  releaseProject?: () => void;
 }
 
 const PROJECT_SLOT = 'project.';
@@ -44,7 +45,7 @@ export class ProjectSessions {
   private readonly membership = new Map<SessionMember, Set<string>>();
 
   constructor(
-    private readonly store: { read(key: string): unknown; set(key: string, value: unknown): void },
+    private readonly store: { read(key: string): unknown; set(key: string, value: unknown): void; acquireProject?(id: string): () => void },
     private readonly options: { channel: string; version: string; log?: (line: string) => void; now?: () => number }
   ) {}
 
@@ -52,9 +53,11 @@ export class ProjectSessions {
   join(member: SessionMember, projectId: string, doc: unknown): JoinResult {
     let session = this.sessions.get(projectId);
     if (!session) {
-      const stored = this.readSlot(projectId);
-      const seed = this.fresher(stored, doc);
-      session = { projectId, doc: seed, seq: 0, members: new Set(), saveTimer: null, dirty: false };
+      const releaseProject = this.store.acquireProject?.(projectId);
+      let seed: unknown;
+      try { seed = this.fresher(this.readSlot(projectId), doc); }
+      catch (error) { releaseProject?.(); throw error; }
+      session = { projectId, doc: seed, seq: 0, members: new Set(), saveTimer: null, dirty: false, releaseProject };
       this.sessions.set(projectId, session);
     }
     session.members.add(member);
@@ -137,6 +140,7 @@ export class ProjectSessions {
   private close(session: Session): void {
     this.save(session);
     this.sessions.delete(session.projectId);
+    session.releaseProject?.();
   }
 
   private scheduleSave(session: Session): void {

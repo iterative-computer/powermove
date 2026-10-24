@@ -48,4 +48,15 @@ describe('FallbackInputs', () => {
     expect(inputs.take('e'.repeat(64), 1, 64, 4)).toBeNull();
     expect(inputs.held).toBeLessThanOrEqual(1024);
   });
+
+  it('keeps the same pixel capacity for float32 bands within a bounded 2× physical budget', () => {
+    const inputs = new FallbackInputs({ bytes: 64 }); // 128 physical RGBA32F bytes.
+    const floatBand = (key: string) => ({ ...band(0, 0, 1, 0, key, 4, 1),
+      rgba16f: new Uint8Array(0), rgba32f: new Uint8Array(4 * 16) });
+    expect(inputs.receive(floatBand('a'.repeat(64)))).toBe(true);
+    expect(inputs.receive(floatBand('b'.repeat(64)))).toBe(true);
+    expect(inputs.held).toBe(128);
+    expect(inputs.take('a'.repeat(64), 1, 4, 1)).not.toBeNull();
+    expect(inputs.take('b'.repeat(64), 1, 4, 1)).not.toBeNull();
+  });
 });

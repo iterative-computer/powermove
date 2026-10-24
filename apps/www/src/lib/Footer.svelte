@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { GITHUB, RELEASES } from '$lib/links';
+  import { DISCORD, GITHUB, RELEASES } from '$lib/links';
   import { download, resolveDownload, stars } from '$lib/download.svelte';
 
   type Link = { label: string; href: string; external?: boolean };
@@ -27,6 +27,7 @@
       title: 'Company',
       links: [
         { label: 'Iterative Computer', href: 'https://iterative.computer', external: true },
+        { label: 'Join our Discord', href: DISCORD, external: true },
         { label: 'hello@iterative.computer', href: 'mailto:hello@iterative.computer' },
         { label: 'Privacy', href: '/privacy' },
         { label: 'Terms', href: '/terms' },

@@ -90,6 +90,42 @@ describe('Svelte shell', () => {
     expect(PM.Projects.openProjects).not.toHaveBeenCalled();
   });
 
+  it('measures the tabs for their animation only when an edit changes what they show', async () => {
+    const { PM, bus, projects } = fakePM();
+    PM.Tabs = { list: vi.fn(() => ['p1', 'p2']), activate: vi.fn(), close: vi.fn(async () => true) };
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+    const measured = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
+    const tabMeasures = () => measured.mock.contexts.filter((el) => (el as HTMLElement).classList?.contains('project-doc')).length;
+    const settle = () => new Promise<void>((resolve) => queueMicrotask(resolve));
+    try {
+      // Edits emit `project`; the tabs show the same: nothing is measured.
+      for (let i = 0; i < 5; i++) flushSync(() => bus.emit('project'));
+      await settle();
+      expect(tabMeasures()).toBe(0);
+      // The first edit marks the project dirty: the strip reconciles (its
+      // tabs animate) as before.
+      flushSync(() => { PM.app.dirty = true; bus.emit('project'); });
+      await settle();
+      const afterDirty = tabMeasures();
+      expect(afterDirty).toBeGreaterThan(0);
+      expect(target.querySelector('[data-project-id="p1"]')?.classList.contains('dirty')).toBe(true);
+      // A rename reconciles too, and the label follows.
+      flushSync(() => { projects.p2.name = 'Renamed'; bus.emit('project'); });
+      await settle();
+      expect(tabMeasures()).toBeGreaterThan(afterDirty);
+      expect(target.querySelector('[data-project-id="p2"] .project-doc-label')?.textContent).toBe('Renamed');
+      // A reordered strip follows the list.
+      PM.Tabs.list.mockReturnValue(['p2', 'p1']);
+      flushSync(() => bus.emit('project'));
+      expect([...target.querySelectorAll<HTMLElement>('.project-doc')].map((t) => t.dataset.tabId)).toEqual(['p2', 'p1']);
+    } finally {
+      measured.mockRestore();
+    }
+  });
+
   it('lists this window\'s tabs in strip order and raises the one on screen', () => {
     const { PM } = fakePM();
     PM.Tabs = { list: vi.fn(() => ['p2', 'p1']), activate: vi.fn(), close: vi.fn(async () => true) };
@@ -126,6 +162,75 @@ describe('Svelte shell', () => {
     expect(target.querySelector('.project-home')?.getAttribute('aria-selected')).toBe('true');
     // Export has nothing to export from Projects.
     expect(target.querySelector('.tb-export')).toBeNull();
+  });
+
+  it('selects a project that is still opening and marks its tab busy until it lands', () => {
+    const { PM, bus } = fakePM();
+    PM.Tabs = { list: vi.fn(() => ['p1', 'p2']), activate: vi.fn() };
+    PM.projectFileState = vi.fn(() => ({ path: '/tmp/x.pmv', dirty: true }));
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+
+    PM.projectFileState.mockClear();
+    flushSync(() => {
+      PM.projectLoading = { id: 'p2', name: 'Second', generation: 1 };
+      bus.emit('project:loading');
+    });
+    const opening = target.querySelector<HTMLElement>('[data-tab-id="p2"]')!;
+    const outgoing = target.querySelector<HTMLElement>('[data-tab-id="p1"]')!;
+    expect(opening.getAttribute('aria-selected')).toBe('true');
+    expect(opening.getAttribute('aria-busy')).toBe('true');
+    expect(opening.classList.contains('pending')).toBe(true);
+    expect(opening.getAttribute('aria-label')).toBe('Second, opening');
+    // The opening tab never reads the saved state the load is reading.
+    expect(PM.projectFileState).not.toHaveBeenCalledWith('p2', expect.anything());
+    expect(outgoing.getAttribute('aria-selected')).toBe('false');
+    expect(outgoing.classList.contains('dirty')).toBe(true);
+    expect(target.querySelector('.project-doc.pending:not([data-tab-id])')).toBeNull();
+
+    flushSync(() => {
+      PM.proj = { id: 'p2', name: 'Second' };
+      PM.projectLoading = null;
+      bus.emit('project:loading');
+    });
+    expect(opening.hasAttribute('aria-busy')).toBe(false);
+    expect(opening.classList.contains('pending')).toBe(false);
+    expect(opening.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('shows one inert placeholder tab for a project opening on a cold boot', () => {
+    const { PM, bus } = fakePM();
+    PM.Tabs = { list: vi.fn(() => []), activate: vi.fn() };
+    PM.proj = undefined;
+    PM.projectLoading = { id: 'p9', name: 'Long Film', generation: 1 };
+    const target = document.getElementById('titlebar')!;
+    target.replaceChildren();
+    instances.push(mount(Titlebar, { target, props: { PM } }));
+    flushSync();
+
+    const chips = target.querySelectorAll<HTMLElement>('.project-doc.pending');
+    expect(chips).toHaveLength(1);
+    const chip = chips[0]!;
+    expect(chip.textContent).toBe('Long Film');
+    expect(chip.dataset.tabId).toBeUndefined();
+    expect(chip.getAttribute('aria-disabled')).toBe('true');
+    expect(chip.getAttribute('aria-busy')).toBe('true');
+    expect(chip.getAttribute('aria-selected')).toBe('true');
+    expect(chip.tabIndex).toBe(-1);
+    expect(chip.querySelector('.project-doc-close')).toBeNull();
+    // Keyboard focus stays on a real tab.
+    expect(target.querySelector<HTMLElement>('.project-home')!.tabIndex).toBe(0);
+
+    flushSync(() => {
+      PM.Tabs.list = vi.fn(() => ['p9']);
+      PM.proj = { id: 'p9', name: 'Long Film' };
+      PM.projectLoading = null;
+      bus.emit('project:loading');
+    });
+    expect(target.querySelector('.project-doc.pending')).toBeNull();
+    expect(target.querySelector('[data-tab-id="p9"]')?.getAttribute('aria-selected')).toBe('true');
   });
 
   it('updates the window document from the same mutable file state after the file bridge appears', () => {

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
 
 import { expect, launchApp, repoRoot, test } from './helpers/app';
 
@@ -94,27 +95,35 @@ test('large images and files cross the real renderer-to-main agent boundary', as
     }
   });
   try {
+    await session.openEditor();
     const result = await session.page.evaluate(async () => {
       const image = new Uint8Array(4 * 1024 * 1024 + 1);
       image.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-      return await (window as any).__powermoveTestBridge.codex.run({
-        id: 'large-attachment-run',
+      let binary = '';
+      for (let offset = 0; offset < image.length; offset += 0x8000) {
+        binary += String.fromCharCode(...image.subarray(offset, offset + 0x8000));
+      }
+      // Exercise the same shim conversion and private IPC used by the agent.
+      return await (window as any).PM.CodexBridge.request('Use the attached references.', null, [window.btoa(binary)], {
         mode: 'autonomous',
-        prompt: 'Use the attached references.',
-        schema: null,
-        images: [image],
         model: null,
         reasoningEffort: null,
         access: 'project',
         projectId: 'large-attachment-project',
         projectName: 'Large attachment project',
         projectJSON: '{"layers":[]}',
-        attachments: [{ name: 'large.bin', data: new Uint8Array(100 * 1024 + 1) }],
-        consentToken: null
+        attachments: [{ name: 'large.bin', content: '\0'.repeat(100 * 1024 + 1) }],
       });
     });
 
-    expect(result).toMatchObject({ ok: true });
+    expect(JSON.parse(result.text)).toMatchObject({ summary: 'done' });
+    const inputs = path.join(session.userData, 'Agent Workspaces', 'large-attachment-project', 'inputs');
+    const reference = await readFile(path.join(inputs, 'references', 'reference-0.png'));
+    expect(reference.byteLength).toBe(4 * 1024 * 1024 + 1);
+    expect([...reference.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    // The workspace sanitizes attachment filenames (large.bin → large-bin).
+    expect((await stat(path.join(inputs, 'attachments', 'large-bin'))).size).toBe(100 * 1024 + 1);
+    expect(await session.page.evaluate(() => typeof (window as any).powermove)).toBe('undefined');
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     await session.close();
@@ -149,23 +158,22 @@ test('Claude subscription status and structured runs cross the real hidden app b
     await expect(page.locator('.agent-modelbar select[aria-label="Model"]')).toHaveValue('sonnet');
     await expect(page.locator('[data-agent-panel] [aria-label="Message composer"]')).toBeVisible();
 
-    const result = await page.evaluate(async () => await (window as any).__powermoveTestBridge.codex.run({
-      id: 'claude-hidden-run',
-      provider: 'claude',
-      mode: 'editor',
-      prompt: 'Return a message.',
-      schema: { type: 'object', required: ['message'], properties: { message: { type: 'string' } } },
-      images: [],
-      model: 'sonnet',
-      reasoningEffort: 'high',
-      access: 'editor',
-      projectId: 'editor',
-      projectName: 'Editor',
-      projectJSON: null,
-      attachments: [],
-      consentToken: null
-    }));
-    expect(result).toMatchObject({ ok: true, text: '{"message":"claude editor done"}' });
+    const result = await page.evaluate(async () => await (window as any).PM.CodexBridge.request(
+      'Return a message.',
+      { type: 'object', required: ['message'], properties: { message: { type: 'string' } } },
+      [], {
+        provider: 'claude',
+        mode: 'editor',
+        model: 'sonnet',
+        reasoningEffort: 'high',
+        access: 'editor',
+        projectId: 'editor',
+        projectName: 'Editor',
+        projectJSON: null,
+        attachments: [],
+      }
+    ));
+    expect(JSON.parse(result)).toEqual({ message: 'claude editor done' });
     expect(session.diagnostics.pageErrors).toEqual([]);
   } finally {
     await session.close();

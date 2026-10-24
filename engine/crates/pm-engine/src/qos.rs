@@ -1,9 +1,9 @@
 //! Thread QoS classes for engine processes (contract 13, invariant 10).
 //!
-//! The job engine runs at utility QoS, never in the Darwin background state
-//! (background slows its reaction to deadline signals and has no GPU
-//! effect). The interactive engine keeps the default class; its render and
-//! audio threads raise their own.
+//! Job infrastructure and agent work run at utility QoS. A user-started
+//! export uses default QoS until playback starts, then utility until it stops.
+//! The interactive engine keeps the default class; its render and audio
+//! threads raise their own.
 //!
 //! On macOS a thread does not inherit its creator's QoS class: a thread
 //! made with `std::thread::spawn` starts at the default class even when its
@@ -17,21 +17,40 @@ use std::thread::{Builder, JoinHandle};
 
 use pm_protocol::error::EngineProcess;
 
+/// The two QoS classes used by job-engine work. Darwin's background class
+/// slows the response to playback deadline signals and has no GPU effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobQos {
+    Default,
+    Utility,
+}
+
+/// Sets the calling thread's class. A thread can only set its own Darwin QoS;
+/// workers refresh at work boundaries when playback state changes.
+pub fn set_job_qos(class: JobQos) -> Result<(), String> {
+    #[cfg(target_vendor = "apple")]
+    {
+        let native = match class {
+            JobQos::Default => libc::qos_class_t::QOS_CLASS_DEFAULT,
+            JobQos::Utility => libc::qos_class_t::QOS_CLASS_UTILITY,
+        };
+        // SAFETY: sets the calling thread's QoS class; no pointers involved.
+        let status = unsafe { libc::pthread_set_qos_class_self_np(native, 0) };
+        if status != 0 {
+            return Err(format!("pthread_set_qos_class_self_np failed ({status})"));
+        }
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    let _ = class;
+    Ok(())
+}
+
 /// Sets the calling thread's QoS class for `process`.
 pub fn apply_process_qos(process: EngineProcess) -> Result<(), String> {
     if process != EngineProcess::Job {
         return Ok(());
     }
-    #[cfg(target_vendor = "apple")]
-    {
-        // SAFETY: sets the calling thread's QoS class; no pointers involved.
-        let status =
-            unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
-        if status != 0 {
-            return Err(format!("pthread_set_qos_class_self_np failed ({status})"));
-        }
-    }
-    Ok(())
+    set_job_qos(JobQos::Utility)
 }
 
 /// Starts an engine thread at `process`'s QoS class. Every long-lived

@@ -104,7 +104,14 @@ fn level_one_bitmap_does_not_quantize_the_source_or_level_two_cache() {
     use serde_json::json;
     use support::doc::*;
     let dir = std::env::temp_dir().join(format!("pm-still-depth-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir(&dir).unwrap();
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Scratch(dir.clone());
     let path = dir.join("deep.png");
     let mut encoder = png::Encoder::new(std::fs::File::create(&path).unwrap(), 8, 8);
     encoder.set_color(png::ColorType::Rgba);
@@ -138,6 +145,7 @@ fn level_one_bitmap_does_not_quantize_the_source_or_level_two_cache() {
             1.0,
         )],
     );
+    value["colorDepth"] = json!(32);
     asset(&mut value, "clip", "image", "png", 8, 8, 1.0);
     let mut resolver = pm_render::MapResolver::default();
     resolver.paths.insert("clip".into(), path);
@@ -157,6 +165,7 @@ fn level_one_bitmap_does_not_quantize_the_source_or_level_two_cache() {
             )
             .unwrap();
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        assert_eq!(frame.color.format(), wgpu::TextureFormat::Rgba32Float);
         let rgba = renderer.read_rgba(&frame).unwrap();
         let expected = if level == 1 {
             f32::from((pixel[0] >> 8) as u8) / 255.0
@@ -173,5 +182,4 @@ fn level_one_bitmap_does_not_quantize_the_source_or_level_two_cache() {
             first = Some(rgba[0]);
         }
     }
-    std::fs::remove_dir_all(dir).unwrap();
 }

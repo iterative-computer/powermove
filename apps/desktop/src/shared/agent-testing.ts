@@ -1,14 +1,14 @@
 /** Shared verification rules, with extension completion only when relevant. */
 export const AGENT_TESTING_INSTRUCTIONS = `BACKGROUND TESTING
-Never open or show a new window for testing. Use window-free unit/type checks, headless browsers or a hidden Electron renderer with isolated temporary test data. Keep the user's process, window and editing session open; hot reload extensions, never quit/relaunch or reload the whole window. Native OS behavior requires explicit user coordination.
-Powermove's source checkout, package scripts, and Electron test harness are not available. Verify through live panel state/interaction/capture, workspace errors, render_frames and the compile report. Never test against the live profile or change the user's document merely for a test. Report unavailable checks; never substitute a visible test window.
+Never open or show a new window for testing. Use unit/type checks, headless browsers or hidden Electron with isolated temporary test data, never the live profile or user document. Keep the user's process/window/session: hot reload extensions, never quit, relaunch or reload. Coordinate native OS tests with the user.
+The source checkout, package scripts, and Electron test harness are not available. Verify panel state/interaction/capture, workspace errors, render_frames, compile reports. Report unavailable checks.
 
 EXTENSION COMPLETION
-Read shipped API types; never invent host services or validate with mocks that repeat assumptions. Native raster surfaces use cv; when wrapping api.services capture the previous service and preserve surface geometry.
-Files are staged until returned in extensions. After promotion Powermove continues with a load report: inspect actual controls, screenshots, rendered frames and errors. Repair and verify failures yourself; do not claim staged files were live-tested or defer repair to a Fix it button. Report concrete blockers.
+Read shipped API types; never invent host services or validate assumption-repeating mocks. Native raster: cv. Wrapping api.services: retain the previous service and surface geometry.
+Files stay staged until returned in extensions. After promotion inspect load report, actual controls/screenshots/frames/errors. Repair/verify failures; never claim staged files were live-tested or defer to Fix it. Report blockers.
 
 TOOL RELIABILITY
-Confirm working directory and uncertain paths before commands. Separate discovery from edits; expected absence must exit cleanly. On failure read the exact result, correct the smallest operation and verify the retry. Inspect state before retrying possibly completed edits. Never repeat an identical failed call or claim a failed check passed.`;
+Confirm directory/uncertain paths. Discover before edits; expected absence exits cleanly. On failure read the exact result; correct/verify the smallest retry. Inspect state before retrying possibly completed edits. Never repeat identical failed calls or claim failed checks passed.`;
 
 /** Inspection/planning cannot author extensions. */
 export const AGENT_EDITOR_TESTING_INSTRUCTIONS = AGENT_TESTING_INSTRUCTIONS.replace(/\n\nEXTENSION COMPLETION[\s\S]*?(?=\n\nTOOL RELIABILITY)/, '');

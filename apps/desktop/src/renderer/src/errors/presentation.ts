@@ -66,6 +66,12 @@ export function presentError(value: unknown): ErrorPresentation {
   if (/no rollout found|(?:thread|session).{0,80}(?:not found|could not be resumed)/i.test(details)) {
     return result('Couldn’t reopen the conversation', 'Send your request again. If this continues, start a new conversation.');
   }
+  if (/cloud:download|cloud download|file is still in the cloud|cloud file is unavailable/i.test(details)) {
+    return result('Couldn’t download cloud media', details.replace(/Error invoking remote method '[^']+': (?:Error: )?/g, ''));
+  }
+  if (/video frame decode|could not decode video frame/i.test(details)) {
+    return result('Couldn’t decode the video', details);
+  }
   if (/rate.?limit|\b429\b|overloaded|usage limit/i.test(details)) {
     return result('Agent is temporarily unavailable', 'Wait a moment, then send your request again. Check your account if you’ve reached a usage limit.');
   }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { kernelSignals } from '../kernel/signals.svelte';
   import { frameBus } from '../runtime/frame-bus';
   import { doc } from '../state/document.svelte';
@@ -99,10 +100,26 @@
   $effect(() => {
     const events = ['layers', 'project', 'history', 'assets'];
     const offs = events.map((event) => PM.bus?.on?.(event, () => refreshToken++));
-    const interval = window.setInterval(() => PM.invalidate?.('status'), 1000);
+    let interval: number | undefined, initialized = false;
+    const syncPolling = () => untrack(() => {
+      const visible = !document.hidden && !PM.ProjectsScreen?.isOpen && !PM.SettingsUI?.isOpen;
+      if (visible && interval === undefined) {
+        // Time-based extension text and expired telemetry refresh as soon as
+        // the editor returns, then keep their normal foreground cadence.
+        if (initialized) refreshToken++;
+        interval = window.setInterval(() => PM.invalidate?.('status'), 1000);
+      } else if (!visible && interval !== undefined) {
+        window.clearInterval(interval); interval = undefined;
+      }
+      initialized = true;
+    });
+    const screenOffs = ['projects:screen', 'settings:screen'].map(event => PM.bus?.on?.(event, syncPolling));
+    document.addEventListener('visibilitychange', syncPolling);
+    syncPolling();
     return () => {
-      offs.forEach((off) => off?.());
-      window.clearInterval(interval);
+      offs.forEach((off) => off?.()); screenOffs.forEach(off => off?.());
+      document.removeEventListener('visibilitychange', syncPolling);
+      if (interval !== undefined) window.clearInterval(interval);
     };
   });
 </script>

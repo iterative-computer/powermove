@@ -7,8 +7,9 @@
 
 use std::sync::Arc;
 
+use pm_eval::node::Got;
 use pm_eval::{CompiledExpression, ExprContext, ExprError, ExpressionEngine, JsValue};
-use pm_expr::{Context, Dialect, Expression, JsStr, JsonHost, Value};
+use pm_expr::{Context, Dialect, Expression, Host, JsStr, JsonHost, JsonRef, Shape, Value};
 use pm_model::JsString;
 
 /// `pm-expr` in the legacy dialect.
@@ -22,6 +23,68 @@ impl ExpressionEngine for PmExprEngine {
         let units: Vec<u16> = source.utf16_units().collect();
         Expression::compile_utf16(&units, Dialect::Legacy)
             .map(|e| Arc::new(Compiled(e)) as Arc<dyn CompiledExpression>)
+    }
+}
+
+/// [`JsonHost`] with the channel's context for `sample` and `motionPath`.
+struct RenderHost<'a> {
+    json: JsonHost<'a>,
+    cx: &'a ExprContext<'a>,
+}
+
+impl<'a> Host for RenderHost<'a> {
+    type Obj = JsonRef<'a>;
+
+    fn shape(&self, obj: &JsonRef<'a>) -> Shape {
+        self.json.shape(obj)
+    }
+
+    fn element(&self, array: &JsonRef<'a>, index: usize) -> Value<JsonRef<'a>> {
+        self.json.element(array, index)
+    }
+
+    fn property(&self, object: &JsonRef<'a>, key: &JsStr) -> Option<Value<JsonRef<'a>>> {
+        self.json.property(object, key)
+    }
+
+    fn sample(
+        &self,
+        layer: &JsStr,
+        channel: &JsStr,
+        local_time: f64,
+    ) -> Option<Result<Value<JsonRef<'a>>, String>> {
+        let layer = JsString::from_utf16_units(layer.units());
+        let channel = JsString::from_utf16_units(channel.units());
+        Some(self.cx.sample(&layer, &channel, local_time).map(|got| {
+            // The layer and composition are owned copies here, so an object
+            // (a path, an array) cannot be handed over; numbers, strings,
+            // booleans, and null are.
+            let value = match got {
+                Got::Node(n) => pm_eval::node::js_value(n),
+                Got::Value(v) => v,
+                Got::Undefined => JsValue::Undefined,
+            };
+            match value {
+                JsValue::Null => Value::Null,
+                JsValue::Bool(b) => Value::Bool(b),
+                JsValue::Number(n) => Value::Number(n),
+                JsValue::String(s) => Value::String(js_str(&s)),
+                JsValue::Undefined | JsValue::Object(_) => Value::Undefined,
+            }
+        }))
+    }
+
+    fn motion_path(
+        &self,
+        layer: &JsStr,
+        channel: &JsStr,
+        progress: f64,
+        start: f64,
+        end: f64,
+    ) -> Option<Result<f64, String>> {
+        let layer = JsString::from_utf16_units(layer.units());
+        let channel = JsString::from_utf16_units(channel.units());
+        Some(self.cx.motion_path(&layer, &channel, progress, start, end))
     }
 }
 
@@ -60,7 +123,11 @@ impl CompiledExpression for Compiled {
             channel: js_str(cx.channel),
             idx: cx.idx,
         };
-        let out = self.0.evaluate(&JsonHost::new(), &ctx);
+        let host = RenderHost {
+            json: JsonHost::new(),
+            cx,
+        };
+        let out = self.0.evaluate(&host, &ctx);
         match out.result {
             Ok(Value::Number(n)) => Ok(JsValue::Number(n)),
             Ok(Value::Bool(b)) => Ok(JsValue::Bool(b)),

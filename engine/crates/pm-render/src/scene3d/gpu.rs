@@ -1734,6 +1734,28 @@ impl Scene3dRenderer {
         plan: &super::Object3dPlan,
         depth_surface: bool,
     ) -> Result<Rendered3d, Error3d> {
+        self.render_at_precision(
+            device,
+            queue,
+            encoder,
+            pool,
+            plan,
+            depth_surface,
+            pm_protocol::color::Precision::Float16,
+        )
+    }
+
+    /// Renders with the composition's selected working precision.
+    pub fn render_at_precision(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        pool: &mut TargetPool,
+        plan: &super::Object3dPlan,
+        depth_surface: bool,
+        precision: pm_protocol::color::Precision,
+    ) -> Result<Rendered3d, Error3d> {
         self.start_generation();
         match &plan.kind {
             super::Render3d::Layer {
@@ -1757,7 +1779,7 @@ impl Scene3dRenderer {
             super::Render3d::ObjMesh(mesh) => {
                 let color = self
                     .legacy
-                    .render(device, queue, encoder, pool, mesh, self.samples)
+                    .render(device, queue, encoder, pool, mesh, self.samples, precision)
                     .map_err(Error3d::Failed)?;
                 Ok(Rendered3d { color, depth: None })
             }

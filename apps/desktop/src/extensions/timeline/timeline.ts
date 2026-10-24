@@ -1,3 +1,4 @@
+import { addTimelineMarker, drawTimelineMarkers, markerAtTime, removeTimelineMarker, timelineMarkerHit } from './markers';
 import { revealedProperties } from './property-reveal';
 import { layerDrop } from './layer-drop';
 import { graphSample, velocityDialog, scaleGraphDialog } from './graph-controls';
@@ -88,6 +89,14 @@ export const timelineWorkArea = {
     return { workArea: [nextStart, nextStart + span] as [number, number] };
   },
 };
+
+/** Keep five seconds of room before the work area or the earliest strip. */
+export function timelineStartTime(work: readonly number[] | undefined, layers: readonly { from: number }[]): number {
+  let first = Number.isFinite(work?.[0]) ? work![0]! : 0;
+  for (const layer of layers) if (Number.isFinite(layer.from)) first = Math.min(first, layer.from);
+  return first - 5;
+}
+
 export interface QuickOffsetTimingItem {
   time: number;
   offsetIndex: number;
@@ -106,6 +115,13 @@ export interface PropertyValueColumn {
   left: number;
   right: number;
   width: number;
+}
+
+/** Bounds and axis of a value edited outside the layer-row layout. */
+export interface PropertyValueField extends PropertyValueColumn {
+  index: number;
+  top: number;
+  height: number;
 }
 
 /** Keep property values aligned and visibly separated from one another and
@@ -559,12 +575,13 @@ const T: any = previous || {
   drop: null as null | { at: number; rowIdx: number; index: number; name: string; kind: string; dur?: number },
   style: { clipRadius: 5, keyframeSize: 8, showLayerNumbers: true, showTypeBadges: true, toolbarDensity: 'compact' },
 };
+let refreshMarquee: (() => void) | null = null;
 /* Built-in extensions activate after project hydration. Restore the current
    project session here, matching the former app bootstrap path that ran after
    the legacy timeline installer. */
 const sessionTimeline = previous ?? api.storage.get<{ pps?: number; scrollT?: number; scrollY?: number; graph?: boolean; graphCombined?: boolean }>(`session:${api.project.get().id}`);
 if (sessionTimeline) {
-  T.pps = Number.isFinite(sessionTimeline.pps) ? sessionTimeline.pps : T.pps;
+  T.pps = Number.isFinite(sessionTimeline.pps) && sessionTimeline.pps! > 0 ? clamp(sessionTimeline.pps, 4, 4000) : 90;
   T.scrollT = Number.isFinite(sessionTimeline.scrollT) ? sessionTimeline.scrollT : T.scrollT;
   T.scrollY = Number.isFinite(sessionTimeline.scrollY) ? sessionTimeline.scrollY : T.scrollY;
   T.graph = !!sessionTimeline.graph;
@@ -634,6 +651,10 @@ let backdrop: HTMLCanvasElement | null = null;
 let backdropKey: unknown[] | null = null;
 let backdropDirty = true;
 let timePaintPending = false;
+let graphPlaybackFrame = -Infinity;
+let graphPlaybackProject: any = null;
+// Integer frame boundaries can arrive a few floating-point bits below whole.
+const graphFrameIndex = () => Math.floor(api.transport.time() * api.project.get().fps + 1e-7);
 function releaseBackdrop() {
   if (backdrop) { backdrop.width = 0; backdrop.height = 0; }
   backdrop = null; backdropKey = null;
@@ -730,6 +751,7 @@ const WorkArea = timelineWorkArea;
 
 let attachedHead: HTMLElement | null = null;
 let attachedWrap: HTMLElement | null = null;
+let measuredWrap: HTMLElement | null = null;
 
 T.attachHead = (head: HTMLElement) => {
     if (attachedHead === head) return;
@@ -751,6 +773,7 @@ T.attachCanvas = (wrap: HTMLElement) => {
     canvasCleanups = [];
     resizeObserver?.disconnect(); resizeObserver = null;
     attachedWrap = wrap;
+    measuredWrap = null;
     T.__timelineWrap = wrap;
     /* Keep the backing store transparent while a host resize is in flight.
        An opaque 2D canvas is cleared to black as soon as its bitmap changes,
@@ -799,7 +822,7 @@ function buildHead(head: any) {
       if (!times.length) return;
       const first = Math.min(...times), last = Math.max(...times);
       T.pps = clamp((T.w - T.gut - 48) / Math.max(1 / api.project.get().fps, last - first), 4, 4000);
-      T.scrollT = Math.max(-.4, first - 24 / T.pps);
+      T.scrollT = Math.max(minimumScrollTime(), first - 24 / T.pps);
       T.graphViewBounds = null; invalidate('timeline');
     } },
   ]), 'Graph options');
@@ -815,18 +838,18 @@ function buildHead(head: any) {
     const tracks = tracksMode();
     const shown = Boolean(T.graph);
     const view = shown ? (T.graphCombined ? 'both' : 'graph') : 'dope';
-    const mode = tracks ? `tracks:${T.trackSnap !== false}:${view}` : view;
-    if (graphShown === mode) return;
-    graphShown = mode;
+    const controlsState = tracks ? `tracks:${T.trackSnap !== false}:${view}` : view;
+    if (graphShown === controlsState) return;
+    graphShown = controlsState;
     /* The track timeline unfolds keyframes inside its tracks, so the dope
        sheet / graph switch applies there too; it adds Premiere's magnet. */
     snap.hidden = !tracks; snap.style.display = tracks ? '' : 'none';
     snap.classList.toggle('on', T.trackSnap !== false); snap.setAttribute('aria-pressed', String(T.trackSnap !== false));
-    graph.classList.toggle('on', mode === 'graph');
-    for (const [button, active] of [[dope, mode === 'dope'], [both, mode === 'both']] as const) {
+    graph.classList.toggle('on', view === 'graph');
+    for (const [button, active] of [[dope, view === 'dope'], [both, view === 'both']] as const) {
       button.classList.toggle('on', active); button.setAttribute('aria-pressed', String(active));
     }
-    graph.setAttribute('aria-pressed', String(mode === 'graph'));
+    graph.setAttribute('aria-pressed', String(view === 'graph'));
     graphOptions.hidden = !shown;
     graphOptions.style.display = shown ? '' : 'none';
   };
@@ -870,7 +893,15 @@ function buildHead(head: any) {
   }, undefined, headCleanups);
   const syncTime = () => {
     const text = api.util.tc(api.transport.time(), api.project.get().fps);
-    if (time.textContent !== text) time.textContent = text;
+    if (time.textContent === text) return;
+    /* Change the timecode's text node in place. Assigning textContent
+       replaces the node, and a child list change makes Chromium check the
+       page's :has() rules: on every playback and scrub frame that
+       invalidated the style of the whole document (1,236 elements, about
+       4 to 7 ms), which the draw's size read below then forced. */
+    const node = time.firstChild;
+    if (node && node === time.lastChild && node.nodeType === Node.TEXT_NODE && text) (node as Text).data = text;
+    else time.textContent = text;
   };
   const syncTransport = () => {
     /* Keep the icon node stable while playback frames update the timecode.
@@ -967,6 +998,7 @@ function resize(wrap?: any) {
   if (r.width < 8 || r.height < 8) return; /* detached / mid-remount */
   T.dpr = Math.min(window.devicePixelRatio || 1, 2);
   T.w = r.width; T.hgt = r.height;
+  measuredWrap = wrap;
   const width = Math.max(2, Math.round(r.width * T.dpr));
   const height = Math.max(2, Math.round(r.height * T.dpr));
   const changed = T.cv.width !== width || T.cv.height !== height;
@@ -1065,6 +1097,10 @@ function visibleProps(L: any) {
 
 const x2t = (x: any) => (x - T.gut) / T.pps + T.scrollT;
 const t2x = (t: any) => T.gut + (t - T.scrollT) * T.pps;
+const minimumScrollTime = () => {
+  const project = api.project.get();
+  return timelineStartTime(project.work, project.layers);
+};
 /* Unshifted row geometry. While a media drag is over the canvas, rows at or
    below the insertion slot move down one row so the ghost lands in a real
    gap: a new layer strip, never on top of an existing one. */
@@ -1084,10 +1120,21 @@ onEvent('invalidate', (what) => {
   if (what !== 'timeline') return;
   // Unexplained host repaints (for example waveform completion while paused)
   // refresh the backdrop. Time and trail frames have an explicit cheap path.
-  if (!timePaintPending) backdropDirty = true;
+  const timeOnly = timePaintPending;
+  if (!timeOnly) backdropDirty = true;
   timePaintPending = false;
   if (!api.uiState.timelineVersion) rowsDirty = true;
-  draw();
+  // A graph's current-value text follows composition frames. On a 120 Hz
+  // display a 30 fps picture has the same curve readout for four refreshes.
+  // Keep audio/transport continuous, and leave paused pointer scrubs precise.
+  if (timeOnly && api.transport.playing() && T.graph && scrubPresentationTime === null
+      && !backdropDirty && !rowsDirty && backdrop && backdropKey
+      && graphPlaybackProject === api.project.get()
+      && graphPlaybackFrame === graphFrameIndex()) {
+    const key = timelineBackdropKey();
+    if (key && key.length === backdropKey.length && key.every((value, index) => value === backdropKey![index])) return;
+  }
+  draw(timeOnly);
 });
 onEvent('time', invalidateTime);
 onEvent('selection', () => {
@@ -1206,6 +1253,7 @@ const trackView = createTrackView({
   rowSelected: (row) => api.selection.layers().includes(row.L.id) && trackSelected(row, api.selection.chan() ?? ''),
   keyDown: (e, row, x, y) => keyDown(e, row, x, y, -1),
   keyMarquee: (e) => marquee(e, { additive: e.shiftKey || e.metaKey }),
+  setMarqueeRefresh: (refresh) => { refreshMarquee = refresh; },
   editKeyAt: (row, x) => editKeyAt(row, x),
   focusRow: (row) => {
     api.selection.set({ chan: row.key });
@@ -1216,6 +1264,11 @@ const trackView = createTrackView({
   toggleAnimation: (row) => togglePropertyAnimation(row),
   icoAnimationDiamond: (c, x, y, animated, current) => icoAnimationDiamond(c, x, y, animated, current),
   fitValue: (c, value, unit, width) => fittedPropertyValue(c, value, unit, width),
+  valueColumns: propertyValueColumns,
+  drawScaleLink: icoScaleLink,
+  toggleScaleLink: (layer) => toggleTimelineScaleLink(api, layer),
+  dragValue: (event, row, field) => dragPropertyValue(event, row, -1, field),
+  editValue: (row, field) => editPropertyValue(row, -1, field.index, field),
   clipPalette: (L) => clipPalette(L) as any,
   roundRect, clipText, rgba,
   captions: captionTrack,
@@ -1229,8 +1282,8 @@ const trackView = createTrackView({
 });
 T.trackView = trackView;
 
-function draw() {
-  try { drawInner(); } catch (e: any) { console.error('[timeline draw]', e, e.stack); }
+function draw(timeOnly = false) {
+  try { drawInner(undefined, timeOnly); } catch (e: any) { console.error('[timeline draw]', e, e.stack); }
 }
 type TimelinePreviewTarget = { canvas: HTMLCanvasElement; width: number; height: number };
 
@@ -1245,10 +1298,12 @@ function animatedTimelineFlag(value: any): boolean {
 }
 
 function timelineBackdropKey(): unknown[] | null {
-  // Graph curves and active drag adornments keep their full drawing path.
-  // One bounded viewport bitmap is sufficient; no frame history is retained.
-  if (T.graph || T.drop || T.reorder || T.marquee || T.quickOffset || T.trackDrag || T.trackDrop || !api.uiState.timelineVersion
+  // Curves, their editable handles, and the timeline describe fixed times.
+  // Retain one bounded viewport bitmap; moving readouts are painted afterward.
+  // Active edits and expression curves keep their conservative drawing path.
+  if (T.drop || T.reorder || T.marquee || T.quickOffset || T.trackDrag || T.trackDrop || T.graphDragBounds || T.graphReadout || !api.uiState.timelineVersion
       || (tracksMode() && trackView.unfolded())
+      || (T.graph && T._graph?.series?.some((axis: any) => axis.prop.expr))
       || T.cv.width * T.cv.height * 4 > 32 * 1024 * 1024) return null;
   const p = api.project.get();
   const key: unknown[] = [T.cv, T.ctx, T.cv.width, T.cv.height, T.w, T.hgt, T.dpr,
@@ -1256,7 +1311,8 @@ function timelineBackdropKey(): unknown[] | null {
     T.style.clipRadius, T.style.keyframeSize, T.style.showLayerNumbers, T.style.showTypeBadges,
     theme, p, p.dur, p.fps, p.work?.[0], p.work?.[1], api.project.revision(),
     api.anim.version(), api.uiState.timelineVersion(), T.mode, T.trackHover?.area, T.trackHover?.lane, T.trackHover?.clip, T.trackScrollY,
-    captionTrack.version()];
+    T.graph, T.graphCombined, T.graphSplit, T.graphType, T.graphMerge, T.graphFocus?.layerId, T.graphFocus?.trackKey,
+    T.graphShown, T.graphViewBounds?.[0], T.graphViewBounds?.[1], captionTrack.version()];
   const [first, end] = visibleRowRange();
   for (let i = first; i < end; i++) {
     const row = T.rows[i];
@@ -1285,7 +1341,7 @@ function rememberBackdrop(key: unknown[] | null) {
   backdropDirty = false;
 }
 
-function drawInner(preview?: TimelinePreviewTarget) {
+function drawInner(preview?: TimelinePreviewTarget, timeOnly = false) {
   if (!preview) refreshTimelineManifest();
   /* Re-resolve the live canvas every frame: workspace rebuilds can replace the
      panel element, and drawing into a detached canvas is the root cause of
@@ -1301,12 +1357,21 @@ function drawInner(preview?: TimelinePreviewTarget) {
   } else {
     const liveCv = document.querySelector<HTMLCanvasElement>('#tl-canvas');
     if (liveCv && liveCv !== T.cv) { T.cv = liveCv; T.ctx = liveCv.getContext('2d'); }
-    /* Unconditional size sync: measure the wrap every draw so the bitmap always
-       matches the laid-out size, regardless of missed observer/RAF frames. */
+    /* The attached host already reports size changes through ResizeObserver.
+       Reading its bounds after every paused time update forces the entire
+       editor's pending layout. Keep that read for structural paints, new hosts
+       and fallback canvases; observed time-only paints reuse the latest size.
+       A resize callback paints synchronously when it changes the bitmap. */
     const host = T.cv && T.cv.parentElement;
-    if (host && ((!api.transport.playing() && scrubPresentationTime === null) || !T.w || !T.hgt)) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const observedTimePaint = timeOnly && !backdropDirty && T.w && T.hgt && resizeObserver
+      && host === attachedWrap && host === measuredWrap && T.dpr === dpr
+      && T.cv.width === Math.max(2, Math.round(T.w * dpr)) && T.cv.height === Math.max(2, Math.round(T.hgt * dpr))
+      && T.cv === host?.querySelector(':scope > #tl-canvas');
+    if (host && !observedTimePaint && ((!api.transport.playing() && scrubPresentationTime === null) || !T.w || !T.hgt)) {
       const r = host.getBoundingClientRect();
       if (r.width >= 8 && r.height >= 8) {
+        T.dpr = dpr; measuredWrap = host;
         const bw = Math.max(2, Math.round(r.width * T.dpr));
         const bh = Math.max(2, Math.round(r.height * T.dpr));
         if (T.cv.width !== bw || T.cv.height !== bh || T.w !== r.width || T.hgt !== r.height) {
@@ -1355,7 +1420,7 @@ function drawInner(preview?: TimelinePreviewTarget) {
     const visibleWidth = W - T.gut;
     if (px > W - Math.min(50, visibleWidth * .1)) T.scrollT = api.transport.time() - visibleWidth * .2 / T.pps;
     else if (px < T.gut) T.scrollT = api.transport.time() - visibleWidth * .8 / T.pps;
-    T.scrollT = Math.max(-.4, T.scrollT);
+    T.scrollT = Math.max(minimumScrollTime(), T.scrollT);
   }
 
   const backgroundKey = preview ? null : timelineBackdropKey();
@@ -1406,7 +1471,6 @@ function drawInner(preview?: TimelinePreviewTarget) {
     }
     else { drawClips(c, W, H); drawDropGhost(c, W, H); }
     if (!tracks) drawGutter(c, W, H);
-    if (T.graph) drawGraphReadout(c, W, H);
     if (T.reorder) {
       const d = T.reorder, y = rowY(d.row), left = 74 + Math.min(48, d.depth * 12);
       c.save(); c.beginPath(); c.rect(0, T.ruler, W, H - T.ruler); c.clip();
@@ -1425,9 +1489,18 @@ function drawInner(preview?: TimelinePreviewTarget) {
       c.fillStyle = '#fff'; c.fillText(label, T.gut + 18, top + 14); c.restore();
     }
     drawRuler(c, W, H);
+    drawTimelineMarkers(c, api.project.get().markers, T.gut, W, H, T.ruler, t2x, theme.tx3);
     if (!preview) rememberBackdrop(backgroundKey ? timelineBackdropKey() : null);
   }
+  if (T.graph) {
+    drawGraphTime(c, W, H);
+    drawGraphReadout(c, W, H);
+  }
   drawPlayhead(c, W, H);
+  if (!preview) {
+    graphPlaybackProject = api.project.get();
+    graphPlaybackFrame = graphFrameIndex();
+  }
   if (T.snapGuide != null) drawDirectionalSnapGuide(c, {
     x: t2x(T.snapGuide), top: T.ruler, bottom: H, left: T.gut, right: W,
   }, '#e7c84b');
@@ -1443,8 +1516,11 @@ function drawInner(preview?: TimelinePreviewTarget) {
     try { (window as any).webkit.messageHandlers.pmLog.postMessage(msg); } catch (e) { }
     console.log(msg);
   }
+  if (!preview) refreshMarquee?.();
   if (T.marquee) {
     c.save(); c.strokeStyle = theme.accent; c.fillStyle = rgba(theme.accent, .14); c.lineWidth = 1;
+    c.beginPath();
+    c.rect(T.gut, T.ruler, W - T.gut, H - T.ruler); c.clip();
     const m = T.marquee;
     c.fillRect(m.x0, m.y0, m.x1 - m.x0, m.y1 - m.y0);
     c.strokeRect(m.x0 + .5, m.y0 + .5, m.x1 - m.x0 - 1, m.y1 - m.y0 - 1); c.restore();
@@ -1613,9 +1689,12 @@ function drawWorkBracket(c: any, x: any, idx: any) {
   c.closePath(); c.fill();
 }
 function fmtRuler(t: any, step: any, fps: any) {
-  if (step < 1) return api.util.tc(t, fps).slice(-5);
-  const m = Math.floor(t / 60), s = Math.round(t % 60);
-  return (m ? m + ':' : '0:') + String(s).padStart(2, '0');
+  const sign = t < 0 ? '-' : '';
+  const magnitude = Math.abs(t);
+  if (step < 1) return sign + api.util.tc(magnitude, fps).slice(-5);
+  const seconds = Math.round(magnitude);
+  const m = Math.floor(seconds / 60), s = seconds % 60;
+  return sign + m + ':' + String(s).padStart(2, '0');
 }
 const fui = () => '"SF Pro Text",-apple-system,BlinkMacSystemFont,sans-serif';
 const fmono = () => '"JetBrains Mono","SF Mono",ui-monospace,Menlo,monospace';
@@ -2228,24 +2307,32 @@ function drawPlayhead(c: any, W: any, H: any) {
   }
   /* stem: a 3px panel-colored halo under the 1px accent core, so the line
      stays legible over clips of any color */
-  const stemTop = WORK_BAR.height + 2;
+  const headTop = WORK_BAR.height + 2;
+  const stemTop = headTop + (62.517 - 56.876) * 2;
   c.beginPath(); c.moveTo(x, stemTop); c.lineTo(x, H);
   c.strokeStyle = theme.panel; c.lineWidth = 3; c.stroke();
   c.strokeStyle = theme.accent; c.lineWidth = 1; c.stroke();
-  /* knob: rounded teardrop, outlined in the panel color to lift off the ruler */
-  const gw = 10, gh = 13, r = 2, gy = stemTop, gx = x - gw / 2;
+  /* Exact Paper brand mark, including its slight asymmetric taper. The
+     source SVG coordinates and transform are retained at timeline scale. */
+  c.save();
+  c.translate(x - 28.833 * 2, headTop - 56.876 * 2);
+  c.scale(2, 2);
+  c.translate(-4.84, 2.52); c.rotate(-4.9 * Math.PI / 180);
   c.beginPath();
-  c.moveTo(gx + r, gy);
-  c.lineTo(gx + gw - r, gy); c.quadraticCurveTo(gx + gw, gy, gx + gw, gy + r);
-  c.lineTo(gx + gw, gy + gh - 5.5);
-  c.quadraticCurveTo(gx + gw, gy + gh - 4, gx + gw - 1.2, gy + gh - 3);
-  c.lineTo(x + 1.4, gy + gh - .4); c.quadraticCurveTo(x, gy + gh + .6, x - 1.4, gy + gh - .4);
-  c.lineTo(gx + 1.2, gy + gh - 3);
-  c.quadraticCurveTo(gx, gy + gh - 4, gx, gy + gh - 5.5);
-  c.lineTo(gx, gy + r); c.quadraticCurveTo(gx, gy, gx + r, gy);
+  c.moveTo(26.443, 56.828); c.lineTo(30.544, 57.174);
+  c.bezierCurveTo(30.886, 57.203, 31.181, 57.428, 31.299, 57.752);
+  c.bezierCurveTo(31.416, 58.075, 31.335, 58.437, 31.091, 58.679);
+  c.lineTo(30.059, 59.703);
+  c.bezierCurveTo(29.911, 59.844, 29.824, 60.011, 29.789, 60.208);
+  c.lineTo(29.439, 61.579);
+  c.bezierCurveTo(29.352, 61.921, 29.069, 62.179, 28.72, 62.233);
+  c.bezierCurveTo(28.371, 62.288, 28.023, 62.129, 27.836, 61.829);
+  c.lineTo(25.578, 58.216);
+  c.bezierCurveTo(25.163, 57.496, 25.646, 56.832, 26.443, 56.828);
   c.closePath();
-  c.strokeStyle = theme.panel; c.lineWidth = 2; c.lineJoin = 'round'; c.stroke();
+  c.strokeStyle = theme.panel; c.lineWidth = 1; c.lineJoin = 'round'; c.stroke();
   c.fillStyle = theme.accent; c.fill();
+  c.restore();
   c.restore();
 }
 
@@ -2355,7 +2442,7 @@ function graphMoveReadout(snapshot: any, x: number, y: number, timeDelta: number
 const graphSamples = createGraphSampleCache((axis, time, speed) => graphSample(api, axis, time, speed));
 function drawGraph(c: any, W: any, H: any) {
   const plotTop = graphTop();
-  graphSamples.begin(api.project.get(), [api.anim.version(), api.project.get().fps, T.pps, T.scrollT, W, T.graphType].join(':'));
+  graphSamples.begin(api.project.get(), [api.project.revision(), api.anim.version(), api.project.get().fps, T.pps, T.scrollT, W, T.graphType].join(':'));
   T._graph = null;
   /* Build from every project property, not only expanded timeline rows. A
      collapsed strip must not make the focused curve disappear. */
@@ -2446,7 +2533,7 @@ function drawGraph(c: any, W: any, H: any) {
   if (T.graphDragBounds) [vmin, vmax] = T.graphDragBounds;
   const top = plotTop + 42, bot = Math.max(top + 1, H - 16);
   const v2y = (v: any) => bot - (v - vmin) / (vmax - vmin) * (bot - top);
-  T._graph = { target, series, linked, vmin, vmax, v2y, y2v: (y: any) => vmin + (bot - y) / (bot - top) * (vmax - vmin), points: [], selectionBounds: null, transform: null };
+  T._graph = { target, series, linked, merged, vmin, vmax, v2y, y2v: (y: any) => vmin + (bot - y) / (bot - top) * (vmax - vmin), points: [], selectionBounds: null, transform: null };
 
   /* value gridlines */
   c.strokeStyle = INK.grid; c.font = '400 9.5px ' + fui(); c.fillStyle = theme.tx3;
@@ -2475,7 +2562,6 @@ function drawGraph(c: any, W: any, H: any) {
      keys up as it sweeps. `selectedKeyIds` only decides which curves are on
      screen, and stays frozen for the duration of that marquee. */
   const liveSelected = new Set(api.selection.keys());
-  const labelPositions: number[] = [];
   series.forEach((axis: any, axisIndex: number) => {
   const L = axis.L;
   const kf = axis.prop.kf;
@@ -2523,20 +2609,7 @@ function drawGraph(c: any, W: any, H: any) {
     drawGraphVertex(c, x, y, curveColor, sel, k);
     api.uiState.setKeyHandles(k, { pt: [x, y] });
   });
-  // Read the value where the playhead meets each curve, as in the reference.
-  const time = api.transport.time(), playX = t2x(time);
-  const current = graphSamples.sample(axis, time, speedMode), currentY = v2y(current);
   c.font = '500 10px ' + fmono(); c.fillStyle = curveColor;
-  if (playX >= T.gut + 35 && playX < W - 40 && currentY >= top && currentY <= bot) {
-    c.beginPath(); c.arc(playX, currentY, 3, 0, Math.PI * 2); c.fill();
-    let labelY = clamp(currentY - 7, top + 10, bot - 3);
-    while (labelPositions.some(y => Math.abs(y - labelY) < 13) && labelY < bot - 16) labelY += 13;
-    if (labelPositions.some(y => Math.abs(y - labelY) < 13)) {
-      labelY = currentY - 20;
-      while (labelPositions.some(y => Math.abs(y - labelY) < 13)) labelY -= 13;
-    }
-    if (labelY >= top + 10) { labelPositions.push(labelY); c.fillText(graphValueText(current), playX + 7, labelY); }
-  }
   const last = kf[kf.length - 1];
   if (last && t2x(L.from + last.t) < W - 55) {
     const endValue = graphSamples.sample(axis, x2t(W - 16), speedMode);
@@ -2588,6 +2661,42 @@ function drawGraph(c: any, W: any, H: any) {
     c.fillStyle = theme.tx2; c.fillText(text, legendX + 15, plotTop + 17);
     legendX += width;
   }
+  c.restore();
+}
+
+let graphReadoutFont: { context: any; value: string } | null = null;
+const refreshTimelineFonts = () => { propertyLabelWidth = null; graphReadoutFont = null; invalidate('timeline'); };
+onEvent('fonts', refreshTimelineFonts);
+listen(document.fonts, 'loadingdone', refreshTimelineFonts);
+/** The playhead changes on every tick; curves and their hit targets do not. */
+function drawGraphTime(c: any, W: number, H: number) {
+  const graph = T._graph;
+  if (!graph || graph.merged) return;
+  const time = api.transport.time(), playX = t2x(time);
+  if (playX < T.gut + 35 || playX >= W - 40) return;
+  const top = graphTop() + 42, bot = Math.max(top + 1, H - 16);
+  const labelPositions: number[] = [];
+  // Keep the font after restoring the drawing state. Assigning it every tick
+  // enters Chromium's style/font machinery even when the text style is fixed.
+  // Compare its canonical value; browsers normalize CSS font whitespace.
+  if (!graphReadoutFont || graphReadoutFont.context !== c || c.font !== graphReadoutFont.value) {
+    c.font = '500 10px ' + fmono();
+    graphReadoutFont = { context: c, value: c.font };
+  }
+  c.save(); c.beginPath(); c.rect(T.gut, graphTop(), W - T.gut, H - graphTop()); c.clip();
+  graph.series.forEach((axis: any, axisIndex: number) => {
+    const current = graphSamples.sample(axis, time, T.graphType === 'speed'), currentY = graph.v2y(current);
+    if (currentY < top || currentY > bot || !Number.isFinite(currentY)) return;
+    c.fillStyle = graphAxisColor(axis.key, axisIndex);
+    c.beginPath(); c.arc(playX, currentY, 3, 0, Math.PI * 2); c.fill();
+    let labelY = clamp(currentY - 7, top + 10, bot - 3);
+    while (labelPositions.some(y => Math.abs(y - labelY) < 13) && labelY < bot - 16) labelY += 13;
+    if (labelPositions.some(y => Math.abs(y - labelY) < 13)) {
+      labelY = currentY - 20;
+      while (labelPositions.some(y => Math.abs(y - labelY) < 13)) labelY -= 13;
+    }
+    if (labelY >= top + 10) { labelPositions.push(labelY); c.fillText(graphValueText(current), playX + 7, labelY); }
+  });
   c.restore();
 }
 
@@ -2731,14 +2840,24 @@ function bind(cv: any, wrap: any) {
   }, undefined, canvasCleanups);
   listen(cv, 'wheel', (e: any) => {
     e.preventDefault();
+    // A non-finite delta poisons the viewport, then the next ruler scrub
+    // passes that invalid position to the transport and blanks the preview.
+    if (!Number.isFinite(e.deltaX) || !Number.isFinite(e.deltaY)) return;
     if (e.ctrlKey || e.metaKey) {
-      const tAt = x2t(e.offsetX);
+      if (!Number.isFinite(e.offsetX)) return;
+      // Recover an invalid saved/live zoom before dividing by its scale.
+      const pps = Number.isFinite(T.pps) && T.pps > 0 ? clamp(T.pps, 4, 4000) : 90;
+      const scrollT = Number.isFinite(T.scrollT) ? T.scrollT : 0;
+      const tAt = (e.offsetX - T.gut) / pps + scrollT;
       const pixels = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? Math.max(100, T.hgt) : 1);
       // Match composition navigation. Exponential scaling makes reversing a
       // pinch restore the original scale instead of gradually zooming out.
       const factor = clamp(Math.exp(-pixels * .006), .5, 2);
-      T.pps = clamp(T.pps * factor, 4, 4000);
-      T.scrollT = tAt - (e.offsetX - T.gut) / T.pps;
+      const nextPps = clamp(pps * factor, 4, 4000);
+      const nextScroll = tAt - (e.offsetX - T.gut) / nextPps;
+      if (!Number.isFinite(nextPps) || !Number.isFinite(nextScroll)) return;
+      T.pps = nextPps;
+      T.scrollT = nextScroll;
     } else if (e.shiftKey) {
       T.scrollT += e.deltaY / T.pps;
     } else {
@@ -2751,7 +2870,7 @@ function bind(cv: any, wrap: any) {
       else T.scrollY += e.deltaY;
       T.scrollT += e.deltaX / T.pps;
     }
-    T.scrollT = Math.max(-.4, T.scrollT);
+    T.scrollT = Math.max(minimumScrollTime(), T.scrollT);
     invalidate('timeline');
   }, { passive: false }, canvasCleanups);
 }
@@ -2763,6 +2882,12 @@ function setHoverRow(index: number | null) {
 }
 function onMove(e: any) {
   const x = e.offsetX, y = e.offsetY;
+  const marker = timelineMarkerHit(api.project.get().markers, x, y, T.gut, T.w, T.ruler, t2x);
+  if (marker) {
+    T.cv.title = `${marker.name || 'Marker'} · ${api.util.tc(marker.t, api.project.get().fps)} · Right-click to remove`;
+    T.cv.style.cursor = 'ew-resize';
+    return;
+  }
   if (tracksMode() && y < tracksBottom() - (T.graph && T.graphCombined ? 4 : 0)) {
     const workHit = x > T.gut && workAreaHit(x, y);
     const next = workHit ? { cursor: workHit.kind === 'handle' ? 'ew-resize' : 'grab', title: '' }
@@ -2936,7 +3061,7 @@ function panViewport(e: PointerEvent) {
   beginDrag(e, {
     cursor: 'grabbing',
     move: (dx: number, dy: number) => {
-      T.scrollT = Math.max(-.4, start - dx / T.pps);
+      T.scrollT = Math.max(minimumScrollTime(), start - dx / T.pps);
       if (g) { const delta = g.y2v(0) - g.y2v(dy); T.graphViewBounds = [g.vmin + delta, g.vmax + delta]; }
       invalidate('timeline');
     },
@@ -2964,7 +3089,7 @@ function quickOffsetLayers(e: any) {
   if (groups.some((members: any[]) => members.some((layer: any) => layer.lock
       || api.groups.ancestors(layer).some((group: any) => group.lock)))) return;
   const timing = groups.flatMap((members: any[], offsetIndex: number) => members.map((L: any) => ({
-    L, time: Number(L.from) || 0, offsetIndex, offsetCount: groups.length, minTime: L.type === 'group' ? -Infinity : 0,
+    L, time: Number(L.from) || 0, offsetIndex, offsetCount: groups.length, minTime: -Infinity,
   })));
   api.edit.begin('Quick offset layers', { origin: 'timeline' });
   let moved = false;
@@ -3162,12 +3287,13 @@ function applySelectedValueKeys(keys: Array<Array<{ key: any; start: number }>>,
   api.anim.touch();
 }
 
-function dragPropertyValue(event: any, row: any, rowIndex: number) {
+function dragPropertyValue(event: any, row: any, rowIndex: number, field?: PropertyValueField) {
+  if (row.L.lock || api.groups.ancestors(row.L).some((group: any) => group.lock)) return;
   const time = api.transport.time();
-  const scaleIndex = isScaleTrack(row) ? scaleValueIndex(event.offsetX) : 0;
+  const scaleIndex = field?.index ?? (isScaleTrack(row) ? scaleValueIndex(event.offsetX) : 0);
   const channels = (target: any) => trackChannels(target).map(axis => ({ ...axis, value: api.anim.evP(target.L, axis.prop, time, axis.key), meta: propertyMetadata(api, target.L, axis.key) }));
   if (!channels(row).every(axis => typeof axis.value === 'number')) {
-    editPropertyValue(row, rowIndex, scaleIndex); return;
+    editPropertyValue(row, rowIndex, scaleIndex, field); return;
   }
   // Every selected layer showing this property moves by the same drag delta,
   // each from its own starting value.
@@ -3204,19 +3330,19 @@ function dragPropertyValue(event: any, row: any, rowIndex: number) {
       });
       invalidate();
     },
-    up: () => { cleanup(); if (editing) keyedEdit ? api.history.commit(label) : api.edit.commit(label); else editPropertyValue(row, rowIndex, scaleIndex); },
+    up: () => { cleanup(); if (editing) keyedEdit ? api.history.commit(label) : api.edit.commit(label); else editPropertyValue(row, rowIndex, scaleIndex, field); },
     cancel: () => { cleanup(); if (editing) keyedEdit ? (api.history.cancel(), api.anim.touch()) : api.edit.cancel(); }
   });
 }
 
-function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0) {
-  if (row.L.lock) return;
+function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0, field?: PropertyValueField) {
+  if (row.L.lock || api.groups.ancestors(row.L).some((group: any) => group.lock)) return;
   const scale = isScaleTrack(row);
   const axes = scale ? [trackChannels(row)[scaleIndex]!] : trackChannels(row);
   const values = axes.map(axis => api.anim.evP(row.L, axis.prop, api.transport.time(), axis.key));
   const time = api.transport.time();
   const scaleCommand = scale ? scaleValueCommand(row, scaleIndex, time) : null;
-  const column = scale ? propertyValueColumns(T.propertyValueX, T.gut, 2, 24)[scaleIndex]! : null;
+  const column = field ?? (scale ? propertyValueColumns(T.propertyValueX, T.gut, 2, 24)[scaleIndex]! : null);
   const choices: Record<string, readonly string[]> = {
     'l.blend': api.model.BLENDS, 'c.align': ['left', 'center', 'right'], 'c.shape': ['rect', 'ellipse', 'polygon', 'star', 'line'],
     'c.fit': ['cover', 'contain', 'stretch']
@@ -3225,8 +3351,8 @@ function editPropertyValue(row: any, rowIndex: number, scaleIndex = 0) {
     ?? (/^m\..+\.shape$/.test(row.key) ? ['rect', 'ellipse'] : /^m\..+\.mode$/.test(row.key) ? ['add', 'subtract'] : null);
   const isColor = !options && typeof values[0] === 'string' && /^#[0-9a-f]{6}$/i.test(values[0]);
   const input = h(options ? 'select' : 'input', { value: values.join(', '), 'aria-label': scale ? `Scale ${scaleIndex === 0 ? 'X' : 'Y'}` : row.label,
-    style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${rowY(rowIndex) + 3}px`,
-      width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${T.row - 6}px`, background: 'var(--bg-row)',
+    style: { position: 'absolute', left: `${column?.left ?? T.propertyValueX}px`, top: `${field?.top ?? rowY(rowIndex) + 3}px`,
+      width: `${column?.width ?? T.gut - T.propertyValueX - 6}px`, height: `${field?.height ?? T.row - 6}px`, background: 'var(--bg-row)',
       border: '1px solid var(--accent)', color: 'var(--tx)', padding: isColor ? '1px' : '0 4px', zIndex: 9 } });
   if (options) { options.forEach(value => input.appendChild(h('option', { value }, value))); input.value = String(values[0]); }
   else if (isColor) { input.type = 'color'; input.value = String(values[0]).toLowerCase(); }
@@ -3387,7 +3513,6 @@ function slide(e: any) {
   const probes: EdgeSnapProbe[] = start.flatMap((s: any) => [
     { time: s.from, edge: 'in' as const }, { time: s.from + s.L.dur, edge: 'out' as const },
   ]);
-  const earliest = Math.min(...start.map((item: any) => item.from));
   let moved = false;
   beginDrag(e, {
     cursor: 'grabbing',
@@ -3395,9 +3520,8 @@ function slide(e: any) {
       moved = true;
       const requested = dx / T.pps;
       const { delta, snapped } = edgeSnapping(ev) ? snapper.resolve(probes, requested) : snapper.release(requested);
-      const dt = Math.max(delta, -earliest);
-      if (Math.abs(dt - delta) > 1e-9) T.snapGuide = null;
-      const at = (from: number) => snapped ? Math.max(0, from + dt) : Math.max(0, api.util.snapF(from + dt, api.project.get().fps));
+      const dt = delta;
+      const at = (from: number) => snapped ? from + dt : api.util.snapF(from + dt, api.project.get().fps);
       groupStart.forEach((s: any) => api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: snapped ? s.from + dt : api.util.snapF(s.from + dt, api.project.get().fps) } }));
       start.forEach((s: any) => api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: at(s.from) } }));
     },
@@ -3465,7 +3589,7 @@ function trim(e: any, side: any) {
       const dt = snapped ? delta : api.util.snapF(delta, api.project.get().fps);
       start.forEach((s: any) => {
         if (side === 'in') {
-          let nf = clamp(s.from + dt, 0, s.from + s.dur - 1 / api.project.get().fps);
+          let nf = Math.min(s.from + dt, s.from + s.dur - 1 / api.project.get().fps);
           if (api.media.timing.isTimed(s.L)) nf = Math.max(nf, api.media.timing.earliestStart({ ...s.L, from: s.from, d: { ...s.L.d, trim: s.trim } }));
           api.edit.dispatch({ type: 'set_layer', target: s.L.id, patch: { from: nf, duration: s.dur + (s.from - nf) } });
           if (api.media.timing.isTimed(s.L)) {
@@ -3994,32 +4118,56 @@ function layersForKeys(keys: any) {
 function marquee(e: any, opt: any = {}) {
   const r = T.cv.getBoundingClientRect();
   const x0 = e.clientX - r.left, y0 = e.clientY - r.top;
+  // The start belongs to the timeline; the other corner follows the pointer.
+  // Reproject on every paint so wheel scrolling works without a mousemove.
+  const originTime = x2t(x0);
+  const scrollY = () => tracksMode() ? T.trackScrollY : T.scrollY;
+  const originY = opt.graph ? T._graph.y2v(y0) : y0 + scrollY();
+  let pointerX = x0, pointerY = y0;
   const additive = !!opt.additive;
   const baseKeys = additive ? [...api.selection.keys()] : [];
   const baseLayers = additive ? [...api.selection.layers()] : [];
   const originalKeys = [...api.selection.keys()], originalLayers = [...api.selection.layers()];
-  const graphPoints = opt.graph ? [...(T._graph?.points ?? [])] : null;
+  const graphPoints = opt.graph ? (T._graph?.points ?? []).map((point: any) => ({
+    ...point, time: x2t(point.x), value: T._graph.y2v(point.y),
+  })) : null;
   if (graphPoints) T.graphMarqueeIds = originalKeys;
   let graphPickedIds: string[] = [];
   let dragged = false;
+  refreshMarquee = () => {
+    if (!dragged) return;
+    const startX = t2x(originTime);
+    const startY = opt.graph ? T._graph.v2y(originY) : originY - scrollY();
+    T.marquee = { x0: Math.min(startX, pointerX), y0: Math.min(startY, pointerY), x1: Math.max(startX, pointerX), y1: Math.max(startY, pointerY) };
+    const m = T.marquee;
+    const picked = graphPoints
+      ? graphPoints.filter((point: any) => {
+        const x = t2x(point.time), y = T._graph.v2y(point.value);
+        return x >= m.x0 && x <= m.x1 && y >= m.y0 && y <= m.y1;
+      }).map((point: any) => point.key)
+      : keysInMarquee(m);
+    const pickedIds = uniqueKeyIds(picked);
+    graphPickedIds = pickedIds;
+    // Keep the graph selection visible until the box is complete.
+    const nextKeys = graphPoints && !additive
+      ? [...new Set([...originalKeys, ...pickedIds])]
+      : selectionAfterMarquee(baseKeys, pickedIds, additive);
+    const nextLayers = [...new Set([...baseLayers, ...layersForKeys(nextKeys)])];
+    T.keySelectionActive = true;
+    const same = (a: any[], b: any[]) => a.length === b.length && a.every((id: any, i: number) => id === b[i]);
+    if (!same(nextKeys, api.selection.keys()) || !same(nextLayers, api.selection.layers())) setSelectedKeys(nextKeys, nextLayers);
+  };
   beginDrag(e, {
     move: (dx: any, dy: any) => {
       if (!dragged && Math.hypot(dx, dy) < 3) return;
       dragged = true;
-      T.marquee = { x0: Math.min(x0, x0 + dx), y0: Math.min(y0, y0 + dy), x1: Math.max(x0, x0 + dx), y1: Math.max(y0, y0 + dy) };
-      const picked = graphPoints
-        ? graphPoints.filter((point: any) => point.x >= T.marquee.x0 && point.x <= T.marquee.x1 && point.y >= T.marquee.y0 && point.y <= T.marquee.y1).map((point: any) => point.key)
-        : keysInMarquee(T.marquee);
-      const pickedIds = uniqueKeyIds(picked);
-      graphPickedIds = pickedIds;
-      // Keep the graph selection visible until the box is complete.
-      const nextKeys = graphPoints && !additive
-        ? [...new Set([...originalKeys, ...pickedIds])]
-        : selectionAfterMarquee(baseKeys, pickedIds, additive);
-      setSelectedKeys(nextKeys, [...baseLayers, ...layersForKeys(nextKeys)]);
+      pointerX = x0 + dx; pointerY = y0 + dy;
+      refreshMarquee?.();
       invalidate('timeline');
     },
     up: () => {
+      refreshMarquee?.();
+      refreshMarquee = null;
       if (!dragged) {
         // Empty track space selects; only the ruler scrubs the playhead.
         if (!additive) clearTimelineSelection();
@@ -4042,6 +4190,7 @@ function marquee(e: any, opt: any = {}) {
       T.graphMarqueeIds = null; T.marquee = null; invalidate('timeline');
     },
     cancel: () => {
+      refreshMarquee = null;
       if (graphPoints) { T.graphMarqueeIds = null; setSelectedKeys(originalKeys, originalLayers); }
       T.marquee = null; invalidate('timeline');
     },
@@ -4155,7 +4304,12 @@ function editKeyframeValues(clickedEntries: any[]) {
         const entry = entries[0];
         if (!Number.isFinite(time.valueAsNumber)) { message.textContent = 'Enter a finite time.'; return false; }
         nextTime = api.util.snapF(time.valueAsNumber - entry.L.from, fps);
-        if (nextTime < 0 || nextTime > entry.L.dur) { message.textContent = 'That time falls outside the layer.'; return false; }
+        // Match keyframe dragging: animation may extend beyond the visible
+        // layer strip, but new times stay inside the composition. Existing
+        // out-of-range keys can keep their time or move toward the composition.
+        const minTime = Math.min(entry.key.t, -entry.L.from);
+        const maxTime = Math.max(entry.key.t, api.project.get().dur - entry.L.from);
+        if (nextTime < minTime || nextTime > maxTime) { message.textContent = 'That time falls outside the composition.'; return false; }
         if (entry.prop.kf.some((key: any) => key !== entry.key && Math.abs(key.t - nextTime!) < .5 / fps)) {
           message.textContent = 'Another keyframe already sits on that frame.'; return false;
         }
@@ -4235,6 +4389,15 @@ function onCtx(e: any) {
   const trackRow = inTracks ? trackView.rowAt(x, y) : null;
   const hr = tracksMode() ? trackRow && { row: trackRow, i: -1 } : hitRow(y);
   const items: any[] = [];
+  if (x >= T.gut && y < T.ruler) {
+    const marker = timelineMarkerHit(api.project.get().markers, x, y, T.gut, T.w, T.ruler, t2x);
+    if (marker) {
+      api.ui.menu({ x: e.clientX, y: e.clientY }, [{ label: 'Remove marker', icon: 'x', run: () => removeTimelineMarker(api, marker) }]);
+      return;
+    }
+    const time = clamp(api.util.snapF(x2t(x), api.project.get().fps), 0, api.project.get().dur);
+    items.push({ label: 'Add marker here', icon: 'plus', disabled: !!markerAtTime(api, time), run: () => addTimelineMarker(api, time) }, '-');
+  }
   const graphPoint = inGraph(x, y)
     ? [...(T._graph?.points || [])]
       .map((point: any) => ({ ...point, distance: Math.hypot(x - point.x, y - point.y) }))

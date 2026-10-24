@@ -84,3 +84,16 @@ To verify the complete workflow from source:
 ```
 
 It uses a temporary profile and checks actual video output, audio, project saving, rollback, planning restrictions and shutdown, without touching the live app's profile.
+
+### Timeline and project library
+
+`get_timeline` pages compact strip timing and stack order. `edit_layer_strips`
+performs atomic move, duplicate, sequence, align, reorder, state, remove, and
+close-gap gestures with normal Undo, group expansion, locks, and revision checks.
+`edit_video` supports slipping source content and extending trims within source
+handles. Media imports and exports use the current durable delivery tools.
+
+`manage_project` lists, creates, opens, renames, duplicates, saves, trashes, and
+restores local library projects. Library changes persist outside timeline Undo.
+Create/open belong to app threads; project threads stay attached to their project.
+Use `save_project` for an editable `.pmv` with packaged media.

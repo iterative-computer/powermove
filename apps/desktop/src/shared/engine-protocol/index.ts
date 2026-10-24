@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-258663435b8bb86f";
+export const PROTOCOL_BUILD = "protocol-f2eb2e9f38d0cb2a";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -90,6 +90,8 @@ export type { DocumentEncoding } from "./DocumentEncoding";
 export type { DocumentId } from "./DocumentId";
 export type { EditorCamera } from "./EditorCamera";
 export type { EffectInstanceId } from "./EffectInstanceId";
+export type { EncodeAudio } from "./EncodeAudio";
+export type { EncodeVideoCodec } from "./EncodeVideoCodec";
 export type { EngineError } from "./EngineError";
 export type { EngineFact } from "./EngineFact";
 export type { EngineProcess } from "./EngineProcess";
@@ -127,6 +129,7 @@ export type { HardwareSessionGrant } from "./HardwareSessionGrant";
 export type { HardwareSessionKind } from "./HardwareSessionKind";
 export type { HardwareSessionRequest } from "./HardwareSessionRequest";
 export type { Hello } from "./Hello";
+export type { HostEncode } from "./HostEncode";
 export type { HostMicros } from "./HostMicros";
 export type { HostShaderFallback } from "./HostShaderFallback";
 export type { HostSnapshot } from "./HostSnapshot";

@@ -18,6 +18,7 @@
  * the renderer's CSP does not apply to it.
  */
 import { createRequire } from 'node:module';
+import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 
 interface Request { id: number; op: string; args: Record<string, unknown> }
@@ -29,6 +30,8 @@ const { _electron } = desktopRequire('playwright');
 
 let app: any = null;
 let page: any = null;
+let launching: Promise<any> | null = null;
+let closing: Promise<unknown> | null = null;
 
 const send = (message: unknown): Promise<void> => new Promise((resolve, reject) => {
   process.send!(message, undefined, {}, (error: Error | null) => error ? reject(error) : resolve());
@@ -45,7 +48,14 @@ async function launch(args: Record<string, unknown>): Promise<unknown> {
   if (app) throw new Error('The app is already launched');
   const env = { ...(args.env as Record<string, string>) };
   delete env.ELECTRON_RUN_AS_NODE;
-  app = await _electron.launch({ args: ['.'], cwd: desktopRoot, env, timeout: Number(args.timeout) || 120_000 });
+  if (!env.POWERMOVE_USER_DATA) throw new Error('An owned app profile is required');
+  // Keep driver artifacts inside the profile's awaited cleanup. Playwright's
+  // default temporary-directory removal can still be pending at bridge exit.
+  const artifactsDir = path.join(env.POWERMOVE_USER_DATA, 'playwright-artifacts');
+  await mkdir(artifactsDir, { recursive: true });
+  launching = _electron.launch({ args: ['.'], cwd: desktopRoot, env, artifactsDir, timeout: Number(args.timeout) || 120_000 });
+  try { app = await launching; } finally { launching = null; }
+  await send({ event: 'electron-pid', text: String(app.process().pid) });
   // Native dialogs are substituted, never shown on the user's desktop (as e2e/helpers/app.ts).
   await app.evaluate(({ dialog }: any) => {
     dialog.showSaveDialog = async () => ({ canceled: true, filePath: '' });
@@ -66,6 +76,42 @@ async function launch(args: Record<string, unknown>): Promise<unknown> {
   await page.waitForURL((url: URL) => url.protocol === 'app:' || url.hostname === 'localhost');
   await page.waitForLoadState('domcontentloaded');
   return { url: page.url(), pid: app.process().pid };
+}
+
+async function closeCurrent(timeout = 20_000): Promise<unknown> {
+  if (closing) return closing;
+  // A close received during launch must wait for the child handle rather than
+  // answering success while Playwright is still creating Electron.
+  if (launching) await launching.catch(() => undefined);
+  if (closing) return closing;
+  const current = app, currentPage = page;
+  app = null; page = null;
+  if (!current) return null;
+  closing = (async () => {
+    const child = current.process();
+    const exited = new Promise<boolean>(resolve => {
+      if (child.exitCode !== null || child.signalCode !== null) resolve(true);
+      else child.once('exit', () => resolve(true));
+    });
+    // The whole graceful close, including renderer preparation, has one bound.
+    const graceful = (async () => {
+      // The disposable profile needs no unsaved-file decision or save.
+      await currentPage?.evaluate('window.PM && (window.PM.prepareToClose = () => true)').catch(() => undefined);
+      await current.evaluate(({ dialog }: any) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
+      await current.close();
+      return true;
+    })().catch(() => false);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const closed = await Promise.race([graceful, new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), timeout); })]);
+    if (timer) clearTimeout(timer);
+    if (!closed) {
+      void send({ event: 'console-error', text: 'The app did not close in time; killing Electron' }).catch(() => undefined);
+      child.kill('SIGKILL');
+    }
+    const didExit = await Promise.race([exited, new Promise<boolean>(resolve => setTimeout(() => resolve(false), 5000))]);
+    return { forced: !closed, exited: didExit };
+  })();
+  return closing;
 }
 
 async function handle(request: Request): Promise<unknown> {
@@ -95,30 +141,7 @@ async function handle(request: Request): Promise<unknown> {
       await requirePage().locator(String(args.selector)).setInputFiles(args.files as string[]);
       return null;
     }
-    case 'close': {
-      const current = app, currentPage = page;
-      app = null; page = null;
-      if (!current) return null;
-      // The profile is disposable: skip the editor's close decision (an unsaved opened
-      // file asks through an in-window sheet nobody can answer) and its save.
-      await currentPage?.evaluate('window.PM && (window.PM.prepareToClose = () => true)').catch(() => undefined);
-      await current.evaluate(({ dialog }: any) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
-      const child = current.process();
-      const exited = new Promise<boolean>(resolve => {
-        if (child.exitCode !== null || child.signalCode !== null) resolve(true);
-        else child.once('exit', () => resolve(true));
-      });
-      const closed = await Promise.race([
-        current.close().then(() => true, () => false),
-        new Promise<boolean>(resolve => setTimeout(() => resolve(false), Number(args.timeout) || 20_000)),
-      ]);
-      if (!closed) {
-        void send({ event: 'console-error', text: 'The app did not close in time; killing Electron' });
-        child.kill('SIGKILL');
-        await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 5000))]);
-      }
-      return { forced: !closed };
-    }
+    case 'close': return closeCurrent(Number(args.timeout) || 20_000);
     default: throw new Error(`Unknown bridge operation ${op}`);
   }
 }
@@ -129,11 +152,12 @@ process.on('message', (request: Request) => {
     (error: Error) => send({ id: request.id, ok: false, error: (error && (error.stack || error.message)) || String(error) }),
   ).then(() => { if (request.op === 'close' && request.args.exit) process.exit(0); });
 });
-process.on('disconnect', () => {
-  const current = app;
-  app = null;
-  if (!current) process.exit(0);
-  const timer = setTimeout(() => { current.process().kill('SIGKILL'); process.exit(0); }, 10_000);
-  current.close().catch(() => undefined).finally(() => { clearTimeout(timer); process.exit(0); });
-});
+let shuttingDown = false;
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  void closeCurrent().catch(() => undefined).finally(() => process.exit(0));
+}
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, shutdown);
+process.on('disconnect', shutdown);
 void send({ event: 'ready' });

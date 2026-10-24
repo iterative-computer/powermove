@@ -1,7 +1,7 @@
 import { createHash, type Hash } from 'node:crypto';
 import { chmod, open, unlink, type FileHandle } from 'node:fs/promises';
 import { INCREMENTAL_MAGIC, isIncrementalProject, projectFooter, readIncrementalIndex, validateLinkedRecords, type IncrementalMedia, type LinkedRecord, type ProjectIndex, type ProjectRecord, type SaveMedia } from '../shared/project-incremental';
-import { checkVersion, copySnapshot, hashHandle, readExactly, syncFile, temporarySibling, type FileVersion } from './durable-file';
+import { checkVersion, changedFile, copySnapshot, hashHandle, readExactly, RecoveryFileError, sameFile, syncFile, temporarySibling, type FileVersion } from './durable-file';
 import { FILE_CHUNK_BYTES } from './file-upload';
 import { validateProjectDocument, type ProjectDocumentValidator } from './project-document';
 
@@ -44,6 +44,7 @@ export class ProjectSave {
   private busy?: Promise<unknown>;
   private ended = false;
   private failed = false;
+  private retainTemporary = false;
   private readonly temporary: string;
   private constructor(readonly destination: string, private commit: (temporary: string, hash: string) => Promise<string>, private release: () => void,
     private readonly validate: ProjectDocumentValidator) {
@@ -62,6 +63,7 @@ export class ProjectSave {
       let index: ProjectIndex | undefined;
       if (previous && reusePrevious) {
         source = await open(destination, 'r');
+        if (!sameFile(previous.info, await source.stat())) throw changedFile();
         if (isIncrementalProject(await readExactly(source, 0, Math.min(5, previous.info.size)))) {
           index = await readIncrementalIndex(previous.info.size, (offset, length) => readExactly(source!, offset, length), nativeHash);
         }
@@ -90,7 +92,9 @@ export class ProjectSave {
         await chmod(save.temporary, save.clonedMode | 0o600);
         save.handle = await open(save.temporary, 'r+');
         save.offset = previous.info.size;
-        save.digest = previous.digest.copy();
+        // Verify the actual staged prefix before trusting reused media.
+        save.digest = await hashHandle(save.handle);
+        if (save.digest.copy().digest('hex') !== previous.hash) throw changedFile();
       } else {
         save.handle = await open(save.temporary, 'wx+', 0o600);
         await save.append(INCREMENTAL_MAGIC);
@@ -104,6 +108,9 @@ export class ProjectSave {
           if (digest.digest('hex') !== item.sha256) throw new Error('The saved media checksum does not match.');
           item.offset = newOffset;
         }
+        // Compaction read directly from this source; a verified clone does not
+        // need this timestamp check because its complete prefix was hashed.
+        if (source && previous && !sameFile(previous.info, await source.stat())) throw changedFile();
       }
       await checkVersion(destination, previous);
       const required = new Set(save.required);
@@ -155,7 +162,11 @@ export class ProjectSave {
       await this.append(bytes); await this.append(footer);
       if (this.clonedMode !== undefined) await this.handle.chmod(this.clonedMode);
       await syncFile(this.handle); await this.handle.close();
-      return await this.commit(this.temporary, this.digest.digest('hex'));
+      try { return await this.commit(this.temporary, this.digest.digest('hex')); }
+      catch (error) {
+        this.retainTemporary = error instanceof RecoveryFileError && error.recoveryPath === this.temporary;
+        throw error;
+      }
     })();
     this.busy = work;
     return work.finally(async () => { this.busy = undefined; await this.dispose(); });
@@ -182,6 +193,6 @@ export class ProjectSave {
     if (this.ended) return;
     this.ended = true;
     try { await this.busy?.catch(() => undefined); await this.handle?.close().catch(() => undefined); }
-    finally { await unlink(this.temporary).catch(() => undefined); this.release(); }
+    finally { if (!this.retainTemporary) await unlink(this.temporary).catch(() => undefined); this.release(); }
   }
 }

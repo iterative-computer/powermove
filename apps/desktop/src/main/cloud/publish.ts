@@ -316,10 +316,11 @@ export function createPublisher(options: PublisherOptions): Publisher {
   const prepared = new Map<string, Prepared>();
   /* One publish at a time: they share the provenance file and the
      confirmation, and a double click must not upload twice. */
-  let queue: Promise<unknown> = Promise.resolve();
+  let queue: Promise<void> = Promise.resolve();
   const serial = <T>(task: () => Promise<T>): Promise<T> => {
     const run = queue.then(task);
-    queue = run.catch(() => undefined);
+    // A completed plan's findings belong to its caller, not the idle queue.
+    queue = run.then(() => undefined, () => undefined);
     return run;
   };
 

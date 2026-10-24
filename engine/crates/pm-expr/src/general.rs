@@ -109,10 +109,14 @@ fn is_static(node: &Node, dialect: Dialect) -> bool {
         Node::Conditional(t, y, n) => {
             is_static(t, dialect) && is_static(y, dialect) && is_static(n, dialect)
         }
-        // The callee is looked up by name, never evaluated.
+        // The callee is looked up by name, never evaluated. `wiggle` reads
+        // local time; `sample` and `motionPath` ask the host's hooks, which a
+        // binding's evaluation does not have (and `sample` may read `t`).
         Node::Call(callee, args) => {
-            !matches!(&**callee, Node::Identifier(name) if Helper::from_name(name) == Some(Helper::Wiggle))
-                && args.iter().all(|a| is_static(a, dialect))
+            !matches!(&**callee, Node::Identifier(name) if matches!(
+                Helper::from_name(name),
+                Some(Helper::Wiggle | Helper::Sample | Helper::MotionPath)
+            )) && args.iter().all(|a| is_static(a, dialect))
         }
     }
 }

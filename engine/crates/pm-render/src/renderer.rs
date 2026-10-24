@@ -299,6 +299,8 @@ pub struct Renderer {
     /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
     reuse: crate::reuse::DrawReuse,
     reuse_enabled: bool,
+    /// [`Renderer::set_channel_memo`].
+    channel_memo: bool,
     /// The bottom of the last reusing frame kept on the GPU
     /// (`crate::frame_prefix`).
     prefix: crate::frame_prefix::FramePrefix,
@@ -413,6 +415,7 @@ impl Renderer {
             compat: None,
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
+            channel_memo: true,
             prefix: Default::default(),
             svg_wait: false,
             svg_skip_failed: false,
@@ -440,10 +443,33 @@ impl Renderer {
         self.reuse_enabled = enabled;
     }
 
+    /// Whether frames plan with the channels found in the same unchanged
+    /// document on earlier frames (`pm_eval` `channel_memo`; on by default).
+    /// Every plan is the one planned without it; tests turn it off to
+    /// compare.
+    pub fn set_channel_memo(&mut self, enabled: bool) {
+        self.channel_memo = enabled;
+        if !enabled {
+            self.evaluator.clear_channel_memo();
+        }
+    }
+
+    /// Opens the channel memo for a plan of `document` when it is on.
+    fn open_channel_memo(&mut self, document: &Document) {
+        if self.channel_memo {
+            self.evaluator.open_channel_memo(document);
+        }
+    }
+
     /// Drops the kept layer draws and the kept bottom of the last frame.
     pub fn clear_draw_reuse(&mut self) {
         self.reuse.clear();
         self.prefix.clear(&mut self.pool);
+    }
+
+    /// The channel memo's hits and misses so far (`pm_eval` `channel_memo`).
+    pub fn channel_memo_stats(&self) -> (u64, u64) {
+        self.evaluator.channel_memo_stats()
     }
 
     /// The draw reuse's counters (with the frames drawn from a kept bottom
@@ -945,6 +971,14 @@ impl Renderer {
                         self.put_fallback_pixels(key.clone(), pixels);
                         break None;
                     }
+                    Ok(pixels) if let Some(code) = pixels.invalid_rgba8_code(&job.request) => {
+                        crate::shader_layers::FallbackFailure {
+                            reason: "pixelCode".into(),
+                            message: format!(
+                                "the runner returned invalid RGBA8 channel code {code} (expected 0..=255)"
+                            ),
+                        }
+                    }
                     Ok(pixels) => crate::shader_layers::FallbackFailure {
                         reason: "size".into(),
                         message: format!(
@@ -1303,21 +1337,40 @@ impl Renderer {
     }
 
     fn supports_precision(&self, precision: Precision) -> bool {
-        precision == Precision::Float16
+        precision != Precision::Float32
             || self
                 .device
                 .features()
                 .contains(wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE)
     }
 
-    /// The output format a fresh [`Self::render`] frame would use. Callers
-    /// rendering into their own target must make the same precision choice.
+    /// The project's requested output format on a device supporting its depth.
+    /// Callers rendering into their own target use [`Self::device_target_format`]
+    /// to include the shipped compositor's hardware fallback.
     pub fn target_format(document: &Document, request: &RenderRequest) -> wgpu::TextureFormat {
         let precision = match document.root().map(project_settings) {
             Some(Ok(c)) => effective_precision(request.precision, c.precision),
             _ => request.precision,
         };
         working_format(precision)
+    }
+
+    /// The actual output format on this device. Main's compositor falls
+    /// back from 32 to 16 when float32 filtering/blending is unavailable.
+    /// Viewers, snapshots and caller-owned targets must use this choice.
+    pub fn device_target_format(
+        &self,
+        document: &Document,
+        request: &RenderRequest,
+    ) -> wgpu::TextureFormat {
+        let format = Self::target_format(document, request);
+        if format == wgpu::TextureFormat::Rgba32Float
+            && !self.supports_precision(Precision::Float32)
+        {
+            working_format(Precision::Float16)
+        } else {
+            format
+        }
     }
 
     /// Renders `composition` at `time` into a new texture.
@@ -1330,7 +1383,7 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let format = Self::target_format(document, request);
+        let format = self.device_target_format(document, request);
         // A target a finished frame gave back (`recycle`), when it fits.
         let target = match self.frame_reuse.target.take() {
             Some(t)
@@ -1640,7 +1693,10 @@ impl Renderer {
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
         debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
-        let precision = effective_precision(request.precision, color.precision);
+        let precision = available_precision(
+            effective_precision(request.precision, color.precision),
+            self.supports_precision(Precision::Float32),
+        );
         if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
                 "32-bit precision on a device without rgba32float filtering and blending",
@@ -1679,6 +1735,9 @@ impl Renderer {
         }
         let options3d = self.options3d.for_request(request);
         let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        // Channels found in this document are kept across its frames while
+        // it is unchanged (`pm_eval` `channel_memo`).
+        self.open_channel_memo(document);
         let (mut plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
@@ -1696,6 +1755,7 @@ impl Renderer {
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
+        self.evaluator.close_channel_memo();
         if !request.background {
             plan.background = Background::Transparent;
         }
@@ -1783,6 +1843,8 @@ impl Renderer {
                 pyramids: &mut self.pyramids,
                 failures: Vec::new(),
                 unsupported: Vec::new(),
+                twins: crate::exec::comp_twins(&plan),
+                comps: Vec::new(),
             };
             // Generic renders flip GL rows into the caller's top-down target.
             // Standard snapshots draw directly into their readback target.
@@ -2310,6 +2372,7 @@ impl Renderer {
             .unwrap_or_else(|| plan::derived_scale(&comp, w, h));
         let options3d = self.options3d.for_request(request);
         let blender = crate::blender::PlanState::new(options3d.blender.clone());
+        self.open_channel_memo(document);
         let (plan, build) = plan::build_blender(
             &mut self.evaluator,
             &comp,
@@ -2327,6 +2390,7 @@ impl Renderer {
             self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
+        self.evaluator.close_channel_memo();
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
         }
@@ -2361,14 +2425,42 @@ fn project_settings(root: &pm_model::Node) -> Result<ColorSettings, RenderError>
         })
 }
 
-/// The precision intermediates use: the request's, raised to the project's
-/// (Settings › Project › Color › Precision is a floor for every render of
-/// the project; exports raise it further by amendment 8).
-pub fn effective_precision(request: Precision, project: Precision) -> Precision {
-    if request == Precision::Float32 || project == Precision::Float32 {
-        Precision::Float32
-    } else {
-        Precision::Float16
+/// The project Color depth is authoritative for preview, snapshots and export.
+/// Request precision is retained in the protocol for older callers, but cannot
+/// change the rounding boundaries of an existing project (DEPTH-1).
+pub fn effective_precision(_request: Precision, project: Precision) -> Precision {
+    project
+}
+
+/// The shipped compositor's hardware fallback: 32 → 16 on devices without
+/// float32 filtering and blending. The saved project depth is unchanged.
+fn available_precision(precision: Precision, float32: bool) -> Precision {
+    match (precision, float32) {
+        (Precision::Float32, false) => Precision::Float16,
+        _ => precision,
+    }
+}
+
+#[cfg(test)]
+mod depth_device_tests {
+    use super::*;
+    #[test]
+    fn float32_hardware_fallback_matches_main_without_promoting_other_depths() {
+        assert_eq!(
+            available_precision(Precision::Float32, false),
+            Precision::Float16
+        );
+        for depth in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
+            assert_eq!(available_precision(depth, true), depth);
+        }
+        assert_eq!(
+            available_precision(Precision::Unorm8, false),
+            Precision::Unorm8
+        );
+        assert_eq!(
+            available_precision(Precision::Float16, false),
+            Precision::Float16
+        );
     }
 }
 

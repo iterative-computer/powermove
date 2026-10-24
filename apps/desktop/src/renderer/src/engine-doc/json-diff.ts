@@ -17,6 +17,7 @@
  */
 import type { PathPart } from '../../../shared/patch';
 import { isIdKeyed, type PatchOp } from '../../../shared/patch-ids';
+import { canonicalStringify } from '../../../shared/canonical-json';
 
 /** No JSON form: the member is absent (`undefined`, a function, a symbol). */
 const ABSENT = Symbol('absent');
@@ -110,8 +111,12 @@ const idOf = (v: any): string | undefined => (isRecord(v) && typeof v.id === 'st
  * almost always unchanged after a reorder, insert, or delete.
  */
 export function sameJson(before: any, after: any): boolean {
+  return sameJsonAt(before, after, '', plainPrototypes(), false);
+}
+
+function sameJsonAt(before: any, after: any, key: PathPart, fast: boolean, arraySlot: boolean): boolean {
   if (before === after) return true;
-  return plainPrototypes() ? fastSame(before, after) : slowSame(before, after);
+  return fast ? fastSame(before, after, key, arraySlot) : slowSame(before, after, key, false, arraySlot);
 }
 
 const OBJECT_PROTO = Object.prototype;
@@ -132,28 +137,28 @@ function plainPrototypes(): boolean {
  * is plain JSON, where a missing member reads `undefined` or an inherited
  * function, neither of which equals a JSON value. Values with other
  * prototypes (primitive wrappers, dates, class instances, array-likes) take
- * `slowSame`, and so does every difference found on a value with a `toJSON`
- * of its own. Not seen: a non-enumerable own `toJSON` on a plain object that
- * otherwise equals the shadow (no writer defines one; the auditor compares
- * serializations and would report it); looking `toJSON` up on every object
- * would cost a quarter of the time. On the 884-layer project's layers
+ * `slowSame`, as does a value with a `toJSON` of its own (including a
+ * non-enumerable one). On the 884-layer project's layers
  * (94,824 values) this takes 2.4 ms where `slowSame` takes 7.4 ms and
  * `JSON.stringify` 3.1 ms (Node, loaded machine).
  */
-function fastSame(b: any, a: any): boolean {
+function fastSame(b: any, a: any, location: PathPart, arraySlot: boolean): boolean {
   if (b === a) return true;
   if (typeof a !== 'object') return typeof a === 'number' && !Number.isFinite(a) && b === null;
   if (a === null) return false;
+  // Consistency checks also use this predicate: custom non-enumerable
+  // toJSON must be observed even when the stored members are unchanged.
+  if (typeof a.toJSON === 'function') return slowSame(b, a, location, true, arraySlot);
   const proto = Object.getPrototypeOf(a);
   const array = proto === ARRAY_PROTO && Array.isArray(a);
-  if (!array && proto !== OBJECT_PROTO && proto !== null) return slowSame(b, a);
-  if (b === null || typeof b !== 'object' || Array.isArray(b) !== array) return differs(b, a);
+  if (!array && proto !== OBJECT_PROTO && proto !== null) return slowSame(b, a, location, true, arraySlot);
+  if (b === null || typeof b !== 'object' || Array.isArray(b) !== array) return differs(b, a, location, arraySlot);
   if (array) {
-    if (b.length !== a.length) return differs(b, a);
+    if (b.length !== a.length) return differs(b, a, location, arraySlot);
     for (let i = 0; i < a.length; i++) {
       const v = a[i];
-      if (v === undefined || typeof v === 'function' || typeof v === 'symbol') { if (b[i] !== null) return differs(b, a); }
-      else if (!fastSame(b[i], v)) return differs(b, a);
+      if (v === undefined || typeof v === 'function' || typeof v === 'symbol') { if (b[i] !== null) return differs(b, a, location, arraySlot); }
+      else if (!fastSame(b[i], v, i, true)) return differs(b, a, location, arraySlot);
     }
     return true;
   }
@@ -162,24 +167,24 @@ function fastSame(b: any, a: any): boolean {
     const v = a[key];
     if (v === undefined || typeof v === 'symbol') continue;
     if (typeof v === 'function') {
-      if (key === 'toJSON') return slowSame(b, a);
+      if (key === 'toJSON') return slowSame(b, a, location, true, arraySlot);
       continue;
     }
     const bv = b[key];
     // Missing from the shadow: a difference, unless the live member has no
     // JSON form after all (a `toJSON` answering undefined); the slow path knows.
-    if (bv === undefined) return slowSame(b, a);
-    if (!fastSame(bv, v)) return differs(b, a);
+    if (bv === undefined) return slowSame(b, a, location, true, arraySlot);
+    if (!fastSame(bv, v, key, false)) return differs(b, a, location, arraySlot);
     n++;
   }
   for (const _ in b) n--;
-  return n === 0 || differs(b, a);
+  return n === 0 || differs(b, a, location, arraySlot);
 }
 
 /** A difference the fast path found, unless the live value's own `toJSON` replaces it. */
-const differs = (b: any, a: any): boolean => a.toJSON !== undefined && slowSame(b, a);
+const differs = (b: any, a: any, key: PathPart, arraySlot: boolean): boolean => a.toJSON !== undefined && slowSame(b, a, key, true, arraySlot);
 
-function slowSame(before: any, after: any): boolean {
+function slowSame(before: any, after: any, location: PathPart, fast: boolean, arraySlot: boolean): boolean {
   if (before === after) return true;
   switch (typeof after) {
     case 'number': return Number.isFinite(after) ? false /* === failed; 0 and -0 are === */ : before === null;
@@ -189,8 +194,10 @@ function slowSame(before: any, after: any): boolean {
   }
   if (after === null) return false;
   if (typeof after.toJSON === 'function' || after instanceof Number || after instanceof String || after instanceof Boolean) {
-    const value = jsonValue(after, '');
-    return value !== ABSENT && value !== after && sameJson(before, value);
+    // JSON.stringify invokes a hook once for this member. The returned object
+    // is then serialized directly, even when it is `after` or has its own hook.
+    const serialized = canonicalStringify({ [location]: after });
+    return arraySlot && serialized === '{}' ? before === null : canonicalStringify({ [location]: before }) === serialized;
   }
   if (before === null || typeof before !== 'object') return false;
   if (Array.isArray(after)) {
@@ -198,7 +205,7 @@ function slowSame(before: any, after: any): boolean {
     for (let i = 0; i < after.length; i++) {
       const v = after[i];
       if (v === undefined || typeof v === 'function' || typeof v === 'symbol') { if (before[i] !== null) return false; }
-      else if (!sameJson(before[i], v)) return false;
+      else if (!sameJsonAt(before[i], v, i, fast, true)) return false;
     }
     return true;
   }
@@ -214,7 +221,7 @@ function slowSame(before: any, after: any): boolean {
       if (v === undefined || typeof v === 'function' || typeof v === 'symbol') break;
       const b = before[key];
       if (b === undefined || typeof b === 'function' || !Object.hasOwn(before, key)) return false;
-      if (!sameJson(b, v)) return false;
+      if (!sameJsonAt(b, v, key, fast, false)) return false;
     }
     if (i === keys.length) return true;
   }
@@ -223,8 +230,11 @@ function slowSame(before: any, after: any): boolean {
   for (const key of keys) {
     const v = after[key];
     if (v === undefined || typeof v === 'function' || typeof v === 'symbol') continue;
-    if (typeof v === 'object' && v !== null && typeof v.toJSON === 'function' && jsonValue(v, key) === ABSENT) continue;
-    if (!Object.hasOwn(before, key) || !sameJson(before[key], v)) return false;
+    if (typeof v === 'object' && v !== null && typeof v.toJSON === 'function') {
+      const serialized = canonicalStringify({ [key]: v });
+      if (serialized === '{}') continue;
+      if (!Object.hasOwn(before, key) || canonicalStringify({ [key]: before[key] }) !== serialized) return false;
+    } else if (!Object.hasOwn(before, key) || !sameJsonAt(before[key], v, key, fast, false)) return false;
     count++;
   }
   return count === Object.keys(before).length;

@@ -16,3 +16,10 @@ export function touchedDocument(PM: any, paths: readonly PathPart[][]): void {
   const doc = PM?.doc;
   if (typeof doc?.touched === 'function') doc.touched(paths);
 }
+
+/** Announces built-in changes with their exact paths; [] is a runtime-cache
+ * notification. Unknown/custom bus events keep the structural safety net. */
+export function notifyDocument(PM: any, event: string, paths: readonly PathPart[][] = []): void {
+  if (typeof PM?.doc?.notify === 'function') PM.doc.notify(event, paths);
+  else PM.bus?.emit?.(event);
+}

@@ -29,7 +29,6 @@ test('floating prompt attaches images and binary files, removes them, and sends 
   await page.evaluate(() => {
     const PM = (window as any).PM;
     PM.AgentUI.setAccess('project');
-    PM.AgentHarness.observe = async () => ({ state: {}, times: [], images: [] });
     PM.CodexBridge.request = (_prompt: string, _schema: any, images: string[], options: any) => {
       (window as any).__attachmentRequest = { images, files: options.attachments };
       return new Promise(() => {});
@@ -38,7 +37,9 @@ test('floating prompt attaches images and binary files, removes them, and sends 
   await composer.locator('textarea').press('Enter');
   await page.waitForFunction(() => Boolean((window as any).__attachmentRequest));
   const request = await page.evaluate(() => (window as any).__attachmentRequest);
-  expect(request.images).toHaveLength(1);
+  const reference = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
+  // The agent also captures context frames; the explicit reference stays intact.
+  expect(request.images.filter((image: string) => image === reference)).toHaveLength(1);
   expect(request.files.map((file: any) => file.name)).toEqual(['brief.pdf']);
   expect([...Buffer.from(request.files[0].dataBase64, 'base64')]).toEqual([37, 80, 68, 70, 45, 0, 255, 128]);
   expect(session.diagnostics.pageErrors).toEqual([]);

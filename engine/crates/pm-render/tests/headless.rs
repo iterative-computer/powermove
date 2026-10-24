@@ -155,7 +155,7 @@ fn render_bytes(
     t: f64,
     request: &RenderRequest,
     resolver: &MapResolver,
-) -> (Vec<u8>, Option<Vec<u8>>, Vec<String>) {
+) -> (Vec<u8>, Option<Vec<u8>>, Vec<String>, wgpu::TextureFormat) {
     let frame = renderer
         .render(doc, "Ptest-root", ticks(t), request, resolver)
         .expect("render");
@@ -166,27 +166,41 @@ fn render_bytes(
     let ids = frame.depth_id.as_ref().map(|t| {
         pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &t.texture).unwrap()
     });
-    (color, ids, frame.legend)
+    (color, ids, frame.legend, frame.color.format())
 }
 
 #[test]
 fn every_feature_is_supported_and_frames_are_deterministic() {
     let (doc, resolver) = everything();
-    let doc = load(&doc);
     assert_eq!(
-        unsupported(&doc, "Ptest-root"),
+        unsupported(&load(&doc), "Ptest-root"),
         vec![],
         "the composition is within the renderer"
     );
     let mut first = Renderer::headless().unwrap();
     let mut second = Renderer::headless().unwrap();
     for precision in [Precision::Float16, Precision::Float32] {
+        let mut project = doc.clone();
+        project["colorDepth"] = json!(if precision == Precision::Float16 {
+            16
+        } else {
+            32
+        });
+        let project = load(&project);
         let mut request = RenderRequest::at_scale(Size::new(W, H), 1.0, precision);
         request.depth_id = true;
         for t in [0.0, 0.73, 1.5] {
-            let a = render_bytes(&mut first, &doc, t, &request, &resolver);
-            let b = render_bytes(&mut first, &doc, t, &request, &resolver);
-            let c = render_bytes(&mut second, &doc, t, &request, &resolver);
+            let a = render_bytes(&mut first, &project, t, &request, &resolver);
+            let b = render_bytes(&mut first, &project, t, &request, &resolver);
+            let c = render_bytes(&mut second, &project, t, &request, &resolver);
+            let expected = if precision == Precision::Float16 {
+                wgpu::TextureFormat::Rgba16Float
+            } else {
+                wgpu::TextureFormat::Rgba32Float
+            };
+            assert_eq!(a.3, expected);
+            assert_eq!(b.3, expected);
+            assert_eq!(c.3, expected);
             assert!(
                 a.0 == b.0 && a.1 == b.1,
                 "{precision:?} t={t}: the same renderer twice differs"
@@ -222,12 +236,24 @@ fn idle_targets_are_released_and_the_next_frame_is_identical() {
 #[test]
 fn regions_equal_the_same_pixels_of_the_full_frame() {
     let (doc, resolver) = everything();
-    let doc = load(&doc);
     let mut r = Renderer::headless().unwrap();
     for precision in [Precision::Float16, Precision::Float32] {
+        let mut project = doc.clone();
+        project["colorDepth"] = json!(if precision == Precision::Float16 {
+            16
+        } else {
+            32
+        });
+        let project = load(&project);
         let mut full = RenderRequest::at_scale(Size::new(W, H), 1.0, precision);
         full.depth_id = true;
-        let (whole, whole_ids, _) = render_bytes(&mut r, &doc, 0.6, &full, &resolver);
+        let (whole, whole_ids, _, format) = render_bytes(&mut r, &project, 0.6, &full, &resolver);
+        let expected = if precision == Precision::Float16 {
+            wgpu::TextureFormat::Rgba16Float
+        } else {
+            wgpu::TextureFormat::Rgba32Float
+        };
+        assert_eq!(format, expected);
         let whole_ids = whole_ids.unwrap();
         let bpp = if precision == Precision::Float16 {
             8
@@ -262,7 +288,9 @@ fn regions_equal_the_same_pixels_of_the_full_frame() {
         ] {
             let mut request = full.clone();
             request.region = Some(rect);
-            let (part, part_ids, _) = render_bytes(&mut r, &doc, 0.6, &request, &resolver);
+            let (part, part_ids, _, part_format) =
+                render_bytes(&mut r, &project, 0.6, &request, &resolver);
+            assert_eq!(part_format, expected);
             let part_ids = part_ids.unwrap();
             // The depth and id surface (rgba16float) follows the region too.
             for y in 0..rect.height as usize {
@@ -732,7 +760,7 @@ fn render_into_a_callers_target_equals_render() {
     let doc = load(&doc);
     let mut r = Renderer::headless().unwrap();
     let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float16);
-    let (expected, _, _) = render_bytes(&mut r, &doc, 0.4, &request, &resolver);
+    let (expected, _, _, _) = render_bytes(&mut r, &doc, 0.4, &request, &resolver);
     // A presenter's working texture (or an export buffer).
     let target = pm_gpu::Target::new(
         r.device(),

@@ -70,7 +70,16 @@ pub enum JobError {
     #[error("{0}")]
     Blender(pm_blender::BlenderError),
     #[error(transparent)]
-    Export(#[from] Error),
+    Export(Error),
+}
+
+impl From<Error> for JobError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Cancelled => Self::Cancelled,
+            error => Self::Export(error),
+        }
+    }
 }
 
 impl From<RenderError> for JobError {
@@ -147,6 +156,12 @@ pub fn asset_records(document: &Document) -> Vec<(String, [u8; 32])> {
 /// The job engine's submission gate (contract 13). The export and still
 /// renderers ask it before every GPU submission and report what each took.
 pub trait GpuGate: Send + Sync {
+    /// Refreshes this worker's QoS at a render or encode work boundary.
+    fn sync_worker_qos(&self) {}
+    /// A refresh callback for CPU row workers spawned by the encoder thread.
+    fn worker_qos_refresh(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        None
+    }
     /// Blocks until GPU work may be submitted and returns how many of the
     /// `units` remaining units of `pass` to submit now (1 to `units`). Returns
     /// `None` when `cancel` is set while waiting.
@@ -175,6 +190,12 @@ pub trait GpuGate: Send + Sync {
     fn measures(&self) -> bool {
         true
     }
+}
+
+/// Refreshes export QoS while an encoder waits for a host reply. Callers
+/// outside a playback-aware export have no installed callback.
+pub fn refresh_current_worker_qos() {
+    crate::par::refresh_current_qos();
 }
 
 thread_local! {
@@ -260,6 +281,10 @@ pub fn pass_key(seed: u64, size: Size) -> u64 {
 pub struct ReadFrame {
     /// Premultiplied working values, top-down, `width × height × 4`.
     pub rgba: Vec<f32>,
+    /// Owned GPU frame for a GPU-capable sink.
+    pub gpu: Option<wgpu::Texture>,
+    /// Whole-frame target held until a GPU sink has finished reading it.
+    gpu_target: Option<Box<pm_render::Frame>>,
     pub width: u32,
     pub height: u32,
     /// Layers that failed and drew nothing (section 8 isolation).
@@ -289,7 +314,7 @@ pub fn render_frame(
     pass: u64,
     cancel: &AtomicBool,
 ) -> Result<ReadFrame, JobError> {
-    let result = render_frame_reusing(
+    let result = render_frame_output(
         renderer,
         document,
         composition,
@@ -299,6 +324,10 @@ pub fn render_frame(
         gate,
         pass,
         cancel,
+        false,
+        true,
+        Some(&mut crate::readback::ExportReadback::default()),
+        Vec::new(),
     );
     renderer.release_frame_reuse();
     result
@@ -320,6 +349,39 @@ pub fn render_frame_reusing(
     pass: u64,
     cancel: &AtomicBool,
 ) -> Result<ReadFrame, JobError> {
+    render_frame_output(
+        renderer,
+        document,
+        composition,
+        time,
+        request,
+        media,
+        gate,
+        pass,
+        cancel,
+        false,
+        true,
+        None,
+        Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_frame_output(
+    renderer: &mut Renderer,
+    document: &Document,
+    composition: &str,
+    time: Ticks,
+    request: &RenderRequest,
+    media: &MediaPaths,
+    gate: &dyn GpuGate,
+    pass: u64,
+    cancel: &AtomicBool,
+    gpu: bool,
+    readback: bool,
+    staging: Option<&mut crate::readback::ExportReadback>,
+    rgba: Vec<f32>,
+) -> Result<ReadFrame, JobError> {
     let span = if gate.measures() {
         gpu_span(renderer)
     } else {
@@ -340,6 +402,10 @@ pub fn render_frame_reusing(
         pass,
         cancel,
         span.as_deref(),
+        gpu,
+        readback,
+        staging,
+        rgba,
     );
     renderer.set_bracket(None);
     result
@@ -358,12 +424,21 @@ fn render_bands(
     pass: u64,
     cancel: &AtomicBool,
     span: Option<&crate::gpu_time::GpuSpan>,
+    gpu: bool,
+    readback: bool,
+    mut staging: Option<&mut crate::readback::ExportReadback>,
+    mut rgba: Vec<f32>,
 ) -> Result<ReadFrame, JobError> {
     let size = request.output_size;
     let (w, h) = (size.width, size.height);
     let total_units = h.div_ceil(BAND_ROWS);
-    // Allocated by the first band unless it is the whole frame.
-    let mut rgba = Vec::new();
+    if readback && staging.is_some() {
+        rgba.resize(w as usize * h as usize * 4, 0.0);
+    } else {
+        rgba.clear();
+    }
+    let mut gpu_frame: Option<wgpu::Texture> = None;
+    let mut gpu_target: Option<Box<pm_render::Frame>> = None;
     let mut failures = Vec::new();
     let mut y = 0u32;
     while y < h {
@@ -375,6 +450,7 @@ fn render_bands(
             .admit(pass, remaining, cancel)
             .ok_or(JobError::Cancelled)?
             .clamp(1, remaining);
+        gate.sync_worker_qos();
         let admission = Admitted {
             gate,
             pass,
@@ -401,6 +477,47 @@ fn render_bands(
                 return Err(e.into());
             }
         };
+        if gpu && whole {
+            // The returned color target belongs to this frame; retaining it
+            // avoids a full float-texture copy while the encoder consumes it.
+            gpu_frame = Some(frame.color.texture.clone());
+        } else if gpu {
+            let target = gpu_frame.get_or_insert_with(|| {
+                renderer.device().create_texture(&wgpu::TextureDescriptor {
+                    label: Some("export GPU working frame"),
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: frame.color.texture.format(),
+                    usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+            });
+            let mut copy =
+                renderer
+                    .device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("export GPU band"),
+                    });
+            copy.copy_texture_to_texture(
+                frame.color.texture.as_image_copy(),
+                wgpu::TexelCopyTextureInfo {
+                    origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                    ..target.as_image_copy()
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: band,
+                    depth_or_array_layers: 1,
+                },
+            );
+            renderer.queue().submit([copy.finish()]);
+        }
         let submitted = Instant::now();
         wait_idle(renderer);
         // A program ran away in this frame: its pixels are not delivered.
@@ -417,24 +534,46 @@ fn render_bands(
             .and_then(|s| s.read_us(renderer.device(), renderer.queue()));
         let units = if whole { total_units } else { admitted };
         admission.finish(units, gpu_us.unwrap_or(wall_us), gpu_us.is_some());
-        let pixels = renderer.read_rgba_reusing(&frame)?;
-        let row = w as usize * 4;
-        let at = y as usize * row;
-        if whole {
-            // One band is the whole frame: its pixels are the frame.
-            rgba = pixels;
-        } else {
-            if rgba.is_empty() {
-                rgba = vec![0f32; w as usize * h as usize * 4];
+        if readback {
+            let row = w as usize * 4;
+            let at = y as usize * row;
+            if let Some(staging) = staging.as_deref_mut() {
+                staging
+                    .read_into(
+                        renderer.device(),
+                        renderer.queue(),
+                        &frame.color.texture,
+                        &mut rgba[at..at + band as usize * row],
+                    )
+                    .map_err(|e| JobError::Render(e.to_string()))?;
+            } else {
+                let pixels = renderer.read_rgba_reusing(&frame)?;
+                if whole {
+                    rgba = pixels;
+                } else {
+                    if rgba.is_empty() {
+                        rgba = vec![0f32; w as usize * h as usize * 4];
+                    }
+                    rgba[at..at + pixels.len()].copy_from_slice(&pixels);
+                    renderer.give_rgba(pixels);
+                }
             }
-            rgba[at..at + pixels.len()].copy_from_slice(&pixels);
         }
         failures.append(&mut frame.failures);
-        renderer.recycle(frame);
+        // A whole GPU target cannot return to the renderer until the sink's
+        // GPU conversion has completed. A band copy and CPU readback have
+        // completed above, so their targets can be reused immediately.
+        if gpu && whole {
+            gpu_target = Some(Box::new(frame));
+        } else {
+            renderer.recycle(frame);
+        }
         y += band;
     }
     Ok(ReadFrame {
         rgba,
+        gpu: gpu_frame,
+        gpu_target,
         width: w,
         height: h,
         failures,
@@ -661,6 +800,9 @@ pub struct ExportPlan {
     /// The document rendered: the job's, or a copy without captions when they
     /// are delivered as a file instead of burned in.
     pub document: Arc<Document>,
+    /// Known offline clips: their video/image frames draw nothing and their
+    /// audio contributes silence, matching the current exporter.
+    pub offline: Vec<OfflineClip>,
     /// PNG sequences: the name frame files start with.
     pub sequence_name: Option<String>,
     /// Encoded-frame previews for the progress sheet.
@@ -691,6 +833,22 @@ pub struct AudioPlan {
     pub graph: Arc<pm_audio::MixGraph>,
     pub cache: Arc<pm_audio::SourceCache>,
     pub sample_rate: u32,
+    /// The export's samples: today's `OfflineAudioContext` length
+    /// ([`legacy_audio_samples`]), not the frames' span.
+    pub samples: i64,
+    /// The range in seconds as today's `renderOffline(t0, t1)` receives it:
+    /// its clips and envelopes start from `t0` (`pm_audio::today`).
+    pub range: (f64, f64),
+}
+
+/// Today's export mix length (`audio.ts` `renderOffline`):
+/// `ceil((t1 − t0) × 48000)` with the range in seconds as JavaScript holds
+/// them. Range ends are ticks of seconds the sheet chose, so the division
+/// gives back the same double.
+pub fn legacy_audio_samples(start: Ticks, end: Ticks, sample_rate: u32) -> i64 {
+    let seconds = |t: Ticks| t.get() as f64 / TICKS_PER_SECOND as f64;
+    let span = (seconds(end) - seconds(start)).max(0.0);
+    (span * f64::from(sample_rate)).ceil() as i64
 }
 
 /// Source blocks kept decoded for one export's mix.
@@ -869,6 +1027,7 @@ fn plan_export_checked(
     } else {
         job.document.clone()
     };
+    let offline = offline_media(&document, &job.composition, &job.media);
     let doc = &*document;
     let (codec, container) = codec_of(s)?;
     let tags = tags_of(s.color)?;
@@ -891,22 +1050,31 @@ fn plan_export_checked(
     let audio_codec = audio_codec_of(s, container);
     let audio = if s.audio && !s.format.is_image() {
         let cache = pm_audio::SourceCache::new(AUDIO_CACHE_BYTES, 2);
+        // An export takes today's exact lengths before it mixes.
+        cache.set_blocking_lengths(true);
         let graph =
             pm_audio::MixGraph::build(doc, &job.composition, &mut evaluator(), &cache, &*job.media)
                 .map_err(|e| JobError::Audio(e.to_string()))?;
         for (name, asset, why) in &graph.problems {
-            problems.push(format!("audio of {name} ({asset}): {why}"));
+            if !offline
+                .iter()
+                .any(|clip| clip.asset.as_str() == asset.as_str())
+            {
+                problems.push(format!("audio of {name} ({asset}): {why}"));
+            }
         }
         if graph.voices.is_empty() {
             None
         } else {
             Some(AudioPlan {
-                // Opus is written at 48 kHz: the mix runs at 48 kHz for WebM.
-                sample_rate: if audio_codec == AudioCodec::Opus {
-                    crate::settings::OPUS_SAMPLE_RATE
-                } else {
-                    pm_audio::mixer::project_sample_rate(doc)
-                },
+                // Today's export OfflineAudioContext is always stereo 48 kHz,
+                // independently of the project's playback device/rate.
+                sample_rate: 48_000,
+                samples: legacy_audio_samples(s.range.start, s.range.end, 48_000),
+                range: (
+                    s.range.start.get() as f64 / TICKS_PER_SECOND as f64,
+                    s.range.end.get() as f64 / TICKS_PER_SECOND as f64,
+                ),
                 graph: Arc::new(graph),
                 cache,
             })
@@ -977,6 +1145,7 @@ fn plan_export_checked(
         request,
         audio,
         document,
+        offline,
         sequence_name: s.delivery.sequence_name.clone(),
         preview: s.delivery.preview,
         frame_post: None,
@@ -1010,7 +1179,7 @@ pub fn preview_jpeg(
     );
     let mut out = vec![0u8; pw as usize * ph as usize * 4];
     let (w, h) = (width as usize, height as usize);
-    for py in 0..ph as usize {
+    crate::par::rows_limited(&mut out, pw as usize * 4, 4, |py, row| {
         let y0 = py * h / ph as usize;
         let y1 = ((py + 1) * h / ph as usize).max(y0 + 1);
         for px in 0..pw as usize {
@@ -1026,15 +1195,15 @@ pub fn preview_jpeg(
                 }
             }
             let n = ((y1 - y0) * (x1 - x0)) as f32;
-            let o = (py * pw as usize + px) * 4;
+            let o = px * 4;
             for k in 0..3 {
                 let v = sum[k] / n;
-                out[o + k] =
+                row[o + k] =
                     (if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) } * 255.0).round() as u8;
             }
-            out[o + 3] = 255;
+            row[o + 3] = 255;
         }
-    }
+    });
     Ok((pw, ph, encode_jpeg(&out, pw, ph, 0.8)?))
 }
 
@@ -1059,7 +1228,12 @@ impl Progress {
 }
 
 enum Rendered {
-    Frame(u64, Vec<f32>),
+    Frame(
+        u64,
+        Vec<f32>,
+        Option<wgpu::Texture>,
+        Option<Box<pm_render::Frame>>,
+    ),
     Failed(JobError),
 }
 
@@ -1124,50 +1298,84 @@ where
         request,
         audio,
         document,
+        offline,
         preview: wants_preview,
         frame_post,
         ..
     } = plan;
     let working = spec.working;
     let frames = spec.frames;
+    // A compatibility pass edits each frame's pixels on the CPU, so those
+    // exports read every frame back instead of handing the encoder textures.
+    let gpu_frames = sink.gpu_frames() && frame_post.is_none();
+    let sampled = crate::verify::sampled_frames(frames);
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
     pipeline.set_legacy_png(crate::png_compat::has_level1_content(&document));
     let mut mixer = audio.map(|a| {
+        let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
+        let mut mixer = pm_audio::Mixer::new_legacy_export(
+            pm_audio::MixFormat::stereo(a.sample_rate),
+            document.clone(),
+            a.graph,
+            evaluator(),
+            a.cache,
+        );
+        // Today's OfflineAudioContext starts at the range's start.
+        mixer.set_today_range(a.range.0.max(0.0), a.range.1, first);
+        mixer.set_today_playhead(
+            job.settings
+                .audio_index_playhead
+                .map(|t| t.get() as f64 / TICKS_PER_SECOND as f64),
+        );
         (
-            pm_audio::Mixer::new(
-                pm_audio::MixFormat::stereo(a.sample_rate),
-                document.clone(),
-                a.graph,
-                evaluator(),
-                a.cache,
-            ),
+            mixer,
             a.sample_rate,
+            // Today's mix ends here, before or after the last frame's end.
+            first + a.samples,
         )
     });
     let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
-    // The encoder gives each frame's pixels back for a later frame to read
-    // into (docs/engine/perfbench.md).
-    let (back_tx, back_rx) = std::sync::mpsc::channel::<Vec<f32>>();
+    // The encoder returns pixels and completed whole GPU targets for later
+    // frames to reuse (docs/engine/perfbench.md).
+    let (back_tx, back_rx) =
+        std::sync::mpsc::channel::<(Vec<f32>, Option<Box<pm_render::Frame>>)>();
     let qos = crate::par::current_qos();
     std::thread::scope(|scope| {
+        let encoder_gate = gate;
         let encoder = scope.spawn(move || -> Result<S::Output, JobError> {
             crate::par::apply_qos(qos);
+            let _qos_refresh = crate::par::install_qos_refresh(encoder_gate.worker_qos_refresh());
+            encoder_gate.sync_worker_qos();
             let mut last_preview: Option<Instant> = None;
+            let profiling = std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1");
+            let (mut video_ns, mut preview_ns, mut audio_ns, mut progress_ns) = (0, 0, 0, 0);
             for expected in 0..frames {
-                let (n, rgba) = match rx.recv() {
-                    Ok(Rendered::Frame(n, rgba)) => (n, rgba),
+                let (n, rgba, texture, gpu_target) = match rx.recv() {
+                    Ok(Rendered::Frame(n, rgba, texture, gpu_target)) => {
+                        (n, rgba, texture, gpu_target)
+                    }
                     Ok(Rendered::Failed(e)) => return Err(e),
                     Err(_) => return Err(JobError::Cancelled),
                 };
+                encoder_gate.sync_worker_qos();
                 debug_assert_eq!(n, expected);
                 let (w, h) = (request.output_size.width, request.output_size.height);
-                pipeline.push_frame(&WorkingFrame {
+                let frame = WorkingFrame {
                     width: w,
                     height: h,
                     rgba: &rgba,
-                })?;
+                };
+                let started = profiling.then(Instant::now);
+                if let Some(texture) = texture {
+                    pipeline.push_gpu(&texture, (!rgba.is_empty()).then_some(&frame))?;
+                } else {
+                    pipeline.push_frame(&frame)?;
+                }
+                video_ns += started.map_or(0, |t| t.elapsed().as_nanos());
+                let started = profiling.then(Instant::now);
                 let due = wants_preview
+                    && !rgba.is_empty()
                     && (n + 1 == frames
                         || last_preview.is_none_or(|t| t.elapsed() >= PREVIEW_EVERY));
                 let preview = if due {
@@ -1183,9 +1391,19 @@ where
                 } else {
                     None
                 };
-                let _ = back_tx.send(rgba);
-                if let Some((mixer, rate)) = mixer.as_mut() {
+                preview_ns += started.map_or(0, |t| t.elapsed().as_nanos());
+                // `push_gpu` has completed every source-texture GPU read.
+                // On an error above, the target is dropped instead of reused.
+                let _ = back_tx.send((rgba, gpu_target));
+                let started = profiling.then(Instant::now);
+                if let Some((mixer, rate, last)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
+                    let first = first.min(*last);
+                    let end = if n + 1 == frames {
+                        *last
+                    } else {
+                        end.min(*last)
+                    };
                     let mut block = Vec::new();
                     let summary = pm_audio::offline::render(mixer, first, end, 8192, |_, inter| {
                         block.extend_from_slice(inter);
@@ -1199,29 +1417,57 @@ where
                         pipeline.push_audio(&block)?;
                     }
                 }
+                audio_ns += started.map_or(0, |t| t.elapsed().as_nanos());
+                let started = profiling.then(Instant::now);
                 progress(Progress {
                     frames_done: n + 1,
                     frames,
                     preview,
                 });
+                progress_ns += started.map_or(0, |t| t.elapsed().as_nanos());
             }
-            Ok(pipeline.finish()?)
+            if profiling {
+                eprintln!(
+                    "[export timing] encoder_video_ms={:.3} encoder_preview_ms={:.3} encoder_audio_ms={:.3} encoder_progress_ms={:.3}",
+                    video_ns as f64 / 1e6,
+                    preview_ns as f64 / 1e6,
+                    audio_ns as f64 / 1e6,
+                    progress_ns as f64 / 1e6,
+                );
+            }
+            encoder_gate.sync_worker_qos();
+            pipeline
+                .finish_with_cancel(cancel)
+                .map_err(|error| match error {
+                    crate::Error::Cancelled => JobError::Cancelled,
+                    error => JobError::Export(error),
+                })
         });
         let mut render_error = None;
+        let _qos_refresh = crate::par::install_qos_refresh(gate.worker_qos_refresh());
+        let mut staging = crate::readback::ExportReadback::default();
+        let mut render_ns = 0u128;
+        let render_started = Instant::now();
+        let mut last_gpu_preview = Instant::now() - PREVIEW_EVERY;
+        let mut available_pixels: Vec<Vec<f32>> = Vec::new();
         for n in 0..frames {
+            gate.sync_worker_qos();
             if cancel.load(Ordering::Relaxed) {
                 render_error = Some(JobError::Cancelled);
                 break;
             }
-            // Three frames' pixels circulate. Before frame n the encoder has
-            // taken frame n - 2 (the channel holds one), so it has given
-            // frame n - 3's back: waiting for it never stalls the export, and
-            // which buffer a frame reads into does not depend on timing. An
-            // encoder that stopped closes the channel: a new buffer then.
+            // Three frames' pixels circulate. Keep returned buffers here so
+            // GPU frames without readback do not discard a sampled frame's
+            // allocation before the next sampled readback.
             if n >= PIXEL_BUFFERS
-                && let Ok(rgba) = back_rx.recv()
+                && let Ok((rgba, gpu_target)) = back_rx.recv()
             {
-                renderer.give_rgba(rgba);
+                if let Some(frame) = gpu_target {
+                    renderer.recycle(*frame);
+                }
+                if !rgba.is_empty() {
+                    available_pixels.push(rgba);
+                }
             }
             let frame_request = match blender.as_deref_mut() {
                 None => Ok(request.clone()),
@@ -1238,9 +1484,15 @@ where
                     )
                     .map(|surfaces| crate::blender::with_surfaces(&request, surfaces)),
             };
+            let preview_due = wants_preview && last_gpu_preview.elapsed() >= PREVIEW_EVERY;
+            if preview_due {
+                last_gpu_preview = Instant::now();
+            }
+            let needs_readback = !gpu_frames || sampled.contains(&n) || preview_due;
+            let frame_started = Instant::now();
             let rendered = frame_request
                 .and_then(|frame_request| {
-                    render_frame_reusing(
+                    render_frame_output(
                         renderer,
                         &document,
                         &job.composition,
@@ -1250,9 +1502,26 @@ where
                         gate,
                         pass,
                         cancel,
+                        gpu_frames,
+                        needs_readback,
+                        Some(&mut staging),
+                        if needs_readback {
+                            available_pixels.pop().unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        },
                     )
                 })
-                .and_then(|f| {
+                .and_then(|mut f| {
+                    f.failures.retain(|failure| {
+                        let asset = failure
+                            .message
+                            .strip_prefix("media for asset ")
+                            .and_then(|rest| rest.strip_suffix(" is offline"));
+                        !offline
+                            .iter()
+                            .any(|clip| asset == Some(clip.asset.as_str()))
+                    });
                     if f.failures.is_empty() {
                         Ok(f)
                     } else if let Some(l) = f
@@ -1276,23 +1545,30 @@ where
                         ))
                     }
                 });
+            render_ns += frame_started.elapsed().as_nanos();
             // The frame as the exporting window's compatibility context
             // leaves it (today's WebM frames: `frame:rendered` handlers drew
             // on the compositor's canvas before it was encoded).
-            let rendered = rendered.and_then(|f| match &frame_post {
-                None => Ok(f.rgba),
-                Some(post) => post.frame(
-                    n,
-                    timeline.tick(n),
-                    request.output_size.width,
-                    request.output_size.height,
-                    working,
-                    f.rgba,
-                ),
+            let rendered = rendered.and_then(|f| {
+                let rgba = match &frame_post {
+                    None => f.rgba,
+                    Some(post) => post.frame(
+                        n,
+                        timeline.tick(n),
+                        request.output_size.width,
+                        request.output_size.height,
+                        working,
+                        f.rgba,
+                    )?,
+                };
+                Ok((rgba, f.gpu, f.gpu_target))
             });
             match rendered {
-                Ok(rgba) => {
-                    if tx.send(Rendered::Frame(n, rgba)).is_err() {
+                Ok((rgba, gpu, gpu_target)) => {
+                    if tx
+                        .send(Rendered::Frame(n, rgba, gpu, gpu_target))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -1301,6 +1577,14 @@ where
                     break;
                 }
             }
+        }
+        if std::env::var("PM_EXPORT_PROFILE").as_deref() == Ok("1") {
+            eprintln!(
+                "[export timing] render_ms={:.3} render_pipeline_ms={:.3} qos={:?}",
+                render_ns as f64 / 1e6,
+                render_started.elapsed().as_secs_f64() * 1e3,
+                crate::par::current_qos()
+            );
         }
         if let Some(e) = render_error {
             // The encoder side stops at the failure (or sees the channel
@@ -1321,7 +1605,17 @@ const PIXEL_BUFFERS: u64 = 3;
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
 /// FFmpeg (WebM), or the engine's PNG writer.
 pub fn sink_for(plan: &ExportPlan) -> Result<crate::OutputSink, JobError> {
-    let mut sink = crate::OutputSink::new(&plan.spec)?;
+    sink_for_with(plan, None)
+}
+
+/// [`sink_for`] with the host's WebCodecs encoders, which the desktop app's
+/// job engine has for the WebM exports today's exporter encodes with them.
+pub fn sink_for_with(
+    plan: &ExportPlan,
+    encoder: Option<Box<dyn crate::webcodecs::EncodeHost>>,
+) -> Result<crate::OutputSink, JobError> {
+    let level1 = crate::png_compat::has_level1_content(&plan.document);
+    let mut sink = crate::OutputSink::for_job_with(&plan.spec, level1, encoder)?;
     if let (crate::OutputSink::Png(png), Some(name)) = (&mut sink, &plan.sequence_name) {
         png.set_stem(name);
     }
@@ -1521,6 +1815,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn encoder_cancellation_remains_cancelled_at_the_job_boundary() {
+        assert!(matches!(
+            JobError::from(Error::Cancelled),
+            JobError::Cancelled
+        ));
+        assert!(matches!(
+            JobError::from(Error::Encode("failed".into())),
+            JobError::Export(_)
+        ));
+    }
+
+    #[test]
     fn timeline_counts_frames_like_todays_exporter_and_lands_on_the_grid() {
         let s = Ticks::from_whole_seconds(1);
         let e = Ticks::from_whole_seconds(3);
@@ -1612,5 +1918,90 @@ mod tests {
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8]);
         let png = encode_png(&rgba, w, h).unwrap();
         assert_eq!(&png[1..4], b"PNG");
+    }
+
+    // Retain the serial filter as the exact oracle, including its summation
+    // order, alpha byte and JPEG encoder boundary.
+    fn serial_preview_jpeg(
+        rgba: &[f32],
+        width: u32,
+        height: u32,
+        max_edge: u32,
+    ) -> Result<(u32, u32, Vec<u8>), JobError> {
+        let scale = (f64::from(max_edge) / f64::from(width.max(height))).min(1.0);
+        let (pw, ph) = (
+            ((f64::from(width) * scale).round() as u32).max(1),
+            ((f64::from(height) * scale).round() as u32).max(1),
+        );
+        let mut out = vec![0u8; pw as usize * ph as usize * 4];
+        let (w, h) = (width as usize, height as usize);
+        for py in 0..ph as usize {
+            let y0 = py * h / ph as usize;
+            let y1 = ((py + 1) * h / ph as usize).max(y0 + 1);
+            for px in 0..pw as usize {
+                let x0 = px * w / pw as usize;
+                let x1 = ((px + 1) * w / pw as usize).max(x0 + 1);
+                let mut sum = [0f32; 3];
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let i = (y * w + x) * 4;
+                        for k in 0..3 {
+                            sum[k] += rgba[i + k];
+                        }
+                    }
+                }
+                let n = ((y1 - y0) * (x1 - x0)) as f32;
+                let o = (py * pw as usize + px) * 4;
+                for k in 0..3 {
+                    let v = sum[k] / n;
+                    out[o + k] =
+                        (if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) } * 255.0).round() as u8;
+                }
+                out[o + 3] = 255;
+            }
+        }
+        Ok((pw, ph, encode_jpeg(&out, pw, ph, 0.8)?))
+    }
+
+    #[test]
+    fn preview_parallel_rows_match_serial_jpeg_bytes() {
+        for (width, height, edge) in [
+            (1920u32, 1080u32, 640u32),
+            (641, 359, 321),
+            (321, 181, 640),
+            (319, 183, 53),
+        ] {
+            for phase in [0usize, 7] {
+                let rgba: Vec<f32> = (0..width as usize * height as usize)
+                    .flat_map(|i| {
+                        let x = i % width as usize;
+                        let y = i / width as usize;
+                        let moving = ((x * 37 + y * 19 + phase * 101) % 1021) as f32 / 1020.0;
+                        let red = if (i + phase).is_multiple_of(701) {
+                            f32::NAN
+                        } else {
+                            moving
+                        };
+                        let green = if (i + phase).is_multiple_of(997) {
+                            f32::INFINITY
+                        } else {
+                            moving - 0.1
+                        };
+                        let blue = if (i + phase).is_multiple_of(1201) {
+                            f32::NEG_INFINITY
+                        } else {
+                            1.1 - moving
+                        };
+                        [red, green, blue, moving]
+                    })
+                    .collect();
+                let expected = serial_preview_jpeg(&rgba, width, height, edge).unwrap();
+                let actual = preview_jpeg(&rgba, width, height, edge).unwrap();
+                assert_eq!(
+                    actual, expected,
+                    "{width}×{height}, edge {edge}, phase {phase}"
+                );
+            }
+        }
     }
 }

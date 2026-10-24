@@ -77,9 +77,9 @@ void main(){
   vec3 sc = s.a > .0001 ? s.rgb / s.a : vec3(0.);
   vec3 dc = d.a > .0001 ? d.rgb / d.a : vec3(0.);
   vec3 bc = blend(dc, sc, u_blend);
-  vec3 res = mix(dc, bc, s.a);
+  vec3 res = (1. - s.a) * d.rgb + (1. - d.a) * s.rgb + s.a * d.a * bc;
   float a = s.a + d.a * (1. - s.a);
-  o = vec4(res * a, a);
+  o = vec4(res, a);
 }`;
 
 /* ── plain textured draw (content → layer buffer) ── */
@@ -187,10 +187,9 @@ const toLegacy = (definition: EffectDefinition): LegacyFx => {
   return cached;
 };
 
-/* A replaced or removed effect invalidates the compiled program cached under
-   `fx:<id>`; without this the compositor would keep drawing the old shader. */
+/* Every effect registry change retires its program and completed pictures.
+   Re-enabling a provider must also discard frames drawn while it was missing. */
 kernel.effects.onChange((change) => {
-  if (change.kind === 'add') return;
   PM.GL?.dropProgram?.('fx:' + change.id);
 });
 

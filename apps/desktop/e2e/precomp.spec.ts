@@ -65,7 +65,8 @@ test.describe('@groups editable timeline groups', () => {
     await page.waitForFunction(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline');return timeline.rows.some((row:any)=>row.L?.name==='Menu card');});
     const row=await page.evaluate(()=>{const PM=(window as any).PM,timeline=PM.Kernel.services.get('timeline'),r=timeline.cv.getBoundingClientRect();return {x:r.left+110,y:r.top+timeline.ruler+timeline.row/2-timeline.scrollY};});
     const timelineItems = await chooseNativeMenu(session, 'Group layers', () => page.mouse.click(row.x,row.y,{button:'right'}));
-    expect(timelineItems).toEqual(canvasItems);
+    expect(timelineItems).toContain('Import Captions…');
+    expect(timelineItems.filter(item => item !== 'Import Captions…')).toEqual(canvasItems);
     await page.waitForFunction(()=>(window as any).PM.firstSel()?.type==='group');
     expect(session.diagnostics.pageErrors).toEqual([]);
   });

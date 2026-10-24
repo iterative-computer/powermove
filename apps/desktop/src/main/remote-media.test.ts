@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { createServer, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -250,9 +251,12 @@ describe('remote media IPC', () => {
   function fakeIpc() {
     const handlers = new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>();
     const ipc = { handle: (channel: string, handler: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown) => handlers.set(channel, handler) } as unknown as IpcMain;
-    const destroyed: Array<() => void> = [];
-    const event = (id: number) => ({ sender: { id, once: (_name: string, fn: () => void) => destroyed.push(fn) } }) as unknown as IpcMainInvokeEvent;
-    return { ipc, handlers, event, destroy: () => destroyed.forEach((fn) => fn()) };
+    const senders = new Map<number, EventEmitter>();
+    const event = (id: number) => {
+      if (!senders.has(id)) senders.set(id, Object.assign(new EventEmitter(), { id, isDestroyed: () => false, isCrashed: () => false }));
+      return { sender: senders.get(id) } as unknown as IpcMainInvokeEvent;
+    };
+    return { ipc, handlers, event, destroy: () => senders.forEach(sender => sender.emit('destroyed')) };
   }
 
   it('hands the file back in bounded chunks to its own window only, and deletes it on release', async () => {

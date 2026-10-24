@@ -17,7 +17,7 @@ export function registerMediaPasteIpc(ipcMain: Pick<IpcMain, 'handle'>, ctx: {
     const window = windowFor(event);
     if (!window || window.isDestroyed() || !window.isFocused() || !await acted(event)) return false;
     const formats = await types();
-    const media = formats.some(type => /^(image|video|audio)\//i.test(type)
+    const media = formats.some(type => /^(image|video|audio)\//i.test(type) || type === 'text/html'
       || type === 'text/uri-list' || type === 'application/x-moz-file'
       || type === 'electron application/osclipboard;format="public.file-url"');
     if (!media || window.isDestroyed() || !window.isFocused()) return false;

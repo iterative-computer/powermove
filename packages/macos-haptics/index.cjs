@@ -14,6 +14,7 @@ module.exports = {
   fullSync(fd) { return native?.fileOperation?.('sync', fd) ?? Promise.resolve(false); },
   cloudFileState(path, download = false) { return native?.cloudFileState?.(path, download) ?? Promise.resolve("unknown"); },
   fontFamilies() { return native?.fontFamilies?.() ?? null; },
+  fontRegistryVersion() { return native?.fontRegistryVersion?.() ?? null; },
   sandboxDeniesLookup(pids, name) { return native?.sandboxDeniesLookup?.(pids, name) ?? null; },
   triggerAlignment() {
     native?.triggerAlignment();

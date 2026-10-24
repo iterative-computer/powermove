@@ -20,7 +20,7 @@ test('editable Pen, canvas text, graph and preview controls render coherently',a
  const text=page.getByRole('textbox',{name:'Edit text on canvas'});await expect(text).toBeFocused();await text.fill('Motion stays editable');await page.keyboard.press('Meta+Enter');
  await page.evaluate(()=>{const PM=(window as any).PM;PM.Edit.apply({type:'set_property',target:PM.proj.layers[0].id,path:'c.size',value:36,preserveHandEdits:false});});
  expect(await page.evaluate(()=>(window as any).PM.proj.layers[0].d.text)).toMatchObject({v:'Motion stays editable'});
- await page.getByRole('group',{name:'Text animator presets'}).getByRole('button',{name:'Rise',exact:true}).click();await expect(page.getByRole('button',{name:'Collapse Rise',exact:true})).toBeVisible();
+ await chooseNativeMenu(session,'Rise',()=>page.getByRole('button',{name:'Add text animator',exact:true}).click());await expect(page.getByRole('button',{name:'Collapse Rise',exact:true})).toBeVisible();
  await page.screenshot({path:path.join(evidence,'text-animator.png')});
  await expect(page.getByRole('combobox',{name:'Preview resolution',exact:true})).toBeVisible();
  await page.waitForFunction(()=>(window as any).PM.quality===1);

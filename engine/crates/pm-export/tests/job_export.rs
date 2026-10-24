@@ -148,6 +148,7 @@ fn settings(format: ExportFormat, alpha: WireAlpha, dur: f64) -> ExportSettings 
             end: seconds(dur),
         },
         audio: true,
+        audio_index_playhead: None,
         motion_blur: false,
         color: OutputColor::Rec709QuickTime {
             candidate: QuickTimeTag::Cicp1_13_1,
@@ -207,7 +208,7 @@ fn generated_projects_export_and_verify_in_every_phase_2_format() {
             WireAlpha::None,
             "mov",
             "apch",
-            "lpcm",
+            "in24",
         ),
         (
             "4444",
@@ -217,7 +218,7 @@ fn generated_projects_export_and_verify_in_every_phase_2_format() {
             WireAlpha::Straight,
             "mov",
             "ap4h",
-            "lpcm",
+            "in24",
         ),
         (
             "h264",
@@ -369,6 +370,96 @@ fn sliced_frames_equal_whole_frames_bit_for_bit() {
 }
 
 #[test]
+fn offline_export_matches_the_same_project_with_missing_layers_hidden() {
+    let dur = 0.2;
+    let (mut doc, mut media) = generated(dur);
+    // A live solid uses the offline clip as both parent and track matte. The
+    // export must retain those relationships in the original snapshot.
+    doc["layers"][0]["parent"] = json!("vid");
+    doc["layers"][0]["matteSource"] = json!("vid");
+    media.paths.remove("clip");
+    let mut omitted = doc.clone();
+    for layer in omitted["layers"].as_array_mut().unwrap() {
+        if layer["d"]["asset"] == "clip" {
+            layer["type"] = json!("null");
+        }
+    }
+    let mut s = settings(
+        ExportFormat::ProRes {
+            profile: WireProRes::Hq,
+        },
+        WireAlpha::None,
+        dur,
+    );
+    s.audio = false;
+    let render = |document: &Value| {
+        let job = job(document, media.clone(), s.clone(), PathBuf::from("/unused"));
+        let mut renderer = Renderer::headless().unwrap();
+        let plan = plan_export(&job).unwrap();
+        run_export_into(
+            &mut renderer,
+            &job,
+            plan,
+            MemorySink::default(),
+            &Unrestricted,
+            &AtomicBool::new(false),
+            &mut no_progress(),
+        )
+        .unwrap()
+        .frames
+    };
+    assert_eq!(render(&doc), render(&omitted));
+    let export_job = job(&doc, media, s, PathBuf::from("/unused"));
+    let plan = plan_export(&export_job).unwrap();
+    assert!(Arc::ptr_eq(&plan.document, &export_job.document));
+    assert_eq!(
+        offline_media(
+            &export_job.document,
+            &export_job.composition,
+            &export_job.media
+        )
+        .iter()
+        .map(|c| c.asset.as_str())
+        .collect::<Vec<_>>(),
+        vec!["clip"]
+    );
+
+    struct Clean(PathBuf);
+    impl Drop for Clean {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = Clean(scratch("offline-byte-identity"));
+    let mut png = settings(
+        ExportFormat::PngStill { sixteen_bit: false },
+        WireAlpha::None,
+        1.0 / 30.0,
+    );
+    png.audio = false;
+    png.color = OutputColor::SrgbImage;
+    let write = |document: &Value, name: &str| {
+        let output = dir.0.join(name);
+        let job = job(
+            document,
+            export_job.media.as_ref().clone(),
+            png.clone(),
+            output.clone(),
+        );
+        run_export(
+            &mut Renderer::headless().unwrap(),
+            &job,
+            &Unrestricted,
+            &AtomicBool::new(false),
+            &mut no_progress(),
+        )
+        .unwrap();
+        std::fs::read(output).unwrap()
+    };
+    assert_eq!(write(&doc, "missing.png"), write(&omitted, "omitted.png"));
+}
+
+#[test]
 fn png_byte_compatibility_follows_the_frozen_document() {
     let mut renderer = Renderer::headless().unwrap();
     for compat in [1, 2] {
@@ -477,7 +568,7 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
 }
 
 #[test]
-fn unsupported_projects_and_offline_media_are_routed_before_writing() {
+fn unsupported_projects_route_and_offline_media_plans_before_writing() {
     let dir = scratch("routing");
     let dur = 1.0;
     let (mut doc, media) = generated(dur);
@@ -504,6 +595,10 @@ fn unsupported_projects_and_offline_media_are_routed_before_writing() {
         }
         other => panic!("expected routing, got {:?}", other.err()),
     }
+    // Offline media is not routed (decision OFFLINE-1): an unattended export
+    // draws the missing clip as nothing, like today's exporter, and reports
+    // it. `offline_export_matches_the_same_project_with_missing_layers_hidden`
+    // checks the rendered frames; planning here still writes nothing.
     let (doc, mut media) = generated(dur);
     media.paths.remove("clip");
     let j = job(
@@ -512,24 +607,14 @@ fn unsupported_projects_and_offline_media_are_routed_before_writing() {
         settings(ExportFormat::H264, WireAlpha::None, dur),
         destination.clone(),
     );
-    let mut renderer = Renderer::headless().unwrap();
-    match run_export(
-        &mut renderer,
-        &j,
-        &Unrestricted,
-        &AtomicBool::new(false),
-        &mut no_progress(),
-    ) {
-        Err(JobError::Unsupported(list)) => {
-            assert!(
-                list.iter()
-                    .any(|u| u.contains("offline") || u.contains("missing")),
-                "{list:?}"
-            )
-        }
-        Err(e) => panic!("expected routing, got {e}"),
-        Ok(_) => panic!("expected routing, got a file"),
-    }
+    let plan = plan_export(&j).expect("an offline clip does not route the export");
+    assert_eq!(
+        plan.offline
+            .iter()
+            .map(|clip| clip.asset.as_str())
+            .collect::<Vec<_>>(),
+        vec!["clip"]
+    );
     let (doc, media) = generated(dur);
     let mut s = settings(ExportFormat::H264, WireAlpha::None, dur);
     s.format = ExportFormat::Webm {
@@ -1097,4 +1182,37 @@ fn measure_heavy_precomp_band_cost() {
             println!("{line}");
         }
     }
+}
+
+#[test]
+fn export_uses_the_apps_audio_index_playhead_instead_of_its_range_start() {
+    let mut precomp = layer("nested", "precomp", json!({
+        "comp": "inner", "audioGain": 1,
+        "trim": keys(json!(0), &[(0.0, json!(0)), (2.0, json!(0.346))])
+    }), 0.0, 0.0, 2.0);
+    precomp["from"] = json!(0);
+    let mut nested = project(W, H, 2.0, no_fill(), vec![precomp]);
+    composition(&mut nested, "inner", W, H, 2.0, vec![audio("tone", "tone", 0.5, 2.0)]);
+    asset(&mut nested, "tone", "audio", "wav", 0, 0, 2.0);
+    let mut flat_clip = audio("tone", "tone", 0.5, 2.0);
+    flat_clip["d"]["trim"] = json!(0.173);
+    let mut flat = project(W, H, 2.0, no_fill(), vec![flat_clip]);
+    asset(&mut flat, "tone", "audio", "wav", 0, 0, 2.0);
+    let mut renderer = Renderer::headless().unwrap();
+    let mut render = |doc: &Value, playhead| {
+        let mut s = settings(ExportFormat::H264, WireAlpha::None, 0.8);
+        s.range.start = seconds(0.7);
+        s.audio_index_playhead = playhead;
+        let mut media = MediaPaths::default();
+        media.insert("tone", fixture("tone.wav"));
+        let job = job(doc, media, s, PathBuf::from("/unused.mp4"));
+        let plan = plan_export(&job).unwrap();
+        run_export_into(&mut renderer, &job, plan, MemorySink::default(),
+            &Unrestricted, &AtomicBool::new(false), &mut no_progress()).unwrap().audio
+    };
+    let expected = render(&flat, None);
+    let indexed = render(&nested, Some(seconds(1.0)));
+    let range_start = render(&nested, None);
+    assert!(indexed == expected, "index trim(1 s) = 0.173, independent of range 0.7 s");
+    assert!(indexed != range_start, "the field must reach the export mixer");
 }

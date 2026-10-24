@@ -1,4 +1,3 @@
-import playerSource from 'virtual:powermove-player';
 import { validateScene, type WebScene } from './scene';
 import { zipFiles } from './archive';
 import { agentHandoff } from './agent-handoff';
@@ -9,10 +8,10 @@ const utf8 = (text: string) => new TextEncoder().encode(text);
 const literal = (value: unknown) => JSON.stringify(value).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 
 /** Only render source crosses the boundary; workspace, notes and edit history stay in the app. */
-function cleanProject(comp: any): any {
-  const fields = ['id', 'name', 'w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'assets', 'params', 'shutter', 'render3d'];
-  const copy = Object.fromEntries(fields.filter(key => comp[key] !== undefined).map(key => [key, structuredClone(comp[key])]));
-  copy.comps = Object.fromEntries(Object.entries(comp.comps || {}).map(([id, sub]) => [id, cleanProject(sub)]));
+function cleanProject(comp: any, cloneFields = true): any {
+  const fields = ['id', 'name', 'w', 'h', 'fps', 'dur', 'bg', 'backgroundFill', 'layers', 'assets', 'params', 'shutter', 'colorDepth'];
+  const copy = Object.fromEntries(fields.filter(key => comp[key] !== undefined).map(key => [key, cloneFields ? structuredClone(comp[key]) : comp[key]]));
+  copy.comps = Object.fromEntries(Object.entries(comp.comps || {}).map(([id, sub]) => [id, cleanProject(sub, cloneFields)]));
   for (const layer of copy.layers) delete layer.locked_intent;
   return copy;
 }
@@ -38,7 +37,6 @@ export function inspectWebExport(PM: any) {
     if (active.has(comp)) { errors.add('Nested compositions contain a cycle'); return; }
     if (visited.has(comp)) return;
     visited.add(comp); active.add(comp);
-    if(comp.render3d?.enabled)warnings.add('Interactive web output uses native 3D shading. Export video or image frames for full Blender materials and rendering.');
     for (const layer of comp.layers) {
       inspectChannels(layer, layer.name);
       if (layer.d?.asset) assets.add(layer.d.asset);
@@ -68,8 +66,7 @@ export function inspectWebExport(PM: any) {
       if (layer.type === 'extension') {
         const def = getDef('layerTypes', layer.d.definition, layer.name);
         if (def?.renderer?.kind === 'mesh' && layer.d.data?.[def.renderer.assetField]) assets.add(layer.d.data[def.renderer.assetField]);
-        if (def?.renderer?.kind === 'layer3d') for(const id of layer3DAssetIds(layer))if(PM.proj.assets?.[id]?.format!=='blend'&&comp.assets?.[id]?.format!=='blend')assets.add(id);
-        if(layer.d.data?.object?.material?.shader||layer.d.data?.object?.slots?.some((slot:any)=>slot.material?.shader))warnings.add('Interactive web output uses native 3D shading. Export video or image frames for full Blender materials and rendering.');
+        if (def?.renderer?.kind === 'layer3d') for(const id of layer3DAssetIds(layer))assets.add(id);
         if (def?.renderer?.kind === 'scene3d') for(const id of sceneAssetIds(parseScene(layer.d.data?.scene))) assets.add(id);
       }
       if (layer.type === 'precomp') {
@@ -114,7 +111,9 @@ export async function buildWebExport(PM: any) {
   // Freeze source and definitions before awaiting assets; user edits cannot mix revisions.
   const serialized = PM.serialize();
   const snapshot = typeof serialized === 'string' ? JSON.parse(serialized) : serialized;
-  const project = cleanProject(snapshot.proj || snapshot);
+  // Parsed JSON already belongs only to this export. Object-returning hosts
+  // still need detached fields before filtering and asynchronous packaging.
+  const project = cleanProject(snapshot.proj || snapshot, typeof serialized !== 'string');
   const inspection = inspectWebExport({ ...PM, proj: project });
   if (inspection.errors.length) throw new Error(inspection.errors.join('\n'));
   const files = new Map<string, Uint8Array>();
@@ -131,22 +130,42 @@ export async function buildWebExport(PM: any) {
   };
   let index = 0;
   const metadata: Record<string, any> = {};
-  const findAsset = (comp: any, id: string): any => comp.assets?.[id] || Object.values(comp.comps || {}).map(sub => findAsset(sub, id)).find(Boolean);
-  for (const id of inspection.assets) {
-    const meta = findAsset(project, id);
-    if (!meta) throw new Error(`Missing media metadata: ${id}`);
-    const blob = meta.rendition === true ? await browserRendition(PM, meta) : await PM.MediaStore.get(meta);
-    if (!blob) throw new Error(`The original media for “${meta.name || id}” is missing. Reimport it before exporting.`);
-    /* The stored bytes decide the extension: a converted animation or playback
-       proxy keeps the name the user chose while holding WebM, and a static host
-       serves these files by extension alone. */
-    const extension = STORED_EXTENSIONS[String(blob.type || '').toLowerCase()]
-      || /\.(png|jpg|jpeg|webp|gif|svg|mp4|webm|mov|wav|mp3|m4a|ogg|flac|obj|glb|gltf)$/i.exec(meta.name || '')?.[1]?.toLowerCase()
-      || 'bin';
-    const location = `assets/media-${index++}.${extension}`;
-    put(location, new Uint8Array(await blob.arrayBuffer())); scene.assets[id] = location;
-    metadata[id] = Object.fromEntries(['id', 'name', 'kind', 'format', 'w', 'h', 'dur', 'channels', 'sampleRate', 'type'].filter(k => meta[k] !== undefined).map(k => [k, meta[k]]));
-    metadata[id].id = id;
+  const findAsset = (comp: any, id: string): any => {
+    const own = comp.assets?.[id];
+    if (own) return own;
+    for (const sub of Object.values(comp.comps || {})) {
+      const found = findAsset(sub, id);
+      if (found) return found;
+    }
+  };
+  const assetIds = [...inspection.assets];
+  // Overlap independent storage reads without starting an unbounded number of
+  // large Blob conversions. Commit each batch in scene order so filenames and
+  // ZIP entry order stay deterministic even when reads finish out of order.
+  for (let start = 0; start < assetIds.length; start += 4) {
+    const loaded = await Promise.allSettled(assetIds.slice(start, start + 4).map(async id => {
+      const meta = findAsset(project, id);
+      if (!meta) throw new Error(`Missing media metadata: ${id}`);
+      const blob = meta.rendition === true ? await browserRendition(PM, meta) : await PM.MediaStore.get(meta);
+      if (!blob) throw new Error(`The original media for “${meta.name || id}” is missing. Reimport it before exporting.`);
+      return { id, meta, blob, data: new Uint8Array(await blob.arrayBuffer()) };
+    }));
+    // Drain active reads before reporting an error, so retrying cannot overlap
+    // a failed export's remaining large Blob conversions.
+    for (const result of loaded) {
+      if (result.status === 'rejected') throw result.reason;
+      const { id, meta, blob, data } = result.value;
+      /* The stored bytes decide the extension: a converted animation or playback
+         proxy keeps the name the user chose while holding WebM, and a static host
+         serves these files by extension alone. */
+      const extension = STORED_EXTENSIONS[String(blob.type || '').toLowerCase()]
+        || /\.(png|jpg|jpeg|webp|gif|svg|mp4|webm|mov|wav|mp3|m4a|ogg|flac|obj|glb|gltf|cube)$/i.exec(meta.name || '')?.[1]?.toLowerCase()
+        || 'bin';
+      const location = `assets/media-${index++}.${extension}`;
+      put(location, data); scene.assets[id] = location;
+      metadata[id] = Object.fromEntries(['id', 'name', 'kind', 'format', 'w', 'h', 'dur', 'channels', 'sampleRate', 'type'].filter(k => meta[k] !== undefined).map(k => [k, meta[k]]));
+      metadata[id].id = id;
+    }
   }
   // All runtime media lookups use the root registry; strip disk paths and unused assets.
   const clearAssets = (comp: any) => { comp.assets = {}; Object.values(comp.comps).forEach(clearAssets); };
@@ -159,25 +178,47 @@ export async function buildWebExport(PM: any) {
     }
   };
   if (typeof document !== 'undefined') for (const sheet of Array.from(document.styleSheets)) { try { readRules(sheet.cssRules); } catch {} }
+  const fontCandidates: Array<{ family: string; url: URL; weight: string; style: string; unicodeRange?: string }> = [];
   for (const family of inspection.fonts) {
     const matches = faces.filter(face => face.style.getPropertyValue('font-family').replace(/['"]/g, '').trim().toLowerCase() === family.toLowerCase());
-    let packaged = false;
     for (const face of matches) {
       const src = /url\(\s*['"]?([^)'"\s]+)['"]?\s*\)/.exec(face.style.getPropertyValue('src'))?.[1];
       if (!src) continue;
       try {
-        const response = await fetch(new URL(src, face.parentStyleSheet?.href || document.baseURI));
-        if (!response.ok) continue;
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        const path = `assets/font-${scene.fonts.length}.bin`;
-        put(path, bytes);
-        scene.fonts.push({ family, src: path, weight: face.style.getPropertyValue('font-weight') || '400', style: face.style.getPropertyValue('font-style') || 'normal', unicodeRange: face.style.getPropertyValue('unicode-range') || undefined });
-        packaged = true;
+        fontCandidates.push({ family, url: new URL(src, face.parentStyleSheet?.href || document.baseURI),
+          weight: face.style.getPropertyValue('font-weight') || '400', style: face.style.getPropertyValue('font-style') || 'normal',
+          unicodeRange: face.style.getPropertyValue('unicode-range') || undefined });
       } catch { /* Host-provided font is recorded below. */ }
     }
-    if (!packaged) scene.warnings.push(`Font “${family}” is not bundled. Supply this font in your app to preserve text layout.`);
+  }
+  const packagedFonts = new Set<string>();
+  // Font families can contain many unicode subsets. Overlap fetch and body
+  // reads, then insert in candidate order to preserve filenames and ZIP bytes.
+  for (let start = 0; start < fontCandidates.length; start += 4) {
+    const loaded = await Promise.all(fontCandidates.slice(start, start + 4).map(async candidate => {
+      try {
+        const response = await fetch(candidate.url);
+        if (!response.ok) return null;
+        return { candidate, bytes: new Uint8Array(await response.arrayBuffer()) };
+      } catch { return null; /* Keep the existing host-font fallback. */ }
+    }));
+    for (const item of loaded) {
+      if (!item) continue;
+      const { candidate: { family, weight, style, unicodeRange }, bytes } = item;
+      const path = `assets/font-${scene.fonts.length}.bin`;
+      put(path, bytes);
+      scene.fonts.push({ family, src: path, weight, style, unicodeRange });
+      packagedFonts.add(family);
+    }
+  }
+  for (const family of inspection.fonts) {
+    if (!packagedFonts.has(family)) scene.warnings.push(`Font “${family}” is not bundled. Supply this font in your app to preserve text layout.`);
   }
   put('scene.json', utf8(JSON.stringify(scene, null, 2)));
+  // The standalone runtime is only needed when packaging a web export. Keep
+  // its source out of the editor's startup bundle; the snapshot above remains
+  // fixed while this chunk loads, just as it does while media/fonts load.
+  const { default: playerSource } = await import('virtual:powermove-player');
   put('player.js', utf8(playerSource));
   put('player.d.ts', utf8(playerTypes));
   put('index.html', utf8(previewHTML(project.name)));

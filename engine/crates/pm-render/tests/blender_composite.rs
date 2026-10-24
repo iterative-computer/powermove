@@ -175,16 +175,21 @@ fn max_diff(a: &[f32], b: &[f64]) -> f64 {
 
 #[test]
 fn surfaces_composite_exactly_per_layer_at_level2() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     check_surfaces(2);
 }
 
 #[test]
 fn level1_matches_the_straight_imagebitmap_upload_including_zero_alpha_rgb() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     check_surfaces(1);
 }
 
 fn check_surfaces(compat: u8) {
     let mut exact = scene(true);
+    exact["colorDepth"] = json!(32);
     for layer in exact["layers"].as_array_mut().unwrap() {
         if compat >= 2 {
             layer["compat"] = json!(compat);
@@ -232,18 +237,33 @@ fn check_surfaces(compat: u8) {
     surfaces.insert(snap.frame.lookup(), decoded.clone());
     let opacity: HashMap<&str, f64> = [("a", 1.0), ("b", 0.5)].into();
     for precision in [Precision::Float32, Precision::Float16] {
+        let mut at_depth = exact.clone();
+        at_depth["colorDepth"] = json!(if precision == Precision::Float32 {
+            32
+        } else {
+            16
+        });
+        let at_depth = load(&at_depth);
         let mut req = request(precision);
         req.blender = BlenderRender::Final(Arc::new(surfaces.clone()));
         let (plan, failures) = r
-            .plan(&doc, "Ptest-root", ticks(0.0), &req, &assets)
+            .plan(&at_depth, "Ptest-root", ticks(0.0), &req, &assets)
             .unwrap();
         assert!(failures.is_empty(), "{failures:?}");
         let order = draw_order(&plan);
         assert_eq!(order.len(), 2, "both layers draw their surfaces");
         let frame = r
-            .render(&doc, "Ptest-root", ticks(0.0), &req, &assets)
+            .render(&at_depth, "Ptest-root", ticks(0.0), &req, &assets)
             .unwrap();
         assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+        assert_eq!(
+            frame.color.format(),
+            if precision == Precision::Float32 {
+                wgpu::TextureFormat::Rgba32Float
+            } else {
+                wgpu::TextureFormat::Rgba16Float
+            }
+        );
         let got = r.read_rgba(&frame).unwrap();
         let want = reference(&order, &decoded, &opacity, compat < 2, precision);
         let d = max_diff(&got, &want);
@@ -259,6 +279,8 @@ fn check_surfaces(compat: u8) {
 
 #[test]
 fn a_missing_surface_fails_the_layer_and_native_shading_needs_no_blender() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let doc = load(&scene(true));
     let mut r = Renderer::headless().expect("a Metal device");
     let assets = MapResolver::default();
@@ -369,6 +391,8 @@ fn preview_snapshot_error_fails_layers_and_reports_host_failure() {
 
 #[test]
 fn the_paused_preview_draws_what_it_has_and_asks_for_the_rest() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let doc = load(&scene(false));
     let mut r = Renderer::headless().expect("a Metal device");
     let assets = MapResolver::default();
@@ -469,6 +493,8 @@ fn the_paused_preview_draws_what_it_has_and_asks_for_the_rest() {
 
 #[test]
 fn nested_compositions_are_their_own_frames() {
+    // Blender is retired in the app; these tests run its stage.
+    pm_render::blender::enable_for_tests();
     let mut doc = project(W, H, 2.0, solid_fill("#000000"), vec![]);
     let mut inner = scene(true);
     let layers = inner["layers"].take().as_array().unwrap().clone();

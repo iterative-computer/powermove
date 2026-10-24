@@ -19,7 +19,7 @@ encoder-input shader must agree with within each bar's tolerance.
 | `Primaries`, `Transfer`, `MatrixCoefficients`, `Range`, `Subsampling`, `ChromaSiting`, `AlphaMode` | One axis each of a source or output description. `Transfer::DisplayE` is the display encoding E; `Bt1886` and `SceneReferredBt709` are the two Interpret alternatives; `Gamma22` is the QuickTime tag candidate; `Pq` and `Hlg` are HDR input. `ChromaSiting` is H.273 types 0 to 5 (untagged 4:2:0 is type 0, `left`). `AlphaMode` includes "premultiplied with color" |
 | `ColorDescription` | All of the above plus bit depth. `input_is_identity` says whether reading the source into the working space is the identity |
 | `WorkingEncoding` | `standard` (premultiplied, E-encoded, BT.709 primaries) or `linearLight` |
-| `Precision` | `float16` (`rgba16float`, default) or `float32` |
+| `Precision` | `unorm8` (`rgba8unorm`), `float16` (`rgba16float`, default), or `float32` |
 | `BlendDomain` | Where screen, overlay, and soft light run when linear blending is on: HDR-safe formulas (default) or in E |
 | `ColorMode`, `ProjectColor` | The project `color` field as the engine sees it. `ProjectColor::DEFAULT` is decision 1 (Standard, linear blending off, 16-bit, HDR-safe) |
 | `BlendMode` | The nine modes |
@@ -42,7 +42,9 @@ Reference functions: `display_encode` (E) and `display_decode` (E⁻¹),
    above 1.
 2. **Linear blending bar value:** E(0.5) = 0.735357, which rounds half up to
    188 at 8 bits (section 2). Tested.
-3. **Clipping happens only at output.** Y′CbCr outputs clip to the codable
+3. **Float clipping happens only at output.** Project depth 8 instead clips and
+   quantizes each working target write to normalized 8-bit values, matching the
+   shipped WebGL pipeline (DEPTH-1). Y′CbCr outputs clip to the codable
    range (8-bit 1 to 254, 10-bit 4 to 1019, 12-bit 16 to 4079); full-range
    RGB to 0..1. Superwhites and sub-blacks survive the pipeline.
 4. **Normalization** matches section 13 exactly: `x420`/`x422`/P010
@@ -65,7 +67,8 @@ Reference functions: `display_encode` (E) and `display_decode` (E⁻¹),
 8. **Blend domains:** normal, add, multiply, difference, lighten, darken run
    in the active encoding; screen, overlay, soft light follow
    `BlendDomain` when linear blending is on (`BlendMode::uses_blend_domain`).
-9. **Non-default project color requires the native engine**
+9. **Non-default color operations require the native engine; Color depth alone
+   is shared with the shipped engine.**
    (`ProjectColor::requires_native`, section 6 table).
 10. **Cache keys:** every color input that changes pixels is in `ColorKey`;
     `key_bytes` changes when any field changes (tested). The render graph
@@ -110,3 +113,20 @@ if no type changes, because cache keys and parity references depend on it.
    wire). Needed by Interpret in Phase 3b.
 3. Whether dither belongs in `ColorKey` for preview frames, where it is
    always off, or only in export keys. Kept in the key for simplicity.
+
+## DEPTH-1: authoritative project depth (2026-10-22)
+
+`project.colorDepth` is the single precision setting. The retired stored
+`color.precision` is read only when depth is absent, then migrated to depth
+16 or 32 on app hydration. Explicit depth wins. Native document readers
+perform the same resolution, so CLI/export do not depend on UI migration.
+Requests retain the precision hint for wire compatibility but never promote
+an explicit project depth. This supersedes automatic export promotion for
+project renders. Source conversion keys distinguish unorm8 from both floats.
+
+Contract 4 adds `Precision::Unorm8`; draft version 0 remains draft and its
+source build identity changes. Old peers fail draft-build negotiation rather
+than interpreting an unknown precision. Existing enum spellings are unchanged.
+The shader-fallback request carries depth 8/16/32: depth 8 transports exact
+byte codes in the existing four u16 slots per pixel, depth 16 uses binary16,
+and depth 32 uses binary32 bands without f16 rounding.

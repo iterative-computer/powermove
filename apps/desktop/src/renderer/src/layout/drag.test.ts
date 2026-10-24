@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../legacy/registry';
 import { animatePanelLayout, beginPanelDrag, panelRects, retargetPreview } from './drag';
-import type { DockSpec, PanelSpec } from './model';
+import { findPanel, type DockSpec, type PanelSpec, type Workspace } from './model';
+import { applyPanelVisibility, rememberPanelVisibility } from './panel-visibility';
 
 const rect = (left: number, top: number, width = 100, height = 100): DOMRect =>
   ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
@@ -53,6 +54,35 @@ describe('panel layout FLIP', () => {
       { duration: 180, easing: 'cubic-bezier(.22,1,.36,1)' }
     );
     expect(parkedAnimate).not.toHaveBeenCalled();
+  });
+});
+
+describe('docking a closed panel', () => {
+  it('remembers an explicit drop as reopening before applying visibility preferences', () => {
+    const workspace: Workspace = { layout: { docks: [{ id: 'right', panels: [] }] }, hiddenPanels: [] };
+    let saved = { agent: false };
+    let handlers: any;
+    const PM = {
+      PANELS: { agent: { title: 'Agent' } },
+      store: { get: () => saved, set: (_key: string, value: typeof saved) => { saved = value; } },
+      clamp: (value: number, min: number, max: number) => Math.max(min, Math.min(max, value)),
+      Layout: {
+        buildDockDropTargets: () => [{ id: 'right', rect: rect(600, 0, 300, 600), panels: [] }],
+        hitTestDockPlacement: () => ({ dockId: 'right', index: 0 }),
+        resolveDropIndex: () => 0,
+        rememberPanelOpen: (id: string) => rememberPanelVisibility(PM, id, true),
+      },
+      WS: { mutate: (change: (ws: Workspace) => void) => { change(workspace); applyPanelVisibility(PM, workspace); } },
+      drag: (_event: unknown, options: unknown) => { handlers = options; return { cancel: () => handlers.cancel() }; },
+      toast: vi.fn(),
+    } as unknown as PMRegistry;
+    const pointer = { clientX: 700, clientY: 100 } as PointerEvent;
+    beginPanelDrag(PM, pointer, { id: 'agent' }, { id: 'titlebar', panels: [] }, document.createElement('div'));
+    handlers.move(10, 0, pointer);
+    handlers.up(10, 0, pointer);
+
+    expect(saved.agent).toBe(true);
+    expect(findPanel(workspace, 'agent')?.dock.id).toBe('right');
   });
 });
 

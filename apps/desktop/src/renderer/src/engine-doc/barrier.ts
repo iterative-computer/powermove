@@ -1,3 +1,5 @@
+import { changedPathsAsync } from './changed-paths-async';
+import type { DigestInstruction } from '../../../shared/document-digest';
 /*
  * The write barrier and the canonical patch stream (docs/rust-engine.md,
  * section 6; contract 5, docs/engine/rfcs/05-patches.md).
@@ -6,8 +8,8 @@
  * dirty path; before any pm-wasm query the barrier flushes: for each dirty
  * path it diffs a shadow (the canonical document exactly as last sent) against
  * the live document with `diffOps` (id-keyed structural operations, leaf
- * patches otherwise), applies the operations to the shadow, encodes them as a
- * canonicalV1 body, and applies the body to pm-wasm as the next revision. The
+ * patches otherwise), encodes a canonicalV1 body, and updates the mirror and
+ * shadow as the next revision. Native apply succeeds before the shadow moves. The
  * same body is offered to subscribers (engine sessions in Phase 2).
  *
  * Writes reach the barrier four ways:
@@ -23,13 +25,18 @@
  * Replacing `PM.proj` with another document resyncs the mirror; replacing it
  * with another version of the same project diffs the whole document.
  */
+import { sameJsonAsync } from './json-diff-async';
+import { jsonCloneAsync } from '../../../shared/canonical-async';
 import type { PathPart } from '../../../shared/patch';
 import { applyOps, type PatchOp } from '../../../shared/patch-ids';
-import { diffJsonOps as diffOps, JsonMemo } from './json-diff';
+import { diffJsonOps as diffOps, JsonMemo, sameJson } from './json-diff';
+import { ConsistencyHash } from './consistency-hash';
 import { encodePatchOps } from '../../../shared/patch-binary';
-import { canonicalHash, canonicalProject, canonicalStringify } from '../../../shared/canonical-json';
+import { canonicalProject, canonicalStringify, jsonClone } from '../../../shared/canonical-json';
 import { canonicalPath } from '../legacy/core/compositions';
 import { APPLY, type PmWasm } from './wasm';
+import { RemotePmWasm } from './remote';
+import { documentId } from '../../../shared/engine-document-id';
 
 /** Why a batch was produced (contract 5, `PatchOrigin`). */
 export type PatchOrigin = 'edit' | 'undo' | 'redo' | 'metadata' | 'structuralDiff' | 'load';
@@ -66,7 +73,7 @@ export interface ConsistencyResult {
   ok: boolean;
   reason: string;
   revision: number;
-  /** The live document's canonical hash and the mirror's. */
+  /** The local integrity digests (wire snapshots keep their canonical hash). */
   live: string;
   mirror: string;
   /** Paths where the live document and the shadow differed (missed writes). */
@@ -81,7 +88,7 @@ export interface BarrierStats {
   bytes: number;
   resyncs: number;
   structuralDiffs: number;
-  /** Batches pm-wasm refused (each followed by a resync). */
+  /** Refused batches (WASM resyncs; native evaluators recover asynchronously). */
   refused: number;
   /** Time spent diffing, encoding, and applying, in ms. */
   flushMs: number;
@@ -183,6 +190,11 @@ export function anchorPath(shadow: any, live: any, path: readonly PathPart[]): P
 
 export class DocumentBarrier {
   revision = 0;
+  /** Native apply can stamp a revision before a later operation fails.
+   * Async replacement must follow this floor without publishing a batch. */
+  recoveryRevision = 0;
+  /** Announcements fence asynchronous preparation even before they flush. */
+  changeEpoch = 0;
   /**
    * The revision of the last batch that could change a composition's shape
    * (`changesShape`; every resync). Answers that depend on the shape only
@@ -195,6 +207,10 @@ export class DocumentBarrier {
   private memo = new JsonMemo();
   private dirty = new Map<string, PathPart[]>();
   private structural = false;
+  private integrity = new ConsistencyHash();
+  private checkpoint: { revision: number; hash: string } | null = null;
+  private journal: PatchBatch[] = [];
+  private journalBytes = 0;
   private resyncPending = false;
   /** The open document's layers that recent diffs found changed, newest last. */
   private hot: Array<{ comp: string; id: string }> = [];
@@ -245,6 +261,7 @@ export class DocumentBarrier {
 
   /** Resyncs at the next flush (the live document was replaced by another). */
   markResync(): void {
+    this.changeEpoch++;
     const was = this.pending;
     this.resyncPending = true;
     if (!was) this.announcePending();
@@ -278,6 +295,7 @@ export class DocumentBarrier {
 
   /** Records canonical paths as dirty. */
   touchedCanonical(paths: readonly PathPart[][], origin: IncrementalOrigin = 'edit', options: { announce?: boolean } = {}): void {
+    if (paths.length) this.changeEpoch++;
     const was = this.pending;
     for (const path of paths) this.dirty.set(pathKey(path), [...path]);
     if (paths.length) this.bump(origin);
@@ -295,6 +313,7 @@ export class DocumentBarrier {
    *  flush (an open transaction's possible writes): nobody needs telling,
    *  the flush that asked for it follows. */
   touchAll(options: { announce?: boolean } = {}): void {
+    this.changeEpoch++;
     const was = this.pending;
     this.structural = true;
     this.bump('structuralDiff');
@@ -304,10 +323,15 @@ export class DocumentBarrier {
   /** Replaces the mirror with the live document. */
   resync(): void {
     this.provisionalRevision = null;
-    const json = JSON.stringify(canonicalProject(this.project()));
+    this.requireNativeAvailable();
+    this.checkpoint = null; this.journal = []; this.journalBytes = 0;
+    const canonical = canonicalProject(this.project());
+    const json = JSON.stringify(canonical);
     this.revision += 1;
-    this.shadow = json === undefined ? undefined : JSON.parse(json);
-    this.wasm.resync(json ?? '', this.revision);
+    // The parse of `json`, built directly and sharing the live document's
+    // strings (shared/canonical-json.ts `jsonClone`).
+    this.shadow = json === undefined ? undefined : jsonClone(canonical);
+    this.wasm.resync(json ?? '', this.revision, documentId(canonical?.id));
     this.shapeRevision = this.revision;
     if (json && json.length > 4 * 1024 * 1024) this.wasm.releaseInput();
     this.dirty.clear();
@@ -315,7 +339,56 @@ export class DocumentBarrier {
     this.resyncPending = false;
     this.origin = 'metadata';
     this.stats.resyncs += 1;
-    this.emit({ baseRevision: this.revision - 1, revision: this.revision, origin: 'load', count: 1, body: encodePatchOps([{ path: [], exists: json !== undefined, value: this.shadow }]), assets: true });
+    // A `load` batch's receivers resync from `snapshot()` rather than apply
+    // it, so its body (the whole document again) is encoded only if asked.
+    const shadow = this.shadow;
+    let body: Uint8Array | null = null;
+    this.emit({
+      baseRevision: this.revision - 1, revision: this.revision, origin: 'load', count: 1, assets: true,
+      get body() { return (body ??= encodePatchOps([{ path: [], exists: json !== undefined, value: shadow }])); }
+    });
+  }
+
+  /** Adopt an already checked native tree without serializing or parsing on the UI thread. */
+  adopt(shadow: any, revision: number, hash: string, integrity: ConsistencyHash): void {
+    this.shadow = shadow;
+    this.revision = this.shapeRevision = revision;
+    this.integrity = integrity;
+    this.checkpoint = { revision, hash }; this.journal = []; this.journalBytes = 0;
+    this.dirty.clear(); this.structural = this.resyncPending = false; this.origin = 'metadata';
+    this.stats.resyncs++;
+    let body: Uint8Array | null = null;
+    this.emit({ baseRevision: revision - 1, revision, origin: 'load', count: 1, assets: true,
+      get body() { return body ??= encodePatchOps([{ path: [], exists: shadow !== undefined, value: shadow }]); } });
+  }
+
+  /** Exact alias comparison remains on the object-owning thread in bounded
+   * slices; native SHA receives only streamed canonical chunks. Recheck if an
+   * announced edit crosses an await, so a save never checks another revision. */
+  async checkAsync(reason: string, hash: (value: any, prefix?: string) => Promise<string>, repair?: () => Promise<void>, batch?: (instructions: DigestInstruction[]) => Promise<string[]>): Promise<ConsistencyResult> {
+    const started = performance.now();
+    this.stats.checks++;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      this.flush();
+      const revision = this.revision, shadow = this.shadow, integrity = this.integrity;
+      const live = canonicalProject(this.project());
+      const equal = await sameJsonAsync(shadow, live);
+      const normalized = equal ? shadow : await jsonCloneAsync(live);
+      const liveHash = equal ? await integrity.digestAsync(shadow, hash, batch) : await new ConsistencyHash().digestAsync(normalized, hash, batch);
+      if (revision !== this.revision || shadow !== this.shadow || this.pending) continue;
+      const mirror = this.wasm.consistencyHash();
+      const ok = equal && liveHash === mirror;
+      const missed = ok ? [] : await changedPathsAsync(shadow, normalized);
+      if (revision !== this.revision || shadow !== this.shadow || this.pending) continue;
+      const result = { ok, reason, revision, live: liveHash, mirror, missed, ms: performance.now() - started };
+      if (!ok) {
+        this.stats.checkMismatches++;
+        if (repair) await repair(); else this.resync();
+        this.onMismatch(result);
+      }
+      return result;
+    }
+    throw new Error('The document kept changing during its consistency check');
   }
 
   /** The paths a structural diff covers: the open composition, the entered one, compositions added or removed, and every project member but `comps`. */
@@ -405,6 +478,7 @@ export class DocumentBarrier {
 
   /** Flushes dirty paths into pm-wasm (section 6, item 2: before every query). */
   flush(): void {
+    this.requireNativeAvailable();
     if (this.flushing || (this.provisionalReads > 0 && this.provisionalRevision !== null)) return;
     if (this.shadow !== undefined) this.beforeFlush();
     if (!this.pending) return;
@@ -460,25 +534,39 @@ export class DocumentBarrier {
   }
 
   private send(ops: PatchOp[], origin: IncrementalOrigin, provisional = false): void {
+    const base = this.revision;
+    const native = this.wasm instanceof RemotePmWasm;
     let body: Uint8Array;
+    let result: ReturnType<PmWasm['apply']> | undefined;
     const encodeStarted = this.trace ? performance.now() : 0;
     try {
       body = encodePatchOps(ops);
+      // Native refusals must leave the JS shadow at its previous revision.
+      // A successful native apply followed by a shadow exception is a broken
+      // mirror too: the owner rebuilds both from the authoritative raw tree.
+      if (native) {
+        result = this.wasm.apply(body, base, base + 1);
+        if (result.code !== APPLY.ok) {
+          this.stats.refused++;
+          throw new Error(`The native document refused a batch (${result.code}: ${result.message})`);
+        }
+      }
       for (const op of ops) {
+        this.integrity.invalidate(this.shadow, [op]);
         this.memo.forgetAlong(this.shadow, op.path);
         this.shadow = applyOps(this.shadow, [op]);
       }
       this.trace?.('document encode and shadow', encodeStarted);
     } catch (error) {
+      if (native) this.nativeApplyFailed(ops, origin, error);
       // A value the format cannot carry (a lone surrogate in a key is fine;
       // a cycle is not) or a shadow that disagrees with its own ops: resync.
       console.warn('[engine-doc] patch encoding failed; resyncing', error);
       this.resync();
       return;
     }
-    const base = this.revision;
     const applyStarted = this.trace ? performance.now() : 0;
-    const result = this.wasm.apply(body, base, base + 1);
+    result ??= this.wasm.apply(body, base, base + 1);
     this.trace?.('document wasm apply', applyStarted);
     this.revision = base + 1;
     if (ops.some(op => changesShape(op.path))) this.shapeRevision = this.revision;
@@ -500,7 +588,41 @@ export class DocumentBarrier {
     this.trace?.('document patch dispatch', postStarted);
   }
 
+  private requireNativeAvailable(): void {
+    if (this.wasm instanceof RemotePmWasm && this.wasm.dead) {
+      throw Object.assign(new Error('The native document mirror is unavailable; asynchronous recovery is required'), { code: 'unavailable' });
+    }
+  }
+
+  private nativeApplyFailed(ops: PatchOp[], origin: IncrementalOrigin, cause: unknown): never {
+    // This marks an actual mirror inconsistency, rather than changing the
+    // transport's treatment of ordinary refused queries. The installer's
+    // existing dead-instance path serializes reconnect/rebuild from PM.proj.
+    if (this.wasm instanceof RemotePmWasm) this.wasm.invalidateMirror();
+    else this.wasm.dead = true;
+    this.recoveryRevision = Math.max(this.recoveryRevision, this.revision + 1);
+    // A revision-gap refusal can reveal a tree farther ahead than our one
+    // attempted batch. Read only its scalar revision; transport/owner loss
+    // can refuse this too, in which case the attempted revision is the floor.
+    if (this.wasm instanceof RemotePmWasm) try {
+      const reply = JSON.parse(this.wasm.bridge.call('{"op":"revision"}'));
+      if (reply.ok && Number.isSafeInteger(reply.value) && reply.value >= 0) {
+        this.recoveryRevision = Math.max(this.recoveryRevision, reply.value);
+      }
+    } catch { /* the recovery will replace the unavailable owner */ }
+    this.checkpoint = null; this.journal = []; this.journalBytes = 0;
+    this.touchedCanonical(ops.map(op => op.path), origin, { announce: false });
+    this.resyncPending = true;
+    throw Object.assign(new Error('The native document apply failed; asynchronous recovery is required', { cause }), { code: 'unavailable' });
+  }
+
   private emit(batch: PatchBatch): void {
+    if (batch.origin !== 'load' && this.checkpoint) {
+      this.journalBytes += batch.body.length;
+      if (this.journalBytes > 8 * 1024 * 1024 || this.journal.length >= 128) {
+        this.checkpoint = null; this.journal = []; this.journalBytes = 0;
+      } else this.journal.push(batch);
+    }
     for (const fn of this.subscribers) {
       try { fn(batch); } catch (error) { console.error('[engine-doc] patch subscriber failed', error); }
     }
@@ -522,7 +644,7 @@ export class DocumentBarrier {
 
   /**
    * The production consistency check (section 6, item 7): flushes, compares
-   * the canonical hash of the live document with pm-wasm's at this revision,
+   * local integrity digests of the live document and pm-wasm at this revision,
    * and on a mismatch resyncs and reports. Also lists writes the barrier
    * missed (paths where the live document differs from what was sent).
    */
@@ -531,9 +653,13 @@ export class DocumentBarrier {
     this.stats.checks += 1;
     this.flush();
     const live = canonicalProject(this.project());
-    const liveHash = live === undefined ? '' : canonicalHash(live);
-    const mirror = this.wasm.hash();
-    const ok = liveHash === mirror;
+    // Equality is checked independently against mutable live aliases. Hash
+    // only changed shadow subtrees; pm-wasm independently hashes its tree
+    // using node revisions and weak shared-container identities.
+    const equal = sameJson(this.shadow, live);
+    const liveHash = equal ? this.integrity.digest(this.shadow) : (live === undefined ? '' : new ConsistencyHash().digest(jsonClone(live)));
+    const mirror = this.wasm.consistencyHash();
+    const ok = equal && liveHash === mirror;
     // Only on a mismatch: where the live document left the shadow (values JSON
     // cannot carry, such as NaN, differ from their stored form every time).
     const missed = ok ? [] : diffOps(this.shadow, live).map(op => op.path.map(String).join('.'));
@@ -553,9 +679,51 @@ export class DocumentBarrier {
    * keys, its revision, and pm-wasm's canonical hash at that revision.
    * Batches with `baseRevision === revision` follow.
    */
-  snapshot(): { revision: number; encoding: 'canonicalJsonV1'; json: string; hash: string } {
+  snapshot(options: { checkpoint?: boolean } = {}): { revision: number; encoding: 'canonicalJsonV1'; bytes: Uint8Array; readonly json: string; hash: string } {
     this.flush();
-    return { revision: this.revision, encoding: 'canonicalJsonV1', json: canonicalStringify(this.shadow) ?? '', hash: this.wasm.hash() };
+    // pm-wasm holds this revision (the shadow equals it): its canonical JSON
+    // comes out as bytes, outside the JavaScript heap, for a large document
+    // the difference between opening and running out of memory.
+    const bytes = this.wasm.toJsonBytes();
+    const hash = this.wasm.hash();
+    // Export/agent snapshots are independent consumers. Only a full viewer
+    // resync may advance its reconnect base and discard the earlier suffix.
+    if (options.checkpoint || !this.checkpoint) {
+      this.checkpoint = { revision: this.revision, hash }; this.journal = []; this.journalBytes = 0;
+    }
+    return { revision: this.revision, encoding: 'canonicalJsonV1', bytes, get json() { return new TextDecoder().decode(bytes); }, hash };
+  }
+
+  /** A checked base and the bounded patch suffix for a short reconnect.
+   * No JSON serialization or staging is needed when the engine kept it. */
+  resume(): { revision: number; hash: string; batches: PatchBatch[] } {
+    this.flush();
+    if (!this.checkpoint) {
+      this.checkpoint = { revision: this.revision, hash: this.wasm.hash() };
+      this.journal = []; this.journalBytes = 0;
+    }
+    return { ...this.checkpoint, batches: [...this.journal] };
+  }
+
+  /** Native sessions can recover an expired suffix without materializing the
+   * whole JSON document or hashing it on the renderer's main thread. */
+  async refreshResume(force = false): Promise<ReturnType<DocumentBarrier['resume']> | null> {
+    const wasm = this.wasm;
+    if (!(wasm instanceof RemotePmWasm)) return null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      this.flush();
+      if (this.checkpoint && !force) return this.resume();
+      const revision = this.revision;
+      let receipt;
+      try { receipt = await wasm.refresh(revision); }
+      catch (error) { if (this.revision !== revision && attempt === 0) continue; throw error; }
+      this.flush();
+      if (this.revision !== revision) continue;
+      wasm.checkpoint(receipt);
+      this.checkpoint = { revision, hash: receipt.hash }; this.journal = []; this.journalBytes = 0;
+      return this.resume();
+    }
+    throw new Error('The document kept changing during checkpoint refresh');
   }
 
   /** Whether the shadow equals the live document (the auditor's comparison). */

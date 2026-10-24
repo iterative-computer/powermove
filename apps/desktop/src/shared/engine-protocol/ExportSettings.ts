@@ -8,6 +8,7 @@ import type { Precision } from "./Precision";
 import type { QualityTier } from "./QualityTier";
 import type { Size } from "./Size";
 import type { TickRange } from "./TickRange";
+import type { Ticks } from "./Ticks";
 
 /**
  * Export settings as the job engine receives them. Today's settings are
@@ -22,7 +23,12 @@ size: Size,
 /**
  * May differ from the composition rate (section 5 rule 6).
  */
-frameRate: FrameRate, range: TickRange, audio: boolean, motionBlur: boolean, color: OutputColor, 
+frameRate: FrameRate, range: TickRange, audio: boolean, 
+/**
+ * App playhead when audioLayers last built its index (embedded and
+ * precomposition trims). Omitted by headless clients: use range start.
+ */
+audioIndexPlayhead?: Ticks, motionBlur: boolean, color: OutputColor, 
 /**
  * Defaults to 32-bit when the output or any source exceeds 10 bits.
  */

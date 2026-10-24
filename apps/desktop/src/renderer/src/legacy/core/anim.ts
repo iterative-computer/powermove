@@ -1,3 +1,4 @@
+import { createPathTiming, type PathTiming } from '../../core/anim/motion-path';
 import { structuredProperties } from './vector-paths';
 import { sceneProperties } from '../../core/scene3d/schema';
 /* Ported from js/core/anim.js — behavior-preserving. */
@@ -5,6 +6,8 @@ import type { PMRegistry } from '../registry';
 import { canAnimateContent, contentLabel, isProperty, resolveContent } from './content-properties';
 import { compileExpression } from './expression';
 import { temporalKeys, temporalValue, temporalEvaluate } from './temporal-bridge';
+import { applyUnitCurve } from '../../core/anim/temporal-ease';
+import { derivedId } from './derived-id';
 
 export function install(PM: PMRegistry): void {
 const Ease = PM.Ease, clamp = PM.clamp;
@@ -19,13 +22,13 @@ PM.touch = () => {
   version++;
   PM.ProjectIndex?.invalidateKeyframes?.();
   /* hierarchy memos must never outlive an edit */
-  woMemo.clear(); wmMemo.clear(); lmMemo.clear(); memoT = null;
+  woMemo.clear(); wmMemo.clear(); lmMemo.clear(); groupSpaceMemo.clear(); memoT = null;
   parentIndexes = new WeakMap();
   staticTransforms = new WeakMap();
 };
 PM.animVersion = () => version;
 let memoT: any = null;
-const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map();
+const woMemo = new Map(), wmMemo = new Map(), lmMemo = new Map(), groupSpaceMemo = new Map();
 
 /* ── keyframe evaluation ───────────────────────────────── */
 function evalKfs(kf: any, t: any, interpolateColor = false) {
@@ -77,8 +80,9 @@ function evalKfs(kf: any, t: any, interpolateColor = false) {
 PM.evalKfs = evalKfs;
 PM.resolveContent = (layer: any, time = PM.time) => resolveContent(PM, layer, time);
 
-/** Normalize persisted keyframes without discarding extension-owned fields. */
-PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) => {
+/** Normalize persisted keyframes without discarding extension-owned fields.
+ *  `stable`: a missing or repeated id is replaced deterministically (opening a document). */
+PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0, options: { stable?: boolean } = {}) => {
   const expected = typeof fallbackValue;
   const validValue = (value: any) => {
     if (expected === 'number') return typeof value === 'number' && Number.isFinite(value);
@@ -96,7 +100,7 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) 
     .map(({ key, index, time }: any) => ({
       ...key,
       t: time === 0 ? 0 : time,
-      i: (typeof key.i === 'string' && key.i) || PM.uid('k'),
+      i: (typeof key.i === 'string' && key.i) || (options.stable ? `k${index}` : PM.uid('k')),
       eo: pair(key.eo, pair(defaultHandles.eo, [.33, 0])),
       ei: pair(key.ei, pair(defaultHandles.ei, [.67, 1])),
       hold: key.hold === true,
@@ -109,7 +113,7 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) 
     const previous = collapsed[collapsed.length - 1];
     const clean = { ...key };
     delete clean.__order;
-    if (ids.has(clean.i)) clean.i = PM.uid('k');
+    if (ids.has(clean.i)) clean.i = options.stable ? derivedId(clean.i, ids) : PM.uid('k');
     ids.add(clean.i);
     if (previous && Math.abs(previous.t - clean.t) <= 1e-6) {
       ids.delete(previous.i);
@@ -124,6 +128,30 @@ PM.normalizeKeyframes = (raw: any, fallbackValue: any, _fps?: any, minTime = 0) 
 PM.exprCache = new Map();
 PM.expressionErrors = new WeakMap();
 const EXPR_CACHE_MAX = 256;
+// Layer identity and source revision invalidate this non-serializable timing
+// cache on edits, undo, and project reload; playback reuses it across axes.
+const pathTimings = new WeakMap<object, Map<string, { version: number; timing: PathTiming }>>();
+function motionPathValue(comp: any, layerId: string, channel: string, progress: number, start: number, end: number): number {
+  if (!/^position\.[xyz]$/.test(channel) || ![progress, start, end].every(Number.isFinite) || !(end > start)) throw new Error('Invalid motion path request');
+  const layer = comp.layers?.find((item: any) => item.id === layerId);
+  if (!layer) throw new Error('Motion path layer is unavailable');
+  const axes = ['position.x', 'position.y', 'position.z'].filter(axis => layer.p?.[axis]);
+  const index = axes.indexOf(channel);
+  if (index < 0) throw new Error('Motion path axis is unavailable');
+  let cache = pathTimings.get(layer);
+  if (!cache) { cache = new Map(); pathTimings.set(layer, cache); }
+  const key = `${start}:${end}`;
+  let entry = cache.get(key);
+  if (!entry || entry.version !== version) {
+    const channels = axes.map(axis => layer.p[axis]);
+    const sample = (time: number) => channels.map(prop => prop.kf?.length ? Number(evalKfs(prop.kf, time)) : Number(prop.v));
+    const timing = createPathTiming(sample, channels.flatMap(prop => prop.kf.map((k: any) => k.t)), start, end);
+    if (cache.size >= 16) cache.delete(cache.keys().next().value!);
+    entry = { version, timing }; cache.set(key, entry);
+  }
+  return entry.timing.position(progress)[index]!;
+}
+
 function compile(src: any) {
   let c = PM.exprCache.get(src);
   if (c !== undefined) return c;
@@ -133,6 +161,14 @@ function compile(src: any) {
     f: (t: number, T: number, fps: number, value: unknown, layer: any, comp: any,
       param: (name: string) => unknown, ch: string, idx: number) => parsed.evaluate({
         t, T, fps, value, layer, comp, param, ch, idx,
+        motionPath: (layerId, channel, progress, start, end) => motionPathValue(comp, layerId, channel, progress, start, end),
+        sample: (layerId, channel, localTime) => {
+          if (!Number.isFinite(localTime)) throw new Error('Sample time must be finite');
+          const sourceLayer = (comp.layers as any[])?.find(item => item.id === layerId);
+          const source = sourceLayer && PM.findProp(sourceLayer, channel);
+          if (!source) throw new Error('Sampled channel is unavailable');
+          return source.kf?.length ? evalKfs(source.kf, localTime) : source.v;
+        },
       }),
   } : null;
   if (PM.exprCache.size >= EXPR_CACHE_MAX) PM.exprCache.delete(PM.exprCache.keys().next().value);
@@ -196,15 +232,22 @@ PM.evP = (L: any, prop: any, T: any, key: any) => {
 };
 
 PM.active = (L: any, T: any) => {
-  if (L?.group && PM.groupAncestors?.(L).some((group: any) => !(isProperty(group.on) ? PM.evP(group, group.on, T, 'l.on') : group.on))) return false;
   const start = Number(L?.from), duration = Number(L?.dur), time = Number(T);
-  if (!(isProperty(L?.on) ? PM.evP(L, L.on, T, 'l.on') : L?.on) || !Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0 || !Number.isFinite(time)) return false;
-  if (L.type === 'group') return true;
-  const end = start + duration;
-  if (time < start - 1e-6) return false;
-  const compEnd = Number(PM.curComp()?.dur);
-  return time < end - 1e-6 ||
-    (Number.isFinite(compEnd) && Math.abs(time - compEnd) <= 1e-6 && Math.abs(end - compEnd) <= 1e-6);
+  if (!Number.isFinite(start) || !Number.isFinite(duration) || duration <= 0 || !Number.isFinite(time)) return false;
+  // Most layers in a long edit are outside the visible frame. Reject them
+  // before walking group visibility or evaluating expression/keyframe switches.
+  // Groups govern their children independently of the group's own timeline bar.
+  if (L.type !== 'group') {
+    if (time < start - 1e-6) return false;
+    const end = start + duration;
+    if (time >= end - 1e-6) {
+      const compEnd = Number(PM.curComp()?.dur);
+      if (!(Number.isFinite(compEnd) && Math.abs(time - compEnd) <= 1e-6 && Math.abs(end - compEnd) <= 1e-6)) return false;
+    }
+  }
+  if (!(isProperty(L.on) ? PM.evP(L, L.on, T, 'l.on') : L.on)) return false;
+  if (L.group && PM.groupAncestors?.(L).some((group: any) => !(isProperty(group.on) ? PM.evP(group, group.on, T, 'l.on') : group.on))) return false;
+  return true;
 };
 
 /* ── transform matrices (2x3, column-major [a,b,c,d,e,f]) ── */
@@ -289,7 +332,7 @@ const indexOfLayer = (comp: any, layer: any) => {
 
 /** Start a fresh evaluation window (called by the compositor per frame). */
 PM.beginEval = (T: any) => {
-  if (!Object.is(memoT, T)) { woMemo.clear(); wmMemo.clear(); lmMemo.clear(); }
+  if (!Object.is(memoT, T)) { woMemo.clear(); wmMemo.clear(); lmMemo.clear(); groupSpaceMemo.clear(); }
   memoT = T;
 };
 
@@ -324,6 +367,26 @@ PM.worldMatrix = (L: any, T: any) => {
     const matrix = PM.localMatrix(L, T);
     if (Object.is(memoT, T)) wmMemo.set(L, matrix);
     return matrix;
+  }
+  if (!L.parent && L.group && Object.is(memoT, T)) {
+    const groups = PM.groupAncestors?.(L) || [];
+    // Ordinary nested groups share one surrounding space across all siblings.
+    // Parent rigs and incomplete/cyclic memberships retain the general path.
+    if (groups.length && !groups[groups.length - 1].group && groups.every((group: any) => !group.parent)) {
+      let space: number[] | undefined, start = groups.length - 1;
+      for (let i = 0; i < groups.length; i++) {
+        const cached = groupSpaceMemo.get(groups[i]);
+        if (cached) { space = cached; start = i - 1; break; }
+      }
+      space ||= [1,0,0,1,0,0];
+      for (let i = start; i >= 0; i--) {
+        space = mul(space, PM.localMatrix(groups[i], T));
+        groupSpaceMemo.set(groups[i], space);
+      }
+      const matrix = mul(space, PM.localMatrix(L, T));
+      wmMemo.set(L, matrix);
+      return matrix;
+    }
   }
   const chain: any[] = [];
   let cur = L, hit = false;
@@ -374,17 +437,36 @@ PM.setKey = (L: any, key: any, T: any, value: any, ease: any) => {
   if (!p) return null;
   return PM.setKeyOn(p, T - L.from, value, ease, PM.proj.fps);
 };
-PM.setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'linear', fps: any = 30, minTime = 0) => {
+const setKeyOn = (p: any, tLocal: any, value: any, ease: any = 'linear', fps: any = 30, prepare = true) => {
   if (!p || typeof p !== 'object') return null;
   p.kf = Array.isArray(p.kf) ? p.kf : [];
   const safeFps = Number.isFinite(Number(fps)) && Number(fps) > 0 ? Number(fps) : 30;
-  const t = Math.max(minTime, PM.snapF(Number.isFinite(Number(tLocal)) ? Number(tLocal) : 0, safeFps));
+  const t = Math.max(0, PM.snapF(Number.isFinite(Number(tLocal)) ? Number(tLocal) : 0, safeFps));
   let k = p.kf.find((k: any) => Math.abs(k.t - t) < .5 / safeFps);
   if (k) { k.v = value; }
   else { k = PM.KF(t, value, ease); p.kf.push(k); sortKf(p); }
-  temporalKeys(p.kf);
+  if (prepare) temporalKeys(p.kf);
   PM.touch();
   return k;
+};
+PM.setKeyOn = setKeyOn;
+/** Convert presets only after every key has its final segment duration/value. */
+PM.setKeysOn = (p: any, points: any[], fps: any = 30) => {
+  const edits = new Map<any, any>();
+  for (const point of points) {
+    const key = setKeyOn(p, point.t, point.v, point.ease || 'linear', fps, false);
+    if (key) edits.set(key, point);
+  }
+  temporalKeys(p.kf);
+  p.kf.forEach((key: any, index: number) => {
+    const point = edits.get(key);
+    if (!point) return;
+    if (point.hold != null) key.hold = !!point.hold;
+    const { eo, ei } = Ease.handles(point.ease || 'linear');
+    if (typeof key.v === 'number') applyUnitCurve(p.kf, index, [eo[0], eo[1], ei[0], ei[1]]);
+    else { key.eo = [...eo]; key.ei = [...ei]; }
+  });
+  PM.touch();
 };
 PM.removeKey = (p: any, k: any) => {
   if (!k) return;
@@ -420,7 +502,7 @@ PM.animate = (L: any, key: any, points: any, opt: any = {}) => {
   const p = L.p[key] || (opt.prop || null);
   if (!p) return false;
   if (!opt.keep) p.kf = [];
-  points.forEach((pt: any) => PM.setKeyOn(p, pt.t, pt.v, pt.ease || opt.ease || 'linear', PM.proj.fps));
+  PM.setKeysOn(p, points.map((pt: any) => ({ ...pt, ease: pt.ease || opt.ease || 'linear' })), PM.proj.fps);
   PM.touch();
   return true;
 };
@@ -453,7 +535,7 @@ PM.allProps = (L: any) => {
   return out;
 };
 PM.findProp = (L: any, key: any) => {
-  if (/^(?:m\.[^.]+$|(?:o|light|camera|environment|shader|slots|model)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
+  if (/^(?:m\.[^.]+$|(?:o|light|camera|environment)\.)/.test(key)) return sceneProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (/^(g|mp|ta|ts)\./.test(key)) return structuredProperties(L).find(p=>p.key===key)?.prop ?? null;
   if (L.p?.[key]) return L.p[key];
   if (key === 'l.blend' || key === 'l.mblur' || key === 'l.matteMode') return isProperty(L[key.slice(2)]) ? L[key.slice(2)] : null;

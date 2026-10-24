@@ -1,8 +1,10 @@
 import { AUDIO_EXTENSIONS as ACCEPTED_EXTENSIONS } from '../../../../shared/media-formats';
 import { evaluatedValue, isProperty, resolveContent } from './content-properties';
 import { measureBlock } from '../../mixer/levels';
+import { buildWaveform } from './media-work';
 /* Ported from js/core/audio.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
+import { encodeOpus, supportsOpus } from './opus-encode';
 
 export function install(PM: PMRegistry): void {
 const AUDIO_EXTENSIONS: any = new Set<string>(ACCEPTED_EXTENSIONS);
@@ -28,6 +30,7 @@ const state: any = {
 };
 let audioCacheProject: any = null;
 let audioCache: any[] | null = null;
+let audioIndexPlayhead = 0;
 let audioById: Map<string, any> | null = null;
 
 const clamp: any = (value: any, min: any, max: any) => Math.max(min, Math.min(max, value));
@@ -58,7 +61,7 @@ function audioLayers(project: any = PM.proj) {
       if (soloed && !layer.solo && !ancestors.some((group: any) => group.solo)) continue;
       const groupChain = ancestors.map((group: any) => ({ group, offset }));
       if (groupChain.some(({ group }: any) => group.on === false)) continue;
-      const naturalStart: any = offset + Math.max(0, finite(layer.from));
+      const naturalStart: any = offset + finite(layer.from);
       const start: any = Math.max(windowStart, naturalStart);
       const end: any = Math.min(windowEnd, naturalStart + Math.max(0, finite(layer.dur)));
       if (end - start <= 1e-4) continue;
@@ -110,6 +113,7 @@ function audioLayers(project: any = PM.proj) {
   };
   visit(project, 0, 0, Infinity, '', 0);
   if (project === PM.proj) {
+    audioIndexPlayhead = finite(PM.time);
     audioCacheProject = project;
     audioCache = output;
     audioById = new Map(output.map((layer: any) => [layer.id, layer]));
@@ -334,31 +338,6 @@ function decodeArrayBuffer(ctx: any, bytes: any) {
   });
 }
 
-/* Waveform peaks at a fixed source rate, never a fixed count: a bucket must
-   span a few milliseconds so the envelope keeps its dynamics. Squashing a
-   whole file into a few hundred max-abs buckets flattens every bucket to the
-   file's loudest sample and draws a solid wall. */
-const PEAKS_PER_SECOND: any = 100;
-function peakEnvelope(buffer: any, rate: any = PEAKS_PER_SECOND) {
-  const frames: any = Math.max(1, buffer.length || 1);
-  const duration: any = Math.max(.001, finite(buffer.duration, frames / Math.max(1, finite(buffer.sampleRate, 1))));
-  const length: any = Math.max(1, Math.min(frames, Math.ceil(duration * rate)));
-  const peaks: any = new Float32Array(length);
-  const channels: any = Math.max(1, buffer.numberOfChannels || 1);
-  const data: any = [];
-  for (let channel: any = 0; channel < channels; channel++) data.push(buffer.getChannelData(channel));
-  for (let bucket: any = 0; bucket < length; bucket++) {
-    const start: any = Math.floor(bucket * frames / length);
-    const end: any = bucket === length - 1 ? frames : Math.max(start + 1, Math.floor((bucket + 1) * frames / length));
-    let peak: any = 0;
-    for (const samples of data) {
-      for (let index: any = start; index < end; index++) peak = Math.max(peak, Math.abs(samples[index] || 0));
-    }
-    peaks[bucket] = peak;
-  }
-  return peaks;
-}
-
 function decodedBytes(buffer: any) {
   return Math.max(0, finite(buffer && buffer.length) * Math.max(1, finite(buffer && buffer.numberOfChannels, 1)) * 4);
 }
@@ -394,7 +373,7 @@ function trimDecodedCache(targetBytes: any = MAX_DECODED_BYTES) {
   }
 }
 
-async function decodeAsset(asset: any) {
+async function decodeAsset(asset: any, { assertCurrent, onStage }: any = {}) {
   if (!asset || !asset.audioBlob) throw new Error('Audio asset is unavailable');
   if (asset.audioBuffer) {
     asset.audioUsedAt = Date.now();
@@ -406,7 +385,10 @@ async function decodeAsset(asset: any) {
   const token: any = asset.audioToken;
   asset.audioDecoding = (async () => {
     try {
+      assertCurrent?.();
+      onStage?.('Decoding audio');
       const bytes: any = await asset.audioBlob.arrayBuffer();
+      assertCurrent?.();
       const buffer: any = await decodeArrayBuffer(context(), bytes);
       if (!buffer || !(buffer.duration > 0)) throw new Error('The decoder returned an empty audio file');
       if (decodedBytes(buffer) > MAX_DECODED_BYTES) {
@@ -415,12 +397,23 @@ async function decodeAsset(asset: any) {
         throw error;
       }
       if (asset.audioDisposed || asset.audioToken !== token) return null;
+      let lastProgress = -1;
+      const peaks = await buildWaveform(buffer, {
+        assertCurrent: () => {
+          assertCurrent?.();
+          if (asset.audioDisposed || asset.audioToken !== token) throw new Error('Audio preparation cancelled');
+        },
+        onProgress: (completed, total) => {
+          const percent = Math.floor(completed / total * 100);
+          if (percent !== lastProgress) { onStage?.(`Building waveform · ${percent}%`, { completed, total }); lastProgress = percent; }
+        },
+      });
       asset.audioBuffer = buffer;
       if (asset.kind === 'video') asset.audioDur = buffer.duration;
       else asset.dur = buffer.duration;
       asset.channels = buffer.numberOfChannels || 1;
       asset.sampleRate = buffer.sampleRate || 0;
-      asset.peaks = peakEnvelope(buffer);
+      asset.peaks = peaks;
       asset.audioUsedAt = Date.now();
       asset.audioDecodeError = null;
       asset.audioRetryAt = 0;
@@ -430,6 +423,7 @@ async function decodeAsset(asset: any) {
       PM.invalidate && PM.invalidate('timeline');
       return buffer;
     } catch (error: any) {
+      assertCurrent?.();
       const failure: any = error && (error.audioUserFacing || /missing|decoder|supported/i.test(error.message || ''))
         ? error
         : new Error('Could not decode this audio file · try WAV, MP3, M4A, AAC, OGG, FLAC, or AIFF');
@@ -443,7 +437,7 @@ async function decodeAsset(asset: any) {
   return asset.audioDecoding;
 }
 
-async function prepareAsset({ id, name, blob, meta = {} }: any) {
+async function prepareAsset({ id, name, blob, meta = {}, assertCurrent, onStage }: any) {
   const asset: any = {
     id,
     name,
@@ -467,7 +461,7 @@ async function prepareAsset({ id, name, blob, meta = {} }: any) {
   };
   /* Imports are decoded before they can mutate project source. Restores already
      have trusted duration metadata and stay lazy until playback/waveform demand. */
-  if (!(asset.dur > 0)) await decodeAsset(asset);
+  if (!(asset.dur > 0)) await decodeAsset(asset, { assertCurrent, onStage });
   return asset;
 }
 
@@ -551,7 +545,7 @@ function envelopePoints(layer: any, localStart: any, duration: any, audibleDurat
 
 function plan(layer: any, asset: any, rangeStart: any, rangeEnd: any) {
   if (!layer || layer.type !== 'audio' || layer.on === false || !layer.d || !layer.d.asset || !asset) return null;
-  const layerStart: any = Math.max(0, finite(layer.from));
+  const layerStart: any = finite(layer.from);
   const layerDuration: any = Math.max(0, finite(layer.dur));
   const windowStart: any = Math.max(layerStart, finite(layer._audioWindowStart, layerStart));
   const windowEnd: any = Math.min(layerStart + layerDuration, finite(layer._audioWindowEnd, layerStart + layerDuration));
@@ -1014,74 +1008,26 @@ async function createRealtimeMix(t0: any, t1: any) {
   }
 }
 
-function opusHead(channels: any, sampleRate: any) {
-  const out: any = new Uint8Array(19);
-  out.set([79, 112, 117, 115, 72, 101, 97, 100], 0); // OpusHead
-  out[8] = 1;
-  out[9] = channels;
-  out[10] = 56; out[11] = 1; // 312-sample pre-skip, little endian
-  new DataView(out.buffer).setUint32(12, sampleRate, true);
-  out[18] = 0;
-  return out;
-}
-
-async function supportsOpus() {
-  const Encoder: any = window.AudioEncoder;
-  const Data: any = window.AudioData;
-  if (!Encoder || !Data || typeof Encoder.isConfigSupported !== 'function') return false;
-  const config: any = { codec: 'opus', sampleRate: 48000, numberOfChannels: 2, bitrate: 160000 };
-  const support: any = await Encoder.isConfigSupported(config).catch(() => null);
-  return !!(support && support.supported);
-}
-
-async function encodeOpus(buffer: any) {
-  const Encoder: any = window.AudioEncoder;
-  const Data: any = window.AudioData;
-  if (!buffer || !Encoder || !Data) return null;
-  const channels: any = Math.min(2, Math.max(1, buffer.numberOfChannels || 1));
-  const config: any = { codec: 'opus', sampleRate: buffer.sampleRate, numberOfChannels: channels, bitrate: 160000 };
-  const support: any = await Encoder.isConfigSupported(config).catch(() => null);
-  if (!support || !support.supported) return null;
-  const chunks: any = [];
-  let privateData: any = null;
-  let encodeError: any = null;
-  const encoder: any = new Encoder({
-    output(chunk: any, metadata: any) {
-      const description: any = metadata && metadata.decoderConfig && metadata.decoderConfig.description;
-      if (!privateData && description) privateData = new Uint8Array(description);
-      const bytes: any = new Uint8Array(chunk.byteLength);
-      chunk.copyTo(bytes);
-      chunks.push({ ts: Number(chunk.timestamp), data: bytes });
-    },
-    error(error: any) { encodeError = error; },
-  });
-  encoder.configure(config);
-  const source: any = Array.from({ length: channels }, (_: any, channel: any) => buffer.getChannelData(channel));
-  const frameLength: any = Math.max(1, Math.floor(buffer.sampleRate * .02));
-  for (let offset: any = 0; offset < buffer.length; offset += frameLength) {
-    const frames: any = Math.min(frameLength, buffer.length - offset);
-    const planar: any = new Float32Array(frames * channels);
-    for (let channel: any = 0; channel < channels; channel++) planar.set(source[channel].subarray(offset, offset + frames), channel * frames);
-    const data: any = new Data({
-      format: 'f32-planar',
-      sampleRate: buffer.sampleRate,
-      numberOfFrames: frames,
-      numberOfChannels: channels,
-      timestamp: Math.round(offset / buffer.sampleRate * 1e6),
-      data: planar,
-    });
-    encoder.encode(data);
-    data.close();
-    if (encoder.encodeQueueSize > 16) await new Promise((resolve: any) => setTimeout(resolve, 4));
-  }
-  await encoder.flush();
-  encoder.close();
-  if (encodeError || !chunks.length) return null;
-  return { chunks, priv: privateData || opusHead(channels, buffer.sampleRate), rate: buffer.sampleRate, channels };
-}
-
 function hasAudibleLayers(project: any = PM.proj) {
   return audioLayers(project).some((layer: any) => layer.on !== false && layer.d && layer.d.asset);
+}
+
+/** A conservative encoder hint, using the same clip windows and source bounds
+ * as offline mixing. Never decode media or create audio contexts just to
+ * predict a track; unknown sources keep the ordinary encoder path. */
+function expectsOfflineMix(t0: number, t1: number): boolean {
+  const from = Math.max(0, finite(t0)), to = Math.max(from, finite(t1, from));
+  if (to - from <= 1e-4 || !PM.proj) return false;
+  try {
+    return audioLayers().some((layer: any) => {
+      const asset = layer.d?.asset && PM.assets?.get?.(layer.d.asset);
+      const duration = asset?.audioBuffer ? asset.audioBuffer.duration : asset?.dur;
+      return Number.isFinite(duration) && duration > 0 && !!plan(layer, asset, from, to);
+    });
+  } catch {
+    // A hint must not replace the export's normal validation or errors.
+    return false;
+  }
 }
 
 const Audio: any = PM.Audio = {
@@ -1119,6 +1065,8 @@ const Audio: any = PM.Audio = {
   supportsOpus,
   encodeOpus,
   hasAudibleLayers,
+  expectsOfflineMix,
+  indexPlayhead: () => { audioLayers(); return audioIndexPlayhead; },
   retune,
   setMonitorSolo,
   monitorSolo: () => [...state.monitorSolo],
