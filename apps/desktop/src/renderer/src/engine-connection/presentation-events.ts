@@ -49,8 +49,17 @@ export class RevisionVersions {
   }
 }
 
-/** A presented frame, as the viewer's presentation reports it. */
-export type PresentedFrameLike = { pts: number; revision: number; viewSeq: number; seq: number };
+/** A presented frame, as the viewer's presentation reports it: a timed
+ *  (playback) frame carries the animation frame (`rafMs`, the page's clock)
+ *  that drew it. */
+export type PresentedFrameLike = { pts: number; revision: number; viewSeq: number; seq: number; timed?: boolean; rafMs?: number };
+
+/**
+ * The page's and the presentation worker's animation frames of one refresh
+ * carry the same BeginFrame time (within 0.1 ms, measured); a frame drawn
+ * more than this before an animation frame was drawn at an earlier refresh.
+ */
+const SAME_REFRESH_MS = 1;
 
 export type FrameRenderedPayload = { viewport: unknown; time: number; version: number | undefined; project: unknown; quality: number };
 
@@ -74,25 +83,45 @@ export function emitPresented(
 }
 
 /**
- * Coalesces presented frames to one emission per animation frame (the
- * newest frame wins), as today's frame loop emits `preview:presented` and
- * `overlay` once per frame it draws, and the overlay redraws in the
- * animation frame rather than inside the presentation's callback.
+ * Emits presented frames at most once per animation frame, as today's
+ * frame loop emits `preview:presented` and `overlay` once per frame it
+ * draws, and the overlay redraws in the animation frame rather than inside
+ * the presentation's callback.
+ *
+ * A timed frame is emitted at the first animation frame of a later refresh
+ * than the one that drew it, whenever its report reached this thread. The
+ * worker draws in its animation frame and its report arrives about a
+ * millisecond into the refresh, the moment the page's own animation frame
+ * runs; taken in arrival order, a report on either side of that frame
+ * left one animation frame with nothing and the next with two, and the
+ * older was never announced (docs/engine/bridge.md, "Pacing at 120 Hz").
+ * Frames drawn on arrival (paused, scrub, gesture) go at the next
+ * animation frame. When the page skipped refreshes, the newest frame due
+ * wins (`coalesced` counts the others), as today's loop draws once.
+ *
  * `listenersMs` and `slowestMs` record what the listeners cost on the
  * page's main thread (measured 2026-10-18 during 30 fps playback: 88
  * emissions in 3 s took 2.2 ms in all, the slowest 0.1 ms).
  */
 export class PresentedEvents {
-  private pending: { frame: PresentedFrameLike; quality: number } | null = null;
+  /** Reported frames not yet emitted, oldest first. */
+  private queue: { frame: PresentedFrameLike; quality: number }[] = [];
   private scheduled = false;
   /** The frame last emitted (the one on screen). */
   private last: { frame: PresentedFrameLike; quality: number } | null = null;
   emitted = 0;
+  /** Frames passed over for a newer one due at the same animation frame. */
+  coalesced = 0;
   /** Redraw requests answered with the frame on screen (`redraw`). */
   redraws = 0;
   /** The revision of the frame on screen, once one was. */
   get shownRevision(): number | null {
     return this.last?.frame.revision ?? null;
+  }
+
+  /** Frames reported and not yet emitted. */
+  get pending(): number {
+    return this.queue.length;
   }
 
   /** Why the latest redraw request announced nothing (diagnostics). */
@@ -103,18 +132,31 @@ export class PresentedEvents {
 
   constructor(
     private readonly emit: (frame: PresentedFrameLike, quality: number) => void,
-    private readonly nextFrame: (fn: () => void) => void
+    private readonly nextFrame: (fn: (t: number) => void) => void
   ) {}
 
   push(frame: PresentedFrameLike, quality: number): void {
-    this.pending = { frame, quality };
+    this.queue.push({ frame, quality });
+    this.schedule();
+  }
+
+  private schedule(): void {
     if (this.scheduled) return;
     this.scheduled = true;
-    this.nextFrame(() => {
+    this.nextFrame((t) => {
       this.scheduled = false;
-      const next = this.pending;
-      this.pending = null;
-      if (!next) return;
+      // Due: drawn on arrival, or by an earlier refresh than this one.
+      const due = (f: PresentedFrameLike) => !f.timed || f.rafMs === undefined || !(f.rafMs > t - SAME_REFRESH_MS);
+      let index = -1;
+      for (let i = this.queue.length - 1; i >= 0; i--) if (due(this.queue[i]!.frame)) { index = i; break; }
+      if (index < 0) {
+        if (this.queue.length) this.schedule();
+        return;
+      }
+      const next = this.queue[index]!;
+      this.coalesced += index;
+      this.queue.splice(0, index + 1);
+      if (this.queue.length) this.schedule();
       this.last = next;
       this.emitted++;
       const started = performance.now();
@@ -137,7 +179,7 @@ export class PresentedEvents {
     const last = this.last;
     const skip = (why: string) => { this.lastRedraw = why; return false; };
     if (!last) return skip('nothing on screen');
-    if (this.pending) return skip('a frame is on its way to the screen');
+    if (this.queue.length) return skip('a frame is on its way to the screen');
     if (current.revision === null || current.revision !== last.frame.revision) return skip(`revision ${current.revision} after ${last.frame.revision}`);
     if (current.viewSeq !== null && current.viewSeq !== last.frame.viewSeq) return skip(`view ${current.viewSeq} after ${last.frame.viewSeq}`);
     if (current.pts !== null && Math.abs(current.pts - last.frame.pts) >= Math.max(1, current.frameTicks) / 2) return skip(`time ${current.pts} after ${last.frame.pts}`);

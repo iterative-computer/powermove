@@ -37,24 +37,49 @@ describe('frame events on presentation', () => {
 
 describe('presented frames are emitted once per animation frame', () => {
   it('the newest frame of an animation frame wins', () => {
-    const frames: Array<() => void> = [];
+    const frames: Array<(t: number) => void> = [];
     const emitted: number[] = [];
     const events = new PresentedEvents((frame) => emitted.push(frame.seq), (fn) => frames.push(fn));
     events.push({ pts: 0, revision: 1, viewSeq: 1, seq: 1 }, 1);
     events.push({ pts: 0, revision: 1, viewSeq: 1, seq: 2 }, 1);
     expect(frames).toHaveLength(1);
-    frames.shift()!();
+    frames.shift()!(0);
     expect(emitted).toEqual([2]);
     events.push({ pts: 0, revision: 2, viewSeq: 1, seq: 3 }, 1);
-    frames.shift()!();
+    frames.shift()!(16);
     expect(emitted).toEqual([2, 3]);
     expect(events.emitted).toBe(2);
+    expect(events.coalesced).toBe(1);
+  });
+
+  it('a timed frame goes at the first animation frame after the refresh that drew it, whichever side of it its report arrived', () => {
+    const P = 1000 / 120;
+    const frames: Array<(t: number) => void> = [];
+    const emitted: number[] = [];
+    const events = new PresentedEvents((frame) => emitted.push(frame.seq), (fn) => frames.push(fn));
+    const timed = (seq: number, refresh: number) => ({ pts: seq, revision: 1, viewSeq: 1, seq, timed: true, rafMs: refresh * P + 0.05 });
+    // Refresh 1's report arrives before the page's animation frame of refresh 1 runs.
+    events.push(timed(1, 1), 1);
+    frames.shift()!(1 * P);
+    expect(emitted).toEqual([]);
+    // Refresh 2's arrives before refresh 2's animation frame; refresh 3's after it.
+    events.push(timed(2, 2), 1);
+    frames.shift()!(2 * P);
+    expect(emitted).toEqual([1]);
+    frames.shift()!(3 * P);
+    events.push(timed(3, 3), 1);
+    expect(emitted).toEqual([1, 2]);
+    frames.shift()!(4 * P);
+    expect(emitted).toEqual([1, 2, 3]);
+    expect(events.coalesced).toBe(0);
+    expect(events.pending).toBe(0);
+    expect(frames).toHaveLength(0);
   });
 });
 
 describe('a paused redraw announces the frame on screen when nothing new is coming', () => {
   it('as today\'s frame loop announces the frame it draws again, but never ahead of a changed revision, view or time', () => {
-    const frames: Array<() => void> = [];
+    const frames: Array<(t: number) => void> = [];
     const events = new PresentedEvents(() => {}, (fn) => frames.push(fn));
     const announced: number[] = [];
     const announce = (frame: { seq: number }) => { announced.push(frame.seq); return true; };
@@ -62,7 +87,7 @@ describe('a paused redraw announces the frame on screen when nothing new is comi
     // Nothing on screen yet.
     expect(events.redraw(now(), announce)).toBe(false);
     events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 7 }, 1);
-    frames.shift()!();
+    frames.shift()!(0);
     expect(events.redraw(now(), announce)).toBe(true);
     expect(announced).toEqual([7]);
     // An edit (a newer revision), a view change, or another frame: the
@@ -73,7 +98,7 @@ describe('a paused redraw announces the frame on screen when nothing new is comi
     // A frame waiting for its animation frame wins.
     events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 8 }, 1);
     expect(events.redraw(now(), announce)).toBe(false);
-    frames.shift()!();
+    frames.shift()!(16);
     // The announcer declines when the redraw changed what the engine draws.
     expect(events.redraw(now(), () => false)).toBe(false);
     expect(events.redraws).toBe(1);
