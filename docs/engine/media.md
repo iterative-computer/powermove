@@ -3,8 +3,13 @@
 ## Source media surfaces (mediaframes lane)
 
 `SnapshotTarget::Source` draws a frozen asset independently of the project
-composition. `time` is source time in ticks, `outputSize` is the returned pixel
-size, and `fit` is stretch, contain, or cover. `display` reads the host's
+composition. `time` is source time in ticks, `outputSize` is the RGBA pixel
+size, and `fit` is stretch, contain, or cover. The source monitor's video-only
+`compositor` request instead returns the original coded YUV planes with
+`SnapshotResult.video` colour metadata; Chromium owns its final fit and colour
+conversion. It requires an async request with straight samples. RGBA `display`
+and `interpreted` snapshots, jobs, and composition rendering keep their
+existing encodings. `display` reads the host's
 `SourceRead` capability, which resolves the browser-playable rendition when
 the asset's binding selects it. A stale cached rendition never replaces a
 browser-playable original. Window bindings and frozen job bindings carry
@@ -69,11 +74,19 @@ The renderer registers `engine.source` only with Use New Engine enabled.
 Assets live posters and inline thumbnails use its source pixels; import,
 replacement, and restore backfill persist the same WebP/JPEG poster format.
 The source viewer keeps its existing controls and keyboard interactions,
-using native RGBA frames and an engine audio voice. Stills present through
+using native source frames and an engine audio voice. Stills present through
 an image element, matching the original compositor layer beneath the
 transport shadow; its lossless PNG is encoded from engine pixels. Video
-presents directly through a canvas without image encoding. Raw canvas pixels
-alone do not certify CSS video-element colour or overlay compositing. Code
+presents the engine's decoded planes through WebCodecs VideoFrames on a
+private generated video track, so the CSS video-element compositor scales
+and colour-manages them as it did for the old source monitor. NV12 and I420A
+frames are buffer-backed, transferring the request-owned ArrayBuffer; NV16
+and P010 use an immutable IOSurface imported by Electron's shared-texture API,
+held until the element presents the frame. The element has no URL, has no
+audio track, and is muted; decoding, seeking, frame selection and audible
+playback remain in the native engine. No browser decoder supplies the source
+frames. Opaque alpha planes are removed only after checking every visible
+alpha sample; true alpha travels as I420A. Code
 export sends frozen originals to browser-rendition jobs. Setting-off branches
 retain their current browser capture and conversion behavior.
 
@@ -86,29 +99,76 @@ scratch-output ownership, revision advancement, cancellation and cache bounds
 are specified in RFC 12. Browser renditions keep per-request isolation.
 The monitor measures its CSS size in ResizeObserver, preserving client-size
 rounding and override padding without forcing layout on every seek. Its
-ImageData view borrows the received RGBA buffer when it has ArrayBuffer
-storage, avoiding another full-frame copy.
+ImageData view for stills borrows the received RGBA buffer when it has
+ArrayBuffer storage, avoiding another full-frame copy.
+
+Monitor video never passes through an intermediate RGBA conversion,
+canvas colour transform, image encoding, or GPU readback. The buffer-backed
+route carries packed source planes in the existing structured-clone IPC reply;
+it does not encode a file. The IOSurface route copies the packed rows once
+in main and transfers an import to the owning window. Each surface is immutable.
+Electron retains the imported IOSurface independently of the native CoreVideo
+buffer, and each VideoFrame retains its shared image. Source preload releases
+the import without a JavaScript GPU-completion callback, then sends its bookkeeping
+notice from the preload's JavaScript sequence. This avoids Electron 44 invoking
+a V8 callback from the VideoFrameCompositor thread when a generated track drops
+a frame. Main releases its CoreVideo ownership after the import bookkeeping
+reports all references released; Chromium's remaining VideoFrame/shared-image
+references continue to own their immutable IOSurface. Main accounts actual padded IOSurface allocations,
+with a 512 MiB aggregate budget and eight outstanding surfaces per window.
+Packed source frames are capped at 128 MiB before allocation; the aggregate
+budget can hold at least three maximum-size frames.
+The preload consumes each token once and expires unused imports after ten
+seconds; navigation and disposal release the associated imports.
+
+Monitor frames carry the stream's CICP tags, or the defaults Chromium's
+demuxer applies to an unspecified or partial set: Rec.601 below 720 lines,
+Rec.709 otherwise (`media/ffmpeg/ffmpeg_common.cc`; VP9/AV1 keep unspecified
+fields, which the raw VideoFrame receives as explicit nulls). From 360
+visible lines, where Chromium prefers its platform decoder, the source-only
+decode requests video-range CoreVideo output and uses complete CoreVideo
+P/T/M attachments. Their 709 transfer is sent as CICP BT.709 (the sRGB
+curve, section 9), not Chromium's CSS-video BT709_APPLE 1.961 gamma, so HD
+monitor tones match composition and export; this is the one deliberate
+difference from today's monitor (`quality-ledger.md`). SD Rec.601 material
+keeps its SMPTE 170M primaries conversion, exactly as today's monitor; the
+composition and export read those primaries as Rec.709
+(`standard_video_primaries`), an open decision recorded in the ledger.
+Its independent decoder/cache purpose leaves composition Display/Export unchanged.
+
+Default poster persistence and poster URL consumers share one in-flight
+native frame and WebP encode. The source service's 64 MiB cache budget is
+split across RGBA frames (40 MiB), ordered filmstrips (16 MiB) and poster blobs
+(8 MiB, at most 128 entries). Source identity changes and cancellation prevent
+stale results from entering the cache. Import commits without waiting for the
+engine poster, which needs the committed binding; the poster then persists
+in the background and schedules an autosave without an `assets` broadcast
+(live cards already show it). Transient import progress updates coalesce
+within one animation frame; start and completion remain immediate.
 
 `e2e/engine-source-media.spec.ts` is the app gate for both settings: exact
-source, encoded-poster, actual inline-image and monitor-canvas comparisons,
+source, encoded-poster, actual inline-image and monitor Canvas2D comparisons,
 fractional SVG fits, ordered video/SVG filmstrips, both-theme media previews,
 decoded/mixed PCM, source audio levels and natural end, silent video, keyboard
 controls and decoded picture/audio identity for code renditions.
-`engine-source-guard.spec.ts` independently rejects legacy video capture,
-playback and host export conversion. `engine-source-performance.spec.ts`
+`engine-source-compositor.spec.ts` compares full-size and intrinsic monitor
+captures in both themes, including a neutral ramp and colour bars, against
+today's CSS video and against a double-precision reference built from the
+stream's colour reading and the screenshot's ICC profile
+(`e2e/helpers/source-colour-reference.ts`). Software-decoded video must match
+today exactly; VideoToolbox-decoded HD must be at least as close to the
+reference as today everywhere it measures, and within output rounding.
+`engine-source-guard.spec.ts`
+independently rejects browser video capture, URL-backed playback and host
+export conversion; it permits only the native private video-track presenter
+and verifies that its frames came through the source service. `engine-source-performance.spec.ts`
 pairs alternating app sessions with native `pm-perfbench` counters on one
 24-frame fixture/grid. Build `source_monitor_pcm` and `source_media` release
 examples before running these specs under `pm-electron-lock`; no build runs
 inside the lock. Targeted Rust and unit passes do not certify app parity,
 relative performance or direct device/DAC output.
-Still source-viewer transport-shadow captures now match exactly in both
-themes after preserving image-element compositing. Filmstrip/scrub latency
-must still meet the unchanged current-app gate. A separate public untagged
-H.264 full-size monitor capture differs between Chromium's CSS video element
-and the native RGBA canvas; matching Canvas2D reference bytes does not certify
-that video-element colour path. This visible colour difference remains a
-cutover blocker. Direct device/DAC output, the broader private corpus and
-non-default interpreted SVG colour remain unmeasured or unsupported as above.
+Direct device/DAC output, the broader private corpus and non-default
+interpreted SVG colour remain unmeasured or unsupported as above.
 
 Production media I/O for plan section 13, built from the S6 spike
 (`docs/engine/spikes/S6.md`, `engine/spikes/s6-decode`). Crates:
