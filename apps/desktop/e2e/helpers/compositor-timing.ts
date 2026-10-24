@@ -42,18 +42,22 @@ export async function compositorTiming(tracePath: string, submits: number[], ori
   if (!sink) throw new Error(`No compositor sink matches ${submits.length} submissions (${receives.size} sinks)`);
   const xs = receives.get(sink)!;
   const presented: number[] = [];
+  /** Per submission: when the display showed it (page clock, ms), or null. */
+  const shownAt: (number | null)[] = [];
   const missing = { received: 0, drawn: 0, superseded: 0 };
   const unmatched: {submitMs:number;reason:string}[] = [];
   for (const ms of submits) {
+    shownAt.push(null);
     const t = offset+ms*1000-2000, i = first(xs,t);
     if (i >= xs.length || xs[i]-t > 50000) { missing.received++; unmatched.push({submitMs:ms,reason:'not-received'}); continue; }
     const swap = swaps[first(swaps,xs[i],s=>s.begin)];
     if (!swap?.end) { missing.drawn++; unmatched.push({submitMs:ms,reason:'not-drawn'}); continue; }
     if (i+1 < xs.length && xs[i+1] <= swap.begin) { missing.superseded++; unmatched.push({submitMs:ms,reason:'superseded'}); continue; }
     presented.push(swap.end/1000);
+    shownAt[shownAt.length-1] = (swap.end-offset)/1000;
   }
   const unique = [...new Set(presented)].sort((a,b)=>a-b);
   const intervals = unique.slice(1).map((t,i)=>t-unique[i]).sort((a,b)=>a-b);
   const q = (p:number) => intervals[Math.min(intervals.length-1,Math.floor(intervals.length*p))] ?? null;
-  return { source:'Graphics.Pipeline.DrawAndSwap presentation feedback',sink,submitted:submits.length,presented:unique.length,missing,unmatched,duplicates:presented.length-unique.length,intervalMs:{p50:q(.5),p95:q(.95),p99:q(.99),max:q(1)} };
+  return { source:'Graphics.Pipeline.DrawAndSwap presentation feedback',sink,submitted:submits.length,presented:unique.length,missing,unmatched,duplicates:presented.length-unique.length,intervalMs:{p50:q(.5),p95:q(.95),p99:q(.99),max:q(1)},shownAt };
 }

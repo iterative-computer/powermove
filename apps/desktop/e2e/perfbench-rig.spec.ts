@@ -84,6 +84,8 @@ const ENV: Record<Mode, Record<string, string>> = { today: { POWERMOVE_NEW_ENGIN
 const MODES: Mode[] = process.env.PM_PERFBENCH_RIG_ORDER === 'engine' ? ['engine', 'today'] : ['today', 'engine'];
 /** The `playing` row's composition rate (120 by default; 60 checks a rate below the display's). */
 const PLAY_FPS = Number(process.env.PM_PERFBENCH_RIG_PLAY_FPS ?? 120);
+/** `PM_PERFBENCH_RIG_AUDIO=1`: the `playing` row's project also plays the public tone, so the engine's audio device is the master clock. */
+const PLAY_AUDIO = process.env.PM_PERFBENCH_RIG_AUDIO === '1';
 
 /** Page hooks: WebGL calls, messages and their clone bytes, media seeks. Installed before the app's scripts run. */
 function installHooks(): void {
@@ -672,6 +674,20 @@ async function synthetic(session: LaunchedApp, mode: Mode, layers: number, fps: 
   return summary;
 }
 
+/** The public 1.5 s tone (tone.wav, 440 Hz) end to end under the whole synthetic project. */
+async function addTone(session: LaunchedApp, mode: Mode): Promise<void> {
+  const tone = Array.from(await readFile(path.join(repoRoot, 'e2e/fixtures/tone.wav')));
+  await session.page.evaluate(async (tone) => {
+    const PM = (window as any).PM;
+    const asset = await PM.assets.add(new File([new Uint8Array(tone)], 'tone.wav', { type: 'audio/wav' }), { newAsset: true, silent: true });
+    for (let n = 0; n * 1.5 < PM.proj.dur; n++) PM.proj.layers.push(PM.mkLayer('audio', { name: `Tone ${n}`, from: n * 1.5, dur: 1.5, d: { asset: asset.id, gain: 1, trim: 0, fadeIn: 0, fadeOut: 0 } }, PM.proj));
+    PM.touch();
+    PM.bus.emit('layers'); PM.bus.emit('assets');
+    await PM.projectAssetsReady;
+  }, tone);
+  await expectEngine(session.page, mode);
+}
+
 const playbackSpecs = (from: number): StepSpec[] => Array.from({ length: STEPS + 4 }, (_, k) => ({ k, kind: 'time', t: from + (k + 1) / 120 }));
 
 /** Main-thread time and engine time over an action that is not a frame step (open, export). */
@@ -732,6 +748,7 @@ test.describe('120 Hz rig', () => {
       let traceDir: string | null = null;
       try {
         const summary = await synthetic(session, mode, 500, PLAY_FPS);
+        if (PLAY_AUDIO) await addTone(session, mode);
         // Warm the playing path once.
         await session.page.evaluate(async () => { const PM = (window as any).PM; PM.setTime(0); PM.play(); await new Promise((r) => setTimeout(r, 1000)); PM.pause(); PM.setTime(0); });
         await new Promise((r) => setTimeout(r, 500));
@@ -787,6 +804,7 @@ test.describe('120 Hz rig', () => {
           let rafs = 0;
           const tick = (t: number) => { if (!run) return; rafs++; pageRafs.push(t); requestAnimationFrame(tick); };
           requestAnimationFrame(tick);
+          const from = Number(PM.time);
           const start = performance.now();
           performance.mark('pm-rig-origin');
           PM.play();
@@ -798,7 +816,7 @@ test.describe('120 Hz rig', () => {
           const pendingAtEnd = events?.pending ?? 0;
           offs.forEach((off) => off());
           const elapsed = performance.now() - start;
-          return { at, oldAt, distinct: times.size, frames: [...times].sort((a, b) => a - b), rafs, elapsed, directCallbacks, gpuCompletions, coalesced, emissionPushes, emissions, pendingAtStart, pendingAtEnd, page: { start, pageRafs, emits, reports } };
+          return { at, oldAt, distinct: times.size, frames: [...times].sort((a, b) => a - b), rafs, elapsed, directCallbacks, gpuCompletions, coalesced, emissionPushes, emissions, pendingAtStart, pendingAtEnd, page: { start, from, pageRafs, emits, reports } };
         }, { ms: seconds * 1000, mode }));
         const counts1 = await session.page.evaluate(() => (window as any).__pmRig.counts());
         const p = m.value;
@@ -813,10 +831,19 @@ test.describe('120 Hz rig', () => {
           // presentation feedback): the worker's timed draws, or today's draws.
           await session.app.evaluate(({ contentTracing }, file) => contentTracing.stopRecording(file), tracePath!);
           const end = p.page.start + p.elapsed;
-          const submits = mode === 'engine'
-            ? ((viewer?.trace?.draws ?? []) as number[][]).filter((d) => d[7] === 1 && d[5]! >= p.page.start && d[5]! <= end).map((d) => d[5]!)
-            : p.oldAt;
-          const display = await compositorTiming(tracePath!, submits, 'pm-rig-origin').catch((error) => ({ error: String(error) }));
+          // Each submitted canvas frame and the composition time it shows.
+          const submitted: [number, number][] = mode === 'engine'
+            ? ((viewer?.trace?.draws ?? []) as number[][]).filter((d) => d[7] === 1 && d[5]! >= p.page.start && d[5]! <= end).map((d) => [d[5]!, d[3]! / TICKS])
+            : p.page.emits.map(([at, time]) => [at, time]);
+          const timing = await compositorTiming(tracePath!, submitted.map((x) => x[0]), 'pm-rig-origin').catch((error) => ({ error: String(error) }));
+          // When the first frame after the playhead's position at Play reached the display.
+          let firstAdvanceShownMs: number | null = null;
+          if ('shownAt' in timing) {
+            const i = submitted.findIndex(([, time]) => time > p.page.from + 1e-6);
+            const shown = i >= 0 ? timing.shownAt[i] : null;
+            firstAdvanceShownMs = shown == null ? null : +(shown - p.page.start).toFixed(1);
+          }
+          const display = { ...timing, firstAdvanceShownMs };
           await appendFile(TRACE_OUT, `${JSON.stringify({ at: new Date().toISOString(), mode, load: os.loadavg()[0], page: p.page, presented: p.at, viewer, native, presenterStats, display })}\n`);
         }
         if (mode === 'engine') {
@@ -829,9 +856,9 @@ test.describe('120 Hz rig', () => {
         const shownFrames = p.frames.map((t) => Math.round(t * PLAY_FPS));
         const dropped = shownFrames.length ? shownFrames.at(-1)! - shownFrames[0]! + 1 - new Set(shownFrames).size : 0;
         const mean = gaps.reduce((a, b) => a + b, 0) / Math.max(1, gaps.length);
-        const advance = p.page.emits.find((e) => e[1] > (p.frames[0] ?? Infinity));
+        const advance = p.page.emits.find((e) => e[1] > p.page.from + 1e-6);
         await record({
-          row: PLAY_FPS === 120 ? 'synthetic-500-playing' : `synthetic-500-playing-${PLAY_FPS}fps`,
+          row: `synthetic-500-playing${PLAY_FPS === 120 ? '' : `-${PLAY_FPS}fps`}${PLAY_AUDIO ? '-audio' : ''}`,
           mode,
           rateHz: PLAY_FPS,
           seconds: +(p.elapsed / 1000).toFixed(3),
@@ -853,7 +880,7 @@ test.describe('120 Hz rig', () => {
           /** Judder: the standard deviation of the intervals between presentations. */
           presentGapStdMs: +Math.sqrt(gaps.reduce((a, g) => a + (g - mean) ** 2, 0) / Math.max(1, gaps.length)).toFixed(3),
           droppedFrames: dropped,
-          /** From PM.play() to the first presentation of a later frame than the paused one. */
+          /** From PM.play() to the bus emission of the first frame after the playhead at Play. */
           firstAdvanceMs: advance ? +(advance[0] - p.page.start).toFixed(1) : null,
           gapsOverBudget: gaps.filter((g) => g > (1000 / PLAY_FPS) * 1.5).length,
           mainThreadMsPerPresented: +(m.mainMs / Math.max(1, presented)).toFixed(3),
