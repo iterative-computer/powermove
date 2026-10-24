@@ -697,6 +697,14 @@ pub struct VsyncHint {
     pub host_time: HostMicros,
     /// The refresh period in µs (8,333.3 at 120 Hz).
     pub period_us: f64,
+    /// How long after a refresh instant the frame the viewer draws at it
+    /// reaches the display (µs; the viewer's own prediction, which picks
+    /// timed frames). The engine starts a Play's line so that the first new
+    /// frame shows at the first refresh it can be ready for. Optional on
+    /// the wire: absent, the line starts after a fixed pre-roll.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub latency_us: Option<f64>,
 }
 
 impl VsyncHint {
@@ -761,6 +769,13 @@ impl Validate for ViewerState {
                 vsync.period_us.is_finite() && vsync.period_us >= min && vsync.period_us <= max,
                 C,
                 || format!("vsync period {} µs outside {min}..{max}", vsync.period_us),
+            )?;
+            ensure(
+                vsync
+                    .latency_us
+                    .is_none_or(|l| l.is_finite() && (0.0..=1e6).contains(&l)),
+                C,
+                || format!("vsync latency {:?} µs outside 0..1 s", vsync.latency_us),
             )?;
         }
         Ok(())
@@ -885,6 +900,7 @@ mod tests {
             vsync: Some(VsyncHint {
                 host_time: HostMicros::new(1_000_000).unwrap(),
                 period_us: 8_333.333,
+                latency_us: Some(15_700.0),
             }),
             depth_id: Some(true),
             chrome_selection: None,
@@ -911,6 +927,13 @@ mod tests {
         bad.vsync = Some(VsyncHint {
             host_time: HostMicros::new(1).unwrap(),
             period_us: 0.0,
+            latency_us: None,
+        });
+        assert!(bad.validate().is_err());
+        bad.vsync = Some(VsyncHint {
+            host_time: HostMicros::new(1).unwrap(),
+            period_us: 8_333.3,
+            latency_us: Some(f64::NAN),
         });
         assert!(bad.validate().is_err());
     }
@@ -920,6 +943,7 @@ mod tests {
         let hint = VsyncHint {
             host_time: HostMicros::new(1_000_000).unwrap(),
             period_us: 8_000.0,
+            latency_us: None,
         };
         assert_eq!(hint.next_at_or_after(1_000_000.0, 0.0), 1_000_000.0);
         assert_eq!(hint.next_at_or_after(1_000_001.0, 0.0), 1_008_000.0);
