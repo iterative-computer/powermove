@@ -849,7 +849,12 @@ describe.skipIf(!built)('the tracking Proxy', () => {
     for (const sameProject of [false, true]) {
       const next = sameProject ? JSON.parse(JSON.stringify(PM.proj)) : PM.mkProject({ dur: 2 });
       next.layers = Array.from({ length: 40 }, () => { const l = PM.mkLayer('solid', {}, next); l.p.rotation.kf = legacyKeys(); return l; });
+      // No path search per adopted key list: the replacement's resync or
+      // whole-document diff covers them (a search per list was quadratic).
+      const touched = vi.spyOn(doc.barrier!, 'touched');
       PM.replaceProject(next);
+      expect(touched).not.toHaveBeenCalled();
+      touched.mockRestore();
       // The replacement adopted every legacy key (a write per key list) while
       // its resync or whole-document diff was pending.
       expect(Object.prototype.propertyIsEnumerable.call(PM.proj.layers[39].p.rotation.kf[0], 'eo')).toBe(false);
