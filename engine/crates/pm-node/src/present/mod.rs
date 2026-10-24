@@ -549,9 +549,10 @@ impl BridgePresenter {
         }
     }
 
-    /// Replan after a transport transition. A pool generation is replaced
-    /// before timed playback starts and after the pause has reached the
-    /// render thread, so a playing jitter queue never sees the smaller ring.
+    /// Replan after a transport transition, once it reached the render
+    /// thread: a Play's start frames leave from the paused pool, and the
+    /// render-ahead fills the playing one (a frame or two at the start of a
+    /// run fit the paused pool's free slots); a pause shrinks it.
     fn replan_transport_pool(&mut self, ctx: &mut PresentContext<'_>, key: Key) {
         let Some(state) = self.views.get(&key).map(|meta| meta.state.clone()) else {
             return;
@@ -674,15 +675,15 @@ impl FramePresenter for BridgePresenter {
                 self.playing.remove(&key)
             }
         });
-        if transition == Some(true) {
-            self.replan_transport_pool(ctx, key);
-        }
+        // The Play first: the run's start frames, rendered while paused,
+        // go out from the paused pool before the playing pool replaces it
+        // (the viewer draws them across the replacement).
         self.send(Command::Transport {
             key,
             command,
             at: pm_bridge::now_us(),
         });
-        if transition == Some(false) {
+        if transition.is_some() {
             self.replan_transport_pool(ctx, key);
         }
     }
@@ -1004,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn paused_pools_expand_before_play_and_shrink_after_pause() {
+    fn paused_pools_expand_after_the_play_and_shrink_after_pause() {
         let (mut p, rx) = presenter();
         let mut budget = LeaseBudget::new(EngineProcess::Interactive);
         let mut evict = NoEviction;
@@ -1068,7 +1069,8 @@ mod tests {
             .iter()
             .position(|c| matches!(c, Command::Transport { .. }))
             .unwrap();
-        assert!(config_at < play_at);
+        // The Play goes first: its start frames leave from the paused pool.
+        assert!(play_at < config_at);
         assert!(matches!(
             &commands[play_at],
             Command::Transport {

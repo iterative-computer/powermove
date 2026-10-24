@@ -263,6 +263,23 @@ describe('EnginePresenter', () => {
     expect(link.releases).toEqual([{ poolIndex: 1, seq: 1 }]);
   });
 
+  it('a larger pool of the same surfaces keeps the frames already here (a Play\'s start frames)', () => {
+    const { source, painter, link, presenter } = setup();
+    const surfaces = (n: number, width = 640) => Array.from({ length: n }, (_, poolIndex) => ({ poolIndex, size: { width, height: 360 }, format: 'bgra8Unorm' as const }));
+    presenter.receive({ type: 'surfacePool', pool: { generation: 2, surfaces: surfaces(4) } });
+    source.arrive(2, 1);
+    presenter.receive({ type: 'frame', frame: desc(1, { poolGeneration: 2 }) });
+    presenter.receive({ type: 'surfacePool', pool: { generation: 3, surfaces: surfaces(8) } });
+    expect(link.releases).toEqual([]);
+    presenter.refresh(16.7);
+    expect(painter.draws).toHaveLength(1);
+    // Another size replaces them.
+    source.arrive(3, 2);
+    presenter.receive({ type: 'frame', frame: desc(2, { poolGeneration: 3 }) });
+    presenter.receive({ type: 'surfacePool', pool: { generation: 4, surfaces: surfaces(8, 1280) } });
+    expect(link.releases.map((r) => r.seq)).toEqual([2]);
+  });
+
   it('reports a color GPU completion after its pool was retired', async () => {
     const { source, painter, link, presenter } = setup();
     source.arrive(1, 1);

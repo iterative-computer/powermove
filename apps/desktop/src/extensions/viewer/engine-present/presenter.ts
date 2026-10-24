@@ -164,6 +164,12 @@ export type TraceRecord = {
 };
 
 const PARK_TIMEOUT_MS = 1000;
+
+/** A pool's surface size and format (its surfaces share them). */
+function poolShape(pool: SurfacePool): string {
+  const s = pool.surfaces[0];
+  return s ? `${s.size.width}x${s.size.height}:${s.format}` : '';
+}
 /** How long after a live resize step its presentation delay is assumed. */
 export const RESIZE_HOLD_MS = 150;
 
@@ -353,6 +359,8 @@ export class EnginePresenter implements Presenter {
 
   /** The depth and object-id pool's generation (`role: depthId`). */
   private depthGeneration = 0;
+  /** The color pool's surface size and format ([`poolShape`]). */
+  private poolShape = '';
 
   private onPool(pool: SurfacePool): void {
     if (pool.role === 'depthId') {
@@ -368,7 +376,13 @@ export class EnginePresenter implements Presenter {
     const previous = this.generation;
     this.generation = pool.generation;
     this.stats.generation = pool.generation;
-    for (const item of this.buffer.clear((i) => i.desc.poolGeneration !== pool.generation)) this.dropItem(item, 'generation');
+    // A pool of the same surfaces, more or fewer of them (Play grows it):
+    // frames of the old one already here still draw (a Play's start
+    // frames). Another size or format replaces them.
+    const shape = poolShape(pool);
+    const same = shape !== '' && shape === this.poolShape;
+    this.poolShape = shape;
+    if (!same) for (const item of this.buffer.clear((i) => i.desc.poolGeneration !== pool.generation)) this.dropItem(item, 'generation');
     this.parked = this.parked.filter((p) => {
       if (p.desc.poolGeneration === pool.generation) return true;
       this.releaseDesc(p.desc, 'generation');
@@ -478,7 +492,9 @@ export class EnginePresenter implements Presenter {
     if (!fit || !this.options.onVsync) return;
     const host = this.hostUs(fit.vsyncMs);
     if (host === null) return;
-    const next: VsyncHint = { hostTime: Math.round(host), periodUs: fit.periodMs * 1000 };
+    // The display latency the decisions use (without a live resize's extra).
+    const latencyUs = ((this.options.latencyRefreshes ?? 1) * fit.periodMs + (this.options.presentOffsetMs ?? 0)) * 1000;
+    const next: VsyncHint = { hostTime: Math.round(host), periodUs: fit.periodMs * 1000, latencyUs };
     if (!hintChanged(this.hint, next)) return;
     if (this.hint && !fit.jumped && rafMs - this.hintSentMs < HINT_INTERVAL_MS) return;
     this.hint = next;

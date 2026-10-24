@@ -74,6 +74,9 @@ pub const DELIVERY_US: f64 = 25_000.0;
 /// The most frames rendered ahead, whatever the frame rate.
 pub const MAX_LEAD: u32 = 28;
 
+/// From a frame's GPU completion to the viewer having it.
+pub const ARRIVAL_US: f64 = 1_000.0;
+
 /// Weight of the newest render in the cost estimate.
 const COST_WEIGHT: f64 = 0.25;
 
@@ -101,6 +104,9 @@ pub struct Schedule {
     redo_pending: bool,
     /// The first frame of this run (nothing before it was rendered).
     start_k: Option<i64>,
+    /// The frame on screen when the run started: the run renders from the
+    /// one after it ([`Self::start_after`]).
+    shown: Option<i64>,
 }
 
 impl Schedule {
@@ -111,6 +117,13 @@ impl Schedule {
         self.redo = None;
         self.redo_pending = false;
         self.start_k = None;
+        self.shown = None;
+    }
+
+    /// The (forward) run starts with frame `k` on screen already, at the
+    /// document revision it plays: it renders from frame `k + 1`.
+    pub fn start_after(&mut self, k: i64) {
+        self.shown = Some(k);
     }
 
     /// The document changed: every frame rendered ahead shows an older
@@ -176,7 +189,11 @@ impl Schedule {
         if frame_us.is_nan() || frame_us <= 0.0 {
             return lead;
         }
-        lead.max((2.0 * delivery_us / frame_us).ceil().min(f64::from(MAX_LEAD)) as u32)
+        lead.max(
+            (2.0 * delivery_us / frame_us)
+                .ceil()
+                .min(f64::from(MAX_LEAD)) as u32,
+        )
     }
 
     /// What to do at host µs `now` with `lead` frames of render-ahead (a
@@ -213,7 +230,7 @@ impl Schedule {
             if clock.rate().num < 0 {
                 k.min(anchor.div_euclid(f) + i64::from(anchor.rem_euclid(f) != 0) - 1)
             } else {
-                k.max(anchor.div_euclid(f))
+                k.max(self.shown.map_or(anchor.div_euclid(f), |s| s + 1))
             }
         });
         if fresh {
@@ -222,9 +239,12 @@ impl Schedule {
         let Some((from, until)) = Self::interval(clock, k) else {
             return Next::Idle;
         };
-        // Gone, or cannot reach the display before its interval ends.
-        let delivery = phase.map_or(DELIVERY_US, |p| {
-            (3.0 * p.hint.period_us).max(DELIVERY_US / 2.0)
+        // Gone, or cannot reach the display before its interval ends: the
+        // viewer picks a frame its display latency and half a refresh
+        // before it shows (or about three refreshes, when it did not say).
+        let delivery = phase.map_or(DELIVERY_US, |p| match p.hint.latency_us {
+            Some(latency) => latency + p.hint.period_us / 2.0 + ARRIVAL_US,
+            None => (3.0 * p.hint.period_us).max(DELIVERY_US / 2.0),
         });
         let lead = Self::lead_frames(lead, delivery, Self::frame_us(clock));
         let ready = now as f64 + self.cost_us.map_or(0.0, |c| c + delivery);
@@ -260,7 +280,11 @@ impl Schedule {
         }
         let slot = phase.slot_at_or_before(now_f);
         let next_slot = slot + phase.hint.period_us;
-        if now_f - slot <= phase.window_us() || from - next_slot < Self::frame_us(clock) {
+        // Waiting for the next slot would leave less than its render and
+        // delivery before it shows (the first frames of a run).
+        let urgent =
+            from - next_slot < Self::frame_us(clock).max(self.cost_us.unwrap_or(0.0) + delivery);
+        if now_f - slot <= phase.window_us() || urgent {
             return Next::Render {
                 k,
                 shown_from: from,
@@ -401,6 +425,23 @@ mod tests {
     }
 
     #[test]
+    fn a_run_from_the_frame_on_screen_renders_the_next_one_first() {
+        let clock = playing(0, PlaybackRate::NORMAL);
+        let mut schedule = Schedule::default();
+        schedule.start_after(600);
+        assert!(matches!(
+            schedule.next(&clock, 0, 4),
+            Next::Render { k: 601, .. }
+        ));
+        // A reset (a seek, another Play) forgets it.
+        schedule.reset();
+        assert!(matches!(
+            schedule.next(&clock, 0, 4),
+            Next::Render { k: 600, .. }
+        ));
+    }
+
+    #[test]
     fn frames_whose_interval_passed_are_skipped() {
         let clock = playing(0, PlaybackRate::NORMAL);
         let mut schedule = Schedule::default();
@@ -508,6 +549,7 @@ mod tests {
             hint: VsyncHint {
                 host_time: pm_protocol::common::HostMicros::new(3_000).unwrap(),
                 period_us: 8_000.0,
+                latency_us: None,
             },
             fraction,
         }

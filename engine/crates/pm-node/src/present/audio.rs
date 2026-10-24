@@ -58,10 +58,12 @@ pub enum AudioCtl {
     Document(DocumentUpdate),
     Media(MediaMap),
     Composition(String),
-    /// Seek to `from` (ticks) and play at `rate`.
+    /// Seek to `from` (ticks) and play at `rate`, the first frame heard at
+    /// host µs `at` (the line the picture starts on too).
     Play {
         from: i64,
         rate: PlaybackRate,
+        at: i64,
     },
     Pause,
     /// Open the device ahead of the first Play once the composition is
@@ -415,7 +417,7 @@ impl Control {
                     playback.set_monitor_solo(solo);
                 }
             }
-            AudioCtl::Play { from, rate } => {
+            AudioCtl::Play { from, rate, at } => {
                 if self.playback.is_none() && !self.open() {
                     return true;
                 }
@@ -430,7 +432,7 @@ impl Control {
                     time: Ticks::new(from.max(0)).unwrap_or(Ticks::ZERO),
                     mode: SeekMode::Exact,
                 });
-                self.command(TransportCommand::Play { rate });
+                self.command_at(TransportCommand::Play { rate }, at);
             }
         }
         true
@@ -459,6 +461,11 @@ impl Control {
     }
 
     fn command(&mut self, command: TransportCommand) {
+        self.command_at(command, 0);
+    }
+
+    /// A command; a Play starts presenting at host µs `at` (0: when ready).
+    fn command_at(&mut self, command: TransportCommand, at: i64) {
         let Some(playback) = &self.playback else {
             return;
         };
@@ -473,7 +480,7 @@ impl Control {
         ) {
             self.watch_until = Some(Instant::now() + Duration::from_millis(1500));
         }
-        if let Err(error) = playback.command(command) {
+        if let Err(error) = playback.command_at(command, at.max(0) as u64) {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             status.problems.push(format!("transport: {error}"));
             if status.problems.len() > 16 {

@@ -1011,6 +1011,12 @@ struct View {
     /// The compatibility needs the last render consulted, and the media
     /// time it drew (unwrapped ticks).
     compat_needs: Option<(i64, Vec<pm_protocol::snapshot::CompatNeed>)>,
+    /// The first frames of the run a Play would start, rendered while
+    /// paused and held in their slots until then ([`Thread::arm`]).
+    armed: Vec<FrameDescriptor>,
+    /// When the paused frame went out (host µs): the start frames are
+    /// rendered once it has stayed [`ARM_IDLE_US`].
+    paused_sent: Option<i64>,
     /// The C′ prototype's refresh-rate request while it plays, and whether
     /// this playback already tried (a failed request is not repeated).
     #[cfg(feature = "remote-layer")]
@@ -1027,6 +1033,18 @@ struct AudioPrefs {
     scrub: bool,
     solo: Option<std::collections::HashSet<String>>,
 }
+
+/// Start frames rendered ahead while paused ([`Thread::arm`]): the first
+/// new frames of a Play, ready when it comes, as many as the paused pool
+/// holds beside the frames the viewer keeps and one free slot.
+const ARMED_FRAMES: i64 = 2;
+
+/// How long the paused frame stays before the start frames are rendered
+/// (a scrub or drag moves it sooner, and they are not drawn for it).
+const ARM_IDLE_US: i64 = 50_000;
+
+/// From a Play to the audio's render thread queueing its first chunk.
+const AUDIO_CONTROL_US: i64 = 2_000;
 
 /// How long a Play waits for the audio device before the line starts on
 /// the host clock.
@@ -3024,7 +3042,122 @@ impl Thread {
     /// clock is the master); without an output device, and for the test
     /// source, the line runs on the host clock. Scrub seeks while paused
     /// play an audio grain when audio scrub is on.
-    /// Starts the line at `rate` (a Play, or the end of its preroll).
+    /// Renders the first new frames of the run a Play from here would start
+    /// (forward at 1×), once the paused frame has stayed [`ARM_IDLE_US`] and
+    /// the pool has slots for them beside a paused redraw. They wait in
+    /// their slots; a Play sends them at once ([`Self::start_play`]), any
+    /// change gives the slots back first ([`Self::disarm`]).
+    fn arm(&mut self, key: Key) {
+        let t = now();
+        let Some(view) = self.views.get(&key) else {
+            return;
+        };
+        let free = view.pool.as_ref().map_or(0, |l| {
+            l.pool.len().saturating_sub(l.ledger.held_count()) as i64
+        });
+        // A session with compatibility producers starts through the native
+        // preroll (their answers for the first frames), not from here.
+        if self.compat_store().has_producers(key) {
+            return;
+        }
+        let Some(view) = self.views.get(&key) else {
+            return;
+        };
+        if !view.armed.is_empty()
+            || view.clock.is_playing()
+            || view.dirty
+            || view.awaiting.is_some()
+            || view.preroll.is_some()
+            || !view.requests.is_empty()
+            || view.external_wait.is_some()
+            // The paused frame lacks something (an SVG bucket, the
+            // window's answers, decoding video): not before it is whole.
+            || !view.svg_without.is_empty()
+            || view.compat_paused_wait.is_some()
+            || view.stand_in.is_some()
+            || view.watchdog_held
+            || view.render_failed
+            || view.state.headless == Some(true)
+            || !matches!(view.reported, Some(Route::Engine))
+            // One slot stays free (a frame request, a paused redraw).
+            || free < 2
+            || view.paused_sent.is_none_or(|at| t - at < ARM_IDLE_US)
+        {
+            return;
+        }
+        let f = view.clock.frame_ticks();
+        let k0 = view.clock.media_at(t).div_euclid(f);
+        let end = view.clock.end();
+        let shown_for = Schedule::frame_us(&view.clock);
+        self.drain_frames();
+        let mut armed = Vec::new();
+        for k in k0 + 1..=k0 + ARMED_FRAMES.min(free - 1) {
+            if end.is_some_and(|e| k * f >= e) {
+                break;
+            }
+            let media = self.views[&key].clock.wrap(k * f);
+            let started = now();
+            let Some(descriptor) = self.render(key, media, k, Some((0.0, shown_for)), false, false)
+            else {
+                break;
+            };
+            self.trace_event("start frame", started, now() - started, k);
+            armed.push(descriptor);
+        }
+        if let Some(view) = self.views.get_mut(&key) {
+            view.armed = armed;
+            // Rendered for this paused frame; another one arms again.
+            view.paused_sent = None;
+        }
+    }
+
+    /// Gives back the slots of the start frames (the paused state changed).
+    fn disarm(view: &mut View) {
+        for descriptor in view.armed.drain(..) {
+            if let Some(live) = view.pool.as_mut()
+                && u64::from(live.spec.generation) == descriptor.pool_generation.get()
+            {
+                let _ = live.ledger.release(FrameRelease {
+                    pool_index: descriptor.pool_index,
+                    seq: descriptor.seq,
+                });
+            }
+        }
+    }
+
+    /// The start frames, when they begin the run a Play at `rate` from
+    /// media `from` starts (same revision, view, and pool); otherwise none,
+    /// and their slots go back.
+    fn take_armed(&mut self, key: Key, rate: PlaybackRateValue, from: i64) -> Vec<FrameDescriptor> {
+        let revision = self.docs.get(&key).map(|d| d.revision());
+        let Some(view) = self.views.get_mut(&key) else {
+            return Vec::new();
+        };
+        let f = view.clock.frame_ticks();
+        let valid = rate == PlaybackRateValue::NORMAL
+            && view.armed.first().is_some_and(|d| {
+                d.pts.get() == view.clock.wrap((from.div_euclid(f) + 1) * f)
+                    && Some(d.revision.get()) == revision
+                    && d.view_seq == view.state.view_seq
+                    && view
+                        .pool
+                        .as_ref()
+                        .is_some_and(|l| u64::from(l.spec.generation) == d.pool_generation.get())
+            });
+        if valid {
+            std::mem::take(&mut view.armed)
+        } else {
+            Self::disarm(view);
+            Vec::new()
+        }
+    }
+
+    /// Starts the line at `rate` (a Play, or the end of its preroll). The
+    /// picture and the sound start together on one line, at the earliest
+    /// instant both can make ([`Self::start_time`]): the audio device is
+    /// told to present the run's first sample then (pm-audio's scheduled
+    /// start), and its first clock sample, on that line, only confirms it.
+    /// Nothing to hear (or no device): the same line on the host clock.
     fn start_play(&mut self, key: Key, rate: PlaybackRateValue, at: i64) {
         let host_clock = self.config.host_clock;
         let Some(view) = self.views.get_mut(&key) else {
@@ -3033,35 +3166,100 @@ impl Thread {
         view.preroll = None;
         let from = view.clock.media_at(at);
         let wants_audio = !host_clock && pm_protocol::clock::JKL_RATES.contains(&rate);
-        // Nothing to hear: the line starts on the host clock at once,
-        // as today's playhead does, instead of waiting for the device
-        // to present its first (silent) buffer.
-        if wants_audio && !self.audible(key) {
-            self.stats().silent_runs += 1;
-            let view = self.views.get_mut(&key).expect("checked");
-            view.clock.apply(TransportCommand::Play { rate }, at);
-            view.schedule.reset();
-            view.sample_due = true;
-        } else if wants_audio && self.audio_for(key).is_some() {
-            let audio = &self.audio[&key];
-            let before = audio.clock().and_then(|c| c.latest()).map(|s| s.epoch);
-            audio.send(AudioCtl::Play { from, rate });
-            let view = self.views.get_mut(&key).expect("checked");
-            // A new rate while playing holds the line where it is
-            // until the new run's first sample.
-            if view.clock.is_playing() {
-                view.clock.hold(from, at);
-                view.schedule.reset();
-            }
-            view.awaiting = Some((at + AUDIO_START_TIMEOUT_US, before, rate));
-            view.sample_due = true;
+        let silent = wants_audio && !self.audible(key);
+        let audio = if wants_audio && !silent {
+            self.audio_for(key).map(|a| a.clock())
         } else {
+            None
+        };
+        if silent {
+            self.stats().silent_runs += 1;
+        } else if audio.is_none() {
             self.stats().host_clock_runs += 1;
-            let view = self.views.get_mut(&key).expect("checked");
-            view.clock.apply(TransportCommand::Play { rate }, at);
-            view.schedule.reset();
-            view.sample_due = true;
         }
+        let audio_lead = audio
+            .as_ref()
+            .map(|clock| clock.as_ref().map_or(0, |c| c.start_lead_us() as i64) + AUDIO_CONTROL_US);
+        let armed = self.take_armed(key, rate, from);
+        let start = self.start_time(key, rate, at, audio_lead, armed.len());
+        let view = self.views.get_mut(&key).expect("checked");
+        view.clock.play_at(rate, at, start);
+        view.schedule.reset();
+        // The paused frame on screen is the run's first frame (the start
+        // is planned for the one after it, so it is not rendered again),
+        // and the start frames follow it.
+        if rate.num > 0 && view.stand_in.is_none() && !view.render_failed {
+            let f = view.clock.frame_ticks();
+            view.schedule
+                .start_after(from.div_euclid(f) + armed.len() as i64);
+        }
+        view.sample_due = true;
+        for descriptor in armed {
+            let revision = descriptor.revision;
+            self.event(key, Event::Frame(descriptor), Some(revision));
+        }
+        let view = self.views.get_mut(&key).expect("checked");
+        if let Some(clock) = audio
+            && let Some(link) = self.audio.get(&key)
+        {
+            let before = clock.and_then(|c| c.latest()).map(|s| s.epoch);
+            link.send(AudioCtl::Play {
+                from,
+                rate,
+                at: start,
+            });
+            view.awaiting = Some((start + AUDIO_START_TIMEOUT_US, before, rate));
+        }
+        self.trace_event("play", at, start - at, -1);
+    }
+
+    /// When a Play from host µs `now` shows its first media: the first new
+    /// frame shows at the first refresh it can be ready for (its render
+    /// cost, then the viewer's own display latency from its vsync hint),
+    /// and the audio, when it plays, needs `audio_lead`; `armed` first new
+    /// frames are rendered already. Without the viewer's timing, a fixed
+    /// pre-roll.
+    fn start_time(
+        &self,
+        key: Key,
+        rate: PlaybackRateValue,
+        now: i64,
+        audio_lead: Option<i64>,
+        armed: usize,
+    ) -> i64 {
+        let Some(view) = self.views.get(&key) else {
+            return now + super::clock::PREROLL_US;
+        };
+        let video = view.state.vsync.and_then(|hint| {
+            let latency = hint.latency_us?;
+            // `armed` frames rendered while paused go at once; the first
+            // one rendered after Play shows that many frames later.
+            let render = view
+                .schedule
+                .cost_us()
+                .or(view.costs.average_us())
+                .unwrap_or(hint.period_us);
+            let cost = (render - armed as f64 * Schedule::frame_us(&view.clock)).max(0.0);
+            let ready = now as f64 + cost + super::schedule::ARRIVAL_US;
+            let shown = hint.next_at_or_after(ready, 0.0) + latency;
+            // How far the first new frame's start is from the paused media.
+            let f = view.clock.frame_ticks();
+            let m = view.clock.media_at(now);
+            let ahead = if rate.num > 0 {
+                (m.div_euclid(f) + 1) * f - m
+            } else {
+                m - m.div_euclid(f) * f
+            };
+            let speed = f64::from(rate.num.unsigned_abs()) / f64::from(rate.den.max(1));
+            Some(shown - ahead as f64 / TICKS_PER_SECOND as f64 * 1e6 / speed)
+        });
+        let start = match (video, audio_lead) {
+            (None, None) => return now + super::clock::PREROLL_US,
+            (video, audio) => video
+                .unwrap_or(now as f64)
+                .max(audio.map_or(now, |a| now + a) as f64),
+        };
+        (start.ceil() as i64).max(now)
     }
 
     /// Whether the window answered for the first [`PREROLL_FRAMES`] frames
@@ -3586,6 +3784,8 @@ impl Thread {
             compat_blocked: None,
             compat_paused_wait: None,
             compat_needs: None,
+            armed: Vec::new(),
+            paused_sent: None,
             #[cfg(feature = "remote-layer")]
             rate: None,
             #[cfg(feature = "remote-layer")]
@@ -3611,6 +3811,7 @@ impl Thread {
         if !hint_only {
             view.external_wait = None;
             view.dirty = true;
+            Self::disarm(view);
         }
         let refresh = composition_changed || !view.clock.is_playing();
         if composition_changed {
@@ -4153,6 +4354,13 @@ impl Thread {
                 // A frame with stand-ins waits for its video to decode.
                 wake = wake.min(now + STAND_IN_POLL_US);
             }
+            if let Some(at) = view.paused_sent
+                && view.armed.is_empty()
+                && !view.clock.is_playing()
+            {
+                // The start frames, once the paused frame has stayed.
+                wake = wake.min(at + ARM_IDLE_US);
+            }
             if view.awaiting.is_some() || view.clock.following() {
                 // Follow the audio clock promptly (it publishes on its own).
                 wake = wake.min(now + 2_000);
@@ -4397,10 +4605,13 @@ impl Thread {
             if let Some((deadline, _, rate)) = view.awaiting
                 && (link.failed() || t >= deadline)
             {
-                // No playing sample from the device: start on the host clock.
+                // No playing sample from the device: the line goes on (or,
+                // held for a seek, starts) on the host clock.
                 view.awaiting = None;
-                view.clock.apply(TransportCommand::Play { rate }, t);
-                view.schedule.reset();
+                if !view.clock.is_playing() {
+                    view.clock.apply(TransportCommand::Play { rate }, t);
+                    view.schedule.reset();
+                }
                 view.sample_due = true;
                 link.send(AudioCtl::Pause);
                 fell_back = true;
@@ -4742,6 +4953,9 @@ impl Thread {
                 && v.awaiting.is_none()
         });
         if paused_dirty {
+            if let Some(view) = self.views.get_mut(&key) {
+                Self::disarm(view);
+            }
             let media = self
                 .preview_controls
                 .current(key)
@@ -4759,6 +4973,7 @@ impl Thread {
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = false;
                     view.render_retry = None;
+                    view.paused_sent = Some(now());
                 }
                 if !deferred {
                     let revision = descriptor.revision;
@@ -4775,6 +4990,8 @@ impl Thread {
             && view.clock.is_playing()
         {
             view.dirty = false;
+        } else {
+            self.arm(key);
         }
         // Playback: render ahead while frames are due and slots are free.
         loop {
