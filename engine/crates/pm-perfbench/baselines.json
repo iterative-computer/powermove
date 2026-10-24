@@ -3,8 +3,8 @@
   "benches": {
     "blend_stack_cold": {
       "all_threads": {
-        "cpu.heap_alloc_bytes": 369754,
-        "cpu.heap_allocs": 2992,
+        "cpu.heap_alloc_bytes": 1419648,
+        "cpu.heap_allocs": 9823,
         "engine.comp_passes": 1,
         "engine.layers_planned": 12,
         "gpu.bind_group_binds": 23,
@@ -19,8 +19,8 @@
         "gpu.uploads": 23
       },
       "thread": {
-        "cpu.heap_alloc_bytes": 369754,
-        "cpu.heap_allocs": 2992,
+        "cpu.heap_alloc_bytes": 1419648,
+        "cpu.heap_allocs": 9823,
         "engine.comp_passes": 1,
         "engine.layers_planned": 12,
         "gpu.bind_group_binds": 23,
@@ -325,8 +325,8 @@
     },
     "text_cold": {
       "all_threads": {
-        "cpu.heap_alloc_bytes": 762099,
-        "cpu.heap_allocs": 6344,
+        "cpu.heap_alloc_bytes": 1392503,
+        "cpu.heap_allocs": 10800,
         "engine.comp_passes": 1,
         "engine.layers_planned": 2,
         "gpu.bind_group_binds": 24,
@@ -335,14 +335,14 @@
         "gpu.draw_calls": 13,
         "gpu.pipeline_binds": 5,
         "gpu.render_passes": 4,
-        "gpu.texture_alloc_bytes": 24645304,
+        "gpu.texture_alloc_bytes": 25218064,
         "gpu.texture_allocs": 12,
         "gpu.upload_bytes": 133032,
         "gpu.uploads": 12
       },
       "thread": {
-        "cpu.heap_alloc_bytes": 762099,
-        "cpu.heap_allocs": 6344,
+        "cpu.heap_alloc_bytes": 1392503,
+        "cpu.heap_allocs": 10800,
         "engine.comp_passes": 1,
         "engine.layers_planned": 2,
         "gpu.bind_group_binds": 24,
@@ -351,7 +351,7 @@
         "gpu.draw_calls": 13,
         "gpu.pipeline_binds": 5,
         "gpu.render_passes": 4,
-        "gpu.texture_alloc_bytes": 24645304,
+        "gpu.texture_alloc_bytes": 25218064,
         "gpu.texture_allocs": 12,
         "gpu.upload_bytes": 133032,
         "gpu.uploads": 12
