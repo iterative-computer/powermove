@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createWriteStream, readFileSync } from 'node:fs';
-import { chmod, cp, mkdir, mkdtemp, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import os from 'node:os';
@@ -39,10 +39,100 @@ const RELATIVE_BINARY: Record<RuntimeProvider, string> = {
 
 let root: string | null = null;
 let appVersion = '';
+let scratchSweep: Promise<void> = Promise.resolve();
+
+/* Runtime-update scratch directories live in os.tmpdir() and are removed by
+   installRelease's finally. A process killed mid-download (quit, crash, an
+   e2e teardown) never runs it and leaves the archive behind, so startup
+   reclaims them:
+   - powermove-runtime-<provider>-*: only installRelease uses this prefix. Its
+     owner.pid names the creating process; the directory is reclaimed once
+     that process is gone, or after STALE_MS when no owner was recorded.
+   - powermove-<provider>-*: builds before this prefix existed. The prefix is
+     shared with editor-run directories (claude/runner.ts, codex/runner.ts,
+     codex/app-server-runner.ts), so these must hold exactly the old layout
+     (a regular package.tgz, optionally an extracted package/ directory) and
+     show no activity for STALE_MS. */
+const RUNTIME_SCRATCH = /^powermove-runtime-(claude|codex)-.+$/;
+const LEGACY_SCRATCH = /^powermove-(claude|codex)-.+$/;
+const OWNER_FILE = 'owner.pid';
+const STALE_MS = 60 * 60 * 1000;
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the pid exists but belongs to someone else: treat as alive.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** The pid in a scratch owner file, or null when it is missing or unusable. */
+async function scratchOwner(scratch: string): Promise<number | null> {
+  const file = path.join(scratch, OWNER_FILE);
+  const info = await lstat(file).catch(() => null);
+  if (!info?.isFile() || info.size > 32) return null;
+  const text = (await readFile(file, 'utf8').catch(() => '')).trim();
+  if (!/^\d+$/.test(text)) return null;
+  const pid = Number(text);
+  return Number.isSafeInteger(pid) && pid > 1 ? pid : null;
+}
+
+/** Newest mtime among the directory and the entries a download writes to. */
+async function lastActivity(scratch: string, dirMtimeMs: number): Promise<number> {
+  let latest = dirMtimeMs;
+  for (const name of ['package.tgz', 'package']) {
+    const info = await lstat(path.join(scratch, name)).catch(() => null);
+    if (info) latest = Math.max(latest, info.mtimeMs);
+  }
+  return latest;
+}
+
+async function legacyLayout(scratch: string): Promise<boolean> {
+  const entries = await readdir(scratch);
+  if (!entries.includes('package.tgz') || entries.some(name => name !== 'package.tgz' && name !== 'package')) return false;
+  const archive = await lstat(path.join(scratch, 'package.tgz'));
+  if (!archive.isFile()) return false;
+  if (!entries.includes('package')) return true;
+  return (await lstat(path.join(scratch, 'package'))).isDirectory();
+}
+
+/** Recover runtime downloads left behind when the process exited before
+    installRelease's finally ran. Never follows symlinks and never touches a
+    directory another live Powermove process is installing into. */
+export async function sweepRuntimeScratch(
+  tmpDir = os.tmpdir(), now = Date.now(), alive: (pid: number) => boolean = processAlive
+): Promise<void> {
+  const cutoff = now - STALE_MS;
+  for (const entry of await readdir(tmpDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const current = RUNTIME_SCRATCH.test(entry.name);
+    if (!current && !LEGACY_SCRATCH.test(entry.name)) continue;
+    const scratch = path.join(tmpDir, entry.name);
+    try {
+      const info = await lstat(scratch);
+      if (!info.isDirectory()) continue;
+      let stale: boolean;
+      if (current) {
+        const owner = await scratchOwner(scratch);
+        stale = owner !== null ? !alive(owner) : await lastActivity(scratch, info.mtimeMs) < cutoff;
+      } else {
+        stale = await legacyLayout(scratch) && await lastActivity(scratch, info.mtimeMs) < cutoff;
+      }
+      if (stale) await rm(scratch, { recursive: true, force: true });
+    } catch {
+      // A concurrent cleanup or an inaccessible entry must not stop the sweep.
+    }
+  }
+}
 
 export function configureRuntimeUpdates(options: { root: string; appVersion: string }): void {
   root = options.root;
   appVersion = options.appVersion;
+  // Start in the background without delaying boot. New installs wait for the
+  // sweep so it cannot race their scratch directories.
+  scratchSweep = sweepRuntimeScratch().catch(() => {});
 }
 
 function installed(provider: RuntimeProvider): InstalledRuntime | null {
@@ -153,8 +243,12 @@ export async function installLatestRuntime(provider: RuntimeProvider): Promise<R
 
 async function installRelease(provider: RuntimeProvider, release: Release): Promise<RuntimeUpdateResult> {
   if (root === null) throw new Error('Runtime updates aren’t available in this build.');
-  const scratch = await mkdtemp(path.join(os.tmpdir(), `powermove-${provider}-`));
+  await scratchSweep;
+  const scratch = await mkdtemp(path.join(os.tmpdir(), `powermove-runtime-${provider}-`));
   try {
+    // Record the owner first: if this process dies before finally runs, the
+    // next launch's sweep sees a dead pid and reclaims the directory.
+    await writeFile(path.join(scratch, OWNER_FILE), String(process.pid));
     const archive = path.join(scratch, 'package.tgz');
     await download(release, archive);
     await run('/usr/bin/tar', ['-xzf', archive, '-C', scratch]);

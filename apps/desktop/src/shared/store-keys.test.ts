@@ -1,6 +1,12 @@
 import { expect, it } from 'vitest';
 import { parseStoreKey, storeFileName } from './store-keys';
 
+it.each(['extensionWorkspaceAppearance', 'extensionThemeAppearance'])('persists the mod cleanup record %s', key => {
+  const parsed = parseStoreKey(key);
+  expect(parsed).toEqual({ kind: 'static', key });
+  expect(storeFileName(parsed!)).toBe(`${key}.json`);
+});
+
 it('accepts the global panel visibility preference', () => {
   expect(parseStoreKey('panelVisibility')).toEqual({ kind: 'static', key: 'panelVisibility' });
 });

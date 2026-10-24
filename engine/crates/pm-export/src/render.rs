@@ -665,12 +665,48 @@ pub struct ExportPlan {
     pub sequence_name: Option<String>,
     /// Encoded-frame previews for the progress sheet.
     pub preview: bool,
+    /// Runs over each rendered frame before it is encoded (an extension's
+    /// compatibility context drawing over today's WebM export frames;
+    /// pm-node `jobs::compat`). `None`: frames are encoded as rendered.
+    pub frame_post: Option<Arc<dyn FramePost>>,
+}
+
+/// A pass over each rendered export frame before encoding ([`ExportPlan::frame_post`]).
+pub trait FramePost: Send + Sync {
+    /// Frame `index` at `time`: its premultiplied working values
+    /// (`width × height × 4`, top-down, `working` encoding), replaced or
+    /// returned unchanged. An error fails the export.
+    fn frame(
+        &self,
+        index: u64,
+        time: Ticks,
+        width: u32,
+        height: u32,
+        working: crate::settings::WorkingEncoding,
+        rgba: Vec<f32>,
+    ) -> Result<Vec<f32>, JobError>;
 }
 
 pub struct AudioPlan {
     pub graph: Arc<pm_audio::MixGraph>,
     pub cache: Arc<pm_audio::SourceCache>,
     pub sample_rate: u32,
+    /// The export's samples: today's `OfflineAudioContext` length
+    /// ([`legacy_audio_samples`]), not the frames' span.
+    pub samples: i64,
+    /// The range in seconds as today's `renderOffline(t0, t1)` receives it:
+    /// its clips and envelopes start from `t0` (`pm_audio::today`).
+    pub range: (f64, f64),
+}
+
+/// Today's export mix length (`audio.ts` `renderOffline`):
+/// `ceil((t1 − t0) × 48000)` with the range in seconds as JavaScript holds
+/// them. Range ends are ticks of seconds the sheet chose, so the division
+/// gives back the same double.
+pub fn legacy_audio_samples(start: Ticks, end: Ticks, sample_rate: u32) -> i64 {
+    let seconds = |t: Ticks| t.get() as f64 / TICKS_PER_SECOND as f64;
+    let span = (seconds(end) - seconds(start)).max(0.0);
+    (span * f64::from(sample_rate)).ceil() as i64
 }
 
 /// Source blocks kept decoded for one export's mix.
@@ -871,6 +907,8 @@ fn plan_export_checked(
     let audio_codec = audio_codec_of(s, container);
     let audio = if s.audio && !s.format.is_image() {
         let cache = pm_audio::SourceCache::new(AUDIO_CACHE_BYTES, 2);
+        // An export takes today's exact lengths before it mixes.
+        cache.set_blocking_lengths(true);
         let graph =
             pm_audio::MixGraph::build(doc, &job.composition, &mut evaluator(), &cache, &*job.media)
                 .map_err(|e| JobError::Audio(e.to_string()))?;
@@ -881,12 +919,14 @@ fn plan_export_checked(
             None
         } else {
             Some(AudioPlan {
-                // Opus is written at 48 kHz: the mix runs at 48 kHz for WebM.
-                sample_rate: if audio_codec == AudioCodec::Opus {
-                    crate::settings::OPUS_SAMPLE_RATE
-                } else {
-                    pm_audio::mixer::project_sample_rate(doc)
-                },
+                // Today's export OfflineAudioContext is always stereo 48 kHz,
+                // independently of the project's playback device/rate.
+                sample_rate: 48_000,
+                samples: legacy_audio_samples(s.range.start, s.range.end, 48_000),
+                range: (
+                    s.range.start.get() as f64 / TICKS_PER_SECOND as f64,
+                    s.range.end.get() as f64 / TICKS_PER_SECOND as f64,
+                ),
                 graph: Arc::new(graph),
                 cache,
             })
@@ -927,6 +967,7 @@ fn plan_export_checked(
         output_size: s.size,
         scale: None,
         region: None,
+        preview_canvas: false,
         precision: s.precision,
         depth_id: false,
         // Today's alpha exports render without the composition background.
@@ -958,6 +999,7 @@ fn plan_export_checked(
         document,
         sequence_name: s.delivery.sequence_name.clone(),
         preview: s.delivery.preview,
+        frame_post: None,
     })
 }
 
@@ -1103,22 +1145,35 @@ where
         audio,
         document,
         preview: wants_preview,
+        frame_post,
         ..
     } = plan;
+    let working = spec.working;
     let frames = spec.frames;
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
     pipeline.set_legacy_png(crate::png_compat::has_level1_content(&document));
     let mut mixer = audio.map(|a| {
+        let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
+        let mut mixer = pm_audio::Mixer::new(
+            pm_audio::MixFormat::stereo(a.sample_rate),
+            document.clone(),
+            a.graph,
+            evaluator(),
+            a.cache,
+        );
+        // Today's OfflineAudioContext starts at the range's start.
+        mixer.set_today_range(a.range.0.max(0.0), a.range.1, first);
+        mixer.set_today_playhead(
+            job.settings
+                .audio_index_playhead
+                .map(|t| t.get() as f64 / TICKS_PER_SECOND as f64),
+        );
         (
-            pm_audio::Mixer::new(
-                pm_audio::MixFormat::stereo(a.sample_rate),
-                document.clone(),
-                a.graph,
-                evaluator(),
-                a.cache,
-            ),
+            mixer,
             a.sample_rate,
+            // Today's mix ends here, before or after the last frame's end.
+            first + a.samples,
         )
     });
     let (tx, rx) = std::sync::mpsc::sync_channel::<Rendered>(1);
@@ -1160,8 +1215,14 @@ where
                     None
                 };
                 let _ = back_tx.send(rgba);
-                if let Some((mixer, rate)) = mixer.as_mut() {
+                if let Some((mixer, rate, last)) = mixer.as_mut() {
                     let (first, end) = timeline.samples(n, *rate);
+                    let first = first.min(*last);
+                    let end = if n + 1 == frames {
+                        *last
+                    } else {
+                        end.min(*last)
+                    };
                     let mut block = Vec::new();
                     let summary = pm_audio::offline::render(mixer, first, end, 8192, |_, inter| {
                         block.extend_from_slice(inter);
@@ -1181,7 +1242,12 @@ where
                     preview,
                 });
             }
-            Ok(pipeline.finish()?)
+            pipeline
+                .finish_with_cancel(cancel)
+                .map_err(|error| match error {
+                    crate::Error::Cancelled => JobError::Cancelled,
+                    error => JobError::Export(error),
+                })
         });
         let mut render_error = None;
         for n in 0..frames {
@@ -1252,9 +1318,23 @@ where
                         ))
                     }
                 });
+            // The frame as the exporting window's compatibility context
+            // leaves it (today's WebM frames: `frame:rendered` handlers drew
+            // on the compositor's canvas before it was encoded).
+            let rendered = rendered.and_then(|f| match &frame_post {
+                None => Ok(f.rgba),
+                Some(post) => post.frame(
+                    n,
+                    timeline.tick(n),
+                    request.output_size.width,
+                    request.output_size.height,
+                    working,
+                    f.rgba,
+                ),
+            });
             match rendered {
-                Ok(f) => {
-                    if tx.send(Rendered::Frame(n, f.rgba)).is_err() {
+                Ok(rgba) => {
+                    if tx.send(Rendered::Frame(n, rgba)).is_err() {
                         break;
                     }
                 }
@@ -1283,7 +1363,17 @@ const PIXEL_BUFFERS: u64 = 3;
 /// The sink for a planned export: VideoToolbox and AVAssetWriter (MOV, MP4),
 /// FFmpeg (WebM), or the engine's PNG writer.
 pub fn sink_for(plan: &ExportPlan) -> Result<crate::OutputSink, JobError> {
-    let mut sink = crate::OutputSink::new(&plan.spec)?;
+    sink_for_with(plan, None)
+}
+
+/// [`sink_for`] with the host's WebCodecs encoders, which the desktop app's
+/// job engine has for the WebM exports today's exporter encodes with them.
+pub fn sink_for_with(
+    plan: &ExportPlan,
+    encoder: Option<Box<dyn crate::webcodecs::EncodeHost>>,
+) -> Result<crate::OutputSink, JobError> {
+    let level1 = crate::png_compat::has_level1_content(&plan.document);
+    let mut sink = crate::OutputSink::for_job_with(&plan.spec, level1, encoder)?;
     if let (crate::OutputSink::Png(png), Some(name)) = (&mut sink, &plan.sequence_name) {
         png.set_stem(name);
     }

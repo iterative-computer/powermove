@@ -3,6 +3,21 @@
 
 #include "signalsmith-linear/stft.h" // https://github.com/Signalsmith-Audio/linear
 
+#ifndef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
+#	define SIGNALSMITH_STRETCH_SETUP_CHECKPOINT() ((void)0)
+#	define SIGNALSMITH_STRETCH_LOCAL_SETUP_CHECKPOINT
+#endif
+#ifndef SIGNALSMITH_STRETCH_DIAG_SCOPE
+#	define SIGNALSMITH_STRETCH_DIAG_SCOPE(category, step) ((void)0)
+#	define SIGNALSMITH_STRETCH_LOCAL_DIAG_SCOPE
+#endif
+#ifndef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_DECLARE
+#	define SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_DECLARE() ((void)0)
+#	define SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_BEGIN() ((void)0)
+#	define SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END() ((void)0)
+#	define SIGNALSMITH_STRETCH_LOCAL_DIAG_OUTPUT_RUN
+#endif
+
 #include <vector>
 #include <array>
 #include <algorithm>
@@ -68,29 +83,43 @@ struct SignalsmithStretch {
 	}
 
 	// Manual setup
-	void configure(int nChannels, int blockSamples, int intervalSamples, bool splitComputation=false) {
+	void configure(int nChannels, int blockSamples, int intervalSamples, bool splitComputation=false, bool deferInitialWindowSetup=false) {
 		_splitComputation = splitComputation;
 		channels = nChannels;
-		stft.configure(channels, channels, blockSamples, intervalSamples + 1);
+		stft.configure(channels, channels, blockSamples, intervalSamples + 1, 0, 0, 0, deferInitialWindowSetup);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		stft.setInterval(intervalSamples, stft.kaiser);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		stft.reset(Sample(0.1));
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		stashedInput = stft.input;
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		stashedOutput = stft.output;
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 
 		bands = int(stft.bands());
 		_channelBands.assign(bands*channels, Band());
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		
 		peaks.reserve(bands/2);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		energy.resize(bands);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		smoothedEnergy.resize(bands);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		outputMap.resize(bands);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		channelPredictions.resize(channels*bands);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 
 		blockProcess = {};
 		formantMetric.resize(bands + 2);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 
 		tmpProcessBuffer.resize(blockSamples + intervalSamples);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 		tmpPreRollBuffer.resize(outputLatency()*channels);
+		SIGNALSMITH_STRETCH_SETUP_CHECKPOINT();
 	}
 	// For querying the existing config
 	int blockSamples() const {
@@ -212,7 +241,9 @@ struct SignalsmithStretch {
 		SIGNALSMITH_STRETCH_PROFILE_PROCESS_START(inputSamples, outputSamples);
 #endif
 		int prevCopiedInput = 0;
+		SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_DECLARE();
 		auto copyInput = [&](int toIndex){
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(1, 0);
 
 			int length = std::min<int>(int(stft.blockSamples() + stft.defaultInterval()), toIndex - prevCopiedInput);
 			tmpProcessBuffer.resize(length);
@@ -229,11 +260,14 @@ struct SignalsmithStretch {
 		};
 
 		Sample totalEnergy = 0;
-		for (int c = 0; c < channels; ++c) {
-			auto &&inputChannel = inputs[c];
-			for (int i = 0; i < inputSamples; ++i) {
-				Sample s = inputChannel[i];
-				totalEnergy += s*s;
+		{
+			SIGNALSMITH_STRETCH_DIAG_SCOPE(0, 0);
+			for (int c = 0; c < channels; ++c) {
+				auto &&inputChannel = inputs[c];
+				for (int i = 0; i < inputSamples; ++i) {
+					Sample s = inputChannel[i];
+					totalEnergy += s*s;
+				}
 			}
 		}
 
@@ -280,6 +314,8 @@ struct SignalsmithStretch {
 		for (int outputIndex = 0; outputIndex < outputSamples; ++outputIndex) {
 			bool newBlock = blockProcess.samplesSinceLast >= stft.defaultInterval();
 			if (newBlock) {
+				SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END();
+				SIGNALSMITH_STRETCH_DIAG_SCOPE(2, 0);
 				blockProcess.step = 0;
 				blockProcess.steps = 0; // how many processing steps this block will have
 				blockProcess.samplesSinceLast = 0;
@@ -323,16 +359,19 @@ struct SignalsmithStretch {
 				Sample processRatio = Sample(blockProcess.samplesSinceLast + 1)/stft.defaultInterval();
 				processToStep = std::min(blockProcess.steps, static_cast<size_t>((blockProcess.steps + 0.999f)*processRatio));
 			}
+			if (blockProcess.step < processToStep) SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END();
 			
 			while (blockProcess.step < processToStep) {
 				size_t step = blockProcess.step++;
 #ifdef SIGNALSMITH_STRETCH_PROFILE_PROCESS_STEP
 				SIGNALSMITH_STRETCH_PROFILE_PROCESS_STEP(step, blockProcess.steps);
 #endif
+				SIGNALSMITH_STRETCH_DIAG_SCOPE(9, step);
 				if (blockProcess.newSpectrum) {
 					if (blockProcess.reanalysePrev) {
 						// analyse past input
 						if (step < stft.analyseSteps()) {
+							SIGNALSMITH_STRETCH_DIAG_SCOPE(3, step);
 							stashedInput.swap(stft.input);
 							stft.analyseStep(step, stft.defaultInterval());
 							stashedInput.swap(stft.input);
@@ -355,6 +394,7 @@ struct SignalsmithStretch {
 
 					// Analyse latest (stashed) input
 					if (step < stft.analyseSteps()) {
+						SIGNALSMITH_STRETCH_DIAG_SCOPE(3, step);
 						stashedInput.swap(stft.input);
 						stft.analyseStep(step);
 						stashedInput.swap(stft.input);
@@ -376,6 +416,7 @@ struct SignalsmithStretch {
 				}
 
 				if (step < processSpectrumSteps) {
+					SIGNALSMITH_STRETCH_DIAG_SCOPE(5, step);
 					processSpectrum(step);
 					continue;
 				}
@@ -395,6 +436,7 @@ struct SignalsmithStretch {
 				step -= 1;
 				
 				if (step < stft.synthesiseSteps()) {
+					SIGNALSMITH_STRETCH_DIAG_SCOPE(6, step);
 					stft.synthesiseStep(step);
 					continue;
 				}
@@ -403,6 +445,7 @@ struct SignalsmithStretch {
 			SIGNALSMITH_STRETCH_PROFILE_PROCESS_ENDSTEP();
 #endif
 
+			SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_BEGIN();
 			++blockProcess.samplesSinceLast;
 			if (_splitComputation) stashedOutput.swap(stft.output);
 			for (int c = 0; c < channels; ++c) {
@@ -414,6 +457,7 @@ struct SignalsmithStretch {
 			stft.moveOutput(1);
 			if (_splitComputation) stashedOutput.swap(stft.output);
 		}
+		SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END();
 		
 		copyInput(inputSamples);
 		prevInputOffset -= inputSamples;
@@ -1057,4 +1101,18 @@ private:
 };
 
 }} // namespace
+#ifdef SIGNALSMITH_STRETCH_LOCAL_SETUP_CHECKPOINT
+#	undef SIGNALSMITH_STRETCH_SETUP_CHECKPOINT
+#	undef SIGNALSMITH_STRETCH_LOCAL_SETUP_CHECKPOINT
+#endif
+#ifdef SIGNALSMITH_STRETCH_LOCAL_DIAG_SCOPE
+#	undef SIGNALSMITH_STRETCH_DIAG_SCOPE
+#	undef SIGNALSMITH_STRETCH_LOCAL_DIAG_SCOPE
+#endif
+#ifdef SIGNALSMITH_STRETCH_LOCAL_DIAG_OUTPUT_RUN
+#	undef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_DECLARE
+#	undef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_BEGIN
+#	undef SIGNALSMITH_STRETCH_DIAG_OUTPUT_RUN_END
+#	undef SIGNALSMITH_STRETCH_LOCAL_DIAG_OUTPUT_RUN
+#endif
 #endif // include guard

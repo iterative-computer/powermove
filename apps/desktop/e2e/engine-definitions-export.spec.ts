@@ -1,3 +1,4 @@
+import { requestJobEngine } from './helpers/job-engine';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -28,6 +29,7 @@ test('an effect registered just before an export is drawn by the job engine, wit
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-engine-definitions-'));
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
   try {
+    await requestJobEngine(session.app);
     await expect.poll(() => session.app.evaluate(() => {
       const status = (globalThis as { __powermoveNativeEngine?: { engine: { status(): Record<string, { state: string }> } | null } }).__powermoveNativeEngine?.engine?.status();
       return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';
@@ -100,6 +102,7 @@ test('an effect only the WebGL runner draws is exported through the window\'s fa
   const root = await mkdtemp(path.join(os.tmpdir(), 'powermove-engine-fallback-export-'));
   const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '1' } });
   try {
+    await requestJobEngine(session.app);
     await expect.poll(() => session.app.evaluate(() => {
       const status = (globalThis as { __powermoveNativeEngine?: { engine: { status(): Record<string, { state: string }> } | null } }).__powermoveNativeEngine?.engine?.status();
       return status ? `${status['interactive']!.state}/${status['job']!.state}` : 'missing';

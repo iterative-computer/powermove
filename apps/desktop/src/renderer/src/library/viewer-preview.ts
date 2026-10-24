@@ -1,6 +1,5 @@
 import { EngineSnapshotError, type EngineRenderTransport } from '../engine-connection/render-transport';
 import type { SnapshotViewer } from '../../../shared/engine-protocol';
-import { getRetainedViewportOverlayBitmap } from '../core/scene3d/overlay-capture';
 
 const finitePositive = (value: number): boolean => Number.isFinite(value) && value > 0;
 
@@ -70,8 +69,7 @@ export function copyClonedCanvasBitmaps(source: Element, target: Element): void 
     }
     canvas.width = original.width;
     canvas.height = original.height;
-    const bitmap = getRetainedViewportOverlayBitmap(original) ?? original;
-    try { canvas.getContext('2d')?.drawImage(bitmap, 0, 0); } catch { /* tainted or GL-only canvas */ }
+    try { canvas.getContext('2d')?.drawImage(original, 0, 0); } catch { /* tainted or GL-only canvas */ }
   });
 }
 

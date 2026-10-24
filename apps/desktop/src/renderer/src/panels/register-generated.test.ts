@@ -154,6 +154,28 @@ const buttonByText = (target: ParentNode, text: string): HTMLButtonElement => {
 };
 
 describe('GeneratedPanel', () => {
+  it('groups automatic controls under More after five primary settings',()=>{
+    const {PM}=fakePM();
+    const section={id:'automatic',title:'Settings',size:260,state:{},controls:
+      Array.from({length:7},(_,index)=>({type:'slider',label:`Value ${index}`,stateKey:`value${index}`,param:`value${index}`,min:0,max:1,def:.5}))
+    } as GeneratedSection;
+    const target=renderPanel(PM,section);
+    const more=target.querySelector('details')!;
+    expect(more).not.toBeNull();
+    expect(more.open).toBe(false);
+    expect(more.querySelectorAll('[role="slider"]')).toHaveLength(2);
+    expect([...target.querySelectorAll('[role="slider"]')].filter(field=>!field.closest('details'))).toHaveLength(5);
+  });
+  it('passes separate coordinate increments to a generated point editor',()=>{
+    const {PM}=fakePM();
+    const section={id:'point-tool',title:'Position',size:260,state:{centerX:.2,centerY:.2},controls:[
+      {type:'slider',label:'Center X',stateKey:'centerX',param:'centerX',min:0,max:1,def:.2,step:.1},
+      {type:'slider',label:'Center Y',stateKey:'centerY',param:'centerY',min:0,max:1,def:.2,step:.01}
+    ]} as GeneratedSection;
+    const target=renderPanel(PM,section);
+    target.querySelector('.point-pad')!.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}));
+    expect(section.state).toEqual({centerX:.2,centerY:.21});
+  });
   it('renders every manifest control kind and writes local, command, and scene-param modes', async () => {
     vi.useFakeTimers();
     const { PM, drag } = fakePM();

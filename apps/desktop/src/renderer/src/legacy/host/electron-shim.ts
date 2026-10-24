@@ -1,6 +1,8 @@
 /* Ported from host/electron-shim.js — behavior-preserving. */
 import type { PMRegistry } from '../registry';
 import { stringifyAsync } from '../core/serialize-async';
+import { parseAsync } from '../core/parse-async';
+import { yieldTask } from '../core/yield-task';
 import { HistoryRecords, packStoredHistory, unpackStoredHistory } from '../../../../shared/history-memory';
 import { bridge as hostBridge } from '../../kernel/bridge';
 import { runCommandWhenReady } from '../../engine-doc/readiness';
@@ -322,12 +324,15 @@ export function install(PM: PMRegistry): void {
     bridge.log('error', `store snapshot failed: ${errorText(error, 'unknown error')}`);
   }
   const cached = new Map(Object.entries(snapshot).map(([key, value]) => [`pm.${key}`, value]));
+  // Recovery checkpoints stay encoded until explicitly opened. Saving must
+  // not parse or clone a multi-megabyte document on the playback thread.
+  const encoded = new Map<string, string>();
   const historyRecords = new HistoryRecords();
   const lazy = new Set<string>(Array.isArray((snapshot as any).__powermoveLazyKeys) ? (snapshot as any).__powermoveLazyKeys : []);
   const serviceKey = (key: any) => String(key).startsWith('pm.') ? String(key).slice(3) : String(key);
   const legacyKey = (key: any) => `pm.${serviceKey(key)}`;
   const saveErrors = new Map<string, string>();
-  const asyncWrites = new Map<string, Promise<void>>();
+  const asyncWrites = new Map<string, Promise<unknown>>();
   const writeVersions = new Map<string, number>();
   /* Every window caches the store, so a sibling's write leaves this copy stale.
      Main names the keys that moved; they are re-read from the store on the next
@@ -339,6 +344,7 @@ export function install(PM: PMRegistry): void {
     if (!get) return;
     try {
       const serialized = get(service);
+      encoded.delete(service);
       if (serialized === null) cached.delete(legacyKey(service));
       else cached.set(legacyKey(service), JSON.parse(serialized));
       stale.delete(service); lazy.delete(service);
@@ -351,9 +357,18 @@ export function install(PM: PMRegistry): void {
     // A development renderer may reload before its native process. Keep using
     // the legacy envelope until the native process advertises the new write API.
     separateHistory: (snapshot as any).__powermoveAsyncStore === true && typeof bridge.store.setSerialized === 'function',
+    has(key: string) {
+      const service = serviceKey(key);
+      if (stale.has(service)) refill(service);
+      return lazy.has(service) || encoded.has(service) || cached.has(legacyKey(service));
+    },
     get(key: any, fallback: any, options: { omitHistory?: boolean } = {}) {
       const stored = legacyKey(key);
       if (stale.has(serviceKey(key)) || lazy.has(serviceKey(key))) refill(serviceKey(key));
+      if (encoded.has(serviceKey(key))) {
+        cached.set(stored, JSON.parse(encoded.get(serviceKey(key))!));
+        encoded.delete(serviceKey(key));
+      }
       if (!cached.has(stored)) return fallback;
       try {
         const value: any = cached.get(stored);
@@ -364,16 +379,65 @@ export function install(PM: PMRegistry): void {
         return unpackStoredHistory(serviceKey(key), cloneValue(value));
       } catch { return fallback; }
     },
+    async getAsync(key: string, fallback: any) {
+      const service = serviceKey(key);
+      await asyncWrites.get(service);
+      if (stale.has(service) || lazy.has(service)) {
+        if (!bridge.store.getEncoded) return PM.store.get(key, fallback);
+        const version = writeVersions.get(service) || 0;
+        const serialized = await bridge.store.getEncoded(service);
+        // A write made during the read is more recent than the native reply.
+        if ((writeVersions.get(service) || 0) !== version) return PM.store.getAsync(key, fallback);
+        cached.delete(legacyKey(service));
+        if (serialized === null) encoded.delete(service);
+        else encoded.set(service, serialized);
+        stale.delete(service); lazy.delete(service);
+      }
+      const serialized = encoded.get(service)
+        ?? (cached.has(legacyKey(service)) ? await stringifyAsync(cached.get(legacyKey(service))) : null);
+      if (serialized === null) return fallback;
+      return unpackStoredHistory(service, await parseAsync(serialized));
+    },
+    /** A mutable live document is valid only while the caller's generation
+     * stays current. Check at every yield and discard superseded snapshots. */
+    setSnapshotAsync(key: string, value: any, isCurrent: () => boolean) {
+      if (!bridge.store.setSerialized) return Promise.resolve(isCurrent() && PM.store.set(key, value));
+      const service = serviceKey(key), version = (writeVersions.get(service) || 0) + 1;
+      writeVersions.set(service, version);
+      const current = () => writeVersions.get(service) === version && isCurrent();
+      const superseded = new Error('Snapshot superseded');
+      const write = stringifyAsync(value, async () => {
+        await yieldTask();
+        if (!current()) throw superseded;
+      }).then(async serialized => {
+        if (!current()) return false;
+        await bridge.store.setSerialized(service, serialized);
+        // A checkpoint may retire its journal only after the base is durable.
+        await bridge.store.flush();
+        if (writeVersions.get(service) !== version) return false;
+        stale.delete(service); lazy.delete(service);
+        cached.delete(legacyKey(service)); encoded.set(service, serialized);
+        saveErrors.delete(service);
+        return true;
+      }).catch(error => {
+        if (error === superseded) return false;
+        if (writeVersions.get(service) === version) saveErrors.set(service, errorText(error, 'Save failed'));
+        throw error;
+      }).finally(() => { if (asyncWrites.get(service) === write) asyncWrites.delete(service); });
+      asyncWrites.set(service, write);
+      return write;
+    },
     /** Internal immutable snapshots (history patches), serialized without blocking input. */
     setAsync(key: string, value: any) {
       if (!bridge.store.setSerialized) return Promise.resolve(PM.store.set(key, value));
       const service = serviceKey(key), version = (writeVersions.get(service) || 0) + 1;
+      encoded.delete(service);
       stale.delete(service); lazy.delete(service);
       writeVersions.set(service, version);
       const packed = packStoredHistory(service, value, historyRecords);
       cached.set(legacyKey(service), packed);
       const write = stringifyAsync(packed, async () => {
-        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        await yieldTask();
         if (writeVersions.get(service) !== version) throw new Error('Snapshot superseded');
       }).then(async serialized => {
         if (writeVersions.get(service) !== version) return;
@@ -387,6 +451,7 @@ export function install(PM: PMRegistry): void {
     },
     set(key: any, value: any) {
       const service = serviceKey(key);
+      encoded.delete(service);
       stale.delete(service); lazy.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       try {
@@ -403,6 +468,7 @@ export function install(PM: PMRegistry): void {
     },
     del(key: any) {
       const service = serviceKey(key);
+      encoded.delete(service);
       stale.delete(service); lazy.delete(service);
       writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
       cached.delete(legacyKey(service));
@@ -483,7 +549,11 @@ export function install(PM: PMRegistry): void {
   bridge.store.onChanged?.((keys: string[]) => {
     const changed = keys.filter(key => typeof key === 'string');
     if (!changed.length) return;
-    for (const key of changed) stale.add(serviceKey(key));
+    for (const key of changed) {
+      const service = serviceKey(key);
+      stale.add(service);
+      writeVersions.set(service, (writeVersions.get(service) || 0) + 1);
+    }
     PM.bus?.emit('store:external', changed);
   });
 
@@ -544,7 +614,7 @@ export function install(PM: PMRegistry): void {
 
     window.setTimeout(() => {
       try {
-        const ok = !!(PM.GL && PM.GL.gl);
+        const ok = !!(PM.GL && (PM.EngineConnection ? PM.GL.peekContext?.() : PM.GL.gl));
         const layers = PM.proj ? PM.proj.layers.length : -1;
         const milliseconds = PM.perf ? (PM.perf.ms || 0).toFixed(1) : '?';
         bridge.log('info', `boot gl=${ok} layers=${layers} ms=${milliseconds}`);

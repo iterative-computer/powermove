@@ -14,8 +14,7 @@
   import { deletePanel, deletedPanelIds } from './panel-deletion';
   import { panelBelongsInLibrary, panelPreviewSize } from './panel-preview';
   import { copyClonedCanvasBitmaps, snapshotClonedCanvasBitmaps, renderLibraryCallback } from './viewer-preview';
-  import { overlayFrameKey, hasOverlayFrameKey } from '../core/scene3d/overlay-frame';
-  import { engineCanvasSceneState } from '../engine-connection/canvas-view';
+  import { compositionHas3D, engineCanvasEditorCamera } from '../engine-connection/canvas-view';
   import { afterEffectsExtensionIds } from './after-effects-imports';
   import { panelFrameOf } from '../kernel/panel-frame';
   import { placePanel } from '../layout/portal';
@@ -479,13 +478,14 @@
     const from = wantsMotion() ? cardBox(id)?.getBoundingClientRect() ?? null : null;
     landed = !from;
     editingId = id;
-    if (!from) { focusScope(id); return; }
-    /* Render the editor now so the stage frame can be measured at its real
-       size before the first painted frame of the animation. */
     flushSync();
     rootEl?.focus({ preventScroll: true });
+    // Scope and composer are ready now; only the live panel waits for its snapshot.
+    focusScope(id);
+    if (!from) return;
+    // Measure the stage at its final size before the first painted frame.
     const stage = stageBox();
-    const joined = () => { if (editingId === id) { landed = true; focusScope(id); } };
+    const joined = () => { if (editingId === id) landed = true; };
     if (stage) {
       const to = stage.getBoundingClientRect();
       const preview = previews.get(id);
@@ -681,21 +681,17 @@
     const transport = PM.EngineRender;
     if (transport && element.querySelector('#engine-present')) {
       const project = PM.proj, time = PM.time;
-      const scene = engineCanvasSceneState(PM as any);
+      const has3D = compositionHas3D(PM as any);
       const presentedBy = () => PM.Kernel.services.get('viewer')?.enginePresentation
         ?? (element.contains(PM.EngineCanvas?.bound) ? PM.EngineCanvas?.viewerPresentation : null);
       const presentation = presentedBy();
       const latest = presentation?.latest;
-      const frameKey = latest ? overlayFrameKey(latest) : null;
       const state = latest ? presentation.stateFor(latest.viewSeq) : null;
       const crop = state?.canvas?.crop ?? PM.GL?.previewViewport;
       const cropped = crop && (crop.x !== 0 || crop.y !== 0 || crop.width !== project.w || crop.height !== project.h);
-      const sceneView = (state: any) => JSON.stringify(state && [state.engineCamera, state.shading, state.xray, state.localView]);
-      const view = sceneView(scene);
+      const editorView = () => JSON.stringify(engineCanvasEditorCamera(PM as any));
+      const view = editorView();
       if (!PM.playing) {
-        // Presentation and chrome update on separate animation callbacks.
-        // A newly attached viewport has no visible chrome until its first draw.
-        if (scene?.hasScene && element.querySelector<HTMLElement>('.vp-nav')?.hidden) return null;
         // The clone's overlay describes the presented frame. Wait for that
         // frame to catch up before combining it with fresh snapshot pixels.
         const revision = transport.currentRevision();
@@ -713,13 +709,10 @@
           }
           return null;
         }
-        const overlay = element.querySelector<HTMLCanvasElement>('canvas[data-scene-overlay]');
-        if (scene?.hasScene && scene.overlays !== false && overlay
-          && overlay.dataset.sceneOverlayFrame !== frameKey) return null;
-        // Pin the state of the frame whose chrome was cloned above. The
-        // snapshot renders its original canvas, before stage presentation.
-        if ((cropped || scene?.hasScene) && !state?.canvas) return null;
-        const viewer = cropped || scene?.hasScene
+        // Pin the view and canvas of the frame cloned above. The snapshot
+        // renders that original canvas, before stage presentation.
+        if ((cropped || has3D) && !state?.canvas) return null;
+        const viewer = cropped || has3D
           ? structuredClone({ view: state.view ?? null, canvas: state.canvas, viewSeq: state.viewSeq }) : undefined;
         const captured = await snapshotClonedCanvasBitmaps(element, clone, {
           transport, time, composition: String(project.compId ?? project.id ?? ''),
@@ -727,8 +720,8 @@
           current: () => current() && PM.EngineRender === transport && PM.proj === project && PM.time === time
             && PM.panelInst?.[id]?.el === element
             && presentedBy() === presentation
-            && (!presentation || hasOverlayFrameKey(presentation.latest, frameKey))
-            && sceneView(engineCanvasSceneState(PM as any)) === view,
+            && presentation?.latest?.viewSeq === latest?.viewSeq
+            && editorView() === view,
         });
         if (!captured) return null;
       }
@@ -1055,9 +1048,8 @@
             </div>
           </div>
         </section>
-        <aside class="library-chat" class:ready={landed} aria-label="Panel conversation">
-          {#if landed}
-            <div class="library-chat-body" in:fly={pageFly(1)}>
+        <aside class="library-chat ready" aria-label="Panel conversation">
+            <div class="library-chat-body">
               <ThreadPicker {PM} />
               <div class="library-chat-log">
                 {#key agentState.threadId}<Conversation {PM} welcome={panelWelcome} />{/key}
@@ -1066,7 +1058,6 @@
                 <Composer {PM} panelId="library" placeholder={`Describe a change to ${editingPanel.title}…`} />
               </div>
             </div>
-          {/if}
         </aside>
       </div>
     {/if}

@@ -116,7 +116,7 @@ def main():
 
     manifest = {
         "schema": 1,
-        "target": "aarch64-apple-darwin",
+        "target": "x86_64-apple-darwin" if os.environ.get("PM_FFMPEG_ARCH") == "x86_64" else "aarch64-apple-darwin",
         "ffmpeg": {
             "version": args.ffmpeg_version,
             "license": license_statement,

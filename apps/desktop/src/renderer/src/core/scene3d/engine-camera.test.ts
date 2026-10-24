@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { LAYER3D_DEFINITIONS } from './layers';
 import { editScene } from './operations';
-import { engineCamera, viewportSnapshot } from './commands';
-import { setViewportMode, orbitViewStep, toggleViewProjection, enterLocalView } from './viewport';
+import { orbitView } from './navigation';
+import { applyViewportPose, editorCamera, setViewportMode, viewportEngineCamera, viewportPose } from './viewport';
 import { makePM } from '../../legacy/__tests__/make-pm';
 
 function editor() {
@@ -15,42 +15,24 @@ function editor() {
   return PM;
 }
 
-/** The engine's reading of contract 2's camera (`View3d::from_override`): world = view⁻¹, ortho zoom = 3 / half height. */
-function engineProjection(camera: NonNullable<ReturnType<typeof engineCamera>>, aspect: number): THREE.Matrix4 {
-  const p = camera.projection;
-  const three = p.kind === 'perspective'
-    ? new THREE.PerspectiveCamera(p.fovYDegrees, aspect, p.near, p.far)
-    : Object.assign(new THREE.OrthographicCamera(-3 * aspect, 3 * aspect, 3, -3, p.near, p.far), { zoom: 3 / p.halfHeight });
-  three.updateProjectionMatrix();
-  return three.projectionMatrix;
-}
-
 describe('the editor camera for engine renders', () => {
-  it('is absent in the camera view and follows the editor view', () => {
+  it('is absent in Camera view and matches the transient three.js camera after orbit', () => {
     const PM = editor();
-    expect(engineCamera(PM)).toBeNull();
-    expect(viewportSnapshot(PM).engineCamera).toBeNull();
+    expect(viewportEngineCamera(PM)).toBeNull();
+    expect(editorCamera(PM)).toBeNull();
     setViewportMode(PM, 'editor');
-    orbitViewStep(PM, 30, 15);
-    const camera = engineCamera(PM)!;
-    expect(camera.projection.kind).toBe('perspective');
-    const world = new THREE.Matrix4().fromArray(camera.view).invert();
-    const expected = new THREE.Matrix4();
-    // The same pose the legacy compositor renders the editor view with.
-    const snapshot = viewportSnapshot(PM);
-    expect(snapshot.engineCamera).toEqual(camera);
-    expected.copy(world);
-    expect(world.elements.every(Number.isFinite)).toBe(true);
-    // Projection the engine rebuilds equals the editor camera's at the same aspect.
-    for (const aspect of [16 / 9, 1, 0.5]) {
-      const legacy = new THREE.PerspectiveCamera(snapshot.view.fov, aspect, (camera.projection as any).near, (camera.projection as any).far);
-      legacy.updateProjectionMatrix();
-      expect(engineProjection(camera, aspect).elements).toEqual(legacy.projectionMatrix.elements);
-    }
-    toggleViewProjection(PM);
-    const ortho = engineCamera(PM)!;
-    expect(ortho.projection.kind).toBe('orthographic');
-    expect(enterLocalView(PM, ['a'])).toBe(true);
-    expect(viewportSnapshot(PM).localView).toEqual(['a']);
+    applyViewportPose(PM, orbitView(viewportPose(PM), 30, 15));
+    const override = viewportEngineCamera(PM)!;
+    const legacy = editorCamera(PM)!;
+    expect(override.projection.kind).toBe('perspective');
+    new THREE.Matrix4().fromArray(override.view).invert().elements.forEach((value, index) =>
+      expect(value).toBeCloseTo(legacy.matrixWorld.elements[index]!, 12));
+    if (override.projection.kind !== 'perspective' || !(legacy instanceof THREE.PerspectiveCamera)) throw new Error('Expected a perspective camera');
+    const zoom = legacy.zoom > 0 ? legacy.zoom : 1;
+    const fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(legacy.fov) / 2) / zoom));
+    expect(override.projection).toEqual({ kind: 'perspective', fovYDegrees: fov, near: legacy.near, far: legacy.far });
+    expect(override.view.every(Number.isFinite)).toBe(true);
+    setViewportMode(PM, 'camera');
+    expect(viewportEngineCamera(PM)).toBeNull();
   });
 });

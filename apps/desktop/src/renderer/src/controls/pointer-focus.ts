@@ -16,8 +16,10 @@ export function installPointerFocus(doc: Document = document): () => void {
     const control = event.composedPath().find((node): node is HTMLElement =>
       node instanceof HTMLElement && node.matches('button,[role="button"],[role="tab"],[role="radio"],[role="menuitem"]'));
     if (!control || focused() !== control) return;
-    const dialog = control.parentElement?.closest<HTMLElement>('[role="dialog"],[role="alertdialog"]');
-    if (dialog?.hasAttribute('tabindex')) dialog.focus({ preventScroll: true });
+    // Keep the enclosing dialog or sheet's Escape/Tab handling reachable
+    // (its handler may still move focus to a field or close it afterwards).
+    const dialog = control.parentElement?.closest<HTMLElement>('[data-svelte-overlay-modal],[role="dialog"],[role="alertdialog"]');
+    if (dialog && (dialog.hasAttribute('data-svelte-overlay-modal') || dialog.hasAttribute('tabindex'))) dialog.focus({ preventScroll: true });
     // A dialog that could not take focus (inert, hidden) must still not leave the control focused.
     if (focused() === control) control.blur();
   };

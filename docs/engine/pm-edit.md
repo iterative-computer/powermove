@@ -106,6 +106,15 @@ dual-mode reference:
   group baked earlier in the same ungroup. When every group is done, the keys move
   to their times on the tick grid (found by their created ids). The values are
   therefore the legacy values; only the times snap.
+- Since the merge of main's editor work (2b1fa379a), ungroup folds the group's
+  opacity clamped to 0–100, leaves the members of an always-hidden group off,
+  and keeps a group that outside layers use as a transform parent as a `null`
+  (solo off) instead of removing it. Main's new refusals (Solo, animated
+  visibility, an opacity that cannot move into a single plain child) are the
+  renderer's checks before it asks. Align skips a layer inside a locked group
+  (`isInspectorLayerEditable`). The material peer kernel (`syncPeers`) has no
+  caller since main removed `scene3d/materials.ts`; the vectors no longer
+  carry its cases.
 
 ## A camera or light reparented into a space that moves with it
 
@@ -213,14 +222,14 @@ All measured on 2026-10-14 and 2026-10-15 at this branch (the vectors, seeds, co
   passes the same functions to pm-text's wrapping and glyph units, so font anchor
   capture, the font anchor reference, its Pan Behind rescale, and split text's
   `font_offset` are compared end to end. The committed set (default seed, plus
-  8 documents built for self-space reparents): 2,455 cases (reparent 419, of
-  them 36 self-space ones left to the legacy edit, move to group 238, ungroup
-  180, group placement 164, align 236, size anchor capture 166, anchor reference
-  27 and font 214, anchor moved 27 and font 106, font anchor capture 242, leave
-  attributes 89, material peers 207, split text 60 and measured 80), 1,104,794
-  numbers, 1,085,450 bit-identical, max relative error 9.5e-10; 3,159 key times
-  in difference 1; no value needs any allowance; 317 error messages identical;
-  0 mismatches.
+  8 documents built for self-space reparents), regenerated from main's
+  TypeScript after the 2b1fa379a merge: 2,367 cases (reparent 415, of them 36
+  self-space ones left to the legacy edit, move to group 257, ungroup 104,
+  group placement 166, align 328, size anchor capture 181, anchor reference 27
+  and font 210, anchor moved 27 and font 110, font anchor capture 236, leave
+  attributes 130, split text 60 and measured 80), 1,023,016 numbers, 1,009,746
+  bit-identical, max relative error 3.6e-10; 7,000 key times in difference 1;
+  no value needs any allowance; 316 error messages identical; 0 mismatches.
 - **Other seeds** (`PM_EDIT_SEED`, `PM_EDIT_SCALE=2`, written outside the
   repository and replayed with `PM_EDIT_VECTORS`): seeds 3, 12345, 7, 99, 4242,
   1, 31337, 2026, 555, 42, 8080, 65537, 9001, 77, and 13, 4,725 to 5,026 cases

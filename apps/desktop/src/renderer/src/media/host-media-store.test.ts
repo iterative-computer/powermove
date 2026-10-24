@@ -400,6 +400,17 @@ describe('import decisions', () => {
 });
 
 describe('the engine stamp', () => {
+  it('installs verified storage for native hidden tabs while ordinary remote tabs retain their existing store', () => {
+    vi.useFakeTimers();
+    try {
+      const { host } = fakeHost(), { legacy } = fakeLegacy();
+      const make = (): any => ({ MediaStore: legacy, proj: { id: 'P', assets: {}, layers: [], comps: {} }, bus: { on: vi.fn() } });
+      const remote = make(); installHostMediaStore(remote, { mediaStore: host, remote: true });
+      expect(remote.MediaStore).toBe(legacy); expect(remote.HostMedia).toBeUndefined();
+      const native = make(); installHostMediaStore(native, { mediaStore: host, remote: true, nativeHidden: true });
+      expect(native.HostMedia.enabled).toBe(true); expect(native.MediaStore.keepsOriginals).toBe(true);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
   it('flushes imported media bindings before an immediate export can ask for them', async () => {
     vi.useFakeTimers();
     try {

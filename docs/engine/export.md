@@ -31,7 +31,7 @@ muxers, verification, atomic output), [pm-render.md](pm-render.md), and
 ```text
 JobDocument (frozen Arc<Document> at the session's revision)
   → plan_export: capability check (pm_render::unsupported_with_media + pm-audio's mix graph problems)
-  → per frame: GpuGate admits bands → pm-render (float, Standard) → readback
+  → per frame: GpuGate admits bands → pm-render (project depth, Standard) → readback
       ─(sync_channel(1))→ encoder input (convert.rs: matrix, siting, dither; row-parallel)
                          + pm-audio offline mix for the frame's samples
                          → VideoToolbox → AVAssetWriter → verify → rename over the host's file
@@ -50,11 +50,11 @@ JobDocument (frozen Arc<Document> at the session's revision)
   `convert.rs`, split across rows on scoped threads that first take the
   calling thread's QoS (utility in the job engine, so it never competes with
   the interactive engine for CPU).
-- **Dither**: on for H.264 (8-bit), off for ProRes unless asked, never on
-  alpha (delivery.md has the tile and its tests).
-- **Precision**: exports render at 32-bit (amendment 8 asks for 32-bit
-  whenever a source exceeds 10 bits; agent exports do not inspect sources
-  first, so they always do).
+- **Dither**: the desktop enables it for delivery formats at 8 bits or less;
+  it is never applied to alpha (delivery.md has the tile and its tests).
+- **Precision**: saved `project.colorDepth` selects 8-bit normalized, 16-bit
+  float, or 32-bit float working targets. The desktop still sends a Float32
+  request hint for wire compatibility; it does not promote project depth.
 - **Audio**: `pm_audio::MixGraph` over the composition with a source cache;
   the samples of export frame n are `[sample(tick(n)), sample(tick(n + 1)))`
   at the project rate, so totals equal `round(duration × sr)`. Audio
@@ -618,3 +618,186 @@ snapshot session before resync. Host-service resolution selects those bindings
 by process and session until the export ends, independently of open windows.
 See `media-store.md` for the lifetime and regression cases. The original
 capability-handle checks still grant paths only to the owning engine port.
+
+## Export encoding parity (EXPORT-1)
+
+Decision EXPORT-1 (orchestrator, final form): for the same settings, the
+engine hands each encoder today's frames and samples, uses today's encoder
+implementation and settings, decodes to today's pictures and samples (or
+within today's own run-to-run variance), and writes today's stream
+properties. Branch `feat/ne-exportaudio`.
+
+### Today's formats through today's encoders
+
+| Format (today's id) | Today | Engine (job exports) |
+|---|---|---|
+| H.264 MP4 (`mp4`) | renderer RGBA8 → bundled FFmpeg (`render-encoder.ts` `encoderArgs`: swscale bt709 limited, `h264_videotoolbox` high, yuv420p, `-b:v 16M` per tier, `-g 250`) → FFmpeg mux with the WAV (`aac`) | `mac::legacy_video`: the same RGBA8 bytes (`convert` to RGBA8, over black, alpha 255, no dither) piped to the same FFmpeg with the same arguments; the same mux (`mac::legacy_audio`) |
+| ProRes 4444 MOV (`prores`) | RGBA8 (opaque: `renderOpaqueFrame`; alpha: `alphaFrame`'s truncating unpremultiply and Canvas2D round trip) → FFmpeg `prores_videotoolbox` 4444 `p416le`/`ayuv64le` → mux with `pcm_s24le` | The same path for documents with level 1 content (`png_compat::has_level1_content`); straight alpha uses the PNG lane's `legacy_png_rgba` bytes. Level 2 content and other ProRes profiles keep VideoToolbox from the float frames |
+| WebM (`webm`) | WebGL canvas → WebCodecs `VideoEncoder` (`vp09.00.31.08`, else `vp8`; tier bit rate; `latencyMode: 'quality'`; keyframe every `round(2 × fps)`), `AudioEncoder` Opus 160 kbps on 20 ms chunks, `muxWebM` | `webcodecs::WebCodecsSink` → `hostEncode` → main's `ExportEncoders` → a hidden encoder window running the same code (shared `webm-video.ts`, `opus-encode.ts`, `webm-mux.ts`) on a WebGL2 canvas with the compositor's context attributes, so `new VideoFrame(canvas)` takes Chromium's GPU REC709 readback |
+| MOV/MP4 audio | `OfflineAudioContext` stereo 48 kHz, `ceil((t1 − t0) × 48000)` samples, 16-bit WAV (`wavBytes`: −32768/+32767 scaling, `Math.round`) → FFmpeg `pcm_s24le`/`aac` with `-shortest` | The engine's mix at 48 kHz for exactly that many samples (`render::legacy_audio_samples`), the same WAV quantization, the same FFmpeg command (see the frame fix below) |
+
+New delivery formats (HEVC, ProRes 422 family, PCM 16/float, AAC in MOV,
+Rec.709 broadcast tags, alpha WebM) have no counterpart today and keep
+VideoToolbox/AVAssetWriter or libvpx/libopus. The CLI has no encoder window
+and keeps libvpx/libopus for WebM ([export-opus.md](export-opus.md)).
+
+### The WebCodecs transport
+
+`pm_protocol::host_encode` (contract 14): `open` (codec, size, rate, bit rate,
+frames, audio, the export's `outputWrite` handle), `video` per frame (RGBA8
+inline up to 1 MiB, else a pm-bridge shared-memory segment main takes once;
+the engine unlinks it after every step), `audio` (interleaved f32, ≤ 768 KB
+per message), `finish` (main writes the muxed file into the handle's
+temporary output; the engine then verifies it with `verify_webm` and commits
+as usual), `abort`. Main answers frame and audio steps once the window has
+them with at most four outstanding, so rendering overlaps encoding; a window
+error fails the next step. The window (`export-encoder.html`, sandboxed,
+own preload that only hands over a MessagePort) opens on the first encode
+and closes 15 s after the last; encodes of an ended engine launch or idle
+for five minutes are aborted. A MessagePortMain does not take transferred
+ArrayBuffers, so the muxed file is copied, not transferred.
+
+### Samples: Chromium's integer conversion
+
+`decodeAudioData` converts integer PCM with Chromium's
+`FixedSampleTypeTraits::ToFloat`: below zero × 1/32768, above zero × the f32
+constant 1/32767 (8-bit: 1/128, 1/127). `pm_media::audio` now does the same
+(it divided by 32768). On a 16-bit WAV at gain 0.8, all 96,000 pre-encode
+samples equal today's (before: 48,080).
+
+### A frame today's mux drops (decision COMPCLOSE-1)
+
+Today's final mux passes `-shortest`. When the mix is shorter than the frames
+(a whole-second range at 29.97 fps: 48,000 samples under 30 frames lasting
+1.001 s), FFmpeg ends the file at the audio and drops the last frame (30 → 29
+frames in MOV and MP4, measured with the bundled FFmpeg 9.0.2). That is a
+missing frame, so the engine leaves `-shortest` out exactly in that case
+(`LegacyMux::shortest`): every frame stays and the audio is today's. When the
+audio is at least as long, the option trims it as today. Recorded for the
+orchestrator as a COMPCLOSE-1 bug fix.
+
+### Movie timescales
+
+FFmpeg 9.0.2's `mov_init` sets the movie timescale to the denominator of the
+GCD of its input streams' time bases, at least 1000: 1000 for an encode at
+24/25/30 fps without audio, 24000 at 23.976, and lcm(video, 48000) after the
+audio mux (24 fps: 1,536,000). `verify::Expected::movie_timescale` follows it
+for FFmpeg-written files.
+
+### Measured (`e2e/export-encoding-parity.spec.ts`, 2026-10-22)
+
+Each fixture exports ProRes 4444, ProRes 4444 with alpha, H.264 MP4 and WebM
+twice with the setting off and once (1080p: twice) with it on; inputs are
+captured at both encoder boundaries in hidden test launches.
+
+- Today against itself: identical in every format and fixture (decoded RGBA,
+  decoded samples, encoded audio bytes, stream properties), including
+  multi-threaded 1080p VP9.
+- **basic** (320×180, 30 fps, 1 s, rotated translucent moving shape, 16-bit
+  WAV at gain 0.8): engine identical to today in all four formats: encoder
+  input RGBA8 and PCM, decoded frames and samples, encoded audio bytes (AAC,
+  PCM24, Opus), every ffprobe stream property including `channel_layout`.
+- **large** (1920×1080, 29.97 fps, 60 frames): decoded frames, samples and
+  stream properties identical in all four formats (per-frame hashes).
+- **automation**, **advanced** (gain keyframes, fades, trims, a nested
+  composition with level and, in `advanced`, speed 1.2): video identical;
+  audio differs because the engine's export mix is silent when the project
+  holds that nested composition (see the gap below).
+- Export time, 1080p, best of two, under shared-machine load 10–33: ProRes
+  1.74 s vs today 2.05 s, ProRes alpha 2.00 vs 6.42, MP4 1.81 vs 2.45 (one run);
+  the final run under heavier load: 4.73 vs 2.13, 5.87 vs 5.20, 2.71 vs 2.23.
+  WebM 1.41–1.92 s vs today 0.50 s in both: slower (see gaps).
+
+### Gaps
+
+- **WebM export time** is about 3× today's at 1080p. Today's frames never leave
+  the GPU (WebGL canvas → GPU readback → encoder, ~8 ms a frame); the engine's
+  go GPU → f32 readback → RGBA8 → shared memory → main → window → texture
+  upload. Matching it needs GPU-resident frames into the encoder window (the
+  viewer's IOSurface frame bridge and `sharedTexture`) or an 8-bit readback.
+- **Nested-composition audio in exports is silent** (all samples): a project
+  whose root holds an audio layer plus a precomposition of an audio layer
+  exports silence with the setting on (today: the mix). Each audio feature
+  alone matches today to the sample level; pm-audio's offline mixer renders
+  the same document shape correctly in a unit test, so the fault is in the
+  app's job path (document or media binding of the nested composition).
+- **Mix parity** beyond integer decode and length: pm-audio's documented
+  "allowed differences" (speed and remaps followed where today ignores them,
+  automation at 3 kHz instead of frame ramps, the resampler) are visible
+  differences on existing projects under the owner rules; the corpus parity
+  test still measures −82 dBFS (gain-fades) and −88 dBFS (precomp-nesting)
+  residuals.
+- A project frame rate held as a decimal that is not the rational's double
+  (for example 29.97 rather than 30000/1001) gives today's encoders a
+  different `-framerate`/`framerate`; the engine passes `num / den`.
+
+## Phase 3c agents: strict batches, host packing and CLI delivery
+
+This section supersedes the capability-routing behavior described above for
+agent jobs. With the engine enabled, its presence selects native work even while
+it is recovering. `unsupported`, `mediaOffline` and other engine failures retain
+their named error; agent exports and frame batches never invoke a legacy fallback.
+User job statuses produced by `AgentJobs` no longer mark failures as routed.
+The broader sheet/router removal remains the derouter lane's work.
+
+`AgentHarness.capture` and `observeVisual` now use the authenticated
+`engine:agent-frames` batch endpoint, at JPEG 0.74 and motion blur off. The endpoint
+uses the job lane, pins the document revision, waits for media bindings and
+extension definitions, and never pauses/resumes playback or enters the exclusive
+compatibility capture helper. MCP composition contact sheets submit all cells as
+one engine batch so the document and definitions freeze together. A partial,
+duplicate or out-of-order native response is validated and restored to request
+order. At a contact-sheet deadline or cancellation, that batch alone is
+cancelled and completed cells return with the remaining cells omitted. Ordinary
+frame requests still require every requested frame. Frame sessions pin media like export
+sessions, including across project changes.
+
+Native `save_project` asks for a single serialized document envelope, workspace
+and Undo snapshot, after pending imports finish. The host writes the same PMV3
+container as today's agent save, then records the project with `Projects.put`.
+The shared `project-assets.ts` helpers retain linked-original conversion and
+Undo-reachable media. Each save gets an exclusive owner-only name and media
+binding scope, including frozen blob MIME types. Missing sources are skipped;
+their metadata stays in the document. Source changes during copying fail by
+name and leave no output. Private document-plan responses have a separate bounded
+budget from paginated public agent state.
+
+`powermove render <project> <output> [options]` invokes the native CLI without a
+shell, preserves its exit code and signals, and accepts user-chosen destinations
+outside the agent exports folder. A missing runtime is
+`native-renderer-unavailable`. `pm-cli render --param NAME=JSON` validates all
+values before applying them to its isolated document, retaining each parameter's
+definition. Existing definition snapshots, host fonts and Blender service remain
+in the native CLI; a missing WebGL runner remains a named headless failure.
+
+Agent exports, frame batches and contact sheets wait, bounded at 45 s, for a
+starting or restarting job engine (the longest crash backoff is 30 s), then
+fail as `The job engine is not running.`; a stopped engine fails at once.
+Frames requested as PNG are labelled `image/png`. Native `save_project`
+validates its (empty) arguments with today's strict schema and message.
+
+Targeted tests cover native failures before/after job acceptance and during
+recovery; pinning and playback isolation; incomplete frames; media binding
+lifetimes; PMV3 byte equality, missing originals, MIME, Undo and exclusive naming; CLI argument boundaries;
+parameter validation and rendered expression changes. The desktop MCP smoke now
+checks native text, publication followed by frames, and host-packed PMV3 media and
+Undo. `e2e/engine-agent-observation.spec.ts` measures twenty five-frame 720 px
+observations during a UHD project's playback. Only measured runs establish its
+performance result.
+
+The macOS native hidden host now embeds host services and the production
+per-project document workers. Its render jobs, batches and saves use the same
+`NativeEngine` and `AgentJobs` as the desktop, over Node child-process ports.
+The desktop persists its probe namespace beside the per-machine shader cache;
+the hidden host, Node render command and direct bundled `pm-cli` read it, read
+only: their first-use decisions stay in memory (hidden-host.md). Unknown
+and pinned user programs request the desktop's WebGL runner in on-demand
+Chromium. This is the shader runner only; composition frames remain native.
+The hidden tabs present CPU snapshots from `pm-node`.
+
+See [hidden-host.md](hidden-host.md) for runtime wiring, reproducible gates and
+remaining compatibility dependencies. Both macOS architectures build through
+`pm-node-addon`, `pm-bridge-addon` and the shipping release profile; no LTO
+profile override is required after the release-build repair. Assembly requires
+matching LGPL FFmpeg and native image-decoder licenses, matching architecture
+checks, and clean Node 22 load tests before distributing artifacts.

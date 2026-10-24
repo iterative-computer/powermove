@@ -124,12 +124,11 @@ function ensure() {
   });
   S.el.addEventListener('dragover', (e: any) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
   S.el.addEventListener('drop', async (e: any) => {
-    const file = [...e.dataTransfer.files].find((f: any) => /\.pmv$/i.test(f.name));
-    if (!file) return;
-    e.preventDefault();
-    const before = PM.proj.id;
-    await PM.importFiles?.([file]);
-    if (PM.proj.id !== before) PM.ProjectsScreen.hide();
+    if (![...e.dataTransfer.types].includes('Files')) return;
+    // Home opens a new document; do not also import into the editor behind it.
+    e.preventDefault(); e.stopPropagation();
+    const files: File[] = [...e.dataTransfer.files];
+    if (files.length) await PM.openFiles?.(files);
   });
 }
 

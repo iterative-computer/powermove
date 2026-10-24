@@ -33,11 +33,8 @@
 
 <style>
   .workspace-step { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; width: min(340px, calc(100vw - 280px)); padding-top: 48px; text-align: center; -webkit-app-region: no-drag; }
-  /* Same entrance as the welcome card (welcome-enter in welcome.css), staggered in as the suitcases rise. */
-  .workspace-step > * { animation: welcome-enter 800ms cubic-bezier(0.16, 1, 0.3, 1) calc(240ms + var(--i, 0) * 120ms) backwards; }
-  .workspace-step > h1 { --i: 1; }
-  .workspace-step > .intro { --i: 2; }
-  .workspace-step > .actions, .workspace-step > .status { --i: 3; }
+  /* Same short entrance as the welcome card (welcome-enter in welcome.css). */
+  .workspace-step > * { animation: welcome-enter 200ms cubic-bezier(0.16, 1, 0.3, 1) backwards; }
   .back { position: absolute; top: 0; left: 0; width: 32px; height: 32px; display: grid; place-items: center; background: transparent; color: var(--tx-3); }
   .back:hover { background: var(--ink-1); color: var(--tx); }
   .source { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; color: var(--tx-2); font-size: var(--fs-sm); font-weight: var(--fw-medium); }

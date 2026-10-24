@@ -9,8 +9,9 @@ use pm_media::probe::timing::PrimingSource;
 use pm_media::probe::{AlphaSource, CostClass, FieldOrder, probe};
 use pm_media::time::RateMethod;
 use pm_protocol::color::{MatrixCoefficients, Primaries, Range};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+use tempfile::TempDir;
 
 fn audio_priming(path: &Path) -> Option<(i64, PrimingSource)> {
     let p = probe(path).unwrap().probe;
@@ -22,10 +23,11 @@ fn audio_priming(path: &Path) -> Option<(i64, PrimingSource)> {
     a.priming.map(|p| (p.samples, p.source))
 }
 
-fn tmp_dir() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("pm-media-probe-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmp_dir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("pm-media-probe-")
+        .tempdir()
+        .unwrap()
 }
 
 #[test]
@@ -58,7 +60,7 @@ fn priming_from_fixtures() {
 #[test]
 fn apple_aac_priming() {
     let dir = tmp_dir();
-    let wav = dir.join("sine.wav");
+    let wav = dir.path().join("sine.wav");
     let ok = Command::new(ffmpeg_bin())
         .args([
             "-v",
@@ -76,7 +78,7 @@ fn apple_aac_priming() {
         .unwrap()
         .success();
     assert!(ok, "ffmpeg could not write a WAV");
-    let m4a = dir.join("afconvert.m4a");
+    let m4a = dir.path().join("afconvert.m4a");
     let ok = Command::new("afconvert")
         .args(["-f", "m4af", "-d", "aac"])
         .arg(&wav)
@@ -209,7 +211,7 @@ fn corpus_probe_facts() {
 #[test]
 fn timecode_with_drop_frame() {
     let dir = tmp_dir();
-    let out = dir.join("tc.mov");
+    let out = dir.path().join("tc.mov");
     let ok = Command::new(ffmpeg_bin())
         .args([
             "-v",

@@ -73,15 +73,15 @@ describe('visibleDockPlan with a panel this build does not have', () => {
     const workspace = {
       layout: {
         docks: [
-          { id: 'left', size: 300, panels: [{ id: 'assets', size: 347 }, { id: 'curve-editor', flex: true, size: 429 }, { id: 'agent', size: 574 }] }
+          { id: 'left', size: 300, panels: [{ id: 'assets', size: 347 }, { id: 'private-extension-10', flex: true, size: 429 }, { id: 'agent', size: 574 }] }
         ]
       }
     } as any;
-    const plan = visibleDockPlan(workspace, () => false, (id) => id !== 'curve-editor');
+    const plan = visibleDockPlan(workspace, () => false, (id) => id !== 'private-extension-10');
     const left = plan[0]!.specs;
     expect(left.map((spec) => spec.id)).toEqual(['assets', 'agent']);
     expect(left.map((spec) => !!spec.flex)).toEqual([true, false]);
     // The model keeps the panel for when its extension comes back.
-    expect(workspace.layout.docks[0].panels.map((spec: any) => spec.id)).toEqual(['assets', 'curve-editor', 'agent']);
+    expect(workspace.layout.docks[0].panels.map((spec: any) => spec.id)).toEqual(['assets', 'private-extension-10', 'agent']);
   });
 });

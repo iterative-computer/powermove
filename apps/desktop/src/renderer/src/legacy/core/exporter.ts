@@ -1,8 +1,16 @@
+import { captureAgentFrame } from './agent-frame-capture';
 import { animateExportPreview } from './export-preview';
-import { prepareFrame } from './frame-preparation';
-import { captureFramePixels, renderOpaqueFrame } from './frame-capture';
+import { frameFontsReady, prepareFrame } from './frame-preparation';
+import { captureFramePixels, renderOpaqueFrame, writeStraightAlphaPixels } from './frame-capture';
+import { trackStaticExport } from './static-export';
+import { trackExportMedia } from './export-media';
+import { exportEffects, type EffectRef } from './export-effects';
+import { AlphaReadbackRetryError } from '../gl/half-readback';
 import { installRenderQueue, wavBytes } from './render-queue';
+import { WEBM_ENCODE_QUEUE_LIMIT, WEBM_VIDEO_CODECS, webmFrameTiming, webmKeyFrame, webmVideoConfig } from './webm-video';
 import { openRenderQueuePanel } from './render-queue-panel';
+import { muxWebM as muxEncodedWebM } from './webm-mux';
+import { writeBlobChunks } from './blob-chunks';
 /* Ported from js/core/exporter.js — behavior-preserving. */
 import {
   EXPORT_FRAME_RATES,
@@ -28,6 +36,7 @@ import {
   migrateFormat,
   normalizeDelivery,
   normalizeTimecode,
+  storedFormatId,
   supportsAlpha,
   type ExportPreset,
   type ExportPresetOptions,
@@ -47,103 +56,15 @@ import { captionSidecars } from '../../captions/sidecar';
 export function install(PM: PMRegistry): void {
 const h: any = PM.h;
 
-/* ── minimal EBML / WebM muxer ─────────────────────────── */
-function vint(n: any, len?: any) {
-  if (!len) { len = 1; while (n >= 2 ** (7 * len) - 1) len++; }
-  const b: any = new Uint8Array(len);
-  for (let i: any = len - 1; i >= 0; i--) { b[i] = n & 0xff; n = Math.floor(n / 256); }
-  b[0] |= 1 << (8 - len);
-  return b;
-}
-function uintBytes(n: any) {
-  if (n === 0) return new Uint8Array([0]);
-  const out: any = [];
-  while (n > 0) { out.unshift(n & 0xff); n = Math.floor(n / 256); }
-  return new Uint8Array(out);
-}
-function floatBytes(f: any) {
-  const b: any = new Uint8Array(8); new DataView(b.buffer).setFloat64(0, f); return b;
-}
-function idBytes(id: any) {
-  const out: any = [];
-  let n: any = id;
-  while (n > 0) { out.unshift(n & 0xff); n = Math.floor(n / 256); }
-  return new Uint8Array(out);
-}
-function el(id: any, payload: any) {
-  /* ArrayBuffer.isView is realm-safe (unlike instanceof), keeping the muxer testable headlessly */
-  const data: any = ArrayBuffer.isView(payload) ? payload : concat(payload);
-  return concat([idBytes(id), vint(data.length ?? data.byteLength), data]);
-}
-function elUnknownSize(id: any) { return concat([idBytes(id), new Uint8Array([0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])]); }
-function concat(arrs: any) {
-  let n: any = 0; arrs.forEach((a: any) => n += a.length);
-  const out: any = new Uint8Array(n); let o: any = 0;
-  arrs.forEach((a: any) => { out.set(a, o); o += a.length; });
-  return out;
-}
-const str: any = (s: any) => new window.TextEncoder().encode(s);
-
-function muxWebM(frames: any, { width, height, fps, codecId = 'V_VP9', audio }: any) {
-  const scale: any = 1e6; // 1ms ticks
-  const header: any = el(0x1A45DFA3, [
-    el(0x4286, uintBytes(1)), el(0x42F7, uintBytes(1)),
-    el(0x42F2, uintBytes(4)), el(0x42F3, uintBytes(8)),
-    el(0x4282, str('webm')), el(0x4287, uintBytes(2)), el(0x4285, uintBytes(2)),
-  ]);
-  /* merged, time-ordered block stream so clusters interleave video + audio */
-  const blocks: any = frames.map((f: any) => ({ ms: Math.round(f.ts / 1000), track: 1, key: f.key, data: f.data }));
-  if (audio && audio.chunks.length) {
-    audio.chunks.forEach((b: any) => blocks.push({ ms: Math.round(b.ts / 1000), track: 2, key: false, data: b.data }));
-    blocks.sort((a: any, b: any) => a.ms - b.ms || a.track - b.track);
-  }
-  const lastMs: any = blocks.length ? blocks[blocks.length - 1].ms : 0;
-  const durMs: any = lastMs + 1000 / fps;
-  const info: any = el(0x1549A966, [
-    el(0x2AD7B1, uintBytes(scale)),
-    el(0x4D80, str('Powermove')), el(0x5741, str('Powermove ' + PM.version)),
-    el(0x4489, floatBytes(durMs)),
-  ]);
-  const tracks: any = [
-    el(0xAE, [
-      el(0xD7, uintBytes(1)), el(0x73C5, uintBytes(1)), el(0x83, uintBytes(1)),
-      el(0x536E, str('Video')), el(0x86, str(codecId)),
-      el(0xE0, [el(0xB0, uintBytes(width)), el(0xBA, uintBytes(height))]),
-    ]),
-  ];
-  if (audio && audio.chunks.length) {
-    tracks.push(el(0xAE, [
-      el(0xD7, uintBytes(2)), el(0x73C5, uintBytes(2)), el(0x83, uintBytes(2)),
-      el(0x536E, str('Audio')), el(0x86, str('A_OPUS')),
-      ...(audio.priv ? [el(0x63A2, audio.priv)] : []),
-      el(0xE1, [
-        el(0xB5, floatBytes(audio.rate || 48000)),
-        el(0x9F, uintBytes(audio.channels || 2)),
-      ]),
-    ]));
-  }
-  const tracksEl: any = el(0x1654AE6B, tracks);
-  /* one cluster per ~2s keeps block-relative timecodes inside their vint */
-  const clusters: any = [];
-  let cur: any = null, curStart: any = 0;
-  for (const b of blocks) {
-    if (!cur || b.ms - curStart > 2000) {
-      if (cur) clusters.push(el(0x1F43B675, [el(0xE7, uintBytes(curStart)), ...cur]));
-      cur = []; curStart = b.ms;
-    }
-    const rel: any = b.ms - curStart;
-    const bh: any = new Uint8Array(4);
-    bh[0] = 0x80 | b.track;          // track number, single-byte vint
-    bh[1] = (rel >> 8) & 0xff; bh[2] = rel & 0xff;
-    bh[3] = b.key ? 0x80 : 0x00;
-    cur.push(el(0xA3, concat([bh, b.data])));
-  }
-  if (cur) clusters.push(el(0x1F43B675, [el(0xE7, uintBytes(curStart)), ...cur]));
-  const segment: any = el(0x18538067, [info, tracksEl, ...clusters]);
-  return new window.Blob([header, segment], { type: 'video/webm' });
-}
+/* Keep the export hook scoped to this editor's application version. */
+const muxWebM = (frames: any, options: any) => muxEncodedWebM(frames, options, PM.version);
 
 /* ── export core ───────────────────────────────────────── */
+// Keep a recovered decoder for the rest of this export, so every later frame
+// does not have to wait for the same stalled original again.
+const recoveryDecoders = new Map<HTMLVideoElement, HTMLVideoElement>();
+const prepareExportFrame: typeof prepareFrame = (pm, time, project, options) =>
+  prepareFrame(pm, time, project, { ...options, recoveryDecoders });
 const X: any = { busy: false, cancel: false };
 PM.Export = X;
 X.buildWeb = () => buildWebExport(PM);
@@ -159,6 +80,20 @@ const engineOn = (): boolean => deliveryEngineOn();
 
 /** The exact export frame rate when it is the composition's own. */
 const RATE_LABEL = (f: number) => (Number.isInteger(f) ? String(f) : f.toFixed(3)) + ' fps';
+
+let nextExportHold = 0;
+/** Each settings sheet and export preflight owns a separate warm-job lease. */
+function holdExportJob(): () => void {
+  const engine = engineOn() ? hostBridge()?.nativeEngine : undefined;
+  const id = `export-${++nextExportHold}`;
+  engine?.exportSheet?.(id, true);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    engine?.exportSheet?.(id, false);
+  };
+}
 
 X.dialog = () => {
   const p: any = PM.proj;
@@ -370,7 +305,9 @@ X.dialog = () => {
     if (BUILT_IN_PRESETS.some((preset) => preset.name === name)) { PM.toast('Built-in presets keep their name; choose another.'); return; }
     const stored = (PM.store.get('renderPresets', []) as any[]).filter((preset: any) => preset?.name !== name);
     const id = PM.uid('preset');
-    stored.push({ id, name, options: presetOptionsOf(opts) });
+    // Saved with today's format id where one exists (issue P1); read back through migratePreset.
+    const options = presetOptionsOf(opts);
+    stored.push({ id, name, options: { ...options, format: storedFormatId(options.format) } });
     PM.store.set('renderPresets', stored);
     presets = allPresets(stored).filter((preset) => engine || !formatInfo(preset.options.format).engine);
     chosenPreset = id;
@@ -449,14 +386,19 @@ X.dialog = () => {
   }
   sync();
   let unmountCorners: (() => void) | undefined;
+  let releaseJob = () => {};
   const actions: any[] = [{ label: 'Cancel' }];
   actions.push({ label: 'Add to Queue', run: () => { X.remember(opts); window.setTimeout(() => void X.addToQueue(opts), 0); } });
   actions.push({ label: exportActionLabel(opts.format), pri: true, run: () => { X.remember(opts); window.setTimeout(() => void run(opts), 0); } });
   m = PM.modal({
     title: 'Export', body, width: 620,
-    onClose: () => unmountCorners?.(),
+    onClose: () => {
+      releaseJob();
+      unmountCorners?.();
+    },
     actions,
   });
+  if (engine) releaseJob = holdExportJob();
   m.el.classList.add('export-modal');
   unmountCorners = mountSquircles(m.el, `${SQUIRCLE_SELECTOR}, .export-destinations, .export-destination, .btn`);
   sync();
@@ -514,7 +456,6 @@ function progressUI(total: any, preparingMedia = false, operation: { cancel: boo
     onClose: () => { if (preparingMedia || operation.busy) operation.cancel = true; stopPreview(); },
     actions: [{ label: 'Cancel', run: () => {
       operation.cancel = true;
-      if (!preparingMedia) void hostBridge()?.blender?.cancel();
       label.textContent = 'Cancelling…'; eta.textContent = '';
       const button = mod.el.querySelector('.mf button');
       if (button) { button.disabled = true; button.textContent = 'Cancelling…'; }
@@ -599,6 +540,7 @@ let sequenceDirectory: any = null;
 
 async function run(opts: any) {
   if (X.busy) return PM.toast('Export already running');
+  if (PM.agentFrameCapture) return PM.toast('Wait for the current frame capture to finish.');
   // Today's ids (`prores`, `mp4`, `webm`, `rec`) are the new formats' names now.
   opts = { ...opts, format: migrateFormat(opts?.format), delivery: normalizeDelivery(opts?.delivery) };
   // The native engine's consistency check (docs/rust-engine.md, section 6).
@@ -606,6 +548,7 @@ async function run(opts: any) {
   X.busy = true;
   X.cancel = false;
   const bridge = (hostBridge() as any);
+  const releaseJob = isRenderFormat(opts.format) && !opts.reportPath ? holdExportJob() : () => {};
   try {
     const p = PM.proj;
     // With Use New Engine on, every render format runs in the job engine; a
@@ -620,12 +563,22 @@ async function run(opts: any) {
       throw new Error(`The new engine can’t export this project yet, and the current exporter doesn’t write ${formatInfo(opts.format).label}. Choose ProRes 4444, H.264, WebM VP9, or PNG.`);
     }
     opts = { ...opts, format: legacy };
+    if (opts.format !== 'json') {
+      const pending = [p], checked = new Set<any>();
+      while (pending.length) {
+        const comp: any = pending.pop();
+        if (!comp || checked.has(comp)) continue;
+        checked.add(comp);
+        pending.push(...Object.values(comp.comps || {}));
+      }
+    }
     if (opts.format === 'prores' || (opts.format === 'mp4' && bridge?.render)) {
       if (!bridge?.render) throw new Error('The native encoder requires the updated desktop runtime.');
       nativeToken = await bridge.render.start({
         width: Math.round(p.w * opts.scale / 2) * 2, height: Math.round(p.h * opts.scale / 2) * 2,
         fps: opts.fps, format: opts.format, alpha: !!opts.alpha,
         bitrateMbps: exportBitrateMbps(opts.quality), name: opts.name || p.name,
+        expectsAudio: opts.audio !== false && PM.Audio.expectsOfflineMix?.(...range(opts)) === true,
       });
       if (!nativeToken) return { cancelled: true };
     } else if (bridge?.exportDestination) {
@@ -652,13 +605,25 @@ async function run(opts: any) {
       if (nativeToken) await bridge.render.cancel(nativeToken).catch(() => undefined);
       if (destinationToken) await bridge.exportDestination.release(destinationToken).catch(() => undefined);
     } finally {
+      for (const video of recoveryDecoders.values()) {
+        video.pause(); video.removeAttribute('src'); video.load();
+      }
+      recoveryDecoders.clear();
       nativeToken = null;
       destinationToken = null;
       sequenceDirectory = null;
       PM.captionsHidden = false;
       X.busy = false;
+      releaseJob();
     }
   }
+}
+
+/** The compatibility producers an export in `format` names. */
+function compatSources(format: unknown): { compat?: string[] } {
+  const render: any = PM.EngineRender;
+  const sources: string[] = typeof render?.exportSources === 'function' ? render.exportSources(format) : (render?.producing ?? []);
+  return sources.length ? { compat: [...sources] } : {};
 }
 
 /** The job engine's view of the sheet's settings (shared/engine-ipc.ts). */
@@ -668,8 +633,11 @@ function sheetOptions(opts: any): any {
   return {
     format: opts.format, alpha: !!opts.alpha && supportsAlpha(opts.format, opts.delivery), fps: Number(opts.fps), scale: Number(opts.scale) || 1,
     start: opts.format === 'still' ? PM.time : t0, end: opts.format === 'still' ? PM.time + 1 / Math.max(1, Number(opts.fps) || p.fps || 30) : t1,
-    audio: opts.audio !== false, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
-    delivery: normalizeDelivery(opts.delivery), hideCaptions: opts.captionsBurn === false
+    audio: opts.audio !== false, audioIndexPlayhead: PM.Audio?.indexPlayhead?.() ?? PM.time, motionBlur: !!opts.mblur, quality: opts.quality ?? 'high',
+    delivery: normalizeDelivery(opts.delivery), hideCaptions: opts.captionsBurn === false,
+    // A raster override's layers are drawn by this window (kernel/raster-compat.ts),
+    // and a WebM export's frames go through its compatibility context (compat-context.ts).
+    ...compatSources(opts.format)
   };
 }
 
@@ -698,7 +666,10 @@ function locateMedia(assets: string[]): void {
 async function exportThroughEngine(opts: any): Promise<any | null> {
   const engine = (hostBridge() as any)?.nativeEngine;
   const status = await engine.status().catch(() => null);
-  if (!status?.enabled || status.processes?.job?.state !== 'ready') return null;
+  // The job engine starts on demand and exits when unused: a stopped one is
+  // not a reason to route. Main starts it and answers `unavailable` only
+  // when it cannot run.
+  if (!status?.enabled) return null;
   const p: any = PM.proj;
   const [t0, t1]: any = range(opts);
   // Statuses can arrive before the start answer; keep them until the job id is known.
@@ -746,6 +717,10 @@ async function exportThroughEngine(opts: any): Promise<any | null> {
       X.cancel = cancelled;
     }
     if (final.routed) {
+      // Never silent: the reason the engine refused goes to the console and
+      // stays readable (`PM.Export.lastRouted`) until the routing is retired.
+      X.lastRouted = { format: opts.format, reason: String(final.error ?? '') };
+      console.warn(`[engine] the export went to the current exporter: ${final.error}`);
       if (legacyFormatId(opts.format)) return null;
       throw new Error(`The new engine can’t export this project yet (${final.error}), and the current exporter doesn’t write ${formatInfo(opts.format).label}.`);
     }
@@ -786,6 +761,7 @@ X.addToQueue = async (rawOpts: any) => {
   // Queue preparation can run alongside a foreground export. Its cancellation
   // belongs to this add only; the foreground export owns X.busy and X.cancel.
   const operation = { cancel: false };
+  const releaseJob = holdExportJob();
   try {
     if (!await prepareMedia(project, operation)) return { status: 'cancelled' };
     // The queued job keeps this window's definitions as they are now.
@@ -796,7 +772,7 @@ X.addToQueue = async (rawOpts: any) => {
   } catch (error) {
     PM.toast('Could not add to the render queue: ' + (error instanceof Error ? error.message : String(error)), 5000);
     return null;
-  }
+  } finally { releaseJob(); }
 };
 
 async function deliver(blob: Blob, name: string): Promise<boolean> {
@@ -805,9 +781,7 @@ async function deliver(blob: Blob, name: string): Promise<boolean> {
   if (destinationToken && bridge.fileUpload && blob.size > 4 * 1024 * 1024) {
     const uploadId = await bridge.fileUpload.begin(blob.size);
     try {
-      for (let offset = 0; offset < blob.size; offset += 1024 * 1024) {
-        await bridge.fileUpload.chunk(uploadId, new Uint8Array(await blob.slice(offset, offset + 1024 * 1024).arrayBuffer()));
-      }
+      await writeBlobChunks(blob, bytes => bridge.fileUpload.chunk(uploadId, bytes));
       result = await bridge.fileUpload.finish(uploadId, { name, destinationToken });
     } finally { await bridge.fileUpload.abort(uploadId).catch(() => undefined); }
   } else {
@@ -858,13 +832,19 @@ async function runPrepared(opts: any) {
   }
   if (opts.format === 'still') {
     const wasPlaying=PM.playing,at=PM.time;PM.pause();
-    try{await prepareFrame(PM,at,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:opts.alpha?20:16});
-      const cv: any = opts.alpha ? alphaFrame(at, W, H, opts.mblur) : PM.renderFrameTo(at, W, H,{mblur:opts.mblur});
+    const capture: AlphaCapture | undefined = opts.alpha ? { canvas: window.document.createElement('canvas') } : undefined;
+    try{await prepareExportFrame(PM,at,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.alpha?20:16,shutter:PM.proj.shutter||.5});
+      const cv: any = opts.alpha ? alphaFrame(at, W, H, opts.mblur, capture, fastAlphaCapture(W, H)) : PM.renderFrameTo(at, W, H);
       const blob=await new Promise<Blob>((resolve,reject)=>cv.toBlob((b:Blob|null)=>b?resolve(b):reject(new Error('Could not encode frame'))));
       if (!await deliver(blob, `${p.name}_${PM.tc(at, p.fps).replace(/:/g, '-')}.png`)) return { cancelled: true };
       PM.toast('Frame exported');return {cancelled:false};
     }catch(error){const message=(error as Error).message;PM.toast(message,6000);return {error:message};}
-    finally{PM.preparedVideoFrames=null;PM.setTime(at,{force:true});viewerService(PM)?.layout();if(wasPlaying)PM.play();}
+    finally {
+      try {
+        releaseAlphaReadback(capture);
+        if (capture) { capture.image = undefined; capture.canvas.width = 0; capture.canvas.height = 0; }
+      } finally { PM.preparedVideoFrames=null;PM.setTime(at,{force:true});viewerService(PM)?.layout();if(wasPlaying)PM.play(); }
+    }
   }
 
   const wasPlaying: any = PM.playing;
@@ -899,9 +879,11 @@ async function runPrepared(opts: any) {
     }
     return {cancelled:X.cancel, ...(opts.reportPath && !X.cancel && lastOutputPath ? { path: lastOutputPath } : {})};
   } catch (e: any) {
+    if (X.cancel && (e?.name === 'AbortError' || e?.name === 'EffectInputError' && /cancelled/.test(e.message))) { PM.toast('Export cancelled'); return { cancelled: true }; }
     window.console.error(e);
-    PM.toast('Export failed: ' + e.message, 5000);
-    return {error:e.message};
+    const message = e instanceof Error ? e.message : String(e);
+    PM.toast('Export failed: ' + message, 5000);
+    return {error:message};
   } finally {
     // Closing completed progress must not mark a successful export as cancelled.
     const cancelled = X.cancel;
@@ -941,37 +923,46 @@ async function writeCaptionSidecars(opts: any, t0: number, t1: number): Promise<
 function renderInto(T: any, W: any, H: any, mblur: any) {
   PM.quality = 1;
   PM.GL.resize(W, H);
-  PM.GL.render(T, { exporting:true, mblur, mbSamples: 20, shutter: PM.proj.shutter || .5 });
+  PM.GL.render(T, { mblur, mbSamples: 20, shutter: PM.proj.shutter || .5 });
   return PM.GL.canvas;
 }
 
 /* Transparent frames: read back the composited FBO (premultiplied, bottom-up)
    and convert to straight-alpha top-down ImageData. */
-function alphaFrame(T: any, W: any, H: any, mblur: any) {
+type AlphaReadback = { capture(time: number, options: Record<string, unknown>): Uint8Array<ArrayBuffer> | null; dispose(): void };
+type AlphaCapture = { canvas: HTMLCanvasElement; image?: ImageData;
+  readback?: { width: number; height: number; depth: 16 | 32; project: any; gl: any; session: AlphaReadback | null } };
+function releaseAlphaReadback(target?: AlphaCapture) {
+  target?.readback?.session?.dispose();
+  if (target) target.readback = undefined;
+}
+function alphaFrame(T: any, W: any, H: any, mblur: any, target?: AlphaCapture, fast = false) {
+  const depth = PM.proj.colorDepth === 32 ? 32 : 16;
+  if (target?.readback && (!fast || target.readback.width !== W || target.readback.height !== H || target.readback.depth !== depth
+      || target.readback.project !== PM.proj || target.readback.gl !== PM.GL.gl)) releaseAlphaReadback(target);
+  if (target && fast && !target.readback) target.readback = { width: W, height: H, depth, project: PM.proj, gl: PM.GL.gl,
+    session: (depth === 32 ? PM.GL.createFloatReadback?.(W, H) : PM.GL.createHalfReadback?.(W, H)) || null };
+  const session = target?.readback?.session;
   const px = captureFramePixels(PM, T, W, H, {
     transparent: true, mblur: mblur !== false, mbSamples: 20, shutter: PM.proj.shutter || .5,
-  });
-  const cv: any = window.document.createElement('canvas');
-  cv.width = W; cv.height = H;
+  }, session ? options => session.capture(T, options) : undefined);
+  return finishAlphaFrame(px, W, H, target);
+}
+function finishAlphaFrame(px: Uint8Array, W: number, H: number, target?: AlphaCapture) {
+  const surface = target || { canvas: window.document.createElement('canvas') };
+  const cv = surface.canvas;
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; surface.image = undefined; }
   const c: any = cv.getContext('2d');
-  const img: any = c.createImageData(W, H);
-  const d: any = img.data;
-  for (let y: any = 0; y < H; y++) {
-    let si: any = ((H - 1 - y) * W) * 4, di: any = y * W * 4;
-    for (let x: any = 0; x < W; x++, si += 4, di += 4) {
-      const a: any = px[si + 3];
-      if (a === 255) { d[di] = px[si]; d[di + 1] = px[si + 1]; d[di + 2] = px[si + 2]; d[di + 3] = 255; }
-      else if (a === 0) { d[di] = d[di + 1] = d[di + 2] = d[di + 3] = 0; }
-      else {
-        d[di] = Math.min(255, (px[si]! * 255 / a) | 0);
-        d[di + 1] = Math.min(255, (px[si + 1]! * 255 / a) | 0);
-        d[di + 2] = Math.min(255, (px[si + 2]! * 255 / a) | 0);
-        d[di + 3] = a;
-      }
-    }
-  }
+  const img = surface.image ||= c.createImageData(W, H);
+  writeStraightAlphaPixels(px, W, H, img.data);
   c.putImageData(img, 0, 0);
   return cv;
+}
+function fastAlphaCapture(width: number, height: number, uncachedFrames = 0): boolean {
+  // Small stills cannot amortize the compatibility probe. Longer per-frame
+  // sequences benefit even at 360p; cached artwork keeps the larger cutoff.
+  const area = width * height;
+  return PM.proj.colorDepth !== 8 && (area >= 1920 * 1080 || uncachedFrames >= 12 && area >= 640 * 360);
 }
 
 async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
@@ -979,7 +970,7 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
   if (!bridge) throw new Error('The native encoder requires the updated desktop runtime.');
   const token = nativeToken;
   if (!token) throw new Error('Export destination is unavailable');
-  const chunks = async (bytes: Uint8Array, audio = false) => {
+  const chunks = async (bytes: Uint8Array, audio = false, retain = false) => {
     const limit = 4 * 1024 * 1024;
     for (let at = 0; at < bytes.length; at += limit) {
       // A view of a large buffer can serialize its entire backing store through
@@ -987,44 +978,277 @@ async function exportNative({opts,W,H,t0,t1,total,ui,pctx}:any) {
       // complete frame/audio buffer that fits in one message.
       const chunk = bytes.length <= limit && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
         ? bytes : bytes.slice(at, at + limit);
-      await bridge.write(token, chunk, audio);
+      await bridge.write(token, chunk, audio, retain);
     }
   };
-  // The canvas is only the progress preview for opaque frames. Retain one
-  // surface per export instead of uploading and reading a new canvas per frame.
-  const preview = opts.alpha ? null : window.document.createElement('canvas');
+  type ReadbackTicket = { readInto(target: Uint8Array, cancelled: () => boolean): Promise<boolean>; dispose(): void };
+  type Readback = { readonly byteLength?: number; begin(time: number, options: any): ReadbackTicket | null; dispose(): void };
+  type WriteResult = { ok: true } | { ok: false; error: unknown };
+  const preview = window.document.createElement('canvas');
+  const alphaCapture: AlphaCapture | undefined = opts.alpha ? { canvas: preview } : undefined;
+  const retention = trackStaticExport(PM, opts.mblur !== false);
+  const media = trackExportMedia(PM);
+  let readback: Readback | null = null, ticket: ReadbackTicket | null = null;
+  let readbackUnavailable = false, pixels: Uint8Array<ArrayBuffer> | null = null, image: ImageData | null = null;
+  let pending: { frame: number; image?: ImageData; result: Promise<WriteResult> } | null = null;
+  let alphaDescriptor: { project: any; gl: any; depth: unknown } | undefined;
+  const expressionFree = (value: any, seen = new WeakSet<object>()): boolean => {
+    if (!value || typeof value !== 'object' || seen.has(value)) return true;
+    if (value.expr) return false;
+    seen.add(value);
+    return Object.values(value).every(child => expressionFree(child, seen));
+  };
+  let eligibility: { project: any; depth: unknown; version: unknown; revision: number; layers: any; count: number; background: any; mediaLayers: any[]; hasVideo: boolean; effectIds: EffectRef[]; allowed: boolean } | null = null;
+  const artworkEligible = () => {
+    // Callers refresh retention.key(time) first. Its revision covers renderer,
+    // font and project events; ordinary edits also advance animVersion.
+    const project = PM.proj, version = PM.animVersion?.(), revision = retention.revision;
+    const depth = opts.alpha ? project.colorDepth : undefined;
+    if (!eligibility || eligibility.project !== project || eligibility.depth !== depth || eligibility.version !== version || eligibility.revision !== revision
+        || eligibility.layers !== project.layers || eligibility.count !== project.layers.length || eligibility.background !== project.backgroundFill) {
+      const mediaLayers = project.layers.filter((layer: any) => layer.type === 'image' || layer.type === 'video');
+      const effectIds: EffectRef[] = [];
+      const knownEffects = (layer: any) => (!layer.fx?.length || Array.isArray(layer.fx) && layer.fx.every((effect: any) => {
+        if (!exportEffects.supports(effect?.type)) return false;
+        effectIds.push(effect);
+        return true;
+      }));
+      const record = (value: any) => value && typeof value === 'object' && !Array.isArray(value);
+      const builtinPath = (path: any) => record(path) && record(path.p) && Array.isArray(path.vertices)
+        && path.vertices.every((vertex: any) => record(vertex) && record(vertex.p));
+      const builtinMasks = (layer: any) => !layer.masks?.length || Array.isArray(layer.masks) && layer.masks.every((mask: any) =>
+        mask && ['rect', 'ellipse'].includes(mask.shape) && (!mask.path || builtinPath(mask.path)) && mask.p && typeof mask.p === 'object');
+      eligibility = { project, depth, version, revision, layers: project.layers, count: project.layers.length, background: project.backgroundFill,
+        mediaLayers, hasVideo: mediaLayers.some((layer: any) => layer.type === 'video'), effectIds,
+        allowed: (!opts.alpha || opts.format === 'prores' && W * H >= 1920 * 1080 && total >= 12
+          && W * (H + 1) * 4 <= 32 * 1024 * 1024 && depth !== 8 && !mediaLayers.length)
+          && W * H * 4 <= 32 * 1024 * 1024 && expressionFree(project.backgroundFill)
+          && (!mediaLayers.length || opts.mblur === false
+            || project.layers.every((layer: any) => layer.type === 'audio' || !layer.mblur))
+          && project.layers.every((layer: any) => layer.type === 'audio' ||
+            ['solid', 'shape', 'text', 'null', 'group', 'image', 'video'].includes(layer.type)
+            && knownEffects(layer) && builtinMasks(layer) && !layer.threeD && !layer.matteSource
+            && !layer.transitionIn && !layer.transitionOut && !layer.d?.animators?.length && expressionFree(layer)) };
+    }
+    // Provider overrides can change without a project edit, even inside a
+    // registry batch. Cache structure only and check active providers live.
+    return eligibility.allowed && (!opts.alpha || !retention.hasStaticPlan)
+      && (!eligibility.effectIds.length || exportEffects.allow(PM, eligibility.effectIds));
+  };
+  const eligible = () => artworkEligible() && frameFontsReady(PM);
+  let failedWrite = false;
+  const releaseReadback = () => {
+    ticket?.dispose(); ticket = null;
+    readback?.dispose(); readback = null; pixels = null; image = null;
+  };
   try {
-    if (preview) { preview.width = W; preview.height = H; }
-    const previewContext = preview?.getContext('2d');
-    if (preview && !previewContext) throw new Error('Could not create export preview');
-    for (let i = 0; i < total; i++) {
-      if (X.cancel) break;
-      const T = t0 + i / opts.fps;
-      await prepareFrame(PM,T,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:opts.alpha?20:16});
-      if (X.cancel) break;
-      // Preserve Canvas2D's established premultiply/unpremultiply rounding for
-      // alpha delivery. Opaque frames have no such round trip to preserve.
-      const image = preview ? renderOpaqueFrame(PM, T, W, H, { mblur: opts.mblur }) : null;
-      const cv = preview || alphaFrame(T, W, H, opts.mblur);
-      const pixels = image ? image.data : cv.getContext('2d').getImageData(0, 0, W, H).data;
-      await chunks(new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength));
-      if (image) previewContext!.putImageData(image, 0, 0);
-      pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
-      ui.set(i + 1, opts.format === 'prores' ? 'ProRes 4444' : 'H.264');
+    preview.width = W; preview.height = H;
+    const previewContext = preview.getContext('2d');
+    if (!previewContext) throw new Error('Could not create export preview');
+    const join = async () => {
+      const writing = pending;
+      if (!writing) return;
+      pending = null;
+      const result = await writing.result;
+      if (!result.ok) { failedWrite = true; throw result.error; }
+      // The preview copies the shared CPU pixels before the next readback may
+      // reuse them. Progress still follows the encoder's acknowledgement.
+      // Alpha already passed through Canvas2D once before delivery. Reusing
+      // its rounded getImageData output here would round the pixels again.
+      if (writing.image) previewContext.putImageData(writing.image, 0, 0);
+      pctx.drawImage(preview, 0, 0, ui.prev.width, ui.prev.height);
+      ui.set(writing.frame + 1, opts.format === 'prores' ? 'ProRes 4444' : 'H.264');
       await new Promise(resolve => setTimeout(resolve, 0));
-    }
-    if (X.cancel) return;
-    if (opts.audio !== false && PM.Audio.hasAudibleLayers(PM.proj)) {
-      const mix = await PM.Audio.renderOffline(t0, t1);
-      if (mix) await chunks(wavBytes(mix), true);
-    }
-    const result = await bridge.finish(token);
-    nativeToken = null;
-    if (result.cancelled) X.cancel = true;
-    else if (!result.path) throw new Error('Could not save video');
-    lastOutputPath = result.path || null;
+    };
+    const prepareNativeFrame = async (time: number) => {
+      retention.key(time); let allowed = artworkEligible();
+      // A video seek can take seconds. Keep it behind the previous write so
+      // an earlier error or cancellation never waits for a speculative seek.
+      if (eligibility!.hasVideo) {
+        await join();
+        if (X.cancel) return { stamp: null, changed: false };
+        // A project or layer edit can arrive during the prior write. Source
+        // stamps must describe the scene that preparation will actually use.
+        retention.key(time); allowed = artworkEligible();
+      }
+      if (X.cancel) return { stamp: null, changed: false };
+      const layers = eligibility!.mediaLayers;
+      if (!allowed || !layers.length) {
+        await prepareExportFrame(PM, time, PM.proj, {mblur:opts.mblur!==false,mbSamples:opts.alpha?20:16,shutter:PM.proj.shutter||.5});
+        return { stamp: undefined, changed: false };
+      }
+      const sources = media.sources(layers);
+      if (sources === null) await join();
+      if (X.cancel) return { stamp: null, changed: false };
+      await prepareExportFrame(PM, time, PM.proj, {mblur:opts.mblur!==false,mbSamples:opts.alpha?20:16,shutter:PM.proj.shutter||.5});
+      const changed = !!sources && !media.sameSources(sources);
+      return { stamp: sources && !changed ? media.prepared(layers, time, sources) : sources === undefined ? undefined : null, changed };
+    };
+    try {
+      let lastKey: string | null = null, retained: Uint8Array | null = null;
+      for (let i = 0; i < total; i++) {
+        if (X.cancel) break;
+        const T = t0 + i / opts.fps;
+        try {
+          if (opts.alpha && (!alphaDescriptor || alphaDescriptor.project !== PM.proj
+              || alphaDescriptor.gl !== PM.GL.gl || alphaDescriptor.depth !== PM.proj.colorDepth)) {
+            releaseReadback(); readbackUnavailable = false;
+            alphaDescriptor = { project: PM.proj, gl: PM.GL.gl, depth: PM.proj.colorDepth };
+          }
+          if (PM.GL.contextLost || PM.GL.gl?.isContextLost?.()) throw new Error('The GPU could not capture the export frame');
+          let key = retention.key(T);
+          if (key !== null || !eligible()) {
+            await join(); releaseReadback();
+            // A bitmap can be replaced or closed while the prior write joins.
+            key = retention.key(T);
+          }
+          if (X.cancel) break;
+          if (key !== null && key === lastKey && retained) {
+            let count = 1;
+            if (bridge.repeat) {
+              // Small batches bound backpressure and keep Cancel responsive.
+              while (count < retention.maxRepeat && i + count < total && retention.key(t0 + (i + count) / opts.fps) === key) count++;
+              try { await bridge.repeat(token, count); } catch (error) { failedWrite = true; throw error; }
+            } else {
+              try { await chunks(retained); } catch (error) { failedWrite = true; throw error; }
+            }
+            i += count - 1;
+            ui.set(i + 1, opts.format === 'prores' ? 'ProRes 4444' : 'H.264');
+            await new Promise(resolve => setTimeout(resolve, 0));
+            continue;
+          }
+          let preparedMedia = await prepareNativeFrame(T);
+          if (X.cancel) break;
+          if (preparedMedia.changed) {
+            await join(); releaseReadback();
+            preparedMedia = await prepareNativeFrame(T);
+            if (X.cancel) break;
+            if (preparedMedia.changed) throw new Error('Media changed while preparing the export frame');
+          }
+          if (preparedMedia.stamp !== null && retention.key(T) === null && eligible()
+              && (!eligibility!.mediaLayers.length || preparedMedia.stamp !== undefined) && !readbackUnavailable) {
+            const mediaStamp = preparedMedia.stamp;
+            const effectsStamp = eligibility!.effectIds.length ? exportEffects.capture(PM, eligibility!.effectIds) : undefined;
+            if (effectsStamp !== null && !readback) {
+              if (opts.alpha) releaseAlphaReadback(alphaCapture);
+              readback = (opts.alpha ? PM.GL.createAlphaReadback?.(W, H) : PM.GL.createOpaqueReadback?.(W, H)) || null;
+              readbackUnavailable = !readback;
+            }
+            if (effectsStamp !== null && readback && (effectsStamp === undefined || exportEffects.valid(PM, effectsStamp))) {
+              const quality = PM.quality, depth = PM.proj.colorDepth, motionBlur = opts.mblur !== false;
+              try {
+                if (!opts.alpha) PM.quality = 1;
+                ticket = readback.begin(T, opts.alpha
+                  ? { transparent: true, mblur: motionBlur, mbSamples: 20, shutter: PM.proj.shutter || .5 }
+                  : { mblur: motionBlur, mbSamples: motionBlur ? 16 : 1,
+                    shutter: PM.proj.shutter || .5, opaque: true, topDownOpaque: true });
+              } finally { if (!opts.alpha) PM.quality = quality; }
+              // Rendering itself may invalidate a font or renderer cache. Stamp
+              // its completed submission, then reject any later source changes.
+              const project = PM.proj, capturedLayers = project.layers, version = PM.animVersion?.(), gl = PM.GL.gl;
+              const capturedKey = retention.key(T), revision = retention.revision, fontsReady = frameFontsReady(PM);
+              const fresh = () => retention.key(T) === capturedKey && retention.revision === revision
+                && project === PM.proj && capturedLayers === PM.proj.layers && version === PM.animVersion?.() && gl === PM.GL.gl
+                && frameFontsReady(PM) === fontsReady && artworkEligible() && document.fonts?.status !== 'loading'
+                && (!opts.alpha || quality === PM.quality && depth === PM.proj.colorDepth)
+                && (mediaStamp === undefined || media.valid(mediaStamp))
+                && (effectsStamp === undefined || exportEffects.valid(PM, effectsStamp));
+              const sourcesUnchanged = (mediaStamp === undefined || media.valid(mediaStamp))
+                && (effectsStamp === undefined || exportEffects.valid(PM, effectsStamp));
+              await join();
+              if (X.cancel) break;
+              if (PM.GL.contextLost || PM.GL.gl?.isContextLost?.()) throw new Error('The GPU could not capture the export frame');
+              if (ticket && sourcesUnchanged && fresh()) {
+                // One reusable raw readback buffer and one PBO. Fill it only
+                // after all prior chunks have been acknowledged.
+                if (!pixels) {
+                  retained = null; lastKey = null;
+                  const length = opts.alpha ? W * (H + 1) * 4 : W * H * 4;
+                  if (opts.alpha && readback.byteLength !== length) throw new Error('The GPU capture target has the wrong size or type');
+                  pixels = new Uint8Array(length);
+                  if (!opts.alpha) image = new ImageData(new Uint8ClampedArray(pixels.buffer), W, H);
+                }
+                let copied = false, retry = false;
+                try { copied = await ticket.readInto(pixels, () => X.cancel); }
+                catch (error) {
+                  if (!opts.alpha || !(error instanceof AlphaReadbackRetryError)
+                      || PM.GL.contextLost || PM.GL.gl?.isContextLost?.()) throw error;
+                  retry = true; readbackUnavailable = true;
+                }
+                if (X.cancel || !retry && !copied) { X.cancel = true; ticket.dispose(); ticket = null; break; }
+                if (PM.GL.contextLost || PM.GL.gl?.isContextLost?.()) throw new Error('The GPU could not capture the export frame');
+                if (!retry && fresh()) {
+                  ticket.dispose(); ticket = null;
+                  retained = null; lastKey = null;
+                  let bytes: Uint8Array = pixels;
+                  if (opts.alpha) {
+                    const visible = captureFramePixels(PM, T, W, H, {}, () => pixels!.subarray(0, W * H * 4));
+                    finishAlphaFrame(visible, W, H, alphaCapture);
+                    const data = previewContext.getImageData(0, 0, W, H).data;
+                    bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+                  }
+                  // Attach rejection handling before preparing another frame,
+                  // including a rejected promise whose reason is undefined.
+                  pending = { frame: i, image: image || undefined, result: chunks(bytes).then<WriteResult, WriteResult>(
+                    () => ({ ok: true }), error => ({ ok: false, error })) };
+                  continue;
+                }
+              }
+              if (!ticket) readbackUnavailable = true;
+              // A source changed, the deferred reader was unavailable, or its
+              // guard failed. Recapture this timestamp through the serial path.
+              releaseReadback(); retained = null; lastKey = null;
+              preparedMedia = await prepareNativeFrame(T);
+              if (X.cancel) break;
+              if (preparedMedia.changed) throw new Error('Media changed while preparing the export frame');
+            }
+          }
+          await join();
+          releaseReadback();
+          if (X.cancel) break;
+          // Alpha preserves Canvas2D's established rounding. Static artwork and
+          // unsupported contexts keep their existing serial/repeat path.
+          const captured = opts.alpha ? null : renderOpaqueFrame(PM, T, W, H, { mblur: opts.mblur });
+          const cv = captured ? preview : alphaFrame(T, W, H, opts.mblur, alphaCapture,
+            fastAlphaCapture(W, H, retention.key(T) === null ? total : 0));
+          // Cached static bytes own their pixels; repeats no longer need the
+          // raw readback or its GPU target. Keep unavailable factories cached.
+          if (key !== null && (i + 1 >= total || retention.key(t0 + (i + 1) / opts.fps) === key)
+              && alphaCapture?.readback?.session) releaseAlphaReadback(alphaCapture);
+          const data = captured ? captured.data : previewContext.getImageData(0, 0, W, H).data;
+          const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+          try { await chunks(bytes, false, key !== null && !!bridge.repeat); }
+          catch (error) { failedWrite = true; throw error; }
+          retained = key !== null ? bytes : null; lastKey = key;
+          if (captured) previewContext.putImageData(captured, 0, 0);
+          pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
+          ui.set(i + 1, opts.format === 'prores' ? 'ProRes 4444' : 'H.264');
+          await new Promise(resolve => setTimeout(resolve, 0));
+        } catch (error) {
+          // An earlier frame's write takes precedence over speculative capture
+          // errors. Drain it before cancellation or preview restoration.
+          await join();
+          if (X.cancel && !failedWrite) return;
+          throw error;
+        }
+      }
+      await join();
+      if (X.cancel) return;
+      if (opts.audio !== false && PM.Audio.hasAudibleLayers(PM.proj)) {
+        const mix = await PM.Audio.renderOffline(t0, t1);
+        if (mix) await chunks(wavBytes(mix), true);
+      }
+      const result = await bridge.finish(token);
+      nativeToken = null;
+      if (result.cancelled) X.cancel = true;
+      else if (!result.path) throw new Error('Could not save video');
+      lastOutputPath = result.path || null;
+    } finally { await join(); }
   } finally {
-    if (preview) { preview.width = 0; preview.height = 0; }
+    releaseReadback(); retention.dispose(); media.dispose();
+    preview.width = 0; preview.height = 0;
+    releaseAlphaReadback(alphaCapture);
+    if (alphaCapture) alphaCapture.image = undefined;
   }
 }
 
@@ -1040,14 +1264,12 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
     },
     error: (e: any) => { encoderError = e; },
   });
+  const retention = trackStaticExport(PM, opts.mblur !== false);
+  let retained: VideoFrame | null = null, lastKey: string | null = null;
   try {
-  const cfgs: any = [
-    { codec: 'vp09.00.31.08', id: 'V_VP9' },
-    { codec: 'vp8', id: 'V_VP8' },
-  ];
   let chosen: any = null;
-  for (const c of cfgs) {
-    const cfg: any = { codec: c.codec, width: W, height: H, bitrate, framerate: opts.fps, latencyMode: 'quality' };
+  for (const c of WEBM_VIDEO_CODECS) {
+    const cfg: any = webmVideoConfig(c.codec, W, H, bitrate, opts.fps);
     const sup: any = await window.VideoEncoder.isConfigSupported(cfg).catch(() => null);
     if (sup && sup.supported) { enc.configure(cfg); chosen = c; configured = true; break; }
   }
@@ -1056,17 +1278,32 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
   for (let i: any = 0; i < total; i++) {
     if (X.cancel) break;
     const T: any = t0 + i / opts.fps;
-    await prepareFrame(PM,T,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:20});
-    const cv: any = renderInto(T, W, H, opts.mblur);
-    const frame: any = new window.VideoFrame(cv, { timestamp: Math.round(i / opts.fps * 1e6), duration: Math.round(1e6 / opts.fps) });
-    try { if (encoderError) throw encoderError; enc.encode(frame, { keyFrame: i % Math.round(opts.fps * 2) === 0 }); } finally { frame.close(); }
+    if (PM.GL.contextLost || PM.GL.gl?.isContextLost?.()) throw new Error('The GPU could not capture the export frame');
+    const key = retention.key(T);
+    let cv: any;
+    if (key === null || key !== lastKey || !retained) {
+      retained?.close(); retained = null;
+      await prepareExportFrame(PM,T,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.format==='png'&&!opts.alpha?16:20,shutter:PM.proj.shutter||.5});
+      if (X.cancel) break;
+      cv = renderInto(T, W, H, opts.mblur);
+    }
+    const frame: VideoFrame = new window.VideoFrame(retained || cv, webmFrameTiming(i, opts.fps));
+    try {
+      if (key !== null && !retained) { retained = frame.clone(); lastKey = key; }
+      if (encoderError) throw encoderError;
+      enc.encode(frame, { keyFrame: webmKeyFrame(i, opts.fps) });
+    } finally { frame.close(); }
     if (i % 3 === 0) {
-      pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
+      pctx.drawImage(retained || cv, 0, 0, ui.prev.width, ui.prev.height);
       ui.set(i + 1, 'Rendering');
       await new Promise((r: any) => window.setTimeout(r, 0));
     }
-    if (enc.encodeQueueSize > 12) await new Promise((r: any) => window.setTimeout(r, 6));
+    while (enc.encodeQueueSize > WEBM_ENCODE_QUEUE_LIMIT && !X.cancel && !encoderError) {
+      await new Promise((r: any) => window.setTimeout(r, 6));
+    }
+    if (encoderError) throw encoderError;
   }
+  if (X.cancel) return;
   await enc.flush();
   if (encoderError) throw encoderError;
   enc.close();
@@ -1085,7 +1322,10 @@ async function exportWebCodecs({ opts, W, H, t0, t1, total, ui, pctx, bitrate }:
   }
   const blob: any = muxWebM(frames, { width: W, height: H, fps: opts.fps, codecId: chosen.id, audio: audioPayload });
   if (!await deliver(blob, `${PM.proj.name || 'powermove'}.webm`)) X.cancel = true;
-  } finally { if (enc.state !== 'closed') enc.close(); }
+  } finally {
+    retained?.close(); retention.dispose();
+    if (enc.state !== 'closed') enc.close();
+  }
 }
 
 async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: any) {
@@ -1125,7 +1365,7 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: 
     for (let i: any = 0; i < total; i++) {
       if (X.cancel) break;
       const T: any = t0 + i / opts.fps;
-    await prepareFrame(PM,T,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:20});
+    await prepareExportFrame(PM,T,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.format==='png'&&!opts.alpha?16:20,shutter:PM.proj.shutter||.5});
       const cv: any = renderInto(T, W, H, opts.mblur);
       if (track.requestFrame) track.requestFrame();
       const target: any = start + i * frameDur;
@@ -1152,28 +1392,100 @@ async function exportRecorder({ opts, W, H, t0, t1, total, ui, pctx, bitrate }: 
 
 async function exportPNGs({ opts, W, H, t0, total, ui, pctx }: any) {
   const dir = sequenceDirectory;
+  const retention = trackStaticExport(PM, opts.mblur !== false);
+  const captureCanvas = window.document.createElement('canvas');
+  const alphaCapture: AlphaCapture | undefined = opts.alpha ? { canvas: captureCanvas } : undefined;
+  let lastKey: string | null = null, retained: Blob | null = null;
+  type DeliveryResult = { status: 'saved' | 'cancelled' } | { status: 'failed'; error: unknown };
+  type PendingPNG = { frame: number; settled: boolean; result: Promise<DeliveryResult> };
+  let pending: PendingPNG | null = null;
+  const save = async (blob: Blob, name: string) => {
+    if (!dir) return await deliver(blob, name);
+    const fh: any = await dir.getFileHandle(name, { create: true });
+    const writer: any = await fh.createWritable();
+    try { await writer.write(blob); await writer.close(); }
+    catch (error) {
+      try { await writer.abort?.(); } catch { /* Keep the original write error. */ }
+      throw error;
+    }
+    return true;
+  };
+  const join = async (): Promise<boolean> => {
+    if (!pending) return true;
+    const delivery = pending;
+    const outcome = await delivery.result; pending = null;
+    if (outcome.status === 'failed') throw outcome.error;
+    if (outcome.status === 'cancelled') { X.cancel = true; return false; }
+    ui.set(delivery.frame + 1, dir ? 'writing to folder' : 'downloading');
+    return true;
+  };
+  try {
   for (let i: any = 0; i < total; i++) {
     if (X.cancel) break;
+    if (pending?.settled && !await join()) return;
     const T: any = t0 + i / opts.fps;
-    await prepareFrame(PM,T,PM.proj,{width:W,height:H,mblur:opts.mblur,mbSamples:opts.alpha?20:16});
     let cv: any;
-    if (opts.alpha) cv = alphaFrame(T, W, H, opts.mblur);
-    if (!cv) cv = PM.renderFrameTo(T, W, H, { mblur: opts.mblur });
-    const blob: Blob = await new Promise((resolve, reject) => cv.toBlob((encoded: Blob | null) =>
-      encoded ? resolve(encoded) : reject(new Error('Could not encode frame')), 'image/png'));
+    let blob: Blob | null = null;
+    let speculative = false, reused = false, capturedKey: string | null = null, capturedRevision = 0, capturedFontsReady = false;
+    try {
+      // Bound the two PNGs' memory and avoid starting a video seek or font wait.
+      // Recheck the live project so edits cannot retain an older eligibility.
+      if ((W * H * 4 > 32 * 1024 * 1024 || !frameFontsReady(PM)
+          || PM.proj.layers.some((layer: any) => layer.type === 'video' || layer.type === 'precomp'))
+          && !await join()) return;
+      if (X.cancel) break;
+      if (PM.GL.contextLost || PM.GL.gl?.isContextLost?.()) throw new Error('The GPU could not capture the export frame');
+      const key = retention.key(T);
+      speculative = pending !== null;
+      blob = key !== null && key === lastKey ? retained : null;
+      reused = blob !== null;
+      if (!blob) {
+        await prepareExportFrame(PM,T,PM.proj,{mblur:opts.mblur!==false,mbSamples:opts.format==='png'&&!opts.alpha?16:20,shutter:PM.proj.shutter||.5});
+        if (X.cancel) break;
+        const cacheKey = retention.key(T);
+        if (opts.alpha) cv = alphaFrame(T, W, H, opts.mblur, alphaCapture, fastAlphaCapture(W, H, cacheKey === null ? total : 0));
+        if (cacheKey !== null && (i + 1 >= total || retention.key(t0 + (i + 1) / opts.fps) === cacheKey)
+            && alphaCapture?.readback?.session) releaseAlphaReadback(alphaCapture);
+        if (!cv) cv = PM.renderFrameTo(T, W, H, { mblur: opts.mblur }, captureCanvas);
+        capturedKey = retention.key(T); capturedRevision = retention.revision;
+        capturedFontsReady = frameFontsReady(PM);
+        blob = await new Promise<Blob>((resolve, reject) => cv.toBlob((encoded: Blob | null) =>
+          encoded ? resolve(encoded) : reject(new Error('Could not encode frame')), 'image/png'));
+        retained = cacheKey !== null ? blob : null; lastKey = cacheKey;
+      } else { capturedKey = key; capturedRevision = retention.revision; capturedFontsReady = frameFontsReady(PM); }
+    } catch (error) {
+      // The earlier durable write's error/cancellation takes precedence over a
+      // speculative capture failure and must settle before restoring preview.
+      if (pending && (!await join() || X.cancel)) return;
+      throw error;
+    }
+    if (!await join()) return;
+    if (X.cancel) break;
+    if ((speculative || reused) && (PM.GL.contextLost || PM.GL.gl?.isContextLost?.())) throw new Error('The GPU could not capture the export frame');
+    if ((speculative || reused) && (retention.key(T) !== capturedKey || retention.revision !== capturedRevision || frameFontsReady(PM) !== capturedFontsReady)) {
+      // Edits while the preceding file was saving belong to this frame, just
+      // as on the serial path. Retry without a pending write or another retry.
+      retained = null; lastKey = null; i--; continue;
+    }
     const name: any = `${PM.proj.name || 'frame'}_${String(i).padStart(5, '0')}.png`;
-    if (dir) {
-      const fh: any = await dir.getFileHandle(name, { create: true });
-      const w: any = await fh.createWritable();
-      try { await w.write(blob); await w.close(); }
-      catch (error) {
-        try { await w.abort?.(); } catch { /* Keep the original write error. */ }
-        throw error;
-      }
-    } else if (!await deliver(blob, name)) { X.cancel = true; return; }
-    pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
-    ui.set(i + 1, dir ? 'writing to folder' : 'downloading');
+    // The preview keeps its own copied pixels while this surface captures the
+    // next frame. Progress advances only after the corresponding save succeeds.
+    if (cv) pctx.drawImage(cv, 0, 0, ui.prev.width, ui.prev.height);
+    const next: PendingPNG = { frame: i, settled: false, result: save(blob!, name).then<DeliveryResult, DeliveryResult>(
+      saved => { next.settled = true; return { status: saved ? 'saved' : 'cancelled' }; },
+      error => { next.settled = true; return { status: 'failed', error }; }) };
+    pending = next;
     await new Promise((r: any) => window.setTimeout(r, 0));
+  }
+  await join();
+  } finally {
+    try { await join(); }
+    finally {
+      retention.dispose();
+      captureCanvas.width = 0; captureCanvas.height = 0;
+      releaseAlphaReadback(alphaCapture);
+      if (alphaCapture) alphaCapture.image = undefined;
+    }
   }
 }
 
@@ -1192,22 +1504,10 @@ X.run = (opts: any) => run(Object.assign({}, X.defaults(), { name: PM.proj.name 
 X.muxWebM = muxWebM;
 
 /* Await source decoding before an agent reviews a video frame. */
-X.snapshotAsync = async (T: number, maxW = 480) => {
+X.snapshotAsync = (time: number, maxWidth = 480, options: { signal?: AbortSignal } = {}) => {
   // "Use New Engine": the engine draws it (engine-connection/app-captures.ts).
-  if (PM.EngineCaptures) return PM.EngineCaptures.snapshotAsync(T, maxW);
-  if (X.busy || PM.agentFrameCapture) throw new Error('Wait for the current frame capture or export to finish.');
-  const wasPlaying = PM.playing;
-  PM.pause();
-  PM.agentFrameCapture = true;
-  try {
-    const scale=Math.min(1,maxW/PM.proj.w);await prepareFrame(PM,T,PM.proj,{width:Math.max(2,Math.round(PM.proj.w*scale)),height:Math.max(2,Math.round(PM.proj.h*scale)),mblur:false});
-    return X.snapshot(T, maxW);
-  } finally {
-    PM.agentFrameCapture = false;
-    PM.preparedVideoFrames = null;
-    PM.invalidate('render');
-    if (wasPlaying) PM.play();
-  }
+  if (PM.EngineCaptures) return PM.EngineCaptures.snapshotAsync(time, maxWidth, options);
+  return captureAgentFrame(PM, X, time, maxWidth, options);
 };
 
 /* Fast still capture used by the agent's `look` tool. */

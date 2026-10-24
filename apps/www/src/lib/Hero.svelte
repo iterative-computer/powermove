@@ -4,28 +4,17 @@
   import { GITHUB } from '$lib/links';
 
   type Player = { duration: number; seek(time: number): void; destroy(): void };
-  type Clip = { name: string; from: number; to: number };
 
   const FPS = 30;
   const DURATION = 15;
-  // Where /hero/scene.json cuts from one noun to the next.
-  const cuts = [3, 6, 9, 12];
   // The band every frame's type stays inside (measured x 219–1718, y 411–631),
   // so the type, not the 1080p frame, decides how big the headline sets.
   const CROP = '200 400 1520 240';
 
   let root: SVGSVGElement | undefined = $state();
-  let scrubber: HTMLElement | undefined = $state();
   let ready = $state(false);
   let time = $state(0);
   let playing = $state(true);
-  let scrubbing = $state(false);
-
-  const frames = $derived(Math.round(time * FPS));
-  const timecode = $derived(
-    [Math.floor(frames / FPS / 60), Math.floor(frames / FPS) % 60, frames % FPS]
-      .map(n => String(n).padStart(2, '0')).join(':'),
-  );
 
   let seek: (t: number) => void = () => {};
   let sync = () => {};
@@ -60,7 +49,7 @@
     sync = () => {
       cancelAnimationFrame(frame); last = 0;
       if (!player || cancelled) return;
-      if (playing && !scrubbing && visible && !document.hidden) frame = requestAnimationFrame(tick);
+      if (playing && visible && !document.hidden) frame = requestAnimationFrame(tick);
       else seek(time);
     };
     const observer = new IntersectionObserver(([entry]) => { visible = entry.isIntersecting; sync(); });
@@ -98,33 +87,10 @@
   });
 
   // Declared after onMount so it first runs once the player wiring exists.
-  $effect(() => { void playing; void scrubbing; untrack(sync); });
-
-  function timeAt(x: number) {
-    const box = scrubber!.getBoundingClientRect();
-    return ((x - box.left) / box.width) * DURATION;
-  }
-  function scrubStart(event: PointerEvent) {
-    if (event.button !== 0) return;
-    scrubber!.setPointerCapture(event.pointerId);
-    scrubbing = true;
-    seek(timeAt(event.clientX));
-  }
-  function scrubMove(event: PointerEvent) {
-    if (scrubbing) seek(timeAt(event.clientX));
-  }
-  function scrubEnd() { scrubbing = false; }
-  function keys(event: KeyboardEvent) {
-    const step = event.shiftKey ? 1 : 1 / FPS;
-    const to = { ArrowLeft: time - step, ArrowRight: time + step, Home: 0, End: DURATION }[event.key];
-    if (to !== undefined) { playing = false; seek(to); }
-    else if (event.key === ' ' || event.key === 'k') playing = !playing;
-    else return;
-    event.preventDefault();
-  }
+  $effect(() => { void playing; untrack(sync); });
 </script>
 
-<div class="hero-art" data-paused={playing ? undefined : ''} data-scrubbing={scrubbing ? '' : undefined} style:--p={time / DURATION}>
+<div class="hero-art">
   <button class="artboard" type="button" aria-label={playing ? 'Pause the headline animation' : 'Play the headline animation'} onclick={() => (playing = !playing)}>
     {#if !ready}
       <!-- The player's opening hold, laid out as separate layers so the handoff
@@ -146,30 +112,10 @@
     <svg bind:this={root} class="hero-vector" viewBox={CROP} aria-hidden="true" style:visibility={ready ? 'visible' : 'hidden'}></svg>
   </button>
 
-  <!-- One hairline for the whole timeline. The cuts are ticks, the playhead is
-       the only colour, and the timecode surfaces only when it's being read. -->
-  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div
-    class="scrubber"
-    bind:this={scrubber}
-    role="slider"
-    tabindex="0"
-    aria-label="Headline animation playhead"
-    aria-valuemin={0}
-    aria-valuemax={DURATION}
-    aria-valuenow={Number(time.toFixed(2))}
-    aria-valuetext={timecode}
-    onpointerdown={scrubStart}
-    onpointermove={scrubMove}
-    onpointerup={scrubEnd}
-    onpointercancel={scrubEnd}
-    onkeydown={keys}
-  >
-    <span class="scrub-track" aria-hidden="true"></span>
-    {#each cuts as cut (cut)}<span class="scrub-cut" style:--t={cut / DURATION} aria-hidden="true"></span>{/each}
-    <span class="scrub-head" aria-hidden="true"><span class="scrub-time tabular">{timecode}</span></span>
-  </div>
+
 </div>
+
+<p class="hero-description">Powermove is a video editing app that lets you shape the featureset. Simply connect an agent and ask.</p>
 
 <div class="hero-cta">
   <a class="pill light" href={download.href}>Download for Mac</a>

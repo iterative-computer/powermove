@@ -8,7 +8,7 @@ test('a panel opens in a native window, keeps edits, and returns to the layout',
   await library.getByRole('searchbox', { name: 'Search panels' }).fill('Notes');
   await library.getByRole('button', { name: 'Add Notes to workspace', exact: true }).click();
   await expect(library).toBeHidden();
-  const notes = page.locator('#panel-notes').getByRole('textbox', { name: 'Project notes', exact: true });
+  const notes = page.locator('#body #panel-notes').getByRole('textbox', { name: 'Project notes', exact: true });
   await notes.fill('Before pop-out');
   await chooseNativeMenu(session, 'Pop out to window', () => page.locator('#panel-notes > header').click({ button: 'right' }));
   await expect.poll(() => app.windows().length).toBe(2);

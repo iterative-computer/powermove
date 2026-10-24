@@ -92,15 +92,22 @@ test('text, shader, extension, blend, and mask stopwatches animate their real va
         : type === 'extension' ? ['x.objectColor', 'x.autoRotate', 'x.size']
         : ['l.blend', 'l.mblur', `${layer.fx[0].id}.$enabled`, `m.${layer.masks[0].id}.on`, `m.${layer.masks[0].id}.shape`, `m.${layer.masks[0].id}.mode`];
     }, type);
+    if (type === 'extension') {
+      const more = page.locator('[data-parameter-prefix="x"] .control-disclosure');
+      await expect(more).toBeVisible();
+      if (!await more.evaluate(element => (element as HTMLDetailsElement).open)) await more.locator('summary').click();
+    }
     for (const path of paths) {
-      const button = page.locator(`[data-property-path="${path}"]`);
-      // Numeric channel rows use their channel wrapper and the same leading stopwatch.
-      const control = await button.count() ? button : page.locator(`[data-channel="${path}"] .property-stopwatch`);
-      // Later parameters sit in the section's closed More disclosure; open it
-      // the way a user does before reaching for the stopwatch.
-      if (await control.evaluate(element => !!element.closest('details:not([open])'))) {
-        await control.locator('xpath=ancestor::details[not(@open)][1]/summary').click();
+      if (path.endsWith('.$enabled')) {
+        const effectId = path.split('.')[0];
+        const expand = page.locator(`[data-effect-id="${effectId}"] .fx-expand`);
+        if (await expand.getAttribute('aria-expanded') !== 'true') await expand.click();
+        const more = page.locator(`[data-parameter-prefix="${effectId}"] .control-disclosure`);
+        await expect(more).toBeVisible();
+        if (!await more.evaluate(element => (element as HTMLDetailsElement).open)) await more.locator('summary').click();
       }
+      // Numeric channel rows use their channel wrapper and the same leading stopwatch.
+      const control = page.locator(`[data-property-path="${path}"], [data-channel="${path}"] .property-stopwatch`);
       await control.click();
       await expect(control).toHaveAttribute('aria-pressed', 'true');
       expect(await page.evaluate(path => {

@@ -22,6 +22,7 @@ const INTERACTIVE: ToolbarButton[] = [
    Keep them visibly separated so they never imply a persistent canvas mode. */
 const CREATE: ToolbarButton[] = [
   { icon: 'solid', title: 'New solid (Command+Y)', command: 'newSolid' },
+  { icon: 'wand', title: 'New adjustment layer (Command+Option+Y)', command: 'newAdjustment' },
   { icon: 'frame', title: 'New null object (Command+Option+Shift+Y)', command: 'newNull' }
 ];
 

@@ -16,11 +16,13 @@ class FakeIpcMain extends EventEmitter {}
 
 class FakeWebContents extends EventEmitter {
   destroyed = false;
+  crashed = false;
   readonly requests: AgentToolRequestEvent[] = [];
 
   constructor(private readonly ipc: FakeIpcMain) { super(); }
 
   isDestroyed(): boolean { return this.destroyed; }
+  isCrashed(): boolean { return this.crashed; }
 
   send(channel: string, request: AgentToolRequestEvent): void {
     expect(channel).toBe(IPC.agentToolRequest);
@@ -58,6 +60,71 @@ async function rpc(child: ChildProcessWithoutNullStreams, message: Record<string
 }
 
 describe('native Powermove agent tool bridge', () => {
+  it('publishes via the authenticated renderer lane in app and planning runs without widening edit access', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '' });
+    try {
+      const session = await bridge.openSession({ runId: 'visual-planning', owner: owner as never, baseRevision: 0, context:'app', inspectionOnly:true });
+      expect((await bridge.callTool(session,'publish_visual_reply',{title:'Palette',html:'<h1>Palette</h1>'})).ok).toBe(true);
+      expect(owner.requests[0]?.tool).toBe('publish_visual_reply');
+      await expect(bridge.callTool(session,'apply_commands',{commands:[]})).rejects.toThrow('only inspect');
+      await session.finish(false);
+      await expect(bridge.callTool(session,'publish_visual_reply',{})).rejects.toThrow('not active');
+    } finally { await bridge.shutdown(); }
+  });
+
+  it('starts the render utility for project runs, including read-only frame inspection', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    let finishStartup!: () => void;
+    const startup = new Promise<void>((resolve) => { finishStartup = resolve; });
+    const prepareRun = vi.fn((_run: string) => startup);
+    const finishRun = vi.fn(async (_run: string) => {});
+    const cancelRun = vi.fn(async (_run: string) => 0);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      mcpServerPath: '',
+      engineJobs: { available: true, prepareRun, finishRun, cancelRun } as never
+    });
+    try {
+      const project = await bridge.openSession({ runId: 'editable', owner: owner as never, baseRevision: 0 });
+      expect(project.runId).toBe('editable');
+      await Promise.resolve();
+      expect(prepareRun).toHaveBeenCalledWith('editable');
+      await bridge.openSession({ runId: 'inspect-plan', owner: owner as never, baseRevision: 0, inspectionOnly: true });
+      await bridge.openSession({ runId: 'app-run1', owner: owner as never, baseRevision: 0, context: 'app' });
+      await bridge.openSession({ runId: 'transaction', owner: owner as never, baseRevision: 0, transactionSession: project });
+      expect(prepareRun).toHaveBeenCalledTimes(2);
+      expect(prepareRun).toHaveBeenCalledWith('inspect-plan');
+      await bridge.callTool(project, 'get_project_state', {});
+      await Promise.resolve();
+      expect(prepareRun).toHaveBeenCalledTimes(3);
+      await project.finish(true);
+      await Promise.resolve();
+      expect(finishRun).toHaveBeenCalledWith('editable');
+      expect(cancelRun).not.toHaveBeenCalledWith('editable');
+    } finally {
+      finishStartup();
+      await bridge.shutdown();
+    }
+  });
+
+  it('releases a warm run if its renderer disappears before finishing', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    const prepareRun = vi.fn(async (_run: string) => {});
+    const cancelRun = vi.fn(async (_run: string) => 0);
+    const bridge = new PowermoveAgentToolBridge(ipc as never, {
+      mcpServerPath: '', engineJobs: { available: true, prepareRun, cancelRun } as never
+    });
+    try {
+      const session = await bridge.openSession({ runId: 'owner-gone', owner: owner as never, baseRevision: 0 });
+      await Promise.resolve();
+      owner.emit('render-process-gone');
+      await Promise.resolve();
+      expect(session.isClosed()).toBe(true);
+      expect(cancelRun).toHaveBeenCalledWith('owner-gone');
+      expect(owner.listenerCount('render-process-gone')).toBe(0);
+    } finally { await bridge.shutdown(); }
+  });
+
   it('routes default delivery tools through the production exporter and keeps planning read-only', async () => {
     const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
     const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '' });
@@ -102,14 +169,14 @@ describe('native Powermove agent tool bridge', () => {
     expect(() => legacy({ format: 'webm-vp9' })).toThrow('not format webm-vp9');
   });
 
-  it('routes export_video and render_frames through the job engine and falls back when it routes', async () => {
+  it('uses the enabled job engine even during recovery and never falls back', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);
     const project = { id: 'P', name: 'P', compId: 'P-root', w: 320, h: 180, fps: 30, dur: 1, layers: [] };
     // The renderer stand-in answers the private plan and context tools.
     owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
       this.requests.push(request);
-      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(project), home: false }
+      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(project), home: false, compat: ['rasterOverride'] }
         : request.tool === '__engine_frames_plan' ? { times: [0, 0.5], width: 320, project: JSON.stringify(project), revision: 4 }
         : { tool: request.tool };
       queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 4 }));
@@ -118,13 +185,13 @@ describe('native Powermove agent tool bridge', () => {
     let route = false;
     const engineJobs = {
       available: true,
-      exportVideo: vi.fn(async (_owner: number, _run: string, _project: unknown, input: { mode?: string }) => route
-        ? { status: 'routed' as const, reason: 'text layer' }
-        : input.mode === 'async' ? { status: 'queued' as const, jobId: 'job-1' }
-        : { status: 'done' as const, jobId: 'job-1', path: '/exports/P.mp4', width: 320, height: 180, fps: 30 }),
-      renderFrames: vi.fn(async () => route
-        ? { status: 'routed' as const, reason: 'text layer' }
-        : { status: 'rendered' as const, revision: 1, queuedMs: 0, images: [0, 0.5].map((time) => ({ time, data: new Uint8Array([1]), mimeType: 'image/jpeg' as const, width: 320, height: 180 })) }),
+      exportVideo: vi.fn(async (_owner: number, _run: string, _project: unknown, input: { mode?: string }) => {
+        if (route) throw new Error('unsupported: text layer');
+        return input.mode === 'async' ? { status: 'queued' as const, jobId: 'job-1' }
+        : { status: 'done' as const, jobId: 'job-1', path: '/exports/P.mp4', width: 320, height: 180, fps: 30 }; }),
+      renderFrames: vi.fn(async () => {
+        if (route) throw new Error('unsupported: text layer');
+        return { status: 'rendered' as const, revision: 1, queuedMs: 0, images: [0, 0.5].map((time) => ({ time, data: new Uint8Array([1]), mimeType: 'image/jpeg' as const, width: 320, height: 180 })) }; }),
       status: vi.fn(() => ({ jobId: 'job-1', state: 'running' as const, progress: 0.5 })),
       cancelRun: vi.fn(async () => 1)
     };
@@ -133,7 +200,8 @@ describe('native Powermove agent tool bridge', () => {
       const session = await bridge.openSession({ runId: 'engine-run', owner: owner as never, baseRevision: 0 });
       const done = await bridge.callTool(session, 'export_video', { name: 'P', audio: false });
       expect(JSON.parse((done.content[0] as { text: string }).text)).toEqual({ path: '/exports/P.mp4', projectId: 'P', width: 320, height: 180, fps: 30, jobId: 'job-1' });
-      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, { name: 'P', format: 'mp4', range: 'all', audio: false, motionBlur: true, alpha: false, mode: 'wait' }, undefined);
+      // The window's raster override goes with the job (its layers are drawn by the window).
+      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, { name: 'P', format: 'mp4', range: 'all', audio: false, motionBlur: true, alpha: false, mode: 'wait' }, undefined, ['rasterOverride']);
       const queued = await bridge.callTool(session, 'export_video', { mode: 'async' });
       expect(JSON.parse((queued.content[0] as { text: string }).text)).toEqual({ status: 'queued', jobId: 'job-1', projectId: 'P' });
       const status = await bridge.callTool(session, 'get_render_status', { jobId: 'job-1' });
@@ -143,25 +211,46 @@ describe('native Powermove agent tool bridge', () => {
       expect(frames.content.filter((item) => item.type === 'image')).toHaveLength(2);
       expect(frames.revision).toBe(4);
       expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', 'get_project_state', '__mcp_context', '__engine_frames_plan']);
-      // Routed: the legacy exporter and capture run, without the engine-only mode.
       route = true;
+      engineJobs.available = false; // recovery cannot authorize legacy rendering
       owner.requests.length = 0;
-      await bridge.callTool(session, 'export_video', { audio: true, mode: 'async' });
-      await bridge.callTool(session, 'render_frames', { times: [0] });
-      expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', '__mcp_export_video', '__engine_frames_plan', 'render_frames']);
-      expect(owner.requests[2]!.arguments).toEqual({ format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false });
-      // Presets the current exporter writes fall back to it too.
-      owner.requests.length = 0;
-      await bridge.callTool(session, 'export_video', { preset: 'web-h264' });
-      expect(owner.requests.at(-1)!.arguments).toEqual({ format: 'mp4', range: 'all', audio: true, motionBlur: true, alpha: false });
-      await bridge.callTool(session, 'export_video', { preset: 'master-alpha', name: 'Key' });
-      expect(owner.requests.at(-1)!.arguments).toEqual({ name: 'Key', format: 'prores', range: 'all', audio: true, motionBlur: true, alpha: true });
-      await expect(bridge.callTool(session, 'export_video', { preset: 'web-hevc' })).rejects.toThrow('not preset web-hevc');
-      await expect(bridge.callTool(session, 'export_video', { alpha: true })).rejects.toThrow('ProRes');
+      await expect(bridge.callTool(session, 'export_video', { audio: true, mode: 'async' })).rejects.toThrow('unsupported: text layer');
+      await expect(bridge.callTool(session, 'render_frames', { times: [0] })).rejects.toThrow('unsupported: text layer');
+      expect(owner.requests.map(r => r.tool)).toEqual(['get_project_state', '__mcp_context', '__engine_frames_plan']);
       await expect(bridge.callTool(session, 'export_video', { codec: 'x' })).rejects.toThrow('does not take codec');
       // Rolling back the run cancels its jobs.
       await session.finish(false);
       expect(engineJobs.cancelRun).toHaveBeenCalledWith('engine-run');
+    } finally { await bridge.shutdown(); }
+  });
+
+  it('exports the full project through the job engine when the agent context is only an index', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    // Over 2 MB of layers: the full document crosses the ordinary tool reply bound.
+    const project = { id: 'P', name: 'P', compId: 'P-root', w: 320, h: 180, fps: 30, dur: 1,
+      layers: Array.from({ length: 3 }, (_, i) => ({ id: `L${i}`, name: 'x'.repeat(1_000_000) })) };
+    const index = { id: 'P', name: 'P', agentSnapshot: { complete: false, note: 'index' }, layerCount: 3, layers: [] };
+    owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
+      this.requests.push(request);
+      const value = request.tool === '__mcp_context' ? { projectId: 'P', projectJSON: JSON.stringify(index), home: false }
+        : request.tool === '__engine_frames_plan' ? { times: [0], width: 720, project: JSON.stringify(project), revision: 4 }
+        : { tool: request.tool };
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 4 }));
+    } as never;
+    (owner as unknown as { id: number }).id = 3;
+    const engineJobs = {
+      available: true,
+      exportVideo: vi.fn(async () => ({ status: 'done' as const, jobId: 'job-1', path: '/exports/P.mp4', width: 320, height: 180, fps: 30 })),
+      renderFrames: vi.fn(), status: vi.fn(), cancelRun: vi.fn(async () => 0)
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', engineJobs: engineJobs as never });
+    try {
+      const session = await bridge.openSession({ runId: 'engine-run', owner: owner as never, baseRevision: 0 });
+      const done = await bridge.callTool(session, 'export_video', { name: 'P' });
+      expect(JSON.parse((done.content[0] as { text: string }).text)).toMatchObject({ path: '/exports/P.mp4', projectId: 'P' });
+      expect(engineJobs.exportVideo).toHaveBeenCalledWith(3, 'engine-run', project, expect.anything(), undefined, []);
+      expect(owner.requests.map((r) => r.tool)).toEqual(['get_project_state', '__mcp_context', '__engine_frames_plan']);
     } finally { await bridge.shutdown(); }
   });
 
@@ -201,10 +290,10 @@ describe('native Powermove agent tool bridge', () => {
       expect(headless).toMatchObject({ valid: true, compiled: true });
       expect(headless.warnings[0]).toContain('the viewer and exports');
       expect(headless.warnings[0]).toContain('pm-cli, headless renders) cannot draw it');
-      // The new engine off: the renderer's own validator, as before.
+      // Recovery keeps native validation; availability is not the engine setting.
       engineJobs.available = false;
       await bridge.callTool(session, 'validate_effect', { definition });
-      expect(owner.requests.at(-1)!.tool).toBe('validate_effect');
+      expect(owner.requests.at(-1)!.tool).toBe('__validate_effect_snapshot');
     } finally { await bridge.shutdown(); }
   });
 
@@ -257,7 +346,8 @@ describe('native Powermove agent tool bridge', () => {
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
       ...ORCHESTRATION_TOOL_NAMES,
-      'save_project', 'export_video', 'get_render_status', 'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'list_media', 'replace_media', 'import_media', 'manage_media', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
+      'publish_visual_reply',
+      'get_timeline', 'edit_layer_strips', 'manage_project', 'save_project', 'export_video', 'get_render_status', 'get_3d_scene', 'edit_3d', 'fork_builtin_extension', 'get_project_state', 'list_media', 'replace_media', 'import_media', 'manage_media', 'select_layers', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'open_panel', 'get_panel_state', 'interact_panel', 'capture_panel', 'computer_use_panel', 'get_workspace_state', 'render_frames', 'apply_commands', 'edit_video', 'rollback_changes', 'validate_effect', 'stage_fork_rebase',
       'probe_media', 'sample_media_frames', 'media_contact_sheet', 'media_waveform', 'transcribe_media', 'check_project',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish',
       'generate_captions', 'export_captions'
@@ -302,7 +392,8 @@ describe('native Powermove agent tool bridge', () => {
     const listed = await rpc(child, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
     expect(listed.result.tools.map((tool: any) => tool.name)).toEqual([
       ...ORCHESTRATION_TOOL_NAMES,
-      'fork_builtin_extension', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'validate_effect', 'stage_fork_rebase',
+      'publish_visual_reply',
+      'manage_project', 'fork_builtin_extension', 'inspect_creative_workspace', 'set_panel_layout', 'get_panel_layout', 'inspect_creative_extension', 'validate_effect', 'stage_fork_rebase',
       'store_search', 'store_extension', 'store_source', 'store_library', 'store_install', 'store_update', 'store_uninstall', 'store_publish_prepare', 'store_publish'
     ]);
     for (const name of ['get_project_state', 'apply_commands']) {
@@ -415,6 +506,97 @@ describe('native Powermove agent tool bridge', () => {
     expect(result.cells).toHaveLength(5);
     expect(result.omitted).toHaveLength(3);
     expect(response.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' });
+  });
+
+  /** A renderer stand-in for an engine contact sheet: composition info and
+   *  the frames plan (cells clamped to the 8 s composition, rounded to 3 decimals). */
+  async function engineSheetFixture(renderFrames: (plan: { times: number[] }, options: { signal?: AbortSignal }) => Promise<unknown>, budgetMs: number) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'powermove-agent-media-'));
+    temporaryDirectories.push(root);
+    const still = path.join(root, 'frame.jpg');
+    const ffmpegPath = resolveFfmpeg({ packaged: false, resourcesPath: '', appPath: path.resolve(__dirname, '../../..') }).ffmpeg;
+    await new Promise<void>((resolve, reject) => spawn(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=320x180', '-frames:v', '1', still])
+      .once('close', (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`))));
+    const jpeg = new Uint8Array(await fs.readFile(still));
+    const project = { id: 'P', name: 'P', compId: 'P-root', w: 1280, h: 720, fps: 30, dur: 8, layers: [] };
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    (owner as unknown as { id: number }).id = 5;
+    owner.send = (_channel: string, request: AgentToolRequestEvent) => {
+      owner.requests.push(request);
+      const cells = Array.isArray(request.arguments.cells) ? (request.arguments.cells as number[]).map((t) => Math.round(Math.min(8, Math.max(0, t)) * 1000) / 1000) : undefined;
+      const value = request.tool === '__composition_info' ? { width: 1280, height: 720, fps: 30, duration: 8 }
+        : request.tool === '__engine_frames_plan' ? { times: [0], width: 320, ...(cells ? { cells } : {}), project: JSON.stringify(project), revision: 7 }
+        : null;
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, { runId: request.runId, callId: request.callId, ok: value !== null, content: value ? [{ type: 'text' as const, text: JSON.stringify(value) }] : [], ...(value ? {} : { error: 'unexpected' }) }));
+    };
+    const image = (time: number) => ({ time, data: jpeg, mimeType: 'image/jpeg' as const, width: 320, height: 180 });
+    const engineJobs = {
+      available: true,
+      exportVideo: vi.fn(),
+      renderFrames: vi.fn(async (_owner: number, _run: string, plan: { times: number[] }, options: { signal?: AbortSignal } = {}) => renderFrames(plan, options)),
+      status: vi.fn(),
+      cancelRun: vi.fn(async () => 0)
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '/resources/agent-tools/mcp-server.mjs', ffmpegPath, mediaFontFile: null, mediaCallBudgetMs: budgetMs, engineJobs: engineJobs as never });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'engine-sheet', owner: owner as never, baseRevision: 0 });
+    return { bridge, session, owner, engineJobs, image };
+  }
+
+  it('renders an engine contact sheet as one batch at the cells today\'s render_frames batches draw', async () => {
+    let fixture!: Awaited<ReturnType<typeof engineSheetFixture>>;
+    fixture = await engineSheetFixture(async (plan) => ({ status: 'rendered', revision: 1, queuedMs: 0, images: plan.times.map((t) => fixture.image(t)) }), 120_000);
+    const response = await fixture.bridge.callTool(fixture.session, 'media_contact_sheet', { target: 'composition', times: [0.12345, 3, 7.9999] });
+    expect(response.ok).toBe(true);
+    expect(fixture.owner.requests.map((request) => request.tool)).toEqual(['__composition_info', '__engine_frames_plan']);
+    expect(fixture.engineJobs.renderFrames).toHaveBeenCalledTimes(1);
+    const [, run, plan, options] = fixture.engineJobs.renderFrames.mock.calls[0]!;
+    expect(run).toBe('engine-sheet');
+    expect((plan as { times: number[]; revision: number }).revision).toBe(7);
+    // resolveSampleTimes keeps times inside the composition; the plan rounds them as safeTimes does.
+    expect((plan as { times: number[] }).times.every((t) => t >= 0 && t <= 8 && Math.round(t * 1000) / 1000 === t)).toBe(true);
+    expect((options as { signal?: AbortSignal }).signal?.aborted).toBe(false);
+    const result = JSON.parse((response.content[0] as { text: string }).text);
+    expect(result.cells).toHaveLength((plan as { times: number[] }).times.length);
+    expect(result.omitted).toBeUndefined();
+    expect(result.incomplete).toBeUndefined();
+  });
+
+  it('cancels only the engine contact-sheet batch at the call deadline and answers with the cells that finished', async () => {
+    let fixture!: Awaited<ReturnType<typeof engineSheetFixture>>;
+    let abortedAt = 0;
+    // A heavy composition: 3 of 8 cells finish; the engine answers the cancel
+    // with them (the rest come back cancelled and are dropped by AgentJobs).
+    fixture = await engineSheetFixture((plan, options) => new Promise((resolve) => {
+      options.signal?.addEventListener('abort', () => {
+        abortedAt = Date.now();
+        setTimeout(() => resolve({ status: 'rendered', revision: 1, queuedMs: 0, images: plan.times.slice(0, 3).map((t) => fixture.image(t)) }), 20);
+      }, { once: true });
+    }), 16_500);
+    const started = Date.now();
+    const response = await fixture.bridge.callTool(fixture.session, 'media_contact_sheet', { target: 'composition', count: 8 });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(abortedAt - started).toBeGreaterThanOrEqual(1_000);
+    expect(response.ok).toBe(true);
+    expect(fixture.engineJobs.renderFrames).toHaveBeenCalledTimes(1);
+    const result = JSON.parse((response.content[0] as { text: string }).text);
+    expect(result.cells).toHaveLength(3);
+    expect(result.omitted).toHaveLength(5);
+    expect(result.incomplete).toContain('3 of 8 cells');
+    expect(response.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' });
+    // The agent run itself is not cancelled: its exports keep running.
+    expect(fixture.engineJobs.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it('answers in time when a cancelled engine contact-sheet batch never answers, and names an empty sheet', async () => {
+    const fixture = await engineSheetFixture(() => new Promise(() => undefined), 16_500);
+    const started = Date.now();
+    await expect(fixture.bridge.callTool(fixture.session, 'media_contact_sheet', { target: 'composition', count: 8 })).rejects.toThrow('did not render in time for one tool call');
+    // 1.5 s to the deadline plus the 2 s cancel grace.
+    expect(Date.now() - started).toBeLessThan(6_000);
+    const [, , , options] = fixture.engineJobs.renderFrames.mock.calls[0]!;
+    expect((options as { signal?: AbortSignal }).signal?.aborted).toBe(true);
   });
 
   it('reports media tools as unavailable without a bundled ffmpeg', async () => {
@@ -668,6 +850,42 @@ describe('native Powermove agent tool bridge', () => {
     expect(owner.requests.filter((request) => request.tool === '__finish_run')).toHaveLength(1);
   });
 
+  it('saves through the host packer and records the saved project afterwards, as today\'s agent save does', async () => {
+    const ipc = new FakeIpcMain();
+    const owner = new FakeWebContents(ipc);
+    const project = { id: 'P', name: 'P', compId: 'P-root', w: 320, h: 180, fps: 30, dur: 1, layers: [] };
+    owner.send = function (this: FakeWebContents, _channel: string, request: AgentToolRequestEvent): void {
+      this.requests.push(request);
+      const value = request.tool === '__engine_save_plan' && request.arguments.saved !== true
+        ? { home: false, projectJSON: JSON.stringify(project), documentJSON: JSON.stringify({ proj: project, history: { entries: [] } }) }
+        : { tool: request.tool };
+      queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: this }, { runId: request.runId, callId: request.callId, ok: true, content: [{ type: 'text', text: JSON.stringify(value) }], revision: 1 }));
+    } as never;
+    let fail = false;
+    const engineJobs = {
+      available: true, exportVideo: vi.fn(), renderFrames: vi.fn(), status: vi.fn(), cancelRun: vi.fn(async () => 0),
+      saveProject: vi.fn(async () => { if (fail) throw new Error('mediaChanged: Original media a changed during the project save.'); return '/exports/P.pmv'; })
+    };
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', engineJobs: engineJobs as never });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'engine-save', owner: owner as never, baseRevision: 0 });
+    const saved = await bridge.callTool(session, 'save_project', {});
+    expect(JSON.parse((saved.content[0] as { text: string }).text)).toEqual({ path: '/exports/P.pmv', projectId: 'P' });
+    expect(engineJobs.saveProject).toHaveBeenCalledWith(project, { proj: project, history: { entries: [] } });
+    const plans = () => owner.requests.filter((request) => request.tool === '__engine_save_plan').map((request) => request.arguments);
+    expect(plans()).toEqual([{}, { saved: true }]);
+    // Extra arguments fail with today's strict schema message, before any plan.
+    const { z } = await import('zod');
+    const today = (() => { try { z.object({}).strict().parse({ name: 'x' }); } catch (error) { return (error as Error).message; } })();
+    await expect(bridge.callTool(session, 'save_project', { name: 'x' })).rejects.toThrow(today);
+    expect(plans()).toEqual([{}, { saved: true }]);
+    fail = true;
+    await expect(bridge.callTool(session, 'save_project', {})).rejects.toThrow('mediaChanged');
+    // A failed save never records the project as saved.
+    expect(plans()).toEqual([{}, { saved: true }, {}]);
+    owner.destroyed = true;
+  });
+
   it('rejects oversized owning-renderer responses immediately instead of timing out', async () => {
     const ipc = new FakeIpcMain();
     const owner = new FakeWebContents(ipc);
@@ -681,6 +899,9 @@ describe('native Powermove agent tool bridge', () => {
     bridges.push(bridge);
     const session = await bridge.openSession({ runId: 'native-run-large', owner: owner as never, baseRevision: 0 });
     await expect(bridge.callRenderer(session, 'get_project_state', {})).rejects.toThrow('oversized response');
+    await expect(bridge.callRenderer(session, '__mcp_context', {})).resolves.toMatchObject({ ok: true });
+    const plan = await bridge.callRenderer(session, '__engine_save_plan', {});
+    expect((plan.content[0] as { text: string }).text.length).toBe(2_000_001);
     owner.destroyed = true;
   });
 
@@ -695,6 +916,19 @@ describe('native Powermove agent tool bridge', () => {
     owner.destroyed = true;
   });
 
+  it('rejects calls to an already crashed renderer without sending or waiting for a timeout', async () => {
+    const ipc = new FakeIpcMain(), owner = new FakeWebContents(ipc);
+    owner.crashed = true;
+    const send = vi.spyOn(owner, 'send').mockImplementation(() => {});
+    const bridge = new PowermoveAgentToolBridge(ipc as never, { mcpServerPath: '', timeoutMs: 30 });
+    bridges.push(bridge);
+    const session = await bridge.openSession({ runId: 'native-run-already-crashed', owner: owner as never, baseRevision: 0 });
+    await expect(bridge.callRenderer(session, 'get_project_state', {})).rejects.toThrow('renderer is unavailable');
+    expect(send).not.toHaveBeenCalled();
+    await session.finish(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('marks the window driven by the agent in main and the renderer for all of computer_use_panel', async () => {
     const ipc = new FakeIpcMain();
     const log: string[] = [];
@@ -705,8 +939,8 @@ describe('native Powermove agent tool bridge', () => {
       if (channel === IPC.agentToolInput) { log.push(`renderer ${payload}`); return; }
       const request = payload as AgentToolRequestEvent;
       log.push(request.tool);
-      const text = request.tool === '__prepare_panel_input' ? { points: [{ x: 5, y: 6 }] }
-        : request.tool === '__panel_bounds' ? { x: 0, y: 0, width: 10, height: 10 } : {};
+      const text = request.tool === '__prepare_panel_input' ? { points: [{ x: 5, y: 6 }], target: 'panel-1' }
+        : request.tool === '__panel_bounds' ? { x: 0, y: 0, width: 10, height: 10, target: 'panel-1' } : {};
       queueMicrotask(() => ipc.emit(IPC.agentToolResponse, { sender: owner }, {
         runId: request.runId, callId: request.callId, ok: true, revision: 1, content: [{ type: 'text', text: JSON.stringify(text) }]
       }));
@@ -720,14 +954,14 @@ describe('native Powermove agent tool bridge', () => {
     await bridge.callTool(session, 'computer_use_panel', { panelId: 'ext.panel', action: 'click', points: [{ x: 5, y: 6 }] });
     expect(input.drive).toHaveBeenCalledExactlyOnceWith(owner);
     expect(log).toEqual([
-      'drive', 'renderer true', '__prepare_panel_input',
+      'drive', 'renderer true', '__prepare_panel_input', '__validate_panel_target',
       'mouseMove (driven)', 'mouseDown (driven)', 'mouseUp (driven)',
-      'get_project_state', '__panel_bounds', 'release', 'renderer false'
+      '__validate_panel_target', 'get_project_state', '__panel_bounds', '__validate_panel_target', 'release', 'renderer false'
     ]);
     log.length = 0;
     owner.sendInputEvent = () => { throw new Error('no input'); };
     await expect(bridge.callTool(session, 'computer_use_panel', { panelId: 'ext.panel', action: 'click', points: [{ x: 5, y: 6 }] })).rejects.toThrow('no input');
-    expect(log).toEqual(['drive', 'renderer true', '__prepare_panel_input', 'release', 'renderer false']);
+    expect(log).toEqual(['drive', 'renderer true', '__prepare_panel_input', '__validate_panel_target', 'release', 'renderer false']);
     owner.destroyed = true;
   });
 

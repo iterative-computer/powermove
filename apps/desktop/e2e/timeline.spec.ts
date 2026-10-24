@@ -1,6 +1,14 @@
 import { expect } from '@playwright/test';
-import { chooseNativeMenu, test } from './helpers/app';
+import { chooseNativeMenu, test, type LaunchedApp } from './helpers/app';
 import type { Page } from '@playwright/test';
+import path from 'node:path';
+
+async function saveFixtureProject(session: LaunchedApp, name: string) {
+  await session.app.evaluate(({ dialog }, filePath) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+  }, path.join(session.userData, name));
+  expect(await session.page.evaluate(() => (window as any).PM.saveProject())).toBe(true);
+}
 
 async function scaleFixture(page: Page) {
   await page.waitForFunction(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return Boolean(timeline?.cv); });
@@ -29,13 +37,7 @@ async function scaleFixture(page: Page) {
 
 async function scaleKeyPoint(page: Page, time: number) {
   await expect.poll(() => page.evaluate(() => { const PM = (window as any).PM; const timeline = PM.Kernel.services.get('timeline'); return timeline.rows.filter((row: any) => row.key === 'scale').length; })).toBe(1);
-  /* Aim at the key the timeline has drawn. A draw can still widen the gutter
-     to fit the new property labels and clamp the scroll; a point read before
-     that draw lands beside the key the user sees (the press then selects no
-     key). Read after a painted frame, and only once two frames agree. */
-  const read = () => page.evaluate(async (time) => {
-    const frame = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-    await frame(); await frame();
+  return page.evaluate((time) => {
     const PM = (window as any).PM;
     const timeline = PM.Kernel.services.get('timeline');
     const box = timeline.cv.getBoundingClientRect();
@@ -43,14 +45,6 @@ async function scaleKeyPoint(page: Page, time: number) {
     return { x: box.x + timeline.gut + (time - timeline.scrollT) * timeline.pps,
       y: box.y + timeline.ruler + index * timeline.row - timeline.scrollY + timeline.row / 2, pps: timeline.pps };
   }, time);
-  let point = await read();
-  await expect.poll(async () => {
-    const next = await read();
-    const same = next.x === point.x && next.y === point.y && next.pps === point.pps;
-    point = next;
-    return same;
-  }).toBe(true);
-  return point;
 }
 
 async function openGraph(page: Page) {
@@ -98,10 +92,11 @@ test('Scale keys move outside the layer, delete together, and never delete their
   expect(await page.evaluate((id) => (window as any).PM.L(id).p['scale.y'].kf.length, id)).toBe(2);
   await page.evaluate(async () => {
     const PM = (window as any).PM;
-    // replaceProject sets fixture data; this window already owns that document,
-    // so the relaunch below restores it rather than the welcome demo.
     await PM.flushProject();
   });
+  // The hidden harness chooses Don't Save on close. Save this document first
+  // so relaunch verifies persistence rather than discarding an unsaved fixture.
+  await saveFixtureProject(session, 'Scale timeline.pmv');
   await session.relaunch();
   await session.openEditor();
   expect(await session.page.evaluate((id) => {
@@ -131,7 +126,6 @@ test('the easing grid applies a curve to both Scale dimensions and preserves lin
   expect(boxes[4]!.x).toBe(boxes[0]!.x);
   await testInfo.attach('easing-grid', { body: await grid.screenshot(), contentType: 'image/png' });
   await grid.getByRole('menuitem', { name: 'Ease out', exact: true }).click();
-  // The menu runs its item after it closes, so read the keys once it has.
   await expect(grid).toHaveCount(0);
   await expect.poll(() => page.evaluate((id) => {
     const L = (window as any).PM.L(id);
@@ -485,6 +479,7 @@ test('project rename is available from the tab menu and persists the live docume
   await expect(chip).toContainText('Renamed composition');
   await page.evaluate(() => (window as any).PM.flushProject());
   expect(await page.evaluate((id) => (window as any).PM.Projects.get(id).name, id)).toBe('Renamed composition');
+  await saveFixtureProject(session, 'Renamed composition.pmv');
   await session.relaunch();
   await session.openEditor();
   await expect(session.page.locator('#tabs .project-doc.on')).toContainText('Renamed composition');

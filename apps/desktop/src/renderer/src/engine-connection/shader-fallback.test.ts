@@ -137,7 +137,7 @@ describe('effect and transition requests in a session', () => {
     const asked: Array<{ r: ShaderFallbackRequest; t: Uint16Array[] }> = [];
     const runner: FallbackRunner = {
       async render(r, t = []) {
-        asked.push({ r, t });
+        asked.push({ r, t: t as Uint16Array[] });
         return { key: r.key, width: r.width, height: r.height, rgba16f: new Uint16Array(r.width * r.height * 4) };
       }
     };
@@ -155,6 +155,31 @@ describe('effect and transition requests in a session', () => {
     expect(input![2 * 16]).toBe(0x3c00);
     expect(backdrop!.every((v) => v === 0x3800)).toBe(true);
     expect(port.fallback()[0]).toMatchObject({ fallback: 'pixels', key: '7a'.repeat(32) });
+  });
+
+  it('relays depth-32 input and output bands without losing float32 bits', async () => {
+    const values = Float32Array.from([1 + 2 ** -20, -2.125, 0.0001, 1]);
+    const bits = new Uint32Array(values.buffer).slice();
+    const seen: Float32Array[] = [];
+    const runner: FallbackRunner = {
+      async render(r, textures = []) {
+        seen.push(textures[0] as Float32Array);
+        return { key: r.key, width: r.width, height: r.height, rgba16f: new Uint16Array(0), rgba32f: values };
+      }
+    };
+    const { port } = await session(runner);
+    const r = { ...effect(1, 1), colorDepth: 32 as const, textures: 1 };
+    port.deliver(envelope({ kind: 'event', body: { type: 'shaderFallback', fallback: 'requests', requests: [r] } } as never, 5));
+    port.deliver(envelope({ kind: 'event', body: {
+      type: 'shaderFallback', fallback: 'input', key: r.key, texture: 0, width: 1, height: 1,
+      row: 0, rows: 1, rgba16f: new Uint8Array(0), rgba32f: new Uint8Array(values.buffer)
+    } } as never, 5));
+    await flush();
+    expect(seen).toHaveLength(1);
+    expect(new Uint32Array(seen[0]!.buffer)).toEqual(bits);
+    const out = port.fallback()[0]!;
+    expect(out['rgba16f']).toEqual(new Uint8Array(0));
+    expect(new Uint32Array((out['rgba32f'] as Uint8Array).slice().buffer)).toEqual(bits);
   });
 
   it('keeps at most as many requests waiting for textures as the engine does, failing the oldest as transient', async () => {
@@ -182,6 +207,7 @@ function fakeGl(active: string[], fence: () => number, maxTextureSize = 16384) {
   const C = {
     VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, LINK_STATUS: 3, ARRAY_BUFFER: 4, STATIC_DRAW: 5, DEPTH_TEST: 6, BLEND: 7,
     TEXTURE_2D: 8, TEXTURE0: 100, RGBA16F: 9, RGBA: 10, HALF_FLOAT: 11, FLOAT: 12, TEXTURE_MIN_FILTER: 13, TEXTURE_MAG_FILTER: 14,
+    RGBA8: 32, UNSIGNED_BYTE: 33, RGBA32F: 34,
     LINEAR: 15, TEXTURE_WRAP_S: 16, TEXTURE_WRAP_T: 17, CLAMP_TO_EDGE: 18, FRAMEBUFFER: 19, COLOR_ATTACHMENT0: 20,
     COLOR_BUFFER_BIT: 21, TRIANGLE_STRIP: 22, NO_ERROR: 0, UNPACK_ALIGNMENT: 23, SYNC_GPU_COMMANDS_COMPLETE: 24,
     ALREADY_SIGNALED: 25, CONDITION_SATISFIED: 26, TIMEOUT_EXPIRED: 27, WAIT_FAILED: 28, MAX_TEXTURE_SIZE: 29
@@ -191,7 +217,7 @@ function fakeGl(active: string[], fence: () => number, maxTextureSize = 16384) {
   let lost = false;
   const bound = new Map<number, unknown>();
   const state = {
-    uploads: [] as Array<{ id: number; data: Uint16Array | null }>,
+    uploads: [] as Array<{ id: number; format: number; data: Uint16Array | Uint8Array | Float32Array | null }>,
     draws: [] as Array<Record<number, unknown>>,
     uniforms: [] as string[],
     lostBy: 0,
@@ -200,14 +226,14 @@ function fakeGl(active: string[], fence: () => number, maxTextureSize = 16384) {
   };
   const gl: Record<string, unknown> = {
     ...C,
-    getExtension: (name: string) => name === 'EXT_color_buffer_float' ? {} : name === 'WEBGL_lose_context' ? { loseContext: () => { lost = true; state.lostBy++; } } : null,
+    getExtension: (name: string) => name === 'EXT_color_buffer_float' || name === 'OES_texture_float_linear' ? {} : name === 'WEBGL_lose_context' ? { loseContext: () => { lost = true; state.lostBy++; } } : null,
     createBuffer: () => ({}), bindBuffer: () => {}, bufferData: () => {}, disable: () => {},
     createShader: () => ({}), shaderSource: () => {}, compileShader: () => {}, createProgram: () => ({}), attachShader: () => {}, linkProgram: () => {},
     getProgramParameter: () => true, getShaderInfoLog: () => '', getProgramInfoLog: () => '', deleteShader: () => {}, deleteProgram: () => {},
     getAttribLocation: () => 0,
     createTexture: () => ({ id: next++ }), activeTexture: (u: number) => { unit = u - C.TEXTURE0; }, bindTexture: (_t: number, tex: unknown) => { bound.set(unit, tex); },
     pixelStorei: () => {},
-    texImage2D: (...a: unknown[]) => { state.uploads.push({ id: (bound.get(unit) as { id: number }).id, data: a[8] as Uint16Array | null }); },
+    texImage2D: (...a: unknown[]) => { state.uploads.push({ id: (bound.get(unit) as { id: number }).id, format: a[2] as number, data: a[8] as Uint16Array | Uint8Array | Float32Array | null }); },
     texParameteri: () => {}, createFramebuffer: () => ({}), bindFramebuffer: () => {}, framebufferTexture2D: () => {}, viewport: () => {},
     clearColor: () => {}, clear: () => {}, useProgram: () => {}, enableVertexAttribArray: () => {}, vertexAttribPointer: () => {},
     getUniformLocation: (_p: unknown, name: string) => (active.includes(name) ? { name } : null),
@@ -424,6 +450,60 @@ describe('the runner helpers', () => {
 });
 
 describe('the runner reads its target', () => {
+  it('keeps float32 codes through input upload, two RGBA32F passes, and sync readback', () => {
+    const { canvas, state, C } = fakeGl(['u_tex'], () => 25);
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    const extensions: string[] = [];
+    const getExtension = gl['getExtension'] as (name: string) => unknown;
+    gl['getExtension'] = (name: string) => { extensions.push(name); return getExtension(name); };
+    const input = Float32Array.from([1 + 2 ** -20, -2.125, 0.0001, 1, 0.33333334, 2.75, -0.25, 0.5]);
+    const bits = new Uint32Array(input.buffer).slice();
+    const reads: number[] = [];
+    gl['readPixels'] = (_x: number, _y: number, _w: number, _h: number, _f: number, type: number, out: Float32Array) => {
+      reads.push(type);
+      out.set(input);
+    };
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    const r = { ...request(2, 1, '4b'.repeat(32)), colorDepth: 32 as const, textures: 1,
+      units: [{ unit: 0, texture: 0, chain: true }], morePasses: [[]] };
+    const out = runner.renderSync(r, [input]);
+    expect(extensions).toContain('OES_texture_float_linear');
+    expect(state.uploads.map(u => u.format)).toEqual([C.RGBA32F, C.RGBA32F, C.RGBA32F]);
+    expect(new Uint32Array((state.uploads[0]!.data as Float32Array).buffer)).toEqual(bits);
+    expect(state.draws).toHaveLength(2);
+    expect(reads).toEqual([C.FLOAT]);
+    expect(out.rgba16f).toHaveLength(0);
+    expect(new Uint32Array(out.rgba32f!.buffer)).toEqual(bits);
+  });
+
+  it('refuses depth-32 linear sampling when OES_texture_float_linear is absent', () => {
+    const { canvas, state } = fakeGl([], () => 25);
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    gl['getExtension'] = (name: string) => name === 'EXT_color_buffer_float' ? {} : null;
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    const r = { ...request(1, 1), colorDepth: 32 as const, textures: 1 };
+    expect(() => runner.renderSync(r, [Float32Array.of(1 + 2 ** -20, 0, 0, 1)]))
+      .toThrowError(expect.objectContaining({ reason: 'unavailable', message: expect.stringContaining('OES_texture_float_linear') }));
+    expect(state.draws).toHaveLength(0);
+  });
+
+  it('stores and reads exact RGBA8 codes at depth 8', async () => {
+    const { canvas, state, C } = fakeGl([], () => 25);
+    const gl = (canvas as unknown as { getContext(): Record<string, unknown> }).getContext();
+    const reads: number[] = [];
+    gl['readPixels'] = (_x: number, _y: number, _w: number, _h: number, _f: number, type: number, out: Uint8Array) => {
+      reads.push(type);
+      out.set([0, 1, 127, 255, 2, 128, 254, 255]);
+    };
+    const runner = new ShaderFallbackRunner({ createCanvas: () => canvas });
+    const r = { ...request(2, 1, '4a'.repeat(32)), colorDepth: 8 as const, textures: 1, units: [{ unit: 0, texture: 0, chain: false }] };
+    const input = Uint16Array.from([0, 1, 127, 255, 2, 128, 254, 255]);
+    const out = await runner.render(r, [input]);
+    expect(state.uploads.map(u => u.format)).toEqual([C.RGBA8, C.RGBA8]);
+    expect(state.uploads[0]!.data).toEqual(Uint8Array.from(input));
+    expect(reads).toEqual([C.UNSIGNED_BYTE]);
+    expect(out.rgba16f).toEqual(input);
+  });
   it('as half floats when the implementation reads RGBA16F that way, else as floats', async () => {
     for (const halfRead of [true, false]) {
       const { canvas, C } = fakeGl([], () => 25);

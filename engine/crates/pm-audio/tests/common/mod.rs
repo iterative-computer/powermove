@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,10 +12,31 @@ use pm_eval::Evaluator;
 use pm_model::Document;
 use pm_model::json::parse;
 
-pub fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("pm-audio-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// Owns test media until the test's playback and cache values have dropped.
+/// Dereferencing keeps existing path-based fixtures concise.
+pub struct TestDir(tempfile::TempDir);
+
+impl Deref for TestDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+impl AsRef<Path> for TestDir {
+    fn as_ref(&self) -> &Path {
+        self.0.path()
+    }
+}
+
+pub fn temp_dir(tag: &str) -> TestDir {
+    TestDir(
+        tempfile::Builder::new()
+            .prefix(&format!("pm-audio-{tag}-"))
+            .tempdir()
+            .unwrap(),
+    )
 }
 
 /// Our FFmpeg build's command-line tool (`PM_FFMPEG_DIR`, see engine/env.sh).
@@ -178,6 +200,14 @@ pub fn comp(fps: f64, dur: f64, layers: &[String], extra: &str) -> String {
 pub struct Rig {
     pub cache: Arc<SourceCache>,
     pub media: HashMap<String, PathBuf>,
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        // The media directory was created before this rig. Join decoder
+        // workers before its TempDir guard can remove those media files.
+        self.cache.shutdown();
+    }
 }
 
 impl Rig {

@@ -210,7 +210,13 @@ async function main(): Promise<void> {
     });
     const engine = installed.engine!;
     await waitFor('the interactive engine', async () => engine.status().interactive.state === 'ready');
-    if (cfg.agentSnapshots) await waitFor('the job engine', async () => engine.status().job.state === 'ready');
+    if (cfg.agentSnapshots) {
+      // The job utility starts on demand. An agent run starts and holds it
+      // while the agent sets up (AgentJobs.prepareRun); do the same, so the
+      // measured window sees the warm utility an agent run sees.
+      await (installed.agentJobs ? installed.agentJobs.prepareRun('measure-agent-run') : engine.ensureReady('job'));
+      await waitFor('the job engine', async () => engine.status().job.state === 'ready');
+    }
     const playbackSignals: Array<[number, boolean]> = [];
     engine.listen({ playback: (playing) => playbackSignals.push([performance.now(), playing]) });
     // The C′ prototype: host the engine's remote layer over the page.
@@ -319,15 +325,15 @@ async function main(): Promise<void> {
         // uncontended cost when playback starts.
         const o = cfg.agentSnapshots;
         const t0 = performance.now();
-        const r = await installed.agentJobs.renderFrames(-2, 'measure-agent-run', { project: snapshotProject(o.layers, 0, o.heavy), times: Array.from({ length: o.frames }, (_, i) => i / 24), width: o.width, revision: 0 });
-        result['agentWarmup'] = { status: r.status, ms: +(performance.now() - t0).toFixed(1), ...(r.status === 'routed' ? { reason: r.reason } : {}) };
+        const r = await installed.agentJobs.renderFrames(win.webContents.id, 'measure-agent-run', { project: snapshotProject(o.layers, 0, o.heavy), times: Array.from({ length: o.frames }, (_, i) => i / 24), width: o.width, revision: 0 });
+        result['agentWarmup'] = { status: r.status, ms: +(performance.now() - t0).toFixed(1) };
       }
       await call(`window.__measure.transport({ command: 'play', rate: { num: 1, den: 1 } })`);
       await sleep(1500);
       await call('window.__measure.reset()');
       if (cfg.mainRate) harness.requestRefreshRate(rateHz);
       const startMs = await call<number>(`window.__measure.mark('pm-record-start')`);
-      const agentRun = cfg.agentSnapshots ? agentSnapshots(installed, cfg.agentSnapshots) : null;
+      const agentRun = cfg.agentSnapshots ? agentSnapshots(installed, cfg.agentSnapshots, win.webContents.id) : null;
       await sleep(cfg.durationMs);
       const endMs = await call<number>(`window.__measure.mark('pm-record-end')`);
       // Counted at the end of the window; a batch still waiting then is
@@ -399,7 +405,10 @@ async function main(): Promise<void> {
 
 /** Agent frame batches through AgentJobs until stopped: count, latency,
  *  queue time, and failures. */
-function agentSnapshots(installed: InstalledNativeEngine, opts: NonNullable<Config['agentSnapshots']>) {
+/** `owner`: the measured window. Agent frame sessions take its font cache
+ *  seeds, as an agent's take its editor window's; the font service keys
+ *  windows by their u32 web contents id. */
+function agentSnapshots(installed: InstalledNativeEngine, opts: NonNullable<Config['agentSnapshots']>, owner: number) {
   const jobs = installed.agentJobs!;
   const stats = { batches: 0, frames: 0, routed: [] as string[], failures: [] as string[], batchMs: [] as number[], queuedMs: [] as number[], sizes: [] as string[] };
   let stopped = false;
@@ -410,9 +419,8 @@ function agentSnapshots(installed: InstalledNativeEngine, opts: NonNullable<Conf
       inFlightSince = t0;
       const times = Array.from({ length: opts.frames }, (_, i) => ((turn * opts.frames + i) % 96) / 24);
       try {
-        const r = await jobs.renderFrames(-2, 'measure-agent-run', { project: snapshotProject(opts.layers, turn, opts.heavy), times, width: opts.width, revision: turn });
-        if (r.status === 'routed') stats.routed.push(r.reason);
-        else {
+        const r = await jobs.renderFrames(owner, 'measure-agent-run', { project: snapshotProject(opts.layers, turn, opts.heavy), times, width: opts.width, revision: turn });
+        {
           stats.batches++;
           stats.frames += r.images.length;
           stats.queuedMs.push(r.queuedMs);

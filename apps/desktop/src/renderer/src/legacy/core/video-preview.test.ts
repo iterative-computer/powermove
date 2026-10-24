@@ -129,6 +129,7 @@ it.each([
   try {
     const first = makeAsset(); await prepareVideoPreview(PM, first, source, () => false);
     expect(first.preview).toBeDefined();
+    expect(PM.bus.emit).toHaveBeenCalledWith('assets', { runtimeOnly: true });
     expect(media.beginPreview).toHaveBeenCalledOnce();
     const reloaded = makeAsset(); await prepareVideoPreview(PM, reloaded, source, () => false);
     expect(reloaded.preview).toBeDefined();

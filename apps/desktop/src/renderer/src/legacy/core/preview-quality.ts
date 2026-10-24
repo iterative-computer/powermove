@@ -3,6 +3,7 @@
 export function createPreviewQualityMonitor() {
   let previous: number | null = null, previouslyPlaying = false;
   const idleIntervals: number[] = [];
+  const sortedIntervals: number[] = [];
   let displayInterval = 1000 / 60;
   let start = Infinity, frames = 0, failed = 0, uncached = 0, slowWindows = 0;
   let target = 0;
@@ -18,13 +19,26 @@ export function createPreviewQualityMonitor() {
     tick(now: number, playing: boolean, fps: number): boolean {
       const gap = previous === null ? 0 : now - previous;
       if (!playing && !previouslyPlaying && gap >= 4 && gap <= 100) {
+        if (idleIntervals.length === 30) {
+          const expired = sortedIntervals.indexOf(idleIntervals.shift()!);
+          for (let index = expired; index < sortedIntervals.length - 1; index++) {
+            sortedIntervals[index] = sortedIntervals[index + 1]!;
+          }
+          sortedIntervals.length--;
+        }
         idleIntervals.push(gap);
-        if (idleIntervals.length > 30) idleIntervals.shift();
+        // Keep the small window ordered as samples arrive, without allocating
+        // and sorting a copy on every paused display frame.
+        let index = sortedIntervals.length;
+        while (index > 0 && sortedIntervals[index - 1]! > gap) {
+          sortedIntervals[index] = sortedIntervals[index - 1]!;
+          index--;
+        }
+        sortedIntervals[index] = gap;
         // Use an idle baseline: learning from saturated playback would mistake
         // its dropped frames for a slower monitor and prevent adaptation.
         if (idleIntervals.length >= 5) {
-          const sorted = [...idleIntervals].sort((a, b) => a - b);
-          displayInterval = sorted[Math.floor(sorted.length / 4)]!;
+          displayInterval = sortedIntervals[Math.floor(sortedIntervals.length / 4)]!;
         }
       }
       // A genuine suspension is a fresh sample; several-hundred-ms GPU frames

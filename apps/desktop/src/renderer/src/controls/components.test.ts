@@ -552,8 +552,9 @@ describe('picker drafts', () => {
       eyedropper.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
       await vi.waitFor(() => expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#0A84FF' })));
       await tick();
+      // Focus returns into the still-open picker (its value field), never to <body>.
       const picker = document.body.querySelector<HTMLElement>('.color-picker')!;
-      expect(document.activeElement).toBe(picker);
+      expect(picker.contains(document.activeElement)).toBe(true);
 
       // Keys go wherever focus really is, as in the app; the editor's global Escape must not see this one.
       document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
@@ -584,7 +585,7 @@ describe('picker drafts', () => {
     const eyedropper = document.body.querySelector<HTMLButtonElement>('[aria-label="Sample screen color"]')!;
     eyedropper.focus();
     eyedropper.click();
-    await vi.waitFor(() => expect(document.activeElement).toBe(document.body.querySelector('.color-picker')));
+    await vi.waitFor(() => expect(document.body.querySelector('.color-picker')!.contains(document.activeElement)).toBe(true));
     expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#0A84FF' }));
     document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     expect(Edit.cancel).toHaveBeenCalledOnce();
@@ -822,6 +823,28 @@ describe('visual fields', () => {
     target.querySelector<HTMLElement>('.point-pad')!.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',shiftKey:true,bubbles:true,cancelable:true}));
     expect(Edit.apply).toHaveBeenLastCalledWith([{type:'set_property',target:'L1',path:'centerX',value:10},{type:'set_property',target:'L1',path:'centerY',value:30}],expect.anything());
     expect(target.querySelectorAll('[role="spinbutton"]')).toHaveLength(2);
+  });
+  it('moves smoothly through normalized point ranges without an authored step',()=>{
+    const {api,Edit}=fakeAPI();
+    const target=render(PointField,{api,get:()=>[.2,.2],edit:commandEdit(),xEdit:commandEdit('X'),yEdit:commandEdit('Y'),minX:0,maxX:1,minY:0,maxY:1});
+    const pad=target.querySelector<HTMLElement>('.point-pad')!;
+    pad.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true,cancelable:true}));
+    expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({value:[.21,.2]}),expect.anything());
+    vi.spyOn(pad,'getBoundingClientRect').mockReturnValue({left:0,top:0,width:100,height:100} as DOMRect);
+    pad.dispatchEvent(pointer('pointerdown',{clientX:25,clientY:75,pointerId:1}));
+    window.dispatchEvent(pointer('pointerup',{clientX:25,clientY:75,pointerId:1}));
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({value:[.25,.75]}));
+  });
+  it('uses independent point steps anchored to each range minimum',()=>{
+    const {api,Edit}=fakeAPI();
+    const target=render(PointField,{api,get:()=>[.3,.4],edit:commandEdit(),xEdit:commandEdit('X'),yEdit:commandEdit('Y'),minX:.1,maxX:1.1,minY:.3,maxY:1.3,stepX:.2,stepY:.05});
+    const pad=target.querySelector<HTMLElement>('.point-pad')!;
+    pad.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true,cancelable:true}));
+    expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({value:[.3,.45]}),expect.anything());
+    pad.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true,cancelable:true}));
+    expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({value:[.5,.4]}),expect.anything());
+    target.querySelector('[aria-label="Y"]')!.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp',bubbles:true,cancelable:true}));
+    expect(Edit.apply).toHaveBeenLastCalledWith(expect.objectContaining({value:.45}),expect.anything());
   });
 });
 

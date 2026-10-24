@@ -8,7 +8,7 @@
  * the document into the store slot the renderer autosaves to, so a tab that
  * joins later, or the agent engine, starts from the latest state.
  */
-import { applyPatch, isPatchList, type Patch } from '../shared/patch';
+import { applyPatch, clonePatchValue, isPatchList, type Patch } from '../shared/patch';
 
 export interface SessionMember {
   id: number;
@@ -32,6 +32,7 @@ interface Session {
   members: Set<SessionMember>;
   saveTimer: ReturnType<typeof setTimeout> | null;
   dirty: boolean;
+  releaseProject?: () => void;
 }
 
 const PROJECT_SLOT = 'project.';
@@ -44,7 +45,7 @@ export class ProjectSessions {
   private readonly membership = new Map<SessionMember, Set<string>>();
 
   constructor(
-    private readonly store: { read(key: string): unknown; set(key: string, value: unknown): void },
+    private readonly store: { read(key: string): unknown; set(key: string, value: unknown): void; acquireProject?(id: string): () => void },
     private readonly options: { channel: string; version: string; log?: (line: string) => void; now?: () => number }
   ) {}
 
@@ -52,9 +53,11 @@ export class ProjectSessions {
   join(member: SessionMember, projectId: string, doc: unknown): JoinResult {
     let session = this.sessions.get(projectId);
     if (!session) {
-      const stored = this.readSlot(projectId);
-      const seed = this.fresher(stored, doc);
-      session = { projectId, doc: seed, seq: 0, members: new Set(), saveTimer: null, dirty: false };
+      const releaseProject = this.store.acquireProject?.(projectId);
+      let seed: unknown;
+      try { seed = this.fresher(this.readSlot(projectId), doc); }
+      catch (error) { releaseProject?.(); throw error; }
+      session = { projectId, doc: seed, seq: 0, members: new Set(), saveTimer: null, dirty: false, releaseProject };
       this.sessions.set(projectId, session);
     }
     session.members.add(member);
@@ -137,6 +140,7 @@ export class ProjectSessions {
   private close(session: Session): void {
     this.save(session);
     this.sessions.delete(session.projectId);
+    session.releaseProject?.();
   }
 
   private scheduleSave(session: Session): void {
@@ -153,8 +157,20 @@ export class ProjectSessions {
   }
 
   private readSlot(projectId: string): unknown | null {
-    const raw = this.store.read(`${PROJECT_SLOT}${projectId}`) as { proj?: unknown } | null | undefined;
-    return raw && typeof raw === 'object' && raw.proj ? raw.proj : null;
+    // Match Projects.get: a checkpoint is followed by its ordered recovery
+    // journal. A native worker joins without bringing a browser's recovered
+    // copy, so reading only the checkpoint would silently lose recent edits.
+    let raw = this.store.read(`${PROJECT_SLOT}${projectId}`);
+    if (!raw) return null;
+    if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { return null; } }
+    const envelope = raw as { proj?: unknown };
+    let project = clonePatchValue(envelope?.proj && typeof envelope.proj === 'object' ? envelope.proj : raw);
+    const journal = this.store.read(`projectJournal.${projectId}`);
+    for (const entry of Array.isArray(journal) ? journal : []) {
+      const patches = entry.patches || [];
+      project = applyPatch(project, patches.filter((patch: Patch) => Array.isArray(patch.path)));
+    }
+    return project;
   }
 
   private writeSlot(projectId: string, doc: unknown): void {

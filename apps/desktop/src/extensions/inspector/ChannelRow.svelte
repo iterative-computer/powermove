@@ -4,6 +4,7 @@
 
 <script lang="ts">
   import { animateSelection, toggleSelectionKey } from './selection-animation';
+  import { isInspectorLayerEditable } from './multi-edit';
   import Icon from './Icon.svelte';
   import { expressionDiagnostic, EXPRESSION_NAMES } from 'powermove';
   import type { ChannelDefinition, EditCommand, MenuContribution } from 'powermove';
@@ -109,6 +110,7 @@
 
   function toggleStopwatch(event: MouseEvent): void {
     event.stopPropagation();
+    if (!isInspectorLayerEditable(api, layer)) return;
     const time = transport.time;
     animateSelection(api,layer,channels,animated,time,`Animate ${label}`);
     api.anim.touch?.();
@@ -134,6 +136,7 @@
   }
 
   function addKeyframe(): void {
+    if (!isInspectorLayerEditable(api, layer)) return;
     const time = transport.time;
     api.history.do('Keyframe', () => {
       properties.forEach((p, index) => api.anim.setKeyOn(
@@ -145,6 +148,11 @@
       ));
     });
     api.transport.invalidate?.();
+  }
+
+  function applyKeyframeEase(name: string): void {
+    if (!isInspectorLayerEditable(api, layer)) return;
+    api.history.do('Ease', () => properties.forEach((p) => api.anim.applyEaseTo(p.kf, name)));
   }
 
   function selectChannel(): void {
@@ -164,6 +172,7 @@
   }
 
   function applyExpression(expression: string | null, editLabel: string): void {
+    if (!isInspectorLayerEditable(api, layer)) return;
     inspectorEdit.apply(
       channels.length > 1
         ? channels.map((path) => ({ type: 'set_expression', target: layer.id, path, expression }))
@@ -174,6 +183,7 @@
   }
 
   function editExpression(): void {
+    if (!isInspectorLayerEditable(api, layer)) return;
     const textarea = window.document.createElement('textarea');
     textarea.className = 'code';
     textarea.value = expression || 'value + wiggle(2, 20)';
@@ -225,6 +235,7 @@
   }
 
   function resetChannel(): void {
+    if (!isInspectorLayerEditable(api, layer)) return;
     const comp = api.model.curComp();
     const defaults: Record<string, number> = {
       'anchor.x': layer.type === 'null' ? 50 : 0,
@@ -266,27 +277,29 @@
   function contextMenu(event: MouseEvent): void {
     if (!allowContextMenu || !prop) return;
     event.preventDefault();
+    const locked = !isInspectorLayerEditable(api, layer);
     const easing = ['power', 'linear', 'easeInOut', 'expoOut', 'backOut', 'glide', 'snap'];
     const items: Array<MenuContribution | null> = [
       { header: label },
-      { label: 'Add keyframe at playhead', icon: 'diamond', run: addKeyframe },
-      animated ? { label: 'Remove animation', icon: 'x', run: () => toggleStopwatch(new MouseEvent('click')) } : null,
+      { label: 'Add keyframe at playhead', icon: 'diamond', disabled: locked, run: addKeyframe },
+      animated ? { label: 'Remove animation', icon: 'x', disabled: locked, run: () => toggleStopwatch(new MouseEvent('click')) } : null,
       { label: 'Show in graph editor', icon: 'graph', run: showGraphEditor },
       '-',
       { header: 'Easing for all keys' },
       ...easing.map((name) => ({
         label: name,
-        disabled: !animated,
-        run: () => api.history.do('Ease', () => properties.forEach((p) => api.anim.applyEaseTo(p.kf, name)))
+        disabled: locked || !animated,
+        run: () => applyKeyframeEase(name)
       })),
       '-',
-      { label: expression ? 'Edit expression…' : 'Add expression…', icon: 'code', run: editExpression },
+      { label: expression ? 'Edit expression…' : 'Add expression…', icon: 'code', disabled: locked, run: editExpression },
       expression ? {
         label: 'Remove expression',
         icon: 'x',
+        disabled: locked,
         run: () => applyExpression(null, 'Remove expression')
       } : null,
-      { label: 'Reset', icon: 'undo', run: resetChannel }
+      { label: 'Reset', icon: 'undo', disabled: locked, run: resetChannel }
     ];
     api.ui.menu({ x: event.clientX, y: event.clientY }, items.filter((item): item is MenuContribution => item !== null));
   }

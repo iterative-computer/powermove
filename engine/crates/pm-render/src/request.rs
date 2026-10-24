@@ -52,7 +52,13 @@ pub struct RenderRequest {
     /// final output only); `None` renders all of it. The returned texture is
     /// the region's size.
     pub region: Option<PixelRect>,
-    /// Intermediate storage: `rgba16float` or `rgba32float`.
+    /// A viewer supplied today's canvas. Compatibility source clipping uses
+    /// that complete canvas (`output_size`), including its pan buffer, while
+    /// `region` limits the pixels the engine needs to draw for presentation.
+    /// Other viewer requests keep their region as the source clip window.
+    pub preview_canvas: bool,
+    /// Compatibility request hint. The project Color depth controls intermediate
+    /// storage (`rgba8unorm`, `rgba16float`, or `rgba32float`).
     pub precision: Precision,
     /// Also render the depth and object-id surface (contract 2).
     pub depth_id: bool,
@@ -98,6 +104,7 @@ impl RenderRequest {
             output_size: Size::new(px(composition.width), px(composition.height)),
             scale: Some((scale, scale)),
             region: None,
+            preview_canvas: false,
             precision,
             depth_id: false,
             background: true,
@@ -118,6 +125,7 @@ impl RenderRequest {
             output_size: output,
             scale: None,
             region: None,
+            preview_canvas: false,
             precision,
             depth_id: false,
             background: true,
@@ -152,6 +160,7 @@ impl RenderRequest {
             output_size: request.output_size,
             scale: Some((request.scale, request.scale)),
             region: request.region,
+            preview_canvas: false,
             precision: request.precision,
             depth_id: request.depth_id,
             background: true,
@@ -189,8 +198,20 @@ impl RenderRequest {
             )));
         }
         if let Some((sx, sy)) = self.scale {
+            // A canvas supplies output pixels per composition pixel, not
+            // FrameRequest's bounded scale: zoom 16 on a 2x display is 32.
+            // Its allocation is still bounded by output_size/region. The
+            // viewer's already-validated canvas contract permits every
+            // finite positive density; captures retain the wire limits.
+            let canvas = self.preview_canvas && !self.export && self.video_end == VideoEnd::Preview;
             for v in [sx, sy] {
-                if !(v.is_finite() && (MIN_SCALE * 0.999..=MAX_SCALE * 1.001).contains(&v)) {
+                if canvas {
+                    if !(v.is_finite() && v > 0.0) {
+                        return Err(RenderError::Request(format!(
+                            "canvas scale {v} must be finite and positive"
+                        )));
+                    }
+                } else if !(v.is_finite() && (MIN_SCALE * 0.999..=MAX_SCALE * 1.001).contains(&v)) {
                     return Err(RenderError::Request(format!("scale {v} outside 0.01..16")));
                 }
             }
@@ -210,5 +231,37 @@ impl RenderRequest {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_preview_canvas_uses_its_derived_density_without_changing_frame_scale_limits() {
+        let mut request = RenderRequest::sized(Size::new(2008, 1416), Precision::Float16);
+        request.scale = Some((32.0, 32.0));
+        assert!(
+            request.validate().is_err(),
+            "ordinary frame scale stays bounded"
+        );
+        request.preview_canvas = true;
+        assert!(request.validate().is_ok(), "16x zoom on a 2x display");
+        request.export = true;
+        assert!(request.validate().is_err(), "export scale stays bounded");
+        request.export = false;
+        request.video_end = VideoEnd::Final;
+        assert!(
+            request.validate().is_err(),
+            "final capture scale stays bounded"
+        );
+        request.video_end = VideoEnd::Preview;
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            request.scale = Some((invalid, 32.0));
+            assert!(request.validate().is_err(), "invalid x density {invalid}");
+            request.scale = Some((32.0, invalid));
+            assert!(request.validate().is_err(), "invalid y density {invalid}");
+        }
     }
 }

@@ -127,11 +127,14 @@ SPIR-V rewrite, the bind check (amendment 9: samplers other than a float
 | `pm-cli render` | No runner: exits 4, "not headless-renderable", naming each layer and definition, before anything is written; the same on every run (`pm-cli/tests/definitions.rs`) |
 
 The runner (`ShaderFallbackRunner`): one WebGL2 context on an
-`OffscreenCanvas` for the window, `EXT_color_buffer_float`, an RGBA16F target
+`OffscreenCanvas` for the window, `EXT_color_buffer_float` for float targets,
+and an RGBA8, RGBA16F or RGBA32F target matching project Color depth
 cleared to transparent with blending off, the quad through `PM.VERT`, the
 calls replayed with the GL entry point each names (GL's own type rules drop
 the mismatched ones, as in the compositor), no texture bound, `readPixels`
-as binary16 in GL row order. Compiles go through `KHR_parallel_shader_compile`
+in GL row order: exact byte codes in u16 slots at 8, binary16 at 16, and
+binary32 at 32. Depth 32 enables `OES_texture_float_linear`; its upload and
+readback use FLOAT throughout. Compiles go through `KHR_parallel_shader_compile`
 with a deadline (10 s); a lost context is recreated, and a program that lost it
 is not run again. Programs are cached (32), requests run one at a time. Every
 pass's draw is fenced and polled under a 10 s draw deadline (the runner's
@@ -218,7 +221,7 @@ Sources and provenance:
 | e2e | e2e fixtures, `register(...)` literals and shader-layer code in e2e specs |
 | unit-tests | GLSL literals in kernel, legacy, and panel unit tests |
 | scenes | onboarding and www hero `scene.json` |
-| store | every public Store release, fetched without credentials through the desktop Store client's read-only routes (`tools/shaders/fetch-store.ts`): 4 releases of 4 extensions on 2026-10-17 (ascii-magic-effects 1.0.0, chrome 1.0.0, `zellzoi/liquid-glass-ios27` 2.0.1 and `mrsigma/liquid-glass-ios27` 2.0.8, two extensions of the same name), all effects. Kept outside the repository; activated under `sandbox-exec` with network and file writes denied (`tools/shaders/activate.ts`) |
+| store | every public Store release, fetched without credentials through the desktop Store client's read-only routes (`tools/shaders/fetch-store.ts`): 4 releases of 4 extensions on 2026-10-17 (private-extension-03 1.0.0, chrome 1.0.0, `zellzoi/private-extension-19` 2.0.1 and `mrsigma/private-extension-19` 2.0.8, two extensions of the same name), all effects. Kept outside the repository; activated under `sandbox-exec` with network and file writes denied (`tools/shaders/activate.ts`) |
 | generated-s3 | spike S3's 56 agent-style shaders (written by Opus 5.5 from the docs) |
 | generated-agent | 37 prompts covering every contract feature (`tools/shaders/prompts.ts`, `CONTRACT`; the script fails when a feature has no prompt), answered by `claude --print` (Claude Code 2.1.300, `claude-opus-5-5`) with the in-app agent's own system prompt (`agentInstructions()`, the adapter's schema suffix), the API pack readable with Read/Glob/Grep, and the shader-layer runtime the Shader panel shows. The in-app harness itself needs a running Powermove with its MCP tools, which cannot run headlessly here; differences: no render_frames or validate_effect loop, the deliverable returned as JSON. Outputs with provenance in `tools/shaders/generated/` |
 | local | opt-in (`--local <project.pmv>` or an extensions folder); not run for this report |
@@ -308,11 +311,11 @@ values scaled by max(1, |reference|).
   a renderer: the kernel's validator rejects their toggle parameters, written
   without `type: 'toggle'` (`orb-extension`, `bars-equalizer`), in both engines.
 - **WebGL-unstable** (amendment 9; judged by review): Store
-  `mrsigma/liquid-glass-ios27` 2.0.8, the case S3 analysed: 43 to 49 pixels
+  `mrsigma/private-extension-19` 2.0.8, the case S3 analysed: 43 to 49 pixels
   differ by up to 99 CV, and WebGL against itself with every input texel one
   binary16 step away from zero moves 26 to 33 pixels by up to 67 CV
   (`webgl.ts --perturb-input`; the class is decided per variant from the
-  perturbed runs). `zellzoi/liquid-glass-ios27` 2.0.1, a separate Store
+  perturbed runs). `zellzoi/private-extension-19` 2.0.1, a separate Store
   extension of the same name, matches. How it arises: the gate gives both
   engines the same input texels, and the differing pixels sit in one small
   region (the refracted highlight of the small square near the top right),
@@ -419,8 +422,8 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
 - **The in-app agent harness** did not generate the agent corpus: it needs a
   running Powermove with its MCP tools. The same model and CLI ran with the
   harness's instructions instead (provenance above and in every output).
-- **Store:** 4 public releases (figuate chrome 1.0.0, zellzoi ascii-magic-effects
-  1.0.0 and liquid-glass-ios27 2.0.1, mrsigma liquid-glass-ios27 2.0.8), 5 effects,
+- **Store:** 4 public releases (figuate chrome 1.0.0, zellzoi private-extension-03
+  1.0.0 and private-extension-19 2.0.1, mrsigma private-extension-19 2.0.8), 5 effects,
   all effects; no Store extension registers a
   shader layer or a fragment layer yet. Local projects (`--local`) were not
   collected for this run.
@@ -454,10 +457,12 @@ bun engine/crates/pm-render/tools/shaders/parse-uniforms-fixture.ts
 
 ## Perf3: bounded asynchronous runner readback (2026-10-19)
 
-`ShaderFallbackRunner` retains its RGBA16F framebuffer at an unchanged size.
+`ShaderFallbackRunner` retains its framebuffer at an unchanged size and depth
+(RGBA8, RGBA16F or RGBA32F).
 Unchanged input pixels reuse their uploaded textures after an exact byte
 comparison against an owned snapshot; an in-place change always uploads again.
-The combined texture/CPU snapshot cache is bounded to 128 MiB and 12 entries
+The combined texture/CPU snapshot cache is bounded to 128 MiB in binary16
+equivalent storage (at most 256 MiB physical for binary32) and 12 entries
 when idle; suspended draws lease their resources so snapshots cannot overwrite
 them. Its asynchronous path serializes GL submission and allows at most three
 pixel-pack buffers to wait for GPU fences, yielding to the browser between
@@ -467,7 +472,8 @@ completion. Context replacement/disposal ends pending reads and frees the
 buffers; a read has a 10-second bound. The blocking snapshot path remains
 available.
 
-RGBA16F is read as binary16 when the implementation exposes that read pair;
+RGBA8 reads exact bytes and RGBA32F reads exact binary32 values. RGBA16F is
+read as binary16 when the implementation exposes that read pair;
 the float path converts the input view's bits without per-component allocation.
 The conversion test covers every finite binary16 value, signed zero, subnormals
 and a nonzero source byte offset. The real Electron/WebGL regression compares
@@ -492,3 +498,6 @@ barrier and checks elapsed time and context loss afterward. Chromium's GPU
 watchdog bounds a hung synchronous draw at the same ten-second default; async
 passes keep their yielding per-pass fences and the runner's deadline. A scripted
 regression verifies that synchronous snapshots do not poll a same-task fence.
+
+Extension identifiers in the corpus discussion are anonymized labels. The
+external corpus retains original manifests; shader hashes select runtime behavior.

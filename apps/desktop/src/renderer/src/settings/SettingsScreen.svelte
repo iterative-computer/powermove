@@ -60,7 +60,7 @@
   let searchText = $state('');
   const query = $derived(searchText.trim().toLowerCase());
   let themeMode = $state<string>('system');
-  /* Reopening last session's windows is the default; the store only ever holds
+  /* Reopening the last active project is the default; the store only ever holds
      the opt-out, so an untouched profile needs no migration. */
   let restoreWindows = $state(true);
   let autoDownloadCloudMedia = $state(false);
@@ -77,6 +77,29 @@
   let rootEl = $state<HTMLElement | null>(null);
   let scrollEl = $state<HTMLElement | null>(null);
   let columnEl = $state<HTMLElement | null>(null);
+  const SECTION_SCROLL_MS = 140;
+  let scrollFrame = 0;
+
+  function cancelSectionScroll(): void {
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+  }
+
+  // Manual scrolling always takes over. These listeners never consume input.
+  $effect(() => {
+    const node = scrollEl;
+    if (!node) return;
+    const media = matchMedia('(prefers-reduced-motion: reduce)');
+    const motionChanged = () => { if (media.matches) cancelSectionScroll(); };
+    const events = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
+    for (const event of events) node.addEventListener(event, cancelSectionScroll, { passive: true });
+    media.addEventListener('change', motionChanged);
+    return () => {
+      cancelSectionScroll();
+      for (const event of events) node.removeEventListener(event, cancelSectionScroll);
+      media.removeEventListener('change', motionChanged);
+    };
+  });
   let matchedPages = $state<string[]>([]);
   let matchCount = $state(0);
   let lastFocus: HTMLElement | null = null;
@@ -139,6 +162,7 @@
   }
 
   export function open(target?: SettingsPage): void {
+    cancelSectionScroll();
     build();
     themeMode = PM.theme?.mode ?? 'system';
     restoreWindows = PM.store?.get?.('restoreWindows', true) !== false;
@@ -164,6 +188,7 @@
   }
 
   export function close(): void {
+    cancelSectionScroll();
     if (!shown) return;
     shown = false;
     searchText = '';
@@ -179,12 +204,30 @@
   }
 
   function show(id: SettingsPage, behavior: ScrollBehavior = 'smooth'): void {
+    cancelSectionScroll();
     page = id;
+    const node = scrollEl;
     const section = columnEl?.querySelector<HTMLElement>(`[data-settings-page="${id}"]`);
-    if (!scrollEl || !section) return;
-    const top = section.getBoundingClientRect().top - scrollEl.getBoundingClientRect().top
-      + scrollEl.scrollTop - parseFloat(getComputedStyle(scrollEl).paddingTop);
-    scrollEl.scrollTo({ top, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : behavior });
+    if (!node || !section) return;
+    const top = Math.max(0, Math.min(node.scrollHeight - node.clientHeight,
+      section.getBoundingClientRect().top - node.getBoundingClientRect().top
+        + node.scrollTop - parseFloat(getComputedStyle(node).paddingTop)
+        + (id === 'extensions' ? parseFloat(getComputedStyle(section).paddingTop) : 0)));
+    if (behavior !== 'smooth' || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      node.scrollTo({ top, behavior: 'instant' });
+      return;
+    }
+    const from = node.scrollTop;
+    if (Math.abs(top - from) < 1) return;
+    const started = performance.now();
+    const step = (now: number) => {
+      scrollFrame = 0;
+      if (!shown || !node.isConnected) return;
+      const progress = Math.min(1, (now - started) / SECTION_SCROLL_MS);
+      node.scrollTo({ top: from + (top - from) * (1 - (1 - progress) ** 3), behavior: 'instant' });
+      if (progress < 1) scrollFrame = requestAnimationFrame(step);
+    };
+    scrollFrame = requestAnimationFrame(step);
   }
 
   function syncSection(): void {
@@ -213,6 +256,7 @@
       syncSection();
     };
     update();
+    cancelSectionScroll();
     scrollEl?.scrollTo({ top: 0, behavior: 'instant' });
     let frame = 0;
     const observer = new MutationObserver(records => {
@@ -363,7 +407,7 @@
         ? visibleItems.length - 1
         : (index + (event.key === 'ArrowDown' ? 1 : -1) + visibleItems.length) % visibleItems.length;
     const target = visibleItems[next]!;
-    show(target.id);
+    show(target.id, 'instant');
     rootEl?.querySelector<HTMLElement>(`[data-settings-tab="${target.id}"]`)?.focus();
   }
 </script>
@@ -478,7 +522,7 @@
                   <div class="settings-row">
                     <div class="settings-copy">
                       <b>Preview memory limit</b>
-                      <span>Remember played sections for smoother replay. A higher limit remembers more in this window.</span>
+                      <span>Keep nearby sections ready for smoother playback. A higher limit remembers more in this window.</span>
                     </div>
                     <select class="settings-select" aria-label="Preview memory limit" value={previewMemoryMiB}
                       onchange={(event) => {
@@ -543,15 +587,15 @@
                   <div class="sg-group">
                     <div class="settings-row">
                       <div class="settings-copy">
-                        <b>Reopen windows on launch</b>
-                        <span>Start Powermove with the projects that had a window when you quit. Off, it opens one window.</span>
+                        <b>Reopen last project on launch</b>
+                        <span>Open only the project you were last working on.</span>
                       </div>
                       <button
                         class="toggle"
                         class:on={restoreWindows}
                         type="button"
                         aria-pressed={restoreWindows}
-                        aria-label="Reopen windows on launch"
+                        aria-label="Reopen last project on launch"
                         onclick={toggleRestoreWindows}
                       ><i aria-hidden="true"></i></button>
                     </div>

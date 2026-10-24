@@ -145,8 +145,8 @@
   </div>
   {#if row.files.length && !live && !isRunning}
     <div class="agent-tool-files">
-      {#each row.files as file, index (file)}
-        <code class="agent-tool-file" style="--i:{index}">{file}</code>
+      {#each row.files as file (file)}
+        <code class="agent-tool-file">{file}</code>
       {/each}
     </div>
   {/if}
@@ -191,7 +191,7 @@
     block-size: 0;
     overflow: clip;
     opacity: 0;
-    transition: block-size 300ms cubic-bezier(.23, 1, .32, 1), opacity 240ms ease-out, content-visibility 300ms allow-discrete;
+    transition: block-size 160ms cubic-bezier(.23, 1, .32, 1), opacity 120ms ease-out, content-visibility 160ms allow-discrete;
   }
   .agent-tool-activity[open]::details-content { block-size: auto; opacity: 1; }
 
@@ -234,7 +234,7 @@
     user-select: text;
     -webkit-user-select: text;
   }
-  .agent-tool-details > div { min-width: 0; animation: agent-fade-up 300ms cubic-bezier(.23, 1, .32, 1) both; }
+  .agent-tool-details > div { min-width: 0; }
   .agent-tool-details > .is-subtask { margin-left: 16px; }
   .agent-tool-line { display: flex; align-items: center; min-width: 0; }
   .agent-tool-line > .agent-tool-row { flex: 1; min-width: 0; }
@@ -304,7 +304,7 @@
     display: grid;
     grid-template-rows: 0fr;
     opacity: 0;
-    transition: grid-template-rows 300ms cubic-bezier(.23, 1, .32, 1), opacity 240ms ease-out;
+    transition: grid-template-rows 160ms cubic-bezier(.23, 1, .32, 1), opacity 120ms ease-out;
   }
   .agent-tool-output.is-open { grid-template-rows: 1fr; opacity: 1; }
   .agent-tool-output > div { min-height: 0; overflow: hidden; }
@@ -325,7 +325,6 @@
     display: inline-block; max-width: 100%; height: 22px; padding: 0 7px; border-radius: var(--r-sm);
     background: var(--bg-panel); box-shadow: var(--ctl-edge); color: var(--tx);
     font: var(--fs-xs)/22px var(--f-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    animation: agent-pop-in 250ms cubic-bezier(.23, 1, .32, 1) calc(var(--i) * 70ms) both;
   }
 
   @media (prefers-reduced-motion: reduce) {

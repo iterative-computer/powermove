@@ -13,8 +13,8 @@ import type { Page } from 'playwright';
 import { expect, launchApp, test } from './helpers/app';
 import { VIEWER_VARIANTS, useViewer, type ViewerVariant } from './helpers/viewer-fork';
 
-/** 2D at 200% panned, 2D at Fit, a 3D model through its camera, and in the right orthographic editor view. */
-type Scene = '2d' | '2d-fit' | '3d' | '3d-right';
+/** 2D at 200% panned, 2D at Fit, a 3D model through its camera, and in the 3D Editor view framed on it. */
+type Scene = '2d' | '2d-fit' | '3d' | '3d-editor';
 
 async function card<T = Buffer>(engine: '0' | '1', theme: string, variant: ViewerVariant, scene: Scene, then?: (page: Page, png: Buffer) => Promise<T>): Promise<T> {
   // Match engine-viewer-canvas's Standard-color gate. The display-profile
@@ -45,8 +45,7 @@ async function card<T = Buffer>(engine: '0' | '1', theme: string, variant: Viewe
         api.scene3d.edit({ operation: 'add_light', light: { id: 'key', type: 'point', p: { x: -2, y: 3, z: 2, intensity: 30 } } });
         api.scene3d.edit({ operation: 'add_object', object: { id: 'cube', source: { primitive: 'box' }, material: { p: { color: '#ff7733' } } } });
         PM.selectLayers(['cube']);
-        const viewport = api.scene3d.viewport;
-        if (scene === '3d-right' && viewport.state().view.mode === 'camera') viewport.run('view.right');
+        if (scene === '3d-editor') { api.scene3d.setView('editor'); api.scene3d.frame(true); }
       }
       PM.invalidate();
     }, { theme, scene });
@@ -142,7 +141,7 @@ async function compare(page: Page, a: Buffer, b: Buffer) {
 }
 
 const cases: Array<{ theme: string; variant: ViewerVariant; scene: Scene }> = [
-  ...['light', 'dark'].flatMap(theme => (['2d', '2d-fit', '3d', '3d-right'] as Scene[])
+  ...['light', 'dark'].flatMap(theme => (['2d', '2d-fit', '3d', '3d-editor'] as Scene[])
     .flatMap(scene => VIEWER_VARIANTS.map(variant => ({ theme, variant, scene })))),
 ];
 

@@ -1,9 +1,10 @@
 //! Every channel layout our FFmpeg build names (the layouts files reach the
 //! engine with; today's engine takes any of them through Chromium's decode)
-//! decodes with its speakers and folds into the stereo bus: each channel's
-//! tone is heard on its side with the matrix's gain, no channel but LFE is
-//! dropped, and channels without a speaker meaning (ambisonics) fold by
-//! Web Audio's channel-count rules, as today.
+//! decodes with its speakers and folds into the stereo bus: 1, 2, 4 and 6
+//! channels by count, as today's Web Audio graph folds them (Chromium's
+//! `AudioBus::SumFromByDownMixing`); every other count by its layout's
+//! ITU-R BS.775 coefficients, so no channel but LFE is dropped (decision
+//! LAYOUT-1: today keeps only their first two channels).
 
 mod common;
 
@@ -69,6 +70,30 @@ const LAYOUTS: &[&str] = &[
     "22.2",
 ];
 
+/// Today's stereo fold of `n` channels: rows L and R.
+fn web_audio_fold(n: usize) -> [Vec<f32>; 2] {
+    let h = 0.5f32.sqrt();
+    let mut m = [vec![0f32; n], vec![0f32; n]];
+    match n {
+        1 => {
+            m[0][0] = 1.0;
+            m[1][0] = 1.0;
+        }
+        4 => {
+            (m[0][0], m[0][2], m[1][1], m[1][3]) = (0.5, 0.5, 0.5, 0.5);
+        }
+        6 => {
+            (m[0][0], m[0][2], m[0][4]) = (1.0, h, h);
+            (m[1][1], m[1][2], m[1][5]) = (1.0, h, h);
+        }
+        _ => {
+            m[0][0] = 1.0;
+            m[1][1] = 1.0;
+        }
+    }
+    m
+}
+
 #[test]
 fn every_named_layout_folds_into_stereo() {
     let dir = temp_dir("layouts-all");
@@ -110,7 +135,10 @@ fn every_named_layout_folds_into_stereo() {
         let doc = project(30.0, 1.0, &[audio("A", "s", 0.0, 1.0, "", "")], &[], "");
         let mut m = rig.mixer(doc, "C", MixFormat::stereo(SR));
         let out = rig.render(&mut m, 0, SR as i64, 1 << 16);
-        let want = layout::matrix(&speakers, &layout::stereo());
+        let want = match channels {
+            1 | 2 | 4 | 6 => web_audio_fold(channels).to_vec(),
+            n => pm_audio::today::stereo_fold(&speakers, n),
+        };
         for (c, s) in speakers.iter().enumerate() {
             let f = 300.0 + 100.0 * c as f64;
             let (l, r) = (
@@ -122,8 +150,10 @@ fn every_named_layout_folds_into_stereo() {
                 (l - el).abs() < 1e-4 && (r - er).abs() < 1e-4,
                 "{name} channel {c} ({s:?}): heard L {l:.4} R {r:.4}, matrix L {el:.4} R {er:.4}"
             );
-            let lfe = matches!(s, Speaker::LowFrequency | Speaker::LowFrequency2);
-            assert!(lfe || l + r > 0.05, "{name}: {s:?} is dropped");
+            if !matches!(channels, 1 | 2 | 4 | 6) {
+                let lfe = matches!(s, Speaker::LowFrequency | Speaker::LowFrequency2);
+                assert!(lfe || l + r > 0.05, "{name}: {s:?} is dropped");
+            }
         }
         summary.push(format!("{name} ({channels} ch, {named} named)"));
     }

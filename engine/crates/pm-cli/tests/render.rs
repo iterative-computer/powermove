@@ -404,12 +404,17 @@ fn every_preset_and_the_phase_3b_formats_render_from_the_cli() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Level 1 SVG images (decision S1): the app draws them with Chromium;
-/// pm-cli has no Chromium, draws them with resvg, and says so by name on
-/// stderr and in the summary. A project without SVG prints no notice.
-#[test]
-fn level_1_svg_images_render_with_a_named_approximate_svg_notice() {
-    let dir = scratch("svg");
+struct SvgProject(PathBuf);
+
+impl Drop for SvgProject {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn svg_project(name: &str) -> SvgProject {
+    let fixture = SvgProject(scratch(name));
+    let dir = &fixture.0;
     let svg = dir.join("art.svg");
     std::fs::write(
         &svg,
@@ -423,13 +428,38 @@ fn level_1_svg_images_render_with_a_named_approximate_svg_notice() {
     });
     let project_file = dir.join("p.json");
     std::fs::write(&project_file, p.to_string()).unwrap();
-    let out = cli(&[
-        project_file.to_str().unwrap(),
-        "-o",
-        dir.join("svg.mp4").to_str().unwrap(),
-        "--preset",
-        "web",
-    ]);
+    fixture
+}
+
+fn without_chromium(args: &[&str], dir: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_pm-cli"))
+        .arg("render")
+        .args(args)
+        .env_remove("POWERMOVE_ANGLE_ENDPOINT")
+        .env_remove("POWERMOVE_ANGLE_TOKEN")
+        .env("POWERMOVE_ANGLE_HELPER", dir.join("missing-helper.cjs"))
+        .output()
+        .unwrap()
+}
+
+/// resvg is an explicit approximation (decision S1), named on stderr and
+/// in the summary. A project without SVG prints no notice.
+#[test]
+fn level_1_svg_images_render_with_a_named_approximate_svg_notice() {
+    let fixture = svg_project("svg-approximate");
+    let dir = &fixture.0;
+    let project_file = dir.join("p.json");
+    let out = without_chromium(
+        &[
+            project_file.to_str().unwrap(),
+            "-o",
+            dir.join("svg.mp4").to_str().unwrap(),
+            "--preset",
+            "web",
+            "--approximate-svg",
+        ],
+        dir,
+    );
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let s = summary(&out);
     let draws = s["approximateSvg"].as_u64().unwrap_or(0);
@@ -453,5 +483,108 @@ fn level_1_svg_images_render_with_a_named_approximate_svg_notice() {
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert_eq!(summary(&out)["approximateSvg"], 0);
     assert!(!stderr.contains("approximate SVG"), "{stderr}");
-    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn level_1_svg_images_without_chromium_fail_with_a_named_error() {
+    let fixture = svg_project("svg-unavailable");
+    let dir = &fixture.0;
+    let output = dir.join("svg.png");
+    let out = without_chromium(
+        &[
+            dir.join("p.json").to_str().unwrap(),
+            "-o",
+            output.to_str().unwrap(),
+            "--format",
+            "still",
+        ],
+        dir,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("svg-chromium-unavailable"), "{stderr}");
+    assert!(stderr.contains("--approximate-svg"), "{stderr}");
+    assert!(!stderr.contains("notice (approximate SVG)"), "{stderr}");
+    assert!(!output.exists(), "a failed export must not publish a still");
+    let mut remaining: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    remaining.sort();
+    assert_eq!(
+        remaining,
+        ["art.svg", "p.json"],
+        "a failed export must remove temporary outputs"
+    );
+}
+
+/// The production helper is configured but its Chromium is missing: an
+/// SVG-only project fails by name on `render` and `scope` and writes
+/// nothing (no resvg fallback when a helper is configured). Skipped with a
+/// printed reason without `POWERMOVE_ANGLE_HELPER` (a built CLI
+/// dist/native-angle-child.cjs); `POWERMOVE_REQUIRE_ANGLE_HELPER=1` makes
+/// that a failure.
+#[test]
+fn level_1_svg_images_with_the_helper_but_no_browser_fail_by_name() {
+    let helper = match std::env::var("POWERMOVE_ANGLE_HELPER") {
+        Ok(helper) if !helper.is_empty() => helper,
+        _ if std::env::var_os("POWERMOVE_REQUIRE_ANGLE_HELPER").is_some() => {
+            panic!("POWERMOVE_REQUIRE_ANGLE_HELPER is set: set POWERMOVE_ANGLE_HELPER")
+        }
+        _ => {
+            eprintln!(
+                "skipped: this gate needs the production ANGLE helper (set POWERMOVE_ANGLE_HELPER to a built CLI dist/native-angle-child.cjs)"
+            );
+            return;
+        }
+    };
+    let fixture = svg_project("svg-no-browser");
+    let dir = &fixture.0;
+    let project_file = dir.join("p.json");
+    let still = dir.join("svg.png");
+    let scopes = dir.join("scopes");
+    for (command, args) in [
+        (
+            "render",
+            vec![
+                project_file.to_str().unwrap(),
+                "-o",
+                still.to_str().unwrap(),
+                "--format",
+                "still",
+                "--approximate-svg",
+            ],
+        ),
+        (
+            "scope",
+            vec![
+                project_file.to_str().unwrap(),
+                "-o",
+                scopes.to_str().unwrap(),
+                "--approximate-svg",
+            ],
+        ),
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_pm-cli"))
+            .arg(command)
+            .args(&args)
+            .env_remove("POWERMOVE_ANGLE_ENDPOINT")
+            .env_remove("POWERMOVE_ANGLE_TOKEN")
+            .env("POWERMOVE_ANGLE_HELPER", &helper)
+            .env("POWERMOVE_CHROMIUM", dir.join("missing-chromium"))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{command}: {stderr}");
+        assert!(
+            stderr.contains("chromium-unavailable"),
+            "{command}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("notice (approximate SVG)"),
+            "{command}: a configured helper never falls back to resvg: {stderr}"
+        );
+    }
+    assert!(!still.exists(), "render published a still");
+    assert!(!scopes.join("scope.json").exists(), "scope wrote scopes");
 }

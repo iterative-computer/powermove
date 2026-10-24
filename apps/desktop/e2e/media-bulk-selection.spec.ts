@@ -25,10 +25,9 @@ test('drag a selection box, delete media, and undo the whole batch in both theme
     if (theme === 'light') await importMedia(page);
     const list = page.getByRole('listbox', { name: 'Project media' });
     const cards = page.locator('.asset-card[data-asset-id]');
-    // Undo restores the files, while the first marquee may have scrolled the
-    // list. Start the next theme's real pointer drag in visible empty space.
+    // The previous marquee scrolls the list; Undo restores media, not its viewport.
     await list.evaluate(element => { element.scrollTop = 0; });
-    await expect(cards.first()).toBeInViewport();
+    await expect.poll(() => list.evaluate(element => element.scrollTop)).toBe(0);
     const bounds = await list.boundingBox();
     const first = await cards.first().boundingBox();
     const last = await cards.last().boundingBox();
@@ -61,8 +60,7 @@ test('Command-click and Shift-click select media; referenced bulk deletion confi
   await page.keyboard.press('Meta+a');
   await expect(page.locator('.asset-card[data-asset-id][aria-selected="true"]')).toHaveCount(4);
   await session.app.evaluate(({ dialog }) => {
-    dialog.showMessageBox = async (...args: unknown[]) => {
-      const options = args.at(-1) as import('electron').MessageBoxOptions;
+    dialog.showMessageBox = async (_window, options) => {
       (globalThis as any).__bulkConfirmation = options.message;
       return { response: 0, checkboxChecked: false };
     };

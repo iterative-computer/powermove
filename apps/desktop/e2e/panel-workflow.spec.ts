@@ -63,7 +63,7 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   expect(new Set(icons).size).toBe(icons.length);
   expect(icons).not.toContain('missing');
   expect(icons).not.toContain('panel');
-  const panelCount = await page.evaluate(() => Object.values((window as any).PM.PANELS).filter((panel: any) => panel.library !== false).length);
+  const panelCount = await page.evaluate(() => Object.values((window as any).PM.PANELS).filter((panel: any) => panel.id !== 'toolbar' && panel.library !== false).length);
   expect(await library.locator('.library-card').count()).toBe(panelCount);
   await expect(library.locator('[data-panel-id="toolbar"]')).toHaveCount(0);
   await expect(library.locator('[data-panel-id="agent"]')).toHaveCount(0);
@@ -103,7 +103,7 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   await expect(timelinePreview).toHaveCSS('width', '800px');
   await expect(timelinePreview).toHaveCSS('height', '440px');
   const timelineFit = await library.locator('[data-panel-id="timeline"] .library-clone').evaluate((clone) => {
-    const canvas = clone.querySelector<HTMLCanvasElement>('[data-library-source-id="tl-canvas"]');
+    const canvas = clone.querySelector<HTMLElement>('[data-library-source-id="tl-canvas"]');
     const wrap = clone.querySelector<HTMLElement>('[data-library-source-id="tl-canvas-wrap"]');
     if (!canvas || !wrap) return null;
     const canvasRect = canvas.getBoundingClientRect();
@@ -175,7 +175,7 @@ libraryTest('library shows a panel grid, adds panels to the workspace, and edits
   await library.getByRole('searchbox', { name: 'Search panels' }).fill('');
   const dragId = await page.evaluate(() => {
     const PM = (window as any).PM;
-    return Object.keys(PM.PANELS).find(id => id !== 'toolbar' && !PM.Layout.findPanel(PM.WS.current, id));
+    return Object.keys(PM.PANELS).find(id => id !== 'toolbar' && PM.PANELS[id].library !== false && !PM.Layout.findPanel(PM.WS.current, id));
   });
   expect(dragId).toBeTruthy();
   await page.evaluate(async (id) => {

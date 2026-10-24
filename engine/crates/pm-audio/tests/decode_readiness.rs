@@ -227,20 +227,25 @@ fn dropped_input_preserves_ready_samples_at_a_block_boundary() {
         assert_eq!(report.starved, 1);
         let mut reference = rig.mixer(doc(), "C", MixFormat::stereo(48_000));
         let expected = rig.render(&mut reference, start, start + frames as i64, frames);
-        let bank = if mapping.is_empty() && source_rate == 48_000 {
-            None
-        } else if mapping.is_empty() {
-            pm_audio::kernel::grid_bank(source_rate, 48_000)
-        } else {
-            Some(pm_audio::kernel::free_bank(ratio))
-        };
+        // A linear clip plays through today's export model: today's decode
+        // resampler reads 16 source frames either side; time-mapped clips
+        // through the engine's sinc.
+        let conversion = (mapping.is_empty() && source_rate != 48_000).then(|| {
+            pm_audio::today::Conversion::new(source.length().unwrap(), source_rate, 48_000)
+        });
+        let bank = (!mapping.is_empty()).then(|| pm_audio::kernel::free_bank(ratio));
         let mut kept = 0;
         let mut dropped = 0;
         for i in 0..frames {
             let position = (start + i as i64) as f64 * ratio;
-            let ready = bank.as_ref().map_or(position < block as f64, |b| {
-                position.floor() as usize + b.taps - b.before() <= block
-            });
+            let ready = match (&conversion, &bank) {
+                (Some(c), _) => {
+                    let j = (start + i as i64) as u64;
+                    c.source_span(j, j + 1).1 <= block as i64
+                }
+                (None, Some(b)) => position.floor() as usize + b.taps - b.before() <= block,
+                (None, None) => position < block as f64,
+            };
             for c in 0..2 {
                 if ready {
                     assert_eq!(out[c][i], expected[c][i], "{source_rate} {mapping} at {i}");

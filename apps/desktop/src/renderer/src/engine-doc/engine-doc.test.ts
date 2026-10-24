@@ -5,7 +5,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { canonicalProject, canonicalProjectHash, canonicalStringify } from '../../../shared/canonical-json';
 import { applyOps, diffOps } from '../../../shared/patch-ids';
@@ -114,6 +114,25 @@ function exercise(PM: any, doc: EngineDoc, random: () => number) {
 }
 
 const mismatches = (doc: EngineDoc) => doc.dual!.stats.samples;
+
+describe('bus announcements', () => {
+  it('does not treat a runtime-only assets event as a document write', () => {
+    const PM = makePM('core/easing', 'core/model', 'core/selection', 'core/anim', 'core/history', 'core/editing', 'gl/compositor');
+    // The module never loads: only the bus wrapper is under test.
+    installEngineDoc(PM, { mode: parseMode('audit'), loadModule: () => new Promise<WebAssembly.Module>(() => {}), sink: () => {}, auditMs: 1e9 });
+    const announce = vi.fn();
+    PM.bus.__engineDocAnnounce = announce;
+    const heard: unknown[] = [];
+    PM.bus.on('assets', (change: unknown) => heard.push(change));
+    PM.bus.emit('assets', { runtimeOnly: true });
+    expect(announce).not.toHaveBeenCalled();
+    PM.bus.emit('assets');
+    PM.bus.emit('assets', { runtimeOnly: false });
+    PM.bus.emit('layers', { runtimeOnly: true });
+    expect(announce).toHaveBeenCalledTimes(3);
+    expect(heard).toEqual([{ runtimeOnly: true }, undefined, { runtimeOnly: false }]);
+  });
+});
 
 describe.skipIf(!built)('engine-doc with pm-wasm', () => {
   it('answers every routed query like the legacy evaluator on random projects', async () => {

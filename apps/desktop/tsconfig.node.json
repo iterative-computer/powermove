@@ -24,11 +24,13 @@
     "src/main/**/*.ts",
     "src/preload/**/*.ts",
     "src/server/**/*.ts",
+    "src/engine/document-host/pool.ts",
+    "src/engine/document-host/protocol.ts",
     "src/shared/**/*.ts",
     "src/renderer/src/legacy/core/compositions.ts",
     "src/renderer/src/legacy/registry.ts",
     "../../engine/crates/pm-model/tests/vectors/generate-patch-binary-vectors.ts"
   ],
   /* The frame bridge harness pages run in a renderer (tsconfig.web.json). */
-  "exclude": ["src/main/engine/integration/*-page.ts", "src/main/engine/integration/page-engine.ts", "src/main/engine/integration/synthetic-project.ts", "src/main/engine/integration/bridge-worker.ts"]
+  "exclude": ["src/server/native/contract-run.ts", "src/main/engine/integration/*-page.ts", "src/main/engine/integration/page-engine.ts", "src/main/engine/integration/synthetic-project.ts", "src/main/engine/integration/bridge-worker.ts"]
 }

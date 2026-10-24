@@ -1,0 +1,10 @@
+{
+  "id": "mods",
+  "name": "Mods",
+  "version": "1.0.0",
+  "apiVersion": 1,
+  "description": "The list of everything added to Powermove, with a switch for each.",
+  "entry": "index.ts",
+  "contributes": ["panels", "commands", "palette"],
+  "author": "powermove"
+}

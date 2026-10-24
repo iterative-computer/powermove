@@ -29,12 +29,12 @@ export class FallbackReadback {
   }
 
   /** Called after ready(), with the output framebuffer bound. */
-  async read(width: number, height: number): Promise<Uint16Array> {
+  async read(width: number, height: number, colorDepth: 8 | 16 | 32 = 16): Promise<Uint16Array | Float32Array> {
     if (this.disposed || this.active >= CAPACITY) throw new Error('Fallback readback has no free slot');
     const gl = this.gl;
-    const half = this.half();
+    const half = colorDepth === 16 && this.half();
     const count = width * height * 4;
-    const bytes = count * (half ? 2 : 4);
+    const bytes = count * (colorDepth === 8 ? 1 : half ? 2 : 4);
     const slot = this.free.pop() ?? { buffer: gl.createBuffer()!, bytes: 0 };
     let fence: WebGLSync | null = null;
     this.active++;
@@ -45,7 +45,7 @@ export class FallbackReadback {
         gl.bufferData(gl.PIXEL_PACK_BUFFER, bytes, gl.STREAM_READ);
         slot.bytes = bytes;
       }
-      gl.readPixels(0, 0, width, height, gl.RGBA, half ? gl.HALF_FLOAT : gl.FLOAT, 0);
+      gl.readPixels(0, 0, width, height, gl.RGBA, colorDepth === 8 ? gl.UNSIGNED_BYTE : half ? gl.HALF_FLOAT : gl.FLOAT, 0);
       fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       if (!fence || gl.getError() !== gl.NO_ERROR) throw new Error('Cannot submit fallback pixel readback');
@@ -61,12 +61,14 @@ export class FallbackReadback {
         // has yielded to its event loop. Never busy-wait on the page.
         await new Promise(resolve => setTimeout(resolve, 1));
       }
-      const pixels = half ? new Uint16Array(count) : new Float32Array(count);
+      const pixels = colorDepth === 8 ? new Uint8Array(count) : half ? new Uint16Array(count) : new Float32Array(count);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
       gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, pixels);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       if (gl.getError() !== gl.NO_ERROR) throw new Error('Cannot copy fallback pixel readback');
-      return half ? pixels as Uint16Array : toHalfArray(pixels as Float32Array);
+      return colorDepth === 8 ? Uint16Array.from(pixels as Uint8Array)
+        : colorDepth === 32 ? pixels as Float32Array
+        : half ? pixels as Uint16Array : toHalfArray(pixels as Float32Array);
     } finally {
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       if (fence) gl.deleteSync(fence);

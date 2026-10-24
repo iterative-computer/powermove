@@ -87,8 +87,28 @@ export interface FramePainter {
    * Not resolved by `dispose`.
    */
   readonly lost?: Promise<string>;
+  /** Drops hidden idle buffers while keeping the context and shaders warm. */
+  trim?(): void;
+  /** Nominal allocations only; browser compositor/backbuffers are opaque. */
+  memoryStats?(): FramePainterMemory;
   dispose(): void;
 }
+
+export type FramePainterMemory = {
+  backend: 'webgl2' | 'webgpu';
+  canvas: { width: number; height: number };
+  configured: { width: number; height: number; format: string; colorSpace: string } | null;
+  drawingBuffer: { width: number; height: number; bytesPerPixel: number; nominalBytes: number } | null;
+  uploadTexture: { width: number; height: number; bytesPerPixel: number; nominalBytes: number } | null;
+  pendingFences: number;
+  contextLost: boolean;
+  trimmed: boolean;
+  /** The browser does not expose its compositor/backbuffer count or charge. */
+  compositorBuffers: 'unknown';
+  contextAttributes?: { alpha: boolean; premultipliedAlpha: boolean; antialias: boolean; preserveDrawingBuffer: boolean; depth: boolean; stencil: boolean } | null;
+  channelBits?: { red: number; green: number; blue: number; alpha: number };
+  trimError?: string | null;
+};
 
 const SHADER = /* wgsl */ `
 @group(0) @binding(0) var src: texture_external;

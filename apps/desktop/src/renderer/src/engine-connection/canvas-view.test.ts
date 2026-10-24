@@ -1,23 +1,22 @@
+import { Vector3 } from 'three';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PMRegistry } from '../legacy/registry';
-import { enterLocalView } from '../core/scene3d/viewport';
-import { engineCanvasSceneState, engineCanvasViewParams, watchEngineCanvasView } from './canvas-view';
+import { applyViewportPose, setViewportMode } from '../core/scene3d/viewport';
+import { compositionHas3D, engineCanvasViewParams, watchEngineCanvasView } from './canvas-view';
 
-function pendingProject() {
-  const api = vi.fn(() => { throw new Error('camera3d unavailable before document readiness'); });
+vi.mock('../core/scene3d/service', async () => {
+  const { PerspectiveCamera } = await import('three');
+  return { compositionRuntime: () => ({ camera: new PerspectiveCamera(50, 16 / 9, 0.1, 100) }) };
+});
+
+function project() {
   const listeners = new Map<string, Set<() => void>>();
-  let resolveReady!: (ready: boolean) => void;
-  const doc = {
-    enabled: true,
-    ready: false,
-    whenReady: new Promise<boolean>(resolve => { resolveReady = resolve; }),
-    onReady: vi.fn(() => () => {})
-  };
   const PM = {
     proj: { id: 'P', layers: [{ id: 'cube', d: { definition: 'powermove.3d.object' } }] },
-    EngineDoc: doc,
-    Kernel: { api },
+    time: 0,
+    active: () => false,
+    invalidate: vi.fn(),
     bus: {
       on(event: string, fn: () => void) {
         const set = listeners.get(event) ?? new Set<() => void>();
@@ -27,46 +26,32 @@ function pendingProject() {
       }
     }
   } as unknown as PMRegistry;
-  const emit = (event: string) => { for (const fn of listeners.get(event) ?? []) fn(); };
-  return { PM, doc, api, emit, resolveReady };
+  return { PM, emit: (event: string) => { for (const fn of listeners.get(event) ?? []) fn(); } };
 }
 
-describe('engine canvas view startup', () => {
-  it('waits for the document before reading 3D editor state, then carries Local View', () => {
-    const { PM, doc, api } = pendingProject();
-    expect(engineCanvasViewParams(PM)).not.toHaveProperty('camera');
-    expect(engineCanvasSceneState(PM)).toMatchObject({ hasScene: true, engineCamera: null });
-    expect(api).not.toHaveBeenCalled();
-
-    doc.ready = true;
-    enterLocalView(PM, ['cube']);
-    expect(engineCanvasViewParams(PM)).toMatchObject({
-      camera: null, shading: 'solid', xray: false, localView: ['cube']
-    });
-    expect(engineCanvasSceneState(PM)?.localView).toEqual(['cube']);
-    expect(api).not.toHaveBeenCalled();
+describe('engine canvas view', () => {
+  it('carries the editor camera only in the Editor view, as the built-in viewer does', () => {
+    const { PM } = project();
+    expect(compositionHas3D(PM)).toBe(true);
+    expect(engineCanvasViewParams(PM)).toEqual({});
+    setViewportMode(PM, 'editor');
+    expect(engineCanvasViewParams(PM).camera?.projection.kind).toBe('perspective');
+    setViewportMode(PM, 'camera');
+    expect(engineCanvasViewParams(PM)).toEqual({});
   });
 
-  it('refreshes on document readiness and editor changes without subscribing to the full viewport snapshot', async () => {
-    const { PM, doc, api, emit, resolveReady } = pendingProject();
-    const updates: ReturnType<typeof engineCanvasViewParams>[] = [];
-    const off = watchEngineCanvasView(PM, () => updates.push(engineCanvasViewParams(PM)));
-    emit('selection');
+  it('coalesces view changes into one refresh and stops after disposal', async () => {
+    const { PM, emit } = project();
+    const refresh = vi.fn();
+    const off = watchEngineCanvasView(PM, refresh);
+    setViewportMode(PM, 'editor');
+    applyViewportPose(PM, { position: new Vector3(0, 0, 5), target: new Vector3(), zoom: 1 });
+    emit('composition');
     await Promise.resolve();
-    expect(updates).toHaveLength(1);
-    expect(updates[0]).not.toHaveProperty('camera');
-
-    doc.ready = true;
-    resolveReady(true);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(updates.at(-1)).toMatchObject({ camera: null, shading: 'solid' });
-    expect(api).not.toHaveBeenCalled();
-
-    const count = updates.length;
+    expect(refresh).toHaveBeenCalledTimes(1);
     off();
-    emit('selection');
+    emit('composition');
     await Promise.resolve();
-    expect(updates).toHaveLength(count);
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 });

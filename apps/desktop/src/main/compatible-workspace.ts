@@ -9,7 +9,8 @@ import { EXTENSION_ID, parseManifest } from '../shared/extensions';
 import { compileExtension } from './extensions/compiler';
 import { collectArtifacts, mimeTypeForPath } from './codex/artifacts';
 import { publishExtensionChanges, withStageSnapshot } from './codex/change-history';
-import { validateStagedExtensions } from './codex/validate-staged-extensions';
+import { extensionSourceWarnings, validateStagedExtensions } from './codex/validate-staged-extensions';
+import { analyzeExtension, DEPRECATION_GUIDANCE } from '../shared/extension-analysis';
 import { loginShellPath } from './login-shell-path';
 import { killStrays, ProcessFamily } from './process-family';
 import { agentResultSchema } from './codex/instructions';
@@ -103,7 +104,9 @@ export class CompatibleWorkspace {
       const source = data.toString('utf8');
       const offset = boundedInteger(args.offset, 0, 0, source.length);
       const limit = boundedInteger(args.limit, 30000, 1, 100000);
-      return text({ text: source.slice(offset, offset + limit), offset, totalChars: source.length });
+      // Reading extension source returns its deprecated compatibility API uses (amendment 23).
+      const deprecations = await this.sourceWarnings(file, source);
+      return text({ text: source.slice(offset, offset + limit), offset, totalChars: source.length, ...(deprecations.length ? { deprecations, guidance: DEPRECATION_GUIDANCE } : {}) });
     }
     if (name === 'write_file') {
       if (typeof args.text !== 'string' || args.text.length > 1000000) throw new Error('Provide text no larger than 1,000,000 characters.');
@@ -119,7 +122,8 @@ export class CompatibleWorkspace {
         await mkdir(path.dirname(file), { recursive: true });
         await writeFile(file, args.text, 'utf8');
       }
-      return text({ path: file, bytes: Buffer.byteLength(args.text) });
+      const deprecations = await this.sourceWarnings(file, args.text);
+      return text({ path: file, bytes: Buffer.byteLength(args.text), ...(deprecations.length ? { deprecations, guidance: DEPRECATION_GUIDANCE } : {}) });
     }
     if (name === 'run_command') {
       if (typeof args.command !== 'string' || !args.command.trim() || args.command.length > 100000) throw new Error('Provide a nonempty command, at most 100,000 characters.');
@@ -163,8 +167,24 @@ export class CompatibleWorkspace {
     const outDir = await mkdtemp(path.join(os.tmpdir(), 'powermove-compile-'));
     try {
       const compiled = await compileExtension({ dir, entry: manifest.manifest.entry || 'index.ts', outDir });
-      return compiled.ok ? { ok: true as const, hash: compiled.hash } : compiled;
+      // Compiling returns the deprecated compatibility APIs the source uses; they never fail it.
+      const deprecations = await extensionSourceWarnings(id, dir);
+      const advice = deprecations.length ? { deprecations, guidance: DEPRECATION_GUIDANCE } : {};
+      return compiled.ok ? { ok: true as const, hash: compiled.hash, ...advice } : { ...compiled, ...advice };
     } finally { await rm(outDir, { recursive: true, force: true }); }
+  }
+
+  /** Deprecated API uses in a file of a staged extension (empty for anything else). */
+  private async sourceWarnings(file: string, source: string) {
+    const staging = await realpath(this.layout.stagingDirectory).catch(() => this.layout.stagingDirectory);
+    for (const root of new Set([staging, this.layout.stagingDirectory])) {
+      const relative = path.relative(root, file);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+      const [id, ...rest] = relative.split(path.sep);
+      if (!id || !EXTENSION_ID.test(id) || !rest.length) return [];
+      return analyzeExtension(id, [{ path: rest.join('/'), text: source }]);
+    }
+    return [];
   }
 
   async finish(value: Record<string, unknown>, signal: AbortSignal): Promise<CodexRunResult> {
@@ -188,13 +208,14 @@ export class CompatibleWorkspace {
     return withStageSnapshot(this.layout, async snapshot => {
       signal.throwIfAborted();
       // The same manifest, credential and compile checks as Codex and Claude runs.
-      await validateStagedExtensions(snapshot, extensions);
+      const extensionWarnings = await validateStagedExtensions(snapshot, extensions);
       signal.throwIfAborted();
       const artifacts = await collectArtifacts(this.layout.runDirectory, this.layout.runId, value.artifacts as unknown[]);
       signal.throwIfAborted();
       const changeSet = await publishExtensionChanges(snapshot, extensions);
-      return { ok: true as const, access: this.access, text: JSON.stringify({ ...value, extensions, artifacts, projectId: this.layout.projectId }), extensions,
-        ...(changeSet ? { extensionChangeSetId: changeSet.id } : {}) };
+      const warned = extensionWarnings.length ? { extensionWarnings } : {};
+      return { ok: true as const, access: this.access, text: JSON.stringify({ ...value, extensions, artifacts, projectId: this.layout.projectId, ...warned }), extensions,
+        ...(changeSet ? { extensionChangeSetId: changeSet.id } : {}), ...warned };
     }, extensions.map(change => change.id));
   }
 }

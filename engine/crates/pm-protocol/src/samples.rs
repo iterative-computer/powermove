@@ -531,6 +531,7 @@ pub fn export_settings() -> ExportSettings {
             end: ticks(7_056_000_000),
         },
         audio: true,
+        audio_index_playhead: None,
         motion_blur: true,
         color: OutputColor::Rec709Broadcast,
         precision: Precision::Float32,
@@ -546,6 +547,7 @@ pub fn export_settings() -> ExportSettings {
             hide_captions: false,
             preview: true,
             sequence_name: None,
+            compat: vec![crate::snapshot::CompatSource::RasterOverride],
         },
     }
 }
@@ -841,6 +843,7 @@ pub fn requests() -> Vec<Envelope> {
                 scale: 1.0,
                 revision: rev(42),
                 svg: None,
+                frame: None,
                 blender: None,
             }),
         ),
@@ -851,6 +854,25 @@ pub fn requests() -> Vec<Envelope> {
                 area: handle(14),
                 textures: vec!["fallback-0.rgba16f".into(), "fallback-1.rgba16f".into()],
                 output: "fallback-out.rgba16f".into(),
+            }),
+        ),
+        request(
+            id(30),
+            Request::HostEncode(crate::host_encode::HostEncode {
+                job: "job-7".into(),
+                step: crate::host_encode::EncodeStep::Open {
+                    codec: crate::host_encode::EncodeVideoCodec::Vp9,
+                    width: 1920,
+                    height: 1080,
+                    frame_rate: crate::common::FrameRate::new(30_000, 1001),
+                    bitrate: 16_000_000,
+                    frames: crate::common::Count::new(300).expect("safe"),
+                    audio: Some(crate::host_encode::EncodeAudio {
+                        sample_rate: 48_000,
+                        channels: 2,
+                    }),
+                    output: handle(15),
+                },
             }),
         ),
     ]
@@ -888,6 +910,7 @@ pub fn snapshot_request() -> crate::snapshot::SnapshotRequest {
         blender_wait_ms: 0,
         captions_hidden: false,
         uploaded: vec!["5e".repeat(32)],
+        compat_uploaded: Vec::new(),
     }
 }
 
@@ -930,6 +953,7 @@ fn fallback_effect_request() -> crate::shader_fallback::ShaderFallbackRequest {
         fragment: "#version 300 es\nprecision highp float;\nuniform sampler2D u_tex;\nuniform highp isampler2D u_lut;\nout vec4 o;\nvoid main(){ o = texture(u_tex, vec2(0.5)); }".into(),
         width: 2,
         height: 1,
+        color_depth: 16,
         calls: pass(0.0),
         stage: "bind".into(),
         message: "sampler `u_lut` (integer)".into(),
@@ -1144,6 +1168,7 @@ pub fn responses() -> Vec<Envelope> {
             24,
             Response::MediaFacts(Box::new(crate::media::MediaFacts {
                 kind: crate::media::MediaKind::Video,
+                audio: None,
                 facts: vec![crate::media::FactLine {
                     label: "Codec".into(),
                     value: "ProRes 422 HQ".into(),
@@ -1217,6 +1242,9 @@ pub fn responses() -> Vec<Envelope> {
                     name: "/pm.0123456789abcdef01234567".into(),
                     length: bytes(1024 * 512 * 4),
                 },
+                native: false,
+                size: Some([256.0, 128.0]),
+                uv: None,
             })),
         ),
     ]
@@ -1330,6 +1358,7 @@ pub fn events() -> Vec<Envelope> {
                     fragment: "#version 300 es\nprecision highp float;\nuniform samplerCube u;\nout vec4 fragColor;\nvoid main(){ fragColor = texture(u, vec3(1.0)); }".into(),
                     width: 2,
                     height: 1,
+                    color_depth: 16,
                     calls: vec![crate::shader_fallback::ShaderFallbackCall {
                         function: "2f".into(),
                         name: "iResolution".into(),
@@ -1354,6 +1383,7 @@ pub fn events() -> Vec<Envelope> {
                     row: 0,
                     rows: 1,
                     rgba16f: crate::common::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 0x3c, 0, 0x3c, 0, 0, 0, 0, 0, 0x3c]),
+                    rgba32f: None,
                 },
             ),
         )),
@@ -1366,6 +1396,7 @@ pub fn events() -> Vec<Envelope> {
                     row: 0,
                     rows: 1,
                     rgba16f: crate::common::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 0x3c, 0, 0, 0, 0, 0, 0, 0, 0x3c]),
+                    rgba32f: None,
                 },
             ),
         )),
@@ -1394,11 +1425,51 @@ pub fn events() -> Vec<Envelope> {
                 row: 1,
                 rows: 1,
                 data: crate::common::Bytes(vec![255, 0, 0, 255, 0, 0, 0, 0]),
+                size: None,
+                uv: None,
+                crop: None,
             },
         ))),
         event(Event::Compat(crate::snapshot::CompatMessage::Forget {
             composition: "comp-1".into(),
             layer: "L7".into(),
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::Producers {
+            sources: vec![crate::snapshot::CompatSource::RasterOverride],
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::Native(
+            crate::snapshot::CompatNative {
+                composition: "comp-1".into(),
+                layer: "title".into(),
+                time: ticks(705_600_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                scale: 2.0,
+                revision: rev(42),
+                crop: None,
+            },
+        ))),
+        event(Event::Compat(crate::snapshot::CompatMessage::Reuse {
+            id: crate::snapshot::CompatKey {
+                composition: "comp-1".into(),
+                layer: "title".into(),
+                time: ticks(705_600_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                key: "[\"typewriter-3\",\"title\",7]".into(),
+            },
+            scale: 2.0,
+            revision: rev(43),
+            crop: Some(crate::common::PixelRect { x: 256, y: 0, width: 512, height: 256 }),
+        })),
+        event(Event::Compat(crate::snapshot::CompatMessage::Needs {
+            revision: rev(43),
+            needs: vec![crate::snapshot::CompatNeed {
+                composition: "comp-1".into(),
+                layer: "title".into(),
+                time: ticks(705_600_000),
+                source: crate::snapshot::CompatSource::RasterOverride,
+                scale: 2.0,
+                crop: Some(crate::common::PixelRect { x: 256, y: 0, width: 512, height: 256 }),
+            }],
         })),
         event(Event::Compat(crate::snapshot::CompatMessage::SvgRequests {
             requests: vec![svg_request()],
@@ -1734,9 +1805,10 @@ pub const fn request_index(request: &Request) -> usize {
         Request::Snapshot(_) => 26,
         Request::CompatFrame(_) => 27,
         Request::ShaderFallback(_) => 28,
+        Request::HostEncode(_) => 29,
     }
 }
-pub const REQUEST_VARIANTS: usize = 29;
+pub const REQUEST_VARIANTS: usize = 30;
 
 /// Exhaustive index of response variants.
 pub const fn response_index(response: &Response) -> usize {

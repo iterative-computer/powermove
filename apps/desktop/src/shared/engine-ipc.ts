@@ -30,6 +30,8 @@ export const ENGINE_IPC = {
   definitions: 'engine:definitions',
   /** renderer → main (invoke): export from the export sheet through the job engine. */
   exportVideo: 'engine:export-video',
+  /** renderer → main: a named export sheet/preflight opens or closes a warm-job hold. */
+  exportSheet: 'engine:export-sheet',
   /** renderer → main (invoke): cancel one of the window's export jobs. */
   cancelExport: 'engine:export-cancel',
   /** main → renderer: an export job's status (`EngineExportStatus`). */
@@ -59,6 +61,8 @@ export const ENGINE_IPC = {
   /** renderer → main (invoke): the same, asynchronously (async siblings,
    *  thumbnails, library cards, posters, the project thumbnail). */
   snapshot: 'engine:snapshot',
+  /** renderer → main: one revision-pinned agent frame batch, without stopping playback. */
+  agentFrames: 'engine:agent-frames',
   /** main → renderer: the job engine needs a layer's compatibility pixels
    *  for an export frame (`EngineCompatAsk`); the window answers with
    *  `compatAnswer`. */
@@ -72,6 +76,12 @@ export const ENGINE_IPC = {
   /** renderer → main (send): the runner's answer (`{ id, ok, rgba16f }` or `{ id, ok: false, reason, message }`). */
   shaderFallbackResult: 'engine:shader-fallback-result'
 } as const;
+
+export type EngineAgentFramesRequest = { project: string; revision: number; times: number[]; width: number };
+export type EngineAgentFramesReply = {
+  status: 'rendered'; revision: number; queuedMs: number;
+  images: Array<{ time: number; data: Uint8Array; mimeType: 'image/jpeg' | 'image/png'; width: number; height: number }>;
+};
 
 /** The `window.postMessage` types the preload uses to hand things to the page. */
 export const ENGINE_WINDOW_MESSAGE = {
@@ -109,6 +119,8 @@ export type SheetExportOptions = {
   start: number;
   end: number;
   audio: boolean;
+  /** Seconds at the last audioLayers index build. */
+  audioIndexPlayhead?: number;
   motionBlur: boolean;
   quality: 'draft' | 'high' | 'max';
   delivery?: Partial<DeliveryOptions>;
@@ -116,6 +128,9 @@ export type SheetExportOptions = {
   hideCaptions?: boolean;
   /** "Render using: Proxies (draft)" (section 14.8). */
   draft?: boolean;
+  /** Compatibility producers the exporting window has (a registered
+   *  `raster` override): the job asks the window for those layers. */
+  compat?: import('./engine-protocol').CompatSource[];
 };
 
 /** Checks the shape and limits of sheet export options (IPC input). */
@@ -123,6 +138,7 @@ export function validSheetExportOptions(value: unknown): value is SheetExportOpt
   if (!value || typeof value !== 'object') return false;
   const o = value as Record<string, unknown>;
   const finite = (k: string) => typeof o[k] === 'number' && Number.isFinite(o[k] as number);
+  if (o['audioIndexPlayhead'] !== undefined && (!finite('audioIndexPlayhead') || (o['audioIndexPlayhead'] as number) < 0)) return false;
   if (typeof o['format'] !== 'string' || migrateFormat(o['format'], 'web') === 'web' || o['format'] === 'json') return false;
   if (!['fps', 'scale', 'start', 'end'].every(finite)) return false;
   const fps = o['fps'] as number, scale = o['scale'] as number, start = o['start'] as number, end = o['end'] as number;
@@ -249,13 +265,21 @@ export type EngineSnapshotRequest = {
   document?: EngineSnapshotDocument;
   /** Shader fallback pixels drawn for an earlier `needsRenderer` answer of
    *  a `document` snapshot (a window's own session gets them on its port). */
-  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array }[];
+  fallbackPixels?: { key: string; width: number; height: number; rgba16f: Uint8Array; rgba32f?: Uint8Array }[];
+  /** The window's compatibility events for a `document` snapshot (its
+   *  producers, and its answers to an earlier `needsRenderer` round's
+   *  `compat` needs): main posts them on its session for the window before
+   *  the snapshot, as the window's own session gets them on its port. */
+  compatEvents?: EngineCompatEvent[];
   /** Level 1 SVG rasters (premultiplied RGBA8, top-down) drawn for an
    *  earlier `needsRenderer` answer of a `document` snapshot: main posts
    *  them on its session for the window before asking again (the window
    *  may have no session of its own yet; decision S1). */
   svgPixels?: { key: import('./engine-protocol').SvgRasterKey; data: Uint8Array }[];
 };
+
+/** A `compat` session event (pm_protocol `CompatMessage`) a window sends. */
+export type EngineCompatEvent = { type: 'compat'; compat: 'producers' | 'native' | 'reuse' | 'pixels' } & Record<string, unknown>;
 
 export type EngineSnapshotDocument = { id: string; revision: number; hash?: string | null; json?: Uint8Array | null };
 
@@ -304,7 +328,14 @@ export type EngineSnapshotReply =
 
 /** main → renderer: compatibility pixels the job engine needs for an export
  *  frame (contract 14 `compatFrame`). */
-export type EngineCompatAsk = { ask: number; request: import('./engine-protocol').CompatFrameRequest };
+export type EngineCompatAsk = {
+  ask: number;
+  request: import('./engine-protocol').CompatFrameRequest;
+  /** The layer as the export's snapshot holds it (JSON), when main has
+   *  the snapshot: the window draws that layer, not its live one (a render
+   *  queue job renders the project as queued, as today's queue did). */
+  layer?: string;
+};
 
 /** A window's `unavailable` answer when another document is open there:
  *  main keeps the more useful reason (the named S1 message, or another
@@ -313,7 +344,11 @@ export const OTHER_DOCUMENT_OPEN = 'This window has another document open.';
 
 /** renderer → main: the answer to an `EngineCompatAsk`. */
 export type EngineCompatAnswer =
-  | { ask: number; status: 'pixels'; key: string; width: number; height: number; format: import('./engine-protocol').CompatFormat; origin: [number, number]; scale: number; data: Uint8Array }
+  | { ask: number; status: 'pixels'; key: string; width: number; height: number; format: import('./engine-protocol').CompatFormat; origin: [number, number]; scale: number; data: Uint8Array;
+      /** The quad in layer pixels and the part of the raster it samples (today's `w`, `h`, `uv`). */
+      size?: [number, number]; uv?: [number, number, number, number] }
+  /** The producer passed the layer through: the job draws it itself. */
+  | { ask: number; status: 'native' }
   | { ask: number; status: 'unavailable'; message: string };
 
 /** The renderer's view (`window.powermove.nativeEngine`, present on the
@@ -331,6 +366,8 @@ export interface EngineBridge {
   stageDocument(request: StageDocumentRequest): Promise<StageDocumentResult>;
   pushDefinitions(update: import('./engine-protocol').DefinitionsUpdate): void;
   exportVideo(request: EngineExportRequest): Promise<EngineExportStart>;
+  /** Independent ids let stacked sheets and export preflight overlap safely. */
+  exportSheet(sheet: string, open: boolean): void;
   /** Adds an export to the render queue (main asks for its destination). */
   queueAdd(request: EngineQueueRequest): Promise<{ status: 'added'; id: string } | { status: 'cancelled' } | { status: 'unavailable'; reason: string }>;
   queueList(): Promise<RenderQueueState>;
@@ -351,11 +388,13 @@ export interface EngineBridge {
   snapshotSync?(request: EngineSnapshotRequest): EngineSnapshotReply;
   /** A snapshot, asynchronously. Never rejects: failures are `status: 'failed'`. */
   snapshot?(request: EngineSnapshotRequest): Promise<EngineSnapshotReply>;
+  /** Agent observations use the job engine at a pinned document revision. */
+  agentFrames?(request: EngineAgentFramesRequest): Promise<EngineAgentFramesReply>;
   /** Compatibility pixels the job engine needs for an export frame; the
    *  listener answers with `answerCompat`. Returns an unsubscribe. */
   onCompatAsk?(listener: (ask: EngineCompatAsk) => void): () => void;
   answerCompat?(answer: EngineCompatAnswer): void;
   /** Runs the job engine's fallback requests in this window's runner
    *  (`run` answers each); returns an unsubscribe. */
-  onShaderFallback?(run: (job: { request: import('./engine-protocol').ShaderFallbackRequest; textures: Uint16Array[] }) => Promise<Uint16Array>): () => void;
+  onShaderFallback?(run: (job: { request: import('./engine-protocol').ShaderFallbackRequest; textures: (Uint16Array | Float32Array)[] }) => Promise<{ rgba16f: Uint16Array; rgba32f?: Float32Array }>): () => void;
 }

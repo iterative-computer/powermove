@@ -15,8 +15,9 @@ import { applyProjectColor, projectColorSettings } from './project-color';
 
 function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
   return {
+    supportedColorDepths: () => PM.GL?.supportedColorDepths || [8, 16, 32],
     composition: () => ({
-      name: PM.proj.name, w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur
+      name: PM.proj.name, w: PM.proj.w, h: PM.proj.h, fps: PM.proj.fps, dur: PM.proj.dur, colorDepth: PM.proj.colorDepth
     }),
     applyComposition: (patch: CompositionPatch) => {
       /* Renaming goes through the project registry so the titlebar and the
@@ -36,7 +37,7 @@ function projectSettingsBridge(PM: PMRegistry): ProjectSettingsBridge {
     ...(PM.HostMedia?.enabled ? {
       mediaImport: () => PM.HostMedia.projectStorage(),
       applyMediaImport: (mode: 'copy' | 'link') => PM.HostMedia.setProjectStorage(mode),
-      /* Linear blending and 32-bit precision render only in the new engine. */
+      /* Linear blending is available with the new engine. */
       projectColor: () => projectColorSettings(PM),
       applyProjectColor: (patch) => { applyProjectColor(PM, patch); }
     } : {}),

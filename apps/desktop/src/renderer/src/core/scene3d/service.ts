@@ -1,21 +1,80 @@
 import * as THREE from 'three';
-import {animatedPart} from './recipe-preview';
 import { world3D,parent3D,depthOrderedLayers } from '../../legacy/core/space-3d';
 import { SceneRuntime } from './runtime';
 import { createScene,parseScene,SCENE3D_DEFINITION,type Scene3D } from './schema';
-import { compositionScene, layer3DRole,layer3DAssetIds,isModelGroup } from './layers';
+import { compositionScene, layer3DRole,isModelGroup } from './layers';
 
 const runtimes = new WeakMap<object,Map<string,SceneRuntime>>();
 const legacyScenes = new WeakMap<object,{signature:string;scene:Scene3D}>();
 const compositionCache=new WeakMap<SceneRuntime,{comp:any;time:number;revision:number;assets:any;references:Map<string,any>}>();
+type AssetReference = {id:string;asset:any;scan:number};
+type ReferenceScan = {busy:boolean;generation:number;ids:string[];local:string[];byId:Map<string,AssetReference>;records:AssetReference[];size:number};
+const referenceScans=new WeakMap<SceneRuntime,ReferenceScan>();
+const newReferenceScan=():ReferenceScan=>({busy:false,generation:0,ids:[],local:[],byId:new Map(),records:[],size:0});
+
+function scanReferences(PM:any,comp:any,scan:ReferenceScan):void {
+  let count=0,localCount=0,maxLocalCount=0;
+  const append=(id:string)=>{
+    if(!id)return;
+    for(let i=0;i<localCount;i++)if(scan.local[i]===id)return;
+    scan.local[localCount++]=id;scan.ids[count++]=id;
+  };
+  // Collect every source before calling the asset getter. A getter may mutate
+  // a later layer; preserve the same snapshot/order as the previous flatMap.
+  const layers=comp.layers;
+  for(let i=0,length=layers.length;i<length;i++){
+    if(!(i in layers))continue; // flatMap snapshots length and skips sparse holes.
+    const layer=layers[i];
+    localCount=0;
+    const node=layer?.d?.data?.object;if(!node)continue;
+    append(node.source?.assetId);
+    const maps=node.material?.maps;
+    // Object.values snapshots keys and rechecks enumerability as getters run.
+    // A for..in fast path would miss maps whose later descriptors change.
+    if(maps)for(const id of Object.values<string>(maps))append(id);
+    maxLocalCount=Math.max(maxLocalCount,localCount);
+  }
+  scan.ids.length=count;scan.local.length=maxLocalCount;
+  if(scan.generation===Number.MAX_SAFE_INTEGER){for(const entry of scan.records)entry.scan=0;scan.generation=0;}
+  const generation=++scan.generation;scan.size=0;
+  for(let i=0;i<count;i++){
+    const id=scan.ids[i]!,asset=PM.assets?.get?.(id);
+    let entry=scan.byId.get(id);
+    if(!entry){entry={id,asset:undefined,scan:0};scan.byId.set(id,entry);scan.records.push(entry);}
+    if(entry.scan!==generation){entry.scan=generation;scan.size++;}
+    // Different layers can share an ID. Resolve every occurrence and retain
+    // the last result, as Map construction did, rather than skipping getters.
+    entry.asset=asset;
+  }
+}
+
+function releaseReferenceScan(scan:ReferenceScan,complete:boolean):void {
+  let count=0;
+  for(const entry of scan.records){
+    entry.asset=undefined;
+    if(complete&&entry.scan===scan.generation)scan.records[count++]=entry;
+    else scan.byId.delete(entry.id);
+  }
+  scan.records.length=count;
+  if(!complete){scan.ids.length=0;scan.local.length=0;}
+  scan.busy=false;
+}
+
 export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):SceneRuntime {
   let pool=runtimes.get(PM);if(!pool){pool=new Map();runtimes.set(PM,pool);}
   const comp=composition || PM._renderComposition3D || PM.curComp?.() || PM.proj,key=`composition:${comp.id || 'root'}`;
   let runtime=pool.get(key);if(!runtime){runtime=new SceneRuntime();pool.set(key,runtime);}
   const cached=compositionCache.get(runtime),revision=PM._scene3dRevision || 0;
-  const references=new Map<string,any>(comp.layers.flatMap((l:any)=>layer3DAssetIds(l)).map((id:string)=>[id,PM.assets?.get?.(id)]));
-  const assetsChanged=!cached || cached.references.size!==references.size || [...references].some(([id,asset])=>cached.references.get(id)!==asset);
+  let scan=referenceScans.get(runtime);
+  if(!scan){scan=newReferenceScan();referenceScans.set(runtime,scan);}
+  else if(scan.busy)scan=newReferenceScan(); // Reentrant getters need a private snapshot.
+  scan.busy=true;let complete=false;
+  try {
+  scanReferences(PM,comp,scan);
+  const assetsChanged=!cached || cached.references.size!==scan.size || scan.records.some(entry=>entry.scan===scan.generation&&cached.references.get(entry.id)!==entry.asset);
   if(assetsChanged || !cached || cached.comp!==comp || cached.time!==time || cached.revision!==revision || cached.assets!==PM.proj.assets){
+    const references=new Map<string,any>();
+    for(const id of scan.ids)references.set(id,scan.byId.get(id)!.asset);
     const starts=new Map<string,number>(comp.layers.map((l:any)=>[l.id,l.from]));
     runtime.sync(compositionScene(PM,time,comp),(id:string)=>PM.assets?.get?.(id),prop=>prop.v,time,true,id=>time-(starts.get(id) || 0));
     const models=comp.layers.filter((l:any)=>layer3DRole(l)==='object');
@@ -23,8 +82,6 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
     // Flattening the evaluated world avoids applying parent transforms twice.
     for(const l of models){const object=runtime.objects.get(l.id);if(!object)continue;
       runtime.scene.add(object);object.matrixAutoUpdate=false;object.matrix.fromArray(world3D(PM,l,time));
-      const part=animatedPart(PM,l,time);if(part){const delta=new THREE.Vector3(part.base.x!-part.prior.x!,part.base.y!-part.prior.y!,part.base.z!-part.prior.z!);const parent=new THREE.Matrix4().fromArray(parent3D(PM,l,time));const origin=new THREE.Vector3().applyMatrix4(parent);delta.applyMatrix4(parent).sub(origin);object.matrix.elements[12]!+=delta.x;object.matrix.elements[13]!+=delta.y;object.matrix.elements[14]!+=delta.z;}
-
       object.matrix.decompose(object.position,object.quaternion,object.scale);object.rotation.order='ZYX';
       object.userData.layerOpacity=PM.worldOpacity?PM.worldOpacity(l,time):1;
       object.userData.layerOccludes=!(l.masks || []).some((mask:any)=>typeof mask.on==='object'?PM.evP(l,mask.on,time,`m.${mask.id}.on`)!==false:mask.on!==false);
@@ -38,13 +95,14 @@ export function compositionRuntime(PM:any,time=PM.time || 0,composition?:any):Sc
       const target=new THREE.Vector3(ev('targetX'),ev('targetY'),ev('targetZ')).applyMatrix4(parent);
       if(role==='camera'){node.up.set(0,1,0).transformDirection(new THREE.Matrix4().fromArray(world3D(PM,l,time)));node.lookAt(target);node.updateMatrixWorld(true);}
       else if((node as THREE.DirectionalLight).target)(node as THREE.DirectionalLight).target.position.copy(target);
-      else if((node as THREE.RectAreaLight).isRectAreaLight)node.lookAt(target);
     }
     runtime.scene.updateMatrixWorld(true);
     compositionCache.set(runtime,{comp,time,revision,assets:PM.proj.assets,references});
   }
   runtime.resizeCamera(comp.w,comp.h);
+  complete=true;
   return runtime;
+  } finally {releaseReferenceScan(scan,complete);}
 }
 /** 2D layers remain compositing barriers between independent model depth groups. */
 export function compositionDepthIds(PM:any,layer:any,time:number):Set<string> {

@@ -100,12 +100,25 @@ pub struct InterpretSetting {
     pub origin: FactOrigin,
 }
 
+/// Numeric import facts of the selected audio stream. Display labels and
+/// channel-layout names are presentation text, never metadata to parse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct AudioFacts {
+    pub sample_rate: u32,
+    pub channels: u32,
+}
+
 /// The job engine's answer to [`ProbeMedia`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct MediaFacts {
     pub kind: MediaKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub audio: Option<AudioFacts>,
     /// Read-only facts, in display order.
     pub facts: Vec<FactLine>,
     /// The settings Interpret Footage shows for this file, in display order.
@@ -123,6 +136,13 @@ pub struct MediaFacts {
 impl Validate for MediaFacts {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::HostServices;
+        ensure(
+            self.audio
+                .as_ref()
+                .is_none_or(|a| a.sample_rate > 0 && a.channels > 0),
+            C,
+            || "audio facts have a positive rate and channel count".into(),
+        )?;
         ensure(self.facts.len() <= MAX_FACT_LINES, C, || {
             "too many fact lines".into()
         })?;

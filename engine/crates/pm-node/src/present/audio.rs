@@ -21,14 +21,14 @@
 //! and the levels of what is heard go back to it about 30 times a second
 //! while playing ([`LEVELS_INTERVAL`]).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use pm_audio::playback::{ClockHandle, Playback, PlaybackConfig};
+use pm_audio::playback::{ClockHandle, CommandReceipt, Playback, PlaybackConfig};
 use pm_audio::{MixFormat, SourceCache};
 use pm_engine::document::DocumentUpdate;
 use pm_protocol::clock::{AudioLevels, SeekMode, TransportCommand, TransportState};
@@ -44,18 +44,58 @@ pub const PROJECT_INTERVAL: Duration = Duration::from_millis(30);
 /// draws at the display rate and steps its own ballistics in between).
 pub const LEVELS_INTERVAL: Duration = Duration::from_millis(33);
 
+/// Bound queued transport answers when a producer stalls behind an earlier command.
+const MAX_PENDING_COMMANDS: usize = 64;
+
 /// Where the levels of what is heard go (the renderer's port).
 pub type LevelsSink = Box<dyn Fn(AudioLevels) + Send>;
+
+/// Opens a viewer's playback: the default output device in the app, a
+/// headless device side in tests.
+type DeviceOpener = Box<
+    dyn FnMut(MixFormat, Arc<SourceCache>, PlaybackConfig) -> pm_audio::Result<Playback> + Send,
+>;
+
+fn default_device_opener() -> DeviceOpener {
+    Box::new(Playback::start)
+}
 /// How long the controls must rest before a warmed thread checks whether
 /// the composition is audible and opens the device.
 pub const WARM_IDLE: Duration = Duration::from_millis(100);
 
 /// Decoded audio kept per viewer.
-const SOURCE_BUDGET: usize = 256 * 1024 * 1024;
+const SOURCE_BUDGET: usize = 128 * 1024 * 1024;
 const DECODE_WORKERS: usize = 2;
+
+// The audio control thread is ordinary-priority. Keep these clock reads and
+// the diagnostic write out of pm-audio's real-time producer and callback.
+fn control_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PM_AUDIO_PROFILE").is_some())
+}
+
+fn play_receive_stamp(ctl: &AudioCtl) -> Option<u64> {
+    (control_profile_enabled()
+        && matches!(
+            ctl,
+            AudioCtl::Play { .. } | AudioCtl::Transport(TransportCommand::Play { .. })
+        ))
+    .then(pm_audio::clock::host_now_us)
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProjectTiming {
+    start_us: u64,
+    clone_done_us: u64,
+    build_send_done_us: u64,
+    status_done_us: u64,
+}
 
 pub enum AudioCtl {
     Document(DocumentUpdate),
+    MemoryPressure,
+    /// Transport forwarded at presenter ingress, before render/document work.
+    Transport(TransportCommand),
     Media(MediaMap),
     Composition(String),
     /// Seek to `from` (ticks) and play at `rate`.
@@ -89,6 +129,8 @@ pub enum AudioCtl {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioStatus {
+    /// Presenter ingress, before document, surface, and DSP preparation work.
+    pub ingress_request_us: Option<u64>,
     pub device: Option<String>,
     pub device_rate: Option<u32>,
     pub latency_us: Option<u32>,
@@ -102,6 +144,154 @@ pub struct AudioStatus {
     pub problems: Vec<String>,
     pub start_timing: Option<pm_audio::playback::StartTiming>,
     pub prepared_starts: Vec<i64>,
+}
+
+/// FIFO ingress shared with the presenter. It holds senders, never render
+/// state; the audio producer remains the sole owner of the playback clock.
+#[derive(Clone, Default)]
+pub struct AudioIngress(Arc<Mutex<BTreeMap<super::Key, Endpoint>>>);
+
+struct Endpoint {
+    tx: Sender<AudioCtl>,
+    clock: Arc<Mutex<Option<ClockHandle>>>,
+    status: Arc<Mutex<AudioStatus>>,
+    enabled: bool,
+    sent_revision: u64,
+    pending_revision: u64,
+    last_play: Option<(PlaybackRate, Option<u32>)>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ForwardedAudio {
+    pub before: Option<u32>,
+}
+
+impl AudioIngress {
+    pub fn register(&self, key: super::Key, link: &AudioLink, enabled: bool, revision: u64) {
+        let mut endpoints = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(endpoint) = endpoints.get_mut(&key) {
+            endpoint.enabled = enabled;
+        } else {
+            endpoints.insert(
+                key,
+                Endpoint {
+                    tx: link.tx.clone(),
+                    clock: link.clock.clone(),
+                    status: link.status.clone(),
+                    enabled,
+                    sent_revision: revision,
+                    pending_revision: revision,
+                    last_play: None,
+                },
+            );
+        }
+    }
+    /// A document sent through the render fallback has now reached audio.
+    pub fn document_sent(&self, key: super::Key, revision: u64) {
+        if let Some(endpoint) = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&key)
+        {
+            endpoint.sent_revision = endpoint.sent_revision.max(revision);
+        }
+    }
+    pub fn forget(&self, key: super::Key) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
+    }
+    pub fn transport(&self, key: super::Key, command: TransportCommand) -> Option<ForwardedAudio> {
+        if matches!(command, TransportCommand::Step { .. }) {
+            return None;
+        }
+        let mut endpoints = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let endpoint = endpoints
+            .get_mut(&key)
+            .filter(|e| e.enabled && e.sent_revision >= e.pending_revision)?;
+        let sample = endpoint
+            .clock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(ClockHandle::latest);
+        let before = sample.as_ref().map(|s| s.epoch);
+        match command {
+            TransportCommand::Play { rate } => {
+                if endpoint.last_play.is_some_and(|(r, epoch)| {
+                    r == rate
+                        && (epoch == before
+                            || sample
+                                .as_ref()
+                                .is_some_and(|s| s.state != TransportState::Stopped))
+                }) {
+                    return Some(ForwardedAudio { before });
+                }
+                endpoint.last_play = Some((rate, before));
+            }
+            TransportCommand::Pause => endpoint.last_play = None,
+            _ => {}
+        }
+        if matches!(
+            command,
+            TransportCommand::Play { .. } | TransportCommand::PlayAround { .. }
+        ) {
+            endpoint
+                .status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .ingress_request_us = Some(pm_audio::clock::host_now_us());
+        }
+        endpoint.tx.send(AudioCtl::Transport(command)).ok()?;
+        Some(ForwardedAudio { before })
+    }
+    pub fn document(&self, key: super::Key, update: &DocumentUpdate) -> bool {
+        let mut endpoints = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(endpoint) = endpoints.get_mut(&key) else {
+            return false;
+        };
+        let revision = update.revision().get();
+        if revision <= endpoint.sent_revision {
+            return true;
+        }
+        // A link can appear while older render-thread document commands are
+        // queued. Do not let fast controls overtake those fallback updates.
+        if revision != endpoint.sent_revision + 1
+            || endpoint.pending_revision > endpoint.sent_revision
+        {
+            endpoint.pending_revision = endpoint.pending_revision.max(revision);
+            return false;
+        }
+        if endpoint
+            .tx
+            .send(AudioCtl::Document(update.clone()))
+            .is_err()
+        {
+            return false;
+        }
+        endpoint.sent_revision = revision;
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_endpoint(&self, key: super::Key) -> Receiver<AudioCtl> {
+        let (tx, rx) = channel();
+        self.0.lock().unwrap().insert(
+            key,
+            Endpoint {
+                tx,
+                clock: Arc::default(),
+                status: Arc::default(),
+                enabled: true,
+                sent_revision: 0,
+                pending_revision: 0,
+                last_play: None,
+            },
+        );
+        rx
+    }
 }
 
 pub struct AudioLink {
@@ -132,10 +322,11 @@ impl AudioLink {
                     rx,
                     clock: thread_clock,
                     status: thread_status,
-                    doc,
+                    doc: Arc::new(doc),
                     composition,
                     media,
                     playback: None,
+                    pending_commands: VecDeque::new(),
                     dirty: true,
                     broken: false,
                     loop_range: None,
@@ -149,6 +340,8 @@ impl AudioLink {
                     warm: false,
                     warm_due: None,
                     paused_at: 0,
+                    transport_running: false,
+                    open_device: default_device_opener(),
                 }
                 .run()
             },
@@ -162,8 +355,32 @@ impl AudioLink {
         })
     }
 
+    /// A link without a control thread: the test reads what it is sent.
+    #[cfg(test)]
+    pub(super) fn test_link() -> (AudioLink, Receiver<AudioCtl>) {
+        let (tx, rx) = channel();
+        let link = AudioLink {
+            tx,
+            clock: Arc::default(),
+            status: Arc::default(),
+            thread: None,
+        };
+        (link, rx)
+    }
+
     pub fn send(&self, ctl: AudioCtl) {
+        if matches!(&ctl, AudioCtl::Play { .. } | AudioCtl::PlayAround { .. }) {
+            self.status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .ingress_request_us = Some(pm_audio::clock::host_now_us());
+        }
+        let sent_us = (control_profile_enabled() && matches!(&ctl, AudioCtl::Play { .. }))
+            .then(pm_audio::clock::host_now_us);
         let _ = self.tx.send(ctl);
+        if let Some(sent_us) = sent_us {
+            eprintln!("pm-audio-node-send sent_us={sent_us}");
+        }
     }
 
     /// The device clock, once the device opened.
@@ -197,14 +414,26 @@ impl Drop for AudioLink {
     }
 }
 
+struct PendingCommand {
+    receipt: CommandReceipt,
+    pause: bool,
+}
+
 struct Control {
     rx: Receiver<AudioCtl>,
     clock: Arc<Mutex<Option<ClockHandle>>>,
     status: Arc<Mutex<AudioStatus>>,
-    doc: pm_model::Document,
+    /// Shared with the mixer after a project goes out; unshared (copied)
+    /// while the controls rest, so neither an edit nor a Play waits for the
+    /// copy ([`Control::unshare_document`]).
+    doc: Arc<pm_model::Document>,
     composition: String,
     media: MediaMap,
     playback: Option<Playback>,
+    /// Individually answered Pause, SetLoop, and exact Seek commands. Their
+    /// FIFO application is guaranteed by the producer queue even across
+    /// separate control-thread receive batches.
+    pending_commands: VecDeque<PendingCommand>,
     /// The mixer plays an older revision, media map, or composition.
     dirty: bool,
     /// An update did not apply; wait for a resync.
@@ -226,6 +455,8 @@ struct Control {
     warm_due: Option<Instant>,
     /// Latest paused playhead, including seeks before the device opens.
     paused_at: i64,
+    transport_running: bool,
+    open_device: DeviceOpener,
 }
 
 impl Control {
@@ -261,17 +492,36 @@ impl Control {
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break,
             };
-            let mut controls: Vec<AudioCtl> = first.into_iter().collect();
+            let mut controls: Vec<(AudioCtl, Option<u64>)> = first
+                .into_iter()
+                .map(|ctl| {
+                    let received_us = play_receive_stamp(&ctl);
+                    (ctl, received_us)
+                })
+                .collect();
             while let Ok(ctl) = self.rx.try_recv() {
-                controls.push(ctl);
+                let received_us = play_receive_stamp(&ctl);
+                controls.push((ctl, received_us));
             }
             let rested = controls.is_empty();
-            for ctl in controls {
-                if !self.apply(ctl) {
+            let starting = controls.iter().any(|(c, _)| {
+                matches!(
+                    c,
+                    AudioCtl::Play { .. }
+                        | AudioCtl::PlayAround { .. }
+                        | AudioCtl::Transport(
+                            TransportCommand::Play { .. } | TransportCommand::PlayAround { .. }
+                        )
+                )
+            });
+            let _priority = starting.then(pm_audio::playback::StartPriority::new);
+            for (ctl, received_us) in controls {
+                if !self.apply(ctl, received_us) {
                     self.shutdown();
                     return;
                 }
             }
+            self.drain_pending_commands();
             if self.playback.is_none() && self.warm {
                 if !rested || self.warm_due.is_none() {
                     // A control came: check once they rest again.
@@ -285,12 +535,24 @@ impl Control {
                 .last_project
                 .is_none_or(|last| last.elapsed() >= PROJECT_INTERVAL);
             if self.playback.is_some() && self.dirty && due {
-                self.set_project();
+                let _ = self.set_project();
             }
             self.send_levels();
             self.report();
+            if rested || !starting {
+                self.unshare_document();
+            }
         }
         self.shutdown();
+    }
+
+    /// Copies the document the mixer shares, between controls, so the next
+    /// edit applies in place: a long project's copy takes milliseconds,
+    /// which an edit and the Play right after it would otherwise wait for.
+    fn unshare_document(&mut self) {
+        if Arc::strong_count(&self.doc) > 1 {
+            Arc::make_mut(&mut self.doc);
+        }
     }
 
     /// Whether the device plays a run (or a grain).
@@ -314,6 +576,11 @@ impl Control {
             return;
         }
         let running = self.running();
+        // A queued Pause has not necessarily reached the producer yet. Do
+        // not publish another running meter frame while its ACK is pending.
+        if running && self.pending_commands.iter().any(|pending| pending.pause) {
+            return;
+        }
         if !running && !self.levels_running {
             return;
         }
@@ -331,18 +598,84 @@ impl Control {
         if let Some(mut playback) = self.playback.take() {
             playback.shutdown();
         }
+        // Shutdown is queued after the receipts, so every earlier command has
+        // either answered or its sender disconnected by the time the join ends.
+        self.drain_pending_commands();
     }
 
     /// Returns false on shutdown.
-    fn apply(&mut self, ctl: AudioCtl) -> bool {
+    fn apply(&mut self, ctl: AudioCtl, received_us: Option<u64>) -> bool {
         match ctl {
+            AudioCtl::Transport(command) => {
+                match command {
+                    TransportCommand::Play { .. } | TransportCommand::PlayAround { .. } => {
+                        let opening = self.playback.is_none();
+                        if opening && !self.open() {
+                            return true;
+                        }
+                        if self.dirty {
+                            let _ = self.set_project();
+                        }
+                        // Seek/pause/loop controls have already reached the
+                        // producer through this same FIFO. Play its own current
+                        // playhead rather than a delayed render-thread estimate.
+                        // A playback this Play opened starts at 0 and never got
+                        // the seeks before it (they only moved `paused_at`
+                        // while no device was open): seek it to the playhead
+                        // first, as the other opening paths do.
+                        self.transport_running = true;
+                        let set_loop = TransportCommand::SetLoop {
+                            range: self.loop_range,
+                        };
+                        if opening {
+                            self.commands(&[
+                                set_loop,
+                                TransportCommand::Seek {
+                                    time: Ticks::new(self.paused_at).unwrap_or(Ticks::ZERO),
+                                    mode: SeekMode::Exact,
+                                },
+                                command,
+                            ]);
+                        } else {
+                            self.commands(&[set_loop, command]);
+                        }
+                    }
+                    TransportCommand::Seek {
+                        time,
+                        mode: SeekMode::Scrub,
+                    } => {
+                        let seek = if self.transport_running {
+                            AudioCtl::Seek(time.get())
+                        } else {
+                            AudioCtl::Scrub(time.get())
+                        };
+                        return self.apply(seek, received_us);
+                    }
+                    TransportCommand::Pause => return self.apply(AudioCtl::Pause, received_us),
+                    TransportCommand::Seek { time, .. } => {
+                        return self.apply(AudioCtl::Seek(time.get()), received_us);
+                    }
+                    TransportCommand::SetLoop { range } => {
+                        return self.apply(AudioCtl::SetLoop(range), received_us);
+                    }
+                    TransportCommand::AudioScrub { enabled } => {
+                        return self.apply(AudioCtl::AudioScrub(enabled), received_us);
+                    }
+                    _ => self.enqueue_simple_command(command),
+                }
+            }
             AudioCtl::Shutdown => return false,
+            AudioCtl::MemoryPressure => {
+                if let Some(playback) = &self.playback {
+                    playback.memory_pressure();
+                }
+            }
             AudioCtl::Document(update) => {
                 let replace = matches!(update, DocumentUpdate::Replace { .. });
                 if self.broken && !replace {
                     return true;
                 }
-                self.broken = update.apply_to(&mut self.doc).is_err();
+                self.broken = update.apply_to(Arc::make_mut(&mut self.doc)).is_err();
                 self.dirty = true;
             }
             AudioCtl::Media(media) => {
@@ -357,13 +690,16 @@ impl Control {
             }
             AudioCtl::SetLoop(range) => {
                 self.loop_range = range;
-                self.command(TransportCommand::SetLoop { range });
+                self.enqueue_simple_command(TransportCommand::SetLoop { range });
             }
-            AudioCtl::Pause => self.command(TransportCommand::Pause),
+            AudioCtl::Pause => {
+                self.transport_running = false;
+                self.enqueue_simple_command(TransportCommand::Pause);
+            }
             AudioCtl::Warm => self.warm = true,
             AudioCtl::Seek(at) => {
                 self.paused_at = at.max(0);
-                self.command(TransportCommand::Seek {
+                self.enqueue_simple_command(TransportCommand::Seek {
                     time: Ticks::new(self.paused_at).unwrap_or(Ticks::ZERO),
                     mode: SeekMode::Exact,
                 });
@@ -372,7 +708,9 @@ impl Control {
                 self.paused_at = at.max(0);
                 if !self.audio_scrub {
                     // Paused timeline moves must still reach the warm mixer.
-                    self.command(TransportCommand::Seek {
+                    // This is an ordinary exact seek, so preserve FIFO without
+                    // waiting for its ACK before the following Play is sent.
+                    self.enqueue_simple_command(TransportCommand::Seek {
                         time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
                         mode: SeekMode::Exact,
                     });
@@ -382,7 +720,7 @@ impl Control {
                     return true;
                 }
                 if self.dirty {
-                    self.set_project();
+                    let _ = self.set_project();
                 }
                 self.command(TransportCommand::Seek {
                     time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
@@ -390,11 +728,12 @@ impl Control {
                 });
             }
             AudioCtl::PlayAround { at, pre, post } => {
+                self.transport_running = true;
                 if self.playback.is_none() && !self.open() {
                     return true;
                 }
                 if self.dirty {
-                    self.set_project();
+                    let _ = self.set_project();
                 }
                 self.command(TransportCommand::Seek {
                     time: Ticks::new(at.max(0)).unwrap_or(Ticks::ZERO),
@@ -416,21 +755,39 @@ impl Control {
                 }
             }
             AudioCtl::Play { from, rate } => {
+                self.transport_running = true;
+                let profiled = received_us.is_some();
+                let begin_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
+                let opening = self.playback.is_none();
                 if self.playback.is_none() && !self.open() {
                     return true;
                 }
+                let open_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
                 self.paused_at = from.max(0);
-                if self.dirty {
-                    self.set_project();
+                let dirty = self.dirty;
+                let project = dirty.then(|| self.set_project()).flatten();
+                let dispatch_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
+                self.commands(&[
+                    TransportCommand::SetLoop {
+                        range: self.loop_range,
+                    },
+                    TransportCommand::Seek {
+                        time: Ticks::new(from.max(0)).unwrap_or(Ticks::ZERO),
+                        mode: SeekMode::Exact,
+                    },
+                    TransportCommand::Play { rate },
+                ]);
+                if let Some(received_us) = received_us {
+                    let ack_us = pm_audio::clock::host_now_us();
+                    let project = project.unwrap_or_default();
+                    eprintln!(
+                        "pm-audio-node-play received_us={received_us} begin_us={begin_us} open_done_us={open_done_us} project_start_us={} clone_done_us={} build_send_done_us={} status_done_us={} dispatch_us={dispatch_us} ack_us={ack_us} dirty={dirty} opened={opening}",
+                        project.start_us,
+                        project.clone_done_us,
+                        project.build_send_done_us,
+                        project.status_done_us,
+                    );
                 }
-                self.command(TransportCommand::SetLoop {
-                    range: self.loop_range,
-                });
-                self.command(TransportCommand::Seek {
-                    time: Ticks::new(from.max(0)).unwrap_or(Ticks::ZERO),
-                    mode: SeekMode::Exact,
-                });
-                self.command(TransportCommand::Play { rate });
             }
         }
         true
@@ -447,7 +804,7 @@ impl Control {
         if pm_audio::graph::audible(&self.doc, &self.composition, &mut ev).unwrap_or(false)
             && self.open()
         {
-            self.set_project();
+            let _ = self.set_project();
             self.command(TransportCommand::SetLoop {
                 range: self.loop_range,
             });
@@ -459,36 +816,90 @@ impl Control {
     }
 
     fn command(&mut self, command: TransportCommand) {
+        self.commands(&[command]);
+    }
+
+    fn enqueue_simple_command(&mut self, command: TransportCommand) {
         let Some(playback) = &self.playback else {
             return;
         };
-        if matches!(
-            command,
-            TransportCommand::Play { .. }
-                | TransportCommand::PlayAround { .. }
-                | TransportCommand::Seek {
-                    mode: SeekMode::Scrub,
-                    ..
-                }
-        ) {
-            self.watch_until = Some(Instant::now() + Duration::from_millis(1500));
+        let pause = matches!(command, TransportCommand::Pause);
+        if self.pending_commands.len() == MAX_PENDING_COMMANDS {
+            let result = self
+                .pending_commands
+                .pop_front()
+                .expect("bounded receipts")
+                .receipt
+                .wait();
+            self.record_transport_result(result);
         }
-        if let Err(error) = playback.command(command) {
-            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-            status.problems.push(format!("transport: {error}"));
-            if status.problems.len() > 16 {
-                status.problems.remove(0);
+        match playback.enqueue_command(command) {
+            Ok(receipt) => self
+                .pending_commands
+                .push_back(PendingCommand { receipt, pause }),
+            Err(error) => {
+                self.drain_pending_commands();
+                self.record_transport_result(Err(error));
             }
         }
+        self.drain_pending_commands();
+    }
+
+    fn drain_pending_commands(&mut self) {
+        while let Some(result) = self
+            .pending_commands
+            .front()
+            .and_then(|pending| pending.receipt.try_result())
+        {
+            self.pending_commands.pop_front();
+            self.record_transport_result(result);
+        }
+    }
+
+    fn record_transport_result(&self, result: pm_audio::Result<()>) {
+        if let Err(error) = result {
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            let problem = format!("transport: {error}");
+            if !status.problems.contains(&problem) {
+                status.problems.push(problem);
+                if status.problems.len() > 16 {
+                    status.problems.remove(0);
+                }
+            }
+        }
+    }
+
+    fn commands(&mut self, commands: &[TransportCommand]) {
+        let Some(playback) = &self.playback else {
+            return;
+        };
+        if commands.iter().any(|command| {
+            matches!(
+                command,
+                TransportCommand::Play { .. }
+                    | TransportCommand::PlayAround { .. }
+                    | TransportCommand::Seek {
+                        mode: SeekMode::Scrub,
+                        ..
+                    }
+            )
+        }) {
+            self.watch_until = Some(Instant::now() + Duration::from_millis(1500));
+        }
+        let result = playback.commands(commands.iter().copied());
+        // This ACK is a FIFO barrier for all earlier queued simple controls;
+        // report their individual failures before this command's failure.
+        self.drain_pending_commands();
+        self.record_transport_result(result);
     }
 
     /// Opens the output device. False (and a reported error) when none opens.
     fn open(&mut self) -> bool {
         let rate = pm_audio::mixer::project_sample_rate(&self.doc);
         let cache = SourceCache::new(SOURCE_BUDGET, DECODE_WORKERS);
-        match Playback::start(MixFormat::stereo(rate), cache, PlaybackConfig::default()) {
+        match (self.open_device)(MixFormat::stereo(rate), cache, PlaybackConfig::default()) {
             Ok(playback) => {
-                playback.set_evaluator(|| {
+                playback.set_standard_evaluator(|| {
                     pm_eval::Evaluator::new()
                         .with_expressions(Arc::new(pm_render::expr::PmExprEngine))
                 });
@@ -516,17 +927,25 @@ impl Control {
         }
     }
 
-    fn set_project(&mut self) {
+    fn set_project(&mut self) -> Option<ProjectTiming> {
         let Some(playback) = &self.playback else {
-            return;
+            return None;
+        };
+        let profiled = control_profile_enabled();
+        let mut timing = ProjectTiming {
+            start_us: profiled.then(pm_audio::clock::host_now_us).unwrap_or(0),
+            ..ProjectTiming::default()
         };
         self.last_project = Some(Instant::now());
         if self.broken || self.doc.root().is_none() {
-            return;
+            return profiled.then_some(timing);
         }
         self.dirty = false;
-        let doc = Arc::new(self.doc.clone());
-        match playback.set_project(doc, &self.composition, &self.media) {
+        let doc = self.doc.clone();
+        timing.clone_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
+        let result = playback.set_project(doc, &self.composition, &self.media);
+        timing.build_send_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
+        match result {
             Ok(problems) => {
                 let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
                 status.projects += 1;
@@ -546,6 +965,8 @@ impl Control {
                 status.problems.drain(..excess);
             }
         }
+        timing.status_done_us = profiled.then(pm_audio::clock::host_now_us).unwrap_or(0);
+        profiled.then_some(timing)
     }
 
     fn report(&self) {
@@ -579,6 +1000,58 @@ fn report_playback(status: &Mutex<AudioStatus>, playback: &Playback) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ingress_keeps_audio_documents_and_transport_fifo_without_a_render_thread() {
+        use pm_protocol::common::{Revision, SessionId};
+        let key = (pm_protocol::host::PortId(1), SessionId::new(1).unwrap());
+        let ingress = super::AudioIngress::default();
+        let rx = ingress.test_endpoint(key);
+        let update = |revision| pm_engine::document::DocumentUpdate::Replace {
+            root: None,
+            revision: Revision::new(revision).unwrap(),
+        };
+        assert!(ingress.document(key, &update(1)));
+        assert!(
+            ingress
+                .transport(
+                    key,
+                    TransportCommand::Play {
+                        rate: PlaybackRate::NORMAL
+                    }
+                )
+                .is_some()
+        );
+        assert!(
+            ingress
+                .transport(
+                    key,
+                    TransportCommand::Play {
+                        rate: PlaybackRate::NORMAL
+                    }
+                )
+                .is_some()
+        );
+        assert!(matches!(rx.recv().unwrap(), super::AudioCtl::Document(_)));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            super::AudioCtl::Transport(TransportCommand::Play { .. })
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "duplicate Play must not restart preparation"
+        );
+        // A link appeared with an older document still in the render queue.
+        // No newer fast control may jump ahead of that fallback update.
+        assert!(!ingress.document(key, &update(3)));
+        assert!(ingress.transport(key, TransportCommand::Pause).is_none());
+        ingress.document_sent(key, 2);
+        assert!(ingress.transport(key, TransportCommand::Pause).is_none());
+        ingress.document_sent(key, 3);
+        assert!(ingress.transport(key, TransportCommand::Pause).is_some());
+        ingress.forget(key);
+        assert!(ingress.transport(key, TransportCommand::Pause).is_none());
+    }
+
     use std::path::Path;
 
     use pm_audio::offline::{PcmFormat, WavWriter};
@@ -609,15 +1082,250 @@ mod tests {
         )
     }
 
+    #[test]
+    fn queued_controls_report_ordered_errors_and_shutdown_drains() {
+        struct ShutdownCache(Arc<SourceCache>);
+        impl Drop for ShutdownCache {
+            fn drop(&mut self) {
+                self.0.shutdown();
+            }
+        }
+
+        let cache = SourceCache::new(1 << 20, 0);
+        let _decode_workers = ShutdownCache(cache.clone());
+        let (playback, _side) = Playback::start_headless(
+            MixFormat::stereo(48_000),
+            cache,
+            PlaybackConfig::default(),
+            48_000,
+            2,
+            0,
+        )
+        .unwrap();
+        let (_tx, rx) = channel();
+        let status = Arc::new(Mutex::new(AudioStatus {
+            problems: vec!["media: missing".into()],
+            ..AudioStatus::default()
+        }));
+        let mut control = Control {
+            rx,
+            clock: Arc::new(Mutex::new(None)),
+            status: status.clone(),
+            doc: Arc::new(pm_model::Document::new(None, 1)),
+            composition: "C".into(),
+            media: MediaMap::default(),
+            playback: Some(playback),
+            pending_commands: VecDeque::new(),
+            dirty: false,
+            broken: false,
+            loop_range: None,
+            last_project: None,
+            audio_scrub: false,
+            solo: None,
+            levels: Box::new(|_| {}),
+            last_levels: None,
+            levels_running: false,
+            watch_until: None,
+            warm: false,
+            warm_due: None,
+            paused_at: 0,
+            transport_running: false,
+            open_device: default_device_opener(),
+        };
+        let invalid_loop = TransportCommand::SetLoop {
+            range: Some(TickRange {
+                start: Ticks::ZERO,
+                end: Ticks::ZERO,
+            }),
+        };
+        control.enqueue_simple_command(invalid_loop);
+        // The frontend requests a scrub for a paused timeline move even
+        // with audible scrubbing disabled. It must enqueue the exact seek
+        // without waiting for its own or the earlier control's receipt.
+        assert!(control.apply(AudioCtl::Scrub(Ticks::from_whole_seconds(1).get()), None));
+        assert_eq!(control.paused_at, Ticks::from_whole_seconds(1).get());
+        control.enqueue_simple_command(invalid_loop);
+        control.commands(&[TransportCommand::Play {
+            rate: PlaybackRate { num: 3, den: 1 },
+        }]);
+
+        assert!(control.pending_commands.is_empty());
+        let problems = status.lock().unwrap().problems.clone();
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(problems[0], "media: missing");
+        assert!(problems[1].contains("loop range must be non-empty"));
+        assert!(problems[2].contains("playback at 3/1"));
+        assert_eq!(
+            control
+                .playback
+                .as_ref()
+                .unwrap()
+                .clock()
+                .unwrap()
+                .media_time,
+            Ticks::from_whole_seconds(1),
+        );
+
+        // Shutdown joins the producer before draining even a receipt that
+        // was deliberately left in the queue without another control poll.
+        status.lock().unwrap().problems.clear();
+        let receipt = control
+            .playback
+            .as_ref()
+            .unwrap()
+            .enqueue_command(invalid_loop)
+            .unwrap();
+        control.pending_commands.push_back(PendingCommand {
+            receipt,
+            pause: false,
+        });
+        control.shutdown();
+        assert!(control.pending_commands.is_empty());
+        let problems = status.lock().unwrap().problems.clone();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("loop range must be non-empty"));
+    }
+
+    /// A Play or a play around forwarded before the device opened (the
+    /// warm-up waits for the controls to rest) plays from the playhead the
+    /// seeks before it set, not from the fresh transport's 0: in the
+    /// clock the picture follows and in what is heard.
+    #[test]
+    fn forwarded_play_that_opens_the_device_starts_at_the_playhead() {
+        use pm_audio::playback::DeviceSide;
+
+        let rate = 48_000u32;
+        let directory = tempfile::Builder::new()
+            .prefix("pm-node-audio-open-play-")
+            .tempdir()
+            .unwrap();
+        // Silence for 2 s, then a 0.5 tone: only a start at the playhead
+        // hears the tone at once.
+        let file = directory.path().join("steps.wav");
+        let left: Vec<f32> = (0..rate as usize * 4)
+            .map(|i| if i < rate as usize * 2 { 0.0 } else { 0.5 })
+            .collect();
+        write_wav(&file, rate, &[left, vec![0.0; rate as usize * 4]]);
+        let text = format!(
+            r#"{{"id":"P","compId":"C","name":"T","w":320,"h":180,"fps":30,"dur":4,"layers":[{}],"comps":{{}},"assets":{{}},"params":{{}}}}"#,
+            clip("steps", "a").replace(r#""dur":1"#, r#""dur":4"#),
+        );
+        let playhead = Ticks::from_whole_seconds(2);
+        for start in [
+            TransportCommand::Play {
+                rate: PlaybackRate::NORMAL,
+            },
+            TransportCommand::PlayAround {
+                pre_roll: Ticks::ZERO,
+                post_roll: Ticks::from_whole_seconds(1),
+            },
+        ] {
+            let sides: Arc<Mutex<Vec<DeviceSide>>> = Arc::default();
+            let caches: Arc<Mutex<Vec<Arc<SourceCache>>>> = Arc::default();
+            let (opened_sides, opened_caches) = (sides.clone(), caches.clone());
+            let (_tx, rx) = channel();
+            let media = MediaMap(Arc::new(BTreeMap::from([(
+                "a".to_string(),
+                Some(file.clone()),
+            )])));
+            let mut control = Control {
+                rx,
+                clock: Arc::new(Mutex::new(None)),
+                status: Arc::new(Mutex::new(AudioStatus::default())),
+                doc: Arc::new(pm_model::Document::new(Some(parse(&text).unwrap()), 1)),
+                composition: "C".into(),
+                media,
+                playback: None,
+                pending_commands: VecDeque::new(),
+                dirty: true,
+                broken: false,
+                loop_range: None,
+                last_project: None,
+                audio_scrub: false,
+                solo: None,
+                levels: Box::new(|_| {}),
+                last_levels: None,
+                levels_running: false,
+                watch_until: None,
+                warm: true,
+                warm_due: None,
+                paused_at: 0,
+                transport_running: false,
+                open_device: Box::new(move |format, cache, config| {
+                    opened_caches.lock().unwrap().push(cache.clone());
+                    let (playback, side) =
+                        Playback::start_headless(format, cache, config, rate, 2, 5_000)?;
+                    opened_sides.lock().unwrap().push(side);
+                    Ok(playback)
+                }),
+            };
+            // The app's `seek exact` then `play`, both forwarded while the
+            // warm-up has not opened the device yet.
+            assert!(control.apply(
+                AudioCtl::Transport(TransportCommand::Seek {
+                    time: playhead,
+                    mode: SeekMode::Exact,
+                }),
+                None,
+            ));
+            assert!(control.playback.is_none(), "the seek alone opens nothing");
+            assert_eq!(control.paused_at, playhead.get());
+            assert!(control.apply(AudioCtl::Transport(start), None));
+            assert!(control.playback.is_some(), "{start:?} opens the device");
+            let problems = control.status.lock().unwrap().problems.clone();
+            assert!(problems.is_empty(), "{start:?}: {problems:?}");
+            let clock = control.playback.as_ref().unwrap().clock().unwrap();
+            assert_eq!(clock.media_time, playhead, "{start:?}: {clock:?}");
+
+            let mut side = sides.lock().unwrap().pop().unwrap();
+            let host_start = pm_audio::clock::host_now_us();
+            let mut out = vec![0.0; 256 * 2];
+            let (mut frame, mut first_heard) = (0u64, None);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            // Up to half a second of device time, paced like a device: the
+            // start waits for its voices (pre-roll), then the tone is the
+            // first thing heard. From 0 it would be 2 s of silence.
+            while frame < rate as u64 / 2 && Instant::now() < deadline {
+                side.callback(&mut out, 2, host_start + frame * 1_000_000 / rate as u64);
+                if let Some(sample) = out.chunks_exact(2).map(|p| p[0]).find(|s| *s != 0.0) {
+                    first_heard = Some(sample);
+                    break;
+                }
+                frame += 256;
+                std::thread::sleep(Duration::from_micros(256 * 1_000_000 / rate as u64));
+            }
+            let clock = control.playback.as_ref().unwrap().clock().unwrap();
+            assert!(clock.media_time >= playhead, "{start:?}: {clock:?}");
+            assert!(
+                first_heard.is_some_and(|s| (s - 0.5).abs() < 1e-3),
+                "{start:?}: first heard {first_heard:?} at frame {frame}"
+            );
+            control.shutdown();
+            drop(side);
+            for cache in caches.lock().unwrap().drain(..) {
+                cache.shutdown();
+            }
+        }
+    }
+
     /// The status polls every 33 ms while a bad block fails each segment
     /// and a stuck decoder drops its voice (A3): each message is listed
     /// once, and a problem listed before (a media resolve) stays.
     #[test]
     fn recurring_render_errors_are_listed_once() {
+        struct ShutdownCache(Arc<SourceCache>);
+        impl Drop for ShutdownCache {
+            fn drop(&mut self) {
+                self.0.shutdown();
+            }
+        }
+
         let rate = 48_000u32;
-        let dir =
-            std::env::temp_dir().join(format!("pm-node-audio-problems-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("pm-node-audio-problems-")
+            .tempdir()
+            .unwrap();
+        let dir = directory.path();
         let (good_file, bad_file, late_file) = (
             dir.join("good.wav"),
             dir.join("bad.wav"),
@@ -628,6 +1336,7 @@ mod tests {
         write_wav(&bad_file, rate, &[vec![0.3; n], vec![0.3; n]]);
         write_wav(&late_file, rate, &[vec![0.0; n], vec![0.2; n]]);
         let cache = SourceCache::new(64 << 20, 2);
+        let _decode_workers = ShutdownCache(cache.clone());
         let good = cache.open(&good_file, None).unwrap();
         cache.block(&good, 0, true).unwrap();
         let bad = cache.open(&bad_file, None).unwrap();
@@ -710,7 +1419,5 @@ mod tests {
             "{problems:?}"
         );
         drop(playback);
-        cache.shutdown();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

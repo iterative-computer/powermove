@@ -58,13 +58,21 @@ fn render_with(
     precision: Precision,
     region: Option<PixelRect>,
 ) -> (Vec<f32>, Vec<pm_render::LayerFailure>) {
+    let mut doc = doc.clone();
+    if doc.get("colorDepth").is_none() && doc["color"].get("precision").is_none() {
+        doc["colorDepth"] = json!(match precision {
+            Precision::Unorm8 => 8,
+            Precision::Float16 => 16,
+            Precision::Float32 => 32,
+        });
+    }
     let w = doc["w"].as_u64().unwrap() as u32;
     let h = doc["h"].as_u64().unwrap() as u32;
     let mut request = RenderRequest::at_scale(Size::new(w, h), 1.0, precision);
     request.region = region;
     let frame = r
         .render(
-            &load(doc),
+            &load(&doc),
             "Ptest-root",
             ticks(t),
             &request,
@@ -109,8 +117,54 @@ fn input(v: [f64; 4], working: WorkingEncoding) -> [f64; 4] {
 /// rounds to 11 significant bits) or single-precision storage.
 fn tolerance(precision: Precision) -> f64 {
     match precision {
+        Precision::Unorm8 => 1.0 / 255.0,
         Precision::Float16 => 4e-3,
         Precision::Float32 => 2e-5,
+    }
+}
+
+/// Exercises cold and warm pipeline use against the compositor reference in
+/// both precision formats. The first draw must produce the same pixels as reuse.
+#[test]
+fn lazy_fixed_pipelines_match_reference_on_first_and_repeat_frame() {
+    let mut renderer = Renderer::headless().unwrap();
+    let top = layer(
+        "top",
+        "solid",
+        json!({ "color": "#CC558880", "w": 8, "h": 8 }),
+        0.0,
+        0.0,
+        1.0,
+    );
+    let bottom = layer(
+        "bottom",
+        "solid",
+        json!({ "color": "#336699", "w": 16, "h": 8 }),
+        0.0,
+        0.0,
+        1.0,
+    );
+    for (precision, name) in [
+        (Precision::Float16, "float16"),
+        (Precision::Float32, "float32"),
+    ] {
+        let doc = with_color(
+            project(16, 8, 1.0, no_fill(), vec![top.clone(), bottom.clone()]),
+            false,
+            "hdrSafe",
+            name,
+        );
+        let start = std::time::Instant::now();
+        let first = render(&mut renderer, &doc, precision);
+        let first_use = start.elapsed();
+        let start = std::time::Instant::now();
+        let repeat = render(&mut renderer, &doc, precision);
+        let warm = start.elapsed();
+        let expected = over(hex("#CC558880"), hex("#336699"));
+        assert!(close(px(&first, 16, 4, 4), expected, tolerance(precision)));
+        assert!(close(px(&repeat, 16, 4, 4), expected, tolerance(precision)));
+        assert_eq!(first, repeat, "cold and warm pixels differ at {name}");
+        eprintln!("lazy fixed pipelines {name}: first frame={first_use:?} repeat={warm:?}");
     }
 }
 
@@ -210,6 +264,32 @@ fn blend_modes_match_the_reference() {
         }
     }
     assert_eq!(checked, 3 * 2 * 5 * 9 * 2);
+}
+
+#[test]
+fn depth_eight_screen_blend_preserves_color_over_transparency() {
+    let mut renderer = Renderer::headless().unwrap();
+    let mut top = layer(
+        "top",
+        "solid",
+        json!({ "color": "#FF000080", "w": 8, "h": 8 }),
+        0.0,
+        0.0,
+        1.0,
+    );
+    top["blend"] = json!("screen");
+    let bottom = layer(
+        "bottom",
+        "solid",
+        json!({ "color": "#00FF0080", "w": 8, "h": 8 }),
+        0.0,
+        0.0,
+        1.0,
+    );
+    let mut doc = project(8, 8, 1.0, no_fill(), vec![top, bottom]);
+    doc["colorDepth"] = json!(8);
+    let got = px(&render(&mut renderer, &doc, Precision::Unorm8), 8, 4, 4);
+    assert_eq!(got.map(|v| (v * 255.0).round() as u8), [128, 128, 0, 192]);
 }
 
 /// A styled group (blend mode, opacity) composites its members first, then
@@ -1022,7 +1102,7 @@ fn compositing_is_deterministic() {
     }
 }
 
-/// Settings › Project › Color: the precision setting is a floor for
+/// Settings › Project › Color: the historical precision setting selects
 /// intermediates, unknown settings are routed, and linear blending is
 /// rendered (not routed).
 #[test]

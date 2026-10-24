@@ -6,10 +6,12 @@
  * stall a gesture. An existing thumbnail stays visible until its replacement
  * is ready, so edits never flash the placeholder icon. */
 import { viewerService } from '../legacy/core/services';
+import { prepareThumbnailVideoFrames, type ThumbnailVideoFrames } from './thumbnail-video-frames';
 
 const WIDTH = 320;
 const SETTLE_MS = 400;
 const RETRY_MS = 500;
+const EMPTY_VIDEO_FRAMES = new Map<string, never>();
 
 type PMLike = Record<string, any>;
 
@@ -39,16 +41,13 @@ export function thumbnailSize(w: number, h: number): { width: number; height: nu
 export function createCompThumbnails(PM: PMLike): CompThumbnails {
   const urls: Record<string, string> = $state({});
   const rendered = new Map<string, string>();
-  const attempts = new Map<string, number>();
   let key = '';
   let timer = 0;
   let disposed = false;
-  let generation = 0;
-  const waits = new Map<number, () => void>();
-  const releaseWaits = () => {
-    for (const [wait, resolve] of waits) { window.clearTimeout(wait); resolve(); }
-    waits.clear();
-  };
+  let canvas: HTMLCanvasElement | null = null;
+  let capture: AbortController | null = null;
+  let inFlight = false;
+  let captureMonitor = 0;
 
   const blocked = () => PM.interactionActive?.() || viewerService(PM as any)?.isNavigating?.() || PM.playing
     || PM.agentFrameCapture || PM.Export?.busy || PM.Preview?.preparing || PM.Preview?.active;
@@ -59,106 +58,139 @@ export function createCompThumbnails(PM: PMLike): CompThumbnails {
     timer = window.setTimeout(step, delay);
   };
 
-  function render(id: string): string | null {
+  function render(id: string, renderedKey: string): string | null | Promise<string | null> {
     const project = PM.proj;
     const comp = project?.compId === id ? project : PM.Comps?.get?.(id);
     if (!comp || !Array.isArray(comp.layers) || !PM.GL?.renderToPixels) return null;
+    const pending = prepareThumbnailVideoFrames(PM, comp, posterTime(comp), () => (capture ??= new AbortController()).signal);
+    if (!pending) return encode(comp);
+    return pending.then(prepared => {
+      try {
+        if (disposed || PM.proj !== project || key !== renderedKey || blocked()) return null;
+        return encode(comp, prepared);
+      } finally { prepared.dispose(); }
+    });
+  }
+
+  function encode(comp: any, prepared?: ThumbnailVideoFrames): string | null {
+    const project = PM.proj;
     const { width, height } = thumbnailSize(comp.w || project.w, comp.h || project.h);
     const quality = PM.quality;
+    const oldFrames = PM.preparedVideoFrames, oldVersion = PM.preparedVideoVersion;
+    const hadFrames = Object.hasOwn(PM, 'preparedVideoFrames'), hadVersion = Object.hasOwn(PM, 'preparedVideoVersion');
     let pixels: Uint8Array<ArrayBuffer> | null;
     try {
       PM.quality = 1;
+      PM.preparedVideoFrames = prepared?.frames ?? EMPTY_VIDEO_FRAMES;
+      PM.preparedVideoVersion = prepared?.version ?? 'thumbnail:empty';
       pixels = PM.GL.renderToPixels(posterTime(comp), width, height, {
-        comp, draft3d:true, mblur: false, mbSamples: 1, opaque: true, topDownOpaque: true,
+        comp, mblur: false, mbSamples: 1, opaque: true, topDownOpaque: true,
+        isolatedVideoFrames: true,
       });
     } finally {
       PM.quality = quality;
+      if (hadFrames) PM.preparedVideoFrames = oldFrames; else delete PM.preparedVideoFrames;
+      if (hadVersion) PM.preparedVideoVersion = oldVersion; else delete PM.preparedVideoVersion;
     }
     if (!pixels || pixels.length !== width * height * 4 || PM.GL.gl?.isContextLost?.()) return null;
-    const canvas = document.createElement('canvas');
-    canvas.width = width; canvas.height = height;
+    // Encoding finishes synchronously, so one bounded, detached canvas can
+    // serve every composition without retaining a backing store per card.
+    canvas ??= document.createElement('canvas');
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
     canvas.getContext('2d')!.putImageData(new ImageData(new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.byteLength), width, height), 0, 0);
     return canvas.toDataURL('image/jpeg', .8);
   }
 
   /** With the new engine on, the engine draws it (an idle snapshot: it
    *  waits out playback and gestures; a stale result comes back null). */
-  async function renderWithEngine(engine: any, id: string, requestGeneration: number, projectAtRequest: any): Promise<string | null> {
+  async function renderWithEngine(engine: any, id: string): Promise<string | null> {
     const project = PM.proj;
     const comp = project?.compId === id ? project : PM.Comps?.get?.(id);
     if (!comp || !Array.isArray(comp.layers)) return null;
     const { width, height } = thumbnailSize(comp.w || project.w, comp.h || project.h);
-    const revision = engine.currentRevision?.();
-    const snapshot = await engine.thumbnails.request({ key: `composition:${id}`, composition: id, time: posterTime(comp), width, height, draft3d: true, minRevision: revision ?? undefined });
-    const current = () => !disposed && generation === requestGeneration && PM.proj === projectAtRequest && PM.EngineRender === engine
-      && (revision == null || engine.currentRevision?.() === revision);
-    if (!snapshot || !current()) return null;
+    const snapshot = await engine.thumbnails.request({ key: `composition:${id}`, composition: id, time: posterTime(comp), width, height, draft3d: true });
+    if (!snapshot) return null;
     // The page's own work (the canvas and the JPEG encode) waits out
     // interaction, navigation, and playback, as today's capture does.
-    while (blocked() && current()) await new Promise<void>((resolve) => {
-      const wait = window.setTimeout(() => { waits.delete(wait); resolve(); }, RETRY_MS);
-      waits.set(wait, resolve);
-    });
-    return current() ? engine.toCanvas(snapshot).toDataURL('image/jpeg', .8) : null;
+    while (blocked() && !disposed) await new Promise((resolve) => window.setTimeout(resolve, RETRY_MS));
+    return disposed ? null : engine.toCanvas(snapshot).toDataURL('image/jpeg', .8);
   }
 
   function step() {
     timer = 0;
-    if (disposed || !PM.proj) return;
+    if (disposed || !PM.proj || inFlight) return;
     if (blocked()) { schedule(RETRY_MS); return; }
     const ids: string[] = (PM.Comps?.list?.() ?? []).map((comp: { id: string }) => comp.id);
-    for (const id of Object.keys(urls)) if (!ids.includes(id)) { delete urls[id]; rendered.delete(id); attempts.delete(id); }
+    const live = new Set(ids);
+    for (const id of Object.keys(urls)) if (!live.has(id)) { delete urls[id]; rendered.delete(id); }
     const next = ids.find((id) => rendered.get(id) !== key);
     if (!next) return;
     const renderedKey = key;
     // With the new engine on, never the current engine (its snapshot opens
     // a session when no viewer has one).
     const engine = PM.EngineRender;
+    const project = PM.proj;
+    // A result for an edit that has since changed, or for another project,
+    // is stale: it neither shows nor counts as this key's attempt.
+    const current = () => !disposed && key === renderedKey && PM.proj === project;
     if (engine) {
-      const requestGeneration = generation;
-      const project = PM.proj;
-      let success = false;
-      void renderWithEngine(engine, next, requestGeneration, project)
-        .then((url) => { if (url && !disposed && generation === requestGeneration && PM.proj === project) { urls[next] = url; success = true; } })
-        .catch((error) => console.warn('Composition thumbnail failed', error))
+      void renderWithEngine(engine, next)
+        .then((url) => { if (url && current()) urls[next] = url; })
+        .catch((error) => { if (current()) console.warn('Composition thumbnail failed', error); })
         .finally(() => {
-          if (!disposed && generation === requestGeneration && PM.proj === project) {
-            if (success) { rendered.set(next, renderedKey); attempts.delete(next); }
-            else {
-              const count = (attempts.get(next) ?? 0) + 1;
-              attempts.set(next, count);
-              if (count >= 3) rendered.set(next, renderedKey);
-            }
-            schedule(success ? 0 : RETRY_MS);
-          }
+          if (current()) rendered.set(next, renderedKey);
+          if (!disposed) schedule(current() ? 0 : SETTLE_MS);
         });
       return;
     }
-    try {
-      const url = render(next);
+    let cancelledAttempt = false;
+    const complete = (url: string | null) => {
+      if (disposed || key !== renderedKey || PM.proj !== project || blocked()) return;
       if (url) urls[next] = url;
+      // Failed captures retain the previous image, without spinning a retry loop.
+      rendered.set(next, renderedKey);
+    };
+    const failed = (error: unknown) => {
+      if ((error as any)?.name === 'AbortError') { cancelledAttempt = true; return; }
+      if (!disposed && key === renderedKey && !blocked() && (error as any)?.name !== 'AbortError') console.warn('Composition thumbnail failed', error);
+      complete(null);
+    };
+    try {
+      const result = render(next, renderedKey);
+      if (result instanceof Promise) {
+        inFlight = true;
+        // Only pending decodes need this guard. A gesture, playback or export
+        // releases the private decoder promptly rather than competing with it.
+        captureMonitor = window.setInterval(() => {
+          if (blocked()) { capture?.abort(); capture = null; }
+        }, 50);
+        void result.then(complete, failed).finally(() => {
+          inFlight = false;
+          window.clearInterval(captureMonitor); captureMonitor = 0;
+          schedule(key !== renderedKey || PM.proj !== project ? SETTLE_MS : blocked() || cancelledAttempt ? RETRY_MS : 0);
+        });
+        return;
+      }
+      complete(result);
     } catch (error) {
-      console.warn('Composition thumbnail failed', error);
+      failed(error);
     }
-    // Record the attempt either way so a comp that cannot render is not retried in a loop.
-    rendered.set(next, renderedKey);
     schedule(0);
   }
 
   return {
     urls,
     refresh(next: string) {
-      generation++;
-      releaseWaits();
-      attempts.clear();
-      if (next !== key) key = next;
+      if (next !== key) { key = next; capture?.abort(); capture = null; }
       schedule(SETTLE_MS);
     },
     dispose() {
       disposed = true;
-      generation++;
       window.clearTimeout(timer);
-      releaseWaits();
+      window.clearInterval(captureMonitor); captureMonitor = 0;
+      capture?.abort(); capture = null;
+      if (canvas) { canvas.width = 0; canvas.height = 0; canvas = null; }
     },
   };
 }

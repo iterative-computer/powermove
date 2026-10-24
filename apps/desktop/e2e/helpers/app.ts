@@ -67,8 +67,7 @@ export type LaunchedApp = {
   /** A fresh profile boots to the Projects home screen. Specs that exercise
    * editor panels open an empty composition first, the way a user would. */
   openEditor(): Promise<void>;
-  /** Opens the agent popover under its titlebar launcher. Sending a message
-   * folds it away, so call again to read the conversation after a send. */
+  /** Opens the agent popover under its titlebar launcher. */
   openAgent(): Promise<void>;
   close(): Promise<void>;
   /** Wall time of the last close: app shutdown, then profile cleanup. */
@@ -108,6 +107,9 @@ async function startElectron(
   await ensureBuilt();
   const launchEnv = {
     ...process.env,
+    // Fresh test profiles must not download runtimes from a connected account.
+    // Runtime-update specs can opt in with an explicit env override below.
+    POWERMOVE_DISABLE_RUNTIME_UPDATES: '1',
     // Offline UI regressions must not depend on the developer's subscription
     // state (or race a real account check that replaces the composer).
     ...(process.env.POWERMOVE_E2E_LIVE ? {} : {
@@ -161,6 +163,8 @@ async function startElectron(
     instrument(page);
     await page.waitForLoadState('domcontentloaded');
     await page.waitForFunction(() => Boolean((window as any).PM));
+    await page.waitForFunction(() => Boolean((window as any).PM?.app));
+    await page.evaluate(async () => { await (window as any).PM.projectReady; });
     return { app, page };
   } catch (error) {
     await closeTestProcess(app, 5_000);
@@ -168,6 +172,7 @@ async function startElectron(
   }
 }
 
+/** Cleanup of an isolated test process must finish even when OS shutdown work hangs. */
 export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedApp> {
   const ownsUserData = options.userData === undefined;
   const userData = options.userData
@@ -203,7 +208,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     diagnostics,
     teardown: null,
     async relaunch() {
-      await active.app.close();
+      if (await closeTestProcess(active.app)) throw new Error(`Electron shutdown exceeded ${SHUTDOWN_MS} ms before relaunch.`);
       active = await startElectron(userData, env, diagnostics, options.normalWindow, switches);
       session.app = active.app;
       session.page = active.page;

@@ -178,7 +178,8 @@ fn world_box<'d>(
     }))
 }
 
-/// The targets the strip moves (unlocked, not audio) with their world boxes.
+/// The targets the strip moves (editable: neither locked nor inside a locked
+/// group, as `isInspectorLayerEditable`; not audio) with their world boxes.
 fn boxed(
     edit: &mut Edit<'_>,
     layers: &[usize],
@@ -191,6 +192,9 @@ fn boxed(
         for &i in layers {
             let Some(l) = s.layers().get(i) else { continue };
             if node::truthy(node::member(Some(l), "lock"))
+                || s.group_ancestors(l)?
+                    .iter()
+                    .any(|g| node::truthy(node::member(Some(g), "lock")))
                 || node::is_str(node::member(Some(l), "type"), "audio")
             {
                 continue;

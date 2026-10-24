@@ -18,9 +18,8 @@ test('an API connection creates a keyframeable effect and verifies it through li
       seen.push(body);
       const previous = body.messages.filter((message: any) => message.role === 'tool').length;
       if (!previous) run++;
-      // The run's staging directory, as src/main/codex/instructions.ts states it.
-      const stage = body.messages[0].content.match(/Stage extensions only in (.+?); Powermove validates/)?.[1];
-      if (!stage) throw new Error('The system prompt no longer names the extension staging directory');
+      const stage = body.messages[0].content.match(/Stage only in ([^;\n]+);/)?.[1];
+      if (!stage) throw new Error('Authoring instructions did not name the isolated staging directory');
       const result = { summary: run === 1 ? 'Created Gradient Tint.' : 'Verified Gradient Tint in Powermove.', commands: [], artifacts: [], extensions: [], notes: [], externalActions: [] };
       const sequence: [string, any][] = run === 1 ? [
         ['read_file', { path: 'powermove-api/samples/gradient-tint/README.md' }],
@@ -46,14 +45,23 @@ test('an API connection creates a keyframeable effect and verifies it through li
   try {
     const port = (server.address() as { port: number }).port;
     await session.openEditor(); await session.openAgent();
-    await session.page.evaluate(async port => {
+    const page = session.page;
+    await page.getByRole('button', { name: 'Open settings', exact: true }).click();
+    const settings = page.getByRole('dialog', { name: 'Settings', exact: true });
+    await settings.getByRole('button', { name: 'Accounts', exact: true }).click();
+    await settings.getByRole('textbox', { name: 'API base URL', exact: true }).fill(`http://127.0.0.1:${port}/v1`);
+    await settings.getByRole('textbox', { name: 'Model name', exact: true }).fill('test-author');
+    await settings.getByRole('checkbox', { name: 'This model supports images', exact: true }).check();
+    await settings.getByRole('button', { name: 'Test and connect', exact: true }).click();
+    await expect(settings).toContainText('Connected model: test-author');
+    await settings.getByRole('main').getByRole('button', { name: 'Done', exact: true }).click();
+    await session.page.evaluate(() => {
       const w = window as any;
-      await w.__powermoveTestBridge.compatible.configure({ baseUrl: `http://127.0.0.1:${port}/v1`, model: 'test-author', vision: true });
       w.PM.AgentUI.setAccess('project');
       w.PM.AgentUI.setProvider('compatible');
       w.PM.SpatialAssistant.open();
       w.PM.AgentUI.submit('Create a reusable Gradient Tint effect with keyframeable controls and apply it to a shape.');
-    }, port);
+    });
     await expect.poll(() => session.page.evaluate(() => (window as any).PM.AgentUI.state.phase), { timeout: 25000 }).toBe('result');
     const proof = await session.page.evaluate(() => {
       const PM = (window as any).PM;

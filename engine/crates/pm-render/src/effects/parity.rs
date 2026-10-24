@@ -11,15 +11,82 @@
 //! reproduces today's ANGLE outcome (skipped and reported, turned off, or a
 //! named job error). A transient failure leaves it unknown; the runner's
 //! retry and backoff decide when it is asked for again.
+//!
+//! Only the process whose runner is the reference a namespace names may write
+//! to it. The desktop's interactive and job engines compare against
+//! Electron's WebGL runner and own its `angle-parity` directory. The hidden
+//! MCP host and the CLIs compare against a different browser (Playwright's
+//! Chromium, possibly SwiftShader without a GUI session), so they open that
+//! directory read only ([`Parity::set_read_only`]): they honour the desktop's
+//! runner pins and native verifications, and keep their own first-use
+//! decisions in memory, never as markers the desktop would trust.
 use std::collections::{HashMap, VecDeque};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::shader_layers::{FallbackFailure, FallbackPixels};
+use pm_protocol::color::Precision;
+
+/// Parity markers judge the fragment's arithmetic *and* the target's store
+/// precision. Keep the GLSL source unchanged for the fallback runner, but
+/// include this value in every verdict/pending/present lookup.
+pub(crate) fn scoped_source(source: &str, precision: Precision) -> String {
+    let depth = match precision {
+        Precision::Unorm8 => "unorm8",
+        Precision::Float16 => "float16",
+        Precision::Float32 => "float32",
+    };
+    format!("working-depth-v1:{depth}\0{source}")
+}
 
 /// How often a cached native verification looks for a pin another process
 /// wrote (one `stat`-sized read per program per period, not per draw).
 const PIN_CHECK: Duration = Duration::from_millis(500);
+
+/// The browser half of the probe environment (desktop: Electron/Chromium and
+/// engine identity). Setting it enables first-use probing.
+pub const ENVIRONMENT_ENV: &str = "POWERMOVE_ENGINE_PARITY_ENV";
+/// The shader cache whose `angle-parity` directory holds the decisions.
+pub const CACHE_ENV: &str = "POWERMOVE_ENGINE_SHADER_CACHE";
+/// `read-only`: honour the directory's decisions but never write any (hosts
+/// whose runner is not the namespace's reference browser). Any other value
+/// is refused, so a misspelling cannot silently grant write access.
+pub const STORE_ENV: &str = "POWERMOVE_ENGINE_PARITY_STORE";
+
+/// Where a renderer's probe decisions come from, read from its environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeStore {
+    pub browser: String,
+    pub directory: Option<PathBuf>,
+    pub read_only: bool,
+}
+
+impl ProbeStore {
+    /// `None` without [`ENVIRONMENT_ENV`] (probing stays off). An unknown
+    /// [`STORE_ENV`] value fails closed as read only.
+    pub fn from_environment(var: impl Fn(&str) -> Option<OsString>) -> Option<ProbeStore> {
+        let browser = var(ENVIRONMENT_ENV)?.into_string().ok()?;
+        let directory = var(CACHE_ENV).map(|d| PathBuf::from(d).join("angle-parity"));
+        let read_only = match var(STORE_ENV) {
+            None => false,
+            Some(value) if value.is_empty() => false,
+            Some(value) => {
+                if value != "read-only" {
+                    eprintln!(
+                        "{STORE_ENV}={value:?} is not 'read-only'; shader probe decisions stay in memory"
+                    );
+                }
+                true
+            }
+        };
+        Some(ProbeStore {
+            browser,
+            directory,
+            read_only,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -40,6 +107,9 @@ pub struct Parity {
     present: HashMap<String, String>,
     /// When each cached native verification last looked for a pin on disk.
     checked: HashMap<String, Instant>,
+    /// Decisions are kept in memory only; the directory is read, never
+    /// written. Sticky: no later `configure` can grant write access.
+    read_only: bool,
 }
 
 impl Parity {
@@ -53,6 +123,16 @@ impl Parity {
         self.pending_order.clear();
         self.present.clear();
         self.checked.clear();
+    }
+
+    /// Never write a decision to the configured directory again (see the
+    /// module notes). Persisted pins and verifications are still honoured.
+    pub fn set_read_only(&mut self) {
+        self.read_only = true;
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn environment(&self) -> Option<&str> {
@@ -125,6 +205,14 @@ impl Parity {
         };
         self.decisions.insert(key, verdict);
         verdict
+    }
+
+    /// Verdict for a shader's source at the working precision used by the
+    /// renderer. Callers with an unscoped GLSL source use this rather than
+    /// reconstructing the storage key; internal callers already holding a
+    /// scoped source can use [`Self::verdict`].
+    pub fn verdict_at_precision(&mut self, source: &str, precision: Precision) -> Verdict {
+        self.verdict(&scoped_source(source, precision))
     }
 
     /// Diagnostic corpus sweeps exercise every parameter set. Re-probe a
@@ -204,17 +292,24 @@ impl Parity {
         }
     }
 
-    /// Any channel over one code value pins the whole program. This is an
-    /// absolute bound, also for HDR; non-finite disagreements pin too.
+    /// RGBA8 comparisons use exact byte codes; half-float comparisons allow
+    /// at most one output code value of difference, also for HDR.
     pub fn judge(
         &mut self,
         source: &str,
         native: &FallbackPixels,
         angle: &FallbackPixels,
     ) -> Verdict {
+        let same = if source.starts_with("working-depth-v1:unorm8\0") {
+            matches_rgba8(native, angle)
+        } else if source.starts_with("working-depth-v1:float32\0") {
+            matches_rgba32(native, angle)
+        } else {
+            matches(native, angle)
+        };
         let verdict = if self.verdict(source) == Verdict::Runner {
             Verdict::Runner
-        } else if matches(native, angle) {
+        } else if same {
             Verdict::NativeVerified
         } else {
             Verdict::Runner
@@ -234,6 +329,9 @@ impl Parity {
         let Some(dir) = &self.directory else {
             return;
         };
+        if self.read_only {
+            return;
+        }
         let bytes: &[u8] = if verdict == Verdict::Runner {
             b"runner\n"
         } else {
@@ -281,11 +379,111 @@ pub fn matches(native: &FallbackPixels, angle: &FallbackPixels) -> bool {
         })
 }
 
+fn matches_rgba8(native: &FallbackPixels, angle: &FallbackPixels) -> bool {
+    native.width == angle.width
+        && native.height == angle.height
+        && native.rgba16f.len() == native.width as usize * native.height as usize * 4
+        && native.rgba16f == angle.rgba16f
+        && native.rgba16f.iter().all(|code| *code <= 255)
+}
+
+fn matches_rgba32(native: &FallbackPixels, angle: &FallbackPixels) -> bool {
+    native.width == angle.width
+        && native.height == angle.height
+        && native.rgba16f.is_empty()
+        && angle.rgba16f.is_empty()
+        && native.rgba32f.as_ref().is_some_and(|bits| {
+            bits.len() == native.width as usize * native.height as usize * 4
+                && angle.rgba32f.as_ref() == Some(bits)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parity_verdicts_are_scoped_to_working_precision() {
+        let mut parity = Parity::default();
+        parity.configure(Some("precision-scoping".into()), None);
+        let source = "void main() { fragColor = vec4(0.5); }";
+        let rgba8 = scoped_source(source, Precision::Unorm8);
+        let half = scoped_source(source, Precision::Float16);
+        let full = scoped_source(source, Precision::Float32);
+        parity.judge(&half, &pixels(0.5), &pixels(0.5));
+        assert_eq!(parity.verdict(&half), Verdict::NativeVerified);
+        assert_eq!(
+            parity.verdict_at_precision(source, Precision::Float16),
+            Verdict::NativeVerified
+        );
+        assert_eq!(
+            parity.verdict_at_precision(source, Precision::Unorm8),
+            Verdict::Unknown
+        );
+        assert_eq!(
+            parity.verdict_at_precision(source, Precision::Float32),
+            Verdict::Unknown
+        );
+        assert_eq!(parity.verdict(&rgba8), Verdict::Unknown);
+        assert_eq!(parity.verdict(&full), Verdict::Unknown);
+        parity.pin(&rgba8);
+        assert_eq!(parity.verdict(&rgba8), Verdict::Runner);
+        assert_eq!(parity.verdict(&half), Verdict::NativeVerified);
+    }
+
+    #[test]
+    fn rgba8_parity_requires_exact_valid_byte_codes() {
+        let mut parity = Parity::default();
+        parity.configure(Some("byte-parity".into()), None);
+        let source = scoped_source("byte probe", Precision::Unorm8);
+        let frame = |code| FallbackPixels {
+            rgba32f: None,
+            width: 1,
+            height: 1,
+            rgba16f: vec![code; 4],
+        };
+        assert_eq!(
+            parity.judge(&source, &frame(0), &frame(255)),
+            Verdict::Runner
+        );
+        assert_eq!(parity.judge(&source, &frame(0), &frame(0)), Verdict::Runner);
+        let source2 = scoped_source("valid byte probe", Precision::Unorm8);
+        assert_eq!(
+            parity.judge(&source2, &frame(255), &frame(255)),
+            Verdict::NativeVerified
+        );
+        let source3 = scoped_source("invalid byte probe", Precision::Unorm8);
+        assert_eq!(
+            parity.judge(&source3, &frame(256), &frame(256)),
+            Verdict::Runner
+        );
+    }
+
+    #[test]
+    fn rgba32_parity_requires_exact_float_bits() {
+        let mut parity = Parity::default();
+        parity.configure(Some("float32-bits".into()), None);
+        let source = scoped_source("full precision probe", Precision::Float32);
+        let frame = |code| FallbackPixels {
+            rgba32f: Some(vec![code; 4]),
+            width: 1,
+            height: 1,
+            rgba16f: vec![],
+        };
+        assert_eq!(
+            parity.judge(&source, &frame(0x3f80_0008), &frame(0x3f80_0000)),
+            Verdict::Runner
+        );
+        let matching = scoped_source("matching full precision probe", Precision::Float32);
+        assert_eq!(
+            parity.judge(&matching, &frame(0x3f80_0008), &frame(0x3f80_0008)),
+            Verdict::NativeVerified
+        );
+    }
+
     fn pixels(v: f32) -> FallbackPixels {
         FallbackPixels {
+            rgba32f: None,
             width: 1,
             height: 1,
             rgba16f: vec![pm_gpu::readback::f32_to_half(v); 4],
@@ -369,6 +567,107 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_namespace_honours_the_desktop_and_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("pm-parity-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let environment = "desktop electron; gpu; pipeline";
+        let mut desktop = Parity::default();
+        desktop.configure(Some(environment.into()), Some(dir.clone()));
+        desktop.judge("desktop pinned", &pixels(0.5), &pixels(0.8));
+        desktop.judge("desktop verified", &pixels(0.5), &pixels(0.5));
+        let before = listing(&dir);
+        assert_eq!(before.len(), 2);
+
+        let mut hidden = Parity::default();
+        hidden.set_read_only();
+        hidden.configure(Some(environment.into()), Some(dir.clone()));
+        assert!(hidden.read_only(), "configure cannot grant write access");
+        assert_eq!(hidden.verdict("desktop pinned"), Verdict::Runner);
+        assert_eq!(hidden.verdict("desktop verified"), Verdict::NativeVerified);
+        // First probes by a host whose reference is another browser: a match,
+        // a mismatch and a lasting runner failure are decided in memory.
+        assert_eq!(
+            hidden.judge("first probe", &pixels(0.5), &pixels(0.5)),
+            Verdict::NativeVerified
+        );
+        assert_eq!(
+            hidden.judge("first mismatch", &pixels(0.5), &pixels(0.8)),
+            Verdict::Runner
+        );
+        hidden.start("r", "lasting failure", pixels(0.5));
+        hidden.failed(
+            "r",
+            &FallbackFailure {
+                reason: "compile".into(),
+                message: String::new(),
+            },
+        );
+        assert_eq!(hidden.verdict("first probe"), Verdict::NativeVerified);
+        assert_eq!(hidden.verdict("first mismatch"), Verdict::Runner);
+        assert_eq!(hidden.verdict("lasting failure"), Verdict::Runner);
+        assert_eq!(
+            listing(&dir),
+            before,
+            "no marker, temporary or pin was written"
+        );
+
+        // The desktop still has to compare these programs with its own runner.
+        let mut later = Parity::default();
+        later.configure(Some(environment.into()), Some(dir.clone()));
+        for source in ["first probe", "first mismatch", "lasting failure"] {
+            assert_eq!(later.verdict(source), Verdict::Unknown, "{source}");
+        }
+        // A pin the desktop writes later still reaches the read-only host.
+        later.judge("first probe", &pixels(0.5), &pixels(0.9));
+        std::thread::sleep(PIN_CHECK);
+        assert_eq!(hidden.verdict("first probe"), Verdict::Runner);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn listing(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn the_store_mode_is_read_from_the_environment_and_fails_closed() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| OsString::from(*v))
+            }
+        };
+        assert_eq!(
+            ProbeStore::from_environment(env(&[(CACHE_ENV, "/c")])),
+            None
+        );
+        let desktop =
+            ProbeStore::from_environment(env(&[(ENVIRONMENT_ENV, "desktop"), (CACHE_ENV, "/c")]))
+                .unwrap();
+        assert_eq!(desktop.directory, Some(PathBuf::from("/c/angle-parity")));
+        assert!(!desktop.read_only);
+        for mode in ["read-only", "readonly", "0"] {
+            let hidden = ProbeStore::from_environment(|name: &str| match name {
+                ENVIRONMENT_ENV => Some("desktop".into()),
+                STORE_ENV => Some(mode.into()),
+                _ => None,
+            })
+            .unwrap();
+            assert!(hidden.read_only, "{mode}");
+            assert_eq!(hidden.directory, None);
+        }
+    }
+
+    #[test]
     fn every_channel_is_judged_without_a_pixel_budget() {
         assert!(matches(&pixels(0.5), &pixels(0.503)));
         assert!(!matches(&pixels(0.5), &pixels(0.505)));
@@ -377,6 +676,7 @@ mod tests {
         assert!(!matches(
             &pixels(0.5),
             &FallbackPixels {
+                rgba32f: None,
                 width: 2,
                 ..pixels(0.5)
             }

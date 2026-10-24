@@ -225,8 +225,41 @@ fn build_options(
         sampling: request.sampling,
         shader_fallback,
         video_end: request.video_end,
+        preview: preview_window(comp, request),
         origin: request.origin,
     }
+}
+
+/// The viewer's source-clipping window in a preview of the open root
+/// composition: today's `canClipPreviewSources` (`crate::compat_crop`). A
+/// supplied canvas includes its pan buffer, even when presentation only
+/// draws a smaller region. Without a canvas, the region is the window.
+fn preview_window(
+    comp: &Comp<'_>,
+    request: &RenderRequest,
+) -> Option<crate::compat_crop::PreviewWindow> {
+    if request.export
+        || !(comp.at_root() || comp.is_open_canonical())
+        || !matches!(request.video_end, crate::request::VideoEnd::Preview)
+    {
+        return None;
+    }
+    let r = if request.preview_canvas {
+        pm_protocol::common::PixelRect {
+            x: 0,
+            y: 0,
+            width: request.output_size.width,
+            height: request.output_size.height,
+        }
+    } else {
+        request.region?
+    };
+    Some(crate::compat_crop::PreviewWindow {
+        x: f64::from(r.x),
+        y: f64::from(r.y),
+        width: f64::from(r.width),
+        height: f64::from(r.height),
+    })
 }
 
 /// The renderer.
@@ -260,6 +293,8 @@ pub struct Renderer {
     explicit_meshes: std::collections::HashMap<String, crate::scene3d::legacy::MeshDefinition>,
     text: crate::text::TextContext,
     text_gpu: crate::text::gpu::TextGpu,
+    /// The session's compatibility rasters (`crate::compat`).
+    compat: Option<Arc<dyn crate::compat::CompatRasters>>,
     /// Layer draws kept across frames of one paused time
     /// ([`Renderer::set_draw_reuse`], `crate::reuse`).
     reuse: crate::reuse::DrawReuse,
@@ -298,6 +333,40 @@ struct FrameReuse {
 }
 
 impl Renderer {
+    /// A CLI host reading the desktop's persisted per-machine probe store.
+    /// GPU/driver and pipeline identity are the same suffix as `new` uses.
+    pub fn configure_shader_reference(
+        &mut self,
+        browser: &str,
+        directory: Option<std::path::PathBuf>,
+    ) {
+        let environment = format!(
+            "{browser}; {:?}; pipeline {}",
+            self.device.adapter_info(),
+            pm_glsl::pipeline::PIPELINE_REVISION
+        );
+        self.effects.parity.configure(Some(environment), directory);
+    }
+
+    /// Honour the configured probe directory without ever writing to it:
+    /// this renderer's runner is not the browser that directory's
+    /// decisions were made against (`effects::parity` module notes).
+    pub fn read_only_shader_reference(&mut self) {
+        self.effects.parity.set_read_only();
+    }
+
+    /// CLI hosts without an ANGLE environment must fail closed for user
+    /// programs instead of treating the absence of a parity service as proof.
+    /// A host that supplied the desktop environment retains its persisted
+    /// decisions; unknown programs still need a runner before output.
+    pub fn require_shader_reference(&mut self) {
+        if !self.effects.parity.enabled() {
+            self.effects
+                .parity
+                .configure(Some("host-without-ANGLE-reference".into()), None);
+        }
+    }
+
     /// A renderer on a device. The device needs
     /// `pm_gpu::device::required_features()`; 32-bit precision also needs
     /// `FLOAT32_FILTERABLE` and `FLOAT32_BLENDABLE` (`pm_gpu::Gpu` requests
@@ -307,15 +376,19 @@ impl Renderer {
         let media = MediaCache::new(&device);
         let text_gpu = crate::text::gpu::TextGpu::new(&device);
         let mut effects = Effects::new(format!("{}; wgpu 30", std::env::consts::OS));
-        if let Ok(browser) = std::env::var("POWERMOVE_ENGINE_PARITY_ENV") {
+        if let Some(store) =
+            crate::effects::parity::ProbeStore::from_environment(|name| std::env::var_os(name))
+        {
             let environment = format!(
-                "{browser}; {:?}; pipeline {}",
+                "{}; {:?}; pipeline {}",
+                store.browser,
                 device.adapter_info(),
                 pm_glsl::pipeline::PIPELINE_REVISION
             );
-            let directory = std::env::var_os("POWERMOVE_ENGINE_SHADER_CACHE")
-                .map(|d| std::path::PathBuf::from(d).join("angle-parity"));
-            effects.parity.configure(Some(environment), directory);
+            if store.read_only {
+                effects.parity.set_read_only();
+            }
+            effects.parity.configure(Some(environment), store.directory);
         }
         Renderer {
             text: crate::text::TextContext::default(),
@@ -337,6 +410,7 @@ impl Renderer {
             shaders: Default::default(),
             fallback_host: None,
             explicit_meshes: Default::default(),
+            compat: None,
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
             prefix: Default::default(),
@@ -346,6 +420,14 @@ impl Renderer {
             frame_reuse: FrameReuse::default(),
             binds: crate::binds::BindCache::default(),
         }
+    }
+
+    /// The compatibility rasters frames draw from (`crate::compat`): with a
+    /// producer for a source, the layers it draws ask it, and a frame whose
+    /// answers have not arrived fails with [`RenderError::CompatPending`].
+    /// `None` (the default): every layer is the engine's own.
+    pub fn set_compat_rasters(&mut self, compat: Option<Arc<dyn crate::compat::CompatRasters>>) {
+        self.compat = compat;
     }
 
     /// Whether [`Renderer::render_into`] plans with the layer draws kept
@@ -679,6 +761,7 @@ impl Renderer {
     pub fn swap_effects(&mut self, effects: &mut Effects) {
         std::mem::swap(&mut self.effects, effects);
         self.effects.fallback.runner = self.shaders.fallback_runner;
+        self.refresh_meshes();
     }
 
     /// Runs `f` with an effect context over the renderer's own definitions,
@@ -861,6 +944,14 @@ impl Renderer {
                         pm_perf::bump(pm_perf::Counter::RasterAnswers);
                         self.put_fallback_pixels(key.clone(), pixels);
                         break None;
+                    }
+                    Ok(pixels) if let Some(code) = pixels.invalid_rgba8_code(&job.request) => {
+                        crate::shader_layers::FallbackFailure {
+                            reason: "pixelCode".into(),
+                            message: format!(
+                                "the runner returned invalid RGBA8 channel code {code} (expected 0..=255)"
+                            ),
+                        }
                     }
                     Ok(pixels) => crate::shader_layers::FallbackFailure {
                         reason: "size".into(),
@@ -1181,6 +1272,16 @@ impl Renderer {
         self.text_gpu.trim(bytes);
     }
 
+    /// Frees every idle intermediate target (a viewer at rest) and returns
+    /// the bytes freed. Targets in use, such as the kept bottom of the last
+    /// frame (`crate::frame_prefix`), and every content cache stay; the
+    /// next frame takes fresh targets from the device.
+    pub fn release_idle_targets(&mut self) -> u64 {
+        let before = self.pool.bytes();
+        self.pool.trim(0);
+        before - self.pool.bytes()
+    }
+
     /// The vector cache's standing bound, enforced while frames render
     /// (default: today's raster cache, 192 MiB and 4096 entries).
     pub fn set_vector_cache_budget(&mut self, max_bytes: u64, max_entries: usize) {
@@ -1210,21 +1311,40 @@ impl Renderer {
     }
 
     fn supports_precision(&self, precision: Precision) -> bool {
-        precision == Precision::Float16
+        precision != Precision::Float32
             || self
                 .device
                 .features()
                 .contains(wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::FLOAT32_BLENDABLE)
     }
 
-    /// The output format a fresh [`Self::render`] frame would use. Callers
-    /// rendering into their own target must make the same precision choice.
+    /// The project's requested output format on a device supporting its depth.
+    /// Callers rendering into their own target use [`Self::device_target_format`]
+    /// to include the shipped compositor's hardware fallback.
     pub fn target_format(document: &Document, request: &RenderRequest) -> wgpu::TextureFormat {
         let precision = match document.root().map(project_settings) {
             Some(Ok(c)) => effective_precision(request.precision, c.precision),
             _ => request.precision,
         };
         working_format(precision)
+    }
+
+    /// The actual output format on this device. Main's compositor falls
+    /// back from 32 to 16 when float32 filtering/blending is unavailable.
+    /// Viewers, snapshots and caller-owned targets must use this choice.
+    pub fn device_target_format(
+        &self,
+        document: &Document,
+        request: &RenderRequest,
+    ) -> wgpu::TextureFormat {
+        let format = Self::target_format(document, request);
+        if format == wgpu::TextureFormat::Rgba32Float
+            && !self.supports_precision(Precision::Float32)
+        {
+            working_format(Precision::Float16)
+        } else {
+            format
+        }
     }
 
     /// Renders `composition` at `time` into a new texture.
@@ -1237,7 +1357,7 @@ impl Renderer {
         assets: &dyn AssetResolver,
     ) -> Result<Frame, RenderError> {
         let size = request.target_size();
-        let format = Self::target_format(document, request);
+        let format = self.device_target_format(document, request);
         // A target a finished frame gave back (`recycle`), when it fits.
         let target = match self.frame_reuse.target.take() {
             Some(t)
@@ -1575,7 +1695,10 @@ impl Renderer {
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
         let color = project_settings(root)?;
         debug_assert!(rows == SnapshotRows::TopDown || color.working == WorkingEncoding::Standard);
-        let precision = effective_precision(request.precision, color.precision);
+        let precision = available_precision(
+            effective_precision(request.precision, color.precision),
+            self.supports_precision(Precision::Float32),
+        );
         if !self.supports_precision(precision) {
             return Err(RenderError::Unsupported(vec![Unsupported::request(
                 "32-bit precision on a device without rgba32float filtering and blending",
@@ -1628,6 +1751,7 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             blender,
+            self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
         if !request.background {
@@ -1644,6 +1768,9 @@ impl Renderer {
         let mut failures = build.failures;
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
+        }
+        if !build.compat_missing.is_empty() {
+            return Err(RenderError::CompatPending(build.compat_missing));
         }
         let region = request.region.map(|r| Region {
             x: r.x,
@@ -2210,6 +2337,7 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             crate::blender::PlanState::collecting(preview, options),
+            self.compat.as_deref(),
             None,
         );
         Ok(crate::blender::BlenderSnapshots::from_build(build.blender))
@@ -2254,6 +2382,7 @@ impl Renderer {
             Some(&mut self.text),
             build_options(&comp, request, self.shaders.fallback_runner),
             blender,
+            self.compat.as_deref(),
             self.reuse_enabled.then_some(&mut self.reuse),
         );
         if !build.unsupported.is_empty() {
@@ -2290,14 +2419,42 @@ fn project_settings(root: &pm_model::Node) -> Result<ColorSettings, RenderError>
         })
 }
 
-/// The precision intermediates use: the request's, raised to the project's
-/// (Settings › Project › Color › Precision is a floor for every render of
-/// the project; exports raise it further by amendment 8).
-pub fn effective_precision(request: Precision, project: Precision) -> Precision {
-    if request == Precision::Float32 || project == Precision::Float32 {
-        Precision::Float32
-    } else {
-        Precision::Float16
+/// The project Color depth is authoritative for preview, snapshots and export.
+/// Request precision is retained in the protocol for older callers, but cannot
+/// change the rounding boundaries of an existing project (DEPTH-1).
+pub fn effective_precision(_request: Precision, project: Precision) -> Precision {
+    project
+}
+
+/// The shipped compositor's hardware fallback: 32 → 16 on devices without
+/// float32 filtering and blending. The saved project depth is unchanged.
+fn available_precision(precision: Precision, float32: bool) -> Precision {
+    match (precision, float32) {
+        (Precision::Float32, false) => Precision::Float16,
+        _ => precision,
+    }
+}
+
+#[cfg(test)]
+mod depth_device_tests {
+    use super::*;
+    #[test]
+    fn float32_hardware_fallback_matches_main_without_promoting_other_depths() {
+        assert_eq!(
+            available_precision(Precision::Float32, false),
+            Precision::Float16
+        );
+        for depth in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
+            assert_eq!(available_precision(depth, true), depth);
+        }
+        assert_eq!(
+            available_precision(Precision::Unorm8, false),
+            Precision::Unorm8
+        );
+        assert_eq!(
+            available_precision(Precision::Float16, false),
+            Precision::Float16
+        );
     }
 }
 

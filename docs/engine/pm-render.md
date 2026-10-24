@@ -39,6 +39,11 @@ the authority.
 - `Renderer::headless()` or `Renderer::new(device, queue)`: one per engine. It
   keeps compiled pipelines, the target pool, media caches, the 3D programs,
   and the evaluator's caches across frames.
+  Fixed 2D, composite, resampling, mask, and text paint render pipelines now
+  compile per variant on first use. Each renderer owns the lazy entries;
+  there is no global device cache. Their one-shot factories release captured
+  shader/device/layout handles after compilation. Descriptors and shader
+  sources are unchanged. See [memory.md](memory.md) for attribution and gates.
 - `render(document, composition, tick, &RenderRequest, &dyn AssetResolver) ->
   Frame`: a new texture with premultiplied working values (Standard: E-encoded,
   Rec.709 primaries) at the request's precision and the region's size, the
@@ -346,8 +351,8 @@ transitions; blend modes other than normal; motion blur; 2.5D layers and 3D
 groups; adjustment layers with effects; `compat` level 2; non-default project
 color; `requiresEngine`; Blender rendering; SVG images; animated images and
 sequences; unreadable media; the 3D limits above; request options (view
-override, 32-bit precision on a device without `rgba32float` filtering and
-blending). A render that still meets something unsupported fails with
+override). DEPTH-1 now follows the shipped compositor's 32-to-16 fallback
+on a device without `rgba32float` filtering and blending. A render that still meets something unsupported fails with
 `RenderError::Unsupported` rather than drawing it wrong; `render_into` then
 leaves the caller's targets untouched (the presenter keeps its last frame).
 Media caches key video sources and stills by file size and modification
@@ -461,3 +466,25 @@ output share the matrix.
   `test/corpus.test.ts`: the generated stills (a dependency-free JPEG, PNG,
   and baseline TIFF encoder, a Display P3 ICC profile, and WebP, AVIF, and
   HEIC derived with `cwebp` and `sips`).
+
+## 8-bit working target routing
+
+At project color depth 8, working composition targets and their intermediate
+passes use `Rgba8Unorm`. The source conversion writes directly to RGBA8 so
+that half-float rounding cannot precede its byte quantization. Resampling
+pyramids, footage orientation, level 2 vector paint, text paint, and legacy
+OBJ mesh outputs use the same target format. Source bitmaps that were already
+RGBA8 remain separate cache entries from float source textures; their format
+alone does not indicate the composition's precision. Three.js scene canvas
+and the 3D object-id/depth planes keep their own formats.
+Compatibility video keeps its centered bilinear chroma reconstruction;
+interpreted video written into an RGBA8 working target keeps native siting
+and filtering.
+
+The WebGL shader fallback request carries the working color depth. At depth
+8 its existing 16-bit wire slots carry exact byte codes, so the runner uploads
+and renders into RGBA8 and reads `UNSIGNED_BYTE`; no half-float stage precedes
+the working target. Older requests omit the field and continue to use RGBA16F.
+The targeted WebGL runner check preserves 24,576 byte codes across readback,
+three passes and depth switches. Full shader-corpus qualification at all
+depths remains required; see `color-depth.md` for current blockers.

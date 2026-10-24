@@ -84,6 +84,8 @@ names! {
         Loop = "loop",
         Pingpong = "pingpong",
         Param = "param",
+        Sample = "sample",
+        MotionPath = "motionPath",
     }
 }
 

@@ -1,4 +1,5 @@
 import type { PowermoveAPI } from 'powermove';
+import { addTimelineMarker, markerAtTime, removeTimelineMarker } from './markers';
 
 import { createTimelineRuntime, timelinePanelOptions } from './timeline';
 import { adjacentKeyframe } from './keyframe-navigation';
@@ -109,6 +110,12 @@ export default function activate(api: PowermoveAPI): void {
   activeApi = api;
   const timeline = createTimelineRuntime(api);
   const revealProperty = createPropertyReveal(api);
+  api.commands.register({ id: 'timeline.addMarker', label: 'Add marker', category: 'Timeline', run: () => addTimelineMarker(api) });
+  api.commands.register({
+    id: 'timeline.removeMarker', label: 'Remove marker at playhead', category: 'Timeline',
+    when: () => !!markerAtTime(api, api.transport.time()),
+    run: () => { const marker = markerAtTime(api, api.transport.time()); if (marker) removeTimelineMarker(api, marker); },
+  });
   for (const [key, , label] of propertyShortcuts) {
     api.commands?.register({
       id: `timeline.revealProperty:${key}`,

@@ -121,12 +121,18 @@ export default function activate(api: PowermoveAPI): void {
       add.title = 'Add effect';
       add.setAttribute('aria-label', 'Add effect');
       add.innerHTML = api.ui.icon('plus');
-      add.addEventListener('click', () => {
+      const showEffects = () => {
         const layers = api.selection.layers()
           .map((id) => api.model.layer(id))
           .filter((layer): layer is Layer => layer !== null);
         showFxMenu(api, add, inspectorSelection(api, layers)[0]);
+      };
+      add.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        showEffects();
       });
+      add.addEventListener('click', (event) => { if (event.detail === 0) showEffects(); });
       header.insertBefore(add, header.querySelector('.panel-options'));
     }
   });

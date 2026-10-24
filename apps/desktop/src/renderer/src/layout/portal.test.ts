@@ -6,6 +6,7 @@ import { install as installLegacyLayout } from '../legacy/ui/layout';
 import { installSvelteLayout, unmountSvelteLayout } from './install';
 import type { DockSpec, PanelSpec, Workspace } from './model';
 import { panelSlot } from './portal';
+import { panelPoolHost } from './panel';
 
 function helper(selector: string, attrs?: unknown, ...children: unknown[]): HTMLElement {
   const element = document.createElement(selector.match(/^[^.#]+/)?.[0] ?? 'div');
@@ -142,6 +143,28 @@ describe('panel portal parking', () => {
     action.destroy();
 
     expect(element.parentElement).toBe(currentSlot);
+  });
+
+  it('keeps a panel in its new dock when the pool updates after its slot', () => {
+    const element = document.getElementById('panel-alpha')!;
+    const oldDock: DockSpec = { id: 'left', panels: [{ id: 'alpha' }] };
+    const nextDock: DockSpec = { id: 'right', panels: [{ id: 'alpha' }] };
+    const host = document.querySelector<HTMLElement>('[data-panel-host="alpha"]')!;
+    const pool = panelPoolHost(host, { PM, spec: oldDock.panels[0]!, dock: oldDock });
+    const dock = document.createElement('div');
+    dock.id = 'dock-right';
+    dock.className = 'dock';
+    const slot = document.createElement('div');
+    slot.dataset.panelSlot = 'alpha';
+    dock.append(slot);
+    document.getElementById('body')!.append(dock);
+    PM.WS.current.layout.docks.push(nextDock);
+    panelSlot(slot, { PM, id: 'alpha', spec: nextDock.panels[0]!, dock: nextDock });
+
+    pool.update({ PM, spec: nextDock.panels[0]!, dock: nextDock });
+
+    expect(element.parentElement).toBe(slot);
+    expect(document.getElementById('pm-panel-pool')!.contains(element)).toBe(false);
   });
 
   it('rejoins the dock with the same panel node after removePanel then addPanel', () => {
