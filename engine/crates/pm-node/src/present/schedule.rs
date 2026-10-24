@@ -173,7 +173,7 @@ impl Schedule {
     /// At 120 fps, 4 frames (33 ms) delivered frames after the viewer had
     /// decided for their refresh (docs/engine/bridge.md, "Pacing at 120 Hz").
     pub fn lead_frames(lead: u32, delivery_us: f64, frame_us: f64) -> u32 {
-        if !(frame_us > 0.0) {
+        if frame_us.is_nan() || frame_us <= 0.0 {
             return lead;
         }
         lead.max((2.0 * delivery_us / frame_us).ceil().min(f64::from(MAX_LEAD)) as u32)
