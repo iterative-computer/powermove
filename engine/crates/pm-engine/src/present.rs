@@ -220,13 +220,27 @@ pub trait FramePresenter: Send {
     }
 
     /// The session's document changed (a resync or a patch batch, in
-    /// revision order; plan section 6, "The patch stream").
+    /// revision order; plan section 6, "The patch stream"). `provisional`:
+    /// frames of the update's revision wait for [`Self::confirm`]; the next
+    /// update supersedes it.
     fn document(
         &mut self,
         _ctx: &mut PresentContext<'_>,
         _port: PortId,
         _session: SessionId,
         _update: DocumentUpdate,
+        _provisional: bool,
+    ) {
+    }
+
+    /// The provisional update that made `revision` was the whole change:
+    /// its frames may be presented. Always after that update.
+    fn confirm(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        _port: PortId,
+        _session: SessionId,
+        _revision: Revision,
     ) {
     }
 

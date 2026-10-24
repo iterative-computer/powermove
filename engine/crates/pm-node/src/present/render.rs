@@ -306,6 +306,13 @@ pub enum Command {
         key: Key,
         update: DocumentUpdate,
         posted: i64,
+        /// Frames of the update's revision wait for [`Command::Confirm`].
+        provisional: bool,
+    },
+    /// The provisional update that made `revision` was the whole change.
+    Confirm {
+        key: Key,
+        revision: Revision,
     },
     /// The session's definitions (contract 10), and those a delta
     /// registered again.
@@ -658,6 +665,12 @@ pub struct Stats {
     pub compat_asked: u64,
     /// Viewer frames that waited for producer answers.
     pub compat_waits: u64,
+    /// Frames of provisional revisions: parked until confirmed, confirmed
+    /// revisions, and parked frames dropped because a later update
+    /// superseded their revision (never presented).
+    pub provisional_parked: u64,
+    pub provisional_confirmed: u64,
+    pub provisional_dropped: u64,
     /// Layer rasters the worker drew off this thread ([`super::rasters`]).
     pub layer_rasters_off_thread: u64,
     /// Times the worker's document mirror was seeded (a session's first
@@ -1182,6 +1195,12 @@ struct Thread {
     work_start: i64,
     /// Sends frames shown at the next refresh once their GPU work is done.
     completer: Option<super::complete::Completer>,
+    /// Per session, the revision of a provisional update not yet confirmed
+    /// or superseded: its frames are parked, not sent.
+    provisional: BTreeMap<Key, Revision>,
+    /// A finished paused frame of a provisional revision, waiting for
+    /// [`Command::Confirm`] (sent then) or the next update (dropped).
+    parked: BTreeMap<Key, super::complete::Pending>,
     /// Level 1 SVG rasters asked of the renderers (decision S1).
     svg: super::svg::SvgState,
     /// GPU work seen last (frames and snapshots) and when; the idle
@@ -1397,6 +1416,8 @@ pub fn run(
         doc_trace: BTreeMap::new(),
         work_start: 0,
         completer,
+        provisional: BTreeMap::new(),
+        parked: BTreeMap::new(),
         svg: super::svg::SvgState::default(),
         rest: Rest::default(),
         rasters,
@@ -1496,6 +1517,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Close { .. } => "close",
         Command::ClosePort { .. } => "close port",
         Command::Document { .. } => "document",
+        Command::Confirm { .. } => "confirm",
         Command::Definitions { .. } => "definitions",
         Command::Media { .. } => "media",
         Command::ShaderFallback { .. } => "shader fallback",
@@ -2368,10 +2390,31 @@ impl Thread {
                 key,
                 update,
                 posted,
+                provisional,
             } => {
+                let revision = update.revision();
                 let mirrored = self.raster_mirrors.contains(&key).then(|| update.clone());
                 self.document(key, update, posted);
                 self.mirror_update(key, mirrored);
+                // Any update ends the previous provisional revision: a frame
+                // parked for it showed a state the renderer superseded.
+                self.drop_parked(key);
+                if provisional {
+                    self.provisional.insert(key, revision);
+                } else {
+                    self.provisional.remove(&key);
+                }
+            }
+            Command::Confirm { key, revision } => {
+                if self.provisional.get(&key) == Some(&revision) {
+                    self.provisional.remove(&key);
+                    self.stats().provisional_confirmed += 1;
+                    if let (Some(pending), Some(completer)) =
+                        (self.parked.remove(&key), self.completer.as_ref())
+                    {
+                        completer.submit(pending);
+                    }
+                }
             }
             Command::FrameSent {
                 key,
@@ -2886,7 +2929,38 @@ impl Thread {
         super::wait::Bounds::new(self.config.external_wait_cap_us)
     }
 
+    /// Drops the frame parked for `key`'s provisional revision: a later
+    /// update superseded that revision, so it is never presented.
+    fn drop_parked(&mut self, key: Key) {
+        if let Some(pending) = self.parked.remove(&key) {
+            self.stats().provisional_dropped += 1;
+            self.release_parked(pending);
+        }
+    }
+
+    /// Returns a parked frame's surface to the pool (the viewer never got
+    /// it) and draws the view again.
+    fn release_parked(&mut self, pending: super::complete::Pending) {
+        let super::complete::Pending { key, meta, .. } = pending;
+        self.preview_candidates.remove(&(key, meta.seq));
+        if let Some(view) = self.views.get_mut(&key) {
+            if let (Some(live), Ok(seq)) = (view.pool.as_mut(), Seq::new(meta.seq))
+                && live.spec.generation == meta.generation
+            {
+                let _ = live.ledger.release(FrameRelease {
+                    pool_index: meta.index,
+                    seq,
+                });
+            }
+            view.dirty = true;
+        }
+    }
+
     fn forget_session(&mut self, key: Key) {
+        self.provisional.remove(&key);
+        if let Some(pending) = self.parked.remove(&key) {
+            self.release_parked(pending);
+        }
         self.prepared.forget(key);
         self.cancel_cache_preview(key);
         self.preview_controls.forget(key);
@@ -4816,7 +4890,13 @@ impl Thread {
             view.dirty = false;
         }
         // Playback: render ahead while frames are due and slots are free.
+        // Never at a provisional revision: the renderer confirms or
+        // supersedes it before it plays (its frames could show a partial
+        // edit).
         loop {
+            if self.provisional.contains_key(&key) {
+                break;
+            }
             let Some(view) = self.views.get_mut(&key) else {
                 return;
             };
@@ -5639,19 +5719,29 @@ impl Thread {
             if timing.is_none() {
                 self.last_interactive = Some(now());
             }
-            completer.submit(super::complete::Pending {
+            let pending = super::complete::Pending {
                 key,
                 device: gpu.device.clone(),
                 submission,
                 bytes,
                 meta,
-            });
+            };
+            let replaced = if self.provisional.get(&key) == Some(&descriptor.revision) {
+                self.stats().provisional_parked += 1;
+                self.parked.insert(key, pending)
+            } else {
+                completer.submit(pending);
+                None
+            };
             self.fail_preview_snapshot(
                 key,
                 descriptor.revision,
                 explicit_generation,
                 preview_failure,
             );
+            if let Some(old) = replaced {
+                self.release_parked(old);
+            }
             return Some(descriptor);
         }
         let done = gpu.device.poll(wgpu::PollType::Wait {
@@ -7262,6 +7352,8 @@ mod tests {
             doc_trace: BTreeMap::new(),
             work_start: 0,
             completer: None,
+            provisional: BTreeMap::new(),
+            parked: BTreeMap::new(),
             svg: super::super::svg::SvgState::default(),
             rest: Rest::default(),
             rasters: None,

@@ -671,6 +671,7 @@ fn patch_batches_follow_the_applied_revision() {
                 encoding: PatchEncoding::CanonicalV1,
                 patch_count: 1,
                 body: Bytes(br#"[{"path":["name"],"exists":true,"value":"B"}]"#.to_vec()),
+                provisional: false,
             }),
             Some(session),
         )

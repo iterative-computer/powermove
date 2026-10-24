@@ -829,11 +829,26 @@ impl FramePresenter for BridgePresenter {
         port: PortId,
         session: SessionId,
         update: pm_engine::document::DocumentUpdate,
+        provisional: bool,
     ) {
         self.send(Command::Document {
             key: (port, session),
             update,
+            provisional,
             posted: render::now_us(),
+        });
+    }
+
+    fn confirm(
+        &mut self,
+        _ctx: &mut PresentContext<'_>,
+        port: PortId,
+        session: SessionId,
+        revision: Revision,
+    ) {
+        self.send(Command::Confirm {
+            key: (port, session),
+            revision,
         });
     }
 
