@@ -168,6 +168,32 @@ export class PresentedEvents {
   }
 
   /**
+   * A Play from rest: today's first animation frame draws the frame at the
+   * playhead, and extensions hear `frame:rendered` for it before the run
+   * moves. The engine does not draw it again when it is the frame on
+   * screen (current revision, view and time), so it is announced again at
+   * the next animation frame, ahead of the run's frames. Returns whether
+   * it will be.
+   */
+  replay(current: { revision: number | null; viewSeq: number | null; pts: number | null; frameTicks: number }): boolean {
+    const last = this.last;
+    if (!last || this.queue.length || !this.matches(last.frame, current)) return false;
+    this.replays++;
+    this.push({ ...last.frame, timed: false }, last.quality);
+    return true;
+  }
+
+  /** Whether `frame` is what the engine shows for `current` (same revision, view, and frame time). */
+  private matches(frame: PresentedFrameLike, current: { revision: number | null; viewSeq: number | null; pts: number | null; frameTicks: number }): boolean {
+    return current.revision !== null && current.revision === frame.revision
+      && (current.viewSeq === null || current.viewSeq === frame.viewSeq)
+      && (current.pts === null || Math.abs(current.pts - frame.pts) < Math.max(1, current.frameTicks) / 2);
+  }
+
+  /** Plays from rest whose frame on screen was announced again (`replay`). */
+  replays = 0;
+
+  /**
    * A paused redraw request (today's frame loop drawing on `draw`, which
    * renders and announces the frame again even when nothing changed). The
    * engine presents a new frame only for a new revision, view or time; when

@@ -77,6 +77,25 @@ describe('presented frames are emitted once per animation frame', () => {
   });
 });
 
+describe('a Play from rest announces the frame on screen first, as today\'s first frame does', () => {
+  it('at the next animation frame, ahead of the run, and only when it is current', () => {
+    const frames: Array<(t: number) => void> = [];
+    const emitted: number[] = [];
+    const events = new PresentedEvents((frame) => emitted.push(frame.seq), (fn) => frames.push(fn));
+    const now = (over: Partial<{ revision: number | null; viewSeq: number | null; pts: number | null }> = {}) => ({ revision: 4, viewSeq: 2, pts: 1000, frameTicks: 100, ...over });
+    expect(events.replay(now())).toBe(false);
+    events.push({ pts: 1000, revision: 4, viewSeq: 2, seq: 7 }, 1);
+    frames.shift()!(0);
+    // An edit not drawn yet: the engine draws the run's first frame itself.
+    expect(events.replay(now({ revision: 5 }))).toBe(false);
+    expect(events.replay(now())).toBe(true);
+    expect(emitted).toEqual([7]);
+    frames.shift()!(16);
+    expect(emitted).toEqual([7, 7]);
+    expect(events.replays).toBe(1);
+  });
+});
+
 describe('a paused redraw announces the frame on screen when nothing new is coming', () => {
   it('as today\'s frame loop announces the frame it draws again, but never ahead of a changed revision, view or time', () => {
     const frames: Array<(t: number) => void> = [];

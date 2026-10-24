@@ -87,6 +87,9 @@ export class EngineTransport implements TransportDriver {
       /** Before each command reaches the session (a viewerless session
        *  follows the open composition first). */
       prepare?: () => void;
+      /** A forward Play from a line resting where it plays from: the
+       *  frame on screen is the run's first (`PresentedEvents.replay`). */
+      fromRest?: () => void;
     } = {}
   ) {}
 
@@ -191,6 +194,7 @@ export class EngineTransport implements TransportDriver {
       && (this.seekSent !== null ? this.seekSent.session === s && this.seekSent.time === target : sampledSinceMove);
     if (!moving && !resting) this.send({ command: 'seek', time: target, mode: 'exact' });
     this.send({ command: 'play', rate: { num: rate, den: 1 } });
+    if (resting && rate > 0) this.options.fromRest?.();
   }
 
   playAround(time: number, preRoll: number, postRoll: number): void {

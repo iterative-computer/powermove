@@ -3180,15 +3180,31 @@ impl Thread {
         let audio_lead = audio
             .as_ref()
             .map(|clock| clock.as_ref().map_or(0, |c| c.start_lead_us() as i64) + AUDIO_CONTROL_US);
-        let armed = self.take_armed(key, rate, from);
-        let start = self.start_time(key, rate, at, audio_lead, armed.len());
+        // The paused frame on screen, current, is the run's first frame:
+        // the start is planned for the one after it, which is not rendered
+        // again (the viewer announces it again, as today's Play does), and
+        // the start frames follow it. Otherwise (a seek or an edit not yet
+        // drawn) the run renders and shows the playhead's frame first.
+        let on_screen = self.views.get(&key).is_some_and(|view| {
+            rate.num > 0
+                && !view.dirty
+                && view.requests.is_empty()
+                && view.stand_in.is_none()
+                && !view.render_failed
+        });
+        let armed = if on_screen {
+            self.take_armed(key, rate, from)
+        } else {
+            if let Some(view) = self.views.get_mut(&key) {
+                Self::disarm(view);
+            }
+            Vec::new()
+        };
+        let start = self.start_time(key, rate, at, audio_lead, on_screen, armed.len());
         let view = self.views.get_mut(&key).expect("checked");
         view.clock.play_at(rate, at, start);
         view.schedule.reset();
-        // The paused frame on screen is the run's first frame (the start
-        // is planned for the one after it, so it is not rendered again),
-        // and the start frames follow it.
-        if rate.num > 0 && view.stand_in.is_none() && !view.render_failed {
+        if on_screen {
             let f = view.clock.frame_ticks();
             view.schedule
                 .start_after(from.div_euclid(f) + armed.len() as i64);
@@ -3216,15 +3232,17 @@ impl Thread {
     /// When a Play from host µs `now` shows its first media: the first new
     /// frame shows at the first refresh it can be ready for (its render
     /// cost, then the viewer's own display latency from its vsync hint),
-    /// and the audio, when it plays, needs `audio_lead`; `armed` first new
-    /// frames are rendered already. Without the viewer's timing, a fixed
-    /// pre-roll.
+    /// and the audio, when it plays, needs `audio_lead`. `on_screen`: the
+    /// playhead's frame is shown already, so the first rendered is the next;
+    /// `armed` of them are rendered already. Without the viewer's timing, a
+    /// fixed pre-roll.
     fn start_time(
         &self,
         key: Key,
         rate: PlaybackRateValue,
         now: i64,
         audio_lead: Option<i64>,
+        on_screen: bool,
         armed: usize,
     ) -> i64 {
         let Some(view) = self.views.get(&key) else {
@@ -3242,13 +3260,15 @@ impl Thread {
             let cost = (render - armed as f64 * Schedule::frame_us(&view.clock)).max(0.0);
             let ready = now as f64 + cost + super::schedule::ARRIVAL_US;
             let shown = hint.next_at_or_after(ready, 0.0) + latency;
-            // How far the first new frame's start is from the paused media.
+            // How far the first frame rendered for the run starts from the
+            // paused media: the next one when the playhead's is on screen,
+            // else the playhead's own (shown from the line's start).
             let f = view.clock.frame_ticks();
             let m = view.clock.media_at(now);
-            let ahead = if rate.num > 0 {
-                (m.div_euclid(f) + 1) * f - m
-            } else {
-                m - m.div_euclid(f) * f
+            let ahead = match (on_screen, rate.num > 0) {
+                (false, _) => 0,
+                (true, true) => (m.div_euclid(f) + 1) * f - m,
+                (true, false) => m - m.div_euclid(f) * f,
             };
             let speed = f64::from(rate.num.unsigned_abs()) / f64::from(rate.den.max(1));
             Some(shown - ahead as f64 / TICKS_PER_SECOND as f64 * 1e6 / speed)
