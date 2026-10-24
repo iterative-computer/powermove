@@ -151,9 +151,6 @@ pub struct ConvertParams {
     pub working: WorkingEncoding,
     pub alpha: AlphaOutput,
     pub dither: bool,
-    /// Reproduce the legacy PNG byte boundaries for documents containing
-    /// level-1 layers. All-level-2 documents retain straight-alpha precision.
-    pub legacy_png: bool,
     /// Frame index: the dither seed.
     pub frame: u32,
 }
@@ -224,37 +221,6 @@ pub fn output_rgba(w: [f32; 4], working: WorkingEncoding, alpha: AlphaOutput) ->
     }
 }
 
-/// Today's transparent PNG export reads the premultiplied accumulator into
-/// RGBA8, truncates the unpremultiplication in `alphaFrame`, and puts that
-/// ImageData into a Canvas2D before encoding it. Reproduce both byte boundaries;
-/// dividing the original floats by alpha changes existing translucent pixels.
-fn legacy_png_rgba(p: [f32; 4]) -> [u8; 4] {
-    let q = p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u32);
-    let a = q[3];
-    if a == 0 {
-        return [0; 4];
-    }
-    let mut out = [0, 0, 0, a as u8];
-    let normalized_a = a as f32 * (1.0f32 / 255.0);
-    let reciprocal_a = 1.0f32 / normalized_a;
-    for c in 0..3 {
-        let straight = (q[c] * 255 / a).min(255);
-        // Canvas2D stores ImageData in premultiplied N32. Chromium 152's
-        // ARM64 SkConvertPixels uses SkSwizzler's RP-simulating unpremul:
-        // normalize each byte in f32, divide by normalized alpha, scale
-        // back, then round to even. An integer reciprocal table differs
-        // on half codes (e.g. 5/6 -> 212, 11/22 -> 128, 38/60 -> 161).
-        // Preserve these separate f32 operations; exact rational division
-        // and reassociating the scale both change existing PNG pixels.
-        let premul = (straight * a + 127) / 255;
-        let normalized_c = premul as f32 * (1.0f32 / 255.0);
-        out[c] = ((normalized_c * reciprocal_a) * 255.0)
-            .min(255.0)
-            .round_ties_even() as u8;
-    }
-    out
-}
-
 fn code(v: f64, lo: f64, hi: f64) -> f64 {
     v.round_ties_even().clamp(lo, hi)
 }
@@ -310,16 +276,8 @@ fn rgba_quant(
     x: usize,
     y: usize,
     scale: f64,
-    wide: bool,
 ) -> [f64; 4] {
     let p = pixel(frame, x, y);
-    if params.legacy_png
-        && !wide
-        && params.working == WorkingEncoding::Standard
-        && params.alpha == AlphaOutput::Straight
-    {
-        return legacy_png_rgba(p).map(f64::from);
-    }
     let (c, a) = output_rgba(p, params.working, params.alpha);
     let d = |ch| {
         if params.dither {
@@ -340,7 +298,7 @@ fn fill_rgba8(frame: &WorkingFrame, params: &ConvertParams, out: &mut [u8]) {
     let w = frame.width as usize;
     crate::par::rows(out, w * 4, |y, row| {
         for x in 0..w {
-            let q = rgba_quant(frame, params, x, y, 255.0, false);
+            let q = rgba_quant(frame, params, x, y, 255.0);
             for k in 0..4 {
                 row[x * 4 + k] = q[k] as u8;
             }
@@ -534,7 +492,7 @@ pub fn convert(
                 let mut out = vec![0u16; w * h * 4];
                 crate::par::rows(&mut out, w * 4, |y, row| {
                     for x in 0..w {
-                        let q = rgba_quant(frame, params, x, y, scale, true);
+                        let q = rgba_quant(frame, params, x, y, scale);
                         for k in 0..4 {
                             row[x * 4 + k] = q[k] as u16;
                         }
@@ -643,45 +601,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transparent_png_keeps_the_legacy_byte_boundaries() {
-        assert_eq!(legacy_png_rgba([0.0; 4]), [0; 4]);
-        assert_eq!(legacy_png_rgba([0.2, 0.4, 0.6, 1.0]), [51, 102, 153, 255]);
-        assert_eq!(legacy_png_rgba([0.2, 0.1, 0.0, 0.5]), [102, 52, 0, 128]);
-        // Quantization precedes alpha division; RGB is clipped only after
-        // division, including the out-of-gamut RGB > alpha bitmap case.
-        assert_eq!(legacy_png_rgba([0.01, 0.0, 0.0, 0.001]), [0; 4]);
-        assert_eq!(legacy_png_rgba([0.7, 0.0, 0.0, 0.5]), [255, 0, 0, 128]);
-        let values = [0.2, 0.1, 0.0, 0.5];
-        let f = WorkingFrame {
-            width: 1,
-            height: 1,
-            rgba: &values,
-        };
-        let p = params(AlphaOutput::Straight, false);
-        let byte = convert(&f, InputFormat::Rgba8, &p).unwrap();
-        assert_eq!(byte.planes[0].u8().unwrap(), [102, 52, 0, 128]);
-        let wide = convert(&f, InputFormat::Rgba16, &p).unwrap();
-        assert_eq!(wide.planes[0].u16().unwrap(), [26214, 13107, 0, 32768]);
-    }
-
-    #[test]
-    fn level2_png_unpremultiplies_before_byte_quantization() {
-        let values = [0.0003, 0.0006, 0.0009, 0.003];
-        let frame = WorkingFrame {
-            width: 1,
-            height: 1,
-            rgba: &values,
-        };
-        let mut p = params(AlphaOutput::Straight, false);
-        let legacy = convert(&frame, InputFormat::Rgba8, &p).unwrap();
-        p.legacy_png = false;
-        let precise = convert(&frame, InputFormat::Rgba8, &p).unwrap();
-        assert_eq!(precise.planes[0].u8().unwrap(), [26, 51, 76, 1]);
-        assert_ne!(precise, legacy);
-        // The flag is irrelevant to native-depth PNG output.
-        let wide = convert(&frame, InputFormat::Rgba16, &p).unwrap();
-        p.legacy_png = true;
-        assert_eq!(convert(&frame, InputFormat::Rgba16, &p).unwrap(), wide);
+    fn transparent_png_unpremultiplies_the_working_floats() {
+        // Straight RGB is the premultiplied float divided by alpha, rounded
+        // once: no 8-bit premultiplied value is unpremultiplied.
+        for (values, expected) in [
+            ([0.2f32, 0.1, 0.0, 0.5], [102u8, 51, 0, 128]),
+            ([0.0003, 0.0006, 0.0009, 0.003], [26, 51, 76, 1]),
+            ([0.7, 0.0, 0.0, 0.5], [255, 0, 0, 128]),
+            ([0.2, 0.4, 0.6, 1.0], [51, 102, 153, 255]),
+        ] {
+            let frame = WorkingFrame {
+                width: 1,
+                height: 1,
+                rgba: &values,
+            };
+            let p = params(AlphaOutput::Straight, false);
+            let byte = convert(&frame, InputFormat::Rgba8, &p).unwrap();
+            assert_eq!(byte.planes[0].u8().unwrap(), expected, "{values:?}");
+            // The f64 reference: one division, one rounding.
+            let a = f64::from(values[3]);
+            for c in 0..3 {
+                let want = (f64::from(values[c]) / a).clamp(0.0, 1.0) * 255.0;
+                assert!((f64::from(expected[c]) - want).abs() <= 0.5 + 1e-9);
+            }
+        }
     }
 
     fn frame(w: u32, h: u32, f: impl Fn(u32, u32) -> [f32; 4]) -> Vec<f32> {
@@ -693,7 +636,6 @@ mod tests {
 
     fn params(alpha: AlphaOutput, dither: bool) -> ConvertParams {
         ConvertParams {
-            legacy_png: true,
             working: WorkingEncoding::Standard,
             alpha,
             dither,
@@ -749,23 +691,20 @@ mod tests {
                 AlphaOutput::Straight,
                 AlphaOutput::Premultiplied,
             ] {
-                for legacy_png in [false, true] {
-                    for dither in [false, true] {
-                        let params = ConvertParams {
-                            working,
-                            alpha,
-                            legacy_png,
-                            dither,
-                            frame: 37,
-                        };
-                        let expected = convert(&frame, InputFormat::Rgba8, &params).unwrap();
-                        convert_rgba8_into(&frame, &params, &mut reused).unwrap();
-                        assert_eq!(
-                            reused.as_slice(),
-                            expected.planes[0].u8().unwrap(),
-                            "{params:?}"
-                        );
-                    }
+                for dither in [false, true] {
+                    let params = ConvertParams {
+                        working,
+                        alpha,
+                        dither,
+                        frame: 37,
+                    };
+                    let expected = convert(&frame, InputFormat::Rgba8, &params).unwrap();
+                    convert_rgba8_into(&frame, &params, &mut reused).unwrap();
+                    assert_eq!(
+                        reused.as_slice(),
+                        expected.planes[0].u8().unwrap(),
+                        "{params:?}"
+                    );
                 }
             }
         }
@@ -998,39 +937,6 @@ mod tests {
         );
         assert_eq!(c, [0.0; 3]);
         assert!((a - 1e-4).abs() < 1e-9);
-    }
-
-    #[test]
-    fn canvas_png_keeps_skia_float32_half_code_rounding() {
-        // Captured through Chromium 152 Canvas2D putImageData -> PNG.
-        // These witnesses distinguish the float32 RP sequence from an
-        // integer reciprocal, exact division, half-up, and unconditional floor.
-        for (input, expected) in [
-            ([4u8, 3, 5, 6], [170, 128, 212, 6]),
-            ([14, 11, 17, 22], [162, 128, 197, 22]),
-            ([38, 29, 47, 60], [161, 123, 200, 60]),
-        ] {
-            let p = input.map(|c| c as f32 / 255.0);
-            assert_eq!(legacy_png_rgba(p), expected, "{input:?}");
-        }
-    }
-
-    #[test]
-    fn canvas_png_matches_every_captured_channel_alpha_pair() {
-        let reference = include_bytes!("../tests/fixtures/canvas-alpha-arm64.bin");
-        assert_eq!(reference.len(), 256 * 256);
-        for a in 0..=255u32 {
-            for c in 0..=255u32 {
-                let p = [c, c, c, a].map(|v| v as f32 / 255.0);
-                let actual = legacy_png_rgba(p);
-                let expected = reference[(a * 256 + c) as usize];
-                assert_eq!(
-                    actual,
-                    [expected, expected, expected, a as u8],
-                    "c={c}, a={a}"
-                );
-            }
-        }
     }
 
     #[test]

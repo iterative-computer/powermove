@@ -1770,9 +1770,6 @@ impl Renderer {
         // Exports never draw stand-ins (docs/engine/scrub.md).
         self.media.stand_ins.clear();
         let scrub = self.media.scrub;
-        let canvas_video = self.media.canvas_video;
-        self.media.canvas_video =
-            request.export || scrub || request.sampling != crate::sampling::Sampling::Playback;
         self.media.scrub = scrub && !request.export;
         // Renderers drawing their own definitions time effects,
         // transitions, and shader and fragment layers (the budget and the
@@ -1940,7 +1937,6 @@ impl Renderer {
         }
         self.media.flush();
         self.media.scrub = scrub;
-        self.media.canvas_video = canvas_video;
         failures.extend(exec_failures);
         crate::scene3d::metadata::failures(document, &failures, &mut scene3d_meta);
         if !unsupported.is_empty() {

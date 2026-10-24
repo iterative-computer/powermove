@@ -207,7 +207,7 @@ fn hdr_sources_are_tone_mapped_with_method_a() {
         let f = decode(&path, n);
         let want: Vec<[f64; 3]> = frame_rgb(&f, reading.siting.value, reading.matrix.value)
             .into_iter()
-            .map(|rgb| hdr_to_sdr(signal, rgb, tm.peak_nits))
+            .map(|rgb| hdr_to_sdr(signal, rgb.map(|v| v.clamp(0.0, 1.0)), tm.peak_nits))
             .collect();
         let d = max_diff(&ours, &want);
         if std::env::var_os("PM_TRACE").is_some() {
@@ -528,10 +528,9 @@ fn interpret_overrides_change_the_reading() {
     let n = src.select(ticks(0.1).get()).unwrap();
     let f = decode(&path, n);
     // As tagged: BT.601. Overridden: BT.709 — the document's `interpret`.
-    // A colour interpretation reads the file natively (section 9's siting
-    // and filters, unclipped floats). Restating the file's own primaries
-    // leaves the tagged matrix to the file; an uninterpreted level 1 layer
-    // keeps today's RGBA8 upload, checked below.
+    // Every reading uses section 9's siting and filters in unclipped
+    // floats. Restating the file's own primaries leaves the tagged matrix
+    // to the file, and an uninterpreted level 1 layer reads it the same way.
     for (interp, matrix) in [
         (
             json!({ "primaries": "bt601_625" }),
@@ -546,20 +545,14 @@ fn interpret_overrides_change_the_reading() {
         eprintln!("color-601-625.mov read with {matrix:?}: max |Δ| {d:.2e}");
         assert!(d < 1e-5, "{interp}: {d}");
     }
-    // Uninterpreted level 1: today's `texImage2D(RGBA, UNSIGNED_BYTE)`
-    // upload — Chromium's centered bilinear chroma, the matrix, then each
-    // channel clipped and rounded to 8 bits before the layer samples it.
     let (doc, res) = document(&path, (w, h), 25.0, None);
     let level1 = render(&mut r, &doc, (w, h), 0.1, &res);
-    let bitmap: Vec<[f64; 3]> = frame_rgb(&f, ChromaSiting::Center, MatrixCoefficients::Bt601)
-        .into_iter()
-        .map(|rgb| rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0))
-        .collect();
-    let d = max_diff(&level1, &bitmap);
-    eprintln!("color-601-625.mov at level 1 against the RGBA8 upload: max |Δ| {d:.2e}");
-    assert!(d < 1e-5, "level 1 upload: {d}");
-    // Members that only choose or place frames leave the level 1 upload
-    // as it is: restating the file's rate, square pixels, full aperture,
+    let tagged = frame_rgb(&f, ChromaSiting::Left, MatrixCoefficients::Bt601);
+    let d = max_diff(&level1, &tagged);
+    eprintln!("color-601-625.mov at level 1: max |Δ| {d:.2e}");
+    assert!(d < 1e-5, "level 1 reading: {d}");
+    // Members that only choose or place frames leave the colours as they
+    // are: restating the file's rate, square pixels, full aperture,
     // progressive scan, or an alpha choice on an opaque file.
     for interp in [
         json!({ "frameRate": 25 }),
@@ -633,26 +626,22 @@ fn a_conformed_rate_shows_frame_n_at_n_over_rate() {
 }
 
 #[test]
-fn wide_gamut_footage_converts_in_linear_light_when_interpreted() {
+fn wide_gamut_footage_converts_in_linear_light() {
     let Some(path) = formats("video/color-p3.mov") else {
         return;
     };
     let (w, h) = (320u32, 180u32);
     let mut r = Renderer::headless().unwrap();
+    // The tagged reading and a restated one are the same conversion.
     let (doc, res) = document(&path, (w, h), 25.0, None);
-    let request = RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32);
-    assert!(
-        r.render(&load(&doc), "Ptest-root", ticks(0.1), &request, &res)
-            .is_err(),
-        "Display P3 footage is routed without an interpretation"
-    );
+    let ours = render(&mut r, &doc, (w, h), 0.1, &res);
     let (doc, res) = document(
         &path,
         (w, h),
         25.0,
         Some(json!({ "primaries": "displayP3" })),
     );
-    let ours = render(&mut r, &doc, (w, h), 0.1, &res);
+    assert_eq!(render(&mut r, &doc, (w, h), 0.1, &res), ours);
     let src = MediaSource::open(&path).unwrap();
     let f = decode(&path, src.select(ticks(0.1).get()).unwrap());
     let m = pm_color::primaries::conversion(
@@ -663,14 +652,15 @@ fn wide_gamut_footage_converts_in_linear_light_when_interpreted() {
     let want: Vec<[f64; 3]> = frame_rgb(&f, ChromaSiting::Left, MatrixCoefficients::Bt709)
         .into_iter()
         .map(|rgb| {
-            let lin = rgb.map(pm_color::transfer::display_decode);
+            // The signal is clipped before it is linearised, as a display does.
+            let lin = rgb.map(|v| pm_color::transfer::display_decode(v.clamp(0.0, 1.0)));
             pm_color::primaries::apply(&m, lin).map(pm_color::transfer::display_encode)
         })
         .collect();
     let d = max_diff(&ours, &want);
     eprintln!("color-p3.mov: P3 → Rec.709 in linear light, max |Δ| {d:.2e}");
     assert!(d < 1e-5, "{d}");
-    // Out-of-gamut values are kept (no clip until output).
+    // Converted colours outside Rec.709 are kept (no clip until output).
     assert!(
         ours.chunks_exact(4)
             .any(|p| p[..3].iter().any(|&v| v < 0.0))
@@ -1103,28 +1093,31 @@ fn interpreted_cmyk_stills_draw_their_converted_samples() {
 /// Shown by replacing a file's bytes while keeping its size and time: the
 /// answers stay; a new time reads the file again.
 #[test]
-fn interpreted_probes_are_kept_per_file_stamp() {
+fn interpreted_probes_follow_the_file_stamp() {
     use pm_render::media::{ProbeIssue, probe_interpreted_image, probe_interpreted_video};
     let dir = std::env::temp_dir().join(format!("pm-render-probe-stamp-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
+    struct Clean(std::path::PathBuf);
+    impl Drop for Clean {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _clean = Clean(dir.clone());
     let interps = [
         json!({ "alpha": "ignore" }),
         json!({ "primaries": "displayP3" }),
         json!({ "transfer": "gamma22", "alphaMatte": "#102030" }),
     ]
     .map(|j| Interpretation::from_json(&j).0);
+    // Same length, modification time restored: only the change time (and
+    // the bytes) say the file is another version.
     let rewrite = |path: &Path| {
         let m = std::fs::metadata(path).unwrap();
         let modified = m.modified().unwrap();
         std::fs::write(path, vec![0u8; m.len() as usize]).unwrap();
         let f = std::fs::File::options().write(true).open(path).unwrap();
         f.set_modified(modified).unwrap();
-        modified
-    };
-    let touch = |path: &Path, t: std::time::SystemTime| {
-        let f = std::fs::File::options().write(true).open(path).unwrap();
-        f.set_modified(t + std::time::Duration::from_secs(2))
-            .unwrap();
     };
 
     let still = dir.join("still.png");
@@ -1141,19 +1134,13 @@ fn interpreted_probes_are_kept_per_file_stamp() {
     for i in &interps {
         assert_eq!(probe_interpreted_image(&still, i), Ok(()));
     }
-    let t = rewrite(&still);
+    rewrite(&still);
     for i in &interps {
-        assert_eq!(
+        assert!(matches!(
             probe_interpreted_image(&still, i),
-            Ok(()),
-            "kept for the stamp"
-        );
+            Err(ProbeIssue::Unreadable(_))
+        ));
     }
-    touch(&still, t);
-    assert!(matches!(
-        probe_interpreted_image(&still, &interps[0]),
-        Err(ProbeIssue::Unreadable(_))
-    ));
 
     if let Some(video) = formats("video/geom-base.mov") {
         let copy = dir.join("video.mov");
@@ -1161,23 +1148,17 @@ fn interpreted_probes_are_kept_per_file_stamp() {
         for i in &interps {
             assert_eq!(probe_interpreted_video(&copy, i), Ok(()));
         }
-        let t = rewrite(&copy);
+        rewrite(&copy);
         for i in &interps {
-            assert_eq!(
-                probe_interpreted_video(&copy, i),
-                Ok(()),
-                "kept for the stamp"
-            );
+            assert!(probe_interpreted_video(&copy, i).is_err());
         }
-        touch(&copy, t);
-        assert!(probe_interpreted_video(&copy, &interps[0]).is_err());
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Capability reasons leave only with exact app references. Default AV1 PQ
-/// and HEVC HLG are now measured; metadata-driven HDR and other unmeasured
-/// readings retain their reasons. Interpretation continues to draw all cases.
+/// Capability reasons leave only with a reference proof against today's
+/// viewer (`tests/video_reading.rs`): default PQ/HLG and wide-gamut SDR are
+/// drawn; metadata-driven HDR and geometry/field readings not compared with
+/// today's viewer keep their reasons. Interpretation draws all cases.
 #[test]
 fn video_capability_gate_tracks_measured_classes_and_interpretation() {
     let cases = [
@@ -1194,7 +1175,7 @@ fn video_capability_gate_tracks_measured_classes_and_interpretation() {
         ("video/geom-rot270.mov", Some("rotated video")),
         ("video/geom-clap.mov", Some("a cropping clean aperture")),
         ("video/meta-pasp.mov", Some("non-square pixels")),
-        ("video/color-p3.mov", Some("primaries")),
+        ("video/color-p3.mov", None),
     ];
     let (restated, _) = Interpretation::from_json(&json!({ "cleanAperture": false }));
     for (file, reason) in cases {
@@ -1207,7 +1188,7 @@ fn video_capability_gate_tracks_measured_classes_and_interpretation() {
                 routed.as_ref().is_err_and(|m| m.contains(reason)),
                 "{file}: {routed:?}"
             ),
-            None => assert_eq!(routed, Ok(()), "{file}: measured HDR class"),
+            None => assert_eq!(routed, Ok(()), "{file}: compared reading"),
         }
         assert_eq!(
             pm_render::media::probe_interpreted_video(&path, &restated),

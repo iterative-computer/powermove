@@ -5,8 +5,7 @@
 
 use super::arbiter::{HardwareArbiter, LocalArbiter};
 use super::session::Session;
-use super::startup::{self, Stage};
-use super::{Backend, DecodeReading, DecoderInfo, StreamSpec, open_with_reading};
+use super::{Backend, DecoderInfo, StreamSpec, open};
 use crate::cache::{CacheStats, FrameCache, FrameKey};
 use crate::error::{MediaError, Result};
 use crate::ff::{CodecInfo, Input, PacketReader};
@@ -26,18 +25,6 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
-const CHROMIUM_CACHE_BIT: u64 = 1 << 63;
-
-/// FrameCache's public key has no reading field. Keep native source IDs as
-/// before, and place Chromium frames in the high-bit source namespace within
-/// the same budget and LRU. Source IDs are monotonically allocated below it.
-pub(crate) fn cache_source_id(source: u64, reading: DecodeReading) -> u64 {
-    debug_assert_eq!(source & CHROMIUM_CACHE_BIT, 0);
-    match reading {
-        DecodeReading::Native => source,
-        DecodeReading::Chromium => source | CHROMIUM_CACHE_BIT,
-    }
-}
 
 /// A probed and indexed video source.
 pub struct MediaSource {
@@ -70,7 +57,6 @@ impl MediaSource {
 
     /// Probes and indexes a file's best video stream.
     pub fn open(path: &Path) -> Result<Arc<MediaSource>> {
-        startup::source_opened();
         let prepared = crate::probe::cache::lookup(path)?;
         let (probe, index, extradata, startup_input) = match prepared {
             Some(prepared) => (
@@ -80,8 +66,7 @@ impl MediaSource {
                 prepared.input,
             ),
             None => {
-                let (Probed { probe, index }, input) =
-                    startup::timed(Stage::Probe, || crate::probe::probe_with_input(path))?;
+                let (Probed { probe, index }, input) = crate::probe::probe_with_input(path)?;
                 let index = Arc::new(index.ok_or_else(|| MediaError::invalid("no video index"))?);
                 let stream = probe
                     .video_stream
@@ -153,7 +138,6 @@ struct SessionKey {
     source: u64,
     instance: InstanceId,
     purpose: DecodePurpose,
-    reading: DecodeReading,
 }
 
 /// Configuration.
@@ -306,7 +290,7 @@ impl SessionGuard<'_> {
             .ok_or_else(|| MediaError::invalid(format!("frame {n} out of range")))?
             .sample;
         let key = FrameKey {
-            source: cache_source_id(self.source.id, self.key.reading),
+            source: self.source.id,
             sample,
             purpose: self.key.purpose,
         };
@@ -314,12 +298,11 @@ impl SessionGuard<'_> {
             return Ok(Some(f));
         }
         let s = self.session.as_mut().unwrap();
-        startup::frame_decoded();
-        let f = startup::timed(Stage::FrameDecode, || s.sample_with(sample, stop));
+        let f = s.sample_with(sample, stop);
         // Everything the session decoded on the way is cached too.
         for (k, fr) in s.window_frames() {
             let key = FrameKey {
-                source: cache_source_id(self.source.id, self.key.reading),
+                source: self.source.id,
                 sample: k,
                 purpose: self.key.purpose,
             };
@@ -392,7 +375,7 @@ impl SessionGuard<'_> {
         for n in read_ahead_order(&self.source, from, plan) {
             let sample = self.source.index.frames[n].sample;
             let key = FrameKey {
-                source: cache_source_id(self.source.id, self.key.reading),
+                source: self.source.id,
                 sample,
                 purpose: self.key.purpose,
             };
@@ -466,33 +449,7 @@ impl DecodeService {
         instance: InstanceId,
         purpose: DecodePurpose,
     ) -> Result<SessionGuard<'_>> {
-        self.session_with_reading(source, instance, purpose, DecodeReading::Native)
-    }
-
-    /// A session with explicit decoded-pixel semantics. Reading is part of
-    /// session identity, so a warm native decoder cannot serve Chromium frames.
-    pub fn session_with_reading(
-        &self,
-        source: &Arc<MediaSource>,
-        instance: InstanceId,
-        purpose: DecodePurpose,
-        reading: DecodeReading,
-    ) -> Result<SessionGuard<'_>> {
-        self.session_with_options(source, instance, purpose, reading, None)
-    }
-
-    /// Open a decoder during import/project preparation and return it to the
-    /// idle pool. The first render for this source, instance, purpose and
-    /// reading reuses the session. No frame is decoded or converted here.
-    pub fn prewarm_session(
-        &self,
-        source: &Arc<MediaSource>,
-        instance: InstanceId,
-        purpose: DecodePurpose,
-        reading: DecodeReading,
-    ) -> Result<DecoderInfo> {
-        let session = self.session_with_reading(source, instance, purpose, reading)?;
-        Ok(session.info())
+        self.session_with(source, instance, purpose, None)
     }
 
     /// As [`session`](DecodeService::session) with a backend preference.
@@ -503,22 +460,10 @@ impl DecodeService {
         purpose: DecodePurpose,
         prefer: Option<Backend>,
     ) -> Result<SessionGuard<'_>> {
-        self.session_with_options(source, instance, purpose, DecodeReading::Native, prefer)
-    }
-
-    fn session_with_options(
-        &self,
-        source: &Arc<MediaSource>,
-        instance: InstanceId,
-        purpose: DecodePurpose,
-        reading: DecodeReading,
-        prefer: Option<Backend>,
-    ) -> Result<SessionGuard<'_>> {
         let key = SessionKey {
             source: source.id,
             instance,
             purpose,
-            reading,
         };
         let reused = self.idle.lock().unwrap().get_mut(&key).and_then(|l| {
             let at = l
@@ -529,16 +474,11 @@ impl DecodeService {
         let session = match reused {
             Some(s) => s,
             None => {
-                startup::session_created();
-                let input = source
-                    .startup_input
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .map(Ok)
-                    .unwrap_or_else(|| {
-                        startup::timed(Stage::SessionInput, || Input::open(source.path()))
-                    })?;
+                // The probe's demuxer serves the first session.
+                let input = match source.startup_input.lock().unwrap().take() {
+                    Some(input) => input,
+                    None => Input::open(source.path())?,
+                };
                 let spec = StreamSpec {
                     input: &input,
                     stream: source.stream,
@@ -546,23 +486,16 @@ impl DecodeService {
                     index: &source.index,
                     extradata: &source.extradata,
                 };
-                let (decoder, _skipped) = startup::timed(Stage::DecoderCreate, || {
-                    open_with_reading(
-                        &spec,
-                        purpose,
-                        &self.pool,
-                        self.arbiter.as_ref(),
-                        self.config.threads,
-                        prefer,
-                        reading,
-                    )
-                })?;
-                let reader = startup::timed(Stage::PacketReader, || {
-                    PacketReader::new(source.path(), source.stream)
-                })?;
-                let mut s = startup::timed(Stage::SessionBuild, || {
-                    Session::new(source.index.clone(), reader, decoder, Some(source.color))
-                });
+                let (decoder, _skipped) = open(
+                    &spec,
+                    purpose,
+                    &self.pool,
+                    self.arbiter.as_ref(),
+                    self.config.threads,
+                    prefer,
+                )?;
+                let reader = PacketReader::new(source.path(), source.stream)?;
+                let mut s = Session::new(source.index.clone(), reader, decoder, Some(source.color));
                 s.set_window(self.config.session_window);
                 self.open_sessions.fetch_add(1, Ordering::Relaxed);
                 s
@@ -591,8 +524,6 @@ impl DecodeService {
         });
         if let Some(s) = source {
             self.cache.remove_source(s);
-            self.cache
-                .remove_source(cache_source_id(s, DecodeReading::Chromium));
         }
     }
 
@@ -714,54 +645,6 @@ pub fn read_ahead_order(source: &MediaSource, from: usize, plan: ReadAhead) -> V
                     v
                 })
                 .collect()
-        }
-    }
-}
-
-#[cfg(test)]
-mod reading_tests {
-    use super::*;
-    use pm_protocol::color::Range;
-
-    #[test]
-    fn full_hevc_readings_keep_distinct_sessions_and_decoded_frames() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../pm-render/tests/fixtures/video-parity-round2/hevc10-709-full.mp4");
-        let source = MediaSource::open(&path).unwrap();
-        let service = DecodeService::new(ServiceConfig::default());
-        let sample = source.index.frames[1].sample;
-        let native = {
-            let mut session = service
-                .session_with_reading(&source, 7, DecodePurpose::Display, DecodeReading::Native)
-                .unwrap();
-            assert_eq!(session.info().output.as_deref(), Some("xf20"));
-            session.frame(1).unwrap()
-        };
-        let chromium = {
-            let mut session = service
-                .session_with_reading(&source, 7, DecodePurpose::Display, DecodeReading::Chromium)
-                .unwrap();
-            assert_eq!(session.info().output.as_deref(), Some("x420"));
-            session.frame(1).unwrap()
-        };
-        assert_eq!(native.format.range, Range::Full);
-        assert_eq!(chromium.format.range, Range::Limited);
-        assert_eq!(service.usage().sessions, 2);
-        for reading in [DecodeReading::Native, DecodeReading::Chromium] {
-            assert!(service.cache().contains(&FrameKey {
-                source: cache_source_id(source.id, reading),
-                sample,
-                purpose: DecodePurpose::Display,
-            }));
-        }
-        service.release(Some(7), Some(source.id));
-        assert_eq!(service.usage().sessions, 0);
-        for reading in [DecodeReading::Native, DecodeReading::Chromium] {
-            assert!(!service.cache().contains(&FrameKey {
-                source: cache_source_id(source.id, reading),
-                sample,
-                purpose: DecodePurpose::Display,
-            }));
         }
     }
 }

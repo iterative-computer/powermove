@@ -465,7 +465,6 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
             },
             InputFormat::V420,
             &convert::ConvertParams {
-                legacy_png: true,
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
                 dither: true,
@@ -1102,13 +1101,27 @@ fn measure_heavy_precomp_band_cost() {
 
 #[test]
 fn export_uses_the_apps_audio_index_playhead_instead_of_its_range_start() {
-    let mut precomp = layer("nested", "precomp", json!({
-        "comp": "inner", "audioGain": 1,
-        "trim": keys(json!(0), &[(0.0, json!(0)), (2.0, json!(0.346))])
-    }), 0.0, 0.0, 2.0);
+    let mut precomp = layer(
+        "nested",
+        "precomp",
+        json!({
+            "comp": "inner", "audioGain": 1,
+            "trim": keys(json!(0), &[(0.0, json!(0)), (2.0, json!(0.346))])
+        }),
+        0.0,
+        0.0,
+        2.0,
+    );
     precomp["from"] = json!(0);
     let mut nested = project(W, H, 2.0, no_fill(), vec![precomp]);
-    composition(&mut nested, "inner", W, H, 2.0, vec![audio("tone", "tone", 0.5, 2.0)]);
+    composition(
+        &mut nested,
+        "inner",
+        W,
+        H,
+        2.0,
+        vec![audio("tone", "tone", 0.5, 2.0)],
+    );
     asset(&mut nested, "tone", "audio", "wav", 0, 0, 2.0);
     let mut flat_clip = audio("tone", "tone", 0.5, 2.0);
     flat_clip["d"]["trim"] = json!(0.173);
@@ -1123,12 +1136,27 @@ fn export_uses_the_apps_audio_index_playhead_instead_of_its_range_start() {
         media.insert("tone", fixture("tone.wav"));
         let job = job(doc, media, s, PathBuf::from("/unused.mp4"));
         let plan = plan_export(&job).unwrap();
-        run_export_into(&mut renderer, &job, plan, MemorySink::default(),
-            &Unrestricted, &AtomicBool::new(false), &mut no_progress()).unwrap().audio
+        run_export_into(
+            &mut renderer,
+            &job,
+            plan,
+            MemorySink::default(),
+            &Unrestricted,
+            &AtomicBool::new(false),
+            &mut no_progress(),
+        )
+        .unwrap()
+        .audio
     };
     let expected = render(&flat, None);
     let indexed = render(&nested, Some(seconds(1.0)));
     let range_start = render(&nested, None);
-    assert!(indexed == expected, "index trim(1 s) = 0.173, independent of range 0.7 s");
-    assert!(indexed != range_start, "the field must reach the export mixer");
+    assert!(
+        indexed == expected,
+        "index trim(1 s) = 0.173, independent of range 0.7 s"
+    );
+    assert!(
+        indexed != range_start,
+        "the field must reach the export mixer"
+    );
 }

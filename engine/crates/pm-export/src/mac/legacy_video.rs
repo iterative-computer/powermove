@@ -323,7 +323,6 @@ impl Sink for LegacyVideoSink {
                 },
                 dither: false,
                 frame: index as u32,
-                legacy_png: alpha,
             },
             &mut self.rgba8,
         )?;
@@ -364,7 +363,6 @@ impl Sink for LegacyVideoSink {
                     alpha: self.spec.alpha,
                     dither: false,
                     frame: index as u32,
-                    legacy_png: false,
                 },
             )?;
             self.blocks.extend(verify::block_means(&reference, index));

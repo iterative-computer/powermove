@@ -1,7 +1,6 @@
 #[path = "support/doc.rs"]
 mod doc;
 
-use pm_media::decode::startup;
 use pm_protocol::{color::Precision, common::Size};
 use pm_render::{MapResolver, RenderRequest, Renderer, VideoEnd};
 use serde_json::json;
@@ -16,7 +15,7 @@ fn serial_preparation() -> std::sync::MutexGuard<'static, ()> {
 fn planned_video_preparation_reuses_exact_source_and_decoder_on_first_render() {
     let _serial = serial_preparation();
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/video-parity/h264-709-full.mp4");
+        .join("tests/fixtures/video/h264-709-limited.mp4");
     let (w, h) = (256, 144);
     let mut project = doc::project(
         w,
@@ -44,30 +43,27 @@ fn planned_video_preparation_reuses_exact_source_and_decoder_on_first_render() {
     let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
     let mut renderer = Renderer::headless().unwrap();
 
-    startup::begin();
     let prepared = renderer
         .prepare_media(&document, "Ptest-root", time, &request, &assets)
         .unwrap();
     let completed = renderer.finish_media_preparation();
-    let prep_stages = startup::finish();
     assert!(prepared.failures.is_empty(), "{:?}", prepared.failures);
     assert!(completed.is_empty(), "{completed:?}");
     assert_eq!(prepared.queued_videos, 1);
-    // Startup runs on the worker, outside this thread-local trace.
-    assert_eq!(prep_stages.source_opens, 0);
-    assert_eq!(prep_stages.session_creates, 0);
-    assert_eq!(prep_stages.frame_decodes, 0);
+    let before = renderer.media_usage();
+    assert_eq!(before.sessions, 1);
 
-    startup::begin();
     let frame = renderer
         .render(&document, "Ptest-root", time, &request, &assets)
         .unwrap();
     renderer.wait_idle();
-    let render_stages = startup::finish();
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
-    assert_eq!(render_stages.source_opens, 0);
-    assert_eq!(render_stages.session_creates, 0);
-    assert_eq!(render_stages.frame_decodes, 0);
+    // The prepared decoder and its decoded frame serve the first render:
+    // one cache hit, no decode, no second session.
+    let after = renderer.media_usage();
+    assert_eq!(after.cache.hits, before.cache.hits + 1);
+    assert_eq!(after.cache.misses, before.cache.misses);
+    assert_eq!(after.sessions, 1);
 
     // The first renderer stays alive and idle. Two more renderers must still
     // be able to prepare; idle workers do not monopolize the global cap.
@@ -87,7 +83,7 @@ fn planned_video_preparation_reuses_exact_source_and_decoder_on_first_render() {
 fn display_preparation_caches_selected_frame_for_first_render() {
     let _serial = serial_preparation();
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/video-parity/h264-709-full.mp4");
+        .join("tests/fixtures/video/h264-709-limited.mp4");
     let (w, h) = (256, 144);
     let mut project = doc::project(
         w,
@@ -122,16 +118,11 @@ fn display_preparation_caches_selected_frame_for_first_render() {
     assert!(renderer.finish_media_preparation().is_empty());
 
     let viewer_before = renderer.scrub_stats();
-    startup::begin();
     let frame = renderer
         .render(&document, "Ptest-root", time, &request, &assets)
         .unwrap();
     renderer.wait_idle();
-    let stages = startup::finish();
     assert!(frame.failures.is_empty(), "{:?}", frame.failures);
-    assert_eq!(stages.source_opens, 0);
-    assert_eq!(stages.session_creates, 0);
-    assert_eq!(stages.frame_decodes, 0);
     let viewer_after = renderer.scrub_stats();
     assert_eq!(viewer_after.cached, viewer_before.cached + 1);
     assert_eq!(viewer_after.decoded, viewer_before.decoded);
@@ -150,7 +141,7 @@ fn display_preparation_caches_selected_frame_for_first_render() {
 fn preparation_finds_video_inside_a_nested_composition() {
     let _serial = serial_preparation();
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/video-parity/h264-709-full.mp4");
+        .join("tests/fixtures/video/h264-709-limited.mp4");
     let (w, h) = (256, 144);
     let mut project = doc::project(
         w,
@@ -204,7 +195,7 @@ fn preparation_finds_video_inside_a_nested_composition() {
 fn display_preparation_is_bounded_across_many_layers() {
     let _serial = serial_preparation();
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/video-parity/h264-709-full.mp4");
+        .join("tests/fixtures/video/h264-709-limited.mp4");
     let (w, h) = (256, 144);
     let mut layers = Vec::new();
     for i in 0..12 {

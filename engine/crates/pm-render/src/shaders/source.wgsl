@@ -7,9 +7,9 @@
 //   horizontally and linear vertically for 4:2:0; then the matrix.
 // - Transfer and primaries into the working encoding. In Standard an
 //   E-encoded Rec.709 source is the identity: code values pass through.
-//   HDR sources (transfer 5 PQ, 6 HLG) are tone mapped with BT.2446 Method A
-//   to Rec.709 SDR code values, which Standard reads as E
-//   (pm_color::tonemap; `PM_TONEMAP` is prepended too).
+//   HDR sources are tone mapped to Rec.709 SDR: transfer 5 (PQ) and 6 (HLG)
+//   with BT.2446 Method A, 7 (PQ) and 8 (HLG) with today's default RWTMO
+//   curve (pm_color::tonemap and tonemap::rwtmo are prepended too).
 // - Alpha by pm_color::alpha's plan.
 //
 // `PM_COLOR` (pm_color::wgsl::COLOR) is prepended; `OUT_FORMAT` is replaced
@@ -22,7 +22,7 @@ struct Params {
     b: vec4<u32>,
     // chroma plane width, height; quantize to f16; convert primaries.
     c: vec4<u32>,
-    // chroma origin (xy); optional compatibility YUV scale and C bias (zw).
+    // chroma origin on the luma grid (xy).
     origin: vec4<f32>,
     // Y′CbCr → R′G′B′ columns.
     m0: vec4<f32>,
@@ -124,10 +124,24 @@ fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
 }
 
 // The input transform: source encoding and primaries to the working encoding.
-fn to_working(c: vec3<f32>) -> vec3<f32> {
+// A reading that changes colour (a gamut conversion, a tone map) clips the
+// video signal to 0..1 before linearising it, as a display does; the
+// working-encoding change alone keeps superwhites.
+fn to_working(signal: vec3<f32>) -> vec3<f32> {
     let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
     if (identity) {
-        return c;
+        return signal;
+    }
+    let displayed = P.c.w == 1u || P.a.y >= 5u;
+    let c = select(signal, clamp(signal, vec3<f32>(0.0), vec3<f32>(1.0)), displayed);
+    if (P.a.y == 7u || P.a.y == 8u) {
+        // Linear Rec.709 relative to SDR white; the primaries columns hold
+        // the source's primaries to BT.2020.
+        let l = pm_rwtmo_to_sdr(c, P.a.y == 8u, mat3x3<f32>(P.p0.xyz, P.p1.xyz, P.p2.xyz));
+        if (P.a.z == 0u) {
+            return pm_e_encode3(l);
+        }
+        return l;
     }
     if (P.a.y == 5u || P.a.y == 6u) {
         // BT.2020 HDR signal to Rec.709 SDR codes (E in Standard); the
@@ -194,17 +208,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (P.a.x == 1u) {
         let cbcr = chroma_sample(id.x, id.y);
         let m = mat3x3<f32>(P.m0.xyz, P.m1.xyz, P.m2.xyz);
-        var ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
-        if (P.origin.z != 0.0) {
-            ycc = ycc * P.origin.z + vec3<f32>(P.hdr.z, P.origin.w, P.origin.w);
-        }
+        let ycc = vec3<f32>(v.r, cbcr.x, cbcr.y);
         if (P.hdr.y == 1.0) { stored = vec4<f32>(bt2020_cl_rgb(ycc), v.a); }
         else { stored = vec4<f32>(m * ycc, v.a); }
     } else {
         stored = v;
-    }
-    if (P.hdr.w != 0.0) {
-        stored = vec4<f32>(round(clamp(stored.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0) / 255.0, stored.a);
     }
     var w: vec4<f32>;
     switch P.a.w {

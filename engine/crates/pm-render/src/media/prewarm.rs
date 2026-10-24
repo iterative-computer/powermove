@@ -1,8 +1,6 @@
 //! Bounded, nonblocking source and decoder preparation for planned views.
 
 use super::*;
-use pm_media::decode::DecodeReading;
-use pm_media::probe::VideoProbe;
 use std::collections::{HashMap, HashSet};
 use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -48,12 +46,8 @@ struct Job {
     stamp: (u64, u128),
     existing: Option<Arc<MediaSource>>,
     seconds: f64,
-    working: WorkingEncoding,
     interpret: Option<Interpretation>,
     composition: pm_time::Rate,
-    sequence: bool,
-    compat: bool,
-    has_color_override: bool,
 }
 
 struct Completed {
@@ -143,54 +137,6 @@ impl Drop for BackgroundPrepare {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn decode_reading(
-    v: &VideoProbe,
-    interp: &Interpretation,
-    compat: bool,
-    sequence: bool,
-    deinterlaced: bool,
-    working: WorkingEncoding,
-    transfer: Transfer,
-    has_color_override: bool,
-) -> DecodeReading {
-    if compat
-        && !sequence
-        && !deinterlaced
-        && working == WorkingEncoding::Standard
-        && ((v.codec.codec == "h264"
-            && v.codec.bit_depth == 8
-            && (v.color.tagged.full_range == Some(true) || (v.width <= 1920 && v.height <= 1080)))
-            || (v.codec.codec == "hevc"
-                && v.codec.bit_depth == 10
-                && v.color.tagged.full_range == Some(true))
-            || (v.codec.codec == "vp9"
-                && v.codec.bit_depth == 8
-                && (v.codec.log2_chroma_w, v.codec.log2_chroma_h) == (1, 1)
-                && (v.color.tagged.full_range == Some(true)
-                    || v.codec.alpha_mode
-                    || v.codec.pix_fmt_alpha))
-            || (v.codec.codec == "av1"
-                && v.codec.profile == 0
-                && v.codec.bit_depth == 8
-                && matches!(v.codec.pix_fmt.as_str(), "yuv420p" | "yuvj420p")
-                && (v.codec.log2_chroma_w, v.codec.log2_chroma_h) == (1, 1)
-                && !v.codec.alpha_mode
-                && !v.codec.pix_fmt_alpha
-                && v.codec.width > 0
-                && v.codec.height > 0
-                && i64::from(v.codec.width) * i64::from(v.codec.height) <= 64 * 1024))
-        && !interprets_video_color(interp)
-        && (v.alpha.is_none() || interp.alpha.is_none())
-        && !has_color_override
-        && !matches!(transfer, Transfer::Pq | Transfer::Hlg)
-    {
-        DecodeReading::Chromium
-    } else {
-        DecodeReading::Native
-    }
-}
-
 fn prepare_one(
     job: Job,
     shared: Option<Arc<MediaSource>>,
@@ -238,16 +184,6 @@ fn prepare_one(
         if service.usage().sessions >= MAX_PREPARED_SESSIONS {
             return Ok(false);
         }
-        let reading_kind = decode_reading(
-            v,
-            interp,
-            job.compat,
-            job.sequence,
-            timing.deinterlaced(),
-            job.working,
-            reading.color.transfer,
-            job.has_color_override,
-        );
         let purpose = if job.key.export {
             DecodePurpose::Export
         } else {
@@ -259,7 +195,7 @@ fn prepare_one(
         // retaining a converted GPU texture. A changed source or cancelled
         // preparation is discarded by the usual completion checks.
         let mut session = service
-            .session_with_reading(src, job.key.instance, purpose, reading_kind)
+            .session(src, job.key.instance, purpose)
             .map_err(|e| MediaFailure::Failed(e.to_string()))?;
         let frame = session
             .frame_with(pick.frame, &mut |_| cancel.load(Ordering::Relaxed))
@@ -278,30 +214,6 @@ fn prepare_one(
 }
 
 impl MediaCache {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn decode_reading(
-        &self,
-        v: &VideoProbe,
-        interp: &Interpretation,
-        path: &Path,
-        compat: bool,
-        sequence: bool,
-        deinterlaced: bool,
-        working: WorkingEncoding,
-        transfer: Transfer,
-    ) -> DecodeReading {
-        decode_reading(
-            v,
-            interp,
-            compat,
-            sequence,
-            deinterlaced,
-            working,
-            transfer,
-            self.interpretations.contains_key(path),
-        )
-    }
-
     fn adopt_prepared(&mut self, result: Completed) -> Result<bool, MediaFailure> {
         if let Some(background) = &mut self.background {
             background.pending.remove(&result.key);
@@ -358,21 +270,17 @@ impl MediaCache {
         failures
     }
 
-    /// Queue source hash/probe/index, decoder startup and the selected source
-    /// frame without blocking the presenter. Returns true for a queued job;
+    /// Queue source probe/index, decoder startup and the selected decoded
+    /// frame without blocking the presenter. Nothing reads the whole file. Returns true for a queued job;
     /// full queues defer to normal source opening at render time.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_video(
         &mut self,
         path: &Path,
         instance: u64,
         seconds: f64,
         export: bool,
-        working: WorkingEncoding,
         interpret: Option<&Interpretation>,
         composition: pm_time::Rate,
-        sequence: bool,
-        compat: bool,
     ) -> Result<bool, MediaFailure> {
         self.drain_prepared();
         let current = stamp(path)
@@ -397,10 +305,7 @@ impl MediaCache {
             instance,
             export,
             stamp: current,
-            settings: format!(
-                "{working:?}|{interpret:?}|{composition:?}|{sequence}|{compat}|{seconds:?}|{}",
-                self.interpretations.contains_key(path)
-            ),
+            settings: format!("{interpret:?}|{composition:?}|{seconds:?}"),
         };
         if background.pending.contains(&key) || background.pending.len() >= MAX_PENDING {
             return Ok(false);
@@ -417,12 +322,8 @@ impl MediaCache {
             stamp: current,
             existing,
             seconds,
-            working,
             interpret: interpret.cloned(),
             composition,
-            sequence,
-            compat,
-            has_color_override: self.interpretations.contains_key(path),
         };
         match background
             .sender

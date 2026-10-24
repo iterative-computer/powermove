@@ -1,176 +1,8 @@
-//! GPU regressions for compatibility source storage and cache isolation.
+//! GPU regressions for source storage, chroma reconstruction and cache
+//! isolation.
 
 use super::*;
 use pm_gpu::readback::{f32_to_half, half_to_f32, read_f32, read_raw};
-
-#[test]
-fn chromium_sdr_video_readings_match_detailed_captures() {
-    let gpu = pm_gpu::Gpu::new("Chromium video source parity").unwrap();
-    let pipelines = Pipelines::new(&gpu.device);
-    let mut media = MediaCache::new(&gpu.device);
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video-parity");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(fixtures.join("references.json")).unwrap()).unwrap();
-    let frames = manifest["frames"].as_array().unwrap();
-    assert_eq!(frames.len(), 38); // Original 32 plus both imported ProRes renditions.
-    for reference in frames {
-        captured_source(
-            &gpu,
-            &pipelines,
-            &mut media,
-            &fixtures,
-            reference["media"].as_str().unwrap(),
-            reference["file"].as_str().unwrap(),
-            reference["time"].as_f64().unwrap(),
-            reference["width"].as_u64().unwrap() as usize,
-            reference["height"].as_u64().unwrap() as usize,
-        );
-    }
-}
-
-#[test]
-fn chromium_hevc_ranges_tags_and_prores_alpha_renditions_are_exact() {
-    let gpu = pm_gpu::Gpu::new("Chromium extended video source parity").unwrap();
-    let pipelines = Pipelines::new(&gpu.device);
-    let mut media = MediaCache::new(&gpu.device);
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video-parity-round2");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(fixtures.join("references.json")).unwrap()).unwrap();
-    let frames = manifest["references"].as_array().unwrap();
-    assert_eq!(frames.len(), 24);
-    for reference in frames {
-        captured_source(
-            &gpu,
-            &pipelines,
-            &mut media,
-            &fixtures,
-            reference["media"].as_str().unwrap(),
-            reference["premultipliedCanvas"]["file"].as_str().unwrap(),
-            reference["time"].as_f64().unwrap(),
-            reference["width"].as_u64().unwrap() as usize,
-            reference["height"].as_u64().unwrap() as usize,
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn captured_source(
-    gpu: &pm_gpu::Gpu,
-    pipelines: &Pipelines,
-    media: &mut MediaCache,
-    fixtures: &Path,
-    source: &str,
-    reference_file: &str,
-    seconds: f64,
-    width: usize,
-    height: usize,
-) {
-    use std::io::Read;
-    let compressed = std::fs::read(fixtures.join(reference_file)).unwrap();
-    let mut reference = Vec::new();
-    flate2::read::ZlibDecoder::new(&compressed[..])
-        .read_to_end(&mut reference)
-        .unwrap();
-    assert_eq!(reference.len(), width * height * 4);
-    assert!(
-        reference
-            .chunks_exact(4)
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-            > 1000
-    );
-    for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        let target = media
-            .video(
-                &gpu.device,
-                &gpu.queue,
-                pipelines,
-                &mut encoder,
-                &fixtures.join(source),
-                1,
-                seconds,
-                true,
-                WorkingEncoding::Standard,
-                precision,
-                None,
-                pm_time::Rate::FPS_30,
-                false,
-                true,
-            )
-            .unwrap()
-            .unwrap();
-        assert_eq!(target.format(), wgpu::TextureFormat::Rgba8Unorm);
-        gpu.queue.submit([encoder.finish()]);
-        let actual = read_raw(&gpu.device, &gpu.queue, &target.texture).unwrap();
-        let max = actual
-            .iter()
-            .zip(&reference)
-            .map(|(a, b)| a.abs_diff(*b))
-            .max()
-            .unwrap();
-        assert_eq!(actual.len(), reference.len());
-        assert_eq!(max, 0, "{source} at {seconds}s {precision:?}");
-        media.flush();
-    }
-}
-
-#[test]
-fn canvas_and_live_video_uploads_do_not_share_converted_pixels() {
-    use std::io::Read;
-    let gpu = pm_gpu::Gpu::new("video Canvas/live cache parity").unwrap();
-    let pipelines = Pipelines::new(&gpu.device);
-    let mut media = MediaCache::new(&gpu.device);
-    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video-parity");
-    for source in ["h264-2020-limited", "h264-709-full"] {
-        let path = fixtures.join(format!("{source}.mp4"));
-        for i in 0..3 {
-            for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
-                for canvas in [true, false, true] {
-                    media.canvas_video = canvas;
-                    let suffix = if canvas { "" } else { ".live" };
-                    let compressed =
-                        std::fs::read(fixtures.join(format!("{source}-{i}{suffix}.rgba.zlib")))
-                            .unwrap();
-                    let mut reference = Vec::new();
-                    flate2::read::ZlibDecoder::new(&compressed[..])
-                        .read_to_end(&mut reference)
-                        .unwrap();
-                    let mut encoder = gpu.device.create_command_encoder(&Default::default());
-                    let target = media
-                        .video(
-                            &gpu.device,
-                            &gpu.queue,
-                            &pipelines,
-                            &mut encoder,
-                            &path,
-                            1,
-                            [0.125, 0.625, 1.125][i],
-                            true,
-                            WorkingEncoding::Standard,
-                            precision,
-                            None,
-                            pm_time::Rate::FPS_30,
-                            false,
-                            true,
-                        )
-                        .unwrap()
-                        .unwrap();
-                    gpu.queue.submit([encoder.finish()]);
-                    let actual = read_raw(&gpu.device, &gpu.queue, &target.texture).unwrap();
-                    let max = actual
-                        .iter()
-                        .zip(&reference)
-                        .map(|(a, b)| a.abs_diff(*b))
-                        .max()
-                        .unwrap();
-                    assert_eq!(max, 0, "{source}, sample {i}, Canvas={canvas}");
-                }
-                media.flush();
-            }
-        }
-    }
-}
 
 /// Exercise the production source compute pass with normalized f32 RGB.
 /// Keeping the input at f32 makes an accidental half-float conversion
@@ -220,6 +52,7 @@ fn source(
         siting: ChromaSiting::Left,
         alpha: AlphaMode::Opaque,
         tone_map: None,
+        curve: HdrCurve::Bt2446a,
     };
     let mut encoder = gpu
         .device
@@ -238,8 +71,6 @@ fn source(
         Factors { x: 1, y: 1 },
         None,
         format,
-        format == wgpu::TextureFormat::Rgba8Unorm && precision != Precision::Unorm8,
-        false,
     );
     gpu.queue.submit([encoder.finish()]);
     target
@@ -274,128 +105,21 @@ fn native_source_storage_preserves_negative_and_superwhite_values() {
 }
 
 #[test]
-fn video_storage_keeps_compatibility_and_native_cache_entries_separate() {
+fn video_storage_follows_project_and_source_depth_with_one_reading() {
     let gpu = pm_gpu::Gpu::new("video source storage test").unwrap();
     let pipelines = Pipelines::new(&gpu.device);
     let mut media = MediaCache::new(&gpu.device);
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/video");
+    let eight = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
-    let interpreted = Interpretation {
-        transfer: Some(Transfer::DisplayE),
-        ..Default::default()
-    };
-    // Members that only choose or place frames keep today's upload.
-    let placed = Interpretation {
-        pixel_aspect: Some((1, 1)),
-        clean_aperture: Some(false),
-        field_order: pm_media::interlace::FieldOverride::Progressive,
-        alpha: Some(pm_media::interpret::AlphaChoice::Ignore),
-        ..Default::default()
-    };
-    // Revisit the same decoded frame across readings, then advance to
-    // exercise retired-target reuse. Neither the converted cache nor
-    // its free targets may lend RGBA8 storage to a native reading.
-    for second in [0.1, 0.2] {
-        for (compat, working, interpretation, expected) in [
-            (
-                true,
-                WorkingEncoding::Standard,
-                None,
-                wgpu::TextureFormat::Rgba8Unorm,
-            ),
-            (
-                false,
-                WorkingEncoding::Standard,
-                None,
-                wgpu::TextureFormat::Rgba32Float,
-            ),
-            (
-                true,
-                WorkingEncoding::Standard,
-                Some(&interpreted),
-                wgpu::TextureFormat::Rgba32Float,
-            ),
-            (
-                true,
-                WorkingEncoding::Standard,
-                Some(&placed),
-                wgpu::TextureFormat::Rgba8Unorm,
-            ),
-            (
-                true,
-                WorkingEncoding::LinearLight,
-                None,
-                wgpu::TextureFormat::Rgba32Float,
-            ),
-            (
-                true,
-                WorkingEncoding::Standard,
-                None,
-                wgpu::TextureFormat::Rgba8Unorm,
-            ),
-        ] {
-            let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            let target = media
-                .video(
-                    &gpu.device,
-                    &gpu.queue,
-                    &pipelines,
-                    &mut encoder,
-                    &path,
-                    1,
-                    second,
-                    true,
-                    working,
-                    Precision::Float32,
-                    interpretation,
-                    pm_time::Rate::FPS_30,
-                    false,
-                    compat,
-                )
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                target.format(),
-                expected,
-                "compat={compat}, {working:?}, {interpretation:?}"
-            );
-            let cached = media
-                .video(
-                    &gpu.device,
-                    &gpu.queue,
-                    &pipelines,
-                    &mut encoder,
-                    &path,
-                    1,
-                    second,
-                    true,
-                    working,
-                    Precision::Float32,
-                    interpretation,
-                    pm_time::Rate::FPS_30,
-                    false,
-                    compat,
-                )
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                cached.texture, target.texture,
-                "identical request cache hit"
-            );
-            gpu.queue.submit([encoder.finish()]);
-            assert!(
-                !read_f32(&gpu.device, &gpu.queue, &target.texture)
-                    .unwrap()
-                    .is_empty()
-            );
-            media.flush();
-        }
-    }
-    // The legacy host's per-file interpretation is a separate entry
-    // point from the document's Interpret Footage fields.
-    let reading = media.video_color(&path).unwrap();
-    for override_color in [Some(reading), None] {
-        media.interpret(&path, override_color);
+    let ten = fixtures.join("hevc10-709-limited.mp4");
+    let hdr = fixtures.join("hevc10-2020-pq.mp4");
+    use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
+    let mut convert = |media: &mut MediaCache,
+                       path: &Path,
+                       precision,
+                       interpretation: Option<&Interpretation>,
+                       compat: bool| {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = media
             .video(
@@ -403,36 +127,79 @@ fn video_storage_keeps_compatibility_and_native_cache_entries_separate() {
                 &gpu.queue,
                 &pipelines,
                 &mut encoder,
-                &path,
+                path,
                 1,
                 0.2,
                 true,
                 WorkingEncoding::Standard,
-                Precision::Float32,
-                None,
+                precision,
+                interpretation,
                 pm_time::Rate::FPS_30,
                 false,
-                true,
+                compat,
             )
             .unwrap()
             .unwrap();
-        assert_eq!(
-            target.format(),
-            if override_color.is_some() {
-                wgpu::TextureFormat::Rgba32Float
-            } else {
-                wgpu::TextureFormat::Rgba8Unorm
-            }
-        );
         gpu.queue.submit([encoder.finish()]);
-        gpu.wait_idle();
+        let pixels = read_f32(&gpu.device, &gpu.queue, &target.texture).unwrap();
         media.flush();
+        (target.format(), pixels)
+    };
+    // Never below 8 bits; half float or better for 10-bit and HDR sources.
+    for (path, precision, format) in [
+        (&eight, Precision::Unorm8, Rgba8Unorm),
+        (&eight, Precision::Float16, Rgba16Float),
+        (&eight, Precision::Float32, Rgba32Float),
+        (&ten, Precision::Unorm8, Rgba16Float),
+        (&ten, Precision::Float32, Rgba32Float),
+        (&hdr, Precision::Unorm8, Rgba16Float),
+    ] {
+        assert_eq!(
+            convert(&mut media, path, precision, None, true).0,
+            format,
+            "{path:?} {precision:?}"
+        );
     }
+    // Layer level, frame-placing overrides and an override equal to the
+    // file's reading do not change an SDR frame's colour.
+    let (_, base) = convert(&mut media, &eight, Precision::Float32, None, true);
+    let placed = Interpretation {
+        pixel_aspect: Some((1, 1)),
+        clean_aperture: Some(false),
+        field_order: pm_media::interlace::FieldOverride::Progressive,
+        ..Default::default()
+    };
+    let same = Interpretation {
+        transfer: Some(Transfer::DisplayE),
+        ..Default::default()
+    };
+    for (interpretation, compat) in [(None, false), (Some(&placed), true), (Some(&same), true)] {
+        assert_eq!(
+            convert(
+                &mut media,
+                &eight,
+                Precision::Float32,
+                interpretation,
+                compat
+            )
+            .1,
+            base,
+            "{interpretation:?} compat={compat}"
+        );
+    }
+    // The host's per-file override is the same reading too.
+    let reading = media.video_color(&eight).unwrap();
+    media.interpret(&eight, Some(reading));
+    assert_eq!(
+        convert(&mut media, &eight, Precision::Float32, None, true).1,
+        base
+    );
+    media.interpret(&eight, None);
 }
 
 #[test]
-fn compatibility_source_storage_rounds_directly_to_rgba8() {
-    let gpu = pm_gpu::Gpu::new("compatibility source storage test").unwrap();
+fn rgba8_source_storage_rounds_the_f32_conversion_once() {
+    let gpu = pm_gpu::Gpu::new("rgba8 source storage test").unwrap();
     let pipelines = Pipelines::new(&gpu.device);
     // Probe both sides of every half-byte boundary, far enough away
     // to avoid a tie but close enough that f16 can cross the boundary.
@@ -459,24 +226,20 @@ fn compatibility_source_storage_rounds_directly_to_rgba8() {
         expected, rounded_via_half,
         "fixture must detect double rounding"
     );
-    for precision in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
-        let target = source(
-            &gpu,
-            &pipelines,
-            &pixels,
-            precision,
-            wgpu::TextureFormat::Rgba8Unorm,
-        );
-        assert_eq!(target.format(), wgpu::TextureFormat::Rgba8Unorm);
-        let actual = read_raw(&gpu.device, &gpu.queue, &target.texture).unwrap();
-        assert_eq!(actual, expected, "{precision:?}: source byte quantization");
-        let last = &actual[actual.len() - 4..];
-        assert_eq!(last, &[255, 0, 64, 255], "clip before subsequent filtering");
-    }
+    let target = source(
+        &gpu,
+        &pipelines,
+        &pixels,
+        Precision::Unorm8,
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
+    let actual = read_raw(&gpu.device, &gpu.queue, &target.texture).unwrap();
+    assert_eq!(actual, expected, "source byte quantization");
+    assert_eq!(&actual[actual.len() - 4..], &[255, 0, 64, 255]);
 }
 
 #[test]
-fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
+fn chroma_follows_its_siting_with_section_9_filters_at_every_storage_depth() {
     let gpu = pm_gpu::Gpu::new("source chroma reconstruction test").unwrap();
     let pipelines = Pipelines::new(&gpu.device);
     let (width, height) = (8u32, 6u32);
@@ -552,8 +315,9 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
         siting: ChromaSiting::Left,
         alpha: AlphaMode::Opaque,
         tone_map: None,
+        curve: HdrCurve::Bt2446a,
     };
-    let converted = |format, compatibility_storage| {
+    let converted = |format| {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = convert_format(
             &gpu.device,
@@ -563,7 +327,7 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
             &normalized,
             &color,
             WorkingEncoding::Standard,
-            if compatibility_storage || format == wgpu::TextureFormat::Rgba32Float {
+            if format == wgpu::TextureFormat::Rgba32Float {
                 Precision::Float32
             } else {
                 Precision::Unorm8
@@ -571,8 +335,6 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
             Factors { x: 2, y: 2 },
             None,
             format,
-            compatibility_storage,
-            false,
         );
         gpu.queue.submit([encoder.finish()]);
         target
@@ -629,33 +391,29 @@ fn compatibility_chroma_is_centered_bilinear_while_native_keeps_left_cubic() {
         pixels
     };
     let unorm = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let centered = reference(true);
     let native = reference(false);
-    let expected: Vec<u8> = centered.iter().map(|&v| unorm(v)).collect();
-    let wrong: Vec<u8> = native.iter().map(|&v| unorm(v)).collect();
+    // Today's viewer reconstructs chroma centered and bilinear: a half
+    // chroma sample off for left-sited 4:2:0, far from the reference here.
+    let centered: Vec<u8> = reference(true).iter().map(|&v| unorm(v)).collect();
+    let expected: Vec<u8> = native.iter().map(|&v| unorm(v)).collect();
     assert!(
         expected
             .iter()
-            .zip(&wrong)
+            .zip(&centered)
             .any(|(&a, &b)| a.abs_diff(b) > 20)
     );
-    let bitmap = converted(wgpu::TextureFormat::Rgba8Unorm, true);
-    assert_eq!(
-        read_raw(&gpu.device, &gpu.queue, &bitmap.texture).unwrap(),
-        expected
-    );
-    let working8 = converted(wgpu::TextureFormat::Rgba8Unorm, false);
+    let working8 = converted(wgpu::TextureFormat::Rgba8Unorm);
     assert_eq!(
         read_raw(&gpu.device, &gpu.queue, &working8.texture).unwrap(),
-        wrong,
-        "RGBA8 working storage keeps native chroma siting and filter"
+        expected,
+        "RGBA8 storage keeps the siting and filter"
     );
-    let float = converted(wgpu::TextureFormat::Rgba32Float, false);
+    let float = converted(wgpu::TextureFormat::Rgba32Float);
     let actual = read_f32(&gpu.device, &gpu.queue, &float.texture).unwrap();
     for (i, (&actual, &expected)) in actual.iter().zip(&native).enumerate() {
         assert!(
             (f64::from(actual) - expected).abs() < 2e-6,
-            "native channel {i}: {actual} != {expected}"
+            "channel {i}: {actual} != {expected}"
         );
     }
     assert!(actual.iter().any(|&v| v < 0.0));

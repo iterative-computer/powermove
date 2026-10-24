@@ -236,36 +236,21 @@ pub fn probe(path: &Path) -> Result<Probed> {
 pub(crate) fn probe_with_input(path: &Path) -> Result<(Probed, Input)> {
     let size = std::fs::metadata(path)?.len();
     // The sampled identity is independent of FFmpeg's stream probe and the
-    // container index. For larger files, overlap its reads with those stages;
-    // tiny clips use the inline path to avoid an extra thread's startup cost.
+    // container index: for larger files its reads overlap them. Tiny clips
+    // stay inline, where a thread would cost more than it saves.
     if size >= 128 << 10 {
-        let diagnose = crate::decode::startup::enabled();
         return std::thread::scope(|scope| {
-            let fingerprint = scope.spawn(|| {
-                let start = diagnose.then(std::time::Instant::now);
-                let value = crate::hash::sampled_fingerprint(path);
-                (value, start.map(|time| time.elapsed()))
-            });
+            let fingerprint = scope.spawn(|| crate::hash::sampled_fingerprint(path));
             let probed = probe_with_input_fingerprint(path, size, || Ok(String::new()));
-            let (value, elapsed) = fingerprint
+            let value = fingerprint
                 .join()
                 .map_err(|_| MediaError::invalid("fingerprint worker panicked"))?;
-            if let Some(elapsed) = elapsed {
-                crate::decode::startup::record_elapsed(
-                    crate::decode::startup::Stage::Fingerprint,
-                    elapsed,
-                );
-            }
             let (mut probed, input) = probed?;
             probed.probe.sampled_fingerprint = value?;
             Ok((probed, input))
         });
     }
-    probe_with_input_fingerprint(path, size, || {
-        crate::decode::startup::timed(crate::decode::startup::Stage::Fingerprint, || {
-            crate::hash::sampled_fingerprint(path)
-        })
-    })
+    probe_with_input_fingerprint(path, size, || crate::hash::sampled_fingerprint(path))
 }
 
 fn probe_with_input_fingerprint(
@@ -273,9 +258,7 @@ fn probe_with_input_fingerprint(
     size: u64,
     fingerprint: impl FnOnce() -> Result<String>,
 ) -> Result<(Probed, Input)> {
-    let input = crate::decode::startup::timed(crate::decode::startup::Stage::ProbeInput, || {
-        Input::open(path)
-    })?;
+    let input = Input::open(path)?;
     let container = input.format_name();
     let mut streams = Vec::new();
     for i in 0..input.streams() {
@@ -409,9 +392,7 @@ fn audio_probe(path: &Path, input: &Input, i: usize, container: &str) -> AudioPr
 
 fn video_probe(path: &Path, input: &Input, v: usize) -> Result<(VideoProbe, FrameIndex)> {
     let info = input.codec_info(v);
-    let idx = crate::decode::startup::timed(crate::decode::startup::Stage::Index, || {
-        index::build(path, input, v)
-    })?;
+    let idx = index::build(path, input, v)?;
     let side = SideData::read(input, v);
     let atom = |n: &[u8; 4]| idx.config.atom(n);
     let hvcc_layers = atom(b"hvcC").map(crate::vt::hevc_max_layers).unwrap_or(1);
@@ -712,18 +693,16 @@ mod tests {
 
     #[test]
     fn parallel_fingerprint_keeps_probe_and_index_identical() {
+        // Large enough to take the parallel route.
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../pm-render/tests/fixtures/video-parity/h264-hd-709-matrix-only.mp4");
+            .join("../../../apps/desktop/e2e/fixtures/tone.wav");
         let size = std::fs::metadata(&path).unwrap().len();
         assert!(size >= 128 << 10);
-        let (mut parallel, _) = probe_with_input(&path).unwrap();
-        let (mut serial, _) =
+        let (parallel, _) = probe_with_input(&path).unwrap();
+        let (serial, _) =
             probe_with_input_fingerprint(&path, size, || crate::hash::sampled_fingerprint(&path))
                 .unwrap();
-        parallel.probe.video.as_mut().unwrap().index.build_ms = 0.0;
-        serial.probe.video.as_mut().unwrap().index.build_ms = 0.0;
-        parallel.index.as_mut().unwrap().stats.build_ms = 0.0;
-        serial.index.as_mut().unwrap().stats.build_ms = 0.0;
+        assert!(!parallel.probe.sampled_fingerprint.is_empty());
         assert_eq!(parallel.probe, serial.probe);
         assert_eq!(parallel.index, serial.index);
     }

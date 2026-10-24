@@ -118,7 +118,6 @@ fn sample(input: &EncoderInput, plane: usize, i: usize) -> u32 {
 
 fn params() -> ConvertParams {
     ConvertParams {
-        legacy_png: true,
         working: WorkingEncoding::Standard,
         alpha: AlphaOutput::None,
         dither: false,

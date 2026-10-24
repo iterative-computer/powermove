@@ -66,7 +66,7 @@ impl Renderer {
         let root = document
             .root()
             .ok_or_else(|| RenderError::Composition(composition.to_owned()))?;
-        let color = project_settings(root)?;
+        project_settings(root)?;
         let comp = Comp::resolve(document, composition)
             .map_err(|_| RenderError::Composition(composition.to_owned()))?;
         let open = capability::open_composition_id(root);
@@ -104,8 +104,6 @@ impl Renderer {
         let mut result = MediaPreparation::default();
         visit_plan(&plan, &mut |layer, source| {
             if let Source::Video {
-                level2,
-                sequence,
                 path,
                 time,
                 interpret,
@@ -118,11 +116,8 @@ impl Renderer {
                     crate::exec::instance_of(layer),
                     *time,
                     request.export,
-                    color.working,
                     interpret.as_ref(),
                     *composition_rate,
-                    *sequence,
-                    !*level2,
                 ) {
                     Ok(true) => result.queued_videos += 1,
                     Ok(false) => {}

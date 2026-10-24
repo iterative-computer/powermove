@@ -23,8 +23,7 @@
 //! neighbourhood, within the cache's lease share), a stride at a time;
 //! nothing after a jump.
 
-use super::DecodeReading;
-use super::service::{DecodeService, InstanceId, MediaSource, cache_source_id};
+use super::service::{DecodeService, InstanceId, MediaSource};
 use super::session::{DEFAULT_WINDOW, Progress};
 use crate::cache::FrameKey;
 use crate::error::{MediaError, Result};
@@ -97,7 +96,7 @@ pub const IDLE_EXIT: Duration = Duration::from_secs(30);
 /// The decode workers of one renderer's display frames.
 pub struct ViewerDecode {
     service: Arc<DecodeService>,
-    workers: Mutex<HashMap<(u64, InstanceId, DecodeReading), Arc<Worker>>>,
+    workers: Mutex<HashMap<(u64, InstanceId), Arc<Worker>>>,
     landed: Arc<AtomicU64>,
     stats: Arc<Mutex<ScrubStats>>,
     idle_exit: Duration,
@@ -113,7 +112,6 @@ struct Worker {
 struct Shared {
     source: Arc<MediaSource>,
     instance: InstanceId,
-    reading: DecodeReading,
     service: Arc<DecodeService>,
     /// Presented position of each sample.
     shown_at: Vec<usize>,
@@ -226,18 +224,6 @@ impl ViewerDecode {
         n: usize,
         want: Want,
     ) -> Result<Fetched> {
-        self.fetch_with_reading(source, instance, n, want, DecodeReading::Native)
-    }
-
-    /// Fetches through a decoder and frame-cache lane for `reading`.
-    pub fn fetch_with_reading(
-        &self,
-        source: &Arc<MediaSource>,
-        instance: InstanceId,
-        n: usize,
-        want: Want,
-        reading: DecodeReading,
-    ) -> Result<Fetched> {
         let sample = source
             .index
             .frames
@@ -245,13 +231,13 @@ impl ViewerDecode {
             .ok_or_else(|| MediaError::invalid(format!("frame {n} out of range")))?
             .sample;
         let key = FrameKey {
-            source: cache_source_id(source.id, reading),
+            source: source.id,
             sample,
             purpose: DecodePurpose::Display,
         };
         self.stats.lock().unwrap().requests += 1;
         loop {
-            let worker = self.worker(source, instance, reading);
+            let worker = self.worker(source, instance);
             if let Some(fetched) = self.fetch_on(&worker.shared, &key, n, want) {
                 return fetched;
             }
@@ -376,14 +362,9 @@ impl ViewerDecode {
         }
     }
 
-    fn worker(
-        &self,
-        source: &Arc<MediaSource>,
-        instance: InstanceId,
-        reading: DecodeReading,
-    ) -> Arc<Worker> {
+    fn worker(&self, source: &Arc<MediaSource>, instance: InstanceId) -> Arc<Worker> {
         let mut workers = self.workers.lock().unwrap();
-        let key = (source.id, instance, reading);
+        let key = (source.id, instance);
         if let Some(w) = workers.get(&key)
             && w.shared.alive.load(Ordering::Acquire)
         {
@@ -399,7 +380,6 @@ impl ViewerDecode {
         let shared = Arc::new(Shared {
             source: source.clone(),
             instance,
-            reading,
             service: self.service.clone(),
             shown_at,
             state: Mutex::new(State::default()),
@@ -458,7 +438,7 @@ impl State {
 impl Shared {
     fn key(&self, n: usize) -> FrameKey {
         FrameKey {
-            source: cache_source_id(self.source.id, self.reading),
+            source: self.source.id,
             sample: self.source.index.frames[n].sample,
             purpose: DecodePurpose::Display,
         }
@@ -470,10 +450,7 @@ impl Shared {
     fn nearest(&self, n: usize, st: &State) -> Option<(usize, DecodedFrame)> {
         let cache = self.service.cache();
         let best = cache
-            .samples_of(
-                cache_source_id(self.source.id, self.reading),
-                DecodePurpose::Display,
-            )
+            .samples_of(self.source.id, DecodePurpose::Display)
             .into_iter()
             .filter_map(|s| self.shown_at.get(s).copied().filter(|&m| m != usize::MAX))
             .min_by_key(|&m| (m.abs_diff(n), m > n));
@@ -492,12 +469,9 @@ impl Shared {
         while let Some(job) = self.next_job() {
             let n = job.frame();
             let result = (|| -> Result<Option<DecodedFrame>> {
-                let mut guard = self.service.session_with_reading(
-                    &self.source,
-                    self.instance,
-                    DecodePurpose::Display,
-                    self.reading,
-                )?;
+                let mut guard =
+                    self.service
+                        .session(&self.source, self.instance, DecodePurpose::Display)?;
                 let (keep, stride) = {
                     let st = self.state.lock().unwrap();
                     if st.stride < 0 {
@@ -692,20 +666,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_instance_keeps_native_and_chromium_scrub_workers_apart() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/desktop/e2e/fixtures/h264-aac.mp4");
-        let src = MediaSource::open(&path).unwrap();
-        let service = Arc::new(DecodeService::new(Default::default()));
-        let viewer = ViewerDecode::new(service);
-        let native = viewer.worker(&src, 1, DecodeReading::Native);
-        let chromium = viewer.worker(&src, 1, DecodeReading::Chromium);
-        assert!(!Arc::ptr_eq(&native, &chromium));
-        assert_ne!(native.shared.key(0), chromium.shared.key(0));
-        viewer.release(Some(src.id));
-    }
-
-    #[test]
     fn the_stride_follows_drags_and_resets_on_jumps() {
         let mut st = State::default();
         st.moved_to(10);
@@ -730,7 +690,7 @@ mod tests {
         let service = Arc::new(DecodeService::new(Default::default()));
         let viewer = ViewerDecode::new(service).with_idle_exit(Duration::ZERO);
         // The worker `fetch` took, exiting idle before it locked the state.
-        let worker = viewer.worker(&src, 1, DecodeReading::Native);
+        let worker = viewer.worker(&src, 1);
         let t = std::time::Instant::now();
         while worker.shared.alive.load(Ordering::Acquire) {
             assert!(t.elapsed().as_secs() < 20, "the worker never exited");

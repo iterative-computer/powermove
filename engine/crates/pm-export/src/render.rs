@@ -1300,7 +1300,6 @@ where
     let sampled = crate::verify::sampled_frames(frames);
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
-    pipeline.set_legacy_png(crate::png_compat::has_level1_content(&document));
     let mut mixer = audio.map(|a| {
         let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
         let mut mixer = pm_audio::Mixer::new_legacy_export(
@@ -1545,10 +1544,7 @@ where
             });
             match rendered {
                 Ok((rgba, gpu, gpu_target)) => {
-                    if tx
-                        .send(Rendered::Frame(n, rgba, gpu, gpu_target))
-                        .is_err()
-                    {
+                    if tx.send(Rendered::Frame(n, rgba, gpu, gpu_target)).is_err() {
                         break;
                     }
                 }

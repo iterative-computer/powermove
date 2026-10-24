@@ -240,9 +240,173 @@ fn pm_hdr_to_sdr(signal: vec3<f32>, hlg: bool, peak: f32, m: mat3x3<f32>) -> vec
 }
 "#;
 
+/// Today's default HDR look for footage without HDR metadata (owner
+/// decision HDR-1): Skia's RWTMO gain curve, as the shipped app's Canvas
+/// applies it, for content mastered at 1000 cd/m² shown with SDR white at
+/// 203 cd/m². The curve is kept exactly; only the arithmetic changes: it
+/// runs on unquantized float light, with no 8-bit store before it.
+///
+/// Per pixel: the HDR signal to linear light relative to SDR white (PQ:
+/// ST 2084 nits / 203; HLG: the BT.2100 OOTF for 1000 cd/m², × 1000/203),
+/// in BT.2020 primaries; a gain 2^g(max(R, G, B)); BT.2020 to Rec.709 in
+/// linear light. g is a cubic Hermite interpolation in log2 between eight
+/// points of the RWTMO cubic; beyond the last point the peak is held.
+pub mod rwtmo {
+    use super::{HdrSignal, to_normalized_display};
+    use crate::primaries::{Mat3, apply};
+
+    pub const SDR_WHITE: f64 = 203.0;
+    pub const PEAK: f64 = 1000.0;
+
+    /// The eight curve points: (max(R, G, B), log2 gain, d(log2 gain)/dx).
+    pub fn points() -> [[f64; 3]; 8] {
+        let headroom = (PEAK / SDR_WHITE).log2();
+        // RWTMO's white for a target with no HDR headroom.
+        let white = 0.5;
+        let (x_max, y_max) = (headroom.exp2(), 1.0);
+        let mid_x = 0.35 + 0.65 * y_max / white;
+        let mid_y = 0.35 * white + 0.65 * y_max;
+        let (xa, xb) = (1.0 - 2.0 * mid_x + x_max, 2.0 * mid_x - 2.0);
+        let (ya, yb) = (white - 2.0 * mid_y + y_max, 2.0 * mid_y - 2.0 * white);
+        std::array::from_fn(|i| {
+            let t = i as f64 / 7.0;
+            let x = 1.0 + t * (xb + t * xa);
+            let y = white + t * (yb + t * ya);
+            let tangent = (2.0 * ya * t + yb) / (2.0 * xa * t + xb);
+            [
+                x,
+                (y / x).log2(),
+                (x * tangent - y) / (std::f64::consts::LN_2 * x * y),
+            ]
+        })
+    }
+
+    /// log2 of the gain at `m` = max(R, G, B).
+    pub fn gain(m: f64) -> f64 {
+        let p = points();
+        if m <= p[0][0] {
+            return p[0][1];
+        }
+        if m >= p[7][0] {
+            return p[7][1] + (p[7][0] / m).log2();
+        }
+        let i = (0..7)
+            .rfind(|&i| p[i][0] <= m)
+            .expect("above the first point");
+        let (a, b) = (p[i], p[i + 1]);
+        let h = b[0] - a[0];
+        let (ma, mb) = (a[2] * h, b[2] * h);
+        let t = (m - a[0]) / h;
+        let c3 = 2.0 * a[1] + ma - 2.0 * b[1] + mb;
+        let c2 = -3.0 * a[1] + 3.0 * b[1] - 2.0 * ma - mb;
+        ((c3 * t + c2) * t + ma) * t + a[1]
+    }
+
+    /// HDR signal R′G′B′ to tone-mapped linear Rec.709 light (SDR white
+    /// 1.0). `to_2020` converts the signal's primaries to BT.2020.
+    pub fn to_sdr(signal: HdrSignal, rgb: [f64; 3], to_2020: &Mat3) -> [f64; 3] {
+        let light = to_normalized_display(signal, rgb, PEAK).map(|c| c * PEAK / SDR_WHITE);
+        let c = apply(to_2020, light);
+        let g = gain(c[0].max(c[1]).max(c[2])).exp2();
+        apply(&super::bt2020_to_709(), c.map(|v| v * g))
+    }
+
+    /// WGSL defining `pm_rwtmo_to_sdr(signal: vec3<f32>, hlg: bool,
+    /// to_2020: mat3x3<f32>) -> vec3<f32>`, [`to_sdr`] in f32. Uses
+    /// `pm_pq_eotf` and `pm_hlg_inverse_oetf` from [`super::WGSL`].
+    pub fn wgsl() -> String {
+        let f = |v: f64| format!("{:.9e}", v);
+        let points = points()
+            .iter()
+            .map(|p| format!("vec3<f32>({}, {}, {})", f(p[0]), f(p[1]), f(p[2])))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let m = super::bt2020_to_709();
+        let to_709 = (0..3)
+            .map(|j| format!("vec3<f32>({}, {}, {})", f(m[0][j]), f(m[1][j]), f(m[2][j])))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"
+const PM_RWTMO: array<vec3<f32>, 8> = array<vec3<f32>, 8>({points});
+const PM_RWTMO_TO_709: mat3x3<f32> = mat3x3<f32>({to_709});
+
+fn pm_rwtmo_gain(m: f32) -> f32 {{
+    if (m <= PM_RWTMO[0].x) {{ return PM_RWTMO[0].y; }}
+    if (m >= PM_RWTMO[7].x) {{ return PM_RWTMO[7].y + log2(PM_RWTMO[7].x / m); }}
+    var i = 0u;
+    for (var k = 1u; k < 7u; k += 1u) {{
+        if (PM_RWTMO[k].x <= m) {{ i = k; }}
+    }}
+    let a = PM_RWTMO[i];
+    let b = PM_RWTMO[i + 1u];
+    let h = b.x - a.x;
+    let ma = a.z * h;
+    let mb = b.z * h;
+    let t = (m - a.x) / h;
+    let c3 = 2.0 * a.y + ma - 2.0 * b.y + mb;
+    let c2 = -3.0 * a.y + 3.0 * b.y - 2.0 * ma - mb;
+    return ((c3 * t + c2) * t + ma) * t + a.y;
+}}
+
+fn pm_rwtmo_to_sdr(signal: vec3<f32>, hlg: bool, to_2020: mat3x3<f32>) -> vec3<f32> {{
+    var light: vec3<f32>;
+    if (hlg) {{
+        let s = pm_hlg_inverse_oetf(signal);
+        let ys = dot(vec3<f32>(0.2627, 0.6780, 0.0593), s);
+        light = s * select(0.0, pow(ys, 0.2), ys > 0.0) * ({peak} / {white});
+    }} else {{
+        light = pm_pq_eotf(signal) / {white};
+    }}
+    let c = to_2020 * light;
+    let g = exp2(pm_rwtmo_gain(max(max(c.r, c.g), c.b)));
+    return PM_RWTMO_TO_709 * (c * g);
+}}
+"#,
+            peak = f(PEAK),
+            white = f(SDR_WHITE),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rwtmo_keeps_todays_curve_anchors() {
+        let p = rwtmo::points();
+        // SDR white maps to half of SDR white; the 1000 cd/m² peak to SDR
+        // white; every interval is increasing in output light.
+        assert_eq!(p[0][0], 1.0);
+        assert!((p[0][1] + 1.0).abs() < 1e-12);
+        assert!((p[7][0] - 1000.0 / 203.0).abs() < 1e-12);
+        assert!((p[7][0] * p[7][1].exp2() - 1.0).abs() < 1e-12);
+        let mut last = 0.0;
+        for i in 1..=1000 {
+            let m = i as f64 * 0.006;
+            let out = m * rwtmo::gain(m).exp2();
+            assert!(out >= last - 1e-12 && out <= 1.0 + 1e-12, "{m}");
+            last = out;
+        }
+    }
+
+    #[test]
+    fn rwtmo_reference_white_and_gamut() {
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        // 203 cd/m² PQ grey is SDR white before the curve, half after it.
+        let grey = pq_inverse_eotf(203.0);
+        for c in rwtmo::to_sdr(HdrSignal::Pq, [grey; 3], &identity) {
+            assert!((c - 0.5).abs() < 1e-9, "{c}");
+        }
+        // HLG 75% grey is 203 cd/m² on its 1000 cd/m² display.
+        for c in rwtmo::to_sdr(HdrSignal::Hlg, [0.75; 3], &identity) {
+            assert!((c - 0.5).abs() < 3e-3, "{c}");
+        }
+        // Saturated BT.2020 green stays out of the Rec.709 gamut.
+        let g = rwtmo::to_sdr(HdrSignal::Pq, [0.0, grey, 0.0], &identity);
+        assert!(g[0] < 0.0 && g[2] < 0.0 && g[1] > 0.0, "{g:?}");
+    }
 
     #[test]
     fn pq_round_trips_and_hits_its_anchors() {

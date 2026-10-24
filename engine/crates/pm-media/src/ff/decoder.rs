@@ -175,7 +175,6 @@ impl PlanarLayout {
 
 struct Opaque {
     pool: FramePool,
-    chromium_h264_padding: bool,
 }
 
 unsafe extern "C" fn get_buffer2(
@@ -199,11 +198,6 @@ unsafe extern "C" fn get_buffer2(
             return ff::averror(libc::ENOMEM);
         };
         let base = slot.ptr();
-        if op.chromium_h264_padding {
-            // Chromium's software H.264 buffer starts cleared. Reused pool
-            // slots must have the same untouched macroblock-edge pixels.
-            ptr::write_bytes(base, 0, slot.len());
-        }
         let n = layout.planes.len();
         for p in 0..n {
             let start = layout.planes[p].offset;
@@ -270,57 +264,6 @@ impl Drop for FfFrame {
     }
 }
 
-/// Verify the exact stride-wide rows Chromium exposes are backed by one of
-/// this AVFrame's live buffers. Checking visible pixels alone would permit
-/// reading into another plane (or beyond libvpx's allocation).
-fn validate_owned_plane(
-    f: *mut ff::AVFrame,
-    plane: usize,
-    row: usize,
-    height: usize,
-) -> Result<()> {
-    unsafe {
-        if height == 0 || (*f).data[plane].is_null() {
-            return Err(MediaError::decode("missing VP9 plane"));
-        }
-        let start = (*f).data[plane] as usize;
-        let end = start
-            .checked_add(
-                (height - 1)
-                    .checked_mul(row)
-                    .ok_or_else(|| MediaError::decode("VP9 plane extent overflow"))?,
-            )
-            .and_then(|end| end.checked_add(row))
-            .ok_or_else(|| MediaError::decode("VP9 plane extent overflow"))?;
-        let mut owned = false;
-        let mut check = |buffer: *mut ff::AVBufferRef| {
-            if !buffer.is_null() && !(*buffer).data.is_null() {
-                let base = (*buffer).data as usize;
-                owned |= base <= start
-                    && base
-                        .checked_add((*buffer).size)
-                        .is_some_and(|limit| end <= limit);
-            }
-        };
-        for &buffer in &(*f).buf {
-            check(buffer);
-        }
-        if (*f).nb_extended_buf > 0 && !(*f).extended_buf.is_null() {
-            for &buffer in
-                std::slice::from_raw_parts((*f).extended_buf, (*f).nb_extended_buf as usize)
-            {
-                check(buffer);
-            }
-        }
-        if !owned {
-            return Err(MediaError::decode(
-                "Chromium VP9 coded plane exceeds owned AVBuffer",
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// FFmpeg decoders that advertise DR1 but copy from the library's own frame
 /// into the `get_buffer2` frame (FFmpeg's VP8 libvpx wrapper calls
 /// `ff_get_buffer` then `av_image_copy2`; libvpx's VP8 decoder has no
@@ -342,8 +285,6 @@ pub struct FfDecoder {
     name: String,
     dr1: bool,
     internal_copy: bool,
-    chromium_h264_padding: bool,
-    chromium_vp9_stride: bool,
     draining: bool,
     /// Frames copied into the pool (decoders without direct rendering, or
     /// formats converted for the importer).
@@ -395,10 +336,7 @@ impl FfDecoder {
             }
             (*ctx).pkt_timebase = (*input.st(stream)).time_base;
             (*ctx).thread_count = threads;
-            let op = Box::into_raw(Box::new(Opaque {
-                pool: pool.clone(),
-                chromium_h264_padding: false,
-            }));
+            let op = Box::into_raw(Box::new(Opaque { pool: pool.clone() }));
             (*ctx).opaque = op as *mut c_void;
             (*ctx).get_format = Some(get_format);
             (*ctx).get_buffer2 = Some(get_buffer2);
@@ -421,8 +359,6 @@ impl FfDecoder {
                 name,
                 dr1,
                 internal_copy,
-                chromium_h264_padding: false,
-                chromium_vp9_stride: false,
                 draining: false,
                 copies: 0,
                 corrupt: 0,
@@ -438,36 +374,6 @@ impl FfDecoder {
     /// The decoder writes its output into pool frames itself.
     pub fn direct(&self) -> bool {
         self.dr1
-    }
-
-    /// Chromium's full-range 8-bit H.264 software decoder exposes its
-    /// cleared, aligned coded YUV planes while retaining visible geometry.
-    /// The option is set before the first packet and never affects native
-    /// decoding or other codecs.
-    pub fn with_chromium_h264_padding(mut self) -> Result<Self> {
-        if self.name != "h264" || !self.dr1 {
-            return Err(MediaError::unsupported(
-                "Chromium H.264 coded padding requires FFmpeg's direct h264 decoder",
-            ));
-        }
-        self.chromium_h264_padding = true;
-        unsafe {
-            (*(self.ctx.as_ref().unwrap().opaque as *mut Opaque)).chromium_h264_padding = true;
-        }
-        Ok(self)
-    }
-
-    /// Preserve libvpx's real stride-wide 8-bit VP9 color and optional alpha
-    /// rows. Chromium wraps those rows at their coded widths before cropping
-    /// to the visible picture. This option never applies to native reading.
-    pub fn with_chromium_vp9_stride(mut self) -> Result<Self> {
-        if self.name != "libvpx-vp9" {
-            return Err(MediaError::unsupported(
-                "Chromium VP9 coded width requires libvpx-vp9",
-            ));
-        }
-        self.chromium_vp9_stride = true;
-        Ok(self)
     }
 
     /// Sends one packet (`None` drains) and appends every frame now available.
@@ -570,92 +476,11 @@ impl FfDecoder {
             let label = cstr(ff::av_get_pix_fmt_name(fmt)).unwrap_or_default();
             let full = (*f).color_range == ff::AVCOL_RANGE_JPEG || label.starts_with("yuvj");
             let range = if full { Range::Full } else { Range::Limited };
-            if let Some(mut layout) = PlanarLayout::for_format(fmt, (*f).width, (*f).height) {
-                if self.chromium_vp9_stride {
-                    if layout.rgb
-                        || layout.depth != 8
-                        || layout.log2_chroma_w != 1
-                        || layout.log2_chroma_h != 1
-                        || layout.planes.len() != if layout.alpha { 4 } else { 3 }
-                    {
-                        return Err(MediaError::unsupported(
-                            "Chromium VP9 coded width requires planar 8-bit 4:2:0",
-                        ));
-                    }
-                    for (p, plane) in layout.planes.iter_mut().enumerate() {
-                        let row = usize::try_from((*f).linesize[p])
-                            .map_err(|_| MediaError::decode("negative VP9 plane stride"))?;
-                        if row < plane.width || row == 0 {
-                            return Err(MediaError::decode(
-                                "VP9 coded row smaller than visible row",
-                            ));
-                        }
-                        validate_owned_plane(f, p, row, plane.height)?;
-                        plane.width = row;
-                    }
-                }
-                if self.chromium_h264_padding {
-                    if layout.rgb
-                        || layout.depth != 8
-                        || layout.log2_chroma_w != 1
-                        || layout.log2_chroma_h != 1
-                    {
-                        return Err(MediaError::unsupported(
-                            "Chromium H.264 coded padding requires planar 8-bit 4:2:0",
-                        ));
-                    }
-                    let (mut coded_w, mut coded_h) = ((*f).width, (*f).height);
-                    let mut align = [0 as c_int; 8];
-                    ff::avcodec_align_dimensions2(
-                        self.ctx,
-                        &mut coded_w,
-                        &mut coded_h,
-                        align.as_mut_ptr(),
-                    );
-                    for plane in &mut layout.planes {
-                        plane.width = ceil_rshift(coded_w as usize, plane.log2_w);
-                        plane.height = ceil_rshift(coded_h as usize, plane.log2_h);
-                    }
-                }
+            if let Some(layout) = PlanarLayout::for_format(fmt, (*f).width, (*f).height) {
                 let slots: Option<Vec<SlotRef>> = (0..layout.planes.len())
                     .map(|p| self.pool.find_containing((*f).data[p]))
                     .collect();
                 if let Some(slots) = slots {
-                    if self.chromium_vp9_stride {
-                        return Err(MediaError::unsupported(
-                            "Chromium VP9 requires libvpx-owned stride-wide planes",
-                        ));
-                    }
-                    if self.chromium_h264_padding {
-                        for (p, slot) in slots.iter().enumerate() {
-                            let offset = (*f).data[p].offset_from(slot.ptr()) as usize;
-                            let stride = (*f).linesize[p] as usize;
-                            let plane = &layout.planes[p];
-                            let end = offset
-                                .checked_add(
-                                    (plane.height - 1).checked_mul(stride).ok_or_else(|| {
-                                        MediaError::invalid("coded plane overflow")
-                                    })?,
-                                )
-                                .and_then(|n| {
-                                    plane
-                                        .width
-                                        .checked_mul(plane.bytes_per_sample)
-                                        .and_then(|width| n.checked_add(width))
-                                })
-                                .ok_or_else(|| MediaError::invalid("coded plane overflow"))?;
-                            let next = if p + 1 < slots.len() && slots[p + 1].ptr() == slot.ptr() {
-                                (*f).data[p + 1].offset_from(slot.ptr()) as usize
-                            } else {
-                                slot.len()
-                            };
-                            if end > next || next > slot.len() {
-                                return Err(MediaError::decode(
-                                    "Chromium H.264 coded plane exceeds pool slot",
-                                ));
-                            }
-                        }
-                    }
                     // Rendered into our slots by the decoder (or copied there by
                     // a wrapper that advertises DR1 but copies internally).
                     if self.internal_copy {
@@ -673,16 +498,7 @@ impl FfDecoder {
                         .collect();
                     return Ok(DecodedFrame {
                         pts,
-                        format: Arc::new(layout.pixel_format(
-                            w,
-                            h,
-                            range,
-                            if self.chromium_h264_padding {
-                                "Chromium I420 coded".into()
-                            } else {
-                                label
-                            },
-                        )),
+                        format: Arc::new(layout.pixel_format(w, h, range, label)),
                         pixels: Pixels::Pool(Arc::new(PoolFrame {
                             planes,
                             owner: Some(Box::new(owner)),
@@ -691,30 +507,12 @@ impl FfDecoder {
                         color: None,
                     });
                 }
-                if self.chromium_h264_padding {
-                    return Err(MediaError::unsupported(
-                        "Chromium H.264 coded padding needs direct pool planes",
-                    ));
-                }
                 // The decoder used its own memory: one copy of the planes.
                 let mut l = layout.clone();
-                let coded_w = if self.chromium_vp9_stride {
-                    layout
-                        .planes
-                        .iter()
-                        .map(|p| p.width.saturating_mul(1usize << p.log2_w))
-                        .max()
-                        .unwrap_or(w)
-                } else {
-                    w
-                };
-                l.pad_to(coded_w, h, &[0; 8]);
+                l.pad_to(w, h, &[0; 8]);
                 let slot = self.pool.acquire(l.total)?;
                 for (p, pl) in l.planes.iter().enumerate() {
                     let row = pl.width * pl.bytes_per_sample;
-                    if row > pl.stride {
-                        return Err(MediaError::decode("coded VP9 row exceeds pool stride"));
-                    }
                     for y in 0..pl.height {
                         ptr::copy_nonoverlapping(
                             (*f).data[p].offset(y as isize * (*f).linesize[p] as isize),
@@ -736,16 +534,7 @@ impl FfDecoder {
                     .collect();
                 return Ok(DecodedFrame {
                     pts,
-                    format: Arc::new(l.pixel_format(
-                        w,
-                        h,
-                        range,
-                        if self.chromium_vp9_stride {
-                            "Chromium VP9 stride coded".into()
-                        } else {
-                            label
-                        },
-                    )),
+                    format: Arc::new(l.pixel_format(w, h, range, label)),
                     pixels: Pixels::Pool(Arc::new(PoolFrame {
                         planes,
                         owner: None,

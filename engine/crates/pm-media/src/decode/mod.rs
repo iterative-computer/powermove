@@ -19,7 +19,6 @@ pub mod scrub;
 pub mod service;
 pub mod session;
 pub mod skip;
-pub mod startup;
 
 use crate::dav1d::Dav1dDecoder;
 use crate::error::{MediaError, Result};
@@ -32,19 +31,6 @@ use crate::pool::FramePool;
 use crate::vt::{DecodePurpose, VtConfig, VtDecoder};
 use arbiter::{HardwareArbiter, HwCodec, HwPermit};
 use serde::Serialize;
-
-/// Which decoder output the caller needs. Chromium's VideoToolbox session
-/// requests video-range biplanar HEVC surfaces even for full-range streams.
-/// Its full-range H.264 software decoder exposes cleared, aligned coded
-/// planes before the visible crop. Native decoding keeps its usual backend
-/// selection, stream range and visible plane geometry.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum DecodeReading {
-    #[default]
-    Native,
-    Chromium,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,10 +214,10 @@ pub fn backends(info: &CodecInfo, idx: &FrameIndex) -> Vec<Backend> {
         }
         "h264" | "hevc" => vec![Backend::VideoToolbox, Backend::Ffmpeg],
         "av1" => {
-            let hardware = unsafe {
+            if unsafe {
                 crate::apple::cf::VTIsHardwareDecodeSupported(crate::apple::cf::fcc(b"av01"))
-            } != 0;
-            if hardware {
+            } != 0
+            {
                 vec![Backend::VideoToolbox, Backend::Dav1d]
             } else {
                 vec![Backend::Dav1d]
@@ -240,23 +226,6 @@ pub fn backends(info: &CodecInfo, idx: &FrameIndex) -> Vec<Backend> {
         "vp8" | "vp9" if info.alpha_mode => vec![Backend::FfmpegAlphaPair],
         _ => vec![Backend::Ffmpeg],
     }
-}
-
-fn tiny_chromium_av1(info: &CodecInfo) -> bool {
-    // On captured 256×144 and source-derived 320×180 Main 8-bit clips,
-    // dav1d and VideoToolbox gave bit-identical visible Y/Cb/Cr on all 18
-    // measured frames, and dav1d decoded the first frame sooner. At 640×360
-    // and HD, hardware was faster. Native/Level 2 reading stays VT-first.
-    info.codec == "av1"
-        && info.profile == 0
-        && info.bit_depth == 8
-        && matches!(info.pix_fmt.as_str(), "yuv420p" | "yuvj420p")
-        && (info.log2_chroma_w, info.log2_chroma_h) == (1, 1)
-        && !info.alpha_mode
-        && !info.pix_fmt_alpha
-        && info.width > 0
-        && info.height > 0
-        && i64::from(info.width) * i64::from(info.height) <= 64 * 1024
 }
 
 /// Everything needed to open decoders for one stream.
@@ -279,58 +248,7 @@ pub fn open(
     threads: i32,
     prefer: Option<Backend>,
 ) -> Result<(Decoder, Vec<String>)> {
-    open_with_reading(
-        spec,
-        purpose,
-        pool,
-        arbiter,
-        threads,
-        prefer,
-        DecodeReading::Native,
-    )
-}
-
-/// Opens a decoder for the requested compatibility reading. The usual
-/// [`open`] remains native by default.
-#[allow(clippy::too_many_arguments)]
-pub fn open_with_reading(
-    spec: &StreamSpec<'_>,
-    purpose: DecodePurpose,
-    pool: &FramePool,
-    arbiter: &dyn HardwareArbiter,
-    threads: i32,
-    prefer: Option<Backend>,
-    reading: DecodeReading,
-) -> Result<(Decoder, Vec<String>)> {
-    let chromium_h264_full = reading == DecodeReading::Chromium
-        && spec.info.codec == "h264"
-        && spec.info.bit_depth == 8
-        && spec.info.full_range
-        && (spec.info.log2_chroma_w, spec.info.log2_chroma_h) == (1, 1);
-    // For the measured SDR H.264 compatibility class through HD, a
-    // direct software decoder avoids a multi-millisecond hardware-session
-    // startup. Native/high-depth readings retain their backend policy.
-    let chromium_h264_software = reading == DecodeReading::Chromium
-        && spec.info.codec == "h264"
-        && spec.info.bit_depth == 8
-        && (spec.info.log2_chroma_w, spec.info.log2_chroma_h) == (1, 1)
-        && (chromium_h264_full || (spec.info.width <= 1920 && spec.info.height <= 1080));
-    let chromium_vp9_coded = reading == DecodeReading::Chromium
-        && spec.info.codec == "vp9"
-        && spec.info.bit_depth == 8
-        && (spec.info.full_range || spec.info.alpha_mode || spec.info.pix_fmt_alpha)
-        && (spec.info.log2_chroma_w, spec.info.log2_chroma_h) == (1, 1);
-    let chromium_av1_tiny =
-        reading == DecodeReading::Chromium && tiny_chromium_av1(spec.info);
-    let mut order = if chromium_h264_software || chromium_vp9_coded {
-        vec![Backend::Ffmpeg]
-    } else {
-        backends(spec.info, spec.index)
-    };
-    if chromium_av1_tiny && order.contains(&Backend::Dav1d) {
-        order.retain(|b| *b != Backend::Dav1d);
-        order.insert(0, Backend::Dav1d);
-    }
+    let mut order = backends(spec.info, spec.index);
     if let Some(p) = prefer {
         if !order.contains(&p) {
             return Err(MediaError::unsupported(format!(
@@ -344,28 +262,9 @@ pub fn open_with_reading(
     let mut skipped = Vec::new();
     for b in order {
         let r = match b {
-            Backend::VideoToolbox => open_vt(spec, purpose, reading, arbiter, pool),
-            Backend::Ffmpeg => FfDecoder::new(
-                spec.input,
-                spec.stream,
-                if chromium_vp9_coded {
-                    Some("libvpx-vp9")
-                } else {
-                    None
-                },
-                pool.clone(),
-                threads,
-            )
-            .and_then(|decoder| {
-                if chromium_h264_full {
-                    decoder.with_chromium_h264_padding()
-                } else if chromium_vp9_coded {
-                    decoder.with_chromium_vp9_stride()
-                } else {
-                    Ok(decoder)
-                }
-            })
-            .map(Decoder::Ff),
+            Backend::VideoToolbox => open_vt(spec, purpose, arbiter, pool),
+            Backend::Ffmpeg => FfDecoder::new(spec.input, spec.stream, None, pool.clone(), threads)
+                .map(Decoder::Ff),
             Backend::Dav1d => Dav1dDecoder::new(pool.clone(), threads).map(Decoder::Dav1d),
             Backend::FfmpegAlphaPair => {
                 AlphaPairDecoder::new(spec.input, spec.stream, pool.clone(), threads)
@@ -387,13 +286,10 @@ pub fn open_with_reading(
 fn open_vt(
     spec: &StreamSpec<'_>,
     purpose: DecodePurpose,
-    reading: DecodeReading,
     arbiter: &dyn HardwareArbiter,
     pool: &FramePool,
 ) -> Result<Decoder> {
-    let cfg = startup::timed(startup::Stage::VtConfig, || {
-        VtConfig::new_with_reading(spec.info, spec.index, spec.extradata, purpose, reading)
-    })?;
+    let cfg = VtConfig::new(spec.info, spec.index, spec.extradata, purpose)?;
     let codec = HwCodec::from_fourcc(cfg.codec_fcc);
     let permit = if cfg.hardware_supported {
         arbiter.try_acquire(codec)
@@ -408,58 +304,11 @@ fn open_vt(
             "no hardware {codec:?} session available"
         )));
     }
-    let dec = startup::timed(startup::Stage::VtSession, || {
-        VtDecoder::new(&cfg, spec.index.timebase, permit.is_some())
-    })?;
+    let dec = VtDecoder::new(&cfg, spec.index.timebase, permit.is_some())?;
     Ok(Decoder::Vt {
         dec,
         cfg,
         _permit: permit,
         pool: pool.clone(),
     })
-}
-
-#[cfg(test)]
-mod backend_policy_tests {
-    use super::*;
-    use crate::decode::service::{DecodeService, MediaSource, ServiceConfig};
-
-    #[test]
-    fn tiny_chromium_av1_uses_dav1d_while_native_and_high_depth_keep_hardware_first() {
-        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../pm-render/tests/fixtures/video-parity/av1-709-limited.mp4");
-        let source = MediaSource::open(&fixture).unwrap();
-        assert!(tiny_chromium_av1(&source.info));
-        let native_order = backends(&source.info, &source.index);
-        if native_order.contains(&Backend::VideoToolbox) {
-            assert_eq!(native_order[0], Backend::VideoToolbox);
-        }
-        let service = DecodeService::new(ServiceConfig::default());
-        let chromium = service
-            .session_with_reading(&source, 1, DecodePurpose::Export, DecodeReading::Chromium)
-            .unwrap();
-        assert_eq!(chromium.info().backend, Backend::Dav1d);
-        drop(chromium);
-        let native = service
-            .session_with_reading(&source, 1, DecodePurpose::Export, DecodeReading::Native)
-            .unwrap();
-        assert_eq!(native.info().backend, native_order[0]);
-        let mut larger = source.info.clone();
-        larger.width = 640;
-        larger.height = 360;
-        assert!(!tiny_chromium_av1(&larger));
-        let larger_order = backends(&larger, &source.index);
-        if larger_order.contains(&Backend::VideoToolbox) {
-            assert_eq!(larger_order[0], Backend::VideoToolbox);
-        }
-
-        let ten_bit = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../pm-render/tests/fixtures/video-parity-round3/av1-10bit-709-limited-r3.mp4");
-        let source = MediaSource::open(&ten_bit).unwrap();
-        assert!(!tiny_chromium_av1(&source.info));
-        let high_depth_order = backends(&source.info, &source.index);
-        if high_depth_order.contains(&Backend::VideoToolbox) {
-            assert_eq!(high_depth_order[0], Backend::VideoToolbox);
-        }
-    }
 }

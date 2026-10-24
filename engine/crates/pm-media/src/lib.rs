@@ -18,7 +18,6 @@
 pub mod apple;
 pub mod audio;
 pub mod cache;
-pub mod compat_video;
 pub mod dav1d;
 pub mod decode;
 pub mod error;

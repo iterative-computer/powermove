@@ -1,0 +1,166 @@
+{
+ "cases": [
+  {
+   "id": "h264-601-limited",
+   "media": "h264-601-limited.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "h264-601-limited.paused.rgba.zlib",
+   "playing": "h264-601-limited.paused.rgba.zlib"
+  },
+  {
+   "id": "h264-709-limited",
+   "media": "h264-709-limited.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "h264-709-limited.paused.rgba.zlib",
+   "playing": "h264-709-limited.paused.rgba.zlib"
+  },
+  {
+   "id": "h264-709-matrix-only",
+   "media": "h264-709-matrix-only.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "h264-709-matrix-only.paused.rgba.zlib",
+   "playing": "h264-709-matrix-only.paused.rgba.zlib"
+  },
+  {
+   "id": "h264-2020-limited",
+   "media": "h264-2020-limited.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "h264-2020-limited.paused.rgba.zlib",
+   "playing": "h264-2020-limited.playing.rgba.zlib"
+  },
+  {
+   "id": "hevc10-709-limited",
+   "media": "hevc10-709-limited.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "hevc10-709-limited.paused.rgba.zlib",
+   "playing": "hevc10-709-limited.paused.rgba.zlib"
+  },
+  {
+   "id": "vp9-untagged",
+   "media": "vp9-untagged.webm",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "vp9-untagged.paused.rgba.zlib",
+   "playing": "vp9-untagged.paused.rgba.zlib"
+  },
+  {
+   "id": "av1-709-limited",
+   "media": "av1-709-limited.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "av1-709-limited.paused.rgba.zlib",
+   "playing": "av1-709-limited.paused.rgba.zlib"
+  },
+  {
+   "id": "hevc10-709-full",
+   "media": "hevc10-709-full.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "hevc10-709-full.paused.rgba.zlib",
+   "playing": "hevc10-709-full.paused.rgba.zlib"
+  },
+  {
+   "id": "hevc10-2020-limited",
+   "media": "hevc10-2020-limited.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "hevc10-2020-limited.paused.rgba.zlib",
+   "playing": "hevc10-2020-limited.playing.rgba.zlib"
+  },
+  {
+   "id": "h264-709-full-258x146",
+   "media": "h264-709-full-258x146.mp4",
+   "time": 0.625,
+   "width": 258,
+   "height": 146,
+   "paused": "h264-709-full-258x146.paused.rgba.zlib",
+   "playing": "h264-709-full-258x146.playing.rgba.zlib"
+  },
+  {
+   "id": "vp9-601-limited",
+   "media": "vp9-601-limited.webm",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "vp9-601-limited.paused.rgba.zlib",
+   "playing": "vp9-601-limited.paused.rgba.zlib"
+  },
+  {
+   "id": "vp9-10bit-709-limited",
+   "media": "vp9-10bit-709-limited.webm",
+   "time": 0.625,
+   "width": 256,
+   "height": 160,
+   "paused": "vp9-10bit-709-limited.paused.rgba.zlib",
+   "playing": "vp9-10bit-709-limited.paused.rgba.zlib"
+  },
+  {
+   "id": "vp9-alpha-709",
+   "media": "vp9-alpha-709.webm",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "vp9-alpha-709.paused.rgba.zlib",
+   "playing": "vp9-alpha-709.playing.rgba.zlib"
+  },
+  {
+   "id": "hevc-alpha-untagged",
+   "media": "hevc-alpha-untagged.mov",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "hevc-alpha-untagged.paused.rgba.zlib",
+   "playing": "hevc-alpha-untagged.paused.rgba.zlib"
+  },
+  {
+   "id": "hevc10-2020-pq",
+   "media": "hevc10-2020-pq.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 144,
+   "paused": "hevc10-2020-pq.paused.rgba.zlib",
+   "playing": "hevc10-2020-pq.playing.rgba.zlib"
+  },
+  {
+   "id": "av1-10bit-2020-hlg",
+   "media": "av1-10bit-2020-hlg.mp4",
+   "time": 0.625,
+   "width": 272,
+   "height": 144,
+   "paused": "av1-10bit-2020-hlg.paused.rgba.zlib",
+   "playing": "av1-10bit-2020-hlg.playing.rgba.zlib"
+  },
+  {
+   "id": "hevc10-p3-pq",
+   "media": "hevc10-p3-pq.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 160,
+   "paused": "hevc10-p3-pq.paused.rgba.zlib",
+   "playing": "hevc10-p3-pq.playing.rgba.zlib"
+  },
+  {
+   "id": "hevc10-p3-sdr",
+   "media": "hevc10-p3-sdr.mp4",
+   "time": 0.625,
+   "width": 256,
+   "height": 160,
+   "paused": "hevc10-p3-sdr.paused.rgba.zlib",
+   "playing": "hevc10-p3-sdr.playing.rgba.zlib"
+  }
+ ]
+}

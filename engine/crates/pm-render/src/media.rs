@@ -37,12 +37,8 @@ use crate::footage::{Geometry, Orient, Pick, Timing};
 use crate::pipelines::{Pipelines, SourceUniform, bytes_of};
 pub use crate::stills::StillReader;
 
-#[path = "media/hdr_compat.rs"]
-mod hdr_compat;
 #[path = "media/prewarm.rs"]
 mod prewarm;
-#[path = "media/video_compat.rs"]
-mod video_compat;
 
 /// Why a media file cannot be drawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +57,19 @@ pub struct SourceColor {
     pub alpha: AlphaMode,
     /// HDR input tone mapping (PQ and HLG sources in Standard, section 9).
     pub tone_map: Option<ToneMap>,
+    /// The curve `tone_map` uses.
+    pub curve: HdrCurve,
+}
+
+/// How an HDR source maps to SDR (section 9; owner decision HDR-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HdrCurve {
+    /// BT.2446 Method A: interpreted HDR and level 2 layers.
+    #[default]
+    Bt2446a,
+    /// Today's default look ([`pm_color::tonemap::rwtmo`]), for level 1
+    /// layers of HDR footage without HDR metadata.
+    Rwtmo,
 }
 
 pub(crate) fn stamp(path: &Path) -> Option<(u64, u128)> {
@@ -197,6 +206,7 @@ pub fn image_color(still: &pm_media::image::StillImage) -> Result<SourceColor, P
         siting: ChromaSiting::Center,
         alpha: c.alpha,
         tone_map: None,
+        curve: HdrCurve::Bt2446a,
     })
 }
 
@@ -314,6 +324,7 @@ fn interpreted_color(
                     _ => AlphaMode::Premultiplied,
                 },
                 tone_map: None,
+                curve: HdrCurve::Bt2446a,
             },
             colorsync: Some(r.alpha.value),
         });
@@ -342,6 +353,7 @@ fn interpreted_color(
             siting: ChromaSiting::Center,
             alpha: r.alpha.value,
             tone_map: r.tone_map,
+            curve: HdrCurve::Bt2446a,
         },
         colorsync: None,
     })
@@ -542,24 +554,22 @@ pub fn sequence_rendition(path: &Path) -> Result<bool, String> {
 
 /// Whether a video file is drawn without routing: it opens and indexes,
 /// the renderer can draw it ([`video_drawable`]), and it shows nothing
-/// whose look the renderer has not matched with today's viewer (section 25:
-/// a feature leaves `pm_render::unsupported` only with a parity test).
-/// Rec.709, BT.601 and the measured BT.2020 H.264 upload are matched;
-/// these other readings are drawn only when the
-/// asset carries Interpret Footage overrides, which only this engine reads:
+/// whose reading has not been checked against today's viewer (section 25).
+/// SDR footage in Rec.709, BT.601, BT.2020 and Display P3 primaries, and
+/// HDR footage of today's default look ([`todays_hdr_look`]), are drawn by
+/// the one video path (docs/engine/video-parity.md). These are drawn only
+/// when the asset carries Interpret Footage overrides, which only this
+/// engine reads:
 ///
-/// - HDR outside the captured default AV1/HEVC PQ/HLG/P3 classes (including
-///   metadata-driven gain curves); native Interpret uses BT.2446 Method A;
+/// - HDR with metadata-driven gain curves; native Interpret uses BT.2446
+///   Method A;
 /// - interlaced sources (bwdif, equal to FFmpeg's; today's viewer shows the
 ///   woven frame);
 /// - display rotations, non-square pixels, and a cropping clean aperture
-///   (exact, but not compared with today's viewer);
-/// - other wide-gamut SDR footage. The measured BT.2020 H.264 class clips
-///   and quantizes at today's upload boundary before Canvas gamut conversion.
+///   (exact, but not compared with today's viewer).
 ///
-/// Answers are kept per file, size, and modification time: capability
-/// routing asks at every document revision, and opening a source indexes
-/// it.
+/// Answers are kept per file stamp: capability routing asks at every
+/// document revision, and opening a source indexes it.
 pub fn probe_video(path: &Path) -> Result<(), String> {
     probe_video_issue(path).map_err(|issue| match issue {
         ProbeIssue::Unreadable(message) => message,
@@ -589,7 +599,8 @@ pub fn probe_interpreted_video(path: &Path, interp: &Interpretation) -> Result<(
     })
 }
 
-/// Typed interpreted probe. Facts are kept per source stamp, independently
+/// Typed interpreted probe. Facts are kept per file stamp (path, size,
+/// modification and change time, inode), independently
 /// of changing interpretation overrides.
 pub fn probe_interpreted_video_issue(
     path: &Path,
@@ -607,32 +618,26 @@ pub fn probe_interpreted_video_issue(
         .map_err(|m| ProbeIssue::Unsupported(Feature::Media(m)))
 }
 
-/// Measured Chromium default Canvas tone-map class. Metadata-driven gain
-/// curves and Dolby Vision retain their explicit parity gate.
-fn chromium_hdr_signal(video: &VideoProbe) -> Option<hdr_compat::Signal> {
-    if !matches!(video.codec.codec.as_str(), "av1" | "hevc")
-        || video.codec.bit_depth != 10
-        || (video.codec.log2_chroma_w, video.codec.log2_chroma_h) != (1, 1)
-        || video.codec.full_range
-        || video.codec.alpha_mode
-        || video.codec.pix_fmt_alpha
-        || video.color.mastering.is_some()
-        || video.color.content_light.is_some()
-        || matches!(video.color.hdr, Some(HdrFormat::DolbyVision { .. }))
-        || !matches!(
-            video.color.interpreted.primaries,
-            Primaries::Bt2020 | Primaries::DisplayP3
-        )
-    {
-        return None;
-    }
-    match video.color.interpreted.transfer {
-        Transfer::Pq => Some(hdr_compat::Signal::Pq),
-        Transfer::Hlg if video.color.interpreted.primaries == Primaries::Bt2020 => {
-            Some(hdr_compat::Signal::Hlg)
+/// The HDR footage today's viewer shows with its default curve (no
+/// metadata-driven gain): the class the level 1 RWTMO reading reproduces.
+fn todays_hdr_look(video: &VideoProbe) -> bool {
+    matches!(video.codec.codec.as_str(), "av1" | "hevc")
+        && video.codec.bit_depth == 10
+        && (video.codec.log2_chroma_w, video.codec.log2_chroma_h) == (1, 1)
+        && !video.codec.full_range
+        && !video.codec.alpha_mode
+        && !video.codec.pix_fmt_alpha
+        && video.color.mastering.is_none()
+        && video.color.content_light.is_none()
+        && !matches!(video.color.hdr, Some(HdrFormat::DolbyVision { .. }))
+        && match video.color.interpreted.transfer {
+            Transfer::Pq => matches!(
+                video.color.interpreted.primaries,
+                Primaries::Bt2020 | Primaries::DisplayP3
+            ),
+            Transfer::Hlg => video.color.interpreted.primaries == Primaries::Bt2020,
+            _ => false,
         }
-        _ => None,
-    }
 }
 
 fn video_supported(src: &MediaSource) -> Result<(), String> {
@@ -672,19 +677,21 @@ fn video_supported(src: &MediaSource) -> Result<(), String> {
         ));
     }
     let c = &src.color;
-    if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) && chromium_hdr_signal(v).is_none() {
+    if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) && !todays_hdr_look(v) {
         return Err(format!(
-            "HDR video (Chromium tone-map parity remains unresolved; {WHEN})"
+            "HDR video with metadata-driven tone mapping ({WHEN})"
         ));
     }
-    // Rec.709 is the identity; BT.601 primaries read as Rec.709 in Standard
-    // (`standard_video_primaries`).
+    // BT.601 primaries read as Rec.709 (`standard_video_primaries`); BT.2020 and
+    // Display P3 convert in linear light.
     if !matches!(
         c.primaries,
-        Primaries::Bt709 | Primaries::Bt601_525 | Primaries::Bt601_625
-    ) && !video_compat::sdr_gamut_upload(v)
-        && chromium_hdr_signal(v).is_none()
-    {
+        Primaries::Bt709
+            | Primaries::Bt601_525
+            | Primaries::Bt601_625
+            | Primaries::Bt2020
+            | Primaries::DisplayP3
+    ) {
         return Err(format!(
             "{:?} primaries (wide-gamut footage is {WHEN})",
             c.primaries
@@ -725,20 +732,6 @@ fn video_probe_drawable(video: Option<&VideoProbe>, interp: &Interpretation) -> 
     Ok(())
 }
 
-/// The primaries a video source is read with in Standard. BT.601 525- and
-/// 625-line primaries (section 9's reading of untagged SD, and SD tags)
-/// pass through as Rec.709: Standard keeps today's look of footage exactly
-/// (section 9, "The rule"), and today's viewer (Chromium) does not convert
-/// them (measured on the e2e fixtures: a BT.601 red decodes to code 254, 0,
-/// 0 there; converting SMPTE C primaries in linear light would show 248, 36,
-/// 0). Converting them is an Interpret option for later phases.
-pub fn standard_video_primaries(p: Primaries) -> Primaries {
-    match p {
-        Primaries::Bt601_525 | Primaries::Bt601_625 | Primaries::Unspecified => Primaries::Bt709,
-        other => other,
-    }
-}
-
 /// Whether Interpret Footage overrides how a video's code values become
 /// colour: primaries, transfer, matrix, range or chroma siting. Frame rate,
 /// field order, pixel aspect and clean aperture only choose or place frames,
@@ -752,11 +745,84 @@ fn interprets_video_color(i: &Interpretation) -> bool {
         || i.siting.is_some()
 }
 
-/// Whether the overrides change the video's colour description (its
-/// colour members or its alpha reading). Without them the frame's own tags
-/// apply, exactly as for an uninterpreted asset.
-fn interprets_video_reading(i: &Interpretation) -> bool {
-    interprets_video_color(i) || i.alpha.is_some()
+/// The primaries a video is drawn with: BT.601 525- and 625-line
+/// primaries (tagged SD video) read as Rec.709, as today's viewer reads
+/// them. Untagged video reaches here with the shared table's primaries
+/// (`pm_media::probe::color::UNTAGGED_SD_PRIMARIES`, owner decision
+/// VIDEO-SD-1, which covers this mapping too).
+pub fn standard_video_primaries(p: Primaries) -> Primaries {
+    match p {
+        Primaries::Bt601_525 | Primaries::Bt601_625 | Primaries::Unspecified => Primaries::Bt709,
+        other => other,
+    }
+}
+
+/// How a video frame's code values become colour: the probe's reading
+/// ([`pm_media::probe::color::video_reading`], the one table the source
+/// monitor and export share), Interpret Footage's overrides, or the host's per-file
+/// override. Every surface (playback, pause, scrub, thumbnails, export)
+/// reads a frame this way.
+fn video_color(
+    v: &VideoProbe,
+    reading: &pm_media::interpret::VideoReading,
+    interp: &Interpretation,
+    override_color: Option<ColorDescription>,
+    has_alpha: bool,
+    sequence: bool,
+    compat: bool,
+) -> SourceColor {
+    let mut desc = override_color.unwrap_or(reading.color);
+    // raster.ts encodes image sequences as untagged BT.601 VP9, even at HD
+    // sizes. Honor explicit file or Interpret Footage matrices.
+    if sequence
+        && v.color.tagged.matrix.is_none()
+        && interp.matrix.is_none()
+        && override_color.is_none()
+    {
+        desc.matrix = MatrixCoefficients::Bt601;
+    }
+    let hdr = matches!(desc.transfer, Transfer::Pq | Transfer::Hlg);
+    SourceColor {
+        transfer: desc.transfer,
+        primaries: standard_video_primaries(desc.primaries),
+        matrix: desc.matrix,
+        siting: desc.siting,
+        alpha: if has_alpha {
+            match desc.alpha {
+                AlphaMode::Opaque if interp.alpha.is_none() => AlphaMode::Straight,
+                other => other,
+            }
+        } else {
+            AlphaMode::Opaque
+        },
+        tone_map: hdr.then(|| {
+            reading.tone_map.unwrap_or(ToneMap {
+                transfer: desc.transfer,
+                peak_nits: 1000.0,
+            })
+        }),
+        // Level 1 keeps today's look of HDR footage without metadata.
+        curve: if compat
+            && hdr
+            && !interprets_video_color(interp)
+            && override_color.is_none()
+            && todays_hdr_look(v)
+        {
+            HdrCurve::Rwtmo
+        } else {
+            HdrCurve::Bt2446a
+        },
+    }
+}
+
+/// The texture format a converted video frame is stored in: the project's
+/// working format, and never below half float for deeper-than-8-bit or HDR
+/// sources, so 10-bit codes and tone-mapped light are not cut to 8 bits.
+fn video_storage(precision: Precision, bits: u8, hdr: bool) -> wgpu::TextureFormat {
+    match precision {
+        Precision::Unorm8 if bits > 8 || hdr => working_format(Precision::Float16),
+        p => working_format(p),
+    }
 }
 
 /// The source pass parameters for a source.
@@ -771,9 +837,10 @@ fn source_uniform(
     let tone = color
         .tone_map
         .filter(|t| matches!(t.transfer, Transfer::Pq | Transfer::Hlg));
+    let rwtmo = color.curve == HdrCurve::Rwtmo;
     let transfer = match (color.transfer, tone) {
-        (_, Some(t)) if t.transfer == Transfer::Pq => 5,
-        (_, Some(_)) => 6,
+        (_, Some(t)) if t.transfer == Transfer::Pq => 5 + 2 * u32::from(rwtmo),
+        (_, Some(_)) => 6 + 2 * u32::from(rwtmo),
         (Transfer::DisplayE, _) => 0,
         (Transfer::Bt1886, _) => 1,
         (Transfer::SceneReferredBt709, _) => 2,
@@ -781,7 +848,11 @@ fn source_uniform(
         (Transfer::Gamma22, _) => 4,
         (Transfer::Pq | Transfer::Hlg, None) => 0,
     };
-    let primaries = if tone.is_some() {
+    let identity3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let primaries = if tone.is_some() && rwtmo {
+        // RWTMO's gain applies in BT.2020; its result is linear Rec.709.
+        pm_color::primaries::conversion(color.primaries, Primaries::Bt2020).unwrap_or(identity3)
+    } else if tone.is_some() {
         // Method A works in BT.2020; its SDR result converts to Rec.709.
         pm_color::tonemap::bt2020_to_709()
     } else {
@@ -793,7 +864,7 @@ fn source_uniform(
             },
             Primaries::Bt709,
         )
-        .unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        .unwrap_or(identity3)
     };
     let convert_primaries = tone.is_none()
         && color.primaries != Primaries::Bt709
@@ -888,14 +959,11 @@ pub(crate) fn convert(
         factors,
         reuse,
         working_format(precision),
-        false,
-        false,
     )
 }
 
-/// Source storage is independent of the composition's working precision.
-/// Today's opaque level 1 video upload clips and quantizes to RGBA8 before
-/// the layer's bilinear filter; native and interpreted sources keep floats.
+/// The source pass into `format` storage, which may be deeper than the
+/// working precision ([`video_storage`]).
 #[allow(clippy::too_many_arguments)]
 fn convert_format(
     device: &wgpu::Device,
@@ -909,8 +977,6 @@ fn convert_format(
     factors: Factors,
     reuse: Option<Target>,
     format: wgpu::TextureFormat,
-    compatibility_storage: bool,
-    compatibility_p010: bool,
 ) -> Target {
     let (luma, chroma, chroma_info) = match normalized {
         Normalized::Rgb { rgba } => (rgba, None, None),
@@ -934,30 +1000,10 @@ fn convert_format(
             )
         });
     let mut uniform = source_uniform(color, working, precision, chroma_info);
-    if format == wgpu::TextureFormat::Rgba8Unorm {
-        // Store the f32 conversion directly: an intermediate half-float
-        // rounding can change which side of an 8-bit boundary it lands on.
+    if format != working_format(Precision::Float16) {
+        // Only half-float storage rounds through f16; any other format
+        // stores the f32 conversion directly.
         uniform.c[2] = 0;
-        uniform.hdr[3] =
-            u32::from(compatibility_storage && color.primaries == Primaries::Bt2020) as f32;
-        if let Some((factors, _, _)) = chroma_info.filter(|_| compatibility_storage) {
-            // Chromium's Skia video upload treats subsampled chroma as
-            // centered and reconstructs it bilinearly before the RGBA8
-            // store. Keep the native float source's siting/filter policy.
-            uniform.b[2] = u32::from(factors.x > 1);
-            uniform.b[3] = u32::from(factors.y > 1);
-            uniform.origin[0] = (factors.x - 1) as f32 * 0.5;
-            uniform.origin[1] = (factors.y - 1) as f32 * 0.5;
-        }
-        if compatibility_p010 {
-            // Chromium samples MSB-aligned P010 R16Unorm planes with
-            // Skia's 8-bit matrix. Re-express that source upload after
-            // native 10-bit normalization, keeping the decoder untouched.
-            let scale = 65280.0f64 / 65535.0;
-            uniform.origin[2] = scale as f32;
-            uniform.origin[3] = ((128.0 / 224.0) * (scale - 1.0)) as f32;
-            uniform.hdr[2] = ((16.0 / 219.0) * (scale - 1.0)) as f32;
-        }
     }
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("pm source params"),
@@ -1127,9 +1173,6 @@ pub struct MediaCache {
     /// Scrub frames: a video whose exact frame is not decoded yet shows
     /// the nearest decoded frame while it decodes ([`Want::Scrub`]).
     pub scrub: bool,
-    /// Paused/scrub/final frames use today's Canvas video snapshot; live
-    /// playback uploads directly. Both readings partition the frame cache.
-    pub canvas_video: bool,
     /// The frame (presented index in its source) of each video layer drawn
     /// with a stand-in since the list was reset.
     pub stand_ins: Vec<usize>,
@@ -1149,8 +1192,6 @@ pub struct MediaCache {
     interpretations: BTreeMap<PathBuf, ColorDescription>,
     /// bwdif on normalized planes (interlaced sources), made on first use.
     deinterlacer: Option<Deinterlacer>,
-    video_upload: Option<video_compat::Upload>,
-    hdr_canvas: Option<hdr_compat::ToneMap>,
     /// The display geometry pass (clean aperture, rotation), made on first use.
     orient: Option<Orient>,
     /// Bytes of converted textures held (stills and frames).
@@ -1177,10 +1218,9 @@ impl MediaCache {
         MediaCache {
             pool: FramePool::new(64 << 20),
             viewer: ViewerDecode::new(service.clone()),
-            service: service.clone(),
+            service,
             background: None,
             scrub: false,
-            canvas_video: true,
             stand_ins: Vec::new(),
             retired_frames: Vec::new(),
             free_frames: Vec::new(),
@@ -1190,8 +1230,6 @@ impl MediaCache {
             frames: BTreeMap::new(),
             interpretations: BTreeMap::new(),
             deinterlacer: None,
-            video_upload: None,
-            hdr_canvas: None,
             orient: None,
             bytes: 0,
         }
@@ -1413,18 +1451,11 @@ impl MediaCache {
         let Some(Pick { frame: n, second }) = timing.pick(&src, ticks) else {
             return Ok(None);
         };
+        let override_color = self.interpretations.get(path).copied();
         let reading_key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            format!(
-                "{interp:?}{composition:?}{sequence}{compat}{}",
-                self.canvas_video
-            )
-            .hash(&mut h);
-            self.interpretations
-                .get(path)
-                .map(|c| format!("{c:?}"))
-                .hash(&mut h);
+            format!("{interp:?}{composition:?}{sequence}{compat}{override_color:?}").hash(&mut h);
             h.finish()
         };
         let key_of = |frame: usize| FrameKey {
@@ -1444,17 +1475,9 @@ impl MediaCache {
         // Export frames, and deinterlaced frames (the current frame and its
         // neighbors: random access includes neighboring fields), decode on
         // this thread; other display frames come from the scrub workers.
+        // Both decode the same pixels: one decoder policy serves playback,
+        // pause, scrub and export.
         let deinterlaced = timing.deinterlaced();
-        let decode_reading = self.decode_reading(
-            v,
-            interp,
-            path,
-            compat,
-            sequence,
-            deinterlaced,
-            working,
-            reading.color.transfer,
-        );
         let (n, frame, fields) = if export || deinterlaced {
             let purpose = if export {
                 DecodePurpose::Export
@@ -1463,7 +1486,7 @@ impl MediaCache {
             };
             let mut session = self
                 .service
-                .session_with_reading(&src, instance, purpose, decode_reading)
+                .session(&src, instance, purpose)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?;
             if deinterlaced {
                 let f = session
@@ -1480,7 +1503,7 @@ impl MediaCache {
             let want = if self.scrub { Want::Scrub } else { Want::Exact };
             let fetched = self
                 .viewer
-                .fetch_with_reading(&src, instance, n, want, decode_reading)
+                .fetch(&src, instance, n, want)
                 .map_err(|e| MediaFailure::Failed(e.to_string()))?;
             if !fetched.exact {
                 self.stand_ins.push(fetched.shown);
@@ -1494,200 +1517,20 @@ impl MediaCache {
             return Ok(Some(t.clone()));
         }
         pm_perf::bump(pm_perf::Counter::MediaCacheMisses);
-        let frame = if compat
-            && !sequence
-            && working == WorkingEncoding::Standard
-            && v.codec.codec == "vp9"
-            && frame.format.bits == 10
-            && frame.format.layout == pm_media::frame::Layout::Planar
-            && frame.format.alignment == pm_protocol::color::SampleAlignment::Lsb
-            && !frame.format.has_alpha()
-            && !interprets_video_color(interp)
-            && !self.interpretations.contains_key(path)
-            && fields.is_none()
-            && !matches!(reading.color.transfer, Transfer::Pq | Transfer::Hlg)
-        {
-            pm_media::compat_video::aligned_planar_10(&frame, &self.pool)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?
-        } else {
-            frame
-        };
-        let full_range_bitmap = compat
-            && self.canvas_video
-            && !sequence
-            && working == WorkingEncoding::Standard
-            && matches!(v.codec.codec.as_str(), "h264" | "vp9")
-            && matches!(
-                video_compat::color(v, reading.color).matrix,
-                MatrixCoefficients::Bt601
-                    | MatrixCoefficients::Bt709
-                    | MatrixCoefficients::Bt2020Ncl
-            )
-            && !matches!(reading.color.transfer, Transfer::Pq | Transfer::Hlg)
-            && frame.format.bits == 8
-            && frame.format.range == pm_protocol::color::Range::Full
-            && !frame.format.has_alpha()
-            && !interprets_video_color(interp)
-            && fields.is_none()
-            && !self.interpretations.contains_key(path);
-        let alpha_bitmap = compat
-            && (self.canvas_video || v.codec.codec != "vp9")
-            && !sequence
-            && working == WorkingEncoding::Standard
-            && frame.format.has_alpha()
-            && !interprets_video_reading(interp)
-            && !self.interpretations.contains_key(path)
-            && fields.is_none()
-            && !matches!(reading.color.transfer, Transfer::Pq | Transfer::Hlg);
-        let bitmap = if full_range_bitmap {
-            Some(
-                pm_media::compat_video::full_range_bitmap(
-                    &frame,
-                    &self.pool,
-                    video_compat::color(v, reading.color).matrix,
-                )
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?,
-            )
-        } else if alpha_bitmap {
-            pm_media::compat_video::alpha_bitmap(
-                &frame,
-                &self.pool,
-                video_compat::color(v, reading.color).matrix,
-            )
-            .map_err(|e| MediaFailure::Failed(e.to_string()))?
-        } else if sequence
-            && compat
-            && !interprets_video_reading(interp)
-            && fields.is_none()
-            && !self.interpretations.contains_key(path)
-            && v.color.tagged.matrix.is_none()
-        {
-            pm_media::image::compat::video_bitmap(&frame, &self.pool)
-                .map_err(|e| MediaFailure::Failed(e.to_string()))?
-        } else {
-            None
-        };
-        let source_bitmap = bitmap.is_some();
-        let frame = bitmap.unwrap_or(frame);
+        let color = video_color(
+            v,
+            &reading,
+            interp,
+            override_color,
+            frame.format.has_alpha(),
+            sequence,
+            compat,
+        );
         if self.deinterlacer.is_none() && fields.is_some() {
             self.deinterlacer = Some(Deinterlacer::new(device));
         }
-        let imported = self
-            .importer()?
-            .import(&frame)
-            .map_err(|e| MediaFailure::Failed(e.to_string()))?;
-        let mut held = vec![];
-        // The importer's normalizations to hand back once recorded.
-        let mut recycled = vec![];
-        let mut desc: ColorDescription = match self.interpretations.get(path) {
-            Some(d) => *d,
-            None if interprets_video_reading(interp) => reading.color,
-            None => frame.color.unwrap_or(reading.color),
-        };
-        if compat
-            && !sequence
-            && working == WorkingEncoding::Standard
-            && !frame.format.has_alpha()
-            && !interprets_video_color(interp)
-            && !self.interpretations.contains_key(path)
-            && fields.is_none()
-            && !matches!(desc.transfer, Transfer::Pq | Transfer::Hlg)
-        {
-            desc = video_compat::color(v, desc);
-            if !self.canvas_video && video_compat::sdr_gamut_upload(v) {
-                // texImage2D keeps encoded RGB; Canvas2D additionally
-                // converts from the video's primaries into its sRGB canvas.
-                desc.primaries = Primaries::Bt709;
-            }
-        }
-        // raster.ts encodes image sequences as untagged BT.601 VP9, even
-        // at HD sizes. Honor explicit file or Interpret Footage matrices.
-        if sequence
-            && v.color.tagged.matrix.is_none()
-            && interp.matrix.is_none()
-            && !self.interpretations.contains_key(path)
-        {
-            desc.matrix = pm_protocol::color::MatrixCoefficients::Bt601;
-        }
-        let color = SourceColor {
-            transfer: desc.transfer,
-            primaries: standard_video_primaries(desc.primaries),
-            matrix: desc.matrix,
-            siting: desc.siting,
-            alpha: if frame.format.has_alpha() {
-                match desc.alpha {
-                    AlphaMode::Opaque if interp.alpha.is_none() => AlphaMode::Straight,
-                    other => other,
-                }
-            } else {
-                AlphaMode::Opaque
-            },
-            tone_map: match desc.transfer {
-                Transfer::Pq | Transfer::Hlg => reading.tone_map.or(Some(ToneMap {
-                    transfer: desc.transfer,
-                    peak_nits: 1000.0,
-                })),
-                _ => None,
-            },
-        };
-        let bitmap_gamut = full_range_bitmap && color.primaries == Primaries::Bt2020;
-        let color = if source_bitmap {
-            SourceColor {
-                transfer: pm_protocol::color::Transfer::DisplayE,
-                primaries: pm_protocol::color::Primaries::Bt709,
-                matrix: pm_protocol::color::MatrixCoefficients::Identity,
-                alpha: AlphaMode::Premultiplied,
-                ..color
-            }
-        } else {
-            color
-        };
+        let format = video_storage(precision, frame.format.bits, color.tone_map.is_some());
         let factors = Factors::from_log2(frame.format.log2_chroma_w, frame.format.log2_chroma_h);
-        // texImage2D uploads ordinary opaque legacy video into RGBA8.
-        // Clip/quantize each source texel before the layer samples it, so
-        // saturated out-of-range RGB cannot bleed across a filtered edge.
-        // The Canvas export and sequence paths keep their libyuv conversion;
-        // live VP9/HEVC alpha samples the YUV and alpha planes before its store.
-        // Level 2 and colour interpretations (Interpret Footage's
-        // colour members or a file's colour override), and unmatched HDR
-        // retain native precision. Overrides that only choose or place frames
-        // (frame rate, field order, pixel aspect, clean aperture) keep the
-        // upload, so they cannot change a level 1 video's colours.
-        let compatibility_bitmap = compat
-            && !sequence
-            && working == WorkingEncoding::Standard
-            && ((!frame.format.has_alpha() && color.alpha == AlphaMode::Opaque)
-                || frame.format.label == "v0a8"
-                || (!self.canvas_video
-                    && v.codec.codec == "vp9"
-                    && frame.format.bits == 8
-                    && frame.format.has_alpha()))
-            && !interprets_video_color(interp)
-            && (!frame.format.has_alpha() || interp.alpha.is_none())
-            && !self.interpretations.contains_key(path)
-            && fields.is_none()
-            && color.tone_map.is_none()
-            && !matches!(color.transfer, Transfer::Pq | Transfer::Hlg)
-            && (matches!(color.primaries, Primaries::Bt709 | Primaries::Unspecified)
-                || video_compat::sdr_gamut_upload(v));
-        let compatibility_hdr = compat
-            && !sequence
-            && working == WorkingEncoding::Standard
-            && !frame.format.has_alpha()
-            && !interprets_video_color(interp)
-            && !self.interpretations.contains_key(path)
-            && fields.is_none()
-            && chromium_hdr_signal(v).is_some()
-            && video_compat::Upload::supports(&imported, color.matrix);
-        let format = if compatibility_bitmap
-            || compatibility_hdr
-            || full_range_bitmap
-            || (alpha_bitmap && source_bitmap)
-        {
-            wgpu::TextureFormat::Rgba8Unorm
-        } else {
-            working_format(precision)
-        };
         // A converted frame retired by an earlier render (its reads are
         // submitted) is overwritten instead of allocating another.
         let (w, h) = (frame.format.width as u32, frame.format.height as u32);
@@ -1696,140 +1539,73 @@ impl MediaCache {
             .iter()
             .position(|t| t.width() == w && t.height() == h && t.format() == format)
             .map(|i| self.free_frames.swap_remove(i));
-        let converted = if compatibility_hdr {
-            let source = self
-                .video_upload
-                .get_or_insert_with(|| video_compat::Upload::new(device))
-                .run(
-                    device,
-                    encoder,
-                    &imported,
-                    color.matrix,
-                    video_compat::UploadReading {
-                        gamut: None,
-                        separate_matrix: !self.canvas_video,
-                        canvas_source_bias_first: self.canvas_video,
-                    },
-                    if self.canvas_video {
-                        None
-                    } else {
-                        reuse.clone()
-                    },
-                );
-            if self.canvas_video {
-                self.hdr_canvas
-                    .get_or_insert_with(|| hdr_compat::ToneMap::new(device))
-                    .run(
-                        device,
-                        encoder,
-                        &source,
-                        chromium_hdr_signal(v).expect("checked HDR reading"),
-                        color.primaries,
-                        reuse,
-                    )
-                    .ok_or_else(|| {
-                        MediaFailure::Failed("invalid Chromium HDR source texture".into())
-                    })?
-            } else {
-                source
-            }
-        } else if bitmap_gamut
-            || (compatibility_bitmap && video_compat::Upload::supports(&imported, color.matrix))
-        {
-            let upload = self
-                .video_upload
-                .get_or_insert_with(|| video_compat::Upload::new(device));
-            upload.run(
-                device,
-                encoder,
-                &imported,
-                color.matrix,
-                video_compat::UploadReading {
-                    gamut: if bitmap_gamut {
-                        Some(Primaries::Bt2020)
-                    } else {
-                        matches!(color.primaries, Primaries::Bt2020 | Primaries::DisplayP3)
-                            .then_some(color.primaries)
-                    },
-                    separate_matrix: !self.canvas_video
-                        && ((v.codec.codec == "vp9" && frame.format.bits == 10)
-                            || (matches!(v.codec.codec.as_str(), "h264" | "hevc")
-                                && frame.format.range == pm_protocol::color::Range::Limited)),
-                    canvas_source_bias_first: false,
-                },
-                reuse,
-            )
-        } else {
-            let importer = self.importer()?;
-            let import = |f: &pm_media::frame::DecodedFrame| {
-                importer
-                    .import(f)
-                    .map_err(|e| MediaFailure::Failed(e.to_string()))
-            };
-            let normalized = match &fields {
-                Some(f) => {
-                    let prev = import(&f.prev)?;
-                    let next = import(&f.next)?;
-                    let norm = |i: &pm_gpu::decode_in::ImportedFrame,
-                                e: &mut wgpu::CommandEncoder| {
-                        importer
-                            .normalize(queue, e, i)
-                            .map_err(|e| MediaFailure::Failed(e.to_string()))
-                    };
-                    let (np, nc, nn) = (
-                        norm(&prev, encoder)?,
-                        norm(&imported, encoder)?,
-                        norm(&next, encoder)?,
-                    );
-                    held.push(prev);
-                    held.push(next);
-                    let pass =
-                        FieldPass::new(timing.fields.top_field_first(), second, f.first, f.last);
-                    let out = self
-                        .deinterlacer
-                        .as_ref()
-                        .expect("made above")
-                        .run(
-                            queue,
-                            encoder,
-                            &np,
-                            &nc,
-                            &nn,
-                            pass,
-                            &CodeSpace::of(&frame.format),
-                        )
-                        .map_err(|e| MediaFailure::Failed(e.to_string()))?;
-                    recycled.extend([np, nc, nn]);
-                    out
-                }
-                None => importer
-                    .normalize(queue, encoder, &imported)
-                    .map_err(|e| MediaFailure::Failed(e.to_string()))?,
-            };
-            let converted = convert_format(
-                device,
-                queue,
-                pipelines,
-                encoder,
-                &normalized,
-                &color,
-                working,
-                precision,
-                factors,
-                reuse,
-                format,
-                compatibility_bitmap,
-                compatibility_bitmap && v.codec.codec == "hevc" && frame.format.label == "x420",
-            );
-            let importer = self.importer()?;
-            if fields.is_none() {
-                importer.recycle(normalized);
-            }
-            for n in recycled {
-                importer.recycle(n);
-            }
-            converted
+        let importer = self.importer()?;
+        let import = |f: &pm_media::frame::DecodedFrame| {
+            importer
+                .import(f)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))
         };
+        let imported = import(&frame)?;
+        let mut held = vec![];
+        // The importer's normalizations to hand back once recorded.
+        let mut recycled = vec![];
+        let normalized = match &fields {
+            Some(f) => {
+                let prev = import(&f.prev)?;
+                let next = import(&f.next)?;
+                let norm = |i: &pm_gpu::decode_in::ImportedFrame, e: &mut wgpu::CommandEncoder| {
+                    importer
+                        .normalize(queue, e, i)
+                        .map_err(|e| MediaFailure::Failed(e.to_string()))
+                };
+                let (np, nc, nn) = (
+                    norm(&prev, encoder)?,
+                    norm(&imported, encoder)?,
+                    norm(&next, encoder)?,
+                );
+                held.push(prev);
+                held.push(next);
+                let pass = FieldPass::new(timing.fields.top_field_first(), second, f.first, f.last);
+                let out = self
+                    .deinterlacer
+                    .as_ref()
+                    .expect("made above")
+                    .run(
+                        queue,
+                        encoder,
+                        &np,
+                        &nc,
+                        &nn,
+                        pass,
+                        &CodeSpace::of(&frame.format),
+                    )
+                    .map_err(|e| MediaFailure::Failed(e.to_string()))?;
+                recycled.extend([np, nc, nn]);
+                out
+            }
+            None => importer
+                .normalize(queue, encoder, &imported)
+                .map_err(|e| MediaFailure::Failed(e.to_string()))?,
+        };
+        let converted = convert_format(
+            device,
+            queue,
+            pipelines,
+            encoder,
+            &normalized,
+            &color,
+            working,
+            precision,
+            factors,
+            reuse,
+            format,
+        );
+        if fields.is_none() {
+            importer.recycle(normalized);
+        }
+        for n in recycled {
+            importer.recycle(n);
+        }
         let geometry = Geometry::of(&reading, (converted.width(), converted.height()));
         let target = if geometry.is_identity() {
             converted
@@ -1945,26 +1721,6 @@ impl MediaCache {
 #[cfg(test)]
 #[path = "media/source_storage_tests.rs"]
 mod source_storage_tests;
-
-#[cfg(test)]
-#[path = "media/composed_parity_tests.rs"]
-mod composed_parity_tests;
-
-#[cfg(test)]
-#[path = "media/round3_tests.rs"]
-mod round3_tests;
-
-#[cfg(test)]
-#[path = "media/round4_tests.rs"]
-mod round4_tests;
-
-#[cfg(test)]
-#[path = "media/hdr_parity_tests.rs"]
-mod hdr_parity_tests;
-
-#[cfg(test)]
-#[path = "media/older_live_tests.rs"]
-mod older_live_tests;
 
 #[cfg(test)]
 mod stamp_frame_tests {

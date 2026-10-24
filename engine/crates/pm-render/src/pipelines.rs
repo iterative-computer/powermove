@@ -392,9 +392,10 @@ impl Pipelines {
         ]
         .map(|(_, name, layout)| {
             let code = format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 pm_color::wgsl::COLOR,
                 pm_color::tonemap::WGSL,
+                pm_color::tonemap::rwtmo::wgsl(),
                 include_str!("shaders/source.wgsl").replace("OUT_FORMAT", name)
             );
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
