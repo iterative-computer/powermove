@@ -82,25 +82,6 @@ fn main() {
         .ok()
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
-    // Level 1 SVG images (decision S1) draw Chromium's rasters, as
-    // tests/corpus.rs draws them: PM_SVG_RASTERS, else the newest
-    // `svg-rasters-*` directory; without one resvg approximates them.
-    renderer.set_svg_wait(true);
-    match std::env::var("PM_SVG_RASTERS")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| newest_capture("svg-rasters-"))
-    {
-        Some(dir) => renderer.set_svg_source(Some(std::sync::Arc::new(
-            pm_render::vector::svg_rasters::RasterDir::new(dir),
-        ))),
-        None => {
-            eprintln!(
-                "no Chromium SVG rasters (PM_SVG_RASTERS): resvg approximates level 1 SVG images"
-            );
-            renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
-        }
-    }
     // The built-in effects, transitions, and extension layers as the kernel
     // snapshots them (as tests/corpus.rs sets them).
     renderer

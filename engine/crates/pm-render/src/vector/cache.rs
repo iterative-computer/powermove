@@ -5,11 +5,10 @@
 //! - Level 1 rasters are computed on the CPU by `pm_vector::canvas2d` and
 //!   uploaded as premultiplied `Rgba8Unorm`, the texture today's compositor
 //!   samples (Standard color: the canvas's sRGB values are working values).
-//! - Level 1 SVG images are Chromium's rasters at today's buckets
-//!   (decision S1, [`super::svg_rasters`]), uploaded like level 1 rasters:
-//!   [`VectorCache::resolve_svg`].
-//! - Level 2 SVG images that are not plain vectors are drawn by resvg at
-//!   output resolution and uploaded like level 1 rasters.
+//! - SVG images are drawn at output resolution: by Vello on the GPU into an
+//!   8-bit straight-alpha texture, premultiplied into the working format by
+//!   one pass, or (documents Vello cannot draw, or no Vello) by resvg and
+//!   uploaded like level 1 rasters.
 //! - Level 2 scenes get analytic area coverage from Vello's GPU compute
 //!   renderer (or `vello_cpu` when Vello is unavailable or forced) in an
 //!   8-bit atlas; the float paint pass then composites `paint × coverage`
@@ -26,22 +25,6 @@ use pm_vector::render::cpu::render_coverage;
 use pm_vector::render::scene::{AtlasLayout, CoverageScene, PixelRect};
 
 use super::VectorSource;
-use super::svg_rasters::{SvgMissPolicy, SvgRasterNeed, SvgRasterizer, SvgRasters};
-use pm_protocol::svg_raster::SvgRasterKey;
-
-/// A level 1 SVG raster's texture for a frame ([`VectorCache::resolve_svg`]).
-pub enum SvgResolved {
-    /// The bucket the frame asked for.
-    Drawn(wgpu::TextureView),
-    /// Preview: another bucket of the same content while the asked one is
-    /// on its way.
-    Substitute(wgpu::TextureView),
-    /// Nothing to draw this frame (the miss is recorded).
-    Missing,
-}
-
-/// The precision slot of level 1 SVG raster textures (always `Rgba8Unorm`).
-const SVG_SLOT: u8 = u8::MAX;
 
 /// Which coverage backend level 2 uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,10 +183,9 @@ pub struct VectorCache {
     backend: CoverageBackend,
     gpu: Option<Option<GpuCoverage>>,
     paint: Option<Paint>,
-    /// Which backend rendered the last level 2 scene (tests).
+    premultiply: Option<Premultiply>,
+    /// Which backend rendered the last level 2 scene or SVG (tests).
     pub last_backend: Option<&'static str>,
-    /// Level 1 SVG rasters the renderers uploaded (decision S1).
-    pub svg: SvgRasters,
 }
 
 impl Default for VectorCache {
@@ -224,8 +206,8 @@ impl VectorCache {
             backend: CoverageBackend::Auto,
             gpu: None,
             paint: None,
+            premultiply: None,
             last_backend: None,
-            svg: SvgRasters::default(),
         }
     }
 
@@ -239,9 +221,9 @@ impl VectorCache {
         self.backend = backend;
     }
 
-    /// Bytes of cached textures and of the stored level 1 SVG rasters.
+    /// Bytes of cached textures.
     pub fn bytes(&self) -> u64 {
-        self.bytes + self.svg.bytes()
+        self.bytes
     }
 
     /// Cached textures.
@@ -275,16 +257,13 @@ impl VectorCache {
     /// bounded).
     pub fn begin_frame(&mut self) {
         self.frame += 1;
-        self.svg.begin_frame();
         self.evict(self.max_bytes, self.max_entries, false);
     }
 
     /// Evicts least recently used textures until at most `budget` bytes
-    /// stay (lease pressure, between frames: every entry may go), then
-    /// stored SVG rasters within what the textures leave.
+    /// stay (lease pressure, between frames: every entry may go).
     pub fn trim(&mut self, budget: u64) {
         self.evict(budget, self.max_entries, true);
-        self.svg.evict(budget.saturating_sub(self.bytes));
     }
 
     /// Evicts least recently used entries until at most `bytes` and
@@ -359,24 +338,6 @@ impl VectorCache {
             VectorSource::Scene { scene, rect } => {
                 self.render_scene(device, queue, scene, *rect, precision)?
             }
-            VectorSource::SvgImage { key, asset, path } => {
-                // Through `resolve_svg` with the policy of a frame that waits.
-                return match self.resolve_svg(
-                    device,
-                    queue,
-                    key,
-                    asset,
-                    path,
-                    SvgMissPolicy::Wait,
-                    ("", ""),
-                )? {
-                    SvgResolved::Drawn(view) | SvgResolved::Substitute(view) => Ok(view),
-                    SvgResolved::Missing => Err(format!(
-                        "the SVG raster {}×{} has not arrived",
-                        key.width, key.height
-                    )),
-                };
-            }
             VectorSource::SvgRaster {
                 path,
                 transform,
@@ -384,17 +345,7 @@ impl VectorCache {
                 clip,
                 ..
             } => {
-                let (doc, _) = super::svg::document(path)?;
-                let clip = clip.map(|[x, y]| pm_vector::kurbo::Point::new(x, y));
-                let b = doc.raster_device(
-                    pm_vector::kurbo::Affine::new(*transform),
-                    *rect,
-                    Some(&clip),
-                );
-                (
-                    upload_rgba8(device, queue, b.width, b.height, &b.rgba),
-                    u64::from(b.width) * u64::from(b.height) * 4,
-                )
+                self.render_svg(device, queue, path, *transform, *rect, clip, precision)?
             }
         };
         // Make room before inserting: earlier frames' entries go first, so
@@ -430,81 +381,53 @@ impl VectorCache {
         view
     }
 
-    /// A cached texture, marked used by this frame.
-    fn touch(&mut self, key: &([u8; 32], u8)) -> Option<wgpu::TextureView> {
-        let (tick, frame) = (self.tick, self.frame);
-        self.entries.get_mut(key).map(|e| {
-            e.used = tick;
-            e.frame = frame;
-            e.view.clone()
-        })
-    }
-
-    /// The texture of a level 1 SVG raster (`Rgba8Unorm`, premultiplied,
-    /// top-down: the bytes today's `texImage2D` of the bucket canvas
-    /// stores). On a miss the need is recorded ([`SvgRasters::take_misses`])
-    /// and, under [`SvgMissPolicy::Substitute`], the content's latest
-    /// bucket stands in.
+    /// An SVG image under `transform` (user units to target pixels) in
+    /// the target rectangle `rect`, clipped to the target polygon `clip`:
+    /// Vello on the GPU when it can draw the document, else resvg.
     #[allow(clippy::too_many_arguments)]
-    pub fn resolve_svg(
+    fn render_svg(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        key: &SvgRasterKey,
-        asset: &str,
         path: &std::path::Path,
-        policy: SvgMissPolicy,
-        at: (&str, &str),
-    ) -> Result<SvgResolved, String> {
-        self.tick += 1;
-        let source_key = |k: &SvgRasterKey| {
-            let source = VectorSource::SvgImage {
-                key: k.clone(),
-                asset: String::new(),
-                path: Default::default(),
-            };
-            (source.key(), SVG_SLOT)
-        };
-        let id = source_key(key);
-        if self.svg.rasterizer == SvgRasterizer::Resvg {
-            self.svg.approximated += 1;
-        }
-        if let Some(view) = self.touch(&id) {
-            self.svg.drawn(key);
-            pm_perf::bump(pm_perf::Counter::SvgCacheHits);
-            return Ok(SvgResolved::Drawn(view));
-        }
-        pm_perf::bump(pm_perf::Counter::SvgCacheMisses);
-        let pixels = match self.svg.rasterizer {
-            SvgRasterizer::Resvg => {
-                let (doc, _) = super::svg::document(path)?;
-                Some(std::sync::Arc::new(doc.raster(key.width, key.height).rgba))
-            }
-            SvgRasterizer::Chromium => self.svg.get(key),
-        };
-        if let Some(pixels) = pixels {
-            let texture = upload_rgba8(device, queue, key.width, key.height, &pixels);
-            let view = self.insert(id, texture, key.bytes());
-            self.svg.drawn(key);
-            return Ok(SvgResolved::Drawn(view));
-        }
-        pm_perf::bump(pm_perf::Counter::RasterRequests);
-        self.svg.miss(SvgRasterNeed {
-            request: pm_protocol::svg_raster::SvgRasterRequest {
-                key: key.clone(),
-                asset: asset.to_owned(),
-            },
-            path: path.to_path_buf(),
-            composition: at.0.to_owned(),
-            layer: at.1.to_owned(),
-        });
-        if policy == SvgMissPolicy::Substitute
-            && let Some(latest) = self.svg.latest(key).cloned()
-            && let Some(view) = self.touch(&source_key(&latest))
+        transform: [f64; 6],
+        rect: PixelRect,
+        clip: &[[f64; 2]; 4],
+        precision: Precision,
+    ) -> Result<(wgpu::Texture, u64), String> {
+        use pm_vector::kurbo::{Affine, Point};
+        let (doc, _) = super::svg::document(path)?;
+        let transform = Affine::new(transform);
+        let clip = clip.map(|[x, y]| Point::new(x, y));
+        let (w, h) = (rect.width.max(1), rect.height.max(1));
+        if doc.gpu_paintable()
+            && let Some(gpu) = self.gpu(device)
         {
-            return Ok(SvgResolved::Substitute(view));
+            let to_rect = Affine::translate((-f64::from(rect.x), -f64::from(rect.y)));
+            let straight = device.create_texture(&GpuCoverage::page_descriptor(w, h));
+            let view = straight.create_view(&wgpu::TextureViewDescriptor::default());
+            gpu.render_svg(
+                device,
+                queue,
+                &doc,
+                to_rect * transform,
+                &clip.map(|p| to_rect * p),
+                (w, h),
+                &view,
+            )
+            .map_err(|e| e.to_string())?;
+            self.last_backend = Some("vello");
+            let format = pm_gpu::working_format(precision);
+            let premultiply = self.premultiply.get_or_insert_with(|| Premultiply::new(device));
+            let out = premultiply.run(device, queue, &view, (w, h), format);
+            return Ok((out, u64::from(w) * u64::from(h) * bytes_per_pixel(format)));
         }
-        Ok(SvgResolved::Missing)
+        self.last_backend = Some("resvg");
+        let b = doc.raster_device(transform, rect, Some(&clip));
+        Ok((
+            upload_rgba8(device, queue, b.width, b.height, &b.rgba),
+            u64::from(b.width) * u64::from(b.height) * 4,
+        ))
     }
 
     fn gpu(&mut self, device: &wgpu::Device) -> Option<&mut GpuCoverage> {
@@ -655,16 +578,163 @@ impl VectorCache {
             }
         }
         queue.submit([encoder.finish()]);
-        let bpp = match format {
-            wgpu::TextureFormat::Rgba32Float => 16,
-            wgpu::TextureFormat::Rgba16Float => 8,
-            wgpu::TextureFormat::Rgba8Unorm => 4,
-            other => panic!("unsupported vector format: {other:?}"),
-        };
         Ok((
             out,
-            u64::from(rect.width.max(1)) * u64::from(rect.height.max(1)) * bpp,
+            u64::from(rect.width.max(1)) * u64::from(rect.height.max(1)) * bytes_per_pixel(format),
         ))
+    }
+}
+
+fn bytes_per_pixel(format: wgpu::TextureFormat) -> u64 {
+    match format {
+        wgpu::TextureFormat::Rgba32Float => 16,
+        wgpu::TextureFormat::Rgba16Float => 8,
+        wgpu::TextureFormat::Rgba8Unorm => 4,
+        other => panic!("unsupported vector format: {other:?}"),
+    }
+}
+
+/// Vello's straight-alpha output premultiplied into a working texture.
+struct Premultiply {
+    layout: wgpu::BindGroupLayout,
+    pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    module: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
+}
+
+const PREMULTIPLY_WGSL: &str = r#"
+@group(0) @binding(0) var straight: texture_2d<f32>;
+
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+    let c = textureLoad(straight, vec2<i32>(floor(p.xy)), 0);
+    return vec4<f32>(c.rgb * c.a, c.a);
+}
+"#;
+
+impl Premultiply {
+    fn new(device: &wgpu::Device) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pm svg premultiply"),
+            source: wgpu::ShaderSource::Wgsl(PREMULTIPLY_WGSL.into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pm svg premultiply"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("pm svg premultiply"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        Self {
+            layout,
+            pipelines: HashMap::new(),
+            module,
+            pipeline_layout,
+        }
+    }
+
+    fn run(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        straight: &wgpu::TextureView,
+        (width, height): (u32, u32),
+        format: wgpu::TextureFormat,
+    ) -> wgpu::Texture {
+        let (module, pipeline_layout) = (&self.module, &self.pipeline_layout);
+        let pipeline = self.pipelines.entry(format).or_insert_with(|| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("pm svg premultiply"),
+                layout: Some(pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        });
+        let out = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pm svg"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let out_view = out.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pm svg premultiply"),
+            layout: &self.layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(straight),
+            }],
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("pm svg premultiply"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("pm svg premultiply"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &out_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit([encoder.finish()]);
+        out
     }
 }
 

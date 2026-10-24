@@ -13,6 +13,7 @@ use peniko::color::AlphaColor;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 
 use crate::render::scene::{AtlasLayout, CoverageScene, FillRule};
+use crate::render::svg::SvgDocument;
 
 /// Why the GPU backend is unavailable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +69,35 @@ impl GpuCoverage {
                 | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         }
+    }
+
+    /// Renders `doc` under `transform` (user units to `target` pixels),
+    /// clipped to the polygon `clip`, into `target` (a texture made with
+    /// [`Self::page_descriptor`] at `width` × `height`): straight-alpha
+    /// sRGB values, as Vello stores them. Only for
+    /// [`SvgDocument::gpu_paintable`] documents.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_svg(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        doc: &SvgDocument,
+        transform: Affine,
+        clip: &[kurbo::Point],
+        (width, height): (u32, u32),
+        target: &wgpu::TextureView,
+    ) -> Result<(), GpuUnavailable> {
+        self.scene.reset();
+        doc.encode(&mut self.scene, transform, clip);
+        let params = RenderParams {
+            base_color: AlphaColor::from_rgba8(0, 0, 0, 0),
+            width,
+            height,
+            antialiasing_method: AaConfig::Area,
+        };
+        self.renderer
+            .render_to_texture(device, queue, &self.scene, target, &params)
+            .map_err(|e| GpuUnavailable(e.to_string()))
     }
 
     /// Renders page `page` of `layout` into `target` (a texture made with

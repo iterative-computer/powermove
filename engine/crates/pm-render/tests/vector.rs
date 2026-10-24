@@ -523,6 +523,15 @@ fn vector_textures_are_accounted_and_trimmed() {
     assert_eq!(first, rebuilt);
 }
 
+/// A test's SVG file, removed with its directory when dropped.
+struct TempSvg(std::path::PathBuf);
+
+impl Drop for TempSvg {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// An SVG image layer (`d.asset` → `path`), `compat` level `compat`.
 fn svg_project(
     svg: &str,
@@ -532,8 +541,8 @@ fn svg_project(
     d: Value,
     compat: u32,
     rotation: f64,
-) -> (Value, MapResolver) {
-    let dir = std::env::temp_dir().join(format!("pm-render-vector-{}", std::process::id()));
+) -> (Value, MapResolver, TempSvg) {
+    let dir = std::env::temp_dir().join(format!("pm-render-vector-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     std::fs::write(&path, svg).unwrap();
@@ -547,21 +556,29 @@ fn svg_project(
     asset(&mut doc, "art", "image", "svg", w, h, 0.0);
     let mut resolver = MapResolver::default();
     resolver.paths.insert("art".into(), path);
-    (doc, resolver)
+    (doc, resolver, TempSvg(dir))
 }
 
 const SOLID_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect x="10" y="10" width="80" height="30" fill="#FFFFFF"/><circle cx="50" cy="25" r="8" fill="#000000"/></svg>"##;
 
+/// Every SVG image (`compat` level 1 and 2 alike) is drawn at output
+/// resolution with analytic edges: a rotated rect against its exact
+/// coverage.
 #[test]
-fn level2_svg_images_are_vectors_at_output_resolution() {
+fn svg_images_are_drawn_at_output_resolution() {
     let mut renderer = Renderer::headless().unwrap();
     let d = json!({ "asset": "art", "fit": "stretch", "w": 200, "h": 100 });
-    let (doc, resolver) = svg_project(SOLID_SVG, "solid.svg", 100, 50, d.clone(), 2, 23.0);
-    assert_eq!(
-        unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
-        vec![]
-    );
-    let rgba = render_rgba(&mut renderer, doc, &resolver);
+    let mut frames = Vec::new();
+    for compat in [1, 2] {
+        let (doc, resolver, _svg) = svg_project(SOLID_SVG, &format!("solid{compat}.svg"), 100, 50, d.clone(), compat, 23.0);
+        assert_eq!(
+            unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
+            vec![]
+        );
+        frames.push(render_rgba(&mut renderer, doc, &resolver));
+    }
+    assert!(frames[0] == frames[1], "the levels draw the same pixels");
+    let rgba = &frames[0];
     let alpha: Vec<f32> = rgba.chunks(4).map(|p| p[3]).collect();
     // The 200 × 100 box centered at (128, 128) rotated 23°: user units ×2.
     let reference = coverage(|x, y| {
@@ -574,7 +591,7 @@ fn level2_svg_images_are_vectors_at_output_resolution() {
         "SVG rect: {} edge pixels, rms {:.5} ({:.1} dB), max {:.4}",
         e.edge_pixels, e.rms, e.psnr_db, e.max_any
     );
-    assert!(e.psnr_db >= 40.0 && e.max_any <= 0.03);
+    assert!(e.psnr_db >= 45.0 && e.max_any <= 0.02);
     // The circle is black and opaque over the white rect.
     let center = (128 * W + 128) as usize * 4;
     assert!(
@@ -582,22 +599,15 @@ fn level2_svg_images_are_vectors_at_output_resolution() {
         "{:?}",
         &rgba[center..center + 4]
     );
-    // Level 1 SVG images are drawn (Chromium's rasters; tests/svg_level1.rs).
-    let (doc1, resolver1) = svg_project(SOLID_SVG, "solid1.svg", 100, 50, d, 1, 23.0);
-    assert_eq!(
-        unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1),
-        vec![]
-    );
 }
 
 #[test]
-fn level2_svg_fallbacks_and_text() {
+fn svg_gradients_crops_and_text() {
     let mut renderer = Renderer::headless().unwrap();
-    // A gradient is drawn by resvg; `cover` crops the 2:1 SVG to the
-    // square box.
+    // `cover` crops the 2:1 SVG to the square box.
     let gradient = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><defs><linearGradient id="g"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#FFFFFF" stop-opacity="0.5"/></linearGradient></defs><rect width="100" height="50" fill="url(#g)"/></svg>"##;
     let d = json!({ "asset": "art", "fit": "cover", "w": 100, "h": 100 });
-    let (doc, resolver) = svg_project(gradient, "gradient.svg", 100, 50, d, 2, 0.0);
+    let (doc, resolver, _svg) = svg_project(gradient, "gradient.svg", 100, 50, d, 1, 0.0);
     assert_eq!(
         unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
         vec![]
@@ -612,31 +622,31 @@ fn level2_svg_fallbacks_and_text() {
     assert!(a(128, 78) > 0.5);
     // The gradient's middle half shows: alpha 0.875 at the left edge,
     // 0.625 at the right.
-    assert!((a(79, 128) - 0.87).abs() < 0.02, "{}", a(79, 128));
-    assert!((a(176, 128) - 0.63).abs() < 0.02, "{}", a(176, 128));
-    // SVG text is routed.
-    let text = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><text x="5" y="30">Powermove</text></svg>"##;
-    let (doc, resolver) = svg_project(
+    assert!((a(79, 128) - 0.87).abs() < 0.01, "{}", a(79, 128));
+    assert!((a(176, 128) - 0.63).abs() < 0.01, "{}", a(176, 128));
+    // SVG text is drawn natively (usvg's layout with the system fonts).
+    let text = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><text x="5" y="30" font-family="Helvetica" font-size="16" fill="#FFFFFF">Powermove</text></svg>"##;
+    let (doc, resolver, _svg) = svg_project(
         text,
         "text.svg",
         100,
         50,
         json!({ "asset": "art", "w": 100, "h": 50 }),
-        2,
+        1,
         0.0,
     );
-    let u = unsupported_with_media(&load(&doc), "Ptest-root", &resolver);
     assert_eq!(
-        u.iter().map(|u| u.feature.clone()).collect::<Vec<_>>(),
-        vec![Feature::SvgImage]
+        unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
+        vec![]
     );
+    let rgba = render_rgba(&mut renderer, doc, &resolver);
+    let ink = rgba.chunks(4).filter(|p| p[3] > 0.5).count();
+    assert!(ink > 100, "the text's ink: {ink} pixels");
 }
 
 /// SVG bytes in another encoding Chromium honors (an XML declaration's
-/// ISO-8859-1, UTF-16 with a byte order mark) are valid SVG images: level
-/// 1 asks the renderer for Chromium's raster of the bytes as they are (no
-/// layer failure), level 2 decodes them as Chromium does and draws the
-/// same pixels as the UTF-8 file.
+/// ISO-8859-1, UTF-16 with a byte order mark) are valid SVG images,
+/// decoded as Chromium decodes them: the same pixels as the UTF-8 file.
 #[test]
 fn svg_images_in_declared_encodings_are_not_failures() {
     let mut renderer = Renderer::headless().unwrap();
@@ -655,47 +665,32 @@ fn svg_images_in_declared_encodings_are_not_failures() {
         b
     };
     let d = json!({ "asset": "art", "fit": "stretch", "w": 200, "h": 100 });
-    let (doc, resolver) = svg_project(utf8, "declared-utf8.svg", 100, 50, d.clone(), 2, 0.0);
+    let (doc, resolver, _svg) = svg_project(utf8, "declared-utf8.svg", 100, 50, d.clone(), 1, 0.0);
     let reference = render_rgba(&mut renderer, doc, &resolver);
+    assert!(reference.iter().any(|&v| v > 0.0));
     for (name, bytes) in [("latin1.svg", &latin1), ("utf16.svg", &utf16)] {
-        let (doc1, resolver1) = svg_project(utf8, name, 100, 50, d.clone(), 1, 0.0);
-        std::fs::write(resolver1.paths["art"].clone(), bytes).unwrap();
+        let (doc, resolver, _svg) = svg_project(utf8, name, 100, 50, d.clone(), 1, 0.0);
+        std::fs::write(resolver.paths["art"].clone(), bytes).unwrap();
         assert_eq!(
-            unsupported_with_media(&load(&doc1), "Ptest-root", &resolver1),
-            vec![],
-            "{name}"
-        );
-        // Rendering asks for the raster, never reports a corrupt file.
-        let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
-        let frame = renderer
-            .render(&load(&doc1), "Ptest-root", ticks(0.0), &request, &resolver1)
-            .unwrap();
-        assert!(frame.failures.is_empty(), "{name}: {:?}", frame.failures);
-        assert_eq!(frame.svg_misses.len(), 1, "{name}");
-
-        let (doc2, resolver2) = svg_project(utf8, name, 100, 50, d.clone(), 2, 0.0);
-        std::fs::write(resolver2.paths["art"].clone(), bytes).unwrap();
-        assert_eq!(
-            unsupported_with_media(&load(&doc2), "Ptest-root", &resolver2),
+            unsupported_with_media(&load(&doc), "Ptest-root", &resolver),
             vec![],
             "{name}"
         );
         assert!(
-            render_rgba(&mut renderer, doc2, &resolver2) == reference,
+            render_rgba(&mut renderer, doc, &resolver) == reference,
             "{name}"
         );
     }
 }
 
-/// Level 1 SVGs that roxmltree rejects but Chromium's libxml2 paints (an
-/// external DTD subset with undeclared entities, a declared external
-/// entity, a parameter entity, nesting at Blink's 5,000-element limit) are
-/// Chromium's rasters like any other: the frame asks the renderer for
-/// them, never paints them empty. Documents Chromium shows as a broken
+/// SVGs that roxmltree rejects but Chromium's libxml2 paints (an external
+/// DTD subset with undeclared entities, a declared external entity, a
+/// parameter entity, nesting at Blink's 5,000-element limit) draw their
+/// content, as Chromium draws them. Documents Chromium shows as a broken
 /// `<img>` (an undeclared entity without a DTD, nesting past the limit)
-/// draw nothing and ask for nothing, as today.
+/// draw nothing, as today.
 #[test]
-fn level1_svgs_libxml2_accepts_are_asked_for_not_blank() {
+fn svgs_draw_where_libxml2_paints_them() {
     let mut renderer = Renderer::headless().unwrap();
     let r = r#"<rect width="8" height="8" fill="red"/>"#;
     let ns = r#"xmlns="http://www.w3.org/2000/svg" width="8" height="8""#;
@@ -728,25 +723,20 @@ fn level1_svgs_libxml2_accepts_are_asked_for_not_blank() {
     let request = RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32);
     for (i, svg) in painted.iter().chain(&broken).enumerate() {
         let name = format!("libxml2-{i}.svg");
-        let (doc, resolver) = svg_project(svg, &name, 8, 8, d.clone(), 1, 0.0);
+        let (doc, resolver, _svg) = svg_project(svg, &name, 8, 8, d.clone(), 1, 0.0);
         let doc = load(&doc);
-        let u = unsupported_with_media(&doc, "Ptest-root", &resolver);
-        let result = renderer.render(&doc, "Ptest-root", ticks(0.0), &request, &resolver);
-        assert_eq!(u, vec![], "{name}");
-        let frame = result.unwrap();
-        assert!(frame.failures.is_empty(), "{name}");
+        assert_eq!(unsupported_with_media(&doc, "Ptest-root", &resolver), vec![], "{name}");
+        let frame = renderer
+            .render(&doc, "Ptest-root", ticks(0.0), &request, &resolver)
+            .unwrap();
+        assert!(frame.failures.is_empty(), "{name}: {:?}", frame.failures);
+        let rgba = renderer.read_rgba(&frame).unwrap();
+        // The layer's center: the red rect, or nothing.
+        let center = &rgba[((128 * W + 128) * 4) as usize..][..4];
         if i < painted.len() {
-            assert_eq!(frame.svg_misses.len(), 1, "{name}");
+            assert_eq!(center, &[1.0, 0.0, 0.0, 1.0], "{name}");
         } else {
-            assert!(frame.svg_misses.is_empty(), "{name}");
-            assert!(
-                renderer
-                    .read_rgba(&frame)
-                    .unwrap()
-                    .iter()
-                    .all(|&v| v == 0.0),
-                "{name}"
-            );
+            assert!(rgba.iter().all(|&v| v == 0.0), "{name}");
         }
     }
 }

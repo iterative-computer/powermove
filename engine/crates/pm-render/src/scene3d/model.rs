@@ -85,8 +85,9 @@ impl Camera3d {
 pub struct Texture3d {
     pub asset: String,
     pub path: PathBuf,
-    /// Chromium SVG map upload (distinct from a 2D SVG bucket).
-    pub svg: Option<pm_protocol::svg_raster::SvgRasterRequest>,
+    /// An SVG map's texel size: the image's natural size, as three.js
+    /// uploads the SVG `<img>` (at most 16,384 on a side).
+    pub svg: Option<(u32, u32)>,
     /// Color and emissive maps decode sRGB (`SRGBColorSpace`); data maps
     /// are linear.
     pub srgb: bool,
@@ -606,7 +607,8 @@ pub trait TextureSource {
     /// The image file of an image asset, or `None` when it is not an image
     /// asset (`asset.kind !== 'image'`) or offline.
     fn image(&self, asset: &str) -> Option<PathBuf>;
-    fn svg(&self, _asset: &str) -> Option<pm_protocol::svg_raster::SvgRasterRequest> {
+    /// The texel size of an SVG image asset's map ([`Texture3d::svg`]).
+    fn svg(&self, _asset: &str) -> Option<(u32, u32)> {
         None
     }
 }
