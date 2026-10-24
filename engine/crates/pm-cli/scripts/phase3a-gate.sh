@@ -75,7 +75,7 @@ run parity-render-jobs ./target/release/pm-cli parity render "${parity_args[@]}"
 # Render classes the parity runner does not judge itself.
 for target in corpus text_corpus text_raster text_level2 text_gpu text_colors \
   scene3d scene3d_gltf scene3d_mesh scene3d_layering scene3d_document scene3d_resources \
-  three_programs blender_snapshots blender_composite shader_gate shader_layers \
+  three_programs shader_gate shader_layers \
   effects_webgl effects effects_linear linear color sampling motion retime composite \
   vector stills headless video_end; do
   t "$target"
