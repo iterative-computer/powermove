@@ -11,8 +11,9 @@
 //! check against today's capture still catches.
 //!
 //! Modelled so far: the composition background (solid, linear and radial
-//! gradients, none) and 2D solid layers (world matrix, size anchor,
-//! opacity, blend mode, level 2 radius) in projects that composite in E.
+//! gradients, none), 2D solid layers (world matrix, size anchor, opacity,
+//! blend mode, radius) and 2D shape layers (shapes and editable paths:
+//! fills and strokes) in projects that composite in E.
 //! Image layers leave their box unreferenced (NaN); any other content
 //! leaves the whole frame unreferenced. The comparator judges unreferenced
 //! pixels against today's capture until the lane that owns that content
@@ -30,6 +31,7 @@ use pm_reference::coverage::{FillRule, fill};
 pub const PATH_SAMPLES: usize = 16;
 
 /// A reference frame.
+#[derive(Clone)]
 pub struct Reference {
     pub width: usize,
     pub height: usize,
@@ -37,8 +39,16 @@ pub struct Reference {
     pub rgba: Vec<f64>,
     /// Pixels where modelled content is partially covered.
     pub edge: Vec<bool>,
-    /// Why the frame is not modelled (empty when it is).
+    /// What the frame holds that is not modelled (empty when nothing).
     pub unmodelled: Vec<String>,
+    /// An unmodelled layer's footprint could not be bounded: the whole
+    /// frame is unreferenced.
+    pub whole_frame: bool,
+    /// Inside unmodelled footprints: pixels within an unmodelled layer's
+    /// spatial reach (its effects' padding) plus 1 pixel of the edge of a
+    /// solid or shape it draws. AA corrected these edges; the corpus's
+    /// `AA_INPUT_PENDING` frames may exceed today's bound only here.
+    pub aa_corrected: Vec<bool>,
 }
 
 impl Reference {
@@ -135,7 +145,10 @@ fn reference_blend(mode: BlendMode) -> Blend {
 
 /// The reference frame of `composition` at `time`, `width × height`
 /// output pixels at the legacy derived scale, with or without the
-/// background (transparent captures draw none).
+/// background (transparent captures draw none), with `samples` motion-blur
+/// samples per blurred layer (1: none). `effects`: the definitions the
+/// engine draws with (for effect padding).
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     document: &Document,
     composition: &str,
@@ -143,6 +156,8 @@ pub fn render(
     width: u32,
     height: u32,
     background: bool,
+    samples: u32,
+    effects: &pm_render::effects::Effects,
 ) -> Reference {
     let (w, h) = (width as usize, height as usize);
     let mut out = Reference {
@@ -151,8 +166,10 @@ pub fn render(
         rgba: vec![0.0; w * h * 4],
         edge: vec![false; w * h],
         unmodelled: Vec::new(),
+        whole_frame: false,
+        aa_corrected: vec![false; w * h],
     };
-    if let Err(why) = draw(document, composition, time, &mut out, background) {
+    if let Err(why) = draw(document, composition, time, &mut out, background, samples, effects) {
         out.unmodelled.push(why);
         out.rgba.fill(f64::NAN);
     }
@@ -165,6 +182,8 @@ fn draw(
     time: pm_protocol::common::Ticks,
     out: &mut Reference,
     background: bool,
+    samples: u32,
+    effects: &pm_render::effects::Effects,
 ) -> Result<(), String> {
     let (w, h) = (out.width, out.height);
     let root = document.root().ok_or("no document")?;
@@ -207,42 +226,258 @@ fn draw(
     let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
     let layers: Vec<&Node> = comp.layers().iter().collect();
     let solo = layers.iter().any(|l| node::truthy(node::member(Some(l), "solo")));
+    // Motion blur (C-K4): a blurred layer is the average of its content at
+    // `t + ((s + ½)/n − ½) · shutter / fps`, masked at the center time.
+    let blur = (samples > 1).then(|| {
+        let fps = pm_render::motion::level_fps(&comp);
+        let shutter = pm_render::motion::shutter_frames(comp.node()) / fps;
+        (0..samples)
+            .map(|s| ((f64::from(s) + 0.5) / f64::from(samples) - 0.5) * shutter)
+            .collect::<Vec<f64>>()
+    });
     // Bottom (last) to top (first), with today's skip rules.
     for &layer in layers.iter().rev() {
         let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
         let flag = |k: &str| node::truthy(node::member(Some(layer), k));
-        if flag("group") || ty == "group" || ty == "precomp" {
-            return Err("groups and precomps".into());
-        }
+        let group = flag("group") || ty == "group";
         if (solo && !flag("solo")) || matches!(ty.as_str(), "null" | "audio") {
             continue;
         }
-        if !scope.active(layer, seconds).map_err(fail)? {
+        if !group && !scope.active(layer, seconds).map_err(fail)? {
             continue;
         }
         let opacity = scope.num(layer, "opacity", seconds).map_err(fail)? / 100.0;
         let opacity = if opacity.is_nan() { opacity } else { opacity.clamp(0.0, 1.0) };
-        if opacity <= 0.001 {
+        if !group && opacity <= 0.001 {
             continue;
         }
-        if !matches!(ty.as_str(), "solid" | "image") {
-            return Err(format!("{ty} layers"));
-        }
-        if flag("matteSource")
-            || flag("mblur")
-            || flag("threeD")
-            || pm_render::composite::build::has_masks(&mut scope, layer, seconds).map_err(fail)?
-            || scope.has_renderable_effects(layer, seconds).map_err(fail)?
-            || scope.active_transition(layer, seconds, &|_| true).map_err(fail)?.is_some()
-            || scope.is_3d_layer(layer).map_err(fail)?
-        {
-            return Err("mattes, motion blur, 3D, masks, effects or transitions".into());
-        }
-        let d = scope.ev.resolve_content(scope.comp, layer, seconds).map_err(fail)?;
-        let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
-        let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
+        // What this reference does not model: the layer's footprint, grown
+        // by its effects' padding, is unreferenced (and anything drawn over
+        // it); the rest of the frame keeps its reference.
+        let unmodelled = if group || ty == "precomp" {
+            Some("groups and precomps")
+        } else if !matches!(ty.as_str(), "solid" | "image" | "shape") {
+            Some("other layer types")
+        } else if flag("matteSource") {
+            Some("mattes")
+        } else if scope.is_3d_layer(layer).map_err(fail)? {
+            Some("2.5D planes")
+        } else if scope.active_transition(layer, seconds, &|_| true).map_err(fail)?.is_some() {
+            Some("transitions")
+        } else if scope.has_renderable_effects(layer, seconds).map_err(fail)? {
+            Some("effects")
+        } else {
+            None
+        };
         let world = scope.world_matrix(layer, seconds).map_err(fail)?;
         let offset = scope.size_anchor_offset(layer, seconds).map_err(fail)?;
+        let scaled = kurbo::Affine::new([
+            world[0] * sx,
+            world[1] * sy,
+            world[2] * sx,
+            world[3] * sy,
+            world[4] * sx,
+            world[5] * sy,
+        ]);
+        let device = scaled * kurbo::Affine::translate((offset.x, offset.y));
+        if let Some(why) = unmodelled {
+            if !out.unmodelled.iter().any(|u| u == why) {
+                out.unmodelled.push(why.into());
+            }
+            let times: Vec<f64> = match &blur {
+                Some(offsets) if flag("mblur") => offsets.iter().map(|o| seconds + o).collect(),
+                _ => vec![seconds],
+            };
+            footprint(&mut scope, effects, layer, &ty, &times, seconds, (sx, sy), out)?;
+            continue;
+        }
+        let d = scope.ev.resolve_content(scope.comp, layer, seconds).map_err(fail)?;
+        if ty == "image" {
+            // Resampled content no lane models yet: its box (centered on
+            // the anchor), grown by a pixel, is unreferenced.
+            let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
+            let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
+            let rect = kurbo::Rect::new(-sw / 2.0, -sh / 2.0, sw / 2.0, sh / 2.0);
+            unreference(out, &(device * kurbo::Shape::to_path(&rect, 1e-9)), 1);
+            continue;
+        }
+        let mode = reference_blend(
+            pm_render::composite::build::blend_mode(&mut scope, layer, seconds).map_err(fail)?,
+        );
+        let blurred = blur.as_ref().filter(|_| {
+            scope
+                .evaluated(layer, node::member(Some(layer), "mblur"), seconds, "l.mblur")
+                .is_ok_and(|v| v.truthy())
+        });
+        // The layer's own pixels: one draw, or the samples' average.
+        let times: Vec<f64> = match blurred {
+            Some(offsets) => offsets.iter().map(|o| seconds + o).collect(),
+            None => vec![seconds],
+        };
+        let mut layer_px = vec![([0.0f64; 4], false); w * h];
+        for &t in &times {
+            let sample = content_pixels(&mut scope, layer, &ty, t, (sx, sy), w, h)?;
+            for (acc, (px, edge)) in layer_px.iter_mut().zip(sample) {
+                for c in 0..4 {
+                    acc.0[c] += px[c] / times.len() as f64;
+                }
+                acc.1 |= edge;
+            }
+        }
+        if blurred.is_some() {
+            // Averaged edges are partial coverage wherever samples differ.
+            for p in &mut layer_px {
+                p.1 |= p.0[3] > 0.0 && p.0[3] < 1.0 - 1e-12;
+            }
+        }
+        // Masks (at the center time), from the mask reference.
+        if let Some((mask, band)) = super::mask_reference::layer_mask(&mut scope, layer, seconds, scaled, w, h)? {
+            for (i, p) in layer_px.iter_mut().enumerate() {
+                p.0 = scale(p.0, mask[i]);
+                p.1 |= band[i];
+            }
+        }
+        for (i, (px, edge)) in layer_px.iter().enumerate() {
+            if px[3] <= 0.0 && !edge {
+                continue;
+            }
+            out.edge[i] |= *edge;
+            let at = &mut out.rgba[i * 4..][..4];
+            let dst = [at[0], at[1], at[2], at[3]];
+            at.copy_from_slice(&clamp(blend(mode, scale(*px, opacity), dst)));
+        }
+    }
+    Ok(())
+}
+
+/// A solid or shape layer's own pixels at `time` (premultiplied, before
+/// opacity and masks), and where they are partially covered.
+fn content_pixels<'d>(
+    scope: &mut Scope<'_, 'd>,
+    layer: &'d Node,
+    ty: &str,
+    time: f64,
+    (sx, sy): (f64, f64),
+    w: usize,
+    h: usize,
+) -> Result<Vec<(Rgba, bool)>, String> {
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let world = scope.world_matrix(layer, time).map_err(fail)?;
+    let offset = scope.size_anchor_offset(layer, time).map_err(fail)?;
+    let device = kurbo::Affine::new([
+        world[0] * sx,
+        world[1] * sy,
+        world[2] * sx,
+        world[3] * sy,
+        world[4] * sx,
+        world[5] * sy,
+    ]) * kurbo::Affine::translate((offset.x, offset.y));
+    let d = scope.ev.resolve_content(scope.comp, layer, time).map_err(fail)?;
+    if ty == "shape" {
+        // The authored geometry and paint (pm-vector's, gated exactly by its
+        // own tests), covered and composited here.
+        let has_paths = node::array(node::member(node::member(Some(layer), "d"), "paths"))
+            .is_some_and(|p| !p.is_empty());
+        let scene = if has_paths {
+            let (_, colors, paths) = pm_render::vector::paths(scope, layer, time).map_err(fail)?;
+            pm_render::vector::paths_scene(&paths, &colors, &device.as_coeffs())
+        } else {
+            let (content, colors) = pm_render::vector::shape_content(&d);
+            match pm_render::vector::shape_scene(&content, &colors, &device.as_coeffs()) {
+                Some(scene) => scene,
+                None => return Ok(vec![([0.0; 4], false); w * h]),
+            }
+        };
+        return scene_pixels(&scene, w, h);
+    }
+    let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
+    let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
+    let paint = hex(&pm_render::js::string(pm_render::js::get(&d, "color"))).ok_or("solid color")?;
+    // `radius` rounds the corners, at most half of either side
+    // (SOLID-RADIUS-1: the inspector edits it).
+    let radius = pm_render::js::get(&d, "radius").to_number();
+    let radius = if radius > 0.0 { radius.min(sw.abs() / 2.0).min(sh.abs() / 2.0) } else { 0.0 };
+    let outline = kurbo::Shape::to_path(&kurbo::RoundedRect::new(0.0, 0.0, sw, sh, radius), 1e-9);
+    let coverage = fill(&(device * outline), FillRule::NonZero, PATH_SAMPLES, w, h);
+    let src: Rgba = [paint[0] * paint[3], paint[1] * paint[3], paint[2] * paint[3], paint[3]];
+    let mut out = vec![([0.0; 4], false); w * h];
+    for y in coverage.y0..coverage.y0 + coverage.height {
+        for x in coverage.x0..coverage.x0 + coverage.width {
+            let k = coverage.at(x, y);
+            if k > 0.0 {
+                out[y * w + x] = (scale(src, k), k < 1.0 - 1e-12);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Marks the pixels `outline` (output pixels) touches, grown by `grow`
+/// pixels, unreferenced.
+fn unreference(out: &mut Reference, outline: &kurbo::BezPath, grow: usize) {
+    let (w, h) = (out.width, out.height);
+    let c = fill(outline, FillRule::NonZero, 1, w, h);
+    let mut inside = vec![false; w * h];
+    for y in c.y0..c.y0 + c.height {
+        for x in c.x0..c.x0 + c.width {
+            inside[y * w + x] = c.at(x, y) > 0.0;
+        }
+    }
+    for (i, _) in pm_reference::compare::dilate(&inside, w, h, grow).iter().enumerate().filter(|(_, g)| **g) {
+        out.rgba[i * 4..][..4].fill(f64::NAN);
+    }
+}
+
+/// An unmodelled layer's footprint: what its content covers under its 2D
+/// world matrix (solids and shapes: their own pixels; other content: its
+/// box) at every time it is drawn, grown by its effects' padding (C-K6: the
+/// sum of their `viewportPadding` parameters) and 2 pixels, is
+/// unreferenced. A footprint this cannot bound (groups, precomps, 2.5D
+/// planes, transitions, which move content) is the whole frame. The edges
+/// of solid and shape content, grown by the padding and 1 pixel, are
+/// recorded as AA-corrected input (`Reference::aa_corrected`).
+#[allow(clippy::too_many_arguments)]
+fn footprint<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &pm_render::effects::Effects,
+    layer: &'d Node,
+    ty: &str,
+    times: &[f64],
+    seconds: f64,
+    (sx, sy): (f64, f64),
+    out: &mut Reference,
+) -> Result<(), String> {
+    let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
+    let (w, h) = (out.width, out.height);
+    let content = matches!(ty, "solid" | "shape");
+    let boxed = matches!(ty, "image" | "shader" | "extension");
+    let bounded = (content || boxed)
+        && !node::truthy(node::member(Some(layer), "group"))
+        && !scope.is_3d_layer(layer).map_err(fail)?
+        && scope.active_transition(layer, seconds, &|_| true).map_err(fail)?.is_none();
+    let padding: f64 = match pm_render::effects::plan::effect_steps(scope, effects, layer, seconds).map_err(fail)? {
+        Ok(steps) => steps.iter().map(|s| s.padding).sum(),
+        Err(_) => f64::INFINITY,
+    };
+    if !bounded || !padding.is_finite() {
+        out.rgba.fill(f64::NAN);
+        out.whole_frame = true;
+        // Every solid and shape edge in the frame may feed it.
+        if content {
+            for &t in times {
+                for (i, (px, edge)) in content_pixels(scope, layer, ty, t, (sx, sy), w, h)?.into_iter().enumerate() {
+                    out.aa_corrected[i] |= edge || (px[3] > 0.0 && px[3] < 1.0);
+                }
+            }
+        }
+        return Ok(());
+    }
+    let mut covered = vec![false; w * h];
+    let mut edges = vec![false; w * h];
+    let mut grow = 2;
+    for &t in times {
+        let world = scope.world_matrix(layer, t).map_err(fail)?;
+        let offset = scope.size_anchor_offset(layer, t).map_err(fail)?;
         let device = kurbo::Affine::new([
             world[0] * sx,
             world[1] * sy,
@@ -251,55 +486,87 @@ fn draw(
             world[4] * sx,
             world[5] * sy,
         ]) * kurbo::Affine::translate((offset.x, offset.y));
-        if ty == "image" {
-            // Resampled content no lane models yet: its box (centered on
-            // the anchor), grown by a pixel, is unreferenced.
-            let rect = kurbo::Rect::new(-sw / 2.0, -sh / 2.0, sw / 2.0, sh / 2.0);
-            let box_ = fill(&(device * kurbo::Shape::to_path(&rect, 1e-9)), FillRule::NonZero, 1, w, h);
-            let mut inside = vec![false; w * h];
-            for y in box_.y0..box_.y0 + box_.height {
-                for x in box_.x0..box_.x0 + box_.width {
-                    inside[y * w + x] = box_.at(x, y) > 0.0;
+        let c = device.as_coeffs();
+        grow = grow.max((padding * c[0].hypot(c[1]).max(c[2].hypot(c[3]))).ceil() as usize + 2);
+        if content {
+            for (i, (px, edge)) in content_pixels(scope, layer, ty, t, (sx, sy), w, h)?.into_iter().enumerate() {
+                covered[i] |= px[3] > 0.0 || edge;
+                edges[i] |= edge || (px[3] > 0.0 && px[3] < 1.0);
+            }
+        } else {
+            let d = scope.ev.resolve_content(scope.comp, layer, t).map_err(fail)?;
+            let bw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
+            let bh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
+            let rect = kurbo::Rect::new(-bw / 2.0, -bh / 2.0, bw / 2.0, bh / 2.0);
+            let f = fill(&(device * kurbo::Shape::to_path(&rect, 1e-9)), FillRule::NonZero, 1, w, h);
+            for y in f.y0..f.y0 + f.height {
+                for x in f.x0..f.x0 + f.width {
+                    covered[y * w + x] |= f.at(x, y) > 0.0;
                 }
             }
-            let grown = pm_reference::compare::dilate(&inside, w, h, 1);
-            for (i, _) in grown.iter().enumerate().filter(|(_, g)| **g) {
-                out.rgba[i * 4..][..4].fill(f64::NAN);
-            }
-            continue;
         }
-        let paint = hex(&pm_render::js::string(pm_render::js::get(&d, "color"))).ok_or("solid color")?;
-        // Level 2 honors `radius` (at most half of either side); level 1
-        // ignores it, as shipped (decision SOLID-RADIUS-1 is open).
-        let radius = pm_render::js::get(&d, "radius").to_number();
-        let radius = if pm_render::vector::level2(layer) && radius > 0.0 {
-            radius.min(sw.abs() / 2.0).min(sh.abs() / 2.0)
-        } else {
-            0.0
+    }
+    for (i, g) in pm_reference::compare::dilate(&covered, w, h, grow).into_iter().enumerate() {
+        if g {
+            out.rgba[i * 4..][..4].fill(f64::NAN);
+        }
+    }
+    for (i, g) in pm_reference::compare::dilate(&edges, w, h, grow - 1).into_iter().enumerate() {
+        out.aa_corrected[i] |= g;
+    }
+    Ok(())
+}
+
+/// Device-pixel tolerance of the reference's stroke outlines.
+const STROKE_TOLERANCE: f64 = 1e-3;
+
+/// A vector layer's own pixels (premultiplied, source-over item by item in
+/// order) over a `w × h` frame, and where any item is partially covered.
+/// Fills are covered exactly; strokes are the exact region their joins and
+/// caps define (`pm_reference::stroke`), covered the same way.
+pub fn scene_pixels(
+    scene: &pm_vector::render::scene::CoverageScene,
+    w: usize,
+    h: usize,
+) -> Result<Vec<(Rgba, bool)>, String> {
+    use pm_vector::render::scene::{FillRule as Rule, ItemStyle};
+    let mut out = vec![([0.0; 4], false); w * h];
+    for item in &scene.items {
+        let (device, rule, cells) = match &item.style {
+            ItemStyle::Fill(rule) => (
+                item.transform * item.path.clone(),
+                match rule {
+                    Rule::NonZero => FillRule::NonZero,
+                    Rule::EvenOdd => FillRule::EvenOdd,
+                },
+                PATH_SAMPLES,
+            ),
+            ItemStyle::Stroke(stroke) => {
+                let c = item.transform.as_coeffs();
+                let scale = c[0].hypot(c[1]).max(c[2].hypot(c[3])).max(1e-12);
+                let region = pm_reference::stroke::outline(&item.path, stroke, STROKE_TOLERANCE / scale)
+                    .ok_or("dashed strokes")?;
+                // Overlapping pieces at the edge count within a cell: finer
+                // cells bound that error (1/n² of a pixel per cell).
+                let cells = if region.folds { 4 * PATH_SAMPLES } else { PATH_SAMPLES };
+                (item.transform * region.path, FillRule::NonZero, cells)
+            }
         };
-        let outline = kurbo::Shape::to_path(&kurbo::RoundedRect::new(0.0, 0.0, sw, sh, radius), 1e-9);
-        let coverage = fill(&(device * outline), FillRule::NonZero, PATH_SAMPLES, w, h);
-        let mode = reference_blend(
-            pm_render::composite::build::blend_mode(&mut scope, layer, seconds).map_err(fail)?,
-        );
-        let a = paint[3] * opacity;
-        let src: Rgba = [paint[0] * a, paint[1] * a, paint[2] * a, a];
+        let coverage = fill(&device, rule, cells, w, h);
+        let paint = item.premultiplied().map(f64::from);
         for y in coverage.y0..coverage.y0 + coverage.height {
             for x in coverage.x0..coverage.x0 + coverage.width {
                 let k = coverage.at(x, y);
                 if k <= 0.0 {
                     continue;
                 }
-                if k < 1.0 - 1e-12 {
-                    out.edge[y * w + x] = true;
-                }
-                let px = &mut out.rgba[(y * w + x) * 4..][..4];
-                let dst = [px[0], px[1], px[2], px[3]];
-                px.copy_from_slice(&clamp(blend(mode, scale(src, k), dst)));
+                let (px, edge) = &mut out[y * w + x];
+                *edge |= k < 1.0 - 1e-12;
+                *px = blend(Blend::Normal, scale(paint, k), *px);
             }
         }
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Preview == export (gate-policy.md): the frame the paused viewer asks for
