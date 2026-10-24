@@ -1296,11 +1296,12 @@ export class NativeApi {
   }
 
   groupAncestors(L: any, layers?: any[]): any[] {
-    // `if (!layer?.group) return []` comes before anything reads the list
-    // (an explicit list, or a layer that is not one; the shaped path below
-    // caches the rest per revision).
+    // Today's `if (!layer?.group) return []` comes before anything reads the
+    // list, explicit or the current composition's: a layer outside a group
+    // needs no query (the timeline asks for every layer on every rebuild).
+    // The shaped path below caches the rest per revision.
     const raw = this.unwrap(L);
-    if (!raw?.group && (layers !== undefined || !raw || typeof raw !== 'object')) {
+    if (!raw?.group) {
       return this.answer('groups.ancestors', () => ({ value: [] }), () => this.legacy.groupAncestors(L, layers), () => ({ layer: L?.id }));
     }
     if (layers !== undefined) {
