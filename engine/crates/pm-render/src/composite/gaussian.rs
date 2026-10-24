@@ -288,9 +288,8 @@ pub(crate) struct Params {
     pub step: i32,
     pub radius: i32,
     pub mode: i32,
-    pub first: i32,
-    pub count: i32,
     pub wbase: i32,
+    pub pad: [i32; 2],
     pub cradius: i32,
     pub cwbase: i32,
 }

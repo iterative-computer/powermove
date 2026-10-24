@@ -17,9 +17,9 @@ struct P {
     step: i32,
     radius: i32,
     mode: i32,
-    first: i32,
-    count: i32,
     wbase: i32,
+    _pad0: i32,
+    _pad1: i32,
     cradius: i32,
     cwbase: i32,
 };
