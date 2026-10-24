@@ -2455,10 +2455,15 @@ impl Thread {
                 if self.provisional.get(&key) == Some(&revision) {
                     self.provisional.remove(&key);
                     self.stats().provisional_confirmed += 1;
-                    if let (Some(pending), Some(completer)) =
-                        (self.parked.remove(&key), self.completer.as_ref())
-                    {
-                        completer.submit(pending);
+                    match (self.parked.remove(&key), self.completer.as_ref()) {
+                        (Some(pending), Some(completer)) => completer.submit(pending),
+                        // Not drawn yet (or held without a completion
+                        // thread): draw it now.
+                        _ => {
+                            if let Some(view) = self.views.get_mut(&key) {
+                                view.dirty = true;
+                            }
+                        }
                     }
                 }
             }
@@ -5041,10 +5046,22 @@ impl Thread {
             // At most `MAX_IN_FLIGHT` frames wait on the GPU; the completion
             // thread sends this one (its descriptor is not sent here).
             let deferred = self.completer.is_some();
+            // Without the completion thread nothing can hold a frame: a
+            // provisional revision is drawn once it is confirmed.
+            let held = !deferred
+                && self
+                    .views
+                    .get(&key)
+                    .is_some_and(|v| self.provisional.get(&key) == Some(&v.revision));
             if let Some(view) = self.views.get_mut(&key) {
                 view.render_failed = false;
             }
-            if let Some(descriptor) = self.render(key, media, -1, None, deferred, true) {
+            if held {
+                // The confirmation draws it (`Command::Confirm`).
+                if let Some(view) = self.views.get_mut(&key) {
+                    view.dirty = false;
+                }
+            } else if let Some(descriptor) = self.render(key, media, -1, None, deferred, true) {
                 let seq = descriptor.seq;
                 self.queue_auto_preview(key, seq);
                 if let Some(view) = self.views.get_mut(&key) {
@@ -6349,12 +6366,16 @@ impl Thread {
         loop {
             let pressure = self.pressure();
             let docs = &self.docs;
+            let provisional = &self.provisional;
             // A document whose media the host has not answered yet is not
             // ready: the snapshot waits (within its wait) rather than draw
-            // media missing that is on its way.
+            // media missing that is on its way. Nor is a provisional one: a
+            // capture asked earlier must not draw a partial edit.
             let revision = |key: Key| {
                 docs.get(&key)
-                    .filter(|d| d.has_document() && d.media_ready())
+                    .filter(|d| {
+                        d.has_document() && d.media_ready() && !provisional.contains_key(&key)
+                    })
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
@@ -6420,9 +6441,12 @@ impl Thread {
             }
             let pressure = self.pressure();
             let docs = &self.docs;
+            let provisional = &self.provisional;
             let revision = |key: Key| {
                 docs.get(&key)
-                    .filter(|d| d.has_document() && d.media_ready())
+                    .filter(|d| {
+                        d.has_document() && d.media_ready() && !provisional.contains_key(&key)
+                    })
                     .map(|d| d.revision())
             };
             let asked = &self.fallback.asked;
