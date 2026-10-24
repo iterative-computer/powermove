@@ -2436,6 +2436,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-reference"
+version = "0.1.0"
+dependencies = [
+ "kurbo",
+ "libm",
+ "pm-color",
+ "pm-protocol",
+]
+
+[[package]]
 name = "pm-render"
 version = "0.1.0"
 dependencies = [
@@ -2454,6 +2464,7 @@ dependencies = [
  "pm-model",
  "pm-perf",
  "pm-protocol",
+ "pm-reference",
  "pm-text",
  "pm-time",
  "pm-vector",

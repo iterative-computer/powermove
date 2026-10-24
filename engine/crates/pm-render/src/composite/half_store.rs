@@ -4,7 +4,7 @@
 //! engine's fused composite steps (`half` in `ops.wgsl`) reproduce the
 //! rounding the device actually performs instead of assuming one
 //! (docs/engine/composite.md "Today's composite drift"; measured toward zero
-//! on Apple M-series, `tests/half_store.rs`).
+//! on Apple M-series).
 
 /// Whether the device rounds to nearest (else toward zero), from one
 /// probe draw: 0.75 + ¾ of an f16 ulp stores as 0.75 when truncated and as

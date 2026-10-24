@@ -13,8 +13,7 @@
 
    The project defaults to `real/powermove-ad` of the newest `text-iso-*`
    capture (`engine/corpus/src/capture.ts --text-only`); the times default
-   to the frames whose text the FONTS-R ratchet lists
-   (`pm-render/tests/fixtures/text-residuals.json`). Cases are named
+   to 16, 18 and 24 s. Cases are named
    `real-<time>-<layer id>`. The legacy app must be built
    (`bun run --cwd apps/desktop build`); it runs hidden with the native
    engine off. `--hide-layers` loads the project with every layer hidden,

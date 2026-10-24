@@ -1,0 +1,19 @@
+[package]
+name = "pm-reference"
+description = "f64 reference renders for the quality gates (docs/engine/gate-policy.md); tests only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Independent of the engine's rendering and color code by design: a
+# reference that shares the engine's math lets the engine's bugs pass.
+[dependencies]
+kurbo = "0.13.1"
+libm.workspace = true
+
+[dev-dependencies]
+# Cross-checks only (tests/engine_formulas.rs); never for reference values.
+pm-color = { path = "../pm-color" }
+pm-protocol = { path = "../pm-protocol", default-features = false }

@@ -234,9 +234,9 @@ plane and out through the flat layer's world matrix, onto the flat layer's ink
 
 ## Level 2 sampling
 
-Level 1 content keeps today's sampling exactly (bilinear, no mipmaps, hard UV edges,
-pixel-center coverage); `level1_keeps_todays_sampling` checks that the resampler
-setting does not reach it. Level 1 stills are sampled from today's 8-bit texture
+Level 1 content is still sampled as today (bilinear, no mipmaps, hard UV edges,
+pixel-center coverage); no gate pins that, and the sampler's bars are meant to
+apply to all content (gate-policy.md). Level 1 stills are sampled from today's 8-bit texture
 (composite.md, "Today's composite drift"). Level 2 raster content (`compat` ≥ 2
 image, video, precomp, shader, and extension layers; SVG images, shapes, text, and
 solids belong to their own renderers) is drawn by `sampling::gpu`. Level 2 shader
