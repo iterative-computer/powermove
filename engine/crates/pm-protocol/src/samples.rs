@@ -905,6 +905,7 @@ pub fn snapshot_request() -> crate::snapshot::SnapshotRequest {
         pixels: crate::snapshot::SnapshotPixels::Opaque,
         class: crate::snapshot::SnapshotClass::Sync,
         view_seq: Some(seq(12)),
+        viewer: None,
         wait_ms: 5_000,
         blender_wait_ms: 0,
         captions_hidden: false,
@@ -1505,6 +1506,15 @@ pub fn events() -> Vec<Envelope> {
             snapshots: Count::new(3).expect("count"),
             snapshot_us_max: 48_000,
             revision: rev(42),
+            audio: Some(crate::snapshot::AudioDiagnostics {
+                error: None,
+                problems: vec![
+                    "Audio decode exceeded 120 ms; missing voice plays as silence: music".into(),
+                ],
+                starved_renders: Count::new(4).expect("count"),
+                underruns: Count::ZERO,
+                device_overloads: Count::new(1).expect("count"),
+            }),
         })),
         event(Event::PreviewControl(crate::preview::PreviewControl {
             generation: seq(3), revision: rev(42), composition: "comp-1".into(),
@@ -1521,9 +1531,11 @@ pub fn events() -> Vec<Envelope> {
         })),
         event(Event::Audio(AudioMessage::PeaksWanted {
             asset: "asset-7".into(),
+            request: Some(seq(7)),
         })),
         event(Event::Audio(AudioMessage::Peaks(AudioPeaks {
             asset: "asset-7".into(),
+            request: Some(seq(7)),
             peaks_per_second: 100.0,
             duration: 0.03,
             peaks: vec![0.0, 0.5, 0.25],

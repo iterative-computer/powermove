@@ -2,14 +2,14 @@
  * Retained imperative event bus for the handful of events that must NOT route
  * through Svelte's reactive scheduler:
  *
- *  overlay        — emitted inside the frame loop right after GL.render; the
+ *  overlay        — emitted on engine presentation (or after GL.render); the
  *                   viewer's 2D overlay must draw in the same frame, after GL.
  *  timeline       — 60 Hz playhead repaint of the timeline canvas.
  *  layout-applied — dock/splitter geometry settled; canvas panels re-measure.
  *                   Fires at rAF cadence during splitter drags (keep the
  *                   immediate / +1 rAF / +120 ms resize choreography).
  *  layout         — theme tokens changed; consumers re-read getComputedStyle.
- *  status         — ≤2 Hz perf/status refresh (reads non-reactive GL.stats).
+ *  status         — ≤2 Hz refresh from engine stats (GL.stats with the flag off).
  *  quality        — adaptive quality changed inside the render loop (FBO pool
  *                   teardown); engine-owned.
  *

@@ -1514,6 +1514,34 @@ impl Renderer {
         )
     }
 
+    /// Renders a pinned viewer canvas through the same top-down color pass
+    /// as a live viewer frame, then records its staging copy. Standard
+    /// snapshots normally skip this pass and reverse GL rows on the CPU.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_viewer_snapshot_into_copy(
+        &mut self,
+        document: &Document,
+        composition: &str,
+        time: Ticks,
+        request: &RenderRequest,
+        assets: &dyn AssetResolver,
+        target: &Target,
+        copy: &pm_gpu::readback::ReadbackCopy,
+    ) -> Result<(Rendered, SnapshotRows), RenderError> {
+        self.render_into_rows(
+            document,
+            composition,
+            time,
+            request,
+            assets,
+            target,
+            None,
+            SnapshotRows::TopDown,
+            Some(copy),
+        )
+        .map(|rendered| (rendered, SnapshotRows::TopDown))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_snapshot_into_with_copy(
         &mut self,

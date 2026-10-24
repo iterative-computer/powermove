@@ -1,6 +1,6 @@
-import { test, expect } from './helpers/app';
+import { test, expect, type LaunchedApp } from './helpers/app';
 
-test('agent image attachments open a fitted preview and Escape returns focus', async ({ session }, testInfo) => {
+async function openAttachment(session: LaunchedApp) {
   await session.openEditor(); await session.openAgent();
   await session.page.evaluate(() => (window as any).PM.SpatialAssistant.open());
   const { page } = session;
@@ -30,9 +30,18 @@ test('agent image attachments open a fitted preview and Escape returns focus', a
     });
     window.dispatchEvent(new CustomEvent('pm-open-project', { detail: project }));
   });
-  const trigger = page.getByRole('button', { name: 'View reference.png', exact: true });
-  await trigger.click();
-  const preview = page.getByRole('dialog', { name: 'reference.png', exact: true });
+  return {
+    page,
+    trigger: page.getByRole('button', { name: 'View reference.png', exact: true }),
+    preview: page.getByRole('dialog', { name: 'reference.png', exact: true })
+  };
+}
+
+test('agent image attachments open a fitted preview and Escape returns focus', async ({ session }, testInfo) => {
+  const { page, trigger, preview } = await openAttachment(session);
+  // Keyboard activation: focus returns to the chip that opened the preview.
+  await trigger.focus();
+  await page.keyboard.press('Enter');
   await expect(preview).toBeVisible();
   const image = preview.getByRole('img', { name: 'reference.png', exact: true });
   await expect(image).toBeVisible();
@@ -47,5 +56,20 @@ test('agent image attachments open a fitted preview and Escape returns focus', a
   await page.keyboard.press('Escape');
   await expect(preview).toHaveCount(0);
   await expect(trigger).toBeFocused();
+  expect(session.diagnostics.pageErrors).toEqual([]);
+});
+
+test('a pointer-opened attachment preview closes on Escape without re-arming its chip', async ({ session }) => {
+  const { page, trigger, preview } = await openAttachment(session);
+  await trigger.click();
+  await expect(preview).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(preview).toHaveCount(0);
+  // Pointer clicks never leave a button focused (pointer-focus contract), but focus still lands somewhere real.
+  await expect(trigger).not.toBeFocused();
+  expect(await page.evaluate(() => document.activeElement !== null && document.activeElement !== document.body)).toBe(true);
+  await page.keyboard.press('Space');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await expect(preview).toHaveCount(0);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

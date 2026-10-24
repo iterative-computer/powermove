@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 
 import { expect, test as base, type TestInfo } from '@playwright/test';
 import { _electron, type ElectronApplication, type Page } from 'playwright';
+import { closeTestProcess, SHUTDOWN_MS } from './close';
 
 /**
  * Page-side service convention for e2e specs: inside each `page.evaluate` or
@@ -70,7 +71,7 @@ export type LaunchedApp = {
   openAgent(): Promise<void>;
   close(): Promise<void>;
   /** Wall time of the last close: app shutdown, then profile cleanup. */
-  readonly teardown: { appCloseMs: number; cleanupMs: number } | null;
+  readonly teardown: { appCloseMs: number; cleanupMs: number; forced: boolean } | null;
 };
 
 /** The Playwright session builds exactly once in global setup. Direct helper users
@@ -129,69 +130,49 @@ async function startElectron(
     cwd: repoRoot,
     env: launchEnv
   });
-  // Native dialogs are substituted in the hidden harness, never shown on the user's desktop.
-  // Individual tests can supply chosen paths or decisions while retaining real file IPC.
-  await app.evaluate(({ dialog }) => {
-    dialog.showSaveDialog = async () => ({ canceled: true, filePath: '' });
-    dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
-    dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false });
-  });
-  const instrumented = new WeakSet<Page>();
-  const instrument = (target: Page): void => {
-    if (instrumented.has(target)) return;
-    instrumented.add(target);
-    target.on('console', message => {
-      const location = message.location();
-      diagnostics.console.push({
-        type: message.type(),
-        text: message.text(),
-        location: location.url
-          ? `${location.url}:${location.lineNumber ?? 0}:${location.columnNumber ?? 0}`
-          : ''
-      });
-    });
-    target.on('pageerror', error => diagnostics.pageErrors.push(error.stack || error.message));
-  };
-  app.on('window', instrument);
-  app.windows().forEach(instrument);
-  // Hidden windows are announced before navigation. Waiting for a second
-  // window here would hang forever. DevTools is disabled in background mode.
-  const page = await app.firstWindow();
-  await page.waitForURL(url => url.protocol === 'app:' || url.hostname === 'localhost');
-  instrument(page);
-  await page.waitForLoadState('domcontentloaded');
-  await page.waitForFunction(() => Boolean((window as any).PM));
-  await page.waitForFunction(() => Boolean((window as any).PM?.app));
-  await page.evaluate(async () => { await (window as any).PM.projectReady; });
-  return { app, page };
-}
-
-/** Cleanup of an isolated test process must finish even when OS shutdown work hangs. */
-async function closeDisposableApp(app: ElectronApplication): Promise<void> {
-  const process = app.process();
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
-      (async () => {
-        await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); }).catch(() => undefined);
-        await app.close();
-      })(),
-      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('disposable app shutdown exceeded 5 s')), 5_000); })
-    ]);
+    // Native dialogs are substituted in the hidden harness, never shown on the user's desktop.
+    // Individual tests can supply chosen paths or decisions while retaining real file IPC.
+    await app.evaluate(({ dialog }) => {
+      dialog.showSaveDialog = async () => ({ canceled: true, filePath: '' });
+      dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
+      dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false });
+    });
+    const instrumented = new WeakSet<Page>();
+    const instrument = (target: Page): void => {
+      if (instrumented.has(target)) return;
+      instrumented.add(target);
+      target.on('console', message => {
+        const location = message.location();
+        diagnostics.console.push({
+          type: message.type(),
+          text: message.text(),
+          location: location.url
+            ? `${location.url}:${location.lineNumber ?? 0}:${location.columnNumber ?? 0}`
+            : ''
+        });
+      });
+      target.on('pageerror', error => diagnostics.pageErrors.push(error.stack || error.message));
+    };
+    app.on('window', instrument);
+    app.windows().forEach(instrument);
+    // Hidden windows are announced before navigation. Waiting for a second
+    // window here would hang forever. DevTools is disabled in background mode.
+    const page = await app.firstWindow();
+    await page.waitForURL(url => url.protocol === 'app:' || url.hostname === 'localhost');
+    instrument(page);
+    await page.waitForLoadState('domcontentloaded');
+    await page.waitForFunction(() => Boolean((window as any).PM));
+    await page.waitForFunction(() => Boolean((window as any).PM?.app));
+    await page.evaluate(async () => { await (window as any).PM.projectReady; });
+    return { app, page };
   } catch (error) {
-    console.warn(`E2E process cleanup: ${String(error)}`);
-  } finally {
-    clearTimeout(timer);
-    if (process.exitCode === null && process.signalCode === null) {
-      const exited = new Promise<void>(resolve => process.once('exit', () => resolve()));
-      process.kill('SIGKILL');
-      let exitTimer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([exited, new Promise<void>(resolve => { exitTimer = setTimeout(resolve, 2_000); })]);
-      clearTimeout(exitTimer);
-    }
+    await closeTestProcess(app, 5_000);
+    throw error;
   }
 }
 
+/** Cleanup of an isolated test process must finish even when OS shutdown work hangs. */
 export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedApp> {
   const ownsUserData = options.userData === undefined;
   const userData = options.userData
@@ -227,7 +208,7 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     diagnostics,
     teardown: null,
     async relaunch() {
-      await closeDisposableApp(active.app);
+      if (await closeTestProcess(active.app)) throw new Error(`Electron shutdown exceeded ${SHUTDOWN_MS} ms before relaunch.`);
       active = await startElectron(userData, env, diagnostics, options.normalWindow, switches);
       session.app = active.app;
       session.page = active.page;
@@ -260,16 +241,19 @@ export async function launchApp(options: LaunchOptions = {}): Promise<LaunchedAp
     async close() {
       if (closed) return;
       closed = true;
-      // A failed close-decision assertion must not leave its Cancel mock
-      // preventing cleanup of this disposable test process.
       const started = performance.now();
-      await closeDisposableApp(active.app);
-      const closedAt = performance.now();
-      if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-      (session as { teardown: LaunchedApp['teardown'] }).teardown = {
-        appCloseMs: Math.round(closedAt - started),
-        cleanupMs: Math.round(performance.now() - closedAt)
-      };
+      let closedAt = started, forced = false;
+      try {
+        forced = await closeTestProcess(active.app);
+        closedAt = performance.now();
+      } finally {
+        if (ownsUserData) await rm(userData, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+        (session as { teardown: LaunchedApp['teardown'] }).teardown = {
+          appCloseMs: Math.round(closedAt - started),
+          cleanupMs: Math.round(performance.now() - closedAt), forced,
+        };
+      }
+      if (forced) throw new Error(`Electron shutdown exceeded ${SHUTDOWN_MS} ms; terminated the test process for cleanup.`);
     }
   };
   return session;
@@ -298,13 +282,15 @@ export const test = base.extend<{ session: LaunchedApp; desktopLaunchOptions: La
     try {
       await use(session);
     } finally {
-      await session.close();
-      await attachDiagnostics(testInfo, session.diagnostics);
-      // Recorded so a slow native shutdown is visible, not only a timeout.
-      await testInfo.attach('session-teardown', {
-        body: Buffer.from(JSON.stringify(session.teardown)),
-        contentType: 'application/json'
-      });
+      try { await session.close(); }
+      finally {
+        await attachDiagnostics(testInfo, session.diagnostics);
+        // Forced cleanup still fails the test; it never hides a shutdown bug.
+        await testInfo.attach('session-teardown', {
+          body: Buffer.from(JSON.stringify(session.teardown)),
+          contentType: 'application/json'
+        });
+      }
     }
   }, { timeout: 60_000 }]
 });
