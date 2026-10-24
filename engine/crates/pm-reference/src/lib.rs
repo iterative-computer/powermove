@@ -11,6 +11,7 @@
 //! | [`coverage`] | Exact area coverage of filled paths and glyph outlines, supersampled per pixel for the fill rule |
 //! | [`composite`] | Porter-Duff operators and the W3C separable blend modes on premultiplied colors |
 //! | [`gaussian`] | The exact separable Gaussian blur |
+//! | [`stroke`] | The region a stroke covers, from its joins, caps and half-width |
 //! | [`color`] | Transfer functions, H.273 matrices, ranges and primaries, ICC matrix/TRC profiles |
 //! | [`compare`] | Pixel classes, error statistics, the gate verdict, geometry and preview == export checks |
 #![forbid(unsafe_code)]
@@ -20,3 +21,4 @@ pub mod compare;
 pub mod composite;
 pub mod coverage;
 pub mod gaussian;
+pub mod stroke;
