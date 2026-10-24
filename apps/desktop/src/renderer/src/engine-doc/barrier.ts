@@ -236,6 +236,10 @@ export class DocumentBarrier {
   /** Whether anything waits to be flushed. */
   get pending(): boolean { return this.resyncPending || this.structural || this.dirty.size > 0; }
 
+  /** Whether the next flush covers every path anyway (a resync, or a diff
+   *  of the whole document): a write needs no path of its own. */
+  get coversDocument(): boolean { return this.resyncPending || this.dirty.has(pathKey([])); }
+
   /** Optional page-clock attribution for interactive performance diagnostics. */
   trace: ((stage: string, began: number) => void) | null = null;
 

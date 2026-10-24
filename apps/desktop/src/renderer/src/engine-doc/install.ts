@@ -259,7 +259,10 @@ export function installEngineDoc(PM: PMRegistry, options: EngineDocOptions = {})
       record(paths);
     },
     wroteObject(object) {
-      if (!barrier || !object || typeof object !== 'object') return;
+      // A document replacement adopts every legacy keyframe it holds: finding
+      // each one's path walked the whole document per keyframe (17 s for
+      // 2,500 keyed layers). The replacement's resync or whole diff has them.
+      if (!barrier || !object || typeof object !== 'object' || barrier.coversDocument) return;
       const path = findPath(current, unwrap(object), 16);
       if (path) barrier.touched([path]);
     },
