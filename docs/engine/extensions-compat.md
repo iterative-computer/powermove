@@ -272,13 +272,18 @@ times.
 
 ### Paused-edit performance gate and attribution
 
-A paused edit with an override goes: the window's barrier diffs the document
-(an unscoped `touch()` compares every layer of the open composition; see
-`write-path.md`), sends the batch, and prepares the frame on screen at the new
-revision at once (`prepareShown`): the wrapper over the cached base, the
-readback, the answer. The engine applies the batch, plans the frame, waits for
-the answer (`CompatPending`), draws it, and the viewer's worker draws it on
-arrival. `frame:rendered` follows in the window's next animation frame.
+A paused edit with an override goes: the window sends the layers the write
+most likely changed as a provisional batch (`write-path.md`), prepares the
+frame on screen at that revision at once (`prepareShown`: the wrapper over the
+cached base, the readback, the answer), then compares the rest of the
+document, which confirms the revision or supersedes it. Meanwhile the engine
+applies the batch, plans the frame, waits for the answer (`CompatPending`),
+draws it and parks it until the confirmation. The page forwards it to the
+viewer's worker, which draws it on arrival; `frame:rendered` follows in the
+window's next animation frame. The gate "a paused edit is presented only
+whole" makes the comparison find more twice (the write moved another layer;
+the override moves one and calls `touch()` while it draws) and requires that
+no frame of either superseded revision is ever drawn.
 
 Build the native addons, wasm and app before acquiring the Electron lock.
 Run the opt-in gate from the repository root:

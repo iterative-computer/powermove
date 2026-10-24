@@ -79,6 +79,20 @@ the barrier forgets every shadow object along an operation's path before applyin
 (the shadow is mutated in place). Values the list cannot vouch for (`toJSON`, other
 prototypes, `NaN`, changed shared prototypes) take the exact comparison.
 
+**Provisional revisions.** That comparison still costs 10 to 12 ms at 2,500 layers
+in the app, so an unscoped write does not wait for it. The barrier remembers the
+layers recent diffs changed (`HOT_LAYERS`, newest last). `flushProvisional` diffs
+only those and the paths written by name, and sends them as a provisional batch:
+the engine applies and draws it, but parks its frames. The edit's own raster
+answers are made next at that revision (`provisionalQueries`: only their queries
+read the provisional mirror), then `flush` compares the whole document as before.
+Nothing more: a `confirmed` stream item (`ConfirmRevision`, on the same port after
+the batch) releases the parked frame. More: that batch supersedes the provisional
+revision, whose frames are dropped and never presented. Invariants: at most one
+provisional revision is outstanding; every other flush, query and snapshot
+completes the comparison first; a coalesced batch is provisional only if its last
+batch is; timed playback frames never render at an unconfirmed revision.
+
 How writes reach the barrier:
 
 | Source | How |
