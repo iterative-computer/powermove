@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod doc;
+pub mod mask_reference;
 pub mod reference;
 pub mod reference_substitutions;
 pub mod text;

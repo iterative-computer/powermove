@@ -267,7 +267,18 @@ fn main() {
                         over2 += usize::from(e > 2);
                     }
                 }
-                let rest: Vec<bool> = mask.iter().map(|m| !m).collect();
+                // Path mask edges of 2D masked layers are corrected (exact
+                // coverage and Gaussian): G-V2 (`tests/path_masks.rs`)
+                // judges them against the reference, not this comparison.
+                let bands = support::mask_reference::mask_bands(
+                    &p.document,
+                    &p.composition,
+                    ticks(s.time),
+                    wu,
+                    hu,
+                )
+                .expect("mask reference");
+                let rest: Vec<bool> = mask.iter().zip(&bands).map(|(m, b)| !m && !b).collect();
                 let d = Diff::of_masked(&ours, &reference, &rest);
                 // A frame whose every pixel is text has no other pixels to
                 // judge (the Standard class holds trivially).

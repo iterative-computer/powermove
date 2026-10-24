@@ -336,7 +336,7 @@ impl Exec<'_> {
 
     /// Masks and the matte on `input` (one fused pass; each step's result
     /// rounded to the storage precision as today's separate passes store
-    /// it). `Err` when a path mask cannot be filled (the layer fails).
+    /// it).
     fn mask_and_matte(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -345,18 +345,13 @@ impl Exec<'_> {
         matte: Option<(&Matte, &Target)>,
         rect: Region,
         full: (u32, u32),
-    ) -> Result<Target, String> {
+    ) -> Target {
         let mut u = self.op_uniform(full);
         let mut coverage = None;
         if let Some(m) = masks {
             if let Some(path) = &m.path {
                 u.i[1] |= FLAG_PATH_MASKS;
-                let texture = self.pipelines.ops.path_masks.coverage(
-                    self.device,
-                    self.queue,
-                    encoder,
-                    path,
-                )?;
+                let texture = self.pipelines.ops.path_masks.coverage(self.device, encoder, path);
                 coverage = Some(texture.create_view(&Default::default()));
             } else {
                 u.i[1] |= FLAG_MASKS;
@@ -400,7 +395,7 @@ impl Exec<'_> {
             out.format(),
             Self::viewport(rect, full),
         );
-        Ok(out)
+        out
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -536,31 +531,19 @@ impl Exec<'_> {
         match &n.effects {
             None => {
                 if n.masks.is_some() || matte.is_some() {
-                    match self.mask_and_matte(
+                    res = self.mask_and_matte(
                         encoder,
                         &res,
                         n.masks.as_ref(),
                         matte.as_ref().map(|(m, t)| (*m, t)),
                         rect,
                         full,
-                    ) {
-                        Ok(t) => res = t,
-                        Err(message) => {
-                            self.fail_layer(plan, &n.layer, message);
-                            return None;
-                        }
-                    }
+                    );
                 }
             }
             Some(effects) => {
                 if n.masks.is_some() {
-                    match self.mask_and_matte(encoder, &res, n.masks.as_ref(), None, rect, full) {
-                        Ok(t) => res = t,
-                        Err(message) => {
-                            self.fail_layer(plan, &n.layer, message);
-                            return None;
-                        }
-                    }
+                    res = self.mask_and_matte(encoder, &res, n.masks.as_ref(), None, rect, full);
                 }
                 match self.run_effects(encoder, effects, &res, Some(acc), rect, full, plan.view) {
                     Ok(Some(t)) => res = t,
@@ -571,9 +554,7 @@ impl Exec<'_> {
                     }
                 }
                 if let Some((m, t)) = &matte {
-                    res = self
-                        .mask_and_matte(encoder, &res, None, Some((m, t)), rect, full)
-                        .expect("a matte alone always runs");
+                    res = self.mask_and_matte(encoder, &res, None, Some((m, t)), rect, full);
                 }
             }
         }
@@ -603,13 +584,7 @@ impl Exec<'_> {
                 }
             };
         let contribution = match &n.masks {
-            Some(m) => match self.mask_and_matte(encoder, &adjusted, Some(m), None, rect, full) {
-                Ok(t) => t,
-                Err(message) => {
-                    self.fail_layer(plan, &n.layer, message);
-                    return None;
-                }
-            },
+            Some(m) => self.mask_and_matte(encoder, &adjusted, Some(m), None, rect, full),
             None => adjusted,
         };
         let out = self.take_rect(rect);
