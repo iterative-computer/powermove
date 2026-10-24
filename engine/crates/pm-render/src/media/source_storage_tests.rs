@@ -115,9 +115,9 @@ fn video_storage_follows_project_and_source_depth_with_one_reading() {
     let hdr = fixtures.join("hevc10-2020-pq.mp4");
     use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float, Rgba32Float};
     let convert = |media: &mut MediaCache,
-                       path: &Path,
-                       precision,
-                       interpretation: Option<&Interpretation>| {
+                   path: &Path,
+                   precision,
+                   interpretation: Option<&Interpretation>| {
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let target = media
             .video(

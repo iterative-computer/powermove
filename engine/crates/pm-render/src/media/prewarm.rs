@@ -228,60 +228,118 @@ pub(crate) struct PlannedVideoDraw {
 }
 
 impl MediaCache {
-    /// Before a frame draws: opens the frame's video sources that are not
-    /// open yet and decodes their selected frames, concurrently, into the
-    /// shared decoded-frame cache. Drawing then finds each source and frame
-    /// ready instead of opening and decoding them one layer at a time. A
-    /// frame with at most one cold source keeps the usual path.
+    /// Before a frame draws: opens the frame's video sources and decodes
+    /// their selected frames into the shared decoded-frame cache, on a
+    /// bounded pool of workers, when two or more of them need it. A source
+    /// needs it when it is not open, or when this renderer has never drawn
+    /// it and its selected frame is not decoded (background preparation
+    /// opened it but stopped at its session cap). Drawing then finds each
+    /// frame ready instead of decoding them one layer at a time.
     pub(crate) fn open_cold(&mut self, videos: &[PlannedVideoDraw], export: bool) {
         self.drain_prepared();
-        let mut cold: Vec<(&PlannedVideoDraw, (u64, u128))> = Vec::new();
+        let purpose = if export {
+            DecodePurpose::Export
+        } else {
+            DecodePurpose::Display
+        };
+        let mut jobs: Vec<Job> = Vec::new();
         for v in videos {
             let Some(current) = stamp(&v.path) else {
                 continue;
             };
-            let open = self
+            // One job per file: layers of a file share its decoded frames.
+            if jobs.iter().any(|j| j.key.path == v.path) {
+                continue;
+            }
+            let existing = self
                 .sources
                 .get(&v.path)
-                .is_some_and(|(seen, _)| *seen == current);
-            // One open per file: layers of a file share its decoded frames.
-            if !open && !cold.iter().any(|(c, _)| c.path == v.path) {
-                cold.push((v, current));
+                .filter(|(seen, _)| *seen == current)
+                .map(|(_, src)| src.clone());
+            if let Some(src) = &existing
+                && (self.frames.keys().any(|k| k.path == v.path)
+                    || self.selected_frame_decoded(src, v, purpose))
+            {
+                continue;
             }
+            jobs.push(Job {
+                key: Key {
+                    path: v.path.clone(),
+                    instance: v.instance,
+                    export,
+                    stamp: current,
+                    settings: String::new(),
+                },
+                stamp: current,
+                existing,
+                seconds: v.seconds,
+                interpret: v.interpret.clone(),
+                composition: v.composition,
+            });
         }
-        if cold.len() < 2 {
+        if jobs.len() < 2 {
             return;
         }
+        // One worker per core at most: probes, indexes and decoder startup
+        // are CPU work, and 50-clip projects must not start 50 at once.
+        let workers = std::thread::available_parallelism()
+            .map_or(2, |n| n.get())
+            .min(jobs.len());
         let service = self.service.clone();
         let cancel = AtomicBool::new(false);
+        let next = AtomicUsize::new(0);
+        let jobs: Vec<Mutex<Option<Job>>> = jobs.into_iter().map(|j| Mutex::new(Some(j))).collect();
         let completed: Vec<Completed> = std::thread::scope(|scope| {
-            let workers: Vec<_> = cold
-                .iter()
-                .map(|(v, current)| {
-                    let job = Job {
-                        key: Key {
-                            path: v.path.clone(),
-                            instance: v.instance,
-                            export,
-                            stamp: *current,
-                            settings: String::new(),
-                        },
-                        stamp: *current,
-                        existing: None,
-                        seconds: v.seconds,
-                        interpret: v.interpret.clone(),
-                        composition: v.composition,
-                    };
-                    let (service, cancel) = (&service, &cancel);
-                    scope.spawn(move || prepare_one(job, None, service, cancel, false))
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    let (service, cancel, next, jobs) = (&service, &cancel, &next, &jobs);
+                    scope.spawn(move || {
+                        let mut done = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(job) = jobs.get(i).and_then(|j| j.lock().unwrap().take())
+                            else {
+                                break done;
+                            };
+                            done.push(prepare_one(job, None, service, cancel, false));
+                        }
+                    })
                 })
                 .collect();
-            workers.into_iter().filter_map(|w| w.join().ok()).collect()
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .flatten()
+                .collect()
         });
         for result in completed {
             // Failures surface again, named, when the layer draws.
             let _ = self.adopt_prepared(result);
         }
+    }
+
+    /// Whether `v`'s selected frame of an open source is in the decoded
+    /// cache.
+    fn selected_frame_decoded(
+        &self,
+        src: &MediaSource,
+        v: &PlannedVideoDraw,
+        purpose: DecodePurpose,
+    ) -> bool {
+        let Some(video) = src.probe.video.as_ref() else {
+            return false;
+        };
+        let none = Interpretation::default();
+        let reading = resolve_video(video, v.interpret.as_ref().unwrap_or(&none));
+        let timing = Timing::new(src, &reading, v.composition);
+        let ticks = (v.seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64;
+        timing.pick(src, ticks).is_some_and(|pick| {
+            self.service.cache().contains(&pm_media::cache::FrameKey {
+                source: src.id,
+                sample: src.index.frames[pick.frame].sample,
+                purpose,
+            })
+        })
     }
 
     fn adopt_prepared(&mut self, result: Completed) -> Result<bool, MediaFailure> {

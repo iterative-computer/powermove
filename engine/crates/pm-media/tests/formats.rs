@@ -329,8 +329,8 @@ fn color_tags_and_defaults() {
     if c.tagged.primaries.is_none() {
         assert_eq!(
             c.interpreted.primaries,
-            Primaries::Bt601_525,
-            "SD: SMPTE 170M"
+            Primaries::Bt601_625,
+            "576-line PAL: BT.470BG"
         );
     }
     // MJPEG is full range by rule; untagged chroma is sited left.

@@ -155,13 +155,19 @@ pub(crate) fn comp_twins(plan: &CompPlan) -> Vec<(usize, usize)> {
     fn content<'p>(c: &'p Content, out: &mut Vec<&'p CompPlan>) {
         match c {
             Content::Placed(p) => content(&p.content, out),
-            Content::Texture { source: Source::Comp(child), .. } => {
+            Content::Texture {
+                source: Source::Comp(child),
+                ..
+            } => {
                 if !child.group {
                     out.push(child);
                 }
                 walk(child, out);
             }
-            Content::Texture { source: Source::Accumulate(child), .. } => walk(child, out),
+            Content::Texture {
+                source: Source::Accumulate(child),
+                ..
+            } => walk(child, out),
             _ => {}
         }
     }

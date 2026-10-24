@@ -3,8 +3,8 @@
 // values at the source's size.
 //
 // - Y′CbCr: siting-aware chroma upsampling, exact at co-sited samples
-//   (pm_color::chroma): horizontal linear for 4:2:2, Catmull-Rom
-//   horizontally and linear vertically for 4:2:0; then the matrix.
+//   (pm_color::chroma): Catmull-Rom horizontally, linear vertically for
+//   4:2:0; then the matrix.
 // - Transfer and primaries into the working encoding. In Standard an
 //   E-encoded Rec.709 source is the identity: code values pass through.
 //   HDR sources (transfer 5 PQ, 6 HLG) are decoded per BT.2100 and tone
@@ -125,20 +125,17 @@ fn transfer_to_linear(c: vec3<f32>) -> vec3<f32> {
 }
 
 // The input transform: source encoding and primaries to the working encoding.
-// A reading that changes colour (a gamut conversion, a tone map) clips an
-// encoded signal to 0..1 before linearising it, as a display does; the
-// working-encoding change alone keeps superwhites.
-fn to_working(signal: vec3<f32>) -> vec3<f32> {
+// SDR transfers are extended and sign-preserving, so superwhites and
+// sub-blacks survive linearisation and any primaries conversion for every
+// reading; only 8-bit storage or display clips them. PQ and HLG are defined
+// on 0..1, so the tone map's input is clipped.
+fn to_working(c: vec3<f32>) -> vec3<f32> {
     let identity = P.a.y == 0u && P.a.z == 0u && P.c.w == 0u;
     if (identity) {
-        return signal;
+        return c;
     }
-    // Linear light (transfer 3: float images, rendered surfaces) is not a
-    // signal and keeps its range.
-    let displayed = (P.c.w == 1u && P.a.y != 3u) || P.a.y >= 5u;
-    let c = select(signal, clamp(signal, vec3<f32>(0.0), vec3<f32>(1.0)), displayed);
     if (P.a.y == 5u || P.a.y == 6u) {
-        let sdr = pm_hdr_to_sdr(c, P.a.y == 6u, P.hdr.x);
+        let sdr = pm_hdr_to_sdr(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), P.a.y == 6u, P.hdr.x);
         let l = mat3x3<f32>(P.p0.xyz, P.p1.xyz, P.p2.xyz) * sdr;
         if (P.a.z == 0u) {
             return pm_e_encode3(l);

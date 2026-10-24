@@ -159,8 +159,9 @@ fn corpus_probe_facts() {
         v("mjpeg.avi").video.unwrap().color.interpreted.range,
         Range::Full
     );
-    // DV: SD coefficients and SMPTE 170M primaries by size (the shared
-    // table), bottom field first from the bitstream.
+    // NTSC DV: SD coefficients and 525-line SMPTE 170M primaries (the shared
+    // table), bottom field first from the bitstream; PAL DV's 576 lines
+    // read BT.470BG.
     let dv = v("dv-ntsc.dv");
     let dvv = dv.video.as_ref().unwrap();
     if dvv.color.tagged.primaries.is_none() {
@@ -168,6 +169,10 @@ fn corpus_probe_facts() {
     }
     assert_eq!(dvv.color.interpreted.matrix, MatrixCoefficients::Bt601);
     assert_eq!(dvv.fields.order, FieldOrder::BottomFirst);
+    let pal = v("dv-pal.avi").video.unwrap().color;
+    if pal.tagged.primaries.is_none() {
+        assert_eq!(pal.interpreted.primaries, Primaries::Bt601_625);
+    }
     // Nominal rates (S6 table) and how they were decided.
     for (name, rate, method) in [
         ("h264-422-10.mov", (25, 1), RateMethod::Median),

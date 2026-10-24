@@ -24,10 +24,6 @@ pub struct TaggedColor {
     pub source: Vec<String>,
 }
 
-/// VIDEO-SD-1 (resolved: fix): untagged SD video reads SMPTE 170M
-/// primaries, converted to the working space in composition and export.
-pub const UNTAGGED_SD_PRIMARIES: bool = true;
-
 /// A complete video colour reading as H.273 code points.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VideoReading {
@@ -39,20 +35,40 @@ pub struct VideoReading {
 
 /// The one video colour table shared by the source monitor, composition and
 /// export, for every codec: tags win field by field; an untagged matrix is
-/// BT.601 (SMPTE 170M) when the frame is at most 576 lines tall and under
-/// 1280 wide, otherwise BT.709 (the mpv/FFmpeg heuristic); an untagged
-/// transfer is BT.709, read as the sRGB curve; untagged primaries are Rec.709
-/// unless [`UNTAGGED_SD_PRIMARIES`]; the range is limited unless tagged full.
+/// BT.601 when the frame is at most 576 lines tall and under 1280 wide,
+/// otherwise BT.709 (the mpv/FFmpeg heuristic); untagged primaries follow
+/// the line count of the system an SD frame comes from (owner decision
+/// VIDEO-SD-1, mpv's rule): 576 lines are 625-line BT.470BG (EBU), other SD
+/// sizes 525-line SMPTE 170M, HD and above BT.709; an untagged transfer is
+/// BT.709, read as the sRGB curve; the range is limited unless tagged full.
 pub fn video_reading(tagged: &TaggedColor, width: u32, height: u32) -> VideoReading {
     let sd = height <= 576 && width < 1280;
+    let sd_primaries = if height == 576 { 5 } else { 6 };
     VideoReading {
         primaries: tagged
             .primaries
-            .unwrap_or(if sd && UNTAGGED_SD_PRIMARIES { 6 } else { 1 }),
+            .unwrap_or(if sd { sd_primaries } else { 1 }),
         transfer: tagged.transfer.unwrap_or(1),
         matrix: tagged.matrix.unwrap_or(if sd { 6 } else { 1 }),
         full_range: tagged.full_range.unwrap_or(false),
     }
+}
+
+/// What a decoded frame's code values mean, for the source monitor,
+/// composition and export alike: the probe's reading ([`interpret`], whose
+/// untagged fields follow [`video_reading`]), except that an image-sequence
+/// rendition's untagged matrix is BT.601 at any size and its untagged
+/// primaries Rec.709. The importer converts sRGB stills with FFmpeg's BT.601
+/// default; renditions written before it tagged them carry no colour tags.
+pub fn frame_reading(color: &ColorInfo, sequence: bool) -> ColorDescription {
+    let mut desc = color.interpreted;
+    if sequence && color.tagged.matrix.is_none() {
+        desc.matrix = MatrixCoefficients::Bt601;
+    }
+    if sequence && color.tagged.primaries.is_none() {
+        desc.primaries = Primaries::Bt709;
+    }
+    desc
 }
 
 /// SMPTE ST 2086 mastering display, chromaticities as (x, y).
@@ -230,17 +246,19 @@ pub fn interpret(
         Some(12) => Primaries::DisplayP3,
         Some(_) => Primaries::Unspecified,
         None => {
-            let p = if table.primaries == 6 {
-                Primaries::Bt601_525
-            } else {
-                Primaries::Bt709
+            let p = match table.primaries {
+                5 => Primaries::Bt601_625,
+                6 => Primaries::Bt601_525,
+                _ => Primaries::Bt709,
             };
             defaults.push(format!("untagged primaries: {p:?} ({w}×{h})"));
             from[0] = Some(Origin::Default {
-                rule: if p == Primaries::Bt709 {
-                    "Untagged video reads as Rec.709 primaries".into()
-                } else {
-                    format!("Untagged {w}×{h} video reads as SMPTE 170M primaries")
+                rule: match p {
+                    Primaries::Bt709 => "Untagged video reads as Rec.709 primaries".into(),
+                    Primaries::Bt601_625 => {
+                        format!("Untagged {w}×{h} (625-line) video reads as BT.470BG primaries")
+                    }
+                    _ => format!("Untagged {w}×{h} (525-line) video reads as SMPTE 170M primaries"),
                 },
             });
             p
@@ -513,11 +531,15 @@ mod reading_tests {
     #[test]
     fn video_reading_applies_the_shared_table() {
         let untagged = TaggedColor::default();
+        // PAL: 625-line BT.470BG primaries; NTSC and other SD: 170M.
         let sd = video_reading(&untagged, 720, 576);
         assert_eq!(
             (sd.primaries, sd.transfer, sd.matrix, sd.full_range),
-            (6, 1, 6, false)
+            (5, 1, 6, false)
         );
+        for (w, h) in [(720, 480), (720, 486), (640, 360), (256, 144)] {
+            assert_eq!(video_reading(&untagged, w, h).primaries, 6, "{w}×{h}");
+        }
         assert_eq!(video_reading(&untagged, 1280, 576).primaries, 1);
         assert_eq!(video_reading(&untagged, 1280, 576).matrix, 1);
         assert_eq!(video_reading(&untagged, 480, 720).matrix, 1);
@@ -582,11 +604,20 @@ mod interpret_tests {
                 assert_eq!(table.matrix, if matrix == Bt601 { 6 } else { 1 });
                 assert_eq!(i.transfer, Transfer::DisplayE);
                 assert_eq!(i.range, Range::Limited);
-                let want = match (tags[0], table.primaries) {
-                    (2, 6) => Primaries::Bt601_525,
+                let primaries = match (tags[0], h <= 576 && w < 1280, h) {
+                    (2, true, 576) => Primaries::Bt601_625,
+                    (2, true, _) => Primaries::Bt601_525,
                     _ => Primaries::Bt709,
                 };
-                assert_eq!(i.primaries, want, "VIDEO-SD-1: {codec} {w}×{h}");
+                assert_eq!(
+                    i.primaries, primaries,
+                    "VIDEO-SD-1 {codec} {w}×{h} {tags:?}"
+                );
+                assert_eq!(
+                    frame_reading(&c, true).matrix,
+                    if tags[2] == 2 { Bt601 } else { matrix }
+                );
+                assert_eq!(frame_reading(&c, true).primaries, Primaries::Bt709);
             }
         }
     }

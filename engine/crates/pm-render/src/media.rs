@@ -728,19 +728,18 @@ fn video_color(
     has_alpha: bool,
     sequence: bool,
 ) -> SourceColor {
-    let mut desc = override_color.unwrap_or(reading.color);
-    // raster.ts encodes image sequences (sRGB frames) as untagged BT.601
-    // VP9, even at HD sizes: their matrix is BT.601 and their primaries are
-    // the frames' Rec.709, not the SD video default. Honor explicit file or
-    // Interpret Footage values.
-    if sequence && override_color.is_none() {
-        if v.color.tagged.matrix.is_none() && interp.matrix.is_none() {
-            desc.matrix = MatrixCoefficients::Bt601;
-        }
-        if v.color.tagged.primaries.is_none() && interp.primaries.is_none() {
-            desc.primaries = Primaries::Bt709;
-        }
+    // The file's reading is the source monitor's (`frame_reading`, with its
+    // image-sequence rule); Interpret Footage members replace their fields,
+    // and the host's per-file override replaces it all.
+    let file = pm_media::probe::color::frame_reading(&v.color, sequence);
+    let mut desc = reading.color;
+    if interp.matrix.is_none() {
+        desc.matrix = file.matrix;
     }
+    if interp.primaries.is_none() {
+        desc.primaries = file.primaries;
+    }
+    let desc = override_color.unwrap_or(desc);
     SourceColor {
         transfer: desc.transfer,
         primaries: desc.primaries,
