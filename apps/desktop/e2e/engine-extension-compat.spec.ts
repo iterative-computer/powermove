@@ -955,7 +955,7 @@ test.describe('Use New Engine: existing extensions', () => {
     const native = await session.app.evaluate(async () => {
       const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
       const p = report?.presenter ?? {};
-      return { parked: p.provisionalParked ?? null, confirmed: p.provisionalConfirmed ?? null, dropped: p.provisionalDropped ?? null };
+      return { parked: p.provisionalParked ?? 0, confirmed: p.provisionalConfirmed ?? 0, dropped: p.provisionalDropped ?? 0 };
     });
     console.log(JSON.stringify({ provisionalProof: { ...result, native } }));
     expect(session.diagnostics.pageErrors).toEqual([]);
@@ -973,6 +973,63 @@ test.describe('Use New Engine: existing extensions', () => {
     const blue = (rgb: number[]) => rgb.every((v, i) => Math.abs(v - [51, 102, 204][i]!) <= 1);
     expect(blue(result.plainPixel), JSON.stringify(result.plainPixel)).toBe(true);
     expect(blue(result.oldPlainPixel), JSON.stringify(result.oldPlainPixel)).toBe(false);
+
+    // 3. The engine draws before the comparison ends: in a document of
+    // 2,500 more layers the whole comparison outlasts the engine's frame,
+    // so the provisional frame is parked, and the extra change found then
+    // drops it. Each attempt changes a layer no earlier write changed.
+    await page.evaluate(() => {
+      const PM = (window as any).PM;
+      const extra = Array.from({ length: 2500 }, (_, i) => {
+        const l = PM.mkLayer('shape', { name: `Off ${i}`, from: 0, dur: 3, d: { shape: 'rect', w: 40, h: 30, color: '#3366CC', stroke: 0 } }, PM.proj);
+        l.id = `off-${i}`; l.on = false; l.p.rotation = PM.P(0, { kf: [PM.KF(0, 0), PM.KF(3, i % 360)] });
+        return l;
+      });
+      PM.proj.layers.push(...extra);
+      PM.touch();
+    });
+    const nativeCounts = native;
+    const counts = () => session.app.evaluate(async () => {
+      const report: any = await (globalThis as any).__powermoveNativeEngine?.engine?.report?.('interactive').catch(() => null);
+      const p = report?.presenter ?? {};
+      return { parked: p.provisionalParked ?? 0, dropped: p.provisionalDropped ?? 0 };
+    });
+    let large = { superseded: [] as number[], drawn: [] as number[], attempts: 0 };
+    let after = await counts();
+    for (let attempt = 0; attempt < 6 && after.dropped === nativeCounts.dropped; attempt++) {
+      const outcome = await page.evaluate(async (attempt) => {
+        const PM = (window as any).PM;
+        const presentation = PM.Kernel.services.get('viewer').enginePresentation;
+        const items: { revision: number; provisional: boolean; confirmed: boolean }[] = [];
+        const off = PM.EngineDoc.subscribe((b: any) => items.push({ revision: b.revision, provisional: !!b.provisional, confirmed: !!b.confirmed }));
+        const layer = (id: string) => PM.proj.layers.find((l: any) => l.id === id);
+        const settled = async () => {
+          const barrier = PM.EngineDoc.barrier;
+          for (let i = 0; i < 300; i++) {
+            await new Promise((r) => requestAnimationFrame(r));
+            if (barrier.provisionalRevision === null && (presentation.latest?.revision ?? 0) >= barrier.revision) break;
+          }
+          await new Promise((r) => setTimeout(r, 200));
+        };
+        const edit = async (fn: () => void) => { fn(); PM.touch(); PM.invalidate(); await settled(); };
+        try {
+          for (let i = 0; i < 3; i++) await edit(() => { layer('tinted').p['position.x'].v = 140 + attempt * 10 + i; });
+          await presentation.takeTrace();
+          await edit(() => { layer('tinted').p['position.x'].v = 120; layer(`off-${attempt}`).p['position.x'].v = 77; });
+        } finally { if (typeof off === 'function') off(); }
+        const confirmed = new Set(items.filter((i) => i.confirmed).map((i) => i.revision));
+        const trace = await presentation.takeTrace();
+        return { superseded: items.filter((i) => i.provisional && !confirmed.has(i.revision)).map((i) => i.revision), drawn: (trace?.draws ?? []).map((d: any[]) => d[2] as number) };
+      }, attempt);
+      large = { superseded: [...large.superseded, ...outcome.superseded], drawn: [...large.drawn, ...outcome.drawn], attempts: attempt + 1 };
+      after = await counts();
+    }
+    console.log(JSON.stringify({ provisionalDrop: { ...large, before: nativeCounts, after } }));
+    // A provisional frame was parked and then dropped, and no frame of a
+    // superseded revision was drawn.
+    expect(after.dropped).toBeGreaterThan(nativeCounts.dropped);
+    expect(large.superseded.length).toBeGreaterThan(0);
+    expect(large.drawn.filter((r) => large.superseded.includes(r))).toEqual([]);
   });
 
   test('editing a large document with a raster override that reads its base copies the document only to seed the raster worker', async ({ session }) => {
