@@ -83,17 +83,22 @@ async function card<T = Buffer>(engine: '0' | '1', theme: string, variant: Viewe
 /**
  * Chromium's tiles keep their raster history: after partial re-rasters, the
  * same final DOM can differ across launches at a few antialiased SVG samples
- * (OFF/OFF launches differed by up to 36 levels on header icons). Recreating
- * the clone's layers rasterizes that final DOM in one pass, so every capture
- * compares the same content, not each launch's history.
+ * (OFF/OFF launches differed by up to 36 levels on header icons), and the
+ * shelf ledge's dithered gradient behind the label by up to 2. Recreating the
+ * clone's layers and the ledge rasterizes that final DOM in one pass, so every
+ * capture compares the same content, not each launch's history.
  */
 async function freshCapture(shown: Locator): Promise<Buffer> {
   await shown.evaluate(element => new Promise<void>(resolve => {
     const clone = element.querySelector<HTMLElement>('.library-clone')!;
     const display = clone.style.display;
+    const ledge = element.ownerDocument.createElement('style');
+    ledge.textContent = '.library-shelf-row::before{display:none}';
     clone.style.display = 'none';
+    element.ownerDocument.head.append(ledge);
     requestAnimationFrame(() => {
       clone.style.display = display;
+      ledge.remove();
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
     });
   }));
