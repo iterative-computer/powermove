@@ -69,8 +69,7 @@ fn sample_quad(in: VsOut) -> vec4<f32> {
 
 // Ordinary 2D textures only need the authored E-to-linear decode. Keeping
 // the scene curve out of this entry point avoids compiling it for 2D draws.
-@fragment
-fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_draw_value(in: VsOut) -> vec4<f32> {
     var c = sample_quad(in);
     if (q.color.z > 0.5) {
         c = pm_premultiplied_e_to_linear(c);
@@ -79,8 +78,7 @@ fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
 }
 
 // `FRAG_SOLID`: the premultiplied color.
-@fragment
-fn fs_solid(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_solid_value(in: VsOut) -> vec4<f32> {
     return q.color;
 }
 
@@ -106,8 +104,7 @@ fn step_amount(e0: f32, e1: f32, x: f32) -> f32 {
     return smoothstep(e0, e1, x);
 }
 
-@fragment
-fn fs_background(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_background_value(in: VsOut) -> vec4<f32> {
     // GL's v_st: x to the right, y up from the bottom edge. Row 0 of the
     // target is the bottom of the region (GL row order).
     let x = in.pos.x + fill.view.x;
@@ -145,3 +142,7 @@ fn fs_flip(in: VsOut) -> @location(0) vec4<f32> {
     let at = vec2<i32>(i32(in.pos.x), h - 1 - i32(in.pos.y));
     return textureLoad(tex, at, 0);
 }
+
+@fragment fn fs_draw(in: VsOut) -> @location(0) vec4<f32> { return fs_draw_value(in); }
+@fragment fn fs_solid(in: VsOut) -> @location(0) vec4<f32> { return fs_solid_value(in); }
+@fragment fn fs_background(in: VsOut) -> @location(0) vec4<f32> { return fs_background_value(in); }

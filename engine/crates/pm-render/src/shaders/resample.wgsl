@@ -235,8 +235,7 @@ fn lanczos(t0: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
     return out;
 }
 
-@fragment
-fn fs_resample(in: VsOut) -> @location(0) vec4<f32> {
+fn resample_value(in: VsOut) -> vec4<f32> {
     // Top-down full-frame output pixel of this fragment.
     let px = vec2<f32>(in.pos.x + r.view.x, r.view.y + r.view.z - in.pos.y);
     let inv = mat3x3<f32>(r.inv0.xyz, r.inv1.xyz, r.inv2.xyz);
@@ -288,3 +287,7 @@ fn fs_resample(in: VsOut) -> @location(0) vec4<f32> {
     }
     return c * (cov * r.params.x);
 }
+
+@fragment fn fs_resample(in: VsOut) -> @location(0) vec4<f32> { return resample_value(in); }
+// RGBA16F targets store the nearest half (Metal's conversion truncates).
+@fragment fn fs_resample_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(resample_value(in)); }

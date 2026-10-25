@@ -241,3 +241,37 @@ fn scene3d_and_2d_overlay_render_at_every_project_depth() {
         );
     }
 }
+
+/// Half-float working storage holds the nearest half of each computed value,
+/// for a plain draw and for a blend op's result (Metal's render-target
+/// conversion truncates: 9/255 would store below its nearest half).
+#[test]
+fn half_float_stores_round_to_nearest() {
+    let nearest = |v: f32| pm_gpu::readback::half_to_f32(pm_gpu::readback::f32_to_half(v));
+    let v = 9.0f32 / 255.0;
+    assert!(nearest(v) > v, "the fixture value rounds up");
+    for blend in [None, Some("screen")] {
+        let mut l = layer(
+            "a",
+            "solid",
+            json!({"color":"#090909","w":8,"h":8}),
+            4.0,
+            4.0,
+            1.0,
+        );
+        if let Some(mode) = blend {
+            l["blend"] = json!(mode);
+        }
+        let mut value = project(8, 8, 1.0, solid_fill("#000000"), vec![l]);
+        value["colorDepth"] = json!(16);
+        let doc = load(&value);
+        let request = RenderRequest::sized(Size::new(8, 8), Precision::Float16);
+        let mut renderer = Renderer::headless().unwrap();
+        let frame = renderer
+            .render(&doc, "Ptest-root", support::ticks(0.0), &request, &MapResolver::default())
+            .unwrap();
+        let pixels = renderer.read_rgba(&frame).unwrap();
+        // Screen over black is the source itself: the op computes 9/255.
+        assert_eq!(pixels[(4 * 8 + 4) * 4], nearest(v), "blend {blend:?}");
+    }
+}

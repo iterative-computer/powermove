@@ -143,9 +143,11 @@ impl Pipelines {
             label: Some("pm-render composite"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}\n{}",
+                    "{}\n{}\n{}\n{}",
                     pm_color::wgsl::COLOR,
-                    include_str!("shaders/composite.wgsl")
+                    crate::scene3d::NEAREST_HALF_WGSL,
+                    include_str!("shaders/composite.wgsl"),
+                    include_str!("shaders/composite_half.wgsl")
                 )
                 .into(),
             ),
@@ -287,13 +289,12 @@ impl Pipelines {
                     multisample: wgpu::MultisampleState::default(),
                     fragment: Some(wgpu::FragmentState {
                         module,
-                        entry_point: Some(
-                            if entry == "fs_scene" && format == wgpu::TextureFormat::Rgba16Float {
-                                "fs_scene_half"
-                            } else {
-                                entry
-                            },
-                        ),
+                        // RGBA16F stores the nearest half of every draw's value.
+                        entry_point: Some(&if format == wgpu::TextureFormat::Rgba16Float {
+                            format!("{entry}_half")
+                        } else {
+                            entry.to_owned()
+                        }),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format,

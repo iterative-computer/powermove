@@ -181,7 +181,7 @@ impl GltfGpu {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("3d transmission mips"),
             source: wgpu::ShaderSource::Wgsl(
-                r#"
+                format!("{}\n{}", super::super::NEAREST_HALF_WGSL, r#"
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
 struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
@@ -192,8 +192,11 @@ struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
     o.uv = vec2<f32>(a.x, 1.0 - a.y);
     return o;
 }
-@fragment fn fs(in: Out) -> @location(0) vec4<f32> { return textureSampleLevel(src, smp, in.uv, 0.0); }
-"#
+// RGBA16F levels store the nearest half (Metal's conversion truncates).
+@fragment fn fs(in: Out) -> @location(0) vec4<f32> {
+    return pm_scene_half_color(textureSampleLevel(src, smp, in.uv, 0.0));
+}
+"#)
                 .into(),
             ),
         });

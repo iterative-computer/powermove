@@ -171,15 +171,11 @@ impl OpPipelines {
                         multisample: wgpu::MultisampleState::default(),
                         fragment: Some(wgpu::FragmentState {
                             module: &module,
-                            entry_point: Some(
-                                if op == Op::SceneOutput
-                                    && format == wgpu::TextureFormat::Rgba16Float
-                                {
-                                    "fs_scene_output_half"
-                                } else {
-                                    entry
-                                },
-                            ),
+                            entry_point: Some(&if format == wgpu::TextureFormat::Rgba16Float {
+                                format!("{entry}_half")
+                            } else {
+                                entry.to_owned()
+                            }),
                             compilation_options: Default::default(),
                             targets: &[Some(wgpu::ColorTargetState {
                                 format,

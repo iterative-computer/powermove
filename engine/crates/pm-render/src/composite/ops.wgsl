@@ -148,8 +148,7 @@ fn path_coverage(px: vec2<f32>) -> f32 {
 // Masks (`FRAG_MASK` then `FRAG_MASK_APPLY`, or `pathMaskApply`) and the track matte
 // (`applyTrackMatte`), in that order, on the layer in `ta`; the matte pass
 // is in `tb`.
-@fragment
-fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_layer_value(in: VsOut) -> vec4<f32> {
     var c = load_a(in.pos);
     if (has(FLAG_MASKS)) {
         c = c * coverage(in.px);
@@ -181,16 +180,14 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
 // blend mode, in the working encoding. Both textures contain premultiplied
 // color; retain each source's unblended contribution wherever the other
 // source is translucent (docs/engine/composite.md).
-@fragment
-fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_composite_value(in: VsOut) -> vec4<f32> {
     return composite_color(load_a(in.pos), load_b(in.pos));
 }
 
 // A single solid can use its actual quad as this pass's geometry. The
 // destination is still snapped to covered bounds, but no source texture is
 // needed. This shares the blend arithmetic with all other layer sources.
-@fragment
-fn fs_solid_composite(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_solid_composite_value(in: VsOut) -> vec4<f32> {
     return composite_color(op.g[0], load_b(in.pos));
 }
 
@@ -217,8 +214,7 @@ fn composite_color(source: vec4<f32>, d: vec4<f32>) -> vec4<f32> {
 }
 
 // A rectangle of `ta` (a padded pass) into a smaller target.
-@fragment
-fn fs_copy(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_copy_value(in: VsOut) -> vec4<f32> {
     return load_a(in.pos);
 }
 
@@ -227,8 +223,7 @@ fn fs_copy(in: VsOut) -> @location(0) vec4<f32> {
 // Color outside coverage (alpha above 1 or below the unpremultiply floor:
 // light a legacy effect wrote, `crate::effects::SimpleOp::DecodeE`) is
 // encoded per channel, as the effect passes decode it.
-@fragment
-fn fs_encode_flip(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_encode_flip_value(in: VsOut) -> vec4<f32> {
     let h = i32(textureDimensions(ta).y);
     var at = vec2<i32>(in.pos.xy);
     if (has(FLAG_FLIP)) { at.y = h - 1 - at.y; }
@@ -250,23 +245,34 @@ fn fs_encode_flip(in: VsOut) -> @location(0) vec4<f32> {
     return c;
 }
 
-@fragment
-fn fs_scene_output(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_scene_output_value(in: VsOut) -> vec4<f32> {
     return scene_output(load_a(in.pos), op.f.x, op.g[0], has(FLAG_LINEAR));
 }
 
-@fragment
-fn fs_scene_output_half(in: VsOut) -> @location(0) vec4<f32> {
-    return pm_scene_half_color(scene_output(load_a(in.pos), op.f.x, op.g[0], has(FLAG_LINEAR)));
-}
 
 // An effect/shader's authored E-space output joins linear filtering only
 // after decoding; decoding a filtered E-space value would change the kernel.
-@fragment
-fn fs_decode_source(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_decode_source_value(in: VsOut) -> vec4<f32> {
     let c = load_a(in.pos);
     if (c.a > 1.0 || !pm_may_unpremultiply(c.a)) {
         return vec4<f32>(pm_e_decode3(c.rgb), c.a);
     }
     return pm_premultiplied_e_to_linear(c);
 }
+
+// Each op's entry point stores its value as is; the `_half` entry for an
+// RGBA16F target stores the nearest half (Metal's conversion truncates).
+@fragment fn fs_layer(in: VsOut) -> @location(0) vec4<f32> { return fs_layer_value(in); }
+@fragment fn fs_layer_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(fs_layer_value(in)); }
+@fragment fn fs_composite(in: VsOut) -> @location(0) vec4<f32> { return fs_composite_value(in); }
+@fragment fn fs_composite_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(fs_composite_value(in)); }
+@fragment fn fs_solid_composite(in: VsOut) -> @location(0) vec4<f32> { return fs_solid_composite_value(in); }
+@fragment fn fs_solid_composite_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(fs_solid_composite_value(in)); }
+@fragment fn fs_copy(in: VsOut) -> @location(0) vec4<f32> { return fs_copy_value(in); }
+@fragment fn fs_copy_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(fs_copy_value(in)); }
+@fragment fn fs_encode_flip(in: VsOut) -> @location(0) vec4<f32> { return fs_encode_flip_value(in); }
+@fragment fn fs_encode_flip_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(fs_encode_flip_value(in)); }
+@fragment fn fs_scene_output(in: VsOut) -> @location(0) vec4<f32> { return fs_scene_output_value(in); }
+@fragment fn fs_scene_output_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(fs_scene_output_value(in)); }
+@fragment fn fs_decode_source(in: VsOut) -> @location(0) vec4<f32> { return fs_decode_source_value(in); }
+@fragment fn fs_decode_source_half(in: VsOut) -> @location(0) vec4<f32> { return pm_scene_half_color(fs_decode_source_value(in)); }

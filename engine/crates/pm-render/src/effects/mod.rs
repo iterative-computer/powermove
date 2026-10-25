@@ -152,7 +152,7 @@ fn texel(p: vec4<f32>) -> vec4<f32> {
   return textureLoad(src, vec2<i32>(p.xy), 0);
 }
 @fragment fn clamp01(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-  return clamp(texel(p), vec4<f32>(0.0), vec4<f32>(1.0));
+  return store(clamp(texel(p), vec4<f32>(0.0), vec4<f32>(1.0)));
 }
 fn coverage(a: f32) -> bool {
   return pm_may_unpremultiply(a) && a <= 1.0;
@@ -160,16 +160,16 @@ fn coverage(a: f32) -> bool {
 @fragment fn encode(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
   let c = texel(p);
   if (coverage(c.a)) {
-    return pm_premultiplied_linear_to_e(c);
+    return store(pm_premultiplied_linear_to_e(c));
   }
-  return vec4<f32>(pm_e_encode3(c.rgb), c.a);
+  return store(vec4<f32>(pm_e_encode3(c.rgb), c.a));
 }
 @fragment fn decode(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
   let c = texel(p);
   if (coverage(c.a)) {
-    return pm_premultiplied_e_to_linear(c);
+    return store(pm_premultiplied_e_to_linear(c));
   }
-  return vec4<f32>(pm_e_decode3(c.rgb), c.a);
+  return store(vec4<f32>(pm_e_decode3(c.rgb), c.a));
 }
 ";
 
@@ -614,7 +614,19 @@ impl Effects {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("pm effect pixel pass"),
                 source: wgpu::ShaderSource::Wgsl(
-                    format!("{}\n{SIMPLE_WGSL}", pm_color::wgsl::COLOR).into(),
+                    // `store`: the nearest half on RGBA16F (Metal's
+                    // conversion truncates), the value itself otherwise.
+                    format!(
+                        "{}\n{}\nfn store(c: vec4<f32>) -> vec4<f32> {{ return {}; }}\n{SIMPLE_WGSL}",
+                        pm_color::wgsl::COLOR,
+                        crate::scene3d::NEAREST_HALF_WGSL,
+                        if format == wgpu::TextureFormat::Rgba16Float {
+                            "pm_scene_half_color(c)"
+                        } else {
+                            "c"
+                        }
+                    )
+                    .into(),
                 ),
             });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

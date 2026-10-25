@@ -404,7 +404,14 @@ impl Resampler {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render resample"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/resample.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\n{}",
+                    crate::scene3d::NEAREST_HALF_WGSL,
+                    include_str!("../shaders/resample.wgsl")
+                )
+                .into(),
+            ),
         });
         let texture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -527,7 +534,11 @@ impl Resampler {
                     &draw_layout,
                     &module,
                     "vs",
-                    "fs_resample",
+                    if f == wgpu::TextureFormat::Rgba16Float {
+                        "fs_resample_half"
+                    } else {
+                        "fs_resample"
+                    },
                     f,
                     Some(blend(b)),
                 )
