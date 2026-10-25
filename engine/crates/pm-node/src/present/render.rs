@@ -6723,14 +6723,10 @@ impl Thread {
         // The session's compatibility producers (the `raster` override).
         renderer.set_compat_rasters(compat_view(&self.compat, job.key, revision, None));
         let size = request.target_size();
-        // The live viewer renders its region at the project's format, then
-        // places it in the display working texture before color conversion.
-        // A pinned canvas captures those display pixels.
-        let format = if job.request.viewer.is_some() {
-            pm_gpu::bridge_out::display::WORKING_FORMAT
-        } else {
-            renderer.device_target_format(doc.document(), &request)
-        };
+        // Keep a pinned snapshot in the project's working format until its
+        // requested API encoding. In particular, 32-bit projects must not
+        // pass through the display's half-float texture here.
+        let format = renderer.device_target_format(doc.document(), &request);
         let target = snapshot_output_target(
             snapshot_target,
             renderer.device(),

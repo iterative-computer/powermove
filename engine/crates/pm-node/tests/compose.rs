@@ -16,6 +16,7 @@ use pm_protocol::common::Rect;
 use pm_protocol::common::{Seq, Size, Ticks};
 use pm_protocol::frame::{MediaPreference, PreviewResolution, ViewerCanvas, ViewerState};
 use pm_protocol::interop::SurfaceFormat;
+use pm_render::{OutputKind, RenderRequest, Renderer};
 use serde_json::json;
 
 const W: u32 = 800;
@@ -31,6 +32,16 @@ fn doc(background: &str) -> pm_model::Document {
 
 /// A `size` composition with a 40 × 20 red solid at `at`.
 fn doc_sized(background: &str, size: (u32, u32), at: (f64, f64)) -> pm_model::Document {
+    doc_sized_with(background, size, at, 100, 8)
+}
+
+fn doc_sized_with(
+    background: &str,
+    size: (u32, u32),
+    at: (f64, f64),
+    opacity: u32,
+    color_depth: u32,
+) -> pm_model::Document {
     let layer = json!({
         "id": "box", "type": "solid", "name": "box", "from": 0, "dur": 2, "on": true, "lock": false,
         "shy": false, "collapsed": true, "threeD": false, "solo": false, "color": "#4C8DFF",
@@ -38,7 +49,7 @@ fn doc_sized(background: &str, size: (u32, u32), at: (f64, f64)) -> pm_model::Do
         "p": {
             "anchor.x": ch(json!(0)), "anchor.y": ch(json!(0)), "position.x": ch(json!(at.0)),
             "position.y": ch(json!(at.1)), "scale.x": ch(json!(100)), "scale.y": ch(json!(100)),
-            "rotation": ch(json!(0)), "opacity": ch(json!(100)), "skew": ch(json!(0))
+            "rotation": ch(json!(0)), "opacity": ch(json!(opacity)), "skew": ch(json!(0))
         },
         "fx": [], "transitionIn": null, "transitionOut": null, "masks": [],
         "d": { "color": "#FF0000", "w": 40, "h": 20 }, "locked_intent": {}
@@ -49,7 +60,7 @@ fn doc_sized(background: &str, size: (u32, u32), at: (f64, f64)) -> pm_model::Do
         json!({ "type": "solid", "angle": 0, "stops": [{ "id": "s1", "color": background, "position": 0 }] })
     };
     let project = json!({
-        "id": "P", "name": "p", "w": size.0, "h": size.1, "fps": 30, "dur": 2, "bg": "#000000",
+        "id": "P", "name": "p", "w": size.0, "h": size.1, "fps": 30, "dur": 2, "bg": "#000000", "colorDepth": color_depth,
         "backgroundFill": fill, "compId": "P-root", "compName": "p", "markers": [], "work": [0, 2],
         "params": {}, "revision": 0, "edits": [], "created": 0, "shutter": 0.5, "layers": [layer],
         "assets": {}, "comps": {}
@@ -215,14 +226,11 @@ fn a_transparent_background_shows_black_and_half_resolution_fills_the_same_recta
     assert_eq!(bgra(&bytes, bpr, lx + 20, ly + 10), [0, 0, 255, 255]);
 }
 
-/// Today's viewer canvas (decision V1): at 150% on a 2x display today's
-/// canvas is the composition's size (`min(1, zoom × DPR)`), and the browser
-/// scales it into its CSS box (here 3×), bilinearly, from its 8-bit pixels.
-/// The engine renders the 160 × 90 canvas and scales it the same way.
+/// Full resolution uses the device box even if a legacy caller sends the
+/// old backing-canvas dimensions. The edge is rendered at its final size.
 #[test]
-fn todays_canvas_is_rendered_at_its_size_and_scaled_bilinearly_into_its_box() {
-    let mut s = state(PreviewResolution::Automatic);
-    // Stage 400 × 300 CSS: the frame at ((400 − 240) / 2 + 10, (300 − 135) / 2).
+fn full_viewer_uses_device_box_with_legacy_canvas_metadata() {
+    let mut s = state(PreviewResolution::Full);
     s.canvas = Some(ViewerCanvas {
         width: 160,
         height: 90,
@@ -239,114 +247,70 @@ fn todays_canvas_is_rendered_at_its_size_and_scaled_bilinearly_into_its_box() {
             height: 135.0,
         },
     });
-    let (bytes, bpr, place) = draw_state("#3366CC", &s, false);
-    assert_eq!(place.output, Size::new(160, 90));
-    assert!(place.canvas);
-    assert_eq!((place.fx, place.fy), (3.0, 3.0));
-    assert_eq!((place.x, place.y), (180.0, 165.0));
-    // Outside the snapped box: transparent; inside its edges: the background.
-    assert_eq!(bgra(&bytes, bpr, 179, 300), [0, 0, 0, 0]);
-    assert_eq!(bgra(&bytes, bpr, 660, 300), [0, 0, 0, 0]);
-    assert_eq!(bgra(&bytes, bpr, 180, 165), [0xCC, 0x66, 0x33, 255]);
-    assert_eq!(bgra(&bytes, bpr, 659, 434), [0xCC, 0x66, 0x33, 255]);
-    // The box's left edge at canvas texel 40 (frame 300): frame pixels sample
-    // `u = (i + 0.5 − 180) / 3 − 0.5` between the background and red.
-    for i in 297..304u32 {
-        let u = (f64::from(i) + 0.5 - 180.0) / 3.0 - 0.5;
-        let t = (u - 39.0).clamp(0.0, 1.0);
-        let expect = |bg: f64, fg: f64| (bg * (1.0 - t) + fg * t).round() as i32;
-        let px = bgra(&bytes, bpr, i, 165 + 40 * 3);
-        let want = [expect(204.0, 0.0), expect(102.0, 0.0), expect(51.0, 255.0)];
-        for c in 0..3 {
-            assert!(
-                (i32::from(px[c]) - want[c]).abs() <= 1,
-                "frame x {i}: {px:?} against {want:?}"
+    let (pixels, bpr, place) = draw_state("#3366CC", &s, false);
+    assert_eq!(place.output, Size::new(480, 270));
+    assert_eq!((place.fx, place.fy), (1.0, 1.0));
+    assert_eq!(bgra(&pixels, bpr, 299, 255), [0xCC, 0x66, 0x33, 255]);
+    assert_eq!(bgra(&pixels, bpr, 300, 255), [0, 0, 255, 255]);
+}
+
+#[test]
+fn sixteen_bit_viewer_keeps_sub_byte_values_until_display() {
+    let gpu = pm_gpu::Gpu::new("viewer precision test").unwrap();
+    let working = WorkingTexture::new(&gpu.device, Size::new(W, H));
+    let document = doc_sized_with("#000000", (160, 90), (40.0, 30.0), 32, 16);
+    let mut composer = Composer::new(&gpu.device, &gpu.queue);
+    let composed = composer
+        .compose(
+            &document,
+            "P-root",
+            &MediaMap::default(),
+            Ticks::ZERO,
+            &state(PreviewResolution::Full),
+            &working,
+        )
+        .unwrap();
+    assert!(composed.failures.is_empty());
+    let rgba = pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, &working.texture).unwrap();
+    let red = rgba[((255 * W + 320) * 4) as usize];
+    // 32% is separated from the nearest 8-bit code by about 0.00157;
+    // 0.31 was too close to 79/255 after the half-float store.
+    let authored = 0.32_f32;
+    let nearest_byte = (authored * 255.0).round() / 255.0;
+    assert!((red - authored).abs() < 0.00025, "working red = {red}");
+    assert!(
+        (red - nearest_byte).abs() > 0.001,
+        "working red {red} passed through RGBA8"
+    );
+
+    // The viewer's Full box is 480 × 270 at this zoom and DPR. With no
+    // view-only override or motion blur, every working pixel must be the
+    // same as an export requested at that output size.
+    let mut renderer = Renderer::new(gpu.device.clone(), gpu.queue.clone());
+    let request = RenderRequest {
+        export: true,
+        output_kind: OutputKind::Final,
+        ..RenderRequest::sized(Size::new(480, 270), pm_protocol::color::Precision::Float16)
+    };
+    let frame = renderer
+        .render(
+            &document,
+            "P-root",
+            Ticks::ZERO,
+            &request,
+            &MediaMap::default(),
+        )
+        .unwrap();
+    let exported = renderer.read_rgba(&frame).unwrap();
+    for y in 0..270u32 {
+        for x in 0..480u32 {
+            let viewer = (((y + 165) * W + x + 180) * 4) as usize;
+            let output = ((y * 480 + x) * 4) as usize;
+            assert_eq!(
+                &rgba[viewer..viewer + 4],
+                &exported[output..output + 4],
+                "viewer/export at {x}, {y}"
             );
         }
     }
-}
-
-/// A fractional box (61% on a 2x display, panned): each edge snaps to the
-/// nearest device pixel as Blink snaps a canvas's content box, and only the
-/// canvas texels the visible pixels read are rendered.
-#[test]
-fn todays_canvas_box_snaps_each_edge_and_renders_what_is_visible() {
-    let mut s = state(PreviewResolution::Automatic);
-    s.zoom = 0.61;
-    s.canvas = Some(ViewerCanvas {
-        width: 160,
-        height: 90,
-        crop: Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 160.0,
-            height: 90.0,
-        },
-        css: Rect {
-            x: -10.3,
-            y: 20.26,
-            width: 97.6,
-            height: 54.9,
-        },
-    });
-    let p = placement(&s, 160.0, 90.0);
-    // −20.6 → −21, 174.6 → 175; 40.52 → 41, 150.32 → 150.
-    assert_eq!((p.x, p.y), (-21.0, 41.0));
-    assert!((p.fx - 196.0 / 160.0).abs() < 1e-12 && (p.fy - 109.0 / 90.0).abs() < 1e-12);
-    let clip = p.clip.unwrap();
-    assert_eq!((clip.x, clip.y, clip.width, clip.height), (0, 41, 175, 109));
-    // Frame pixel 0 reads texels 16 and 17 (u = 21.5 / 1.225 − 0.5 = 17.05).
-    let r = p.region.unwrap();
-    assert_eq!((r.x, r.y, r.width, r.height), (17, 0, 143, 90));
-}
-
-/// Today's crop at 500% on a 2x display of a 1920 × 1080 composition,
-/// panned to its right edge (`previewRenderViewport` for a 400 × 300 CSS
-/// stage: a 656 × 556 CSS crop at composition (1788.86, 444.4), a 1312 ×
-/// 1112 canvas). The output is today's canvas at today's full scale (10),
-/// starting at the crop's unrounded origin (17,888.6, 4,444), so every
-/// layer lands where today's does, at today's resolution (decision V1b).
-#[test]
-fn a_crop_far_from_the_origin_is_drawn_at_todays_scale_in_todays_box() {
-    let mut s = state(PreviewResolution::Automatic);
-    s.zoom = 5.0;
-    s.canvas = Some(ViewerCanvas {
-        width: 1312,
-        height: 1112,
-        crop: Rect {
-            x: 1788.86,
-            y: 444.4,
-            width: 131.2,
-            height: 111.2,
-        },
-        css: Rect {
-            x: -256.0,
-            y: -128.0,
-            width: 656.0,
-            height: 556.0,
-        },
-    });
-    // The red solid covers composition (1880, 500) to (1920, 520): output
-    // (911.4, 556) to (1311.4, 756), frame (399.4, 300) to (799.4, 500).
-    let document = doc_sized("#3366CC", (1920, 1080), (1880.0, 500.0));
-    let (bytes, bpr, place) = draw_doc(&document, (1920.0, 1080.0), &s, false);
-    assert!(place.canvas);
-    assert_eq!(place.output, Size::new(1312, 1112));
-    let (ox, oy) = place.origin.unwrap();
-    assert!((ox - 17888.6).abs() < 1e-6 && (oy - 4444.0).abs() < 1e-6);
-    let red = [0, 0, 255, 255];
-    let bg = [0xCC, 0x66, 0x33, 255];
-    // A solid's quad covers the texels whose centers it holds: texel 911
-    // (center 911.5 ≥ 911.4) is red, at frame pixel 399, through 1311
-    // (center 1311.5 > 1311.4: not) at frame 799; a 1:1 box samples each
-    // texel exactly.
-    assert_eq!(bgra(&bytes, bpr, 399, 400), red);
-    assert_eq!(bgra(&bytes, bpr, 398, 400), bg);
-    assert_eq!(bgra(&bytes, bpr, 798, 400), red);
-    assert_eq!(bgra(&bytes, bpr, 799, 400), bg);
-    assert_eq!(bgra(&bytes, bpr, 600, 300), red);
-    assert_eq!(bgra(&bytes, bpr, 600, 299), bg);
-    assert_eq!(bgra(&bytes, bpr, 600, 499), red);
-    assert_eq!(bgra(&bytes, bpr, 600, 500), bg);
-    assert_eq!(bgra(&bytes, bpr, 10, 10), bg);
 }

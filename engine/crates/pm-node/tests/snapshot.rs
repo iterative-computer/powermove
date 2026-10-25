@@ -1037,10 +1037,9 @@ fn child_viewer_snapshot() {
     assert_eq!(full.view_seq, Some(Seq::new(6).unwrap()));
     assert_eq!(pixels_of(&full), pixels);
 
-    // Project Float32 raises render intermediates, while the live viewer
-    // still writes its composition into an F16 display working texture.
-    // At this opacity, ordinary Float32 rounds white on black to code 95;
-    // the viewer's F16 display texture rounds the same pixel to code 94.
+    // The pinned viewer uses the project's Float32 working target, then
+    // quantizes only when the snapshot API returns opaque bytes. This
+    // opacity distinguishes Float32 from an intermediate Float16 store.
     let mut high_precision = project(100.0);
     high_precision["color"] =
         json!({ "mode": "standard", "linearBlending": false, "precision": "float32" });
@@ -1092,14 +1091,15 @@ fn child_viewer_snapshot() {
     c.snapshot(55, high_precision_pin, Some(2), WINDOW, c.session);
     let high_precision_viewer = rendered(c.inbox.wait(Duration::from_secs(20), answer(55)));
     assert_eq!(high_precision_viewer.view_seq, Some(Seq::new(7).unwrap()));
+    let ordinary_pixels = pixels_of(&ordinary_float32);
+    let viewer_pixels = pixels_of(&high_precision_viewer);
+    let expected = ((37.060_f64 / 100.0) * 255.0).round() as u8;
+    assert_eq!(expected, 95);
     assert_eq!(
-        at(&pixels_of(&ordinary_float32), 320, 120, 70),
-        [95, 95, 95, 255]
+        at(&ordinary_pixels, 320, 120, 70),
+        [expected, expected, expected, 255]
     );
-    assert_eq!(
-        at(&pixels_of(&high_precision_viewer), 320, 120, 70),
-        [94, 94, 94, 255]
-    );
+    assert_eq!(viewer_pixels, ordinary_pixels);
     println!("CHILD-OK");
 }
 

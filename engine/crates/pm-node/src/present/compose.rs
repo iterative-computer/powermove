@@ -6,12 +6,11 @@
 //! pixels per composition pixel and pan CSS pixels from the centered
 //! position, so the composition rectangle is the one the legacy viewer
 //! places its canvas in (`view::composition_rect` for the test source). It
-//! is snapped to whole device pixels, so at Full resolution every
-//! composition pixel lands on one frame pixel and the frame is sampled
-//! 1:1. Only the visible part is rendered (`pm-render`'s region of
-//! interest), at the preview resolution, then placed: composited over
-//! opaque black inside the rectangle (today's WebGL canvas is opaque) and
-//! transparent around it, where the viewer's stage shows through.
+//! has both edges snapped to whole device pixels. At Full resolution the
+//! visible composition renders on that grid and is copied pixel for pixel.
+//! Only explicit Half and Quarter previews use a reduced render grid.
+//! The composition is opaque over black, with transparent stage pixels
+//! around it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,34 +29,24 @@ pub struct Placement {
     /// Where output pixel (0, 0)'s top-left corner lands, in frame pixels.
     pub x: f64,
     pub y: f64,
-    /// Frame pixels per output pixel, per axis (1 / the preview resolution,
-    /// or today's canvas box over its backing size).
+    /// Frame pixels per output pixel, per axis (1 / the preview resolution).
     pub fx: f64,
     pub fy: f64,
-    /// The output: the whole composition at the render scale, today's
-    /// canvas, or (a view larger than the largest output without a
-    /// canvas) the visible part of the composition.
+    /// The output: the whole composition at the render scale, or its
+    /// visible part when the whole output exceeds the maximum size.
     pub output: Size,
-    /// Output pixels per composition pixel when it is not the output over
-    /// the composition (today's crop, or a visible part); `None`: derived
+    /// Output pixels per composition pixel for a visible part; `None`: derived
     /// from the output and composition sizes.
     pub scale: Option<(f64, f64)>,
     /// Output pixel (0, 0) in scaled composition pixels
     /// ([`RenderRequest::origin`](pm_render::RenderRequest::origin)): the
-    /// crop's origin at today's scale, unrounded, as today's
-    /// `scaledWorld` puts it (`crop.x × sx`). `None`: the composition's
-    /// origin.
+    /// visible region's origin on the full output grid. `None`: the
+    /// composition's origin.
     pub origin: Option<(f64, f64)>,
     /// The visible part of the output (`None`: nothing is visible).
     pub region: Option<PixelRect>,
     /// The frame-pixel rectangle the composition covers.
     pub comp: Rect,
-    /// The frame pixels the placement writes (today's snapped canvas box
-    /// within the frame); `None`: the region's rectangle.
-    pub clip: Option<PixelRect>,
-    /// Today's canvas (decision V1): the region is stored as today's 8-bit
-    /// canvas and scaled into its box with Chromium's bilinear sampling.
-    pub canvas: bool,
 }
 
 impl Placement {
@@ -94,12 +83,10 @@ pub fn resolution_scale(resolution: PreviewResolution) -> f64 {
 }
 
 /// The placement of a `width` × `height` composition in a viewer frame:
-/// today's canvas when the viewer sends it ([`canvas_placement`]), else the
-/// composition at zoom × DPR × the preview resolution.
+/// the composition at zoom × DPR × the preview resolution. Legacy canvas
+/// metadata remains on the wire for extension snapshots but cannot set the
+/// live viewer's render resolution.
 pub fn placement(state: &ViewerState, width: f64, height: f64) -> Placement {
-    if let Some(canvas) = state.canvas.as_ref() {
-        return canvas_placement(state, canvas, width, height);
-    }
     let dpr = if state.device_pixel_ratio > 0.0 {
         state.device_pixel_ratio
     } else {
@@ -111,42 +98,48 @@ pub fn placement(state: &ViewerState, width: f64, height: f64) -> Placement {
     let frame_h = f64::from(state.size.height);
     let full_w = (width * zoom * dpr).max(1.0);
     let full_h = (height * zoom * dpr).max(1.0);
-    let x = ((frame_w - full_w) / 2.0 + state.pan[0] * dpr).round();
-    let y = ((frame_h - full_h) / 2.0 + state.pan[1] * dpr).round();
+    let left = (frame_w - full_w) / 2.0 + state.pan[0] * dpr;
+    let top = (frame_h - full_h) / 2.0 + state.pan[1] * dpr;
+    // Snap both edges of the composition's CSS box to device pixels. At
+    // Full resolution the output then has exactly one pixel per box pixel.
+    let (x, y) = (left.round(), top.round());
+    let (box_w, box_h) = ((left + full_w).round() - x, (top + full_h).round() - y);
     let max = f64::from(pm_protocol::frame::MAX_OUTPUT_DIMENSION);
     // The whole composition at the render scale; beyond the largest
     // output, only the visible part is drawn, from its own origin.
     let (full_out_w, full_out_h) = (
-        (full_w * resolution).round().max(1.0),
-        (full_h * resolution).round().max(1.0),
+        (box_w * resolution).round().max(1.0),
+        (box_h * resolution).round().max(1.0),
     );
-    let span = |origin: f64, frame: f64, out: f64| -> Option<(f64, f64)> {
-        let a = ((0.0 - origin) * resolution).floor().clamp(0.0, out);
-        let b = ((frame - origin) * resolution).ceil().clamp(0.0, out);
+    let (fx, fy) = (box_w / full_out_w, box_h / full_out_h);
+    let span = |origin: f64, frame: f64, out: f64, factor: f64| -> Option<(f64, f64)> {
+        let a = ((0.0 - origin) / factor).floor().clamp(0.0, out);
+        let b = ((frame - origin) / factor).ceil().clamp(0.0, out);
         (b > a).then_some((a, b - a))
     };
-    let visible = match (span(x, frame_w, full_out_w), span(y, frame_h, full_out_h)) {
+    let visible = match (
+        span(x, frame_w, full_out_w, fx),
+        span(y, frame_h, full_out_h, fy),
+    ) {
         (Some(h), Some(v)) => Some((h, v)),
         _ => None,
     };
     let comp = Rect {
         x,
         y,
-        width: full_out_w / resolution,
-        height: full_out_h / resolution,
+        width: box_w,
+        height: box_h,
     };
     let base = Placement {
         x,
         y,
-        fx: 1.0 / resolution,
-        fy: 1.0 / resolution,
+        fx,
+        fy,
         output: Size::new(full_out_w.min(max) as u32, full_out_h.min(max) as u32),
         scale: None,
         origin: None,
         region: None,
         comp,
-        clip: None,
-        canvas: false,
     };
     let Some(((rx, rw), (ry, rh))) = visible else {
         return base;
@@ -165,8 +158,8 @@ pub fn placement(state: &ViewerState, width: f64, height: f64) -> Placement {
     // The visible part only, at the same scale and on the same pixel grid
     // (its origin is a whole output pixel).
     Placement {
-        x: x + rx / resolution,
-        y: y + ry / resolution,
+        x: x + rx * fx,
+        y: y + ry * fy,
         output: Size::new(rw as u32, rh as u32),
         scale: Some((full_out_w / width, full_out_h / height)),
         origin: Some((rx, ry)),
@@ -180,93 +173,8 @@ pub fn placement(state: &ViewerState, width: f64, height: f64) -> Placement {
     }
 }
 
-/// Today's viewer canvas (decision V1): the output is the canvas today's
-/// viewer draws (its backing size, at today's `outputScale`: the canvas
-/// over the part of the composition it holds), and it covers the canvas's
-/// CSS box snapped to whole device pixels as Blink snaps a replaced
-/// element's content box (each edge rounded).
-///
-/// A crop's output starts at the crop (decision V1b): composition pixel
-/// `x` lands at output pixel `x · sx − crop.x · sx`, the origin unrounded,
-/// as today's `scaledWorld` puts it with a preview viewport. The output is
-/// the canvas itself, so a crop never needs more than today's canvas
-/// (at most the largest output), at today's full scale.
-pub fn canvas_placement(
-    state: &ViewerState,
-    canvas: &pm_protocol::frame::ViewerCanvas,
-    width: f64,
-    height: f64,
-) -> Placement {
-    let dpr = if state.device_pixel_ratio > 0.0 {
-        state.device_pixel_ratio
-    } else {
-        1.0
-    };
-    let snap = |v: f64| (v * dpr).round();
-    let (x0, x1) = (snap(canvas.css.x), snap(canvas.css.x + canvas.css.width));
-    let (y0, y1) = (snap(canvas.css.y), snap(canvas.css.y + canvas.css.height));
-    let (w, h) = (f64::from(canvas.width), f64::from(canvas.height));
-    let (scale, origin) = canvas_render_grid(canvas, width, height);
-    let (sx, sy) = scale.unwrap_or((w / width, h / height));
-    let (ox, oy) = origin.unwrap_or((0.0, 0.0));
-    let output = Size::new(canvas.width, canvas.height);
-    let fx = (x1 - x0) / w;
-    let fy = (y1 - y0) / h;
-    let comp = Rect {
-        x: x0 - ox * fx,
-        y: y0 - oy * fy,
-        width: width * sx * fx,
-        height: height * sy * fy,
-    };
-    // The frame pixels inside the box, and the canvas texels their bilinear
-    // samples read (`u = (i + 0.5 − x0) / fx − 0.5` and the texel after it).
-    let span = |lo: f64, hi: f64, frame: u32, f: f64, n: f64| -> Option<((u32, u32), (u32, u32))> {
-        let a = lo.max(0.0);
-        let b = hi.min(f64::from(frame));
-        if !(b > a && f > 0.0) {
-            return None;
-        }
-        let u0 = ((a + 0.5 - lo) / f - 0.5).floor().clamp(0.0, n);
-        let u1 = (((b - 0.5 - lo) / f - 0.5).floor() + 2.0).clamp(0.0, n);
-        (u1 > u0).then_some(((a as u32, (b - a) as u32), (u0 as u32, (u1 - u0) as u32)))
-    };
-    let (region, clip) = match (
-        span(x0, x1, state.size.width, fx, w),
-        span(y0, y1, state.size.height, fy, h),
-    ) {
-        (Some(((cx, cw), (rx, rw))), Some(((cy, ch), (ry, rh)))) => (
-            Some(PixelRect {
-                x: rx,
-                y: ry,
-                width: rw,
-                height: rh,
-            }),
-            Some(PixelRect {
-                x: cx,
-                y: cy,
-                width: cw,
-                height: ch,
-            }),
-        ),
-        _ => (None, None),
-    };
-    Placement {
-        x: x0,
-        y: y0,
-        fx,
-        fy,
-        output,
-        scale,
-        origin,
-        region,
-        comp,
-        clip,
-        canvas: true,
-    }
-}
-
-/// The unscaled backing canvas grid shared by live composition and pinned
-/// viewer snapshots. CSS placement only happens after this render.
+/// The legacy backing canvas grid for pinned viewer snapshots. Live viewer
+/// composition uses the snapped device box from [`placement`].
 pub(crate) fn canvas_render_grid(
     canvas: &pm_protocol::frame::ViewerCanvas,
     width: f64,
@@ -327,28 +235,6 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 "#;
 
-/// Today's WebGL canvas holds 8 bits per channel (opaque: the composition
-/// over black). The region is stored that way before it is scaled, so the
-/// upscale filters the values today's compositor would have filtered.
-const CANVAS_WGSL: &str = r#"
-@group(0) @binding(0) var src: texture_2d<f32>;
-
-@vertex
-fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
-    let q = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
-    return vec4f(q * 2.0 - 1.0, 0.0, 1.0);
-}
-
-@fragment
-fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-    let c = textureLoad(src, vec2i(pos.xy), 0);
-    return vec4f(c.rgb, 1.0);
-}
-"#;
-
-/// Today's canvas format.
-const CANVAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-
 /// Renders documents for the presenter. One per GPU device.
 pub struct Composer {
     renderer: Renderer,
@@ -358,10 +244,6 @@ pub struct Composer {
     linear: wgpu::Sampler,
     nearest: wgpu::Sampler,
     scratch: Option<Target>,
-    /// The region as today's 8-bit canvas (decision V1).
-    canvas_scratch: Option<Target>,
-    canvas_pipeline: wgpu::RenderPipeline,
-    canvas_layout: wgpu::BindGroupLayout,
     /// The viewer is playing: today's playing motion-blur count and the
     /// playback resampler (`set_playing`).
     playing: bool,
@@ -449,54 +331,6 @@ impl Composer {
             multiview_mask: None,
             cache: None,
         });
-        let canvas_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("viewer canvas"),
-            source: wgpu::ShaderSource::Wgsl(CANVAS_WGSL.into()),
-        });
-        let canvas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("viewer canvas"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            }],
-        });
-        let canvas_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("viewer canvas"),
-                bind_group_layouts: &[Some(&canvas_layout)],
-                immediate_size: 0,
-            });
-        let canvas_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("viewer canvas"),
-            layout: Some(&canvas_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &canvas_module,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &canvas_module,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: CANVAS_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("viewer placement"),
             size: 16,
@@ -521,9 +355,6 @@ impl Composer {
             linear: sampler(wgpu::FilterMode::Linear),
             nearest: sampler(wgpu::FilterMode::Nearest),
             scratch: None,
-            canvas_scratch: None,
-            canvas_pipeline,
-            canvas_layout,
             definitions: None,
             parked: HashMap::new(),
             playing: false,
@@ -707,22 +538,12 @@ impl Composer {
         if place.region.is_none() {
             return;
         }
-        let (x0, y0, x1, y1) = match place.clip {
-            // Today's snapped canvas box: the bilinear margin texels outside
-            // it are never written.
-            Some(c) => (
-                c.x.min(size.width),
-                c.y.min(size.height),
-                (c.x + c.width).min(size.width),
-                (c.y + c.height).min(size.height),
-            ),
-            None => (
-                dst.x.max(0.0).floor() as u32,
-                dst.y.max(0.0).floor() as u32,
-                ((dst.x + dst.width).ceil().max(0.0) as u32).min(size.width),
-                ((dst.y + dst.height).ceil().max(0.0) as u32).min(size.height),
-            ),
-        };
+        let (x0, y0, x1, y1) = (
+            dst.x.max(0.0).floor() as u32,
+            dst.y.max(0.0).floor() as u32,
+            ((dst.x + dst.width).ceil().max(0.0) as u32).min(size.width),
+            ((dst.y + dst.height).ceil().max(0.0) as u32).min(size.height),
+        );
         if x1 <= x0 || y1 <= y0 {
             return;
         }
@@ -739,9 +560,9 @@ impl Composer {
         // Both placements of a frame write the same rectangle.
         queue.write_buffer(&self.uniforms, 0, &bytes);
         let source_view = source.texture.create_view(&Default::default());
-        // Chromium scales a canvas into its CSS box bilinearly (no mipmaps,
-        // clamped at the canvas's edges); depth and ids are never filtered.
-        let sampler = if exact || (!place.canvas && place.fx == 1.0 && place.fy == 1.0) {
+        // Full resolution copies one pixel to one pixel; explicit reduced
+        // resolution previews scale once. Depth and ids are never filtered.
+        let sampler = if exact || (place.fx == 1.0 && place.fy == 1.0) {
             &self.nearest
         } else {
             &self.linear
@@ -768,57 +589,6 @@ impl Composer {
         pass.set_bind_group(0, &group, &[]);
         pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
         pass.draw(0..3, 0..1);
-    }
-
-    /// Stores the rendered region as today's 8-bit opaque canvas (decision
-    /// V1): the target is taken out of `canvas_scratch` for this frame's
-    /// placement and kept there again after it.
-    fn store_canvas(
-        &mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        device: &wgpu::Device,
-    ) -> Option<Target> {
-        let source = self.scratch.as_ref()?;
-        let (w, h) = (source.texture.width(), source.texture.height());
-        let canvas = match self.canvas_scratch.take() {
-            Some(t) if t.texture.width() == w && t.texture.height() == h => t,
-            _ => Target::new(
-                device,
-                "viewer canvas",
-                w,
-                h,
-                CANVAS_FORMAT,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            ),
-        };
-        let source_view = source.texture.create_view(&Default::default());
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("viewer canvas"),
-            layout: &self.canvas_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&source_view),
-            }],
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("viewer canvas"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &canvas.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.canvas_pipeline);
-            pass.set_bind_group(0, &group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        Some(canvas)
     }
 
     /// Draws `composition` of `doc` at `time` into `working` for `state`.
@@ -871,7 +641,7 @@ impl Composer {
                 scale: place.scale,
                 origin: place.origin,
                 region: Some(region),
-                preview_canvas: place.canvas,
+                preview_canvas: false,
                 precision: Precision::Float16,
                 depth_id: false,
                 background: true,
@@ -933,11 +703,6 @@ impl Composer {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewer placement"),
         });
-        let canvas = if place.canvas && place.region.is_some() {
-            self.store_canvas(&mut encoder, &device)
-        } else {
-            None
-        };
         self.place(
             &mut encoder,
             &device,
@@ -945,13 +710,10 @@ impl Composer {
             &working.view,
             working.size,
             &place,
-            canvas.as_ref().or(self.scratch.as_ref()),
+            self.scratch.as_ref(),
             false,
         );
         queue.submit([encoder.finish()]);
-        if let Some(canvas) = canvas {
-            self.canvas_scratch = Some(canvas);
-        }
         let (chrome_legend, chrome_glyphs, chrome_selection) =
             if let Some((depth, coverage)) = depth {
                 // Chrome follows today's fractional CSS composition frame.
@@ -1106,15 +868,15 @@ mod tests {
         let zoom = (1195.0 / 1920.0f64).min(546.0 / 1080.0);
         let s = state(2390, 1092, zoom, [0.0, 0.0], 2.0, PreviewResolution::Full);
         let p = placement(&s, 1920.0, 1080.0);
-        assert_eq!(p.output, Size::new(1941, 1092));
-        // Centered: (2390 − 1941.3) / 2 = 224.3, snapped to a whole pixel.
+        assert_eq!(p.output, Size::new(1942, 1092));
+        // Centered: each edge of the fractional device box snaps separately.
         assert_eq!((p.x, p.y), (224.0, 0.0));
         assert_eq!(
             p.region,
             Some(PixelRect {
                 x: 0,
                 y: 0,
-                width: 1941,
+                width: 1942,
                 height: 1092
             })
         );
@@ -1152,86 +914,28 @@ mod tests {
     }
 
     #[test]
-    fn todays_cropped_canvas_renders_its_part_at_its_scale() {
-        // 500% at DPR 2 with today's crop of (100.3, 50, 150, 90)
-        // composition pixels in a 1500 × 900 canvas: scale 10, the output
-        // is the canvas, starting at the crop (origin 1003, 500, unrounded).
-        let mut s = state(1600, 1000, 5.0, [0.0, 0.0], 2.0, PreviewResolution::Full);
+    fn legacy_canvas_metadata_does_not_reduce_live_viewer_resolution() {
+        let mut s = state(800, 600, 1.5, [10.0, 0.0], 2.0, PreviewResolution::Full);
+        let full = placement(&s, 160.0, 90.0);
         s.canvas = Some(pm_protocol::frame::ViewerCanvas {
-            width: 1500,
-            height: 900,
+            width: 160,
+            height: 90,
             crop: Rect {
-                x: 100.3,
-                y: 50.0,
-                width: 150.0,
+                x: 0.0,
+                y: 0.0,
+                width: 160.0,
                 height: 90.0,
             },
             css: Rect {
-                x: 25.0,
-                y: -40.0,
-                width: 750.0,
-                height: 450.0,
+                x: 90.0,
+                y: 82.5,
+                width: 240.0,
+                height: 135.0,
             },
         });
-        let p = placement(&s, 600.0, 338.0);
-        assert_eq!(p.scale, Some((10.0, 10.0)));
-        assert_eq!(p.output, Size::new(1500, 900));
-        let (ox, oy) = p.origin.unwrap();
-        assert!((ox - 1003.0).abs() < 1e-9 && oy == 500.0, "{ox} {oy}");
-        assert_eq!((p.fx, p.fy), (1.0, 1.0));
-        // Output pixel 0 (the crop's first) lands on the box's left edge.
-        assert_eq!(p.to_frame([0.0, 0.0]), [50.0, -80.0]);
-        let r = p.region.unwrap();
-        assert_eq!((r.x, r.y, r.width, r.height), (0, 80, 1500, 820));
-        // Composition pixel 0 lands at the box's edge less the origin.
-        assert!((p.comp.x - (50.0 - ox)).abs() < 1e-9);
-    }
-
-    /// Today's crop at 500% on a 2x display of a 1920 × 1080 composition,
-    /// panned to its right edge (19,200 output pixels from the
-    /// composition's origin), and a 4K one at 250%: the output is today's
-    /// canvas at today's full scale, its origin the crop's.
-    #[test]
-    fn a_crop_far_from_the_origin_is_drawn_at_todays_scale() {
-        for (zoom, width, height, crop_w, crop_h) in [
-            (5.0, 1920.0, 1080.0, 211.2, 151.2),
-            (8.0, 1920.0, 1080.0, 132.0, 94.5),
-            (2.5, 3840.0, 2160.0, 422.4, 302.4),
-        ] {
-            let mut s = state(1600, 1000, zoom, [0.0, 0.0], 2.0, PreviewResolution::Full);
-            let canvas = pm_protocol::frame::ViewerCanvas {
-                width: 2112,
-                height: 1512,
-                crop: Rect {
-                    x: width - crop_w,
-                    y: 0.0,
-                    width: crop_w,
-                    height: crop_h,
-                },
-                css: Rect {
-                    x: -128.0,
-                    y: -128.0,
-                    width: 1056.0,
-                    height: 756.0,
-                },
-            };
-            s.canvas = Some(canvas);
-            let p = placement(&s, width, height);
-            assert!(p.canvas);
-            assert_eq!(p.output, Size::new(2112, 1512));
-            let (sx, _) = p.scale.unwrap();
-            assert!((sx - 2112.0 / crop_w).abs() < 1e-9);
-            let (ox, _) = p.origin.unwrap();
-            assert!((ox - (width - crop_w) * sx).abs() < 1e-6, "{ox}");
-            // The composition's right edge is the box's right edge.
-            let right = p.comp.x + p.comp.width;
-            assert!((right - (-256.0 + 2112.0)).abs() < 1e-6, "{right}");
-            let clip = p.clip.unwrap();
-            assert_eq!(
-                (clip.x, clip.y, clip.width, clip.height),
-                (0, 0, 1600, 1000)
-            );
-        }
+        assert_eq!(placement(&s, 160.0, 90.0), full);
+        assert_eq!(full.output, Size::new(480, 270));
+        assert_eq!((full.fx, full.fy), (1.0, 1.0));
     }
 
     /// Without a canvas, a view larger than the largest output draws its
@@ -1263,34 +967,23 @@ mod tests {
         assert_eq!((p.fx, p.fy), (1.0, 1.0));
     }
 
-    /// A custom viewer's crop that starts before the composition's origin:
-    /// a negative origin, the composition where the crop puts it.
     #[test]
-    fn a_crop_before_the_origin_starts_before_the_composition() {
-        let mut s = state(1600, 1000, 2.0, [0.0, 0.0], 1.0, PreviewResolution::Full);
-        let canvas = pm_protocol::frame::ViewerCanvas {
-            width: 400,
-            height: 200,
-            crop: Rect {
-                x: -50.0,
+    fn thirty_two_pixel_zoom_keeps_the_visible_grid_exact() {
+        let s = state(1600, 1000, 16.0, [0.0, 0.0], 2.0, PreviewResolution::Full);
+        let p = placement(&s, 1920.0, 1080.0);
+        assert_eq!(p.output, Size::new(1600, 1000));
+        assert_eq!(p.scale, Some((32.0, 32.0)));
+        assert_eq!(p.origin, Some((29_920.0, 16_780.0)));
+        assert_eq!(
+            p.region_rect(),
+            Some(Rect {
+                x: 0.0,
                 y: 0.0,
-                width: 200.0,
-                height: 100.0,
-            },
-            css: Rect {
-                x: 100.0,
-                y: 100.0,
-                width: 400.0,
-                height: 200.0,
-            },
-        };
-        s.canvas = Some(canvas);
-        let p = placement(&s, 640.0, 360.0);
-        assert_eq!(p.origin, Some((-100.0, 0.0)));
-        assert_eq!(p.output, Size::new(400, 200));
-        // Composition x 0 at css 100 + 50 × 2.
-        assert_eq!(p.comp.x, 200.0);
-        assert_eq!(p.clip.unwrap().x, 100);
+                width: 1600.0,
+                height: 1000.0
+            })
+        );
+        assert_eq!((p.fx, p.fy), (1.0, 1.0));
     }
 
     trait IntoState {
