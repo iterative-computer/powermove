@@ -14,6 +14,8 @@
 //! `gltf-scene3d-*`); `PM_GLTF_ONLY=<prefix>` limits the cases;
 //! `PM_RENDER_DIFFS=<dir>` writes ours and theirs for failing outputs.
 
+#[path = "shared/scene3d_reference.rs"]
+mod float_reference;
 mod support;
 
 use std::collections::HashMap;
@@ -21,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pm_model::json::{Map, Value};
-use pm_render::parity::{bar_3d, msaa_edges};
+use pm_reference::compare::{Bounds, compare, geometry, same_geometry};
 use pm_render::scene3d::describe::{self, DrawDesc, Layer3d, PassDesc};
 use pm_render::scene3d::model::{
     Evaluated, LayerFacts, Look, MaterialKind, ModelLookup, ModelSource, NoTextures, Placement,
@@ -30,7 +32,7 @@ use pm_render::scene3d::model::{
 use pm_render::scene3d::{MathMode, Object3dPlan, Render3d, Scene3dRenderer};
 use pm_render::three::materials::Side;
 use pm_render::three::math::Mat4;
-use pm_render::three::program::sources;
+use pm_render::three::program::{ToneMapping, chunk, sources};
 
 fn fixture() -> Vec<Value> {
     let path = concat!(
@@ -278,103 +280,166 @@ fn selected() -> Option<(PathBuf, Vec<Case>)> {
 }
 
 #[test]
-fn gltf_sweep_within_the_3d_bar() {
-    let Some((dir, cases)) = selected() else {
-        eprintln!("no glTF reference capture; run tools/three-ref/run-gltf.ts");
+fn gltf_sweep_resolves_finite_linear_color() {
+    let Some((_, cases)) = selected() else {
+        eprintln!("no glTF scene assets; run tools/three-ref/run-gltf.ts");
         return;
     };
-    let gpu = pm_gpu::Gpu::new("pm-render glTF sweep").expect("a Metal device");
-    let diffs = std::env::var_os("PM_RENDER_DIFFS").map(PathBuf::from);
+    let gpu = pm_gpu::Gpu::new("pm-render glTF linear sweep").expect("a Metal device");
     let mut renderer = Scene3dRenderer::default();
     renderer.set_math_mode(MathMode::Safe);
     let mut pool = pm_gpu::TargetPool::new();
-    let mut failed = Vec::new();
     let mut compared = 0;
     for c in &cases {
-        for (plan, k) in &c.outputs {
-            let (w, h) = plan.scene.canvas();
-            let (w, h) = (w as usize, h as usize);
-            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        for (plan, _) in &c.outputs {
             renderer.begin_frame();
-            let out =
-                match renderer.render(&gpu.device, &gpu.queue, &mut encoder, &mut pool, plan, true)
-                {
-                    Ok(o) => o,
-                    Err(e) => {
-                        failed.push(format!("{}: {e}", plan.layer));
-                        continue;
-                    }
-                };
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let out = renderer
+                .render(&gpu.device, &gpu.queue, &mut encoder, &mut pool, plan, true)
+                .unwrap_or_else(|e| panic!("{}: {e}", plan.layer));
             gpu.queue.submit([encoder.finish()]);
-            let gl =
-                pm_gpu::readback::read_raw(&gpu.device, &gpu.queue, &out.color.texture).unwrap();
+            assert_eq!(out.color.format(), wgpu::TextureFormat::Rgba16Float);
+            assert!(matches!(
+                out.color_space,
+                pm_render::scene3d::OutputColor3d::LinearScene { .. }
+            ));
+            let color =
+                pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, &out.color.texture).unwrap();
+            assert!(
+                color
+                    .chunks_exact(4)
+                    .all(|p| p.iter().all(|v| v.is_finite()) && (0.0..=1.0).contains(&p[3])),
+                "{}: finite premultiplied color",
+                plan.layer
+            );
             let depth = pm_gpu::readback::read_f32(
                 &gpu.device,
                 &gpu.queue,
                 &out.depth.as_ref().unwrap().texture,
             )
             .unwrap();
-            let row = w * 4;
-            let mut ours = vec![0u8; gl.len()];
-            let mut object = vec![false; w * h];
-            for y in 0..h {
-                ours[y * row..(y + 1) * row].copy_from_slice(&gl[(h - 1 - y) * row..(h - y) * row]);
-                for x in 0..w {
-                    object[y * w + x] = depth[(h - 1 - y) * w + x].is_finite();
-                }
-            }
-            let base = dir.join(&c.id);
-            let (rw, rh, reference) = support::read_png(&base.join(format!("{k}.msaa.png")));
-            let (_, _, noaa) = support::read_png(&base.join(format!("{k}.noaa.png")));
-            assert_eq!((rw as usize, rh as usize), (w, h), "{}", plan.layer);
-            let edges = msaa_edges(&reference, &noaa, w, h);
-            let s = bar_3d(&reference, &ours, &edges, &object, w, h);
+            assert_eq!(depth.len(), color.len() / 4, "{}: depth size", plan.layer);
             compared += 1;
-            let line = format!(
-                "{:<48} ≤2 CV {:>8.4}%  max {:>3}  max outside edges {:>3}  SSIM {:.5}  ({} edge px)",
-                plan.layer,
-                100.0 * s.fraction_within_2,
-                s.max_cv,
-                s.max_cv_outside_edges,
-                s.object_ssim.unwrap_or(f64::NAN),
-                s.excluded
-            );
-            eprintln!("{line}");
-            if !s.pass() {
-                failed.push(line);
-            }
-            if let Some(d) = &diffs
-                && (!s.pass() || std::env::var_os("PM_RENDER_DIFFS_ALL").is_some())
-            {
-                std::fs::create_dir_all(d).unwrap();
-                let stem = plan.layer.replace('/', "-");
-                support::write_png(
-                    &d.join(format!("{stem}-engine.png")),
-                    w as u32,
-                    h as u32,
-                    &ours,
-                );
-                support::write_png(
-                    &d.join(format!("{stem}-three.png")),
-                    w as u32,
-                    h as u32,
-                    &reference,
-                );
-            }
             pool.give(out.color);
-            if let Some(d) = out.depth {
-                pool.give(d);
-            }
+            pool.give(out.depth.unwrap());
         }
     }
-    eprintln!(
-        "{compared} outputs compared; {} outside the bar or failed",
-        failed.len()
+    assert!(compared > 0);
+}
+
+/// G-D1: native and today's displayed imported-model outputs against an
+/// independent r180 RGBA32F scene at 8x, resolved in linear light and
+/// displayed through f64 ACES and sRGB. Poses and ray-grid picks are checked
+/// by their separate exact tests.
+#[test]
+fn gltf_displayed_pixels_prefer_supersampled_float_reference() {
+    let Some((capture, cases)) = selected() else {
+        eprintln!("no glTF scene assets; run tools/three-ref/run-gltf.ts");
+        return;
+    };
+    let path = std::env::var_os("PM_GLTF_FLOAT_REF")
+        .map(PathBuf::from)
+        .expect("G-D1 requires PM_GLTF_FLOAT_REF (examples/scene3d_float_reference.ts --gltf)");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(path.join("manifest.json")).expect("glTF float reference manifest"),
+    )
+    .unwrap();
+    assert_eq!(manifest["three"], "0.180.0");
+    assert_eq!(manifest["scale"], 8);
+    assert_eq!(manifest["format"], "rgba32float");
+    assert_eq!(
+        manifest["captureId"].as_str(),
+        capture.file_name().and_then(|n| n.to_str())
+    );
+    let gpu =
+        pm_gpu::Gpu::new("pm-render glTF independent float reference").expect("a Metal device");
+    let mut renderer = Scene3dRenderer::default();
+    renderer.set_math_mode(MathMode::Safe);
+    let mut pool = pm_gpu::TargetPool::new();
+    let mut compared = 0;
+    let mut failures = Vec::new();
+    for c in &cases {
+        for (plan, k) in &c.outputs {
+            let (w, h) = plan.scene.canvas();
+            let bytes = std::fs::read(path.join(&c.id).join(format!("{k}.rgba32f")))
+                .unwrap_or_else(|e| panic!("{}/{} reference: {e}", c.id, k));
+            assert_eq!(bytes.len(), w as usize * h as usize * 16, "{}/{}", c.id, k);
+            let reference: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            renderer.begin_frame();
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            let out = renderer
+                .render(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut encoder,
+                    &mut pool,
+                    plan,
+                    false,
+                )
+                .unwrap_or_else(|e| panic!("{}: {e}", plan.layer));
+            gpu.queue.submit([encoder.finish()]);
+            let actual = float_reference::top_down_linear(
+                pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, &out.color.texture).unwrap(),
+                w as usize,
+                h as usize,
+            );
+            assert_eq!(actual.len(), reference.len());
+            assert!(
+                reference.iter().all(|v| v.is_finite()),
+                "{} reference nonfinite",
+                plan.layer
+            );
+            let actual_alpha: Vec<_> = actual.chunks_exact(4).map(|p| f64::from(p[3])).collect();
+            let reference_alpha: Vec<_> =
+                reference.chunks_exact(4).map(|p| f64::from(p[3])).collect();
+            if let Err(error) = same_geometry(
+                &geometry(&actual_alpha, w as usize),
+                &geometry(&reference_alpha, w as usize),
+                1e-3,
+            ) {
+                failures.push(format!("{}:{} {error}", c.id, k));
+            }
+            let background = match &plan.kind {
+                Render3d::Whole
+                | Render3d::Layer {
+                    background: true, ..
+                } => plan.scene.background,
+                _ => None,
+            };
+            let modeled = float_reference::display(&reference, plan.scene.exposure, background);
+            let engine = float_reference::display(
+                &actual,
+                plan.scene.exposure,
+                background,
+            );
+            let (tw, th, today_bytes) =
+                support::read_png(&capture.join(&c.id).join(format!("{k}.msaa.png")));
+            assert_eq!((tw, th), (w, h), "{}:{} today size", c.id, k);
+            let today: Vec<_> = today_bytes
+                .into_iter()
+                .map(|v| f64::from(v) / 255.0)
+                .collect();
+            let classes = float_reference::classes(&modeled, w as usize, h as usize);
+            let report = compare(&engine, &today, &modeled, &classes);
+            eprintln!("glTF float display {}:{} {report}", c.id, k);
+            for failure in report.failures(&Bounds::HALF_FLOAT) {
+                failures.push(format!("{}:{} {failure}", c.id, k));
+            }
+            compared += 1;
+            pool.give(out.color);
+        }
+    }
+    assert!(
+        compared >= 150,
+        "only {compared} independent glTF references compared"
     );
     assert!(
-        failed.is_empty(),
-        "outside the 3D bar:\n{}",
-        failed.join("\n")
+        failures.is_empty(),
+        "G-D2 independent displayed reference deviations:\n{}",
+        failures.join("\n")
     );
 }
 
@@ -647,6 +712,37 @@ fn normalized(src: &str, shadow: bool) -> String {
         .join("\n")
 }
 
+/// Restore only r180's color-output transfer or packed shadow storage for
+/// linked-program comparison. Transmission draws already target linear
+/// light, so a color draw may match either the canvas or transmission form.
+/// Geometry, material, light, texture and clipping source remains exact.
+fn reference_program_sources(d: &DrawDesc) -> Vec<(String, String)> {
+    let mut p = d.params.clone();
+    match p.shader_type.as_str() {
+        "MeshDepthMaterial" => {
+            p.fragment_shader = chunk("depth_frag").expect("r180 depth fragment").into();
+            p.use_depth_packing = true;
+            p.depth_packing = 3201;
+            let (vs, fs) = sources(&p).expect("r180 depth program");
+            vec![(vs, float_reference::restore_linear_output(fs))]
+        }
+        "MeshDistanceMaterial" => {
+            p.fragment_shader = chunk("distanceRGBA_frag")
+                .expect("r180 distance fragment")
+                .into();
+            let (vs, fs) = sources(&p).expect("r180 distance program");
+            vec![(vs, float_reference::restore_linear_output(fs))]
+        }
+        _ => {
+            let (vs, fs) = sources(&p).expect("r180 transmission program");
+            let linear = (vs, float_reference::restore_linear_output(fs));
+            p.tone_mapping = ToneMapping::AcesFilmic;
+            p.output_srgb = true;
+            vec![linear, sources(&p).expect("r180 canvas program")]
+        }
+    }
+}
+
 fn f32s(v: &serde_json::Value) -> Vec<f32> {
     v.as_array()
         .unwrap()
@@ -691,12 +787,19 @@ fn gltf_programs_and_uniforms_equal_three_js() {
             let mut used = vec![false; recorded.len()];
             let mut last: Option<usize> = None;
             for (n, d) in ours.iter().enumerate() {
-                let (vs, fs) = sources(&d.params).unwrap();
                 let shadow = matches!(
                     d.params.shader_type.as_str(),
                     "MeshDepthMaterial" | "MeshDistanceMaterial"
                 );
-                let (vs, fs) = (normalized(&vs, shadow), normalized(&fs, shadow));
+                let program_forms: Vec<_> = reference_program_sources(d)
+                    .into_iter()
+                    .map(|(vs, fs)| (normalized(&vs, shadow), normalized(&fs, shadow)))
+                    .collect();
+                let program_matches = |v: &str, f: &str| {
+                    program_forms.iter().any(|(vs, fs)| {
+                        normalized(v, shadow) == *vs && normalized(f, shadow) == *fs
+                    })
+                };
                 let mine = |name: &str| {
                     d.uniforms
                         .iter()
@@ -722,9 +825,13 @@ fn gltf_programs_and_uniforms_equal_three_js() {
                         .iter()
                         .any(|b| b.as_bool() == Some(true));
                     let (rv, rf) = &programs[&r["program"].as_u64().unwrap()];
-                    color == d.state.color_write
-                        && normalized(rv, shadow) == vs
-                        && normalized(rf, shadow) == fs
+                    // r180's packed shadow target wrote color; the live
+                    // depth texture changes storage, not the draw's phase.
+                    (if shadow {
+                        r["depthMask"].as_bool() == Some(true)
+                    } else {
+                        color == d.state.color_write
+                    }) && program_matches(rv, rf)
                 };
                 let Some(i) = recorded
                     .iter()
@@ -744,9 +851,7 @@ fn gltf_programs_and_uniforms_equal_three_js() {
                         extra += 1;
                         continue;
                     }
-                    let program_known = programs
-                        .values()
-                        .any(|(v, f)| normalized(v, shadow) == vs && normalized(f, shadow) == fs);
+                    let program_known = programs.values().any(|(v, f)| program_matches(v, f));
                     if std::env::var_os("PM_GLTF_DEBUG").is_some() {
                         eprintln!(
                             "{} {k} draw {n}: object {} mesh {} model {:?}",
@@ -767,8 +872,11 @@ fn gltf_programs_and_uniforms_equal_three_js() {
                         }
                     }
                     if !program_known && std::env::var_os("PM_GLTF_PROGRAMS").is_some() {
-                        let p = PathBuf::from("/tmp/gltf-programs");
+                        let p = std::env::var_os("PM_GLTF_PROGRAMS")
+                            .map(PathBuf::from)
+                            .expect("program dump directory");
                         std::fs::create_dir_all(&p).unwrap();
+                        let (vs, fs) = &program_forms[0];
                         std::fs::write(p.join(format!("{}-{k}-{n}.vs", c.id)), &vs).unwrap();
                         std::fs::write(p.join(format!("{}-{k}-{n}.fs", c.id)), &fs).unwrap();
                         for (id, (rv, rf)) in &programs {

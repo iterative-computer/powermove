@@ -1,16 +1,15 @@
 /*
- * Library viewer cards with "Use New Engine" on are today's cards, pixel for
- * pixel (plan appendix C row C3; owner rule: no visible difference on an
- * existing project). Each case launches the app twice, engine off then on,
- * one Electron at a time, builds the same scene with the same viewer, opens
- * the Library, and compares the two card images exactly. 3D cards use the
- * reference rule (QUALITY-1): pixels away from edges are exact, and an edge
- * pixel may differ only if it is at least as close as today's to the
- * engine's supersampled render of the same pinned view.
+ * Library viewer card parity (plan appendix C row C3). Each case launches
+ * the app twice, engine off then on, one Electron at a time. 2D cards compare
+ * exactly. 3D cards use the independent three.js Float32 render at 8× as the
+ * reference: the engine must be at least as close as today.
  *
- * Run serially: pm-electron-lock bunx playwright test e2e/library-card-parity.spec.ts --workers=1
+ * Build the Three.js browser entry outside the lock, then run serially with
+ * PM_CARD_FLOAT_BUNDLE pointing to that output:
+ *   bun build engine/crates/pm-render/examples/scene3d_card_reference.ts --target browser --format iife --outfile /tmp/card-float-reference.js
+ *   pm-electron-lock bunx playwright test e2e/library-card-parity.spec.ts --workers=1
  */
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import type { Locator, Page } from 'playwright';
 
 import { expect, launchApp, test } from './helpers/app';
@@ -105,27 +104,65 @@ async function freshCapture(shown: Locator): Promise<Buffer> {
   return shown.screenshot({ animations: 'disabled' });
 }
 
-/**
- * The same card with its composition from the engine's 4× supersampled render
- * of the pinned view (16 pixels, each 4× MSAA, box-averaged per card pixel).
+/** Independent three.js r180 reference: float scene light at 8× per axis.
+ * The authored test scene is recreated from its stated constants, not sampled
+ * from the native renderer. Tone mapping and sRGB encoding below are f64 CPU
+ * math after linear premultiplied supersampling.
  */
+const referenceBundle = () => {
+  const path = process.env.PM_CARD_FLOAT_BUNDLE;
+  if (!path) throw new Error('Prebuild scene3d_card_reference.ts outside pm-electron-lock and set PM_CARD_FLOAT_BUNDLE');
+  return readFile(path, 'utf8');
+};
+
 async function referenceCard(page: Page): Promise<Buffer> {
-  await page.evaluate(async () => {
-    const PM = (window as any).PM, k = 4;
+  const bundle = await referenceBundle();
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    const result = await cdp.send('Runtime.evaluate', {
+      expression: bundle, allowUnsafeEvalBlockedByCSP: true, returnByValue: true,
+    });
+    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+  } finally {
+    await cdp.detach();
+  }
+  await page.evaluate(() => {
+    const PM = (window as any).PM, k = 8;
     const presentation = PM.Kernel.services.get('viewer')?.enginePresentation ?? PM.EngineCanvas?.viewerPresentation;
     const state = presentation.stateFor(presentation.latest.viewSeq);
     const { width, height } = state.canvas;
-    const snapshot = await PM.EngineRender.thumbnails.request({
-      key: 'c3-reference', composition: String(PM.proj.compId ?? PM.proj.id ?? ''), time: PM.time,
-      width: width * k, height: height * k, pixels: 'opaque', draft3d: true,
-      viewer: { view: state.view ?? null, canvas: { ...state.canvas, width: width * k, height: height * k }, viewSeq: state.viewSeq },
-    });
-    const big = PM.EngineRender.toCanvas(snapshot).getContext('2d').getImageData(0, 0, width * k, height * k).data;
+    // The pinned card's camera and backing size are presentation metadata;
+    // shading and rasterization below are independent Three.js float work.
+    const samples = (window as any).cardFloatReference({ width, height, view: state.view }) as Float32Array;
     const out = new ImageData(width, height);
-    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) for (let c = 0; c < 4; c++) {
-      let sum = 0;
-      for (let j = 0; j < k; j++) for (let i = 0; i < k; i++) sum += big[(((y * k + j) * width * k) + x * k + i) * 4 + c]!;
-      out.data[(y * width + x) * 4 + c] = Math.round(sum / (k * k));
+    const fit = (v: number) => {
+      const a = v * (v + .0245786) - .000090537;
+      const b = v * (.983729 * v + .4329510) + .238081;
+      return a / b;
+    };
+    const aces = (rgb: number[]) => {
+      const [r, g, b] = rgb.map(v => v / .6);
+      const x = fit(.59719 * r + .35458 * g + .04823 * b);
+      const y = fit(.07600 * r + .90834 * g + .01566 * b);
+      const z = fit(.02840 * r + .13383 * g + .83777 * b);
+      return [1.60475 * x - .53108 * y - .07367 * z,
+        -.10208 * x + 1.10813 * y - .00605 * z,
+        -.00327 * x - .07276 * y + 1.07602 * z].map(v => Math.max(0, Math.min(1, v)));
+    };
+    const encode = (v: number) => 255 * (v <= .0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - .055);
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const sum = [0, 0, 0, 0];
+      for (let j = 0; j < k; j++) for (let i = 0; i < k; i++) {
+        const at = (((height - 1 - y) * k + (k - 1 - j)) * width * k + x * k + i) * 4;
+        const alpha = samples[at + 3]!;
+        for (let c = 0; c < 3; c++) sum[c] += samples[at + c]! * alpha;
+        sum[3] += alpha;
+      }
+      const coverage = sum[3] / (k * k);
+      const color = coverage > 0 ? aces(sum.slice(0, 3).map(v => v / sum[3])) : [0, 0, 0];
+      const at = (y * width + x) * 4;
+      for (let c = 0; c < 3; c++) out.data[at + c] = Math.round(encode(color[c]!) * coverage);
+      out.data[at + 3] = 255;
     }
     const target = [...document.querySelectorAll<HTMLCanvasElement>('.library-card[data-panel-id="viewer"] .library-clone canvas')]
       .find(canvas => !canvas.hidden && canvas.width === width && canvas.height === height);
@@ -185,9 +222,9 @@ async function compare(page: Page, a: Buffer, b: Buffer) {
 }
 
 /**
- * The reference rule: every differing pixel must be an edge (its 3×3
- * neighbourhood in today's card spans more than 8 levels) and, per channel,
- * at least as close to the supersampled reference as today's pixel.
+ * The independent float reference judges every pixel. Interior authored
+ * colors stay within one code of today; changed edge pixels must be at least
+ * as close to the reference, allowing half a code for final quantization.
  */
 async function compareToReference(page: Page, today: Buffer, engine: Buffer, reference: Buffer) {
   return page.evaluate(async ({ a, b, r }) => {
@@ -201,7 +238,8 @@ async function compareToReference(page: Page, today: Buffer, engine: Buffer, ref
       return context.getImageData(0, 0, w, h).data;
     };
     const [t, e, ref] = images.map(pixels) as [Uint8ClampedArray, Uint8ClampedArray, Uint8ClampedArray];
-    let interior = 0, edge = 0, edgeWorse = 0, worseBy = 0;
+    let interior = 0, interiorWorse = 0, edge = 0, edgeWorse = 0, worseBy = 0;
+    const before: number[] = [], after: number[] = [];
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
       if (t[i] === e[i] && t[i + 1] === e[i + 1] && t[i + 2] === e[i + 2] && t[i + 3] === e[i + 3]) continue;
@@ -213,13 +251,30 @@ async function compareToReference(page: Page, today: Buffer, engine: Buffer, ref
         }
         span = Math.max(span, hi - lo);
       }
-      if (span <= 8) { interior++; continue; }
-      edge++;
-      let by = 0;
-      for (let c = 0; c < 4; c++) by = Math.max(by, Math.abs(e[i + c]! - ref[i + c]!) - Math.abs(t[i + c]! - ref[i + c]!));
-      if (by > 0) { edgeWorse++; worseBy = Math.max(worseBy, by); }
+      let oldError = 0, newError = 0, by = 0, changed = 0;
+      for (let c = 0; c < 4; c++) {
+        const old = Math.abs(t[i + c]! - ref[i + c]!);
+        const now = Math.abs(e[i + c]! - ref[i + c]!);
+        oldError = Math.max(oldError, old); newError = Math.max(newError, now);
+        by = Math.max(by, now - old);
+        changed = Math.max(changed, Math.abs(e[i + c]! - t[i + c]!));
+      }
+      before.push(oldError); after.push(newError);
+      if (span <= 8) {
+        if (changed > 1) interior++;
+        if (by > .5) interiorWorse++;
+      } else {
+        edge++;
+        if (by > .5) { edgeWorse++; worseBy = Math.max(worseBy, by); }
+      }
     }
-    return { size: true, interior, edgeWorse, worseBy, edge };
+    const stats = (values: number[]) => {
+      values.sort((a, b) => a - b);
+      return { max: values.at(-1) ?? 0, p999: values[Math.floor((values.length - 1) * .999)] ?? 0,
+        mean: values.reduce((a, b) => a + b, 0) / Math.max(1, values.length) };
+    };
+    return { size: true, interior, interiorWorse, edgeWorse, worseBy, edge,
+      before: stats(before), after: stats(after) };
   }, { a: today.toString('base64'), b: engine.toString('base64'), r: reference.toString('base64') });
 }
 
@@ -227,27 +282,6 @@ const cases: Array<{ theme: string; variant: ViewerVariant; scene: Scene }> = [
   ...['light', 'dark'].flatMap(theme => (['2d', '2d-fit', '3d', '3d-editor'] as Scene[])
     .flatMap(scene => VIEWER_VARIANTS.map(variant => ({ theme, variant, scene })))),
 ];
-
-/**
- * 3D cards that still fail the reference rule for a known, owned reason.
- * Each stays measured: its interior pixels are exact, and at most `worse`
- * edge pixels, each at most one level, are further from the reference than
- * today's. An entry that starts passing fails until it is removed, and a run
- * of the whole file fails for an entry it never measured.
- *
- * C3-Q2 (lane L4): in the Editor view the engine's 8-bit MSAA resolve puts
- * 4-5 edge pixels per card one level further than today's; it needs the
- * linear-light 3D resolve (docs/engine/quality-ledger.md).
- */
-const REFERENCE_PENDING: ReadonlyMap<string, { worse: number }> = new Map(['light', 'dark']
-  .flatMap(theme => VIEWER_VARIANTS.map(variant => [pendingKey('3d-editor', theme, variant), { worse: 5 }] as const)));
-
-function pendingKey(scene: Scene, theme: string, variant: ViewerVariant): string {
-  return `${scene} in ${theme}, ${variant.name}`;
-}
-
-const measured = new Set<string>();
-let ran = 0;
 
 async function geometry(page: Page) {
   return page.locator('.library-card[data-panel-id="viewer"]').evaluate(card => {
@@ -263,43 +297,40 @@ async function geometry(page: Page) {
   });
 }
 
+async function diagnosticCanvas(page: Page, testInfo: { outputPath(name: string): string }, name: string) {
+  if (!process.env.PM_CARD_RAW_DUMP) return;
+  const png = await page.locator('.library-card[data-panel-id="viewer"] .library-clone canvas')
+    .first()
+    .evaluate(canvas => (canvas as HTMLCanvasElement).toDataURL('image/png'));
+  await writeFile(testInfo.outputPath(name), Buffer.from(png.split(',')[1]!, 'base64'));
+}
+
 for (const { theme, variant, scene } of cases) {
   test(`Library card with the engine on is today's card: ${scene} in ${theme}, ${variant.name}`, async ({}, testInfo) => {
     test.setTimeout(120_000);
-    ran++;
     const today = await card('0', theme, variant, scene, async (page, png) => {
       await testInfo.attach('card geometry, engine off', { body: JSON.stringify(await geometry(page)), contentType: 'application/json' });
+      await diagnosticCanvas(page, testInfo, 'raw-canvas-engine-off.png');
       return png;
     });
     await writeFile(testInfo.outputPath('card-engine-off.png'), today);
     await testInfo.attach('Library card, engine off', { path: testInfo.outputPath('card-engine-off.png'), contentType: 'image/png' });
     const result = await card('1', theme, variant, scene, async (page, engine) => {
       await testInfo.attach('card geometry, engine on', { body: JSON.stringify(await geometry(page)), contentType: 'application/json' });
+      await diagnosticCanvas(page, testInfo, 'raw-canvas-engine-on.png');
       await writeFile(testInfo.outputPath('card-engine-on.png'), engine);
       await testInfo.attach('Library card, engine on', { path: testInfo.outputPath('card-engine-on.png'), contentType: 'image/png' });
       if (scene === '2d' || scene === '2d-fit') return compare(page, today, engine);
       const reference = await referenceCard(page);
+      await diagnosticCanvas(page, testInfo, 'raw-canvas-reference.png');
       await writeFile(testInfo.outputPath('card-reference.png'), reference);
       await testInfo.attach('Library card, supersampled reference', { path: testInfo.outputPath('card-reference.png'), contentType: 'image/png' });
       return compareToReference(page, today, engine, reference);
     });
     await testInfo.attach('comparison', { body: JSON.stringify(result), contentType: 'application/json' });
-    const key = pendingKey(scene, theme, variant), pending = REFERENCE_PENDING.get(key);
-    measured.add(key);
     if (scene === '2d' || scene === '2d-fit') expect(result).toEqual({ size: true, differing: 0, max: 0 });
-    else if (!pending) expect(result).toMatchObject({ size: true, interior: 0, edgeWorse: 0 });
-    else {
-      const r = result as { size: boolean; interior: number; edgeWorse: number; worseBy: number };
-      expect(r, `${key} passes the reference rule now; remove it from REFERENCE_PENDING`).not.toMatchObject({ edgeWorse: 0 });
-      expect(r).toMatchObject({ size: true, interior: 0 });
-      expect(r.edgeWorse).toBeLessThanOrEqual(pending.worse);
-      expect(r.worseBy).toBeLessThanOrEqual(1);
-    }
+    else expect(result, `${scene} in ${theme}, ${variant.name}`).toMatchObject({
+      size: true, interior: 0, interiorWorse: 0, edgeWorse: 0,
+    });
   });
 }
-
-test.afterAll(() => {
-  // Only a run of the whole file can say an entry went unmeasured.
-  if (ran < cases.length) return;
-  for (const key of REFERENCE_PENDING.keys()) expect(measured.has(key), `REFERENCE_PENDING entry not measured: ${key}`).toBe(true);
-});
