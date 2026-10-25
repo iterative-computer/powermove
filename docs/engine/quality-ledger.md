@@ -75,6 +75,7 @@ nearest-even half computed in the shader.
 | Transmission samples the authored background (r180 `renderTransmissionPass`) | 92.57, 91.62, 2.856 | 5.61, 0.47, 0.004 | `khr-GlassVaseFlowers` interior |
 | Luminance-weighted MSAA resolve (Karis) | 175.55, 128.96, 5.747 | 195.71, 125.52, 5.241 (box resolve: 243.04, 129.58, 5.347) | `khr-ToyCar` edge |
 | Material slots and mesh groups ignored, as v1.2.0 (main 2b1fa379a; both slot cases re-recorded from v1.2.0) | 1.40, 1.17, 0.048 | 0.96, 0.84, 0.028 | `slots-draw-nothing:0` interior |
+| Old scenes carrying `slots` or mesh `groups` open (v1.2.0's strict `parseScene` throws on them) | no frame | 0.05, 0.04, 0.000 | `slots-and-groups:0` interior |
 
 Library cards pass gate-policy's precision-bound rule (all 32). Their remaining
 one-code differences are the half-float working frame rounded again to 8 bits: the
@@ -83,30 +84,49 @@ Editor card's interior mean is 0.0070 CV (today 0.0004) and its edge mean 0.1606
 
 The weighted resolve brings edges toward the reference: per pixel, `khr-ToyCar`'s
 largest excess over today's error falls from 134.37 to 71.71 CV (p99.9 59.22 to 32.04)
-and `khr-IridescenceLamp`'s from 177.30 to 64.39 (p99.9 72.96 to 31.73). Tone mapping
-each sample before the resolve was measured too and lands further from the reference
-on most of these (`khr-ToyCar` edge p99.9 excess 48.84, `khr-BoomBox` interior 5.70 CV).
-34 glTF outputs still fail: 2 geometry rows predate this work, the rest are p99.9 or
-per-pixel edge statistics over small edge sets, and 11 interiors miss the interior
-rule. By cause:
+and `khr-IridescenceLamp`'s from 177.30 to 64.39 (p99.9 72.96 to 31.73). Over all 165
+glTF outputs the pixel-weighted edge mean is 3.98 CV from the reference (today 6.12),
+and the engine's edge mean is at or below today's in 159. Two other resolves were
+measured and land further from the reference: tone mapping each sample (40 failing
+outputs; `khr-ToyCar` edge p99.9 excess 48.84) and tone mapping luminance only,
+w = T(L)/L inverted after the resolve (45; 48.48). The adapter (Apple M4 Max) offers
+1, 2 and 4 samples for RGBA16F and Depth32Float, not 8. 34 glTF outputs fail: 2
+geometry rows predate this work, the rest are p99.9 or per-pixel edge statistics over
+small edge sets, and 11 interiors miss the interior rule.
 
-- MSAA shading at the pixel center. Where triangles meet inside a surface, a
-  sample's triangle is shaded at the pixel center, outside the triangle, and a
-  normal-mapped, iridescent or anisotropic highlight lands in one sample. Today shows
-  the same sparkle; the reference shades each sample where it lies. Today tones each
-  sample before averaging, so the engine's sparkle stays brighter even weighted
-  (worst excess, box → weighted: `khr-NormalTangentTest` 112 → 72 CV,
-  `khr-NormalTangentMirrorTest` 133 → 61, `khr-LightsPunctualLamp` 39 → 22,
-  `khr-IridescenceLamp` 24 → 14, `khr-IridescenceSuzanne` 14 → 8,
-  `khr-AnisotropyBarnLamp` 3.4 → 2.8, `khr-CompareAnisotropy` 1.9 → 1.7).
-- A bright feature the reference keeps: `khr-PlaysetLightTest` (3.93 CV, box 1.25),
-  where one sample of a lamp pixel is genuinely bright and the weight dims it.
-- One or two codes in a few pixels, the same with the box, weighted and per-sample
-  toned resolves (so not the weights' recovery) and measured before the 8-bit encode:
-  `webp-avif` (1.33 CV over 45 pixels, blue only: the AVIF texels' decode),
-  `khr-TextureCoordinateTest` (1.57, one pixel 5% darker: a texture level of detail),
-  `khr-CompareTransmission` (1.62) and `transmission-background` (1.43), two pixels
-  each in the transmission sample.
+**MSAA-SPEC-1 (owner beta decision, measured trade-off).** Where triangles meet inside
+a surface, a sample's triangle is shaded at the pixel center, outside the triangle,
+and a normal-mapped, iridescent or anisotropic highlight lands in one sample. Today
+shows the same sparkle and tones each sample before averaging; the reference shades
+each sample where it lies. No resolve that keeps one tone map after transparent
+blending brings these interiors to today + 1 CV. Interior, CV from the reference (max,
+p99.9, mean), and the worst pixel's excess over today's error (box resolve → weighted):
+
+| Case | Today | Engine | Worst excess |
+|---|---|---|---|
+| `khr-NormalTangentTest` | 124.00, 2.00, 0.031 | 195.56, 1.71, 0.032 | 112 → 72 |
+| `khr-NormalTangentMirrorTest` | 115.00, 0.36, 0.012 | 176.12, 0.05, 0.013 | 133 → 61 |
+| `khr-LightsPunctualLamp` | 58.53, 2.74, 0.016 | 69.52, 2.65, 0.017 | 39 → 22 |
+| `khr-IridescenceLamp` | 211.87, 90.90, 3.016 | 212.14, 4.28, 0.159 | 24 → 14 |
+| `khr-IridescenceSuzanne` | 131.83, 93.21, 0.917 | 132.06, 22.55, 0.071 | 14 → 8 |
+| `khr-AnisotropyBarnLamp` | 90.95, 90.77, 0.314 | 63.82, 14.96, 0.045 | 3.4 → 2.8 |
+| `khr-CompareAnisotropy` | 44.00, 7.88, 0.044 | 44.29, 7.51, 0.043 | 1.9 → 1.7 |
+
+Other interiors that miss the interior rule:
+
+- `khr-PlaysetLightTest` (3.93 CV, box 1.25): one sample of a lamp pixel is
+  genuinely bright, the reference keeps it, and the weight dims it.
+- One or two codes in a few pixels, the same with every resolve measured (so not the
+  weights' recovery) and present before the 8-bit encode:
+  - `webp-avif` (1.33 CV over 45 pixels, blue only): the AVIF texels' decode, owned
+    by L5 (stills).
+  - `khr-TextureCoordinateTest` (1.57, one pixel 5% darker). The texture is
+    512 × 512 with r180's default trilinear sampler, no LOD bias on either side, and
+    the program is r180's own; neither LOD bias nor mip generation explains it.
+  - `khr-CompareTransmission` (1.62) and `transmission-background` (1.43), two pixels
+    each in the transmission sample. The transmission mips equal ANGLE's
+    `generateMipmap` at 480 × 270 (odd levels 135 → 67 → 33, bilinear at texel
+    centers) to the last bit, so mip generation is ruled out.
 
 ## Raster sampling and masks
 
