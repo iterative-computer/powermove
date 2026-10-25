@@ -93,11 +93,15 @@ is no editor-window raster request or bucket-size cache. An SVG project can rend
 and export headlessly, including through `pm-cli`.
 
 usvg parses the document and lays out SVG text. System fonts load lazily, once per
-process. Paths use exact area coverage. The GPU painter evaluates gradients without an
-8-bit lookup table and composites clips, masks, group opacity and W3C blends through
-32-bit float intermediates, storing once at the project's working precision. Filters, patterns and embedded images use resvg
-in the output rectangle at output resolution. This fallback currently stores
-RGBA8, so it does not provide the float painter's precision. External resources never load; data URLs may resolve.
+process. Paths use exact area coverage. Gradients integrate premultiplied paint
+with subcell coverage at an adaptive 1–16 samples per axis. Clips and masks share
+a 4× grid with child paint, group opacity and W3C blending, then resolve once.
+Intermediates stay RGBA32F until the project's working-precision store.
+
+Filters, patterns, embedded images and documents exceeding device limits or the
+128 MiB fine-grid budget use resvg in the output rectangle at output resolution.
+This fallback stores RGBA8 and still fails the filtered SVG quality gate.
+External resources never load; data URLs may resolve.
 The image reader retains the existing corrupt-document and encoding decisions,
 and deeply nested documents use a bounded, sized stack.
 
@@ -111,6 +115,7 @@ size instead of stretching the content bounds. Rounded rectangles follow SVG's
 `rx`/`ry` rules, including `auto`.
 
 `pm-render/tests/svg.rs` (G-V3) checks geometry, paint, scale, cache independence
-and preview/export equality against exact coverage or a supersampled independent
-renderer. The CLI and job-engine tests require an SVG project to render with no
+and preview/export equality against an independent f64 paint reference. It requires
+captured legacy-app frames for all placements and all Chromium semantic probes.
+The CLI and job-engine tests require an SVG project to render with no
 Chromium helper or editor window attached.

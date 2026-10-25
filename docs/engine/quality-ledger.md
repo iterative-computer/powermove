@@ -151,3 +151,19 @@ the unclipped reference over the same band centers.
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
 | Exact path coverage and Gaussian feather replace canvas rasterization and the approximate blur | 95.25, 82.62, 3.876 | 0.080, 0.077, 0.016 | 54 masks and stacks, including transformed, subtract-only, HD and UHD cases |
+
+## SVG coverage and paint
+
+- **Reference:** independent f64 SVG geometry, gradients, Porter-Duff paint and
+  luminance masks, integrated with exact subcell coverage on a shared grid.
+  Text uses raw shaped glyph outlines before the engine's contour resolution.
+- **Gate:** `pm-render/tests/svg.rs` (G-V3), against 43 actual legacy-app frames
+  and 374 required Chromium semantic probe rasters. Geometry stays within 1e-3;
+  every placement checks preview/export identity.
+- **Units:** CV, worst per-case max, p99.9 and mean over resampled pixels.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Output-resolution coverage, float gradient integration and joint clip/mask compositing (SVG geometry and paint rules) | 170.45, 163.81, 21.368 | 6.757, 6.245, 0.0133 | Five SVG sources at contain/cover/stretch placements and 25–800% or animated scale, 43 frames |
+
+Filtered SVGs still use the RGBA8 fallback and fail their separate desktop gate.

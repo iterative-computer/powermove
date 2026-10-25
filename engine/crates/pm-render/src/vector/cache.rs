@@ -289,14 +289,16 @@ impl VectorCache {
                 let (doc, _) = super::svg::document(path)?;
                 let transform = pm_vector::kurbo::Affine::new(*transform);
                 let clip = clip.map(|[x, y]| pm_vector::kurbo::Point::new(x, y));
-                if doc.gpu_paintable() {
+                if doc.gpu_paintable()
+                    && device.features().contains(wgpu::Features::FLOAT32_BLENDABLE)
+                {
                     let mut encoder =
                         device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("pm svg float"),
                         });
                     let painter = self
                         .svg
-                        .get_or_insert_with(|| super::svg_float::SvgPainter::new(device));
+                        .get_or_insert_with(|| super::svg_float::SvgPainter::new(device).unwrap());
                     if let Some(drawn) = painter.render(
                         device,
                         queue,

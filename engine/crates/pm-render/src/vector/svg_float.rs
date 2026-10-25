@@ -50,37 +50,53 @@ fn gradient_t(q: vec2<f32>) -> f32 {
     let v = max(lo, hi);
     return select(v, min(lo, hi), p.v[4].y + dr * v < 0.0);
 }
+fn gradient_color(q0: vec2<f32>) -> vec4<f32> {
+    let q = vec2<f32>(dot(p.v[1].xyz, vec3<f32>(q0, 1.0)), dot(p.v[2].xyz, vec3<f32>(q0, 1.0)));
+    let t = extend(gradient_t(q), u32(p.v[6].w));
+    let first = bitcast<u32>(p.v[6].y);
+    let n = bitcast<u32>(p.v[6].z);
+    if (n == 0u) { return vec4<f32>(0.0); }
+    var rgba = stops[first].color;
+    for (var i = 1u; i < n; i = i + 1u) {
+        let next = stops[first + i];
+        let prev = stops[first + i - 1u];
+        if (i == n - 1u && t >= next.position.x) { rgba = next.color; break; }
+        if (t < next.position.x || i == n - 1u) {
+            let u = clamp((t - prev.position.x) / max(next.position.x - prev.position.x, 1e-12), 0.0, 1.0);
+            rgba = mix(prev.color, next.color, u);
+            break;
+        }
+    }
+    rgba.a *= p.v[4].z;
+    return rgba;
+}
 @fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let xy = vec2<i32>(floor(pos.xy));
     let box = vec4<i32>(p.v[5]);
     if (xy.x < box.x || xy.y < box.y || xy.x >= box.x + box.z || xy.y >= box.y + box.w) {
         discard;
     }
-    let idx = bitcast<u32>(p.v[6].x) + u32((xy.y - box.y) * box.z + xy.x - box.x);
-    let cov = clamp(coverage[idx], 0.0, 1.0);
-    var rgba = p.v[0];
-    if (p.v[4].w > 0.5) {
-        let q0 = pos.xy + p.v[7].xy;
-        let q = vec2<f32>(dot(p.v[1].xyz, vec3<f32>(q0, 1.0)), dot(p.v[2].xyz, vec3<f32>(q0, 1.0)));
-        let t = extend(gradient_t(q), u32(p.v[6].w));
-        let first = bitcast<u32>(p.v[6].y);
-        let n = bitcast<u32>(p.v[6].z);
-        if (n == 0u) { return vec4<f32>(0.0); }
-        rgba = stops[first].color;
-        for (var i = 1u; i < n; i = i + 1u) {
-            let next = stops[first + i];
-            let prev = stops[first + i - 1u];
-            if (i == n - 1u && t >= next.position.x) { rgba = next.color; break; }
-            if (t < next.position.x || i == n - 1u) {
-                let u = clamp((t - prev.position.x) / max(next.position.x - prev.position.x, 1e-12), 0.0, 1.0);
-                rgba = mix(prev.color, next.color, u);
-                break;
-            }
-        }
-        rgba.a *= p.v[4].z;
+    let first = bitcast<u32>(p.v[6].x);
+    let local = xy - box.xy;
+    if (p.v[4].w < 0.5) {
+        let cov = clamp(coverage[first + u32(local.y * box.z + local.x)], 0.0, 1.0);
+        let alpha = p.v[0].a * cov;
+        return vec4<f32>(p.v[0].rgb * alpha, alpha);
     }
-    let alpha = rgba.a * cov;
-    return vec4<f32>(rgba.rgb * alpha, alpha);
+    let rate = u32(p.v[7].z);
+    let stride = u32(p.v[7].w);
+    let origin = first + u32(local.y) * rate * stride + u32(local.x) * rate;
+    var sum = vec4<f32>(0.0);
+    for (var y = 0u; y < rate; y++) {
+        for (var x = 0u; x < rate; x++) {
+            let cov = clamp(coverage[origin + y * stride + x], 0.0, 1.0);
+            let q0 = vec2<f32>(xy) + (vec2<f32>(f32(x), f32(y)) + vec2<f32>(0.5)) / f32(rate) + p.v[7].xy;
+            let rgba = gradient_color(q0);
+            let alpha = rgba.a * cov;
+            sum += vec4<f32>(rgba.rgb * alpha, alpha);
+        }
+    }
+    return sum / f32(rate * rate);
 }
 "#;
 
@@ -167,9 +183,38 @@ const COPY: &str = r#"
 }
 "#;
 
+const RESOLVE: &str = r#"
+struct Params { v: array<vec4<f32>, 2> };
+@group(0) @binding(0) var fine: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> p: Params;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(f32(i & 1u)*2.0-1.0, 1.0-f32(i >> 1u)*2.0,0.0,1.0);
+}
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let xy = vec2<i32>(floor(pos.xy)) - vec2<i32>(p.v[0].xy);
+    let size = vec2<i32>(p.v[0].zw);
+    let rate = i32(p.v[1].x);
+    if (xy.x < 0 || xy.y < 0 || xy.x >= size.x || xy.y >= size.y) {
+        return vec4<f32>(0.0);
+    }
+    var sum = vec4<f32>(0.0);
+    for (var y = 0; y < rate; y++) {
+        for (var x = 0; x < rate; x++) {
+            sum += textureLoad(fine, xy * rate + vec2<i32>(x, y), 0);
+        }
+    }
+    return sum / f32(rate * rate);
+}
+"#;
+
+const GROUP_RATE: u32 = 4;
+const MAX_FINE_BYTES: u64 = 128 * 1024 * 1024;
+
 struct DrawEntry {
     path: BezPath,
     bounds: PixelRect,
+    coverage_bounds: PixelRect,
+    samples: u32,
     offset: u64,
 }
 
@@ -181,6 +226,8 @@ pub struct SvgPainter {
     composite_layout: wgpu::BindGroupLayout,
     copy: [wgpu::RenderPipeline; 3],
     copy_layout: wgpu::BindGroupLayout,
+    resolve: wgpu::RenderPipeline,
+    resolve_layout: wgpu::BindGroupLayout,
 }
 
 fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -326,7 +373,12 @@ fn render_pass(
 }
 
 impl SvgPainter {
-    pub fn new(device: &wgpu::Device) -> Self {
+    /// Float blending is optional on engine devices. Reject it before
+    /// constructing pipelines so the caller can use the native fallback.
+    pub fn new(device: &wgpu::Device) -> Option<Self> {
+        if !device.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
+            return None;
+        }
         let dm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm svg float draw"),
             source: wgpu::ShaderSource::Wgsl(DRAW.into()),
@@ -338,6 +390,10 @@ impl SvgPainter {
         let xm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm svg float copy"),
             source: wgpu::ShaderSource::Wgsl(COPY.into()),
+        });
+        let rm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pm svg float resolve"),
+            source: wgpu::ShaderSource::Wgsl(RESOLVE.into()),
         });
         let dl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm svg float draw"),
@@ -361,7 +417,11 @@ impl SvgPainter {
             label: Some("pm svg float copy"),
             entries: &[tex_entry(0)],
         });
-        Self {
+        let rl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pm svg float resolve"),
+            entries: &[tex_entry(0), buffer_entry(1, false)],
+        });
+        Some(Self {
             coverage: AreaCoverage::new(device),
             draw: pipeline(
                 device,
@@ -380,7 +440,9 @@ impl SvgPainter {
             ]
             .map(|f| pipeline(device, &xm, &xl, f, None)),
             copy_layout: xl,
-        }
+            resolve: pipeline(device, &rm, &rl, wgpu::TextureFormat::Rgba32Float, None),
+            resolve_layout: rl,
+        })
     }
 
     /// Records a float SVG render. Unsupported documents return `None` for
@@ -397,25 +459,83 @@ impl SvgPainter {
         clip: &[Point],
         precision: Precision,
     ) -> Result<Option<(wgpu::Texture, u64)>, String> {
-        let Some(scene) = doc.float_scene(transform, clip) else {
+        let Some(mut scene) = doc.float_scene(transform, clip) else {
             return Ok(None);
         };
         let (w, h) = (rect.width.max(1), rect.height.max(1));
+        let mut paint_rect = rect;
+        let mut resolve = None;
         let mut paths = Vec::new();
-        collect(&scene, rect, &mut paths);
-        let covered_pixels = paths.iter().fold(0u64, |sum, e| {
-            sum.saturating_add(u64::from(e.bounds.width) * u64::from(e.bounds.height))
-        });
-        if covered_pixels > device.limits().max_storage_buffer_binding_size / 4
-            || covered_pixels > u64::from(u32::MAX)
-        {
+        if collect(&scene, rect, &mut paths).is_none() {
+            return Ok(None);
+        }
+        if needs_joint_samples(&scene) {
+            let Some(bounds) = path_bounds(&paths) else {
+                return Ok(None);
+            };
+            let rate = GROUP_RATE;
+            let Some(x) = rect
+                .x
+                .checked_add(bounds.x)
+                .and_then(|v| v.checked_mul(rate as i32))
+            else {
+                return Ok(None);
+            };
+            let Some(y) = rect
+                .y
+                .checked_add(bounds.y)
+                .and_then(|v| v.checked_mul(rate as i32))
+            else {
+                return Ok(None);
+            };
+            let Some(fw) = bounds.width.checked_mul(rate) else {
+                return Ok(None);
+            };
+            let Some(fh) = bounds.height.checked_mul(rate) else {
+                return Ok(None);
+            };
+            let max_dim = device.limits().max_texture_dimension_2d;
+            if fw > max_dim || fh > max_dim {
+                return Ok(None);
+            }
+            let fine_clip: Vec<_> = clip
+                .iter()
+                .map(|p| Point::new(p.x * f64::from(rate), p.y * f64::from(rate)))
+                .collect();
+            let Some(fine_scene) =
+                doc.float_scene(Affine::scale(f64::from(rate)) * transform, &fine_clip)
+            else {
+                return Ok(None);
+            };
+            let fine_rect = PixelRect::new(x, y, fw, fh);
+            let mut fine_paths = Vec::new();
+            if collect(&fine_scene, fine_rect, &mut fine_paths).is_none() {
+                return Ok(None);
+            }
+            let target_bytes = u64::from(fw)
+                .saturating_mul(u64::from(fh))
+                .saturating_mul(16)
+                .saturating_mul(target_count(&fine_scene));
+            let coverage_bytes = coverage_pixels(&fine_paths).saturating_mul(4);
+            if target_bytes.saturating_add(coverage_bytes) > MAX_FINE_BYTES {
+                return Ok(None);
+            }
+            scene = fine_scene;
+            paths = fine_paths;
+            paint_rect = fine_rect;
+            resolve = Some(bounds);
+        }
+        let limit = (device.limits().max_storage_buffer_binding_size / 4).min(u64::from(u32::MAX));
+        // Never lower the selected sampling rate to fit storage: that would
+        // silently weaken the paint integration bound.
+        if coverage_pixels(&paths) > limit {
             return Ok(None);
         }
         let items: Vec<_> = paths
             .iter()
             .map(|e| Item {
                 path: &e.path,
-                bounds: e.bounds,
+                bounds: e.coverage_bounds,
                 at: [0, 0],
             })
             .collect();
@@ -437,7 +557,7 @@ impl SvgPainter {
             device,
             encoder,
             &scene,
-            rect,
+            paint_rect,
             &paths,
             &values,
             &stop_buffer,
@@ -445,6 +565,41 @@ impl SvgPainter {
             &mut cursor,
             &mut stop_cursor,
         )?;
+        let target = if let Some(bounds) = resolve {
+            let output = float_target(device, w, h);
+            let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let ub = uniform(
+                device,
+                &[
+                    bounds.x as f32,
+                    bounds.y as f32,
+                    bounds.width as f32,
+                    bounds.height as f32,
+                    GROUP_RATE as f32,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+            );
+            let bg = bind(
+                device,
+                &self.resolve_layout,
+                &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: ub.as_entire_binding(),
+                    },
+                ],
+            );
+            render_pass(encoder, &output, true, &self.resolve, &bg);
+            output
+        } else {
+            target
+        };
         let format = pm_gpu::working_format(precision);
         let (output, bpp) = match format {
             wgpu::TextureFormat::Rgba8Unorm => (0, 4),
@@ -659,7 +814,60 @@ impl SvgPainter {
     }
 }
 
-fn collect(nodes: &[FloatNode], rect: PixelRect, out: &mut Vec<DrawEntry>) {
+fn needs_joint_samples(nodes: &[FloatNode]) -> bool {
+    nodes.iter().any(|node| match node {
+        FloatNode::Draw(_) => false,
+        FloatNode::Group(group) => {
+            group.clip.is_some() || group.mask.is_some() || needs_joint_samples(&group.children)
+        }
+    })
+}
+
+fn target_count(nodes: &[FloatNode]) -> u64 {
+    1 + nodes
+        .iter()
+        .filter_map(|node| match node {
+            FloatNode::Draw(_) => None,
+            FloatNode::Group(g) => Some(
+                1 + target_count(&g.children)
+                    + g.clip.as_deref().map(target_count).unwrap_or(0)
+                    + g.mask.as_deref().map(target_count).unwrap_or(0),
+            ),
+        })
+        .sum::<u64>()
+}
+
+fn coverage_pixels(paths: &[DrawEntry]) -> u64 {
+    paths.iter().fold(0u64, |sum, e| {
+        sum.saturating_add(u64::from(e.coverage_bounds.width) * u64::from(e.coverage_bounds.height))
+    })
+}
+
+fn path_bounds(paths: &[DrawEntry]) -> Option<PixelRect> {
+    let mut x0 = i32::MAX;
+    let mut y0 = i32::MAX;
+    let mut x1 = 0i64;
+    let mut y1 = 0i64;
+    for e in paths {
+        if e.bounds.width == 0 || e.bounds.height == 0 {
+            continue;
+        }
+        x0 = x0.min(e.bounds.x);
+        y0 = y0.min(e.bounds.y);
+        x1 = x1.max(i64::from(e.bounds.x) + i64::from(e.bounds.width));
+        y1 = y1.max(i64::from(e.bounds.y) + i64::from(e.bounds.height));
+    }
+    (x0 != i32::MAX).then(|| {
+        PixelRect::new(
+            x0,
+            y0,
+            (x1 - i64::from(x0)) as u32,
+            (y1 - i64::from(y0)) as u32,
+        )
+    })
+}
+
+fn collect(nodes: &[FloatNode], rect: PixelRect, out: &mut Vec<DrawEntry>) -> Option<()> {
     for node in nodes {
         match node {
             FloatNode::Draw(d) => {
@@ -667,22 +875,112 @@ fn collect(nodes: &[FloatNode], rect: PixelRect, out: &mut Vec<DrawEntry>) {
                     Affine::translate((-f64::from(rect.x), -f64::from(rect.y))) * d.outline.clone();
                 let bounds = coverage::bounds(&path, rect.width.max(1), rect.height.max(1))
                     .unwrap_or(PixelRect::new(0, 0, 0, 0));
+                let samples = gradient_samples(&d.paint);
+                if u64::from(bounds.width) * u64::from(samples) > u64::from(u32::MAX)
+                    || u64::from(bounds.height) * u64::from(samples) > u64::from(u32::MAX)
+                    || i64::from(bounds.x) * i64::from(samples) > i64::from(i32::MAX)
+                    || i64::from(bounds.y) * i64::from(samples) > i64::from(i32::MAX)
+                {
+                    return None;
+                }
                 out.push(DrawEntry {
-                    path,
+                    path: Affine::scale(f64::from(samples)) * path,
                     bounds,
+                    coverage_bounds: sample_bounds(bounds, samples),
+                    samples,
                     offset: 0,
                 });
             }
             FloatNode::Group(g) => {
-                collect(&g.children, rect, out);
+                collect(&g.children, rect, out)?;
                 if let Some(c) = &g.clip {
-                    collect(c, rect, out);
+                    collect(c, rect, out)?;
                 }
                 if let Some(m) = &g.mask {
-                    collect(m, rect, out);
+                    collect(m, rect, out)?;
                 }
             }
         }
+    }
+    Some(())
+}
+
+fn sample_bounds(bounds: PixelRect, rate: u32) -> PixelRect {
+    PixelRect::new(
+        bounds.x * rate as i32,
+        bounds.y * rate as i32,
+        bounds.width * rate,
+        bounds.height * rate,
+    )
+}
+
+/// Gradient change across one device pixel, in worst-case 8-bit code values.
+/// Radials receive more samples near a focal circle tangent to the outer
+/// circle; solids keep exact one-pixel coverage.
+fn gradient_samples(paint: &FloatPaint) -> u32 {
+    let FloatPaint::Gradient {
+        geometry,
+        stops,
+        spread,
+        ..
+    } = paint
+    else {
+        return 1;
+    };
+    let per_pixel = match geometry {
+        FloatGradient::Linear { p0, p1, inverse } => {
+            let d = [f64::from(p1[0] - p0[0]), f64::from(p1[1] - p0[1])];
+            let length2 = (d[0] * d[0] + d[1] * d[1]).max(1e-30);
+            ((f64::from(inverse[0]) * d[0] + f64::from(inverse[1]) * d[1]).abs()
+                + (f64::from(inverse[2]) * d[0] + f64::from(inverse[3]) * d[1]).abs())
+                / length2
+        }
+        FloatGradient::Radial {
+            focus,
+            center,
+            radius,
+            focus_radius,
+            inverse,
+        } => {
+            // On |q - F - t(C-F)| = fr + t(r-fr), implicit
+            // differentiation gives |grad_q t| = 1 / |u·(C-F) + r-fr|.
+            // Its worst angular direction has denominator (r-fr)-|C-F|.
+            let dr = f64::from(*radius - *focus_radius);
+            let separation = f64::from(center[0] - focus[0]).hypot(f64::from(center[1] - focus[1]));
+            (f64::from(inverse[0]).hypot(f64::from(inverse[1]))
+                + f64::from(inverse[2]).hypot(f64::from(inverse[3])))
+                / (dr - separation).max(1e-12)
+        }
+    };
+    let mut narrowest = 1.0f64;
+    for pair in stops.windows(2) {
+        let span = f64::from(pair[1].offset - pair[0].offset);
+        if span <= 0.0 && pair[0].rgba != pair[1].rgba {
+            return 16;
+        }
+        if span > 0.0 {
+            narrowest = narrowest.min(span);
+        }
+    }
+    if matches!(spread, pm_vector::render::svg::SpreadMethod::Repeat)
+        && stops
+            .first()
+            .zip(stops.last())
+            .is_some_and(|(a, b)| a.rgba != b.rgba)
+    {
+        return 16;
+    }
+    let cv = 255.0 * per_pixel / narrowest;
+    if cv < 0.5 {
+        1
+    } else if cv < 2.0 {
+        2
+    } else if cv < 4.0 {
+        4
+    } else if cv < 8.0 {
+        8
+    } else {
+        16
     }
 }
 fn collect_stops(nodes: &[FloatNode]) -> (Vec<[f32; 8]>, Vec<(u32, u32)>) {
@@ -734,7 +1032,12 @@ fn draw_params(d: &FloatDraw, e: &DrawEntry, rect: PixelRect, range: (u32, u32))
         f32::from_bits(range.1),
         0.0,
     ]);
-    v[28..30].copy_from_slice(&[rect.x as f32, rect.y as f32]);
+    v[28..32].copy_from_slice(&[
+        rect.x as f32,
+        rect.y as f32,
+        e.samples as f32,
+        e.coverage_bounds.width as f32,
+    ]);
     match &d.paint {
         FloatPaint::Solid(color) => v[..4].copy_from_slice(color),
         FloatPaint::Gradient {

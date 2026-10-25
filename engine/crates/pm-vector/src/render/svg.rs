@@ -160,6 +160,40 @@ impl SvgDocument {
         (f64::from(s.width()), f64::from(s.height()))
     }
 
+    /// Raw glyph outlines after usvg shapes text, before the renderer's
+    /// flattening and disjoint-contour resolution. This gives the SVG gate
+    /// independent geometry for exact f64 coverage of the authored text.
+    pub fn raw_text_fill_paths(&self) -> Vec<(kurbo::BezPath, bool)> {
+        fn visit(
+            group: &usvg::Group,
+            parent: kurbo::Affine,
+            in_text: bool,
+            out: &mut Vec<(kurbo::BezPath, bool)>,
+        ) {
+            let t = parent * affine(group.transform());
+            for node in group.children() {
+                match node {
+                    usvg::Node::Group(g) => visit(g, t, in_text, out),
+                    usvg::Node::Text(text) => visit(text.flattened(), t, true, out),
+                    usvg::Node::Path(path) if in_text => {
+                        if let Some(fill) = path.fill() {
+                            out.push((
+                                t * bez(path.data()),
+                                fill.rule() == usvg::FillRule::EvenOdd,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        with_stack(self.depth, || {
+            let mut paths = Vec::new();
+            visit(self.tree.root(), kurbo::Affine::IDENTITY, false, &mut paths);
+            paths
+        })
+    }
+
     /// Whether the float painter can draw every part of the document (no filters,
     /// patterns, embedded images, or `crispEdges` shapes).
     pub fn gpu_paintable(&self) -> bool {
