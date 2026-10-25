@@ -204,6 +204,79 @@ pub fn write(
     Ok((angle_calls(&source), entry))
 }
 
+/// The fragment MSL of a program drawing into an RGBA16F target: each float
+/// color output is converted to `half` in the shader, where MSL's
+/// conversion rounds to the nearest even half, so the target's store is
+/// exact. Metal's own render-target conversion truncates f32 toward zero,
+/// which biases every pass of an effect chain down by up to one half step.
+/// naga writes the entry point's outputs as `struct main_Output` and returns
+/// them with one `return main_Output { ... };` per exit; `None` when the
+/// source is not written that way.
+pub fn half_store(msl: &str, entry_point: &str) -> Option<String> {
+    const OUTPUT: &str = "struct main_Output {\n";
+    let start = msl.find(OUTPUT)? + OUTPUT.len();
+    let end = start + msl[start..].find("};\n")?;
+    let mut members = Vec::new();
+    let mut converted = String::new();
+    for line in msl[start..end].lines() {
+        let line = line.trim().strip_suffix(';')?;
+        let (declaration, attribute) = line.split_once(" [[")?;
+        let (ty, name) = declaration.rsplit_once(' ')?;
+        let half = match ty {
+            _ if !attribute.starts_with("color(") => None,
+            "float" => Some("half"),
+            "metal::float2" => Some("metal::half2"),
+            "metal::float3" => Some("metal::half3"),
+            "metal::float4" => Some("metal::half4"),
+            _ => None,
+        };
+        members.push(format!("    {} {name} [[{attribute};", half.unwrap_or(ty)));
+        converted.push_str(&match half {
+            Some(h) => format!("{h}(o.{name}), "),
+            None => format!("o.{name}, "),
+        });
+    }
+    let signature = format!("fragment main_Output {entry_point}(");
+    let at = msl.find(&signature)?;
+    let (head, body) = msl.split_at(at);
+    let returns = body.matches("return main_Output {").count();
+    if returns == 0 || members.is_empty() {
+        return None;
+    }
+    let body = body
+        .replacen(&signature, &format!("fragment pm_half_Output {entry_point}("), 1)
+        .lines()
+        .map(|line| match line.trim_start().strip_prefix("return main_Output {") {
+            Some(rest) => {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                rest.strip_suffix(" };")
+                    .map(|values| format!("{indent}return pm_half(main_Output {{{values} }});"))
+                    .unwrap_or_else(|| line.to_owned())
+            }
+            None => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if body.matches("return pm_half(").count() != returns {
+        return None;
+    }
+    Some(format!(
+        "{head}struct pm_half_Output {{\n{}\n}};\npm_half_Output pm_half(main_Output o) {{ return pm_half_Output {{ {} }}; }}\n{body}\n",
+        members.join("\n"),
+        converted.trim_end_matches(", ")
+    ))
+}
+
+/// A stage compiled from MSL `source` (passthrough).
+pub fn msl_stage(device: &wgpu::Device, label: &str, source: String, entry_point: &str) -> Result<Stage, String> {
+    let compiled = pm_gpu::msl::from_source(device, label, &source, entry_point)?;
+    Ok(Stage {
+        module: compiled.module,
+        entry_point: compiled.entry_point,
+        msl: Some(source),
+    })
+}
+
 /// The module for one stage of a legacy program: ANGLE's calls through
 /// passthrough MSL where the device takes it, else wgpu's translation.
 pub fn stage_module(
@@ -224,12 +297,7 @@ pub fn stage_module(
         });
     }
     let (source, entry_point) = write(&module, stage, entries)?;
-    let compiled = pm_gpu::msl::from_source(device, label, &source, &entry_point)?;
-    Ok(Stage {
-        module: compiled.module,
-        entry_point: compiled.entry_point,
-        msl: Some(source),
-    })
+    msl_stage(device, label, source, &entry_point)
 }
 
 #[cfg(test)]
@@ -292,6 +360,19 @@ mod tests {
             );
             assert_eq!(lines[1], "}", "{f}");
         }
+    }
+
+    #[test]
+    fn half_store_converts_color_outputs_at_every_return() {
+        let msl = "struct main_Output {\n    metal::float4 member [[color(0)]];\n    float gl_FragDepth [[depth(any)]];\n};\nfragment main_Output main_(\n  main_Input varyings [[stage_in]]\n) {\n    if (x) {\n        return main_Output { a, d };\n    }\n    return main_Output { _e7, d };\n}\n";
+        let out = half_store(msl, "main_").expect("naga's form");
+        assert!(out.contains("struct pm_half_Output {\n    metal::half4 member [[color(0)]];\n    float gl_FragDepth [[depth(any)]];\n};"), "{out}");
+        assert!(out.contains("return pm_half_Output { metal::half4(o.member), o.gl_FragDepth };"), "{out}");
+        assert!(out.contains("fragment pm_half_Output main_("), "{out}");
+        assert_eq!(out.matches("return pm_half(main_Output {").count(), 2, "{out}");
+        assert!(!out.contains("        return main_Output {"), "{out}");
+        // Not naga's form: left to the caller.
+        assert!(half_store("fragment float4 main_() { return x; }", "main_").is_none());
     }
 
     #[test]
