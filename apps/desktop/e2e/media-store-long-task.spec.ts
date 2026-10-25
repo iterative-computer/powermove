@@ -7,7 +7,7 @@ import { expect, launchApp, test } from './helpers/app';
  * (docs/engine/host-processes.md). Each launch uses and removes its own
  * temporary profile. */
 test('the legacy media store survives a long main-thread task during its first open', async () => {
-  const session = await launchApp();
+  const session = await launchApp({ env: { POWERMOVE_NEW_ENGINE: '0' } });
   try {
     await session.openEditor();
     const result = await session.page.evaluate(async () => {

@@ -94,7 +94,7 @@ describe('MediaPathCache', () => {
     const staged = await cache.finish(3, begun.token);
     expect(staged.origin).toBe('cache');
     expect(path.extname(staged.path)).toBe('.webm');
-    expect(new Uint8Array(await readFile(staged.path))).toEqual(data);
+    expect((await readFile(staged.path)).equals(data)).toBe(true);
 
     expect(await cache.lookup(3, { assetId: 'a1', storageKey: 'media:v2:x', size: data.length })).toEqual(staged);
     expect(await cache.begin(5, request)).toEqual(staged);

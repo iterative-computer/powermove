@@ -8,8 +8,7 @@ import { chooseNativeMenu, expect, test } from './helpers/app';
  * flag on, the kernels must have answered (the only fallback allowed is glyph
  * ink, which needs outlines the Phase 1 font registry does not serve), and in
  * the dual modes the TypeScript edits must agree with them. A second test
- * covers material peers (shared shader channels keyed on off-grid layer
- * starts), move to group, and Pre-compose › Leave all attributes. Fonts need
+ * covers move to group and Pre-compose › Leave all attributes. Fonts need
  * POWERMOVE_ENGINE_FONTS=1 and the pm-bridge addon.
  */
 
@@ -21,12 +20,14 @@ const close = (a: number[], b: number[]) => a.every((v, i) => Math.abs(v - b[i]!
 /**
  * The e2e build bakes `VITE_POWERMOVE_NATIVE_EVALUATOR` from this process's
  * environment (global setup builds with it), so the page must report that
- * mode: a build made without the flag would otherwise pass every check below
- * as if the run were meant to be `off`.
+ * mode. Use New Engine turns a default `off` build into `on` so its document
+ * mirror and native edits can serve the interactive renderer.
  */
-function expectBuiltMode(report: { mode: string } | null): void {
+function expectBuiltMode(report: { mode: string } | null, newEngine: boolean): void {
   const raw = (process.env.VITE_POWERMOVE_NATIVE_EVALUATOR ?? 'off').trim().toLowerCase();
-  const want = raw === '1' || raw === 'true' ? 'on' : raw || 'off';
+  const configured = raw === '1' || raw === 'true' || raw === 'on' ? 'on'
+    : ['audit', 'audit-proxy', 'strict'].includes(raw) ? raw : 'off';
+  const want = newEngine && configured === 'off' ? 'on' : configured;
   expect(report?.mode ?? 'off', 'native evaluator mode of the build').toBe(want);
 }
 test('align, reparent, group, ungroup, anchors and split text through pm-edit keep the artwork in place', async ({ session }) => {
@@ -171,7 +172,7 @@ test('align, reparent, group, ungroup, anchors and split text through pm-edit ke
     const doc = (window as any).PM.EngineDoc, stats = doc?.stats?.();
     return stats?.enabled === false || !stats ? null : { mode: stats.mode as string, edits: stats.edits as Stats, dual: stats.dual };
   });
-  expectBuiltMode(report);
+  expectBuiltMode(report, await page.evaluate(() => !!(window as any).PM.EngineConnection));
   if (report) {
     const kernels = ['align', 'reparent', 'groupPlacement', 'ungroup', 'captureSizeAnchor', 'anchorReference', 'anchorMoved', 'captureFontAnchor', 'splitText'];
     for (const name of kernels) expect(report.edits.calls[name] ?? 0, `${name} asked`).toBeGreaterThan(0);
@@ -197,61 +198,25 @@ test('align, reparent, group, ungroup, anchors and split text through pm-edit ke
   expect(session.diagnostics.pageErrors).toEqual([]);
 });
 
-test('material peers, move to group and Leave all attributes through pm-edit keep timing and artwork', async ({ session }) => {
+test('move to group and Leave all attributes through pm-edit keep timing and artwork', async ({ session }) => {
   await session.openEditor();
   const { page } = session;
   await page.waitForFunction(() => Boolean((window as any).PM?.Kernel?.services.get('viewer')));
-  // An exact 24 fps composition with off-grid layer starts: the peer's keys are
-  // the source's moved by the starts' difference, written on the tick grid.
+  // The old peer fixture used scene3d.createMaterial/setMaterial, which are
+  // absent from the released Scene3DAPI. The remaining edit kernels still
+  // exercise undoable geometry and pixel preservation through the public API.
   expect(await page.evaluate(() => {
     const PM = (window as any).PM;
-    const project = PM.mkProject({ name: 'pm-edit peers', w: 640, h: 360, dur: 4, fps: 24, bg: '#FFFFFF' });
+    const project = PM.mkProject({ name: 'pm-edit grouping', w: 640, h: 360, dur: 4, fps: 24, bg: '#FFFFFF' });
     const card = PM.mkLayer('shape', { name: 'Card', d: { w: 90, h: 60, color: '#EF683B' }, p: { 'position.x': 470, 'position.y': 250, rotation: -20, 'scale.x': 130 } }, project);
     const holder = PM.mkLayer('shape', { name: 'Holder', d: { w: 50, h: 50, color: '#4274EC' }, p: { 'position.x': 160, 'position.y': 120 } }, project);
     const plate = PM.mkLayer('solid', { name: 'Plate', from: 0.3, dur: 3, d: { w: 160, h: 90, color: '#386BDC' }, p: { 'position.x': 300, 'position.y': 200, rotation: 15, 'anchor.x': 20 } }, project);
     project.layers = [card, holder, plate];
     PM.replaceProject(project);
     PM.setTime(1, { force: true });
-    const api = PM.Kernel.api('pm-edit-peers');
-    api.scene3d.edit({ operation: 'add_camera', camera: { p: { x: 0, y: 0, z: 6 } } });
-    for (const [id, x] of [['ball', -0.7], ['cube', 0.7]] as const) api.scene3d.edit({ operation: 'add_object', object: { id, source: { primitive: 'box' }, p: { x } } });
-    PM.Edit.apply({ type: 'set_layer', target: 'cube', patch: { from: 1.0667 } });
-    const shader = api.scene3d.createMaterial('surface', 'pm_edit_shared', 'Shared');
-    const assigned = [
-      api.scene3d.setMaterial('ball', 'base', { ...PM.L('ball').d.data.object.material, shader }, false),
-      api.scene3d.setMaterial('cube', 'base', PM.L('ball').d.data.object.material, false),
-    ].map((r: any) => r.ok ? true : r.message ?? JSON.stringify(r));
     PM.hist.clear();
-    return { assigned, shaders: ['ball', 'cube'].map(id => PM.L(id)?.d?.data?.object?.material?.shader?.id ?? JSON.stringify(PM.L(id)?.d).slice(0, 400)) };
-  })).toEqual({ assigned: [true, true], shaders: ['pm_edit_shared', 'pm_edit_shared'] });
-
-  // Keying the shared roughness on the ball copies it to the cube.
-  const peers = await page.evaluate(() => {
-    const PM = (window as any).PM;
-    const results = [
-      PM.Edit.apply({ type: 'replace_keyframes', target: 'ball', path: 'shader.roughness', keyframes: [{ time: 0.25, value: 0.1 }, { time: 1.5, value: 0.9 }] }, { origin: 'user' }),
-      PM.Edit.apply({ type: 'set_property', target: 'ball', path: 'shader.roughness', value: 0.35, time: 1.1, mode: 'keyframe' }, { origin: 'user' }),
-    ];
-    const ball = PM.L('ball'), cube = PM.L('cube');
-    const track = (layer: any) => layer.d.data.object.material.shader.p.roughness.kf.map((k: any) => [k.t, k.v, k.i]);
-    const comp = [0.4, 1.2, 1.7, 2.3, 2.9];
-    const roughness = (layer: any, t: number) => PM.evP(layer, layer.d.data.object.material.shader.p.roughness, t, 'shader.roughness');
-    return {
-      ok: results.map((r: any) => r.ok), shift: ball.from - cube.from, ball: track(ball), cube: track(cube),
-      ev: comp.map(t => [roughness(ball, t), roughness(cube, t)]),
-    };
-  });
-  expect(peers.ok).toEqual([true, true]);
-  expect(peers.cube.length).toBe(peers.ball.length);
-  expect(peers.ball.length).toBe(3);
-  const tick = 1 / 705_600_000;
-  for (const [i, [t, v, id]] of peers.ball.entries()) {
-    const [ct, cv, cid] = peers.cube[i]!;
-    expect(Math.abs(ct - (t + peers.shift)), `cube key ${i} time ${ct}, ball ${t}`).toBeLessThanOrEqual(2 * tick);
-    expect(cv).toBe(v);
-    expect(cid).not.toBe(id);
-  }
-  for (const [ball, cube] of peers.ev) expect(Math.abs(ball - cube)).toBeLessThan(1e-6);
+    return PM.proj.layers.map((layer: any) => layer.name);
+  })).toEqual(['Card', 'Holder', 'Plate']);
 
   // Move the card into a rotated, scaled group and back out: it keeps its world pose.
   const world = (name: string) => page.evaluate(name => {
@@ -287,15 +252,15 @@ test('material peers, move to group and Leave all attributes through pm-edit kee
   expect(leave).toEqual({ left: true, type: 'precomp', same: true });
 
   await page.evaluate(() => { const PM = (window as any).PM; while (PM.hist.undo()) { /* to the start */ } });
-  expect(await page.evaluate(() => (window as any).PM.L('cube').d.data.object.material.shader.p.roughness.kf.length)).toBe(0);
+  expect(await page.evaluate(() => (window as any).PM.proj.layers.map((layer: any) => layer.name))).toEqual(['Card', 'Holder', 'Plate']);
 
   const report = await page.evaluate(() => {
     const doc = (window as any).PM.EngineDoc, stats = doc?.stats?.();
     return stats?.enabled === false || !stats ? null : { mode: stats.mode as string, edits: stats.edits as Stats, dual: stats.dual };
   });
-  expectBuiltMode(report);
+  expectBuiltMode(report, await page.evaluate(() => !!(window as any).PM.EngineConnection));
   if (report) {
-    const kernels = ['syncPeers', 'moveToGroup', 'leaveAttributes'];
+    const kernels = ['moveToGroup', 'leaveAttributes'];
     for (const name of kernels) expect(report.edits.calls[name] ?? 0, `${name} asked`).toBeGreaterThan(0);
     expect(Object.keys(report.edits.fallbacks), 'fallbacks').toEqual([]);
     if (report.mode === 'on') for (const name of kernels) expect(report.edits.applied[name] ?? 0, `${name} applied`).toBe(report.edits.calls[name]);

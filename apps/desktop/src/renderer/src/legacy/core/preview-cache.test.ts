@@ -7,15 +7,15 @@ function fixture() {
   const listeners = new Map<string, Array<() => void>>();
   const bitmap = { close: vi.fn() };
   const drawImage = vi.fn();
-  const canvas = { style: {}, getContext: () => ({ drawImage }), remove: vi.fn() };
+  const canvas = { width: 0, height: 0, style: {}, getContext: () => ({ drawImage }), remove: vi.fn() };
   vi.stubGlobal('document', { createElement: () => canvas });
   vi.stubGlobal('createImageBitmap', vi.fn(async () => bitmap));
   vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
   const audio = { running: true, tick: vi.fn(), seek: vi.fn(), start: vi.fn(() => { audio.running = true; }), pause: vi.fn(() => { audio.running = false; }) };
   const PM: any = {
-    proj: { id: 'project', fps: 30, dur: 1 / 30, work: [0, 1 / 30] },
-    time: 0, playing: true, Audio: audio,
+    proj: { id: 'project', w: 2, h: 2, fps: 30, dur: 1 / 30, work: [0, 1 / 30] },
+    time: 0, playing: true, quality: 1, Audio: audio,
     GL: { canvas: { width: 2, height: 2, parentElement: { appendChild: vi.fn() } }, render: vi.fn() },
     pause: () => { PM.playing = false; audio.pause(); },
     setTime: vi.fn((time: number) => { PM.time = time; PM.bus.emit('time', time); }),
@@ -68,6 +68,78 @@ describe('cached preview audio ownership', () => {
     expect(audio.running).toBe(true);
     expect(audio.pause).not.toHaveBeenCalled();
   });
+});
+
+it.each(['stop', 'clear'])('renders native cache frames and releases native audio on %s', async action => {
+  vi.useFakeTimers();
+  const { PM, audio, canvas } = fixture();
+  PM.proj.dur = 2; PM.proj.work = [1, 1 + 2 / 30];
+  const source = { width: 2, height: 2 };
+  const renderFrameTo = vi.fn(async () => source);
+  const pictures = [{ close: vi.fn() }, { close: vi.fn() }];
+  vi.mocked(createImageBitmap).mockImplementationOnce(async () => pictures[0] as any).mockImplementationOnce(async () => pictures[1] as any);
+  const transport = { active: () => true, setLoop: vi.fn(), play: vi.fn(), pause: vi.fn(), now: vi.fn(() => ({ time: 1 + 1 / 30, playing: true })) };
+  PM.EngineConnection = { render: { renderFrameTo }, transport };
+  const prepared = PM.Preview.cache();
+  await vi.runAllTimersAsync(); await prepared;
+  expect(renderFrameTo.mock.calls).toEqual([
+    [1, 2, 2, { mblur: true, mbSamples: 6 }],
+    [1 + 1 / 30, 2, 2, { mblur: true, mbSamples: 6 }],
+  ]);
+  expect(PM.GL.render).not.toHaveBeenCalled();
+  expect(vi.mocked(createImageBitmap).mock.calls.every(([value]) => value === source)).toBe(true);
+  expect(transport.setLoop).toHaveBeenCalledWith([1, 1 + 2 / 30]);
+  expect(transport.play).toHaveBeenCalledWith(1);
+  expect(audio.start).not.toHaveBeenCalled();
+  const tick = vi.mocked(requestAnimationFrame).mock.calls[0]![0];
+  tick(performance.now() + 1000 / 60);
+  expect(canvas.getContext().drawImage).toHaveBeenCalledWith(pictures[1], 0, 0);
+  expect(PM.time).toBeCloseTo(1 + 1 / 30);
+  expect(audio.tick).not.toHaveBeenCalled();
+  PM.Preview[action]();
+  expect(transport.pause).toHaveBeenCalledOnce();
+  expect(transport.setLoop).toHaveBeenLastCalledWith(null);
+  expect(audio.pause).toHaveBeenCalledTimes(2); // cache setup and playback handoff
+});
+
+it('sizes native cached frames from composition quality, ignoring the hidden legacy canvas', async () => {
+  vi.useFakeTimers();
+  const { PM, canvas } = fixture();
+  PM.proj.w = 640; PM.proj.h = 360; PM.proj.work = [0, 2 / 30]; PM.quality = .25;
+  PM.GL.canvas.width = 1464; PM.GL.canvas.height = 824;
+  PM.Memory = { budget: () => 200_000 };
+  const renderFrameTo = vi.fn(async () => {
+    // The compatibility canvas can change while the native viewer presents.
+    PM.GL.canvas.width = 1920;
+    return { width: 160, height: 90 };
+  });
+  PM.EngineConnection = { render: { renderFrameTo }, transport: { active: () => false } };
+  const prepared = PM.Preview.cache();
+  await vi.runAllTimersAsync(); await prepared;
+  expect(renderFrameTo.mock.calls).toEqual([
+    [0, 160, 90, { mblur: true, mbSamples: 6 }],
+    [1 / 30, 160, 90, { mblur: true, mbSamples: 6 }],
+  ]);
+  expect(PM.Preview.active).toBe(true);
+  expect(PM.Preview.count).toBe(2);
+  expect(PM.Preview.bytes).toBe(2 * 160 * 90 * 4);
+  expect(canvas.width).toBe(160); expect(canvas.height).toBe(90);
+  expect(PM.GL.canvas.parentElement.appendChild).toHaveBeenCalledWith(canvas);
+  expect(PM.toast).not.toHaveBeenCalled();
+  PM.Preview.stop();
+});
+
+it('restores the project loop after a native cached preview ends', async () => {
+  vi.useFakeTimers();
+  const { PM } = fixture();
+  PM.proj.work = [0, 0.05]; PM.loop = true;
+  const transport = { active: () => true, setLoop: vi.fn(), play: vi.fn(), pause: vi.fn(), now: vi.fn() };
+  PM.EngineConnection = { render: { renderFrameTo: vi.fn(async () => ({ width: 2, height: 2 })) }, transport };
+  const prepared = PM.Preview.cache();
+  await vi.runAllTimersAsync(); await prepared;
+  expect(transport.setLoop).toHaveBeenCalledWith([0, 2 / 30]);
+  PM.Preview.stop();
+  expect(transport.setLoop).toHaveBeenLastCalledWith([0, 0.05]);
 });
 
 it('starts at frame zero when the first RAF timestamp predates playback setup', async () => {

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { readdir, stat } from 'node:fs/promises';
+import { mkdir, readdir, stat } from 'node:fs/promises';
 import { expect, test } from './helpers/app';
 
 test('every export asks for its destination before rendering or showing progress', async ({ session }) => {
@@ -7,7 +7,7 @@ test('every export asks for its destination before rendering or showing progress
   await session.page.evaluate(() => {
     const PM = (window as any).PM;
     PM.pause();
-    PM.proj = PM.mkProject({ name: 'Destination', w: 64, h: 64, fps: 2, dur: 1 });
+    PM.replaceProject(PM.mkProject({ name: 'Destination', w: 64, h: 64, fps: 2, dur: 1 }));
     (window as any).__exportFrames = 0;
     const original = PM.renderFrameTo;
     PM.renderFrameTo = (...args: any[]) => { (window as any).__exportFrames++; return original(...args); };
@@ -40,19 +40,23 @@ test('still and sequence exports use the selected file or folder without another
   await session.page.evaluate(() => {
     const PM = (window as any).PM;
     PM.pause();
-    PM.proj = PM.mkProject({ name: 'Destination', w: 64, h: 64, fps: 2, dur: 1 });
+    PM.replaceProject(PM.mkProject({ name: 'Destination', w: 64, h: 64, fps: 2, dur: 1 }));
   });
   const output = path.join(session.userData, 'chosen.png');
+  const folder = path.join(session.userData, 'Destination');
+  await mkdir(folder);
   await session.app.evaluate(({ dialog }, { output, folder }) => {
     (globalThis as any).__exportPromptCount = 0;
-    dialog.showSaveDialog = async () => { (globalThis as any).__exportPromptCount++; return { canceled: false, filePath: output }; };
+    // Native sequences name their folder in a save panel; the legacy path
+    // selects an existing folder. Both must honor the selected destination.
+    dialog.showSaveDialog = async () => { const pick = ++(globalThis as any).__exportPromptCount; return { canceled: false, filePath: pick === 1 ? output : folder }; };
     dialog.showOpenDialog = async () => { (globalThis as any).__exportPromptCount++; return { canceled: false, filePaths: [folder] }; };
-  }, { output, folder: session.userData });
+  }, { output, folder });
   for (const format of ['still', 'png']) {
     expect(await session.page.evaluate(format => (window as any).PM.Export.run({ format, audio: false }), format)).toEqual({ cancelled: false });
   }
   expect((await stat(output)).size).toBeGreaterThan(0);
-  expect(await readdir(session.userData)).toEqual(expect.arrayContaining(['Destination_00000.png', 'Destination_00001.png']));
+  expect((await readdir(folder)).sort()).toEqual(['Destination_00000.png', 'Destination_00001.png']);
   expect(await session.app.evaluate(() => (globalThis as any).__exportPromptCount)).toBe(2);
   expect(session.diagnostics.pageErrors).toEqual([]);
 });

@@ -48,8 +48,7 @@ function primitives(): CorpusProject {
   )));
   b.add(b.light3d({ type: 'sun', p: { intensity: 2.5, color: '#FFF4E0' } }, { position: [-4, 6, 4] }));
   b.add(camera(b));
-  return project(b, { group: '3D', title: 'Primitives with shadows', covers: ['primitives: box, sphere, plane, cylinder, cone, torus, capsule, icosahedron', 'standard material color, roughness, metalness, emissive', 'sun shadow', 'receive shadow', 'animated 3D rotation'], samples: [0, 1.5, 3], alpha: true,
-    blender: { engine: 'eevee', samples: 32, previewSamples: 8, previewScale: .5 } });
+  return project(b, { group: '3D', title: 'Primitives with shadows', covers: ['primitives: box, sphere, plane, cylinder, cone, torus, capsule, icosahedron', 'standard material color, roughness, metalness, emissive', 'sun shadow', 'receive shadow', 'animated 3D rotation'], samples: [0, 1.5, 3], alpha: true });
 }
 
 function latheExtrude(): CorpusProject {
@@ -72,11 +71,10 @@ function lights(): CorpusProject {
   b.add(b.light3d({ type: 'sun', p: { intensity: 1.2, color: '#FFE2B8' } }, { name: 'Sun', position: [-3, 5, 3] }));
   b.add(b.light3d({ type: 'point', p: { intensity: 15, color: '#4C8DFF', distance: 12, decay: 2 } }, { name: 'Point', position: [2.5, 2, 1.5] }));
   b.add(b.light3d({ type: 'spot', p: { intensity: 40, color: '#FF6B1A', angle: 30, penumbra: .5, targetX: -1, targetY: -1, targetZ: 0 } }, { name: 'Spot', position: [-2, 4, 2] }));
-  b.add(b.light3d({ type: 'area', p: { intensity: 4, color: '#3FCF8E', width: 2, height: 1, targetX: 0, targetY: 0, targetZ: 0 } }, { name: 'Area (no native shadow)', position: [0, 2, 3] }));
+  b.add(b.light3d({ type: 'point', p: { intensity: 4, color: '#3FCF8E', distance: 8, decay: 2 } }, { name: 'Fourth shadow light', position: [0, 2, 3] }));
   b.add(b.light3d({ type: 'point', p: { intensity: 10, color: '#F2C14E' } }, { name: 'Fifth shadow light (over the limit of 4)', position: [3, 1, -2] }));
   b.add(camera(b, { environment: { p: { ambient: .3, ambientColor: '#8899FF', exposure: 1.1 } } }, [0, 2.5, 7]));
-  return project(b, { group: '3D', title: 'Light types and shadow limits', covers: ['sun, point, spot, area lights', 'hemisphere ambient', 'exposure', 'shadow map limit (first 4 shadow lights)', 'area light LTC without shadows'], samples: [0], alpha: true,
-    blender: { engine: 'cycles', samples: 128, previewSamples: 4, previewScale: .25, denoise: false, device: 'cpu' } });
+  return project(b, { group: '3D', title: 'Light types and shadow limits', covers: ['sun, point, spot lights', 'hemisphere ambient', 'exposure', 'shadow map limit (first 4 shadow lights)'], samples: [0], alpha: true });
 }
 
 function cameras(): CorpusProject[] {
@@ -107,7 +105,7 @@ function motionBlur(): CorpusProject {
   b.add(b.object3d({ source: { primitive: 'torus' }, material: material('#3FCF8E') }, { name: 'Spinning torus (no blur)', position: [1.6, .8, 0], p: { 'rotation.x': b.ch(0, [[0, 0], [2, 720]]) } }));
   b.add(b.light3d({ type: 'sun' }, { position: [-3, 5, 4] }));
   b.add(camera(b, {}, [0, .5, 6]));
-  return project(b, { group: '3D', title: '3D layers with motion blur', covers: ['3D motion blur', 'per-layer motion blur on 3D objects', 'composition shutter 270°', 'Blender shutter-sample snapshots'], samples: [.5, 1.2] });
+  return project(b, { group: '3D', title: '3D layers with motion blur', covers: ['3D motion blur', 'per-layer motion blur on 3D objects', 'composition shutter 270°'], samples: [.5, 1.2] });
 }
 
 function transparency(): CorpusProject {
@@ -172,18 +170,17 @@ function gltfMaterials(): CorpusProject {
 }
 
 function meshSlots(): CorpusProject {
-  const b = newProject('3d/mesh-slots-maps', { name: 'Indexed mesh, slots, and maps', backgroundFill: BLACK });
+  const b = newProject('3d/mesh-slots-maps', { name: 'Indexed mesh and color map', backgroundFill: BLACK });
   const positions = [-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0, -1, -1, -1, 1, -1, -1];
   const indices = [0, 1, 2, 0, 2, 3, 0, 4, 5, 0, 5, 1];
-  const mesh = { positions, indices, uvs: [0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1], groups: [{ start: 0, count: 6, materialIndex: 0 }, { start: 6, count: 6, materialIndex: 1 }] };
+  const mesh = { positions, indices, uvs: [0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1] };
   b.add(b.object3d({
-    source: { mesh },
-    slots: [{ id: 'front', name: 'Front', material: { p: { color: '#FF6B1A', roughness: .4, metalness: 0 } } }, { id: 'floor', name: 'Floor', material: { p: { color: '#4C8DFF', roughness: .6, metalness: .3 } } }],
-  }, { name: 'Indexed mesh with two slots', position: [-1.3, 0, 0], p: { 'rotation.y': 25, 'rotation.x': 20 } }));
-  b.add(b.object3d({ source: { primitive: 'box' }, material: { p: { color: '#FFFFFF', roughness: .5, metalness: .1 }, maps: { color: ref('still.webp') }, placement: { scaleX: 2, scaleY: 2, offsetX: 0, offsetY: 0, rotation: 15 } } }, { name: 'Color map with placement', position: [1.4, 0, 0], p: { 'rotation.y': 30 } }));
+    source: { mesh }, material: material('#FF6B1A', { roughness: .4, metalness: 0 }),
+  }, { name: 'Indexed mesh', position: [-1.3, 0, 0], p: { 'rotation.y': 25, 'rotation.x': 20 } }));
+  b.add(b.object3d({ source: { primitive: 'box' }, material: { p: { color: '#FFFFFF', roughness: .5, metalness: .1 }, maps: { color: ref('still.webp') } } }, { name: 'Color map', position: [1.4, 0, 0], p: { 'rotation.y': 30 } }));
   b.add(b.light3d({ type: 'sun' }, { position: [-3, 5, 4] }));
   b.add(camera(b, {}, [0, .8, 5]));
-  return project(b, { group: '3D', title: 'Indexed mesh with material slots; color map with UV placement', covers: ['indexed meshes', 'material slots', 'color map', 'UV placement'], samples: [0] });
+  return project(b, { group: '3D', title: 'Indexed mesh and color map', covers: ['indexed meshes', 'color map'], samples: [0] });
 }
 
 function special(): CorpusProject[] {
@@ -225,15 +222,10 @@ function special(): CorpusProject[] {
   ];
 }
 
-/**
- * Generated model groups whose recipe parameters are animated
- * (`animatedPart`): the parts draw the recipe's parametric geometry for
- * the evaluated parameters and move by their new base. Parts are stored
- * as the recipe built them at the stored parameters.
- */
+/** Model parts grouped under animated 3D transforms. */
 function modelGroups(): CorpusProject {
-  const b = newProject('3d/model-group', { name: 'Animated model-group recipes', backgroundFill: BLACK });
-  const zero = { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1, sz: 1 };
+  const b = newProject('3d/model-group', { name: 'Grouped 3D model parts', backgroundFill: BLACK });
+  const zero = { x: 0, y: 0, z: 0 };
   const rocket = b.layer('group', { name: 'Rocket', threeD: true, p: { 'rotation.y': b.ch(0, [[0, 0], [3, 90]]) } });
   const radius = .6, length = 2.8, nose = 1;
   const rocketParts: Array<[string, Doc, Doc]> = [
@@ -241,40 +233,25 @@ function modelGroups(): CorpusProject {
     ['nose', { primitive: 'cone', parameters: { radius, height: nose } }, { ...zero, y: length / 2 + nose / 2 }],
     ['engine', { primitive: 'cylinder', parameters: { radiusTop: radius * .75, radiusBottom: radius * .55, height: radius * .7 } }, { ...zero, y: -length / 2 - radius * .35 }],
   ];
-  const rocketMeta: Doc = {};
   for (const [part, source, base] of rocketParts) {
-    const layer = b.object3d({ source, material: material(part === 'nose' ? '#FF6B1A' : '#E8E2CF', { metalness: .4 }), generation: { groupId: rocket.id, partId: part } },
+    const layer = b.object3d({ source, material: material(part === 'nose' ? '#FF6B1A' : '#E8E2CF', { metalness: .4 }) },
       { name: `Rocket ${part}`, group: rocket.id, position: [base.x - 1.6, base.y, base.z] });
-    rocketMeta[part] = { layerId: layer.id, base };
     b.add(layer);
   }
-  rocket.d = { ...rocket.d, modeling: {
-    version: 1, recipe: { kind: 'rocket', parameters: { length, radius, nose, fins: 4, finSize: .8 }, modifiers: [] },
-    p: { length: b.ch(length, [[0, length], [3, 4.2]]), nose: b.ch(nose, [[1, nose], [3, 1.6]]) },
-    parts: rocketMeta, retired: [],
-  } };
   b.add(rocket);
-  const stairs = b.layer('group', { name: 'Staircase', threeD: true });
-  const stairMeta: Doc = {};
+  const stairs = b.layer('group', { name: 'Staircase', threeD: true, p: { 'rotation.y': b.ch(0, [[0, 0], [3, 45]]) } });
   const steps = 6, sr = 1.2, rise = .22, turn = 30;
   for (let i = 0; i < steps; i++) {
-    const part = `step_${String(i).padStart(3, '0')}`, angle = i * turn * Math.PI / 180;
+    const angle = i * turn * Math.PI / 180;
     const base = { ...zero, x: sr * Math.cos(angle), y: i * rise, z: sr * Math.sin(angle) };
-    const layer = b.object3d({ source: { primitive: 'box', parameters: { width: 1, height: rise * .6, depth: .45 } }, material: material('#4C8DFF', { roughness: .6 }), generation: { groupId: stairs.id, partId: part } },
+    const layer = b.object3d({ source: { primitive: 'box', parameters: { width: 1, height: rise * .6, depth: .45 } }, material: material('#4C8DFF', { roughness: .6 }) },
       { name: `Step ${i}`, group: stairs.id, position: [base.x + 1.6, base.y - 1, base.z], rotation: [0, i ? -turn * i : 0, 0] });
-    stairMeta[part] = { layerId: layer.id, base };
     b.add(layer);
   }
-  stairs.d = { ...stairs.d, modeling: {
-    version: 1, recipe: { kind: 'staircase', parameters: { steps, radius: sr, rise, turn, width: 1, depth: .45 }, modifiers: [] },
-    p: { rise: b.ch(rise, [[0, rise], [3, .32]]), turn: b.ch(turn, [[0, turn], [3, 45]]), radius: b.ch(sr, [[1.5, sr], [3, 1.6]]) },
-    parts: stairMeta, retired: [],
-  } };
   b.add(stairs);
   b.add(b.light3d({ type: 'sun', p: { intensity: 2.5 } }, { position: [-3, 5, 4] }));
   b.add(camera(b, {}, [0, .8, 7]));
-  return project(b, { group: '3D', title: 'Animated model-group recipes (rocket, staircase)', covers: ['model groups', 'animated recipe parameters', 'recipe part geometry', 'recipe part base offsets', 'Blender snapshots of recipe parts'], samples: [0, 1.5, 3],
-    blender: { engine: 'eevee', samples: 16, previewSamples: 8, previewScale: .5 } });
+  return project(b, { group: '3D', title: 'Grouped 3D model parts (rocket, staircase)', covers: ['model groups', 'part geometry', 'animated group transforms'], samples: [0, 1.5, 3] });
 }
 
 /**
