@@ -1,16 +1,17 @@
-//! Text rasters on the GPU: exact float coverage pages and color glyph images,
+//! Text rasters on the GPU: exact float coverage and color glyph images,
 //! painted in order into float canvases
 //! (`shaders/text.wgsl`), with a content-keyed raster cache.
 //!
-//! Coverage is written as R32Float by the shared area renderer in the same
-//! command encoder as paint. Pages are returned to the pool after submission,
-//! so later layers cannot overwrite coverage still in use. The CPU mode is
-//! retained for raster comparisons.
+//! Eligible contours are integrated in paint pixels from cached line data.
+//! Other contours use R32Float pages from the shared area renderer in the
+//! same command encoder as paint. Pages are returned to the pool after
+//! submission, so later layers cannot overwrite coverage still in use.
+//! The CPU mode is retained for raster comparisons.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use kurbo::{Affine, BezPath, Rect};
+use kurbo::{Affine, BezPath, PathEl, Rect, Shape};
 use pm_gpu::{Target, TargetPool, working_format};
 use pm_protocol::color::{Precision, WorkingEncoding};
 use pm_text::render::atlas::{self, Atlas, Cell};
@@ -24,8 +25,11 @@ use crate::pipelines::{UNIFORM_STRIDE, bytes_of};
 /// The largest coverage page side.
 pub const MAX_PAGE: u32 = 2048;
 /// Rasters kept across frames (bytes of texel storage).
-pub const CACHE_BYTES: u64 = 32 * 1024 * 1024;
+pub const CACHE_BYTES: u64 = 4 * 1024 * 1024;
+const RETIRED_BYTES: u64 = 2 * 1024 * 1024;
 const IMAGE_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+const DIRECT_CACHE_BYTES: u64 = 8 * 1024 * 1024;
+const DIRECT_MAX_SIDE: f64 = 512.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -50,10 +54,14 @@ struct BlurUniform {
 /// How coverage is produced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coverage {
-    /// Exact GPU area coverage in R32Float pages.
+    /// Integrate eligible contours in paint pixels; otherwise use area pages.
     Auto,
+    /// Force exact GPU area coverage in R32Float pages.
+    Area,
     /// CPU coverage for reference comparisons.
     Cpu,
+    /// Integrate eligible contours in paint pixels, with area page fallback.
+    Direct,
 }
 
 /// Counters for tests and performance reports.
@@ -70,6 +78,31 @@ struct Cached {
     used: u64,
 }
 
+#[derive(Clone, Copy)]
+struct DirectMeta {
+    origin: [f64; 2],
+    table: u32,
+    list: u32,
+    row_start: i32,
+    rows: u32,
+    width: u32,
+}
+
+struct DirectCacheEntry {
+    path: Arc<BezPath>,
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    meta: DirectMeta,
+    bytes: u64,
+    used: u64,
+}
+
+struct DirectSource {
+    view: wgpu::TextureView,
+    meta: DirectMeta,
+    translation: [f64; 2],
+}
+
 pub struct TextGpu {
     area: AreaCoverage,
     batch: coverage::Batch,
@@ -78,12 +111,21 @@ pub struct TextGpu {
     item_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     paint: [crate::pipelines::LazyRenderPipeline; 2],
+    image_paint: [crate::pipelines::LazyRenderPipeline; 2],
     blur_layout: wgpu::BindGroupLayout,
     blur: [crate::pipelines::LazyRenderPipeline; 2],
     images: HashMap<u64, (wgpu::Texture, wgpu::TextureView)>,
     image_bytes: u64,
+    direct: HashMap<usize, DirectCacheEntry>,
+    direct_bytes: u64,
+    raster_pool: TargetPool,
     cache: HashMap<([u64; 2], Precision, WorkingEncoding), Cached>,
     cache_bytes: u64,
+    // Cached rasters can still be sampled by this frame's encoder after an
+    // LRU eviction. begin_frame gives them back to this pool only after the
+    // preceding frame's submission.
+    retired: VecDeque<Target>,
+    retired_bytes: u64,
     tick: u64,
     pub stats: TextStats,
 }
@@ -139,12 +181,189 @@ fn to_working(mut rgba: [f32; 4], working: WorkingEncoding) -> [f32; 4] {
     rgba
 }
 
+/// Pack a resolved, line-only glyph into one RG32Float texture: contiguous
+/// contour points, a conservative Y-row table, then pairs of edge-start
+/// point indices. Only listed consecutive point pairs are edges, so MoveTo
+/// jumps never contribute area. A pixel querying row r has local Y in
+/// [r, r + 1), so its unit-height interval is contained in [r, r + 2).
+/// An edge can contribute only for r in [floor(min_y) - 1, floor(max_y)].
+fn direct_texels(path: &BezPath, max_dimension: u32) -> Option<(Vec<[f32; 2]>, DirectMeta)> {
+    let bounds = path.bounding_box();
+    if ![bounds.x0, bounds.y0, bounds.x1, bounds.y1]
+        .into_iter()
+        .all(f64::is_finite)
+        || bounds.width() > DIRECT_MAX_SIDE
+        || bounds.height() > DIRECT_MAX_SIDE
+    {
+        return None;
+    }
+    let origin = [bounds.x0.floor(), bounds.y0.floor()];
+    // Visit points in exactly the packed order. The optional predecessor
+    // identifies an edge; a MoveTo emits a point without an edge.
+    fn walk_points(
+        path: &BezPath,
+        origin: [f64; 2],
+        mut emit: impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
+    ) -> Option<usize> {
+        fn append(
+            p: [f32; 2],
+            count: &mut usize,
+            last: &mut Option<[f32; 2]>,
+            emit: &mut impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
+        ) {
+            if let Some(prev) = *last
+                && prev != p
+            {
+                emit(*count, p, Some(prev));
+                *count += 1;
+            }
+            *last = Some(p);
+        }
+        fn close(
+            count: &mut usize,
+            first: &mut Option<[f32; 2]>,
+            last: &mut Option<[f32; 2]>,
+            emit: &mut impl FnMut(usize, [f32; 2], Option<[f32; 2]>),
+        ) {
+            if let Some(p) = *first {
+                append(p, count, last, emit);
+            }
+            *first = None;
+            *last = None;
+        }
+
+        let (mut first, mut last) = (None, None);
+        let mut count = 0;
+        for element in path.elements() {
+            match *element {
+                PathEl::MoveTo(p) => {
+                    close(&mut count, &mut first, &mut last, &mut emit);
+                    let q = [(p.x - origin[0]) as f32, (p.y - origin[1]) as f32];
+                    emit(count, q, None);
+                    count += 1;
+                    first = Some(q);
+                    last = Some(q);
+                }
+                PathEl::LineTo(p) => {
+                    last?;
+                    append(
+                        [(p.x - origin[0]) as f32, (p.y - origin[1]) as f32],
+                        &mut count,
+                        &mut last,
+                        &mut emit,
+                    );
+                }
+                PathEl::ClosePath => close(&mut count, &mut first, &mut last, &mut emit),
+                PathEl::QuadTo(..) | PathEl::CurveTo(..) => return None,
+            }
+        }
+        close(&mut count, &mut first, &mut last, &mut emit);
+        Some(count)
+    }
+
+    let row_start = -2i32;
+    let row_end = bounds.height().ceil() as i32 + 3;
+    let rows = (row_end - row_start + 1) as usize;
+    let mut cursors = vec![0usize; rows];
+    let range = |a: f32, b: f32| {
+        let low = (a.min(b).floor() as i32 - 1).max(row_start);
+        let high = (a.max(b).floor() as i32).min(row_end);
+        low..=high
+    };
+    let mut edges = 0usize;
+    let point_count = walk_points(path, origin, |_, point, prev| {
+        if let Some(prev) = prev {
+            edges += 1;
+            if prev[1] != point[1] {
+                for row in range(prev[1], point[1]) {
+                    cursors[(row - row_start) as usize] += 1;
+                }
+            }
+        }
+    })?;
+    if edges == 0 || point_count >= (1 << 24) {
+        return None;
+    }
+    let mut length = 0usize;
+    // Prefix counts in place; each entry becomes the insertion cursor for
+    // the second walk after its starting offset has been written below.
+    for count in &mut cursors {
+        let row_count = *count;
+        *count = length;
+        length += row_count;
+    }
+    if length >= (1 << 24) {
+        return None;
+    }
+    let table = point_count as u32;
+    let list = table + rows as u32;
+    let needed = list as usize + length.div_ceil(2);
+    let width = (needed as u32).min(1024).min(max_dimension).max(1);
+    let height = (needed as u32).div_ceil(width);
+    if height > max_dimension || u64::from(width) * u64::from(height) * 8 > DIRECT_CACHE_BYTES / 2 {
+        return None;
+    }
+    let total = width as usize * height as usize;
+    let mut texels = vec![[0.0, 0.0]; total];
+    for row in 0..rows {
+        let end = if row + 1 < rows {
+            cursors[row + 1]
+        } else {
+            length
+        };
+        texels[table as usize + row] = [cursors[row] as f32, (end - cursors[row]) as f32];
+    }
+    let written = walk_points(path, origin, |index, point, prev| {
+        texels[index] = point;
+        if let Some(prev) = prev
+            && prev[1] != point[1]
+        {
+            for row in range(prev[1], point[1]) {
+                let position = &mut cursors[(row - row_start) as usize];
+                texels[list as usize + *position / 2][*position & 1] = (index - 1) as f32;
+                *position += 1;
+            }
+        }
+    })?;
+    debug_assert_eq!(written, point_count);
+    Some((
+        texels,
+        DirectMeta {
+            origin,
+            table,
+            list,
+            row_start,
+            rows: rows as u32,
+            width,
+        },
+    ))
+}
+
 impl TextGpu {
     pub fn new(device: &wgpu::Device) -> TextGpu {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pm-render text"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/text.wgsl").into()),
-        });
+        // Each text module has one entry point. Metal's shader translation
+        // can borrow its IR directly, and plain glyphs never compile the
+        // polygon clipping functions used only by bitmap images.
+        let text_module = |label, body: &str| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(
+                    format!("{}\n{body}", include_str!("../shaders/text_common.wgsl")).into(),
+                ),
+            })
+        };
+        let vertex_module = text_module(
+            "pm-render text quad",
+            include_str!("../shaders/text_vertex.wgsl"),
+        );
+        let outline_module = text_module(
+            "pm-render text outline",
+            include_str!("../shaders/text.wgsl"),
+        );
+        let image_module = text_module(
+            "pm-render text image",
+            include_str!("../shaders/text_image.wgsl"),
+        );
         let blur_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render text Gaussian"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/text_blur.wgsl").into()),
@@ -225,21 +444,23 @@ impl TextGpu {
                 operation: wgpu::BlendOperation::Add,
             },
         };
-        let pipeline = |module: &wgpu::ShaderModule,
+        let pipeline = |vertex_module: &wgpu::ShaderModule,
+                        fragment_module: &wgpu::ShaderModule,
                         layout: &wgpu::PipelineLayout,
                         vs: &'static str,
                         fs: &'static str,
                         format: wgpu::TextureFormat,
                         blend: Option<wgpu::BlendState>| {
             let device = device.clone();
-            let module = module.clone();
+            let vertex_module = vertex_module.clone();
+            let fragment_module = fragment_module.clone();
             let layout = layout.clone();
             crate::pipelines::LazyRenderPipeline::new(move || {
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(fs),
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
-                        module: &module,
+                        module: &vertex_module,
                         entry_point: Some(vs),
                         compilation_options: Default::default(),
                         buffers: &[],
@@ -252,7 +473,7 @@ impl TextGpu {
                     depth_stencil: None,
                     multisample: wgpu::MultisampleState::default(),
                     fragment: Some(wgpu::FragmentState {
-                        module: &module,
+                        module: &fragment_module,
                         entry_point: Some(fs),
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
@@ -267,10 +488,31 @@ impl TextGpu {
             })
         };
         let formats = [Precision::Float16, Precision::Float32].map(working_format);
-        let paint =
-            formats.map(|f| pipeline(&module, &paint_layout, "vs", "fs_paint", f, Some(over)));
+        let paint = formats.map(|f| {
+            pipeline(
+                &vertex_module,
+                &outline_module,
+                &paint_layout,
+                "vs",
+                "fs_outline",
+                f,
+                Some(over),
+            )
+        });
+        let image_paint = formats.map(|f| {
+            pipeline(
+                &vertex_module,
+                &image_module,
+                &paint_layout,
+                "vs",
+                "fs_image",
+                f,
+                Some(over),
+            )
+        });
         let blur = formats.map(|f| {
             pipeline(
+                &blur_module,
                 &blur_module,
                 &blur_pipeline_layout,
                 "vs_blur",
@@ -287,12 +529,18 @@ impl TextGpu {
             item_layout,
             texture_layout,
             paint,
+            image_paint,
             blur_layout,
             blur,
             images: HashMap::new(),
             image_bytes: 0,
+            direct: HashMap::new(),
+            direct_bytes: 0,
+            raster_pool: TargetPool::new(),
             cache: HashMap::new(),
             cache_bytes: 0,
+            retired: VecDeque::new(),
+            retired_bytes: 0,
             tick: 0,
             stats: TextStats::default(),
         }
@@ -302,6 +550,7 @@ impl TextGpu {
     pub(crate) fn built_count(&self) -> usize {
         self.paint
             .iter()
+            .chain(self.image_paint.iter())
             .filter(|pipeline| pipeline.is_built())
             .count()
             + self
@@ -315,8 +564,10 @@ impl TextGpu {
     pub(crate) fn probe_all(&self) -> Vec<(String, std::time::Duration)> {
         let mut times = Vec::new();
         for (name, pipeline) in [
-            ("paint f16", &self.paint[0]),
-            ("paint f32", &self.paint[1]),
+            ("outline paint f16", &self.paint[0]),
+            ("outline paint f32", &self.paint[1]),
+            ("image paint f16", &self.image_paint[0]),
+            ("image paint f32", &self.image_paint[1]),
             ("Gaussian f16", &self.blur[0]),
             ("Gaussian f32", &self.blur[1]),
         ] {
@@ -337,18 +588,33 @@ impl TextGpu {
     pub fn begin_frame(&mut self) {
         self.area.begin_frame();
         self.batch.trim_scratch(8 * 1024 * 1024);
+        for target in self.retired.drain(..) {
+            self.raster_pool.give(target);
+        }
+        self.retired_bytes = 0;
     }
 
-    /// Drops cached rasters and color glyph textures.
+    /// Drops cached rasters and color glyph textures. The private raster
+    /// pool releases accounting without explicitly destroying textures that
+    /// might still be referenced by recorded commands.
     pub fn clear(&mut self) {
-        self.cache.clear();
+        for (_, c) in self.cache.drain() {
+            self.raster_pool.release(c.target);
+        }
+        for target in self.retired.drain(..) {
+            self.raster_pool.release(target);
+        }
+        self.retired_bytes = 0;
+        self.raster_pool.trim(0);
         self.cache_bytes = 0;
         self.images.clear();
         self.image_bytes = 0;
+        self.direct.clear();
+        self.direct_bytes = 0;
     }
 
     pub fn cached_bytes(&self) -> u64 {
-        self.cache_bytes
+        self.raster_pool.bytes()
     }
 
     fn image(
@@ -437,6 +703,92 @@ impl TextGpu {
         view
     }
 
+    fn direct_source(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        path: Arc<BezPath>,
+        translation: [f64; 2],
+    ) -> Option<DirectSource> {
+        let key = Arc::as_ptr(&path) as usize;
+        if let Some(entry) = self.direct.get_mut(&key)
+            && Arc::ptr_eq(&entry.path, &path)
+        {
+            entry.used = self.tick;
+            return Some(DirectSource {
+                view: entry.view.clone(),
+                meta: entry.meta,
+                translation,
+            });
+        }
+        let (texels, meta) = direct_texels(&path, device.limits().max_texture_dimension_2d)?;
+        let height = (texels.len() as u32).div_ceil(meta.width);
+        let bytes = u64::from(meta.width) * u64::from(height) * 8;
+        if bytes > DIRECT_CACHE_BYTES / 2 {
+            return None;
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pm text direct resolved edges"),
+            size: wgpu::Extent3d {
+                width: meta.width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        // [f32; 2] has no padding; the immutable slice remains alive for
+        // queue.write_texture, which copies its bytes before returning.
+        let data =
+            unsafe { std::slice::from_raw_parts(texels.as_ptr().cast::<u8>(), texels.len() * 8) };
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(meta.width * 8),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: meta.width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&Default::default());
+        while self.direct_bytes + bytes > DIRECT_CACHE_BYTES {
+            let (&oldest, _) = self.direct.iter().min_by_key(|(_, entry)| entry.used)?;
+            let removed = self.direct.remove(&oldest)?;
+            self.direct_bytes -= removed.bytes;
+        }
+        self.direct_bytes += bytes;
+        self.direct.insert(
+            key,
+            DirectCacheEntry {
+                path,
+                _texture: texture,
+                view: view.clone(),
+                meta,
+                bytes,
+                used: self.tick,
+            },
+        );
+        Some(DirectSource {
+            view,
+            meta,
+            translation,
+        })
+    }
+
     /// Renders the coverage pages of `atlas` into pool targets (pushed to
     /// `taken`, returned after the frame is submitted).
     fn pages(
@@ -451,7 +803,7 @@ impl TextGpu {
     ) -> Result<Vec<wgpu::TextureView>, String> {
         let mut views = Vec::with_capacity(atlas.pages.len());
         for (page, &(w, h)) in atlas.pages.iter().enumerate() {
-            let use_gpu = self.coverage == Coverage::Auto;
+            let use_gpu = self.coverage != Coverage::Cpu;
             // The atlas cells keep their exact logical coordinates. Only the
             // R32 target allocation is bucketed so a growing text raster can
             // reuse the same pool texture across several adjacent sizes.
@@ -556,12 +908,40 @@ impl TextGpu {
         pm_perf::bump(pm_perf::Counter::TextCacheMisses);
         let scene = &plan.scene;
         let atlas = atlas::pack(scene, MAX_PAGE);
-        let pages = self.pages(device, queue, encoder, pool, taken, scene, &atlas)?;
+        // A scene uses one coverage source throughout, including when any
+        // contour is too large or otherwise unsuitable for direct integration.
+        let mut direct = matches!(self.coverage, Coverage::Auto | Coverage::Direct);
+        let mut direct_sources: HashMap<usize, DirectSource> = HashMap::new();
+        if direct {
+            for (i, item) in scene.items.iter().enumerate() {
+                let ItemContent::Coverage { paths } = &item.content else {
+                    continue;
+                };
+                let [placed] = paths.as_slice() else {
+                    direct = false;
+                    break;
+                };
+                let lines = self.cpu.coverage_cache().get(placed);
+                let [_, _, _, _, x, y] = placed.transform.as_coeffs();
+                let Some(source) = self.direct_source(device, queue, lines, [x, y]) else {
+                    direct = false;
+                    break;
+                };
+                direct_sources.insert(i, source);
+            }
+        }
+        if !direct {
+            direct_sources.clear();
+        }
+        let pages = if direct {
+            Vec::new()
+        } else {
+            self.pages(device, queue, encoder, pool, taken, scene, &atlas)?
+        };
         let (tw, th) = (plan.width(), plan.height());
         let format = text_format(precision);
-        let raster = Target::new(
+        let raster = self.raster_pool.take(
             device,
-            "pm text raster",
             tw,
             th,
             format,
@@ -581,6 +961,9 @@ impl TextGpu {
                 images.insert(i, self.image(device, queue, image, working));
             }
         }
+        for (&i, source) in &direct_sources {
+            images.insert(i, source.view.clone());
+        }
         let mut cleared = false;
         let mut i = 0;
         while i < scene.items.len() {
@@ -594,6 +977,7 @@ impl TextGpu {
                     plan,
                     i,
                     &cells,
+                    &direct_sources,
                     &images,
                     &pages,
                     &raster,
@@ -609,7 +993,16 @@ impl TextGpu {
             while i < scene.items.len() && scene.items[i].blur <= 0.0 {
                 i += 1;
             }
-            let draws = self.draws(scene, start..i, crop, (tw, th), &cells, &images, working);
+            let draws = self.draws(
+                scene,
+                start..i,
+                crop,
+                (tw, th),
+                &cells,
+                &direct_sources,
+                &images,
+                working,
+            );
             self.pass(
                 device,
                 queue,
@@ -636,21 +1029,55 @@ impl TextGpu {
             );
         }
         self.stats.painted += 1;
-        self.insert(plan, precision, working, raster.clone());
-        Ok(raster.view)
+        let view = raster.view.clone();
+        self.insert(plan, precision, working, raster);
+        self.raster_pool.trim(CACHE_BYTES);
+        Ok(view)
     }
 
     /// Evicts least recently used rasters until the cache holds at most
-    /// `bytes` (lease pressure).
+    /// `bytes` (lease pressure). Discarded handles are never reused.
     pub fn trim(&mut self, bytes: u64) {
+        self.evict(bytes, false);
+        for target in self.retired.drain(..) {
+            self.raster_pool.release(target);
+        }
+        self.retired_bytes = 0;
+        self.raster_pool.trim(bytes);
+    }
+
+    fn retire(&mut self, target: Target) {
+        let bytes = target.bytes();
+        if bytes > RETIRED_BYTES {
+            self.raster_pool.release(target);
+            return;
+        }
+        self.retired_bytes += bytes;
+        self.retired.push_back(target);
+        while self.retired_bytes > RETIRED_BYTES {
+            let oldest = self
+                .retired
+                .pop_front()
+                .expect("retired bytes have a target");
+            self.retired_bytes -= oldest.bytes();
+            // Drop without Texture::destroy: the current encoder may still
+            // sample this raster, but it will never be pooled or overwritten.
+            self.raster_pool.release(oldest);
+        }
+    }
+
+    fn evict(&mut self, bytes: u64, recycle: bool) {
         while self.cache_bytes > bytes {
             let Some((&k, _)) = self.cache.iter().min_by_key(|(_, c)| c.used) else {
                 break;
             };
-            // Dropped, not destroyed: a command encoder of the frame being
-            // recorded may still read it (wgpu keeps it alive until then).
             if let Some(c) = self.cache.remove(&k) {
                 self.cache_bytes = self.cache_bytes.saturating_sub(c.target.bytes());
+                if recycle {
+                    self.retire(c.target);
+                } else {
+                    self.raster_pool.release(c.target);
+                }
             }
         }
     }
@@ -664,9 +1091,10 @@ impl TextGpu {
     ) {
         let bytes = target.bytes();
         if bytes > CACHE_BYTES / 2 {
+            self.raster_pool.release(target);
             return;
         }
-        self.trim(CACHE_BYTES.saturating_sub(bytes));
+        self.evict(CACHE_BYTES.saturating_sub(bytes), true);
         self.cache_bytes += bytes;
         self.cache.insert(
             (plan.key, precision, working),
@@ -686,6 +1114,7 @@ impl TextGpu {
         origin: [f64; 2],
         size: (u32, u32),
         cells: &HashMap<usize, Vec<Cell>>,
+        direct_sources: &HashMap<usize, DirectSource>,
         images: &HashMap<usize, wgpu::TextureView>,
         working: WorkingEncoding,
     ) -> Vec<Draw> {
@@ -709,9 +1138,49 @@ impl TextGpu {
                     for c in cells.get(&i).map(Vec::as_slice).unwrap_or(&[]) {
                         let x0 = c.device_x as f64 - origin[0];
                         let y0 = c.device_y as f64 - origin[1];
+                        let direct = direct_sources.get(&i);
+                        let (page, image, map, params, inv0, inv1) = if let Some(source) = direct {
+                            // Split the local origin in the render target into
+                            // whole pixels and a subpixel phase before f32.
+                            let px = source.meta.origin[0] + source.translation[0] - origin[0];
+                            let py = source.meta.origin[1] + source.translation[1] - origin[1];
+                            let whole = [px.floor(), py.floor()];
+                            (
+                                None,
+                                Some(i),
+                                [
+                                    whole[0] as f32,
+                                    whole[1] as f32,
+                                    (px - whole[0]) as f32,
+                                    (py - whole[1]) as f32,
+                                ],
+                                [3.0, 0.0, tw, th],
+                                [
+                                    source.meta.table as f32,
+                                    source.meta.list as f32,
+                                    source.meta.row_start as f32,
+                                    source.meta.width as f32,
+                                ],
+                                [source.meta.rows as f32, 0.0, 0.0, 0.0],
+                            )
+                        } else {
+                            (
+                                Some(c.page),
+                                None,
+                                [
+                                    (f64::from(c.x) - x0) as f32,
+                                    (f64::from(c.y) - y0) as f32,
+                                    0.0,
+                                    0.0,
+                                ],
+                                [0.0, 0.0, tw, th],
+                                [0.0; 4],
+                                [0.0; 4],
+                            )
+                        };
                         out.push(Draw {
-                            page: Some(c.page),
-                            image: None,
+                            page,
+                            image,
                             u: ItemUniform {
                                 rect: [
                                     x0 as f32,
@@ -719,14 +1188,11 @@ impl TextGpu {
                                     (x0 + f64::from(c.width)) as f32,
                                     (y0 + f64::from(c.height)) as f32,
                                 ],
-                                map: [
-                                    (f64::from(c.x) - x0) as f32,
-                                    (f64::from(c.y) - y0) as f32,
-                                    0.0,
-                                    0.0,
-                                ],
+                                map,
                                 color,
-                                params: [0.0, 0.0, tw, th],
+                                params,
+                                inv0,
+                                inv1,
                                 ..Default::default()
                             },
                         });
@@ -838,13 +1304,23 @@ impl TextGpu {
             multiview_mask: None,
         });
         *cleared = true;
-        pass.set_pipeline(self.paint[format_index(precision)].get());
+        let mut bound_image = None;
         for (k, d) in draws.iter().enumerate() {
             let bind = match (d.page, d.image) {
                 (Some(p), _) => &page_binds[p],
                 (None, Some(i)) => &image_binds[&i],
                 (None, None) => continue,
             };
+            let is_image = d.u.params[0] == 1.0;
+            if bound_image != Some(is_image) {
+                let pipeline = if is_image {
+                    &self.image_paint[format_index(precision)]
+                } else {
+                    &self.paint[format_index(precision)]
+                };
+                pass.set_pipeline(pipeline.get());
+                bound_image = Some(is_image);
+            }
             pass.set_bind_group(0, &item_bind, &[(k as u64 * UNIFORM_STRIDE) as u32]);
             pass.set_bind_group(1, bind, &[]);
             pass.draw(0..4, 0..1);
@@ -864,6 +1340,7 @@ impl TextGpu {
         plan: &TextPlan,
         index: usize,
         cells: &HashMap<usize, Vec<Cell>>,
+        direct_sources: &HashMap<usize, DirectSource>,
         images: &HashMap<usize, wgpu::TextureView>,
         pages: &[wgpu::TextureView],
         raster: &Target,
@@ -920,6 +1397,7 @@ impl TextGpu {
             [rx0, ry0],
             (lw, lh),
             cells,
+            direct_sources,
             images,
             working,
         );
@@ -1122,4 +1600,149 @@ pub fn render_cpu(plan: &TextPlan) -> pm_text::render::paint::Image {
         out.data[y * w as usize * 4..(y + 1) * w as usize * 4].copy_from_slice(src);
     }
     out
+}
+
+#[cfg(test)]
+mod direct_tests {
+    use super::*;
+
+    #[test]
+    fn closed_form_clamped_integral_matches_piecewise_reference() {
+        // Independently split the parameter interval at the two clamp
+        // crossings, as the original shader did. The shader now integrates
+        // the sorted value interval without constructing these cuts.
+        fn piecewise(u0: f64, u1: f64) -> f64 {
+            let delta = u1 - u0;
+            if delta == 0.0 {
+                return u0.clamp(0.0, 1.0);
+            }
+            let mut cuts = vec![0.0, 1.0];
+            for crossing in [-u0 / delta, (1.0 - u0) / delta] {
+                if crossing > 0.0 && crossing < 1.0 {
+                    cuts.push(crossing);
+                }
+            }
+            cuts.sort_by(f64::total_cmp);
+            cuts.windows(2)
+                .map(|segment| {
+                    let [left, right] = [segment[0], segment[1]];
+                    let a = (u0 + delta * left).clamp(0.0, 1.0);
+                    let b = (u0 + delta * right).clamp(0.0, 1.0);
+                    (a + b) * (right - left) * 0.5
+                })
+                .sum()
+        }
+
+        fn closed_form(u0: f64, u1: f64) -> f64 {
+            let lo = u0.min(u1);
+            let hi = u0.max(u1);
+            if hi <= 0.0 {
+                return 0.0;
+            }
+            if lo >= 1.0 {
+                return 1.0;
+            }
+            let span = hi - lo;
+            if span == 0.0 {
+                return lo.clamp(0.0, 1.0);
+            }
+            let a = lo.max(0.0);
+            let b = hi.min(1.0);
+            let middle = (b - a).max(0.0) * (0.5 * (a + b));
+            let tail = (hi - lo.max(1.0)).max(0.0);
+            (middle + tail) / span
+        }
+
+        let values = [
+            -1e6,
+            -2.0,
+            -1.0,
+            -1e-12,
+            0.0,
+            1e-12,
+            0.25,
+            0.5,
+            1.0 - 1e-12,
+            1.0,
+            1.0 + 1e-12,
+            2.0,
+            1e6,
+        ];
+        for u0 in values {
+            for u1 in values {
+                let actual = closed_form(u0, u1);
+                let expected = piecewise(u0, u1);
+                // The old crossing calculation can lose a few ulps when
+                // the endpoints span a million units in either direction.
+                assert!(
+                    (actual - expected).abs() <= 1e-10,
+                    "u0={u0}, u1={u1}: closed={actual}, piecewise={expected}"
+                );
+                assert!((0.0..=1.0).contains(&actual));
+            }
+        }
+    }
+
+    #[test]
+    fn row_index_includes_every_edge_at_fractional_phases() {
+        let mut path = BezPath::new();
+        let epsilon = 1.0 / 4096.0;
+        let rectangles = [
+            (0.0, 0.0, 9.5, epsilon),
+            (12.0, epsilon, 9.5, 1.0 - 2.0 * epsilon),
+            (24.0, 1.0 - epsilon, 9.5, 2.0 * epsilon),
+            (36.0, 1.0, 9.5, epsilon),
+            (48.0, 1.0 + epsilon, 9.5, 1.0 - epsilon),
+            (60.0, 2.5, 9.5, 3.5),
+            (72.0, 3.0 - epsilon, 9.5, 1.0 + epsilon),
+            (84.0, 4.0, 9.5, 0.5),
+        ];
+        for (x, y, w, h) in rectangles {
+            path.move_to((x, y));
+            path.line_to((x + w, y));
+            path.line_to((x + w, y + h));
+            path.line_to((x, y + h));
+            path.close_path();
+        }
+        let (data, meta) = direct_texels(&path, 1024).expect("small contours fit");
+        // Each closed contour has four edges and a duplicated first point.
+        for phase in (0..64)
+            .map(|step| step as f32 / 64.0)
+            .chain([1.0 - f32::EPSILON])
+        {
+            for output_y in -3..11 {
+                let local_y = output_y as f32 - phase;
+                let row = local_y.floor() as i32 - meta.row_start;
+                let listed: Vec<u32> = if row < 0 || row >= meta.rows as i32 {
+                    Vec::new()
+                } else {
+                    let [start, count] = data[meta.table as usize + row as usize];
+                    (start as u32..start as u32 + count as u32)
+                        .map(|position| {
+                            let pair = data[meta.list as usize + (position / 2) as usize];
+                            if position & 1 == 0 {
+                                pair[0] as u32
+                            } else {
+                                pair[1] as u32
+                            }
+                        })
+                        .collect()
+                };
+                for contour in 0..rectangles.len() {
+                    let first = contour as u32 * 5;
+                    for edge in first..first + 4 {
+                        let a = data[edge as usize][1];
+                        let b = data[edge as usize + 1][1];
+                        if a != b && a.min(b) < local_y + 1.0 && a.max(b) > local_y {
+                            assert!(
+                                listed.contains(&edge),
+                                "missing edge {edge} at phase {phase}, row {row}, [{a}, {b}]"
+                            );
+                        }
+                    }
+                    assert!(!listed.contains(&(first + 4)), "indexed a contour jump");
+                }
+            }
+        }
+    }
 }

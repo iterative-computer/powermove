@@ -2,6 +2,22 @@
 
 #![allow(dead_code)]
 
+/// Select a coverage implementation for whole-corpus comparisons. This is
+/// test configuration; production always uses the renderer's default.
+pub fn configure_coverage(renderer: &mut pm_render::Renderer) {
+    use pm_render::text::gpu::Coverage;
+    if let Ok(mode) = std::env::var("PM_TEXT_COVERAGE") {
+        let coverage = match mode.as_str() {
+            "auto" => Coverage::Auto,
+            "area" => Coverage::Area,
+            "direct" => Coverage::Direct,
+            "cpu" => Coverage::Cpu,
+            _ => panic!("PM_TEXT_COVERAGE must be auto, area, direct, or cpu"),
+        };
+        renderer.text_gpu().set_coverage(coverage);
+    }
+}
+
 /// `(ink SSIM, full SSIM, ink ratio)`: `pm_render::parity::text_ssim`.
 pub fn ink_ssim(reference: &[u8], test: &[u8], w: usize, h: usize) -> (f64, f64, f64) {
     pm_render::parity::text_ssim(reference, test, w, h)

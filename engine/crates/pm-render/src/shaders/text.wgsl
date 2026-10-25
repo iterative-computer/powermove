@@ -1,141 +1,68 @@
-// The ordered paint pass of text rasters (docs/engine/text-render.md).
-//
-// The shared area renderer writes float coverage pages 1:1 with device pixels.
-// This pass paints each draw in order with premultiplied source-over in
-// floating-point working precision:
-//
-// - kind 0, coverage: `color × coverage`;
-// - kind 1, image: original bitmap texels in the working domain, with exact
-//   area integration for downscaled output pixels, times draw alpha;
-// - kind 2, layer: a pre-painted layer (a blurred draw) copied 1:1;
-//
-// Targets are top-down (row 0 at the top), like images.
-
-struct Item {
-    // The quad in target pixels: x0, y0, x1, y1.
-    rect: vec4<f32>,
-    // Page (or layer) texel = floor(fragment) + map.xy.
-    map: vec4<f32>,
-    // Coverage: premultiplied paint. Image: alpha multiplier in w.
-    color: vec4<f32>,
-    // x: kind, y: image needs area integration, zw: target size.
-    params: vec4<f32>,
-    // Image: target pixel to source pixel, rows (a, c, e) and (b, d, f).
-    inv0: vec4<f32>,
-    inv1: vec4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> it: Item;
-@group(1) @binding(0) var src: texture_2d<f32>;
-
-fn image_texel(p: vec2<i32>) -> vec4<f32> {
-    let size = textureDimensions(src, 0);
-    if (p.x < 0 || p.y < 0 || p.x >= i32(size.x) || p.y >= i32(size.y)) {
-        return vec4<f32>(0.0);
-    }
-    return textureLoad(src, p, 0);
-}
-fn image_bilinear(u: vec2<f32>) -> vec4<f32> {
-    let p = u - vec2<f32>(0.5);
-    let lo = vec2<i32>(floor(p));
-    let t = fract(p);
-    let top = mix(image_texel(lo), image_texel(lo + vec2<i32>(1, 0)), t.x);
-    let bottom = mix(image_texel(lo + vec2<i32>(0, 1)), image_texel(lo + vec2<i32>(1, 1)), t.x);
-    return mix(top, bottom, t.y);
+// The direct RG32Float source contains glyph-local points,
+// row table entries and pairs of point indices. All integer metadata stays
+// below 2^24, where f32 represents it exactly.
+fn direct_texel(index: u32) -> vec2<f32> {
+    let width = u32(it.inv0.w);
+    return textureLoad(src, vec2<i32>(i32(index % width), i32(index / width)), 0).xy;
 }
 
-struct Polygon {
-    vertices: array<vec2<f32>, 8>,
-    count: u32,
-};
-
-fn clip_polygon(input: Polygon, axis: u32, bound: f32, keep_above: bool) -> Polygon {
-    var output: Polygon;
-    output.count = 0u;
-    if (input.count == 0u) {
-        return output;
-    }
-    for (var i = 0u; i < input.count; i++) {
-        let a = input.vertices[i];
-        let b = input.vertices[(i + 1u) % input.count];
-        let av = select(a.y, a.x, axis == 0u);
-        let bv = select(b.y, b.x, axis == 0u);
-        let a_inside = select(av <= bound, av >= bound, keep_above);
-        let b_inside = select(bv <= bound, bv >= bound, keep_above);
-        if (a_inside != b_inside) {
-            let t = (bound - av) / (bv - av);
-            output.vertices[output.count] = a + t * (b - a);
-            output.count++;
-        }
-        if (b_inside) {
-            output.vertices[output.count] = b;
-            output.count++;
-        }
-    }
-    return output;
+// Exact integral of clamp(linear(t), 0, 1) over t in [0, 1]. The
+// monotone segment spends its span below zero, inside [0, 1], or above one.
+// Integrating those intervals directly avoids cuts, sorting and loops.
+fn direct_clamped_integral(u0: f32, u1: f32) -> f32 {
+    let lo = min(u0, u1);
+    let hi = max(u0, u1);
+    if (hi <= 0.0) { return 0.0; }
+    if (lo >= 1.0) { return 1.0; }
+    let span = hi - lo;
+    if (span == 0.0) { return clamp(lo, 0.0, 1.0); }
+    let a = max(lo, 0.0);
+    let b = min(hi, 1.0);
+    let middle = max(b - a, 0.0) * (0.5 * (a + b));
+    let tail = max(hi - max(lo, 1.0), 0.0);
+    return (middle + tail) / span;
 }
 
-fn polygon_area(poly: Polygon) -> f32 {
-    if (poly.count < 3u) {
+// Green's theorem on a pixel square: each oriented edge contributes
+// integral_y clamp(x_edge(y) - pixel_x, 0, 1) dy. The CPU cache has already
+// resolved nonzero contours into a disjoint boundary, including holes.
+fn direct_area(pixel: vec2<f32>) -> f32 {
+    let local = pixel - it.map.xy - it.map.zw;
+    let row = i32(floor(local.y));
+    let table_row = row - i32(it.inv0.z);
+    if (table_row < 0 || table_row >= i32(it.inv1.x)) {
         return 0.0;
     }
-    // Local triangle coordinates keep tiny clipped slivers accurate even
-    // when their source texel lies far from the image origin.
-    let origin = poly.vertices[0];
-    var twice = 0.0;
-    for (var i = 1u; i + 1u < poly.count; i++) {
-        let a = poly.vertices[i] - origin;
-        let b = poly.vertices[i + 1u] - origin;
-        twice += a.x * b.y - b.x * a.y;
-    }
-    return abs(twice) * 0.5;
-}
-
-fn image_area(pixel: vec2<f32>) -> vec4<f32> {
-    var quad: Polygon;
-    quad.count = 4u;
-    let corners = array<vec2<f32>, 4>(pixel, pixel + vec2<f32>(1.0, 0.0),
-        pixel + vec2<f32>(1.0, 1.0), pixel + vec2<f32>(0.0, 1.0));
-    for (var i = 0u; i < 4u; i++) {
-        let p = vec3<f32>(corners[i], 1.0);
-        quad.vertices[i] = vec2<f32>(dot(it.inv0.xyz, p), dot(it.inv1.xyz, p));
-    }
-    let whole = polygon_area(quad);
-    if (whole <= 0.0) {
-        return vec4<f32>(0.0);
-    }
-    var lo = quad.vertices[0];
-    var hi = lo;
-    for (var i = 1u; i < 4u; i++) {
-        lo = min(lo, quad.vertices[i]);
-        hi = max(hi, quad.vertices[i]);
-    }
-    let size = vec2<i32>(textureDimensions(src, 0));
-    let begin = max(vec2<i32>(floor(lo)), vec2<i32>(0));
-    let end = min(vec2<i32>(ceil(hi)), size);
-    var sum = vec4<f32>(0.0);
-    for (var sy = begin.y; sy < end.y; sy++) {
-        for (var sx = begin.x; sx < end.x; sx++) {
-            var clipped = clip_polygon(quad, 0u, f32(sx), true);
-            clipped = clip_polygon(clipped, 0u, f32(sx + 1), false);
-            clipped = clip_polygon(clipped, 1u, f32(sy), true);
-            clipped = clip_polygon(clipped, 1u, f32(sy + 1), false);
-            let weight = polygon_area(clipped) / whole;
-            sum += image_texel(vec2<i32>(sx, sy)) * weight;
+    let entry = direct_texel(u32(it.inv0.x) + u32(table_row));
+    let begin = u32(entry.x);
+    let count = u32(entry.y);
+    var area = 0.0;
+    for (var k = 0u; k < count; k++) {
+        let position = begin + k;
+        let pair = direct_texel(u32(it.inv0.y) + position / 2u);
+        let edge = u32(select(pair.x, pair.y, (position & 1u) != 0u));
+        let a = direct_texel(edge);
+        let b = direct_texel(edge + 1u);
+        let dy = b.y - a.y;
+        if (dy == 0.0) {
+            continue;
         }
+        let at0 = (local.y - a.y) / dy;
+        let at1 = (local.y + 1.0 - a.y) / dy;
+        let lo = max(0.0, min(at0, at1));
+        let hi = min(1.0, max(at0, at1));
+        if (lo >= hi) {
+            continue;
+        }
+        let p = mix(a, b, lo);
+        let q = mix(a, b, hi);
+        area += (q.y - p.y) * direct_clamped_integral(p.x - local.x, q.x - local.x);
     }
-    return sum;
-}
-
-@vertex
-fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-    let a = vec2<f32>(f32(i & 1u), f32(i >> 1u));
-    let p = mix(it.rect.xy, it.rect.zw, a);
-    return vec4<f32>(p.x / it.params.z * 2.0 - 1.0, 1.0 - p.y / it.params.w * 2.0, 0.0, 1.0);
+    return clamp(abs(area), 0.0, 1.0);
 }
 
 @fragment
-fn fs_paint(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs_outline(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let kind = it.params.x;
     if (kind < 0.5) {
         let t = vec2<i32>(floor(pos.xy) + it.map.xy);
@@ -143,13 +70,8 @@ fn fs_paint(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let c = clamp(coverage.r, 0.0, 1.0);
         return it.color * c;
     }
-    if (kind < 1.5) {
-        if (it.params.y > 0.5) {
-            return image_area(floor(pos.xy)) * it.color.w;
-        }
-        let p = vec3<f32>(pos.xy, 1.0);
-        let u = vec2<f32>(dot(it.inv0.xyz, p), dot(it.inv1.xyz, p));
-        return image_bilinear(u) * it.color.w;
+    if (kind > 2.5) {
+        return it.color * direct_area(floor(pos.xy));
     }
     let t = vec2<i32>(floor(pos.xy) + it.map.xy);
     return textureLoad(src, t, 0);

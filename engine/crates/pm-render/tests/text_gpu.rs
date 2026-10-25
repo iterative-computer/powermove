@@ -3,7 +3,7 @@
 //! - the float paint pass (coverage curve, color glyph images, Gaussian
 //!   blur, item order) equals `pm_text::render::paint` within float
 //!   rounding when both read the same `vello_cpu` coverage;
-//! - shared R32Float area coverage and the CPU coverage fallback agree (SSIM);
+//! - forced R32Float area coverage and the CPU coverage fallback agree (SSIM);
 //! - rasters are deterministic and the content-keyed cache returns them;
 //! - without fonts a text layer is refused, not drawn wrong.
 //!
@@ -59,6 +59,7 @@ fn main() {
     };
     let mut gpu = Renderer::headless().expect("a Metal device");
     gpu.set_text_fonts(Some(fonts()));
+    gpu.text_gpu().set_coverage(Coverage::Area);
     let mut cpu = Renderer::headless().expect("a Metal device");
     cpu.set_text_fonts(Some(fonts()));
     cpu.text_gpu().set_coverage(Coverage::Cpu);
@@ -212,10 +213,168 @@ fn main() {
     }
     linear_overlap_and_colr_source(&mut gpu, &mut failures);
     linear_project_text_source(&mut gpu, &mut failures);
+    direct_fractional_coverage(&mut gpu, &mut failures);
     for f in &failures {
         println!("FAILED {f}");
     }
     assert!(failures.is_empty());
+}
+
+/// Auto and Direct must take the same eligible contour path and retain
+/// analytic coverage at fractional phases. Area and an independent f64
+/// outline reference judge the same whole, uncropped 96 px glyph.
+#[cfg(target_os = "macos")]
+fn direct_fractional_coverage(renderer: &mut pm_render::Renderer, failures: &mut Vec<String>) {
+    use kurbo::Affine;
+    use pm_protocol::color::{Precision, WorkingEncoding};
+    use pm_reference::compare::{Class, geometry, same_geometry};
+    use pm_render::text::gpu::{Coverage, TextGpu};
+    use pm_text::render::scene::{ItemContent, TextScene};
+    use serde_json::json;
+
+    let mut samples = Vec::new();
+    for text in ["H", "Powermove"] {
+        let layer = support::doc::layer(
+            "t",
+            "text",
+            json!({"text":text, "font":"SF Pro Display", "size":96,
+                "weight":600, "color":"#FFFFFF", "align":"left"}),
+            48.0,
+            38.0,
+            3.0,
+        );
+        let project = support::doc::project(768, 192, 3.0, support::doc::no_fill(), vec![layer]);
+        let document = pm_model::Document::new(
+            Some(pm_model::json::parse(&project.to_string()).unwrap()),
+            1,
+        );
+        let raster = renderer
+            .text_raster(&document, "Ptest-root", "t", 0.0, 1.0, Precision::Float32)
+            .unwrap()
+            .unwrap();
+        let items = raster.plan.scene.items.clone();
+        assert!(items.iter().all(
+            |item| matches!(&item.content, ItemContent::Coverage { paths } if paths.len() == 1)
+        ));
+        samples.push(items);
+    }
+    let device = renderer.device();
+    let queue = renderer.queue();
+    let mut area = TextGpu::new(device);
+    area.set_coverage(Coverage::Area);
+    let mut auto = TextGpu::new(device);
+    let mut direct = TextGpu::new(device);
+    direct.set_coverage(Coverage::Direct);
+    let mut render = |painter: &mut TextGpu, plan: &pm_render::text::TextPlan| {
+        let mut pool = pm_gpu::TargetPool::new();
+        let mut held = Vec::new();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("fractional direct text coverage gate"),
+        });
+        let view = painter
+            .render(
+                device,
+                queue,
+                &mut encoder,
+                &mut pool,
+                &mut held,
+                plan,
+                Precision::Float32,
+                WorkingEncoding::Standard,
+            )
+            .unwrap();
+        queue.submit([encoder.finish()]);
+        let pixels = pm_gpu::readback::read_f32(device, queue, view.texture()).unwrap();
+        for target in held {
+            pool.give(target);
+        }
+        pixels
+    };
+    for (sample, items) in samples.into_iter().enumerate() {
+        let bounds = items
+            .iter()
+            .skip(1)
+            .fold(items[0].bounds, |bounds, item| bounds.union(item.bounds));
+        for (phase, (fx, fy)) in [(0.0, 0.0), (0.125, 0.375), (0.5, 0.75), (0.875, 0.25)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut items = items.clone();
+            let shift = Affine::translate((42.0 + fx - bounds.x0, 36.0 + fy - bounds.y0));
+            for item in &mut items {
+                item.bounds = shift.transform_rect_bbox(item.bounds);
+                if let ItemContent::Coverage { paths } = &mut item.content {
+                    for path in paths {
+                        path.transform = shift * path.transform;
+                    }
+                }
+                item.color = [1.0; 4];
+                item.opacity = 1.0;
+                item.blur = 0.0;
+            }
+            let scene = TextScene {
+                width: 768,
+                height: 192,
+                items,
+            };
+            let reference = support::text_reference::render(&scene);
+            assert_eq!(reference.unreferenced, 0);
+            let plan = pm_render::text::TextPlan::whole(scene);
+            let area_pixels = render(&mut area, &plan);
+            let auto_pixels = render(&mut auto, &plan);
+            let direct_pixels = render(&mut direct, &plan);
+            assert_eq!(
+                auto_pixels, direct_pixels,
+                "eligible Auto and Direct differ"
+            );
+            let alpha = |pixels: &[f64]| pixels.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+            let area_f64: Vec<f64> = area_pixels.iter().map(|v| f64::from(*v)).collect();
+            let direct_f64: Vec<f64> = direct_pixels.iter().map(|v| f64::from(*v)).collect();
+            let expected_geometry = geometry(&alpha(&reference.rgba), 768);
+            let area_geometry = geometry(&alpha(&area_f64), 768);
+            let direct_geometry = geometry(&alpha(&direct_f64), 768);
+            let mut edge_pixels = 0usize;
+            let (mut area_max, mut direct_max, mut between_max) = (0.0f64, 0.0f64, 0.0f64);
+            for (i, class) in reference.classes.iter().enumerate() {
+                if *class != Class::Edge {
+                    continue;
+                }
+                edge_pixels += 1;
+                for channel in 0..4 {
+                    let at = i * 4 + channel;
+                    area_max = area_max.max((area_f64[at] - reference.rgba[at]).abs() * 255.0);
+                    direct_max =
+                        direct_max.max((direct_f64[at] - reference.rgba[at]).abs() * 255.0);
+                    between_max = between_max.max((direct_f64[at] - area_f64[at]).abs() * 255.0);
+                }
+            }
+            println!(
+                "case 3 sample {sample} phase {phase}: edges {edge_pixels}, max CV Area/reference {area_max:.4}, Direct/reference {direct_max:.4}, Direct/Area {between_max:.4}; area {:.6}/{:.6}/{:.6}; centroid {:?}/{:?}/{:?}",
+                area_geometry.area,
+                direct_geometry.area,
+                expected_geometry.area,
+                area_geometry.centroid,
+                direct_geometry.centroid,
+                expected_geometry.centroid,
+            );
+            if edge_pixels == 0 || area_max > 1.0 || direct_max > 1.0 || between_max > 1.0 {
+                failures.push(format!(
+                "direct phase {phase}: edge pixels {edge_pixels}, Area/ref {area_max:.4}, Direct/ref {direct_max:.4}, Direct/Area {between_max:.4} CV"
+            ));
+            }
+            for (name, actual) in [("Area", area_geometry), ("Direct", direct_geometry)] {
+                if let Err(reason) = same_geometry(&actual, &expected_geometry, 1e-3) {
+                    failures.push(format!("direct phase {phase} {name}: {reason}"));
+                }
+            }
+        }
+    }
+    if direct.stats.pages != 0 || auto.stats.pages != 0 || area.stats.pages < 8 {
+        failures.push(format!(
+            "coverage routing: Direct pages {}, Auto pages {}, Area pages {}",
+            direct.stats.pages, auto.stats.pages, area.stats.pages
+        ));
+    }
 }
 
 /// Two translucent glyphs of different colors overlap in the project
