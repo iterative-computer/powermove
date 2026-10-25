@@ -27,7 +27,6 @@
 //! | [`anchor`] | `font-anchor.ts`, `size-anchor.ts`, `editing.ts` `runOne` | anchor capture and anchor moves with font and size anchors |
 //! | [`split_text`] | `split-text.ts` | the layers a text split creates |
 //! | [`comp_bounds`] | `compositions.ts` `leaveAttributes` | composition bounds for Pre-compose › Leave all attributes |
-//! | [`materials`] | `editing.ts` `synchronizePeers`, `scene3d/materials.ts` `shaderPeers` | material peer synchronization |
 //!
 //! # Time (section 5, rule 4 with amendment 1)
 //!
@@ -50,7 +49,6 @@ pub mod anchor;
 pub mod channel;
 pub mod comp_bounds;
 pub mod groups;
-pub mod materials;
 pub mod pose;
 pub mod split_text;
 pub mod time;

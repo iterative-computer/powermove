@@ -19,7 +19,7 @@ use std::sync::Arc;
 use pm_edit::align::{self, Mode, Spread};
 use pm_edit::anchor::{self, Kind};
 use pm_edit::split_text;
-use pm_edit::{Edit, IdSource, comp_bounds, groups, materials, pose};
+use pm_edit::{Edit, IdSource, comp_bounds, groups, pose};
 use pm_eval::JsThrow;
 use pm_eval::space3d::Rect;
 use pm_model::ops::ops_to_value;
@@ -266,16 +266,6 @@ pub(crate) fn dispatch(
                 extra.raw(":");
                 extra.num(v);
             }
-            Ok(())
-        }
-        "syncPeers" => {
-            let layer = index(get(request, "layer"), count)?;
-            let channel = get(request, "channel")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsThrow::type_error("channel is required"))?;
-            let n = materials::synchronize_peers(&mut edit, layer, channel)?;
-            extra.raw(",\"count\":");
-            extra.num(n as f64);
             Ok(())
         }
         other => Err(JsThrow::type_error(format!("unknown edit '{other}'"))),
