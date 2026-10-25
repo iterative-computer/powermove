@@ -14,8 +14,8 @@ function fixture() {
   vi.stubGlobal('cancelAnimationFrame', vi.fn());
   const audio = { running: true, tick: vi.fn(), seek: vi.fn(), start: vi.fn(() => { audio.running = true; }), pause: vi.fn(() => { audio.running = false; }) };
   const PM: any = {
-    proj: { id: 'project', fps: 30, dur: 1 / 30, work: [0, 1 / 30] },
-    time: 0, playing: true, Audio: audio,
+    proj: { id: 'project', w: 2, h: 2, fps: 30, dur: 1 / 30, work: [0, 1 / 30] },
+    time: 0, playing: true, quality: 1, Audio: audio,
     GL: { canvas: { width: 2, height: 2, parentElement: { appendChild: vi.fn() } }, render: vi.fn() },
     pause: () => { PM.playing = false; audio.pause(); },
     setTime: vi.fn((time: number) => { PM.time = time; PM.bus.emit('time', time); }),
@@ -100,6 +100,33 @@ it.each(['stop', 'clear'])('renders native cache frames and releases native audi
   expect(transport.pause).toHaveBeenCalledOnce();
   expect(transport.setLoop).toHaveBeenLastCalledWith(null);
   expect(audio.pause).toHaveBeenCalledTimes(2); // cache setup and playback handoff
+});
+
+it('sizes native cached frames from composition quality, ignoring the hidden legacy canvas', async () => {
+  vi.useFakeTimers();
+  const { PM, canvas } = fixture();
+  PM.proj.w = 640; PM.proj.h = 360; PM.proj.work = [0, 2 / 30]; PM.quality = .25;
+  PM.GL.canvas.width = 1464; PM.GL.canvas.height = 824;
+  PM.Memory = { budget: () => 200_000 };
+  const renderFrameTo = vi.fn(async () => {
+    // The compatibility canvas can change while the native viewer presents.
+    PM.GL.canvas.width = 1920;
+    return { width: 160, height: 90 };
+  });
+  PM.EngineConnection = { render: { renderFrameTo }, transport: { active: () => false } };
+  const prepared = PM.Preview.cache();
+  await vi.runAllTimersAsync(); await prepared;
+  expect(renderFrameTo.mock.calls).toEqual([
+    [0, 160, 90, { mblur: true, mbSamples: 6 }],
+    [1 / 30, 160, 90, { mblur: true, mbSamples: 6 }],
+  ]);
+  expect(PM.Preview.active).toBe(true);
+  expect(PM.Preview.count).toBe(2);
+  expect(PM.Preview.bytes).toBe(2 * 160 * 90 * 4);
+  expect(canvas.width).toBe(160); expect(canvas.height).toBe(90);
+  expect(PM.GL.canvas.parentElement.appendChild).toHaveBeenCalledWith(canvas);
+  expect(PM.toast).not.toHaveBeenCalled();
+  PM.Preview.stop();
 });
 
 it('restores the project loop after a native cached preview ends', async () => {

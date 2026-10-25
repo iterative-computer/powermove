@@ -65,8 +65,9 @@ test('multiple graph curves, velocity editing and a cached preview retain editab
  const overflow=await page.locator('#tl-head').evaluate(el=>{const bounds=el.getBoundingClientRect();return [...el.querySelectorAll('button,select,input')].some(e=>{const b=e.getBoundingClientRect();return b.width>0&&b.right>bounds.right+1;});});expect(overflow).toBe(false);
  await page.locator('#preview-controls select').selectOption('0.25');
  await page.waitForFunction(()=>{const connection=(window as any).PM.EngineConnection;return !connection||(connection.status().connected&&connection.status().route==='engine'&&connection.session()?.documentAccepted);},undefined,{timeout:30_000});
- await page.evaluate(()=>(window as any).PM.Preview.cache());
- try { await page.waitForFunction(()=>(window as any).PM.Preview.active,undefined,{timeout:10_000}); }
+ await expect.poll(()=>page.evaluate(()=>(window as any).PM.quality)).toBe(.25);
+ const cached=await page.evaluate(async()=>{const PM=(window as any).PM;await PM.Preview.cache();return {active:PM.Preview.active,count:PM.Preview.count,quality:PM.quality,bytes:PM.Preview.bytes,native:!!PM.EngineConnection};});
+ try { expect(cached).toMatchObject({active:true,count:60,quality:.25});if(cached.native)expect(cached.bytes).toBe(60*160*90*4); }
  finally { const screenshot=test.info().outputPath('ram-preview.png');await page.screenshot({path:screenshot});await test.info().attach('RAM preview',{path:screenshot,contentType:'image/png'}); }
  expect(await page.evaluate(()=>(window as any).PM.Preview.count)).toBe(60);
  await page.evaluate(()=>(window as any).PM.Preview.stop());
