@@ -756,7 +756,7 @@ mod tests {
             (
                 "checker",
                 (0..w * h)
-                    .map(|i| f64::from(u8::from((i % w + i / w) % 2 == 0 && (i % w).abs_diff(cx) < 40)))
+                    .map(|i| f64::from(u8::from((i % w + i / w).is_multiple_of(2) && (i % w).abs_diff(cx) < 40)))
                     .collect(),
             ),
         ]

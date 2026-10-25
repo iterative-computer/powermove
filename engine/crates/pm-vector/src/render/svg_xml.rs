@@ -108,10 +108,6 @@ fn specified_length(s: &str) -> Option<f64> {
     (value.is_finite() && value >= 0.0).then_some(value)
 }
 
-fn absolute_length(s: &str) -> Option<f64> {
-    specified_length(s).filter(|&v| v > 0.0)
-}
-
 /// The byte offset of a roxmltree position (1-based row and char column).
 fn offset(text: &str, pos: usvg::roxmltree::TextPos) -> Option<usize> {
     let mut line = 0usize;

@@ -108,6 +108,7 @@ fn export_png(
 /// upload samples it), times the layer's opacity, over the same project's
 /// background (the gradient capture at this depth). Returns RGBA per pixel
 /// and whether the text reaches the pixel (any tap with ink).
+#[allow(clippy::too_many_arguments)]
 fn text_reference(
     doc: &pm_model::Document,
     comp: &str,

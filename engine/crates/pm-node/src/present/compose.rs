@@ -265,13 +265,15 @@ pub fn canvas_placement(
     }
 }
 
+type CanvasRenderGrid = (Option<(f64, f64)>, Option<(f64, f64)>);
+
 /// The unscaled backing canvas grid shared by live composition and pinned
 /// viewer snapshots. CSS placement only happens after this render.
 pub(crate) fn canvas_render_grid(
     canvas: &pm_protocol::frame::ViewerCanvas,
     width: f64,
     height: f64,
-) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
+) -> CanvasRenderGrid {
     let whole = canvas.crop.x == 0.0
         && canvas.crop.y == 0.0
         && canvas.crop.width == width

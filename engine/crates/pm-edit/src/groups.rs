@@ -256,13 +256,7 @@ const SPACE_CHANNELS: [&str; 8] = [
 /// (NaN passes through). A group can be keyed outside the range its own
 /// compositing clamps to; ungrouping folds only the clamped value.
 fn clamp_opacity(v: f64) -> f64 {
-    if v < 0.0 {
-        0.0
-    } else if v > 100.0 {
-        100.0
-    } else {
-        v
-    }
+    v.clamp(0.0, 100.0)
 }
 
 /// `constantProperty(group.on, false)` (`layer-groups.ts`): a switch that is

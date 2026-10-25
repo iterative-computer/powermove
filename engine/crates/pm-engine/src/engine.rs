@@ -781,12 +781,11 @@ impl Engine {
             .map(|(id, _)| *id)
             .collect();
         for id in &closed {
-            if let Some(mut session) = self.sessions.remove(id) {
-                if let Some(mut checkpoint) = session.checkpoint.take() {
-                    checkpoint.expires =
-                        std::time::Instant::now() + std::time::Duration::from_secs(15);
-                    self.reconnect_mirror = Some(checkpoint);
-                }
+            if let Some(mut session) = self.sessions.remove(id)
+                && let Some(mut checkpoint) = session.checkpoint.take()
+            {
+                checkpoint.expires = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                self.reconnect_mirror = Some(checkpoint);
             }
         }
         self.resync_work.retain(|_, p| p.port != port);
@@ -1510,7 +1509,7 @@ impl Engine {
         let owner = self.document_owners.get(&session.port);
         let hash = hex(&resync.hash.0);
         if let Some(mirror) = self.kernel_mirrors.iter().find_map(|(candidate, saved)| {
-            if !owner.is_none_or(|owner| owner == candidate) || saved.document != resync.document {
+            if owner.is_some_and(|owner| owner != candidate) || saved.document != resync.document {
                 return None;
             }
             let usable = |mirror: &pm_model::Document, verified: Option<&str>| {

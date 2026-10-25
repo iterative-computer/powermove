@@ -46,7 +46,7 @@ pub fn outline(path: &BezPath, style: &Stroke, tolerance: f64) -> Option<Region>
         path: BezPath::new(),
         folds: false,
     };
-    if !(h > 0.0) {
+    if h.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return Some(out);
     }
     let dashed;
@@ -90,10 +90,16 @@ fn tangents(from: Point, el: PathEl) -> (Option<Vec2>, Option<Vec2>) {
             let d = (p - from).hypot().gt(&0.0).then_some(p - from);
             (d, d)
         }
-        PathEl::QuadTo(c, p) => (first(&[c, p]), [c, from].iter().map(|q| p - *q).find(|v| v.hypot() > 0.0)),
+        PathEl::QuadTo(c, p) => (
+            first(&[c, p]),
+            [c, from].iter().map(|q| p - *q).find(|v| v.hypot() > 0.0),
+        ),
         PathEl::CurveTo(c1, c2, p) => (
             first(&[c1, c2, p]),
-            [c2, c1, from].iter().map(|q| p - *q).find(|v| v.hypot() > 0.0),
+            [c2, c1, from]
+                .iter()
+                .map(|q| p - *q)
+                .find(|v| v.hypot() > 0.0),
         ),
         _ => (None, None),
     }
@@ -219,7 +225,11 @@ fn polylines(path: &BezPath, tolerance: f64) -> Vec<Polyline> {
 /// all primitives makes the union the nonzero fill).
 fn polygon(out: &mut BezPath, points: &[Point]) {
     let area: f64 = (0..points.len())
-        .map(|i| points[i].to_vec2().cross(points[(i + 1) % points.len()].to_vec2()))
+        .map(|i| {
+            points[i]
+                .to_vec2()
+                .cross(points[(i + 1) % points.len()].to_vec2())
+        })
         .sum();
     if area == 0.0 {
         return;
@@ -249,7 +259,7 @@ fn sector(out: &mut BezPath, center: Point, from: Vec2, to: Vec2, tolerance: f64
     while sweep < -core::f64::consts::PI {
         sweep += core::f64::consts::TAU;
     }
-    if sweep.abs() < 1e-12 || !(r > 0.0) {
+    if sweep.abs() < 1e-12 || r.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return;
     }
     // Chords within `tolerance / 4` of the arc.
@@ -269,7 +279,13 @@ fn normal(d: Vec2) -> Vec2 {
 }
 
 /// Appends the polyline's stroke region; whether any smooth joint folds.
-fn stroke_polyline(poly: &Polyline, style: &Stroke, h: f64, tolerance: f64, out: &mut BezPath) -> bool {
+fn stroke_polyline(
+    poly: &Polyline,
+    style: &Stroke,
+    h: f64,
+    tolerance: f64,
+    out: &mut BezPath,
+) -> bool {
     let p = &poly.points;
     let n = p.len();
     let pieces = if poly.closed { n } else { n - 1 };
@@ -285,14 +301,17 @@ fn stroke_polyline(poly: &Polyline, style: &Stroke, h: f64, tolerance: f64, out:
             // tolerance (h·θ²/8) joins as a smooth joint.
             let turn = poly.tangent_in[i]
                 .zip(poly.tangent_out[i])
-                .map_or(0.0, |(a, b)| (a.dot(b) / (a.hypot() * b.hypot())).clamp(-1.0, 1.0).acos());
+                .map_or(0.0, |(a, b)| {
+                    (a.dot(b) / (a.hypot() * b.hypot())).clamp(-1.0, 1.0).acos()
+                });
             if !has_join || (poly.corner[i] && h * turn * turn / 8.0 > tolerance) {
                 return None;
             }
             let (d0, d1) = (dir((i + n - 1) % n), dir(i));
             let (n0, n1) = (normal(d0), normal(d1));
             let sum = n0 + n1;
-            let reach = h * (1.0 - n0.dot(n1)).max(0.0).sqrt() / (1.0 + n0.dot(n1)).max(1e-12).sqrt();
+            let reach =
+                h * (1.0 - n0.dot(n1)).max(0.0).sqrt() / (1.0 + n0.dot(n1)).max(1e-12).sqrt();
             (reach <= 0.5 * d0.hypot().min(d1.hypot())).then(|| sum * (2.0 * h / sum.hypot2()))
         })
         .collect();
@@ -311,7 +330,11 @@ fn stroke_polyline(poly: &Polyline, style: &Stroke, h: f64, tolerance: f64, out:
         let ob = shared[j].unwrap_or_else(|| normal(arriving(j)) * h);
         polygon(out, &[a + oa, b + ob, b - ob, a - oa]);
     }
-    let joins: Vec<usize> = if poly.closed { (0..n).collect() } else { (1..n - 1).collect() };
+    let joins: Vec<usize> = if poly.closed {
+        (0..n).collect()
+    } else {
+        (1..n - 1).collect()
+    };
     for i in joins.into_iter().filter(|&i| shared[i].is_none()) {
         let at = p[i];
         let (d0, d1) = (arriving(i), leaving(i));
@@ -374,7 +397,10 @@ mod tests {
     use kurbo::{Circle, Rect, Shape};
 
     fn area(path: &BezPath) -> f64 {
-        fill(path, FillRule::NonZero, 4, 400, 400).alpha.iter().sum()
+        fill(path, FillRule::NonZero, 4, 400, 400)
+            .alpha
+            .iter()
+            .sum()
     }
 
     #[test]
@@ -387,7 +413,8 @@ mod tests {
         // Round corners: the outer corners lose (1 − π/4)·25 each.
         let round = Stroke::new(10.0).with_join(Join::Round);
         let a = area(&outline(&r, &round, 1e-4).unwrap().path);
-        let expected = 110.0 * 90.0 - 90.0 * 70.0 - 4.0 * 25.0 * (1.0 - core::f64::consts::FRAC_PI_4);
+        let expected =
+            110.0 * 90.0 - 90.0 * 70.0 - 4.0 * 25.0 * (1.0 - core::f64::consts::FRAC_PI_4);
         assert!((a - expected).abs() < 1e-2, "{a} {expected}");
     }
 
@@ -396,9 +423,19 @@ mod tests {
         let c = Circle::new((200.0, 200.0), 80.0).to_path(1e-9);
         // Per pixel against the exact annulus (two circles of opposite
         // winding, no overlapping contours) at the gates' 16 cells.
-        let stroke = fill(&outline(&c, &Stroke::new(12.0), 1e-4).unwrap().path, FillRule::NonZero, 16, 400, 400);
+        let stroke = fill(
+            &outline(&c, &Stroke::new(12.0), 1e-4).unwrap().path,
+            FillRule::NonZero,
+            16,
+            400,
+            400,
+        );
         let mut annulus = Circle::new((200.0, 200.0), 86.0).to_path(1e-9);
-        annulus.extend(Circle::new((200.0, 200.0), 74.0).to_path(1e-9).reverse_subpaths());
+        annulus.extend(
+            Circle::new((200.0, 200.0), 74.0)
+                .to_path(1e-9)
+                .reverse_subpaths(),
+        );
         let exact = fill(&annulus, FillRule::NonZero, 16, 400, 400);
         let mut worst: f64 = 0.0;
         for y in 100..300 {
@@ -413,11 +450,18 @@ mod tests {
     fn tiny_flattening_seams_do_not_cut_a_curved_stroke() {
         let center = (68.0, 60.0);
         let circle = Circle::new(center, 38.0).to_path(1e-9);
-        let stroke = fill(&outline(&circle, &Stroke::new(6.0), 1e-4).unwrap().path, FillRule::NonZero, 16, 136, 120);
+        let stroke = fill(
+            &outline(&circle, &Stroke::new(6.0), 1e-4).unwrap().path,
+            FillRule::NonZero,
+            16,
+            136,
+            120,
+        );
         let mut annulus = Circle::new(center, 41.0).to_path(1e-9);
         annulus.extend(Circle::new(center, 35.0).to_path(1e-9).reverse_subpaths());
         let exact = fill(&annulus, FillRule::NonZero, 16, 136, 120);
-        let (mut actual, mut wanted) = (Vec::with_capacity(136 * 120), Vec::with_capacity(136 * 120));
+        let (mut actual, mut wanted) =
+            (Vec::with_capacity(136 * 120), Vec::with_capacity(136 * 120));
         let mut worst = 0.0f64;
         for y in 0..120 {
             for x in 0..136 {
@@ -436,12 +480,27 @@ mod tests {
         let mut l = BezPath::new();
         l.move_to((100.0, 200.0));
         l.line_to((300.0, 200.0));
-        let butt = area(&outline(&l, &Stroke::new(10.0).with_caps(Cap::Butt), 1e-4).unwrap().path);
+        let butt = area(
+            &outline(&l, &Stroke::new(10.0).with_caps(Cap::Butt), 1e-4)
+                .unwrap()
+                .path,
+        );
         assert!((butt - 2000.0).abs() < 1e-6, "{butt}");
-        let square = area(&outline(&l, &Stroke::new(10.0).with_caps(Cap::Square), 1e-4).unwrap().path);
+        let square = area(
+            &outline(&l, &Stroke::new(10.0).with_caps(Cap::Square), 1e-4)
+                .unwrap()
+                .path,
+        );
         assert!((square - 2100.0).abs() < 1e-6, "{square}");
-        let round = area(&outline(&l, &Stroke::new(10.0).with_caps(Cap::Round), 1e-4).unwrap().path);
-        assert!((round - (2000.0 + core::f64::consts::PI * 25.0)).abs() < 1e-2, "{round}");
+        let round = area(
+            &outline(&l, &Stroke::new(10.0).with_caps(Cap::Round), 1e-4)
+                .unwrap()
+                .path,
+        );
+        assert!(
+            (round - (2000.0 + core::f64::consts::PI * 25.0)).abs() < 1e-2,
+            "{round}"
+        );
     }
 
     #[test]
@@ -451,8 +510,16 @@ mod tests {
         v.line_to((200.0, 300.0));
         v.line_to((300.0, 100.0));
         let style = Stroke::new(10.0).with_join(Join::Miter);
-        let within = area(&outline(&v, &style.clone().with_miter_limit(10.0), 1e-4).unwrap().path);
-        let beyond = area(&outline(&v, &style.with_miter_limit(1.5), 1e-4).unwrap().path);
+        let within = area(
+            &outline(&v, &style.clone().with_miter_limit(10.0), 1e-4)
+                .unwrap()
+                .path,
+        );
+        let beyond = area(
+            &outline(&v, &style.with_miter_limit(1.5), 1e-4)
+                .unwrap()
+                .path,
+        );
         assert!(within > beyond + 10.0, "{within} {beyond}");
     }
 
@@ -461,27 +528,57 @@ mod tests {
         let mut line = BezPath::new();
         line.move_to((20.0, 50.0));
         line.line_to((120.0, 50.0));
-        let butt = Stroke::new(4.0).with_caps(Cap::Butt).with_dashes(5.0, [10.0, 10.0]);
+        let butt = Stroke::new(4.0)
+            .with_caps(Cap::Butt)
+            .with_dashes(5.0, [10.0, 10.0]);
         let region = outline(&line, &butt, 1e-4).unwrap();
         let cov = fill(&region.path, FillRule::NonZero, 16, 140, 100);
-        for (x, expected) in [(22, 1.0), (30, 0.0), (40, 1.0), (50, 0.0), (100, 1.0), (110, 0.0), (117, 1.0)] {
+        for (x, expected) in [
+            (22, 1.0),
+            (30, 0.0),
+            (40, 1.0),
+            (50, 0.0),
+            (100, 1.0),
+            (110, 0.0),
+            (117, 1.0),
+        ] {
             assert!((cov.at(x, 50) - expected).abs() < 1e-12, "x={x}");
         }
         // The first and last marks are 5 units; four full marks are 10.
         assert!((area(&region.path) - 200.0).abs() < 1e-6);
-        let round = Stroke::new(4.0).with_caps(Cap::Round).with_dashes(5.0, [10.0, 10.0]);
+        let round = Stroke::new(4.0)
+            .with_caps(Cap::Round)
+            .with_dashes(5.0, [10.0, 10.0]);
         let round_area = area(&outline(&line, &round, 1e-4).unwrap().path);
-        assert!((round_area - (200.0 + 6.0 * core::f64::consts::PI * 4.0)).abs() < 0.1, "{round_area}");
+        assert!(
+            (round_area - (200.0 + 6.0 * core::f64::consts::PI * 4.0)).abs() < 0.1,
+            "{round_area}"
+        );
         // SVG doubles odd arrays and normalizes negative phases.
-        let odd = Stroke::new(4.0).with_caps(Cap::Butt).with_dashes(-5.0, [10.0, 5.0, 5.0]);
-        let even = Stroke::new(4.0).with_caps(Cap::Butt).with_dashes(35.0, [10.0, 5.0, 5.0, 10.0, 5.0, 5.0]);
-        let a = fill(&outline(&line, &odd, 1e-4).unwrap().path, FillRule::NonZero, 16, 140, 100);
-        let b = fill(&outline(&line, &even, 1e-4).unwrap().path, FillRule::NonZero, 16, 140, 100);
+        let odd = Stroke::new(4.0)
+            .with_caps(Cap::Butt)
+            .with_dashes(-5.0, [10.0, 5.0, 5.0]);
+        let even = Stroke::new(4.0)
+            .with_caps(Cap::Butt)
+            .with_dashes(35.0, [10.0, 5.0, 5.0, 10.0, 5.0, 5.0]);
+        let a = fill(
+            &outline(&line, &odd, 1e-4).unwrap().path,
+            FillRule::NonZero,
+            16,
+            140,
+            100,
+        );
+        let b = fill(
+            &outline(&line, &even, 1e-4).unwrap().path,
+            FillRule::NonZero,
+            16,
+            140,
+            100,
+        );
         for y in 0..100 {
             for x in 0..140 {
                 assert!((a.at(x, y) - b.at(x, y)).abs() < 1e-12, "{x},{y}");
             }
         }
     }
-
 }

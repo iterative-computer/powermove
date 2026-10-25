@@ -19,6 +19,9 @@ use pm_reference::gaussian::{Edge, blur};
 use pm_render::composite::build::{MaskRoute, masks};
 use pm_vector::{MaskMode, MaskShape, ParametricMasks, PathMasks};
 
+/// Per-pixel coverage and the edge band used to classify it.
+pub type MaskCoverage = (Vec<f64>, Vec<bool>);
+
 /// A layer's mask coverage per output pixel (`w × h`, top-down) and its band
 /// (reference coverage strictly between 0 and 1, grown by 1 px), or `None`
 /// when the layer draws unmasked. `device` is the layer's `scaledWorld`:
@@ -31,7 +34,7 @@ pub fn layer_mask<'d>(
     device: Affine,
     w: usize,
     h: usize,
-) -> Result<Option<(Vec<f64>, Vec<bool>)>, String> {
+) -> Result<Option<MaskCoverage>, String> {
     let fail = |e: pm_eval::JsThrow| format!("evaluation: {e:?}");
     if !pm_render::composite::build::has_masks(scope, layer, seconds).map_err(fail)? {
         return Ok(None);

@@ -1673,7 +1673,9 @@ impl Scene3dRenderer {
                 for material in mesh.materials.iter() {
                     for (_, map) in material.maps.all() {
                         let Some(map) = map else { continue };
-                        let Some((width, height)) = map.svg else { continue };
+                        let Some((width, height)) = map.svg else {
+                            continue;
+                        };
                         if self.textures.has_map(&map.path, map.srgb) {
                             continue;
                         }
@@ -1724,6 +1726,7 @@ impl Scene3dRenderer {
     }
 
     /// Renders with the composition's selected working precision.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_at_precision(
         &mut self,
         device: &wgpu::Device,

@@ -40,24 +40,26 @@ pub(super) fn normalize(text: &str) -> Option<String> {
         let name = &source[1..name_end];
         let attrs = attributes(source);
         if name == "path" && !markers {
-            if let Some((_, d, range)) = attrs.iter().find(|(n, _, _)| *n == "d") {
-                if let Some(new_d) = precise_path(d) {
-                    // Attribute ranges include the name and quotes; replace
-                    // only the value so other attributes keep their spelling.
-                    let quote = source[range.clone()].find(['"', '\'']).unwrap();
-                    let value_start = range.start + quote + 1;
-                    edits.push((start + value_start..start + value_start + d.len(), new_d));
-                }
+            if let Some((_, d, range)) = attrs.iter().find(|(n, _, _)| *n == "d")
+                && let Some(new_d) = precise_path(d)
+            {
+                // Attribute ranges include the name and quotes; replace
+                // only the value so other attributes keep their spelling.
+                let quote = source[range.clone()].find(['"', '\'']).unwrap();
+                let value_start = range.start + quote + 1;
+                edits.push((start + value_start..start + value_start + d.len(), new_d));
             }
-        } else if !css_shapes && !markers && empty && matches!(name, "circle" | "ellipse" | "rect")
+        } else if !css_shapes
+            && !markers
+            && empty
+            && matches!(name, "circle" | "ellipse" | "rect")
+            && let Some(d) = shape_path(name, &attrs)
         {
-            if let Some(d) = shape_path(name, &attrs) {
-                // Keep every authored attribute, including class, id, style,
-                // transform, and geometry attributes used by [attr] selectors
-                // or references. usvg ignores the extra geometry on <path>.
-                edits.push((start + 1..start + name_end, "path".into()));
-                edits.push((end - 2..end - 2, format!(" d=\"{d}\"")));
-            }
+            // Keep every authored attribute, including class, id, style,
+            // transform, and geometry attributes used by [attr] selectors
+            // or references. usvg ignores the extra geometry on <path>.
+            edits.push((start + 1..start + name_end, "path".into()));
+            edits.push((end - 2..end - 2, format!(" d=\"{d}\"")));
         }
     });
     if edits.is_empty() {
