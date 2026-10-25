@@ -182,6 +182,22 @@ async function renderCase(c: any) {
       const averaged = new Float32Array(c.width * c.height * 4);
       const restore = applyLook(runtime.scene, o.look || {});
       const render = (w: number, h: number) => {
+        // The scene color stays transparent (the gate composites the
+        // authored background after the curve), but r180's transmission
+        // target sees the canvas clear: with a background output that is the
+        // opaque background, not its half-transparent white fallback.
+        const background = o.background && c.scene.environment.background
+          ? new THREE.Color(c.scene.environment.background) : null;
+        const setRenderTarget = renderer.setRenderTarget;
+        if (background) renderer.setRenderTarget = function(rt: any, ...rest: any[]) {
+          // Only the transmission target (4× MSAA with mipmaps); shadow maps
+          // keep their own clear.
+          if (rt && rt.samples === 4 && rt.texture.generateMipmaps) renderer.setClearColor(background, 1);
+          return setRenderTarget.call(renderer, rt, ...rest);
+        };
+        try { renderLayer(w, h); } finally { renderer.setRenderTarget = setRenderTarget; }
+      };
+      const renderLayer = (w: number, h: number) => {
         if (!o.object) {
           runtime.render(w, h, undefined, undefined, false, camera);
           return;

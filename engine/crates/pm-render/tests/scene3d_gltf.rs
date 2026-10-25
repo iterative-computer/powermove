@@ -425,9 +425,13 @@ fn gltf_displayed_pixels_prefer_supersampled_float_reference() {
             eprintln!("glTF float display {}:{} {report}", c.id, k);
             // A 3D correction (quality ledger, "3D output and Library
             // cards") moves interior shading away from today only toward
-            // the reference: accepted where no interior pixel ends further
-            // from it than today's by more than the interior bound.
-            let corrected = report.class(Class::Interior).excess.max <= Bounds::MSAA4.interior_cv;
+            // the reference: accepted where 99.9% of interior pixels end
+            // no further from it than today's by more than the interior
+            // bound, and none by more than one pixel's shading sample (MSAA
+            // shades once per pixel where the reference averages 64).
+            let excess = &report.class(Class::Interior).excess;
+            let corrected = excess.p999 <= Bounds::MSAA4.interior_cv
+                && excess.max <= Bounds::MSAA4.per_pixel_cv.1;
             for failure in report.failures(&Bounds::MSAA4) {
                 if corrected && failure.starts_with("interior:") {
                     eprintln!("corrected interior {}:{} {failure}", c.id, k);
