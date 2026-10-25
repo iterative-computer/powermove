@@ -412,10 +412,7 @@ impl Exec<'_> {
                         self.taken.push(target);
                     }
                     Source::Image {
-                        path,
-                        interpret,
-                        level2,
-                        ..
+                        path, interpret, ..
                     } => {
                         match self.media.image(
                             self.device,
@@ -426,7 +423,6 @@ impl Exec<'_> {
                             self.working,
                             self.precision,
                             interpret.as_ref(),
-                            !*level2,
                         ) {
                             Ok(t) => {
                                 r.view = Some(t.view.clone());
@@ -477,9 +473,7 @@ impl Exec<'_> {
                                 self.prepare_level2(encoder, r, view.texture(), false);
                                 r.view = Some(view);
                             }
-                            Err(message) => {
-                                self.fail(plan, draw, MediaFailure::Failed(message))
-                            }
+                            Err(message) => self.fail(plan, draw, MediaFailure::Failed(message)),
                         }
                     }
                     Source::Text(text) => {
@@ -550,6 +544,18 @@ impl Exec<'_> {
                     Source::Object3d(object) => {
                         self.scene3d
                             .prepare_svg_maps(self.device, self.queue, encoder, object);
+                        let (device, queue, pipelines) = (self.device, self.queue, self.pipelines);
+                        let media = &mut *self.media;
+                        self.scene3d.prepare_image_maps(
+                            device,
+                            encoder,
+                            object,
+                            &mut |encoder, path, srgb| {
+                                crate::scene3d::textures::still_map(
+                                    media, device, queue, pipelines, encoder, path, srgb,
+                                )
+                            },
+                        );
                         match self.scene3d.render_at_precision(
                             self.device,
                             self.queue,
@@ -773,9 +779,7 @@ impl Exec<'_> {
         let mut data = vec![0u8; slots * UNIFORM_STRIDE as usize];
         // A region's origin in the full frame's GL rows (`region_viewport`):
         // solids compute coverage from full-frame pixel positions.
-        let region_origin = region.map_or([0.0, 0.0], |g| {
-            [g.x as f32, (fh - g.y - th) as f32]
-        });
+        let region_origin = region.map_or([0.0, 0.0], |g| [g.x as f32, (fh - g.y - th) as f32]);
         let quad = |m: [f64; 6], uv: [f64; 4], color: [f64; 4]| QuadUniform {
             m: m3(&m),
             res: [fw as f32, fh as f32, region_origin[0], region_origin[1]],

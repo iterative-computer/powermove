@@ -22,7 +22,6 @@ use pm_media::decode::service::{
     DecodeService, MediaLease, MediaSource, MediaUsage, ServiceConfig,
 };
 use pm_media::frame::DecodedFrame;
-use pm_media::image::icc::IccClass;
 use pm_media::interpret::{Interpretation, ToneMap, resolve_video};
 use pm_media::pool::FramePool;
 use pm_media::probe::color::HdrFormat;
@@ -37,7 +36,6 @@ use pm_protocol::common::Ticks;
 use crate::capability::Feature;
 use crate::footage::{Geometry, Orient, Pick, Timing};
 use crate::pipelines::{Pipelines, SourceUniform, bytes_of};
-pub use crate::stills::StillReader;
 
 #[path = "media/prewarm.rs"]
 mod prewarm;
@@ -60,6 +58,13 @@ pub struct SourceColor {
     pub alpha: AlphaMode,
     /// HDR input tone mapping (PQ and HLG sources in Standard, section 9).
     pub tone_map: Option<ToneMap>,
+    /// Chromaticities (red, green, blue, white x/y) replacing `primaries`
+    /// (PNG `cHRM`, OpenEXR): converted to Rec.709 in linear light, the
+    /// white adapted to D65 (Bradford, ICC.1 Annex E).
+    pub chromaticities: Option<[f64; 8]>,
+    /// A pure power decoding exponent replacing `transfer` (PNG `gAMA`
+    /// alone: linear = code^(1/gamma)).
+    pub power: Option<f32>,
 }
 
 pub(crate) fn stamp(path: &Path) -> Option<(u64, u128)> {
@@ -158,39 +163,128 @@ fn stat_stamp(path: &Path) -> Option<(u64, u128)> {
     Some((m.len(), modified))
 }
 
-/// The color reading of a still, or why it cannot be read.
-pub fn image_color(still: &pm_media::image::StillImage) -> Result<SourceColor, ProbeIssue> {
-    let c = &still.color;
-    let primaries = match c.icc_class {
-        None | Some(IccClass::Srgb) | Some(IccClass::GraySrgb) => Primaries::Bt709,
-        Some(IccClass::DisplayP3) => Primaries::DisplayP3,
-        Some(IccClass::Other) => {
-            return Err(ProbeIssue::Unsupported(Feature::Media(
-                "an ICC profile other than sRGB or Display P3".into(),
-            )));
+/// How the source pass reads a still: its colour, and whether ColorSync
+/// converts the samples first.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterpretedStill {
+    /// The source pass's reading of the texture it receives.
+    pub color: SourceColor,
+    /// The embedded ICC profile is neither sRGB nor Display P3: ColorSync
+    /// converts the samples first (ICC.1 in float), reading their alpha this
+    /// way ([`pm_media::image::imageio::convert_to_linear_srgb`]); the
+    /// texture is then premultiplied linear Rec.709, as `color` says.
+    pub colorsync: Option<AlphaMode>,
+}
+
+/// The facts of a still the reading needs, without its samples.
+#[derive(Debug, Clone, PartialEq)]
+struct StillFacts {
+    color: pm_media::image::ImageColor,
+    float: bool,
+    /// Y′CbCr planes (AVIF).
+    planar: bool,
+    /// Deeper than 8 bits per sample (or float).
+    deep: bool,
+}
+
+impl StillFacts {
+    fn of(still: &pm_media::image::StillImage) -> StillFacts {
+        StillFacts {
+            color: still.color.clone(),
+            float: still.float,
+            planar: still.frame.format.layout == pm_media::frame::Layout::Planar,
+            deep: still.float || still.bit_depth > 8,
         }
-        // ImageIO has already converted these samples to sRGB. The original
-        // profile is retained as provenance, not applied a second time.
-        Some(IccClass::ConvertedToSrgb) => Primaries::Bt709,
+    }
+}
+
+/// How a still is read, with Interpret Footage overrides (empty for none),
+/// from its file's color facts (`pm_media::interpret::interpret_still`, the
+/// reading the sheet shows):
+///
+/// - an ICC profile: sRGB and Display P3 by matrix; any other through
+///   ColorSync (ICC.1, relative colorimetric, in float);
+/// - H.273 code points (PNG `cICP`, AVIF `colr`): primaries, transfer and,
+///   for Y′CbCr, the matrix; PQ and HLG decoded per BT.2100 and tone mapped
+///   to SDR white (BT.2390 EETF, 203 cd/m², BT.2408) as video is;
+/// - chromaticities (PNG `cHRM`, OpenEXR): converted to Rec.709 with the
+///   white adapted to D65 (Bradford); PNG `gAMA` alone: a pure power;
+/// - otherwise sRGB.
+///
+/// Every override replaces the file's reading of that value.
+fn still_reading(
+    facts: &StillFacts,
+    interp: &Interpretation,
+) -> Result<InterpretedStill, ProbeIssue> {
+    let color = &facts.color;
+    let unsupported = |what: String| Err(ProbeIssue::Unsupported(Feature::Media(what)));
+    // Y′CbCr samples (AVIF): the matrix of their code points (a profile
+    // replaces only primaries and transfer), sited as video's are.
+    let matrix = if facts.planar {
+        let m = color.cicp.map_or(2, |c| c[2]);
+        match pm_media::interpret::still_cicp([1, 13, m, 1]) {
+            Some((_, _, m)) => m,
+            None => return unsupported(format!("AVIF stills with matrix coefficients {m}")),
+        }
+    } else {
+        MatrixCoefficients::Identity
     };
-    if let Some(ch) = c.chromaticities {
-        let rec709 = [0.64f32, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290];
-        if ch.iter().zip(rec709).any(|(a, b)| (a - b).abs() > 1e-4) {
-            return Err(ProbeIssue::Unsupported(Feature::Media(
-                "OpenEXR chromaticities other than Rec.709".into(),
-            )));
-        }
+    let siting = match color.chroma_location {
+        Some(1) => ChromaSiting::Center,
+        Some(2) => ChromaSiting::TopLeft,
+        Some(3) => ChromaSiting::Top,
+        Some(4) => ChromaSiting::BottomLeft,
+        Some(5) => ChromaSiting::Bottom,
+        // Untagged chroma is sited left (type 0), as video's.
+        _ => ChromaSiting::Left,
+    };
+    let si = pm_media::interpret::interpret_still(color, facts.float, interp);
+    let r = &si.reading;
+    if si.colorsync {
+        return Ok(InterpretedStill {
+            color: SourceColor {
+                transfer: Transfer::Linear,
+                primaries: Primaries::Bt709,
+                matrix,
+                siting,
+                alpha: match r.alpha.value {
+                    AlphaMode::Opaque => AlphaMode::Opaque,
+                    _ => AlphaMode::Premultiplied,
+                },
+                tone_map: None,
+                chromaticities: None,
+                power: None,
+            },
+            colorsync: Some(r.alpha.value),
+        });
     }
-    if matches!(c.transfer, Transfer::Pq | Transfer::Hlg) {
-        return Err(ProbeIssue::Unsupported(Feature::Media("HDR stills".into())));
+    if let Some(c) = color.cicp.filter(|_| color.icc_class.is_none())
+        && pm_media::interpret::still_cicp(c).is_none()
+    {
+        return unsupported(format!(
+            "stills with color primaries {} and transfer {}",
+            c[0], c[1]
+        ));
     }
-    Ok(SourceColor {
-        transfer: c.transfer,
-        primaries,
-        matrix: MatrixCoefficients::Identity,
-        siting: ChromaSiting::Center,
-        alpha: c.alpha,
-        tone_map: None,
+    let profile = color.icc_class.is_some();
+    Ok(InterpretedStill {
+        color: SourceColor {
+            transfer: r.transfer.value,
+            primaries: r.primaries.value,
+            matrix,
+            siting,
+            alpha: r.alpha.value,
+            tone_map: r.tone_map,
+            chromaticities: color
+                .chromaticities
+                .filter(|_| interp.primaries.is_none() && !profile)
+                .map(|c| c.map(f64::from)),
+            power: color
+                .gamma
+                .filter(|_| interp.transfer.is_none() && !profile)
+                .map(|g| 1.0 / g),
+        },
+        colorsync: None,
     })
 }
 
@@ -221,270 +315,143 @@ fn offline(path: &Path) -> String {
     format!("{} is offline", path.display())
 }
 
-/// What the interpreted probe of a still reads: the reader's color facts
-/// and whether the samples are float, or why the file cannot be drawn
-/// (unreadable, or animated). Independent of the interpretation, so one
-/// decode serves every edit of the asset's overrides.
-fn still_facts(path: &Path) -> Result<(pm_media::image::ImageColor, bool), ProbeIssue> {
-    static CACHE: StampCache<Result<(pm_media::image::ImageColor, bool), ProbeIssue>> =
-        OnceLock::new();
+/// What a still reads as, or why it cannot be drawn: unreadable (including
+/// the files today's importer rejects), animated, or outside the still
+/// classes ([`crate::stills::check`]). Decoded once per size and
+/// modification time; each interpretation is then resolved from its facts.
+fn still_facts(path: &Path) -> Result<StillFacts, ProbeIssue> {
+    static CACHE: StampCache<Result<StillFacts, ProbeIssue>> = OnceLock::new();
     per_stamp(&CACHE, path, || {
-        crate::stills::check_native_source_header(path).map_err(ProbeIssue::Unsupported)?;
         if let Ok(Some(a)) = pm_media::image::animation(path)
             && a.frames > 1
         {
             return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
         }
+        crate::stills::rejected(path).map_err(ProbeIssue::Unreadable)?;
         let pool = FramePool::new(0);
         let still = pm_media::image::read(path, &pool)
             .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
-        Ok((still.color, still.float))
+        crate::stills::check(path, &still).map_err(ProbeIssue::Unsupported)?;
+        Ok(StillFacts::of(&still))
     })
     .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
 }
 
-/// [`probe_image`] for an asset with Interpret Footage overrides (only this
-/// engine reads them, so there is no legacy look to match): readable, not
-/// animated, and a reading the renderer converts (every ICC profile, through
-/// ColorSync where it is neither sRGB nor Display P3; Rec.709 OpenEXR).
-///
-/// The file is decoded once per size and modification time
-/// ([`still_facts`]); each interpretation is then resolved from its facts.
-pub fn probe_interpreted_image(path: &Path, interp: &Interpretation) -> Result<(), ProbeIssue> {
-    let (color, float) = still_facts(path)?;
-    // An empty interpretation keeps the native PNG gamma decode. Nonempty
-    // overrides that retain that curve are not implemented; an explicit
-    // transfer override can still replace it.
-    if !interp.is_empty()
-        && interp.transfer.is_none()
-        && pm_media::image::png_gamma::imageio_gamma(path)
-            .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?
-            .is_some()
-    {
-        return Err(ProbeIssue::Unsupported(Feature::Media(
-            "PNG gamma (gAMA) with Interpret Footage overrides".into(),
-        )));
-    }
-    interpreted_color(&color, float, interp).map(|_| ())
+/// Whether an image file can be drawn: readable, not animated, in a tested
+/// still class ([`crate::stills`]), with a color reading the engine
+/// converts. Image layers at every level and 3D material maps read the same
+/// native-depth samples.
+pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
+    let facts = still_facts(path)?;
+    still_reading(&facts, &Interpretation::default()).map(|_| ())
 }
 
-/// How the renderer reads a still with Interpret Footage overrides.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct InterpretedStill {
-    /// The source pass's reading of the texture it receives.
-    pub color: SourceColor,
-    /// ColorSync converts the stored samples first, reading their alpha
-    /// this way ([`pm_media::image::imageio::convert_to_linear_srgb`]); the
-    /// texture is then premultiplied linear Rec.709, as `color` says.
-    pub colorsync: Option<AlphaMode>,
+/// [`probe_image`] for an asset with Interpret Footage overrides.
+pub fn probe_interpreted_image(path: &Path, interp: &Interpretation) -> Result<(), ProbeIssue> {
+    let facts = still_facts(path)?;
+    still_reading(&facts, interp).map(|_| ())
 }
 
 /// A still's reading with Interpret Footage overrides
-/// ([`pm_media::interpret::interpret_still`], which the sheet shows): every
-/// override replaces the file's reading of that value. A profile that is
-/// neither sRGB nor Display P3 is converted by ColorSync unless a primaries
-/// or transfer override sets it aside; alpha overrides are applied by that
-/// conversion, never on top of it.
+/// ([`pm_media::interpret::interpret_still`], which the sheet shows).
 pub fn interpreted_image_color(
     still: &pm_media::image::StillImage,
     interp: &Interpretation,
 ) -> Result<InterpretedStill, ProbeIssue> {
-    interpreted_color(&still.color, still.float, interp)
+    still_reading(&StillFacts::of(still), interp)
 }
 
-fn interpreted_color(
-    color: &pm_media::image::ImageColor,
-    float: bool,
-    interp: &Interpretation,
-) -> Result<InterpretedStill, ProbeIssue> {
-    let si = pm_media::interpret::interpret_still(color, float, interp);
-    let r = &si.reading;
-    if si.colorsync {
-        return Ok(InterpretedStill {
-            color: SourceColor {
-                transfer: Transfer::Linear,
-                primaries: Primaries::Bt709,
-                matrix: MatrixCoefficients::Identity,
-                siting: ChromaSiting::Center,
-                alpha: match r.alpha.value {
-                    AlphaMode::Opaque => AlphaMode::Opaque,
-                    _ => AlphaMode::Premultiplied,
-                },
-                tone_map: None,
+/// Whether a still's samples are deeper than 8 bits (or HDR): its texture is
+/// then never stored below half float.
+pub(crate) fn deep_still(path: &Path) -> bool {
+    still_facts(path).is_ok_and(|f| {
+        f.deep
+            || f.color
+                .cicp
+                .is_some_and(|c| matches!(c[1], 16 | 18) && f.color.icc_class.is_none())
+    })
+}
+
+/// Y′CbCr planes to straight R′G′B′A in the stored encoding (no transfer or
+/// primaries conversion), on the CPU: chroma upsampled with section 9's
+/// filters at the given siting, then the matrix. For the consumers that
+/// need packed samples (glTF textures; ColorSync conversions).
+pub(crate) fn ycbcr_rgba(
+    still: &pm_media::image::StillImage,
+    color: &SourceColor,
+) -> Result<Vec<f32>, String> {
+    let f = &still.frame;
+    let (w, h) = (f.format.width, f.format.height);
+    let (ya, cc) = f.reference().map_err(|e| e.to_string())?;
+    let factors = Factors::from_log2(f.format.log2_chroma_w, f.format.log2_chroma_h);
+    let (cw, ch) = factors.chroma_size(w as u32, h as u32);
+    let up = |k: usize| {
+        let samples: Vec<f32> = cc.iter().map(|p| p[k]).collect();
+        pm_color::chroma::upsample(
+            &pm_color::chroma::Plane {
+                width: cw,
+                height: ch,
+                samples: &samples,
             },
-            colorsync: Some(r.alpha.value),
-        });
-    }
-    if interp.primaries.is_none()
-        && let Some(ch) = color.chromaticities
-    {
-        let rec709 = [0.64f32, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.3290];
-        if ch.iter().zip(rec709).any(|(a, b)| (a - b).abs() > 1e-4) {
-            return Err(ProbeIssue::Unsupported(Feature::Media(
-                "OpenEXR chromaticities other than Rec.709".into(),
-            )));
-        }
-    }
-    // A PQ or HLG reading, from the file or an override: the tone map
-    // assumes BT.2020 and has no still test, so HDR stills stay with the
-    // legacy renderer (a non-HDR transfer override reads one as SDR).
-    if matches!(r.transfer.value, Transfer::Pq | Transfer::Hlg) {
-        return Err(ProbeIssue::Unsupported(Feature::Media("HDR stills".into())));
-    }
-    Ok(InterpretedStill {
-        color: SourceColor {
-            transfer: r.transfer.value,
-            primaries: r.primaries.value,
-            matrix: MatrixCoefficients::Identity,
-            siting: ChromaSiting::Center,
-            alpha: r.alpha.value,
-            tone_map: r.tone_map,
-        },
-        colorsync: None,
-    })
-}
-
-/// Keep native-depth sources unchanged. At level 1, a file Chromium can
-/// decode must not depend on ImageIO accepting the same AVIF container.
-/// TIFF reads the shipped FFmpeg PNG rendition before compatibility color conversion.
-fn image_source(
-    path: &Path,
-    pool: &FramePool,
-    compat: bool,
-) -> pm_media::Result<pm_media::image::StillImage> {
-    if compat {
-        use std::io::Read;
-        let mut head = [0; 16];
-        let n = std::fs::File::open(path)?.read(&mut head)?;
-        if pm_media::image::sniff(&head[..n]) == pm_media::image::ImageFormat::Tiff {
-            return pm_media::image::compat::read_tiff_source(path, pool);
-        }
-    }
-    pm_media::image::read(path, pool).or_else(|error| {
-        if compat {
-            use std::io::Read;
-            let mut head = [0; 512];
-            let n = std::fs::File::open(path)?.read(&mut head)?;
-            if pm_media::image::sniff(&head[..n]) == pm_media::image::ImageFormat::Avif {
-                return pm_media::image::avif_compat::read_bitmap(path, pool);
-            }
-        }
-        Err(error)
-    })
-}
-
-/// The still samples a layer draws: Chromium's bitmap at level 1, the
-/// native-depth source at level 2.
-pub fn still_reader(level1: bool) -> StillReader {
-    if level1 {
-        StillReader::Chromium
-    } else {
-        StillReader::Native
-    }
-}
-
-/// Whether an image file can be drawn by a level 1 layer (Chromium's
-/// compatibility bitmap): [`probe_still`] with [`StillReader::Chromium`].
-pub fn probe_image(path: &Path) -> Result<(), ProbeIssue> {
-    probe_still(path, StillReader::Chromium)
-}
-
-/// Whether an image file can be drawn with `reader`'s samples: readable,
-/// not animated, in a tested still class ([`crate::stills`]), a color
-/// reading the engine converts. Level 1 layers read Chromium's bitmap;
-/// level 2 layers and 3D maps read the native-depth source, whose classes
-/// are narrower (it reads neither PNG cICP/cHRM nor HDR transfers, and
-/// ImageIO converts CMYK and other models to sRGB).
-pub fn probe_still(path: &Path, reader: StillReader) -> Result<(), ProbeIssue> {
-    static CHROMIUM: StampCache<Result<(), ProbeIssue>> = OnceLock::new();
-    static NATIVE: StampCache<Result<(), ProbeIssue>> = OnceLock::new();
-    let cache = match reader {
-        StillReader::Chromium => &CHROMIUM,
-        StillReader::Native => &NATIVE,
+            w as u32,
+            h as u32,
+            factors,
+            color.siting,
+        )
     };
-    per_stamp(cache, path, || {
-        if let Ok(Some(a)) = pm_media::image::animation(path)
-            && a.frames > 1
-        {
-            return Err(ProbeIssue::Unsupported(Feature::ImageSequence));
-        }
-        let pool = FramePool::new(0);
-        let chromium = reader == StillReader::Chromium;
-        let still = image_source(path, &pool, chromium)
-            .map_err(|e| ProbeIssue::Unreadable(format!("{}: {e}", path.display())))?;
-        if !chromium {
-            crate::stills::check(path, &still, reader).map_err(ProbeIssue::Unsupported)?;
-            // The level 2 source pass converts profiles other than sRGB and
-            // Display P3 through ColorSync (`MediaCache::image`); every other
-            // reading must be one it draws.
-            if still.color.icc_class == Some(IccClass::Other) {
-                return Ok(());
-            }
-            return image_color(&still).map(|_| ());
-        }
-        // Chromium cannot show an AVIF its decoder cannot parse, whatever
-        // ImageIO reads: a named failure, not a class.
-        if pm_media::image::avif_compat::applies(&still) {
-            pm_media::image::avif_compat::unmeasured(path).map_err(|e| {
-                ProbeIssue::Unreadable(format!(
-                    "{}: Chromium's AVIF decoder cannot parse it ({e})",
-                    path.display()
-                ))
-            })?;
-        }
-        crate::stills::check(path, &still, reader).map_err(ProbeIssue::Unsupported)?;
-        if pm_media::image::avif_compat::applies(&still) {
-            let bitmap = pm_media::image::avif_compat::read(path, &still, &pool)
-                .map_err(|e| ProbeIssue::Unreadable(e.to_string()))?;
-            image_color(&bitmap).map(|_| ())
-        } else if pm_media::image::compat::applies(&still) {
-            let bitmap = pm_media::image::compat::bitmap_at(path, &still, &pool)
-                .map_err(|e| ProbeIssue::Unreadable(e.to_string()))?;
-            image_color(&bitmap).map(|_| ())
+    let (cb, cr) = (up(0), up(1));
+    let rgb_planes = f.format.layout == pm_media::frame::Layout::PlanarRgb;
+    let matrix = Matrix::of(color.matrix);
+    let mut out = Vec::with_capacity(w * h * 4);
+    for i in 0..w * h {
+        let (y, b, r) = (f64::from(ya[i][0]), f64::from(cb[i]), f64::from(cr[i]));
+        let rgb = if rgb_planes {
+            // G, B, R planes (matrix 0).
+            [r, y, b]
+        } else if color.matrix == MatrixCoefficients::Bt2020Cl {
+            pm_color::ycbcr::bt2020_cl_to_rgb([y, b, r])
         } else {
-            image_color(&still).map(|_| ())
-        }
-    })
-    .unwrap_or_else(|| Err(ProbeIssue::Unreadable(offline(path))))
-}
-
-/// Today's 8-bit Chromium bitmap of a still: the `ImageBitmap` the
-/// importer keeps (`createImageBitmap(blob)`), which level 1 image layers
-/// draw and today's 3D runtime hands three.js as a material map
-/// (`core/scene3d/runtime.ts` `texture()`). Its rows are oriented, top row
-/// first, in the bitmap's sRGB encoding, premultiplied as Chromium stores
-/// them. The second value is true when today's RGBA8 upload of it fails
-/// ([`pm_media::image::compat::upload_fails`]; the rows are then image
-/// layers' incomplete texture).
-pub fn level1_bitmap(
-    path: &Path,
-    pool: &FramePool,
-) -> Result<(pm_media::image::StillImage, bool), ProbeIssue> {
-    probe_still(path, StillReader::Chromium)?;
-    let unreadable =
-        |e: pm_media::MediaError| ProbeIssue::Unreadable(format!("{}: {e}", path.display()));
-    let still = image_source(path, pool, true).map_err(unreadable)?;
-    let fails = pm_media::image::compat::upload_fails(path, &still).map_err(unreadable)?;
-    level1_bitmap_of(path, still, pool).map(|b| (b, fails))
-}
-
-fn level1_bitmap_of(
-    path: &Path,
-    still: pm_media::image::StillImage,
-    pool: &FramePool,
-) -> Result<pm_media::image::StillImage, ProbeIssue> {
-    let unreadable =
-        |e: pm_media::MediaError| ProbeIssue::Unreadable(format!("{}: {e}", path.display()));
-    if pm_media::image::avif_compat::applies(&still) {
-        pm_media::image::avif_compat::read(path, &still, pool).map_err(unreadable)
-    } else if pm_media::image::compat::applies(&still) {
-        pm_media::image::compat::bitmap_at(path, &still, pool).map_err(unreadable)
-    } else {
-        Err(ProbeIssue::Unsupported(Feature::Media(format!(
-            "{} stills without Chromium's 8-bit bitmap",
-            still.frame.format.label
-        ))))
+            matrix
+                .ok_or("an unsupported matrix")?
+                .ycbcr_to_rgb([y, b, r])
+        };
+        out.extend_from_slice(&[rgb[0] as f32, rgb[1] as f32, rgb[2] as f32, ya[i][1]]);
     }
+    Ok(out)
+}
+
+/// A Y′CbCr still as packed straight R′G′B′A in float with the same color
+/// facts ([`ycbcr_rgba`]), for ColorSync's conversion.
+fn packed(
+    still: &pm_media::image::StillImage,
+    color: &SourceColor,
+    pool: &FramePool,
+) -> Result<pm_media::image::StillImage, String> {
+    let rgba = ycbcr_rgba(still, color)?;
+    let (w, h) = (still.frame.format.width, still.frame.format.height);
+    let frame = pm_media::image::pool_rgba(
+        pool,
+        w,
+        h,
+        pm_media::image::Rgba::F32(&rgba),
+        false,
+        32,
+        format!("{} as R′G′B′A", still.frame.format.label),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(pm_media::image::StillImage {
+        frame,
+        bit_depth: 32,
+        float: true,
+        color: pm_media::image::ImageColor {
+            alpha: match still.color.alpha {
+                AlphaMode::Opaque => AlphaMode::Opaque,
+                a => a,
+            },
+            ..still.color.clone()
+        },
+        ..still.clone()
+    })
 }
 
 /// The shipped `sequencePlaybackTime`: select an available CFR slot,
@@ -756,6 +723,8 @@ fn video_color(
                 peak_nits: 1000.0,
             })
         }),
+        chromaticities: None,
+        power: None,
     }
 }
 
@@ -784,6 +753,7 @@ fn source_uniform(
     let transfer = match (color.transfer, tone) {
         (_, Some(t)) if t.transfer == Transfer::Pq => 5,
         (_, Some(_)) => 6,
+        _ if color.power.is_some() => 7,
         (Transfer::DisplayE, _) => 0,
         (Transfer::Bt1886, _) => 1,
         (Transfer::SceneReferredBt709, _) => 2,
@@ -793,18 +763,29 @@ fn source_uniform(
     };
     // The source's primaries to Rec.709 in linear light: after the tone
     // map for HDR, after the transfer for SDR.
-    let primaries = pm_color::primaries::conversion(
-        if color.primaries == Primaries::Unspecified {
-            Primaries::Bt709
-        } else {
-            color.primaries
-        },
-        Primaries::Bt709,
-    )
+    let chromaticities = color
+        .chromaticities
+        .map(|c| pm_color::primaries::Chromaticities {
+            r: [c[0], c[1]],
+            g: [c[2], c[3]],
+            b: [c[4], c[5]],
+            w: [c[6], c[7]],
+        });
+    let primaries = match &chromaticities {
+        Some(c) => pm_color::primaries::conversion_from(c, Primaries::Bt709),
+        None => pm_color::primaries::conversion(
+            if color.primaries == Primaries::Unspecified {
+                Primaries::Bt709
+            } else {
+                color.primaries
+            },
+            Primaries::Bt709,
+        ),
+    }
     .unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
     let convert_primaries = tone.is_none()
-        && color.primaries != Primaries::Bt709
-        && color.primaries != Primaries::Unspecified;
+        && (chromaticities.is_some()
+            || color.primaries != Primaries::Bt709 && color.primaries != Primaries::Unspecified);
     let identity = transfer == 0 && working == WorkingEncoding::Standard && !convert_primaries;
     let plan = source_plan(color.alpha, identity);
     let matte = match color.alpha {
@@ -834,7 +815,7 @@ fn source_uniform(
             } else {
                 0.0
             },
-            0.0,
+            color.power.unwrap_or(1.0),
             0.0,
         ],
         ..Default::default()
@@ -866,36 +847,6 @@ fn source_uniform(
         }
     }
     u
-}
-
-/// Records the source pass from normalized textures into a new working
-/// texture of the source's size.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn convert(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    pipelines: &Pipelines,
-    encoder: &mut wgpu::CommandEncoder,
-    normalized: &Normalized,
-    color: &SourceColor,
-    working: WorkingEncoding,
-    precision: Precision,
-    factors: Factors,
-    reuse: Option<Target>,
-) -> Target {
-    convert_format(
-        device,
-        queue,
-        pipelines,
-        encoder,
-        normalized,
-        color,
-        working,
-        precision,
-        factors,
-        reuse,
-        working_format(precision),
-    )
 }
 
 /// The source pass into `format` storage, which may be deeper than the
@@ -999,74 +950,6 @@ fn convert_format(
     out
 }
 
-/// An 8-bit RGBA still (Blink's compatibility bitmap) as an `Rgba8Unorm`
-/// texture, or `None` when its pixels are not one 8-bit RGBA plane. The
-/// texture is for sampling (and copying out) only: it is not a working
-/// target of any precision (see [`MediaCache::image`]).
-fn rgba8_bitmap(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    still: &pm_media::image::StillImage,
-) -> Option<Target> {
-    let (w, h) = (still.frame.format.width, still.frame.format.height);
-    let rgba = still
-        .frame
-        .with_planes(|planes| {
-            let p = planes.first()?;
-            if planes.len() != 1 || p.desc.format != pm_media::frame::PlaneFormat::Rgba8 {
-                return None;
-            }
-            let mut out = Vec::with_capacity(w * h * 4);
-            for y in 0..h {
-                // SAFETY: the plane holds `height` rows of `stride` bytes,
-                // each with `width` RGBA8 texels.
-                out.extend_from_slice(unsafe {
-                    std::slice::from_raw_parts(p.ptr.add(y * p.stride), w * 4)
-                });
-            }
-            Some(out)
-        })
-        .ok()??;
-    let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
-    let target = Target::new(
-        device,
-        "pm still bitmap",
-        w,
-        h,
-        wgpu::TextureFormat::Rgba8Unorm,
-        wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::COPY_SRC,
-    );
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &target.texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &rgba,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(w * 4),
-            rows_per_image: Some(h),
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-    debug_assert!(
-        target.format() == wgpu::TextureFormat::Rgba8Unorm
-            && !target.texture.usage().intersects(
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::STORAGE_BINDING
-            ),
-        "the still bitmap is sample-only"
-    );
-    Some(target)
-}
-
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ImageKey {
     path: PathBuf,
@@ -1077,7 +960,6 @@ struct ImageKey {
     reading: String,
     /// Converted textures hold working values: linear light differs.
     linear: bool,
-    compat: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1182,15 +1064,11 @@ impl MediaCache {
     }
 
     /// The working texture of a still, read with the asset's Interpret
-    /// Footage overrides when it has any.
-    ///
-    /// A `compat` level 1 still in the Standard encoding comes back as
-    /// today's 8-bit bitmap ([`rgba8_bitmap`]): an `Rgba8Unorm` texture
-    /// whatever `precision`, usable only as a sampled texture or a copy
-    /// source (no `RENDER_ATTACHMENT` or `STORAGE_BINDING`). Every consumer
-    /// samples it; one that copies it into a working target or renders into
-    /// it must convert it first (the formats and usages differ and wgpu
-    /// rejects it).
+    /// Footage overrides when it has any: the native-depth samples
+    /// ([`pm_media::image::read`]) converted in float by the source pass
+    /// ([`still_reading`]), premultiplied, oriented as the file says, and
+    /// stored at the project's precision but never below half float for a
+    /// deep or HDR still. Every still consumer reads this one path.
     #[allow(clippy::too_many_arguments)]
     pub fn image(
         &mut self,
@@ -1202,7 +1080,6 @@ impl MediaCache {
         working: WorkingEncoding,
         precision: Precision,
         interpret: Option<&Interpretation>,
-        compat: bool,
     ) -> Result<Target, MediaFailure> {
         let (len, modified) = stamp(path)
             .ok_or_else(|| MediaFailure::Failed(format!("{} is offline", path.display())))?;
@@ -1213,7 +1090,6 @@ impl MediaCache {
             precision: precision as u8,
             reading: interpret.map(|i| format!("{i:?}")).unwrap_or_default(),
             linear: working == WorkingEncoding::LinearLight,
-            compat,
         };
         if let Some(t) = self.images.get(&key) {
             pm_perf::bump(pm_perf::Counter::MediaCacheHits);
@@ -1224,76 +1100,21 @@ impl MediaCache {
             ProbeIssue::Unsupported(f) => MediaFailure::Unsupported(f),
             ProbeIssue::Unreadable(m) => MediaFailure::Failed(m),
         };
-        match interpret {
-            Some(i) => probe_interpreted_image(path, i),
-            None => probe_still(path, still_reader(compat)),
-        }
-        .map_err(issue)?;
-        let mut still = image_source(path, &self.pool, compat && interpret.is_none())
-            .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
-        let mut bitmap = false;
-        if compat && interpret.is_none() && pm_media::image::avif_compat::applies(&still) {
-            still = pm_media::image::avif_compat::read(path, &still, &self.pool)
-                .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
-            bitmap = true;
-        } else if compat && interpret.is_none() && pm_media::image::compat::applies(&still) {
-            still = pm_media::image::compat::bitmap_at(path, &still, &self.pool)
-                .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
-            bitmap = true;
-        }
-        // Today's image layers sample Blink's 8-bit premultiplied bitmap as
-        // an RGBA8 texture (`texImage2D` with `UNPACK_PREMULTIPLY_ALPHA`).
-        // The GPU's bilinear filter weighs 8-bit texels differently from
-        // half float ones, so the compatibility bitmap is sampled as it is
-        // (in the display encoding; linear light converts it below).
-        if bitmap
-            && working == WorkingEncoding::Standard
-            && let Some(target) = rgba8_bitmap(device, queue, &still)
-        {
-            self.images.retain(|k, _| {
-                k.path != key.path || k.precision != key.precision || k.linear != key.linear
-            });
-            self.images.insert(key, target.clone());
-            self.recount();
-            return Ok(target);
-        }
-        // Empty interpretations retain the native file reading, including
-        // PNG's pure power curve. Resolve colour only after decoding that
-        // curve into linear samples. Compatibility bitmaps already applied
-        // their own transfer reading and must not be decoded again.
-        if !compat
-            && interpret.is_none_or(Interpretation::is_empty)
-            && still.format == pm_media::image::ImageFormat::Png
-            && let Some(gamma) = pm_media::image::png_gamma::imageio_gamma(path)
-                .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?
-        {
-            still = pm_media::image::png_gamma::gamma_to_linear(&still, gamma, &self.pool)
-                .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
-        }
-        let color = match interpret {
-            Some(i) => {
-                let read = interpreted_image_color(&still, i).map_err(issue)?;
-                if let Some(alpha) = read.colorsync {
-                    still =
-                        pm_media::image::imageio::convert_to_linear_srgb(&still, &self.pool, alpha)
-                            .map_err(|e| {
-                                MediaFailure::Failed(format!("{}: {e}", path.display()))
-                            })?;
-                }
-                read.color
+        let failed =
+            |e: pm_media::MediaError| MediaFailure::Failed(format!("{}: {e}", path.display()));
+        let none = Interpretation::default();
+        let interp = interpret.unwrap_or(&none);
+        probe_interpreted_image(path, interp).map_err(issue)?;
+        let mut still = pm_media::image::read(path, &self.pool).map_err(failed)?;
+        let read = interpreted_image_color(&still, interp).map_err(issue)?;
+        let deep = still.float || still.bit_depth > 8 || read.color.tone_map.is_some();
+        if let Some(alpha) = read.colorsync {
+            if still.frame.format.layout != pm_media::frame::Layout::Rgba {
+                still = packed(&still, &read.color, &self.pool).map_err(MediaFailure::Failed)?;
             }
-            None => {
-                if still.color.icc_class == Some(IccClass::Other) {
-                    still = pm_media::image::imageio::convert_to_linear_srgb(
-                        &still,
-                        &self.pool,
-                        still.color.alpha,
-                    )
-                    .map_err(|e| MediaFailure::Failed(format!("{}: {e}", path.display())))?;
-                }
-                image_color(&still).map_err(issue)?
-            }
-        };
+            still = pm_media::image::imageio::convert_to_linear_srgb(&still, &self.pool, alpha)
+                .map_err(failed)?;
+        }
         let importer = self.importer()?;
         let imported = importer
             .import(&still.frame)
@@ -1301,21 +1122,37 @@ impl MediaCache {
         let normalized = importer
             .normalize(queue, encoder, &imported)
             .map_err(|e| MediaFailure::Failed(e.to_string()))?;
-        let target = convert(
+        let format = video_storage(precision, if deep { 16 } else { 8 }, false);
+        let mut target = convert_format(
             device,
             queue,
             pipelines,
             encoder,
             &normalized,
-            &color,
+            &read.color,
             working,
             precision,
-            Factors { x: 1, y: 1 },
+            Factors::from_log2(
+                still.frame.format.log2_chroma_w,
+                still.frame.format.log2_chroma_h,
+            ),
             None,
+            format,
         );
         // The decoded pixels must outlive the commands reading them; the
         // imported textures hold the frame until wgpu releases them.
         drop(imported);
+        if !still.oriented {
+            let orient = self.orient.get_or_insert_with(|| Orient::new(device));
+            target = orient.run(
+                device,
+                queue,
+                encoder,
+                &target,
+                Geometry::exif(still.orientation),
+                format,
+            );
+        }
         // Older versions of the same file are dropped.
         // (Dropped, not destroyed: a frame being recorded may still use it.)
         self.images.retain(|k, _| {
@@ -1324,6 +1161,23 @@ impl MediaCache {
         self.images.insert(key, target.clone());
         self.recount();
         Ok(target)
+    }
+
+    /// Drops the converted texture of `path` at `precision` and `working`
+    /// without overrides (a consumer that keeps its own copy, as 3D maps do).
+    pub(crate) fn release_image(
+        &mut self,
+        path: &Path,
+        precision: Precision,
+        working: WorkingEncoding,
+    ) {
+        self.images.retain(|k, _| {
+            k.path != path
+                || k.precision != precision as u8
+                || k.linear != (working == WorkingEncoding::LinearLight)
+                || !k.reading.is_empty()
+        });
+        self.recount();
     }
 
     fn source(&mut self, path: &Path) -> Result<Arc<MediaSource>, MediaFailure> {
@@ -1694,7 +1548,14 @@ impl MediaCache {
             converted
         } else {
             let orient = self.orient.get_or_insert_with(|| Orient::new(device));
-            orient.run(device, queue, encoder, &converted, geometry, precision)
+            orient.run(
+                device,
+                queue,
+                encoder,
+                &converted,
+                geometry,
+                working_format(precision),
+            )
         };
         drop(imported);
         drop(held);

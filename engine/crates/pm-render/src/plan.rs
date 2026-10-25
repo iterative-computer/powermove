@@ -204,7 +204,6 @@ impl PartialEq for CompatDraw {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Source {
     Image {
-        level2: bool,
         asset: String,
         path: PathBuf,
         /// The asset's Interpret Footage overrides (section 9).
@@ -1411,7 +1410,6 @@ fn native_content_quad<'d>(
                 }
             } else {
                 Source::Image {
-                    level2: crate::sampling::is_level2(layer),
                     asset: asset_id,
                     path,
                     interpret,

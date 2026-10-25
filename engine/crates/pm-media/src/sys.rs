@@ -45,12 +45,3 @@ pub mod openexr {
 pub mod turbojpeg {
     include!(concat!(env!("OUT_DIR"), "/turbojpeg.rs"));
 }
-
-pub mod avif {
-    include!(concat!(env!("OUT_DIR"), "/avif.rs"));
-    pub use root::crabbyavif::*;
-}
-
-pub mod skcms {
-    include!(concat!(env!("OUT_DIR"), "/skcms.rs"));
-}

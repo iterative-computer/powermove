@@ -1,35 +1,28 @@
-//! The still-image classes this renderer draws (docs/engine/pm-render.md,
-//! "Image classes").
+//! The still-image classes this renderer draws (docs/engine/media.md,
+//! "Stills").
 //!
-//! Level 1 consumes Blink's 8-bit compatibility bitmap (pm-media/image/
-//! compat.rs): PNG16 quantization, skcms ICC conversion/clipping, and WebP
-//! premultiplication occur before filtering. AVIF uses Chromium 152's
-//! pinned CrabbyAvif/dav1d/libyuv conversion, followed by the measured
-//! Skia PQ/HLG/primaries transform. TIFF uses the shipped FFmpeg rendition;
-//! JPEG supports CMYK and preserves deep JPEG's incomplete black sampler.
-//! Native-depth source readers
-//! remain available to level 2 and Interpret Footage.
+//! Every still at every compat level is read once, at its native depth, by
+//! `pm_media::image::read` and converted in float by the source pass. The
+//! classes are those today's app draws: decoder structures, color
+//! descriptions and container transforms each compared with the app, so a
+//! project that imported a still keeps drawing it. Files today's importer
+//! rejects stay rejected ([`rejected`]); other readings outside the classes
+//! stay explicit.
 //!
-//! All 21 detailed still corpus cases pass the 2D/alpha classes. Header
-//! checks keep unmeasured color descriptions explicit; measured decoder
-//! failures preserve today's errors or incomplete texture as documented.
-//!
-//! Container transforms are drawn only as Chromium shows them, each
-//! compared in the app (`e2e/native-still-orientation-parity.spec.ts`):
-//! EXIF orientation the decoder applied from PNG `eXIf` before the image
-//! data, JPEG APP1 and TIFF tag 274; HEIF `irot`/`imir`/`clap` (ImageIO, as
-//! the `sips` rendition Chromium shows); AVIF `irot`/`imir`/`clap` as Blink
-//! interprets them (`avif_compat`); WebP EXIF, which Blink ignores (so does
-//! pm-media). Late PNG `eXIf` is ignored as Blink ignores it. A decoder
-//! disagreeing with a pre-image-data transform stays explicit.
+//! Container transforms are drawn as Chromium shows them, each compared in
+//! the app (`e2e/native-still-orientation-parity.spec.ts`): EXIF orientation
+//! the decoder applied from PNG `eXIf` before the image data, JPEG APP1 and
+//! TIFF tag 274; HEIF `irot`/`imir`/`clap` (ImageIO); AVIF `irot`/`imir` and
+//! an origin-anchored `clap` as Blink interprets them (`pm_media::image::
+//! avif`); WebP EXIF, which Blink ignores (so does pm-media). Late PNG
+//! `eXIf` is ignored as Blink ignores it. A decoder disagreeing with a
+//! pre-image-data transform stays explicit.
 
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use pm_media::image::icc::IccClass;
 use pm_media::image::{ImageFormat, StillImage};
-use pm_protocol::color::AlphaMode;
 
 use crate::capability::Feature;
 
@@ -39,21 +32,6 @@ fn unsupported(what: impl Into<String>) -> Result<(), Feature> {
 
 fn feature(what: impl Into<String>) -> Feature {
     Feature::Media(what.into())
-}
-
-/// The samples a still layer draws, which decide its header classes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StillReader {
-    /// Level 1: Chromium's compatibility bitmap (`pm_media::image::compat`,
-    /// `avif_compat`, and the FFmpeg TIFF rendition). Its header classes
-    /// cover every color description and structure compared with the app.
-    Chromium,
-    /// Level 2 layers and 3D material maps: the native-depth readers
-    /// (`pm_media::image::read`). These read neither PNG cICP/cHRM nor HDR
-    /// transfers, and ImageIO converts CMYK and other models to sRGB, so the
-    /// structures and color descriptions measured only for Chromium's
-    /// bitmap stay explicit here.
-    Native,
 }
 
 /// Embedded metadata (EXIF payloads) read whole is bounded; larger
@@ -82,120 +60,126 @@ impl Header {
 
 /// Whether the drawn still shows the container's transform as Chromium
 /// shows it (module notes).
-fn transform_matches(still: &StillImage, header: &Header, compat: bool) -> bool {
-    compat
-        && match still.format {
-            ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Tiff => {
-                header.exif == Some(u16::from(still.orientation))
-            }
-            ImageFormat::WebP => still.orientation == 1,
-            ImageFormat::Heif => true,
-            _ => false,
+fn transform_matches(still: &StillImage, header: &Header) -> bool {
+    match still.format {
+        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Tiff => {
+            header.exif == Some(u16::from(still.orientation))
         }
+        ImageFormat::WebP => still.orientation == 1,
+        ImageFormat::Heif => true,
+        _ => false,
+    }
 }
 
-/// Whether a decoded still is in a tested class for `reader`. An AVIF
-/// Chromium's decoder cannot parse is not a class:
-/// [`crate::media::probe_image`] reports it as an unreadable source before
-/// calling this.
-pub fn check(path: &Path, still: &StillImage, reader: StillReader) -> Result<(), Feature> {
-    let chromium = reader == StillReader::Chromium;
-    if still.float && !pm_media::image::compat::applies(still) {
-        return unsupported("floating-point stills");
-    }
-    // Compatibility classes consume the decoder-applied orientation (the
-    // container check below decides whether it is Chromium's).
-    let compat =
-        pm_media::image::compat::applies(still) || pm_media::image::avif_compat::applies(still);
-    if still.orientation != 1 && !compat {
-        return unsupported(orientation_message(&format!(
-            "EXIF orientation {}",
-            still.orientation
-        )));
-    }
-    let icc = still.color.icc_class;
-    if icc == Some(IccClass::DisplayP3) && !compat {
-        return unsupported(
-            "Display P3 stills (out-of-gamut handling differs from the legacy renderer)",
-        );
-    }
+/// Whether a decoded still is in a drawn class.
+pub fn check(path: &Path, still: &StillImage) -> Result<(), Feature> {
     match still.format {
-        ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP => {}
+        ImageFormat::Png
+        | ImageFormat::Jpeg
+        | ImageFormat::WebP
+        | ImageFormat::Tiff
+        | ImageFormat::Bmp
+        | ImageFormat::Ico
+        | ImageFormat::Gif => {}
         ImageFormat::Heif => {
             // ImageIO supplies oriented integer RGBA with its ICC profile
-            // and alpha reading intact. Both native conversion and the
-            // compatibility bitmap support these samples; a browser PNG
-            // rendition is not required to make them drawable.
+            // and alpha reading intact.
             if !matches!(still.bit_depth, 8 | 16) {
                 return unsupported("HEIF stills outside the integer 8/16-bit decoder layouts");
             }
         }
-        ImageFormat::Tiff => {
-            if still.bit_depth != 8 && !compat {
-                return unsupported("TIFF stills deeper than 8 bits");
-            }
-            if still.color.alpha != AlphaMode::Opaque && !compat {
-                return unsupported("TIFF stills with alpha");
-            }
-            // ICC is preserved by the native reader and converted by skcms
-            // in the level-1 bitmap, as in the shipped PNG rendition.
-            if icc.is_some() && !compat {
-                return unsupported(
-                    "TIFF stills with an ICC profile (not compared with the legacy renderer)",
-                );
-            }
-        }
-        ImageFormat::Avif if pm_media::image::avif_compat::applies(still) => {
-            // Container transforms follow Blink in `avif_compat`.
-            let unmeasured = if chromium {
-                pm_media::image::avif_compat::unmeasured(path)
-            } else {
-                pm_media::image::avif_compat::unmeasured_sdr(path)
-            };
-            return match unmeasured {
-                Ok(None) => Ok(()),
-                Ok(Some(what)) => {
-                    unsupported(format!("{what} (not compared with the legacy renderer)"))
-                }
-                // Reported unreadable by `probe_image`.
-                Err(_) => Ok(()),
-            };
-        }
-        ImageFormat::Avif => {
-            return unsupported("AVIF stills outside the tested SDR classes");
-        }
-        ImageFormat::Bmp | ImageFormat::Ico | ImageFormat::Gif => return Ok(()),
+        // Container transforms are applied in the reader, as Blink does.
+        ImageFormat::Avif => return avif(still),
         ImageFormat::Exr => return unsupported("OpenEXR stills"),
         ImageFormat::Dpx => return unsupported("DPX stills"),
         ImageFormat::Svg => return unsupported("SVG stills"),
         ImageFormat::Other => return unsupported("stills of an unrecognized format"),
     }
     let file = File::open(path).map_err(|e| feature(format!("{}: {e}", path.display())))?;
-    let header = if still.format == ImageFormat::Tiff && compat {
-        tiff(&mut BufReader::new(file), true, reader)
-            .map_err(|e| feature(format!("malformed TIFF headers ({e})")))??
-    } else if still.format == ImageFormat::Png && compat {
-        let cicp = match still.color.icc_class {
-            Some(IccClass::DisplayP3) => Some([12, 13, 0, 1]),
-            Some(IccClass::Srgb) => Some([1, 13, 0, 1]),
-            _ => None,
-        };
-        png(&mut BufReader::new(file), cicp, reader)
-            .map_err(|e| feature(format!("malformed PNG headers ({e})")))??
-    } else {
-        parse(&mut BufReader::new(file), still.format, reader)?
-    };
+    let header = parse(&mut BufReader::new(file), still.format)?;
     if let Some(t) = &header.transform
-        && !transform_matches(still, &header, compat)
+        && !transform_matches(still, &header)
     {
         return unsupported(orientation_message(t));
     }
-    match still.format {
-        ImageFormat::Png if still.bit_depth != 8 && !compat => unsupported("16-bit PNG stills"),
-        ImageFormat::WebP if still.color.alpha != AlphaMode::Opaque && !compat => {
-            unsupported("WebP stills with alpha")
+    Ok(())
+}
+
+/// AVIF: 8, 10 and 12-bit Y′CbCr, monochrome or GBR, with an RGB (or, for
+/// monochrome, gray) ICC profile, or the H.273 descriptions compared with
+/// the app (`pm_media::interpret::still_cicp`: primaries BT.709,
+/// unspecified, BT.2020, P3; the sRGB/BT.709 transfers, PQ, HLG).
+fn avif(still: &StillImage) -> Result<(), Feature> {
+    if !matches!(still.bit_depth, 8 | 10 | 12) {
+        return unsupported(format!("{}-bit AVIF stills", still.bit_depth));
+    }
+    let cicp = still.color.cicp.unwrap_or([1, 13, 6, 1]);
+    if let Some(icc) = &still.color.icc {
+        let gray = still.frame.format.label.contains("yuv400");
+        match icc.get(16..20) {
+            Some(b"RGB ") => {}
+            Some(b"GRAY") if gray => {}
+            _ => {
+                return unsupported("AVIF stills whose ICC color model does not match their planes");
+            }
         }
-        _ => Ok(()),
+        // The profile replaces primaries and transfer; the matrix stays.
+        return match pm_media::interpret::still_cicp([1, 13, cicp[2], cicp[3]]) {
+            Some(_) => Ok(()),
+            None => unsupported(format!("AVIF stills with matrix coefficients {}", cicp[2])),
+        };
+    }
+    match pm_media::interpret::still_cicp(cicp) {
+        Some(_) => Ok(()),
+        None => unsupported(format!(
+            "AVIF stills with color primaries {}, transfer {} and matrix {}",
+            cicp[0], cicp[1], cicp[2]
+        )),
+    }
+}
+
+/// Files today's importer rejects stay rejected (as unreadable media): the
+/// TIFF layouts its FFmpeg conversion does not decode, whatever the native
+/// readers could read (docs/engine/media.md, "Rejected imports").
+pub fn rejected(path: &Path) -> Result<(), String> {
+    let mut file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut head = [0; 16];
+    let n = file
+        .read(&mut head)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if pm_media::image::sniff(&head[..n]) != ImageFormat::Tiff {
+        return Ok(());
+    }
+    file.rewind().map_err(|e| e.to_string())?;
+    // A malformed first IFD is left to the decoder to report.
+    let Ok(entries) = ifd0(&mut BufReader::new(file)) else {
+        return Ok(());
+    };
+    let scalar = |tag, default| ifd_scalar(&entries, tag, default).ok();
+    let per_sample = |tag, default| ifd_per_sample(&entries, tag, default).ok();
+    let photometric = scalar(262, 2);
+    let float = per_sample(339, 1) == Some(3);
+    let bits = per_sample(258, 1);
+    let samples = scalar(277, 1).unwrap_or(1);
+    let why = if matches!(photometric, Some(8..=10)) {
+        Some("CIELab")
+    } else if float && bits == Some(64) {
+        Some("64-bit floating-point")
+    } else if float && matches!(photometric, Some(0 | 1)) {
+        Some("gray floating-point")
+    } else if float && bits == Some(32) && samples == 4 && scalar(317, 1) == Some(3) {
+        Some("RGBA float32 floating-point-predictor")
+    } else if scalar(259, 1) == Some(7) && bits == Some(12) {
+        Some("12-bit JPEG-compressed")
+    } else {
+        None
+    };
+    match why {
+        Some(w) => Err(format!(
+            "{}: {w} TIFF is not an importable still",
+            path.display()
+        )),
+        None => Ok(()),
     }
 }
 
@@ -238,43 +222,16 @@ pub fn container_transform(path: &Path, format: ImageFormat) -> Result<Option<St
         return Err(feature(format!("no header parse for {format:?} stills")));
     }
     let file = File::open(path).map_err(|e| feature(format!("{}: {e}", path.display())))?;
-    Ok(parse(&mut BufReader::new(file), format, StillReader::Native)?.transform)
+    Ok(parse(&mut BufReader::new(file), format)?.transform)
 }
 
 fn orientation_message(what: &str) -> String {
     format!("oriented stills ({what}; not compared with the legacy renderer)")
 }
 
-/// Native interpretations bypass the legacy still-class checks, but must
-/// retain HEIF's container transfer guard: ImageIO labels its decoded
-/// integer samples DisplayE even when nclx requests PQ or HLG. Other still
-/// formats keep their existing interpreted readers and colour resolution.
-pub(crate) fn check_native_source_header(path: &Path) -> Result<(), Feature> {
-    let mut file = File::open(path).map_err(|e| feature(format!("{}: {e}", path.display())))?;
-    let mut head = [0; 512];
-    let n = file
-        .read(&mut head)
-        .map_err(|e| feature(format!("{}: {e}", path.display())))?;
-    if pm_media::image::sniff(&head[..n]) != ImageFormat::Heif {
-        return Ok(());
-    }
-    file.rewind()
-        .map_err(|e| feature(format!("{}: {e}", path.display())))?;
-    parse(
-        &mut BufReader::new(file),
-        ImageFormat::Heif,
-        StillReader::Native,
-    )
-    .map(|_| ())
-}
-
 /// Parses the container header of a format [`check`] draws. Reads only
 /// headers and metadata, seeking past image data.
-fn parse<R: Read + Seek>(
-    r: &mut R,
-    format: ImageFormat,
-    reader: StillReader,
-) -> Result<Header, Feature> {
+fn parse<R: Read + Seek>(r: &mut R, format: ImageFormat) -> Result<Header, Feature> {
     let name = match format {
         ImageFormat::Png => "PNG",
         ImageFormat::Jpeg => "JPEG",
@@ -283,11 +240,12 @@ fn parse<R: Read + Seek>(
         _ => "HEIF",
     };
     let parsed = match format {
-        ImageFormat::Png => png(r, None, reader),
-        ImageFormat::Jpeg => jpeg(r, reader),
+        ImageFormat::Png => png(r),
+        ImageFormat::Jpeg => jpeg(r),
         ImageFormat::WebP => webp(r),
-        ImageFormat::Tiff => tiff(r, false, reader),
-        _ => heif(r),
+        ImageFormat::Tiff => tiff(r),
+        ImageFormat::Heif => heif(r),
+        _ => return Ok(Header::default()),
     };
     match parsed {
         Ok(h) => h,
@@ -441,34 +399,18 @@ fn exif_orientation(payload: &[u8]) -> io::Result<Option<u16>> {
     ifd0_orientation(&ifd0(&mut io::Cursor::new(tiff))?)
 }
 
-/// PNG at all legal integer depths.
-///
-/// For Chromium's bitmap ([`StillReader::Chromium`]): gAMA-only
-/// conversion, cHRM/gAMA, and cICP that matches the ICC profile or is a
-/// full-range RGB pair of primaries {1, 9, 12} and transfer {13, 16, 18},
-/// every pair compared with the app at 8 and 16 bits, opaque and with alpha
-/// (media.md, "Level 1 HDR and chromaticity stills"); mDCv/cLLi do not
-/// change Chromium's bitmap.
-///
-/// For the native readers ([`StillReader::Native`]), which read neither
-/// cICP nor cHRM nor HDR metadata: gAMA-only conversion and cICP equal to
-/// the ICC profile's; other cICP, HDR metadata, and cHRM without sRGB or
-/// iCCP stay explicit.
-///
-/// Like Blink, eXIf is read only before IDAT.
-fn png<R: Read + Seek>(
-    r: &mut R,
-    equivalent_cicp: Option<[u8; 4]>,
-    reader: StillReader,
-) -> io::Result<Result<Header, Feature>> {
+/// PNG at all legal integer depths: `gAMA`, `cHRM`, `iCCP`, `sRGB`, HDR
+/// metadata, and a `cICP` of full-range RGB with primaries BT.709, BT.2020
+/// or P3-D65 and the sRGB, PQ or HLG transfer, every pair compared with the
+/// app at 8 and 16 bits, opaque and with alpha (media.md). Like Blink, eXIf
+/// is read only before IDAT.
+fn png<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     if &array::<8, _>(r)? != b"\x89PNG\r\n\x1a\n" {
         return Err(malformed("no PNG signature"));
     }
-    let chromium = reader == StillReader::Chromium;
     let mut header = Header::default();
     let mut depth = 0u8;
     let mut before_idat = true;
-    let (mut srgb, mut iccp, mut chrm) = (false, false, false);
     while let Some(head) = array_or_eof::<8, _>(r)? {
         let len = u32::from_be_bytes(head[..4].try_into().unwrap()) as u64;
         let ty: [u8; 4] = head[4..].try_into().unwrap();
@@ -478,28 +420,22 @@ fn png<R: Read + Seek>(
                 depth = array::<13, _>(r)?[8];
                 body_read = 13;
             }
-            b"sRGB" => srgb |= before_idat,
-            b"iCCP" => iccp |= before_idat,
-            b"cHRM" => chrm |= before_idat,
-            b"cICP" if len == 4 && chromium && before_idat => {
+            b"cICP" if len == 4 && before_idat => {
                 let tag = array::<4, _>(r)?;
                 body_read = 4;
-                if Some(tag) != equivalent_cicp && !chromium_png_cicp(tag) {
-                    return Ok(unsupported("PNG CICP differs from its ICC profile").map(|_| header));
+                if !(matches!(tag[0], 1 | 9 | 12)
+                    && matches!(tag[1], 13 | 16 | 18)
+                    && tag[2..] == [0, 1])
+                {
+                    return Ok(unsupported(format!(
+                        "PNG stills with CICP {}/{}/{}/{}",
+                        tag[0], tag[1], tag[2], tag[3]
+                    ))
+                    .map(|_| header));
                 }
             }
-            b"cICP" if chromium && before_idat => {
-                return Ok(unsupported("PNG stills with CICP or HDR metadata").map(|_| header));
-            }
-            b"cICP" if len == 4 && !chromium && equivalent_cicp.is_some() => {
-                let tag = array::<4, _>(r)?;
-                body_read = 4;
-                if Some(tag) != equivalent_cicp {
-                    return Ok(unsupported("PNG CICP differs from its ICC profile").map(|_| header));
-                }
-            }
-            b"cICP" | b"mDCv" | b"cLLi" | b"mDCV" | b"cLLI" if !chromium => {
-                return Ok(unsupported("PNG stills with CICP or HDR metadata").map(|_| header));
+            b"cICP" if before_idat => {
+                return Ok(unsupported("PNG stills with a malformed cICP chunk").map(|_| header));
             }
             b"eXIf" if before_idat => {
                 header.exif(exif_orientation(&read_vec(r, len)?)?);
@@ -514,30 +450,13 @@ fn png<R: Read + Seek>(
     if !matches!(depth, 1 | 2 | 4 | 8 | 16) {
         return Ok(unsupported(format!("{depth}-bit PNG stills")).map(|_| header));
     }
-    if !chromium && chrm && !srgb && !iccp {
-        return Ok(
-            unsupported("PNG stills with independent chromaticity chunks (cHRM)").map(|_| header),
-        );
-    }
     Ok(Ok(header))
 }
 
-/// The PNG cICP tags Chromium's bitmap draws without an equivalent ICC
-/// profile: full-range RGB with primaries BT.709, BT.2020 or P3-D65 and the
-/// sRGB, PQ or HLG transfer, each pair compared with the app
-/// (`pm_media::image::compat`, `PngColor::Cicp`).
-fn chromium_png_cicp(tag: [u8; 4]) -> bool {
-    matches!(tag[0], 1 | 9 | 12) && matches!(tag[1], 13 | 16 | 18) && tag[2..] == [0, 1]
-}
-
-/// JPEG: Huffman baseline/progressive with gray/RGB/Y'CbCr and APP1 EXIF.
-/// For Chromium's bitmap also extended sequential, lossless and arithmetic
-/// DCT (whose deep ImageBitmap uploads keep Chromium's opaque-black
-/// incomplete sampler) and CMYK/YCCK. The native readers keep those
-/// explicit: ImageIO converts CMYK to sRGB, and deep JPEG has no level 2
-/// comparison.
-fn jpeg<R: Read + Seek>(r: &mut R, reader: StillReader) -> io::Result<Result<Header, Feature>> {
-    let chromium = reader == StillReader::Chromium;
+/// JPEG: baseline, extended sequential, progressive and lossless, Huffman
+/// or arithmetic, 2 to 16 bits, gray/RGB/Y'CbCr/CMYK/YCCK, with APP1 EXIF.
+/// All decode at their sample precision.
+fn jpeg<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     if array::<2, _>(r)? != [0xFF, 0xD8] {
         return Err(malformed("no start of image"));
     }
@@ -562,13 +481,6 @@ fn jpeg<R: Read + Seek>(r: &mut R, reader: StillReader) -> io::Result<Result<Hea
         }
         let body_len = len - 2;
         match marker {
-            // The native readers draw only baseline and progressive Huffman.
-            0xC1 | 0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF if !chromium => {
-                return Ok(
-                    unsupported("JPEG stills other than baseline or progressive Huffman")
-                        .map(|_| header),
-                );
-            }
             // The Adobe APP14 transform and component ids are decoder facts
             // libjpeg-turbo applies as Chromium does; only EXIF and the
             // frame header decide the class.
@@ -589,16 +501,15 @@ fn jpeg<R: Read + Seek>(r: &mut R, reader: StillReader) -> io::Result<Result<Hea
         }
     }
     let sof = sof.ok_or_else(|| malformed("no frame header"))?;
-    Ok(jpeg_frame(&sof, reader).map(|_| header))
+    Ok(jpeg_frame(&sof).map(|_| header))
 }
 
 /// The component/sample class of a JPEG frame header.
-fn jpeg_frame(sof: &[u8], reader: StillReader) -> Result<(), Feature> {
-    let chromium = reader == StillReader::Chromium;
+fn jpeg_frame(sof: &[u8]) -> Result<(), Feature> {
     if sof.len() < 6 {
         return unsupported("malformed JPEG headers");
     }
-    if !(chromium && (2..=16).contains(&sof[0]) || sof[0] == 8) {
+    if !(2..=16).contains(&sof[0]) {
         return unsupported(format!("{}-bit JPEG stills", sof[0]));
     }
     let n = sof[5] as usize;
@@ -609,11 +520,10 @@ fn jpeg_frame(sof: &[u8], reader: StillReader) -> Result<(), Feature> {
     match n {
         // libjpeg-turbo performs both RGB and Y'CbCr conversion as in
         // Chromium; component ids and Adobe transform are decoder facts.
-        1 | 3 => Ok(()),
-        // CMYK/YCCK: Chromium's integer conversion (`pm_media::image::jpeg`).
-        4 if chromium => Ok(()),
-        _ if chromium => unsupported("JPEG stills with neither 1, 3 nor 4 components"),
-        _ => unsupported("CMYK and other JPEG stills with neither 1 nor 3 components"),
+        // CMYK/YCCK: through a CMYK profile, else device CMYK
+        // (`pm_media::image::jpeg`).
+        1 | 3 | 4 => Ok(()),
+        _ => unsupported("JPEG stills with neither 1, 3 nor 4 components"),
     }
 }
 
@@ -645,137 +555,14 @@ fn webp<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     Ok(Ok(header))
 }
 
-/// TIFF, first IFD (the image FFmpeg converts for the legacy renderer and
-/// pm-media decodes).
-///
-/// Chromium's bitmap ([`StillReader::Chromium`] with `allow_icc`) reads the
-/// shipped FFmpeg PNG rendition (`pm_media::image::compat_tiff`), which
-/// decodes tiles, planar layouts, Y'CbCr/JPEG, CMYK and the float layouts
-/// as the app does; files the app rejects are named media errors before
-/// this check, so only the orientation tag (274) remains.
-///
-/// The native readers keep the structures compared with the legacy
-/// renderer (`render/still-photo-tiff` and the app compositions in
-/// `media.md`): strips (not tiles), fill order 1, no predictor other than
-/// horizontal differencing, compressed without loss by a scheme whose
-/// decode was shown identical to the uncompressed file (`tests/stills.rs`,
-/// `tiff_compressions_decode_alike`): none, LZW, Deflate (8 and 32946),
-/// PackBits. Without the compatibility bitmap's classes (`allow_icc`
-/// false) only chunky 8-bit RGB without an ICC profile is in the class.
-/// With them: RGB or RGBA in 8 or 16-bit unsigned integers or
-/// uncompressed/Deflate float32 samples, gray or gray-alpha in 8 or 16
-/// bits, 8-bit palettes, and an ICC profile (tag 34675). Colorimetry tags
-/// (TransferFunction, WhitePoint, PrimaryChromaticities), CMYK, Y'CbCr and
-/// planar layouts were not compared for the native readers. Depth and alpha
-/// are also decided from the decoded still; the orientation tag other than
-/// 1 is a transform.
-fn tiff<R: Read + Seek>(
-    r: &mut R,
-    allow_icc: bool,
-    reader: StillReader,
-) -> io::Result<Result<Header, Feature>> {
+/// TIFF, first IFD: its orientation (tag 274). Every structure today's app
+/// imports is drawn by the native readers; [`rejected`] keeps the others
+/// rejected.
+fn tiff<R: Read + Seek>(r: &mut R) -> io::Result<Result<Header, Feature>> {
     let entries = ifd0(r)?;
     let mut header = Header::default();
     header.exif(ifd0_orientation(&entries)?);
-    if allow_icc && reader == StillReader::Chromium {
-        return Ok(Ok(header));
-    }
-    // A tag of the image structure: present and scalar, or absent (the
-    // TIFF default); several values (or another type) is outside the class.
-    let scalar = |tag: u16, default: u32| ifd_scalar(&entries, tag, default);
-    let class = (|| -> Result<(), String> {
-        if ifd_entry(&entries, 34675).is_some() && !allow_icc {
-            return Err(
-                "TIFF stills with an ICC profile (not compared with the legacy renderer)".into(),
-            );
-        }
-        if let Some(e) = [301, 318, 319]
-            .into_iter()
-            .find_map(|t| ifd_entry(&entries, t))
-        {
-            return Err(format!(
-                "TIFF stills with colorimetry tags (tag {}; not compared with the legacy renderer)",
-                e.tag
-            ));
-        }
-        let compression = scalar(259, 1).map_err(|_| "TIFF compression tag".to_string())?;
-        if !matches!(compression, 1 | 5 | 8 | 32946 | 32773) {
-            return Err(format!("TIFF stills with compression {compression}"));
-        }
-        // RGB, gray and 8-bit palette indices were compared through the
-        // app. CMYK and Y'CbCr remain separate unmeasured classes.
-        let photometric = scalar(262, u32::MAX).map_err(|_| "TIFF photometric tag".to_string())?;
-        if photometric != 2 && !(allow_icc && matches!(photometric, 0 | 1 | 3)) {
-            return Err(format!(
-                "TIFF stills with photometric interpretation {}",
-                if photometric == u32::MAX {
-                    "missing".to_string()
-                } else {
-                    photometric.to_string()
-                }
-            ));
-        }
-        let samples = scalar(277, 1);
-        let bits = ifd_per_sample(&entries, 258, 1);
-        if photometric == 3 {
-            if samples != Ok(1) || bits != Ok(8) {
-                return Err("TIFF palettes outside the tested 8-bit index class".into());
-            }
-        } else if matches!(photometric, 0 | 1) {
-            if !matches!(samples, Ok(1 | 2)) || !matches!(bits, Ok(8 | 16)) {
-                return Err("gray TIFF outside unsigned 8/16-bit gray/alpha samples".into());
-            }
-        } else {
-            if !(samples == Ok(3) || (allow_icc && samples == Ok(4))) {
-                return Err("TIFF stills with other than three samples per pixel".into());
-            }
-            if !(bits == Ok(8)
-                || (allow_icc && bits == Ok(16))
-                || (allow_icc
-                    && bits == Ok(32)
-                    && matches!(compression, 1 | 8)
-                    && ifd_per_sample(&entries, 339, 1) == Ok(3)))
-            {
-                return Err("TIFF stills with other than 8 bits in every sample".into());
-            }
-        }
-        if !(ifd_per_sample(&entries, 339, 1) == Ok(1)
-            || (allow_icc
-                && photometric == 2
-                && bits == Ok(32)
-                && matches!(compression, 1 | 8)
-                && ifd_per_sample(&entries, 339, 1) == Ok(3)))
-        {
-            return Err(
-                "TIFF stills outside unsigned integer or measured RGB float32 samples".into(),
-            );
-        }
-        if scalar(284, 1) != Ok(1) {
-            return Err("planar TIFF stills".into());
-        }
-        if scalar(266, 1) != Ok(1) {
-            return Err("TIFF stills with fill order other than 1".into());
-        }
-        if [322, 323, 324, 325]
-            .into_iter()
-            .any(|t| ifd_entry(&entries, t).is_some())
-        {
-            return Err("tiled TIFF stills".into());
-        }
-        let predictor = scalar(317, 1).map_err(|_| "TIFF predictor tag".to_string())?;
-        if !matches!(predictor, 1 | 2) {
-            return Err(format!("TIFF stills with predictor {predictor}"));
-        }
-        Ok(())
-    })();
-    if allow_icc {
-        return Ok(class.map(|()| header).map_err(feature));
-    }
-    // Preserve the old header-only orientation diagnostic.
-    Ok(match class {
-        Err(what) if header.transform.is_none() => Err(feature(what)),
-        _ => Ok(header),
-    })
+    Ok(Ok(header))
 }
 
 /// HEIF: the item property boxes that transform the image (`irot`,
@@ -875,12 +662,7 @@ mod tests {
     use super::*;
 
     fn run(format: ImageFormat, bytes: &[u8]) -> Result<Header, Feature> {
-        parse(&mut io::Cursor::new(bytes), format, StillReader::Chromium)
-    }
-
-    /// The classes of the native-depth readers (level 2 and 3D maps).
-    fn native(format: ImageFormat, bytes: &[u8]) -> Result<Header, Feature> {
-        parse(&mut io::Cursor::new(bytes), format, StillReader::Native)
+        parse(&mut io::Cursor::new(bytes), format)
     }
 
     fn transform(format: ImageFormat, bytes: &[u8]) -> Option<String> {
@@ -987,12 +769,11 @@ mod tests {
         let late = png_with_bodies(8, &[(b"cHRM", &[0; 32])], &[(b"sRGB", &[0])]);
         assert!(png(late.clone()).is_ok());
         assert!(png(b"\x89PNG\r\n\x1a".to_vec()).is_err());
-        // Chromium's bitmap: the 3 × 3 compared CICP pairs, full range RGB.
+        // The 3 × 3 compared CICP pairs, full range RGB.
         let cicp = |tag: [u8; 4]| png_with_bodies(16, &[(b"cICP", &tag)], &[]);
         for p in [1, 9, 12] {
             for t in [13, 16, 18] {
                 assert!(png(cicp([p, t, 0, 1])).is_ok(), "{p}/{t}");
-                assert!(native(ImageFormat::Png, &cicp([p, t, 0, 1])).is_err());
             }
         }
         for tag in [
@@ -1004,28 +785,10 @@ mod tests {
         ] {
             assert!(png(cicp(tag)).is_err(), "{tag:?}");
         }
-        // The native readers read neither cICP nor cHRM nor HDR metadata.
-        let native_png = |b: Vec<u8>| native(ImageFormat::Png, &b);
-        assert!(native_png(png_with(8, &[b"gAMA"])).is_ok());
-        assert!(native_png(png_with(16, &[])).is_ok());
-        assert!(native_png(png_with(8, &[b"sRGB", b"gAMA", b"cHRM"])).is_ok());
-        assert!(native_png(png_with(8, &[b"iCCP", b"gAMA", b"cHRM"])).is_ok());
-        for chunks in [
-            &[b"cHRM", b"gAMA"][..],
-            &[b"cHRM"],
-            &[b"cICP"],
-            &[b"mDCv"],
-            &[b"cLLi"],
-            &[b"mDCV"],
-            &[b"cLLI"],
-        ] {
-            let e = native_png(png_with(16, chunks)).unwrap_err();
-            assert!(
-                e.to_string().contains("chromaticity") || e.to_string().contains("CICP"),
-                "{e}"
-            );
+        for chunks in [&[b"cHRM", b"gAMA"][..], &[b"cHRM"], &[b"mDCV"], &[b"cLLI"]] {
+            assert!(png(png_with(16, chunks)).is_ok());
         }
-        assert!(native_png(late).is_err());
+        assert!(png(late).is_ok());
     }
 
     #[test]
@@ -1132,22 +895,6 @@ mod tests {
         for sof in [0xC5, 0xC6, 0xC7, 0xCB, 0xCD, 0xCE, 0xCF] {
             assert!(jpeg(jpeg_with(sof, 8, &gray, None)).is_err(), "{sof:x}");
         }
-        // The native readers: baseline/progressive 8-bit gray/RGB/Y'CbCr.
-        let native_jpeg = |b: Vec<u8>| native(ImageFormat::Jpeg, &b);
-        assert!(native_jpeg(jpeg_with(0xC0, 8, &ycc(0x22), None)).is_ok());
-        assert!(native_jpeg(jpeg_with(0xC2, 8, &gray, None)).is_ok());
-        assert!(native_jpeg(jpeg_with(0xC0, 8, &rgb, None)).is_ok());
-        for (sof, bits, comps, what) in [
-            (0xC1, 12, &gray[..], "baseline"),
-            (0xC0, 12, &gray[..], "12-bit"),
-            (0xC9, 8, &gray[..], "baseline"),
-            (0xCA, 8, &gray[..], "baseline"),
-            (0xC3, 8, &gray[..], "baseline"),
-            (0xC0, 8, &cmyk[..], "CMYK"),
-        ] {
-            let e = native_jpeg(jpeg_with(sof, bits, comps, Some(2))).unwrap_err();
-            assert!(e.to_string().contains(what), "{sof:x}: {e}");
-        }
     }
 
     #[test]
@@ -1227,158 +974,51 @@ mod tests {
         assert!(run(ImageFormat::Tiff, b"II+\0\x08\0\0\0").is_err());
     }
 
+    /// The TIFF layouts today's importer rejects, and nothing else.
     #[test]
-    fn tiff_classes() {
-        let tiff = |extra: &[(u16, u16, u32)]| run(ImageFormat::Tiff, &rgb_tiff(true, extra));
-        for c in [1, 5, 8, 32946, 32773] {
-            assert!(tiff(&[(259, 3, c)]).is_ok(), "compression {c}");
-        }
-        for c in [2, 3, 4, 6, 7, 34712] {
-            let e = tiff(&[(259, 3, c)]).unwrap_err();
-            assert!(e.to_string().contains("compression"), "{c}: {e}");
-        }
-        assert!(tiff(&[(317, 3, 2)]).is_ok());
-        assert!(tiff(&[(317, 3, 3)]).is_err(), "floating-point predictor");
-        assert!(tiff(&[(284, 3, 1)]).is_ok());
-        assert!(tiff(&[(284, 3, 2)]).is_err(), "planar");
-        // Photometric: only RGB; a missing tag is outside the class.
-        for (photometric, name) in [
-            (0, "white"),
-            (1, "black"),
-            (3, "palette"),
-            (5, "CMYK"),
-            (6, "Y'CbCr"),
-        ] {
-            let b = tiff_ifd(true, &[(262, 3, photometric), (277, 3, 3)]);
-            let e = run(ImageFormat::Tiff, &b).unwrap_err();
-            assert!(e.to_string().contains("photometric"), "{name}: {e}");
-        }
-        let missing = tiff_ifd(true, &[(277, 3, 3)]);
-        assert!(
-            run(ImageFormat::Tiff, &missing)
-                .unwrap_err()
-                .to_string()
-                .contains("missing")
-        );
-        // Samples per pixel: three only (an extra sample is not alpha the
-        // decoders agree on).
-        let four = tiff_ifd(true, &[(262, 3, 2), (277, 3, 4), (338, 3, 0)]);
-        assert!(run(ImageFormat::Tiff, &four).is_err());
-        let one = tiff_ifd(true, &[(262, 3, 2)]);
-        assert!(
-            run(ImageFormat::Tiff, &one).is_err(),
-            "SamplesPerPixel defaults to 1"
-        );
-        // The structure FFmpeg and ImageIO write: per-sample arrays stored
-        // after the IFD, in either byte order.
-        for le in [true, false] {
-            let b = tiff_ifd_values(
-                le,
-                &[
-                    (256, 3, vec![4]),
-                    (258, 3, vec![8, 8, 8]),
-                    (259, 3, vec![5]),
-                    (262, 3, vec![2]),
-                    (266, 3, vec![1]),
-                    (277, 3, vec![3]),
-                    (284, 3, vec![1]),
-                    (317, 3, vec![2]),
-                    (339, 3, vec![1, 1, 1]),
-                ],
-            );
-            assert!(run(ImageFormat::Tiff, &b).is_ok(), "{le}");
-        }
-        let arrays = |extra: (u16, u16, Vec<u32>)| {
-            let mut e = vec![(256, 3, vec![4]), (262, 3, vec![2]), (277, 3, vec![3])];
-            if extra.0 != 258 {
-                e.push((258, 3, vec![8, 8, 8]));
-            }
-            e.push(extra);
-            e.sort_by_key(|t| t.0);
-            run(ImageFormat::Tiff, &tiff_ifd_values(true, &e))
-        };
-        for (entry, want) in [
-            ((258, 3, vec![16, 16, 16]), "8 bits"),
-            ((258, 3, vec![8, 8, 4]), "8 bits"),
-            (
-                (
-                    258,
-                    4,
-                    vec![8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8],
-                ),
-                "8 bits",
-            ),
-            ((339, 3, vec![3, 3, 3]), "unsigned"),
-            ((339, 3, vec![2, 2, 2]), "unsigned"),
-            ((339, 3, vec![1, 1, 3]), "unsigned"),
-            ((266, 3, vec![2]), "fill order"),
-            ((322, 3, vec![16]), "tiled"),
-            ((323, 4, vec![16]), "tiled"),
-            ((324, 4, vec![8, 8]), "tiled"),
-            ((34675, 7, vec![0]), "ICC profile"),
-            ((301, 3, vec![0; 3]), "colorimetry"),
-            ((318, 5, vec![0]), "colorimetry"),
-            ((319, 5, vec![0]), "colorimetry"),
-        ] {
-            let tag = entry.0;
-            let e = arrays(entry).unwrap_err().to_string();
-            assert!(e.contains(want), "tag {tag}: {e}");
-        }
-        assert!(arrays((258, 3, vec![8, 8, 8])).is_ok());
-        assert!(arrays((339, 3, vec![1, 1, 1])).is_ok());
-        assert!(arrays((266, 3, vec![1])).is_ok());
-        // An ICC profile is routed in either byte order, and the
-        // orientation still takes precedence in the message.
-        for le in [true, false] {
-            let b = rgb_tiff(le, &[(34675, 7, 0)]);
-            assert!(run(ImageFormat::Tiff, &b).is_err(), "{le}");
-            let oriented = rgb_tiff(le, &[(274, 3, 6), (34675, 7, 0)]);
-            assert!(transform(ImageFormat::Tiff, &oriented).is_some(), "{le}");
-        }
-        // A structure tag with several values is outside the class.
-        let mut multi = rgb_tiff(true, &[]);
-        let at = 8 + 2 + 2 * 12; // the third entry, photometric
-        multi[at + 4..at + 8].copy_from_slice(&2u32.to_le_bytes());
-        assert!(run(ImageFormat::Tiff, &multi).is_err());
-    }
-
-    /// Chromium's bitmap reads the shipped FFmpeg TIFF rendition, whose
-    /// structures were compared with the app; the native readers keep the
-    /// structures compared for them.
-    #[test]
-    fn tiff_classes_follow_the_reader() {
-        let class = |entries: &[(u16, u16, u32)], reader| {
+    fn tiff_imports_today_rejects() {
+        let dir = tempfile::Builder::new()
+            .prefix("pm-tiff-rejected-")
+            .tempdir()
+            .unwrap();
+        let verdict = |entries: &[(u16, u16, u32)]| {
             let mut e = entries.to_vec();
-            if !e.iter().any(|t| t.0 == 258) {
-                e.push((258, 3, 8));
-            }
             e.sort_by_key(|t| t.0);
-            tiff(&mut io::Cursor::new(tiff_ifd(true, &e)), true, reader).unwrap()
+            let path = dir.path().join("t.tiff");
+            std::fs::write(&path, tiff_ifd(true, &e)).unwrap();
+            rejected(&path)
         };
-        for (entries, what) in [
-            (&[(262, 3, 5), (277, 3, 4)][..], "photometric"),
-            (&[(262, 3, 5), (277, 3, 5), (338, 3, 2)][..], "photometric"),
-            (&[(262, 3, 6), (277, 3, 3), (259, 3, 7)][..], "compression"),
-            (
-                &[(262, 3, 2), (277, 3, 3), (322, 3, 16), (323, 3, 16)][..],
-                "tiled",
-            ),
-            (&[(262, 3, 2), (277, 3, 3), (284, 3, 2)][..], "planar"),
-            (
-                &[(262, 3, 2), (277, 3, 3), (258, 3, 16), (339, 3, 3)][..],
-                "unsigned",
-            ),
-            (&[(262, 3, 2), (277, 3, 3), (317, 3, 3)][..], "predictor"),
-            (&[(262, 3, 8), (277, 3, 3)][..], "photometric"),
+        for entries in [
+            &[(262, 3, 8), (277, 3, 3)][..],
+            &[(262, 3, 2), (277, 3, 3), (258, 3, 64), (339, 3, 3)],
+            &[(262, 3, 1), (277, 3, 1), (258, 3, 32), (339, 3, 3)],
+            &[
+                (262, 3, 2),
+                (277, 3, 4),
+                (258, 3, 32),
+                (339, 3, 3),
+                (317, 3, 3),
+            ],
+            &[(262, 3, 6), (277, 3, 3), (258, 3, 12), (259, 3, 7)],
         ] {
-            assert!(class(entries, StillReader::Chromium).is_ok(), "{entries:?}");
-            let e = class(entries, StillReader::Native).unwrap_err().to_string();
-            assert!(e.contains(what), "{entries:?}: {e}");
+            assert!(verdict(entries).is_err(), "{entries:?}");
         }
-        // Both draw the RGB classes compared for the native readers.
-        let rgb = [(262, 3, 2), (277, 3, 3), (258, 3, 16)];
-        assert!(class(&rgb, StillReader::Native).is_ok());
-        assert!(class(&rgb, StillReader::Chromium).is_ok());
+        for entries in [
+            &[(262, 3, 2), (277, 3, 3), (258, 3, 8)][..],
+            &[
+                (262, 3, 2),
+                (277, 3, 3),
+                (258, 3, 32),
+                (339, 3, 3),
+                (317, 3, 3),
+            ],
+            &[(262, 3, 2), (277, 3, 3), (258, 3, 16), (339, 3, 3)],
+            &[(262, 3, 5), (277, 3, 5), (338, 3, 2)],
+            &[(262, 3, 6), (277, 3, 3), (259, 3, 7)],
+            &[(262, 3, 2), (277, 3, 3), (322, 3, 16), (323, 3, 16)],
+        ] {
+            assert!(verdict(entries).is_ok(), "{entries:?}");
+        }
     }
 
     fn bmff(ty: &[u8; 4], body: &[u8]) -> Vec<u8> {

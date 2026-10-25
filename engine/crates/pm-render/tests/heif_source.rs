@@ -11,7 +11,7 @@ use pm_protocol::color::AlphaMode;
 use pm_protocol::common::{Size, Ticks};
 use pm_protocol::snapshot::SourceFit;
 use pm_render::Renderer;
-use pm_render::media::{StillReader, probe_still};
+use pm_render::media::probe_image;
 
 // The encoder/decoder and reference draw use Apple's native APIs, like the
 // ImageIO orientation cases in tests/stills.rs. Reference color conversion
@@ -155,9 +155,7 @@ fn original_sdr_heif_depth_alpha_orientation_and_profile_reach_source_frames() {
             (decoded.frame.format.width, decoded.frame.format.height),
             (size.width as usize, size.height as usize)
         );
-        for reader in [StillReader::Chromium, StillReader::Native] {
-            assert_eq!(probe_still(path, reader), Ok(()), "{name}: {reader:?}");
-        }
+        assert_eq!(probe_image(path), Ok(()), "{name}");
         let expected = std::fs::read(temp.path().join(format!("{name}.rgba"))).unwrap();
         if name.contains("alpha") {
             assert!(

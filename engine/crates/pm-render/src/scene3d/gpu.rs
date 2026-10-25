@@ -497,13 +497,7 @@ impl Scene3dRenderer {
     /// texture getter returns nothing; one outside the classes this pass
     /// draws (changed since the capability check) makes the render
     /// unsupported.
-    fn resolve_maps(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        scene: &Arc<Scene3d>,
-    ) -> Result<Arc<Scene3d>, Error3d> {
+    fn resolve_maps(&mut self, scene: &Arc<Scene3d>) -> Result<Arc<Scene3d>, Error3d> {
         if let Some((from, to)) = &self.resolved
             && Arc::ptr_eq(from, scene)
         {
@@ -515,7 +509,7 @@ impl Scene3dRenderer {
                 for mat in m.materials.iter() {
                     for (_, t) in mat.maps.all() {
                         let Some(t) = t else { continue };
-                        match self.textures.map(device, queue, encoder, &t.path, t.srgb) {
+                        match self.textures.map(&t.path, t.srgb) {
                             Ok(_) => {}
                             Err(MapError::Unsupported(why)) => {
                                 return Err(Error3d::Unsupported(why));
@@ -1295,7 +1289,7 @@ impl Scene3dRenderer {
                 Some(TextureRef::Map(map)) => {
                     let tex = self
                         .textures
-                        .map(device, queue, encoder, &map.path, map.srgb)
+                        .map(&map.path, map.srgb)
                         .map_err(|e| match e {
                             MapError::Unsupported(m) => Error3d::Unsupported(m),
                             MapError::Failed(m) => Error3d::Failed(m),
@@ -1657,6 +1651,41 @@ impl Scene3dRenderer {
         Ok(())
     }
 
+    /// Loads the image maps this scene samples into the map cache, once per
+    /// file version: `still` converts a map's still as image layers do
+    /// (`MediaCache::image`, in linear light for sRGB maps) and says whether
+    /// it is deeper than 8 bits; the texels are its straight values.
+    pub fn prepare_image_maps(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        plan: &super::Object3dPlan,
+        still: &mut dyn FnMut(
+            &mut wgpu::CommandEncoder,
+            &std::path::Path,
+            bool,
+        ) -> Result<(wgpu::Texture, bool), MapError>,
+    ) {
+        for object in &plan.scene.objects {
+            for mesh in &object.meshes {
+                for material in mesh.materials.iter() {
+                    for (_, map) in material.maps.all() {
+                        let Some(map) = map else { continue };
+                        if map.svg.is_some() || self.textures.has_result(&map.path, map.srgb) {
+                            continue;
+                        }
+                        match still(encoder, &map.path, map.srgb) {
+                            Ok((texture, deep)) => self
+                                .textures
+                                .put_still(device, encoder, &map.path, map.srgb, &texture, deep),
+                            Err(e) => self.textures.put_failure(&map.path, map.srgb, e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Draws the SVG maps this scene samples into the map cache: each SVG
     /// at its texel size, straight alpha, bottom row first (three.js's
     /// `<img>` upload with `flipY`), once per file version.
@@ -1814,7 +1843,7 @@ impl Scene3dRenderer {
             }
             _ => cross_scene_prepass_safe(scene),
         };
-        let scene = &self.resolve_maps(device, queue, encoder, scene)?;
+        let scene = &self.resolve_maps(scene)?;
         let (w, h) = scene.canvas();
         self.attachments(device, w, h);
         let layer = Layer3d {
@@ -1875,7 +1904,7 @@ impl Scene3dRenderer {
         scene: &Arc<Scene3d>,
         depth_surface: bool,
     ) -> Result<Rendered3d, Error3d> {
-        let scene = &self.resolve_maps(device, queue, encoder, scene)?;
+        let scene = &self.resolve_maps(scene)?;
         let (w, h) = scene.canvas();
         self.attachments(device, w, h);
         self.prepass = None;

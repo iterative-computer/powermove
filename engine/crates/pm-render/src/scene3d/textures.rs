@@ -1,32 +1,24 @@
 //! Textures of the 3D pass: material maps (`new THREE.Texture(bitmap)`:
-//! RGBA8, sRGB decode for color and emissive maps, repeat wrapping,
-//! generated mipmaps, trilinear filtering), shadow maps (RGBA8 with
-//! nearest filtering, clamped), and the rectangular area light tables
+//! sRGB decode for color and emissive maps, repeat wrapping, generated
+//! mipmaps, trilinear filtering), shadow maps (RGBA8 with nearest
+//! filtering, clamped), and the rectangular area light tables
 //! (`LTC_FLOAT_1` and `LTC_FLOAT_2`: RGBA f32 64 × 64, linear
 //! magnification, nearest minification, clamped).
 //!
-//! Map images are today's level 1 content: the runtime's texture getter
-//! hands three.js the asset's `ImageBitmap`, the same Chromium bitmap image
-//! layers draw. Maps therefore read pm-render's level 1 still-compatibility
-//! bitmap ([`crate::media::level1_bitmap`]: PQ/HLG/cHRM/cICP PNG, CMYK
-//! JPEG, the TIFF structures, the AVIF classes, Chromium's gamma and ICC
-//! readings, and the deep or arithmetic JPEGs whose RGBA8 upload fails),
-//! in every class image layers draw, at every compat level. three.js
-//! uploads it into storage of `log2(max(w, h)) + 1` levels
-//! (`texStorage2D`, `texSubImage2D`). WebGL ignores every unpack flag for
-//! an `ImageBitmap` (`UNPACK_FLIP_Y_WEBGL`, `UNPACK_PREMULTIPLY_ALPHA_WEBGL`
-//! false, the colorspace conversion), so the texels are the bitmap's own
-//! premultiplied bytes, top row first (texture coordinate v = 0 samples the
-//! image's top row), which three.js then samples as straight alpha. A deep
-//! or arithmetic JPEG has no 8-bit bitmap; the importer keeps an image
-//! element whose `texSubImage2D` fails, leaving the storage zeroed
-//! (transparent black, not image layers' opaque black). Measured texel for
-//! texel through the app (`tests/threed_maps.rs`). Probes are decided once
-//! per file version ([`Textures::probe`]).
+//! Map images are the stills image layers draw: the same native-depth
+//! samples converted by the same source pass (`MediaCache::image`), in
+//! every class image layers draw, oriented, top row first (texture
+//! coordinate v = 0 samples the image's top row). three.js samples a map as
+//! straight alpha, so the converted premultiplied values are divided by
+//! alpha into the map (`MAP_STORE_WGSL`): color maps in linear light,
+//! stored as sRGB-encoded RGBA8 (the hardware decodes on sampling), data
+//! maps as their encoded values; a still deeper than 8 bits or HDR keeps
+//! half float. Mipmaps are box filters, in linear light for color maps.
+//! Probes are decided once per file version ([`Textures::probe`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 /// A material map on the GPU.
 pub struct MapTexture {
@@ -51,12 +43,28 @@ struct MapKey {
 /// Why a map cannot be drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MapError {
-    /// A still outside the level 1 classes: the same feature an image
-    /// layer of the file reports (`crate::media::probe_image`), as both
-    /// read Chromium's bitmap.
+    /// A still outside the drawn classes: the same feature an image layer
+    /// of the file reports (`crate::media::probe_image`), as both read the
+    /// same samples.
     Unsupported(crate::capability::Feature),
     Failed(String),
 }
+
+/// Divides a converted, premultiplied working texture by alpha: the
+/// straight texels three.js samples.
+const MAP_STORE_WGSL: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let a = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(a * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment
+fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let p = textureLoad(src, vec2<i32>(pos.xy), 0);
+    return vec4<f32>(select(vec3<f32>(0.0), p.rgb / p.a, p.a > 0.0), p.a);
+}
+"#;
 
 const MIP_WGSL: &str = r#"
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -83,12 +91,19 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 /// frames.
 pub struct Textures {
     maps: HashMap<MapKey, MapEntry>,
+    /// Maps of a file version that did not load (`resolve_maps` drops or
+    /// refuses them).
+    failed: HashMap<MapKey, MapError>,
     /// The current 3D frame generation (`Scene3dRenderer::begin_frame`).
     generation: u64,
-    pool: pm_media::pool::FramePool,
+    /// The mip pass by map format, and its layout.
     mip: Option<(
-        wgpu::RenderPipeline,
-        wgpu::RenderPipeline,
+        HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+        wgpu::BindGroupLayout,
+    )>,
+    /// The straight-alpha store pass by map format, and its layout.
+    store: Option<(
+        HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
         wgpu::BindGroupLayout,
     )>,
     ltc: Option<(wgpu::TextureView, wgpu::TextureView)>,
@@ -102,9 +117,10 @@ impl Default for Textures {
     fn default() -> Self {
         Textures {
             maps: HashMap::new(),
+            failed: HashMap::new(),
             generation: 0,
-            pool: pm_media::pool::FramePool::new(16 << 20),
             mip: None,
+            store: None,
             ltc: None,
             repeat_trilinear: None,
             clamp_nearest: None,
@@ -214,110 +230,281 @@ impl Textures {
         Ok(t)
     }
 
-    fn mip_pipelines(&mut self, device: &wgpu::Device) {
-        if self.mip.is_some() {
-            return;
-        }
+    /// A one-texture fullscreen pass of `wgsl` (`vs` and `fs`) into
+    /// `format`.
+    fn pass_pipeline(
+        device: &wgpu::Device,
+        wgsl: &str,
+        format: wgpu::TextureFormat,
+        layout: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("3d mips"),
-            source: wgpu::ShaderSource::Wgsl(MIP_WGSL.into()),
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("3d mips"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
+            label: Some("3d map pass"),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("3d mips"),
-            bind_group_layouts: &[Some(&layout)],
+            label: Some("3d map pass"),
+            bind_group_layouts: &[Some(layout)],
             immediate_size: 0,
         });
-        let make = |format: wgpu::TextureFormat| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("3d mips"),
-                layout: Some(&pl),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("fs"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        self.mip = Some((
-            make(wgpu::TextureFormat::Rgba8Unorm),
-            make(wgpu::TextureFormat::Rgba8UnormSrgb),
-            layout,
-        ));
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("3d map pass"),
+            layout: Some(&pl),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
-    /// The GPU texture of a map image (mipmapped), decoded once per file
-    /// version.
-    pub fn map(
+    fn texture_layout(
+        device: &wgpu::Device,
+        filterable: bool,
+        sampler: bool,
+    ) -> wgpu::BindGroupLayout {
+        let mut entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        }];
+        if sampler {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("3d map pass"),
+            entries: &entries,
+        })
+    }
+
+    /// Draws one fullscreen pass of `pipeline` into `dst`.
+    fn draw_pass(
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::RenderPipeline,
+        bind: &wgpu::BindGroup,
+        dst: &wgpu::TextureView,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("3d map pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// `generateMipmap`: each level of `texture` a box filter of the one
+    /// above, in linear light for sRGB formats (the views decode and
+    /// encode) and float formats holding linear light.
+    fn mips(
         &mut self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        path: &Path,
-        srgb: bool,
-    ) -> Result<Arc<MapTexture>, MapError> {
-        let (len, modified) = stamp(path)
-            .ok_or_else(|| MapError::Failed(format!("{} is offline", path.display())))?;
-        let key = MapKey {
+        texture: &wgpu::Texture,
+    ) {
+        self.samplers(device);
+        let format = texture.format();
+        let (pipelines, layout) = self
+            .mip
+            .get_or_insert_with(|| (HashMap::new(), Self::texture_layout(device, true, true)));
+        let pipeline = pipelines
+            .entry(format)
+            .or_insert_with(|| Self::pass_pipeline(device, MIP_WGSL, format, layout));
+        let sampler = self.linear_clamp.as_ref().expect("samplers");
+        for level in 1..texture.mip_level_count() {
+            let view = |l: u32| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: l,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            };
+            let (src, dst) = (view(level - 1), view(level));
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("3d mip"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                ],
+            });
+            Self::draw_pass(encoder, pipeline, &bind, &dst);
+        }
+    }
+
+    fn key(path: &Path, srgb: bool) -> Option<MapKey> {
+        let (len, modified) = stamp(path)?;
+        Some(MapKey {
             path: path.to_path_buf(),
             len,
             modified,
             srgb,
-        };
-        if let Some(e) = self.maps.get_mut(&key) {
-            e.used = self.generation;
-            return Ok(e.texture.clone());
-        }
-        let (w, h, rgba) = decode(path, &self.pool)?;
-        let texture = self.upload_rgba(device, queue, encoder, w, h, &rgba, srgb, true);
+        })
+    }
+
+    fn insert(&mut self, key: MapKey, texture: wgpu::Texture) {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let t = Arc::new(MapTexture { texture, view });
         self.maps
+            .retain(|k, _| k.path != key.path || k.srgb != key.srgb);
+        self.failed
             .retain(|k, _| k.path != key.path || k.srgb != key.srgb);
         self.maps.insert(
             key,
             MapEntry {
-                texture: t.clone(),
+                texture: Arc::new(MapTexture { texture, view }),
                 used: self.generation,
             },
         );
-        Ok(t)
+    }
+
+    /// The map of `path` from its converted still (`MediaCache::image`:
+    /// premultiplied, in linear light for an sRGB map, else in the display
+    /// encoding): straight texels in sRGB RGBA8, RGBA8 or (`deep`) half
+    /// float, with its mip chain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_still(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        path: &Path,
+        srgb: bool,
+        still: &wgpu::Texture,
+        deep: bool,
+    ) {
+        let Some(key) = Self::key(path, srgb) else {
+            return;
+        };
+        let format = match (deep, srgb) {
+            (true, _) => wgpu::TextureFormat::Rgba16Float,
+            (false, true) => wgpu::TextureFormat::Rgba8UnormSrgb,
+            (false, false) => wgpu::TextureFormat::Rgba8Unorm,
+        };
+        let (w, h) = (still.width(), still.height());
+        let texture = Self::map_texture(device, w, h, format);
+        let (pipelines, layout) = self
+            .store
+            .get_or_insert_with(|| (HashMap::new(), Self::texture_layout(device, false, false)));
+        let pipeline = pipelines
+            .entry(format)
+            .or_insert_with(|| Self::pass_pipeline(device, MAP_STORE_WGSL, format, layout));
+        let src = still.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("3d map store"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&src),
+            }],
+        });
+        let dst = texture.create_view(&wgpu::TextureViewDescriptor {
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            ..Default::default()
+        });
+        Self::draw_pass(encoder, pipeline, &bind, &dst);
+        self.mips(device, encoder, &texture);
+        self.insert(key, texture);
+    }
+
+    /// Records that the map of `path`'s current version did not load.
+    pub fn put_failure(&mut self, path: &Path, srgb: bool, error: MapError) {
+        if let Some(key) = Self::key(path, srgb) {
+            self.failed
+                .retain(|k, _| k.path != key.path || k.srgb != key.srgb);
+            self.failed.insert(key, error);
+        }
+    }
+
+    fn map_texture(
+        device: &wgpu::Device,
+        w: u32,
+        h: u32,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("3d map"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: mip_levels(w, h),
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_DST
+                // Read back by the map tests.
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        })
+    }
+
+    /// The GPU texture of a map image (mipmapped), prepared for this file
+    /// version by `Scene3dRenderer::prepare_image_maps` (or an SVG map).
+    pub fn map(&mut self, path: &Path, srgb: bool) -> Result<Arc<MapTexture>, MapError> {
+        let key = Self::key(path, srgb)
+            .ok_or_else(|| MapError::Failed(format!("{} is offline", path.display())))?;
+        if let Some(e) = self.maps.get_mut(&key) {
+            e.used = self.generation;
+            return Ok(e.texture.clone());
+        }
+        Err(self
+            .failed
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| MapError::Failed(format!("{} was not loaded", path.display()))))
+    }
+
+    /// Whether the map of `path`'s current version is loaded or failed.
+    pub fn has_result(&self, path: &Path, srgb: bool) -> bool {
+        Self::key(path, srgb)
+            .is_some_and(|k| self.maps.contains_key(&k) || self.failed.contains_key(&k))
     }
 
     /// Whether the map of `path`'s current version is cached.
@@ -354,29 +541,14 @@ impl Textures {
         height: u32,
         rgba: &[u8],
     ) -> Result<(), MapError> {
-        let (len, modified) =
-            stamp(path).ok_or_else(|| MapError::Failed("SVG map is offline".into()))?;
-        let key = MapKey {
-            path: path.to_path_buf(),
-            len,
-            modified,
-            srgb,
-        };
+        let key =
+            Self::key(path, srgb).ok_or_else(|| MapError::Failed("SVG map is offline".into()))?;
         if let Some(e) = self.maps.get_mut(&key) {
             e.used = self.generation;
             return Ok(());
         }
         let texture = self.upload_rgba(device, queue, encoder, width, height, rgba, srgb, true);
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.maps
-            .retain(|k, _| k.path != key.path || k.srgb != srgb);
-        self.maps.insert(
-            key,
-            MapEntry {
-                texture: Arc::new(MapTexture { texture, view }),
-                used: self.generation,
-            },
-        );
+        self.insert(key, texture);
         Ok(())
     }
 
@@ -395,32 +567,31 @@ impl Textures {
         srgb: bool,
         mips: bool,
     ) -> wgpu::Texture {
-        self.samplers(device);
-        self.mip_pipelines(device);
         let format = if srgb {
             wgpu::TextureFormat::Rgba8UnormSrgb
         } else {
             wgpu::TextureFormat::Rgba8Unorm
         };
-        let levels = if mips { mip_levels(w, h) } else { 1 };
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("3d map"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: levels,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_DST
-                // Read back by the mip comparison test.
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
+        let texture = if mips {
+            Self::map_texture(device, w, h, format)
+        } else {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("3d map"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        };
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -440,54 +611,7 @@ impl Textures {
                 depth_or_array_layers: 1,
             },
         );
-        // `generateMipmap`: each level a box filter of the one above, in
-        // linear light for sRGB textures (the views decode and encode).
-        let (unorm, srgb_pipe, layout) = self.mip.as_ref().expect("mip pipelines");
-        let pipeline = if srgb { srgb_pipe } else { unorm };
-        let sampler = self.linear_clamp.as_ref().expect("samplers");
-        for level in 1..levels {
-            let view = |l: u32| {
-                texture.create_view(&wgpu::TextureViewDescriptor {
-                    base_mip_level: l,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                })
-            };
-            let (src, dst) = (view(level - 1), view(level));
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("3d mip"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&src),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(sampler),
-                    },
-                ],
-            });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("3d mip"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &dst,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        self.mips(device, encoder, &texture);
         texture
     }
 
@@ -506,10 +630,11 @@ impl Textures {
             .values()
             .map(|e| {
                 let t = &e.texture.texture;
+                let texel = u64::from(t.format().block_copy_size(None).unwrap_or(4));
                 (0..t.mip_level_count())
                     .map(|l| {
                         let (w, h) = ((t.width() >> l).max(1), (t.height() >> l).max(1));
-                        u64::from(w) * u64::from(h) * 4
+                        u64::from(w) * u64::from(h) * texel
                     })
                     .sum::<u64>()
             })
@@ -517,78 +642,54 @@ impl Textures {
         (self.maps.len(), bytes)
     }
 
-    /// Whether `path` is a map image this pass draws: readable, and in the
-    /// still classes level 1 image layers draw. Decided once per file
-    /// version (path, size, modification time), so the capability check and
-    /// the scene build can ask at every frame.
+    /// Whether `path` is a map image this pass draws: the verdict of an
+    /// image layer of the file ([`crate::media::probe_image`], decided once
+    /// per file version), so the capability check and the scene build can
+    /// ask at every frame.
     pub fn probe(path: &Path) -> Result<(), MapError> {
-        type Probes = Mutex<HashMap<MapKey, Result<(), MapError>>>;
-        static CACHE: OnceLock<Probes> = OnceLock::new();
-        let (len, modified) = stamp(path)
-            .ok_or_else(|| MapError::Failed(format!("{} is offline", path.display())))?;
-        let key = MapKey {
-            path: path.to_path_buf(),
-            len,
-            modified,
-            srgb: false,
-        };
-        let cache = CACHE.get_or_init(Default::default);
-        if let Some(r) = cache.lock().unwrap().get(&key) {
-            return r.clone();
-        }
-        let result = decode(path, &pm_media::pool::FramePool::new(0)).map(|_| ());
-        let mut c = cache.lock().unwrap();
-        // One answer per path: a new version replaces the old one.
-        c.retain(|k, _| k.path != key.path);
-        if c.len() >= 4096 {
-            c.clear();
-        }
-        c.insert(key, result.clone());
-        result
+        crate::media::probe_image(path).map_err(|e| match e {
+            crate::media::ProbeIssue::Unsupported(f) => MapError::Unsupported(f),
+            crate::media::ProbeIssue::Unreadable(m) => MapError::Failed(m),
+        })
     }
 }
 
-/// Decodes a map image to the RGBA8 texels three.js stores for it: tight
-/// rows, top row first, as Chromium's bitmap stores them.
-pub fn decode(
+/// A map's converted still: `MediaCache::image` in linear light for an sRGB
+/// map, else in the display encoding, at full float precision (the map
+/// keeps its own texture, so the converted one is released), and whether
+/// the still is deeper than 8 bits.
+pub fn still_map(
+    media: &mut crate::media::MediaCache,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipelines: &crate::pipelines::Pipelines,
+    encoder: &mut wgpu::CommandEncoder,
     path: &Path,
-    pool: &pm_media::pool::FramePool,
-) -> Result<(u32, u32, Vec<u8>), MapError> {
-    let (bitmap, upload_fails) = match crate::media::level1_bitmap(path, pool) {
-        Ok(b) => b,
-        Err(crate::media::ProbeIssue::Unsupported(f)) => return Err(MapError::Unsupported(f)),
-        Err(crate::media::ProbeIssue::Unreadable(m)) => return Err(MapError::Failed(m)),
+    srgb: bool,
+) -> Result<(wgpu::Texture, bool), MapError> {
+    use pm_protocol::color::{Precision, WorkingEncoding};
+    let working = if srgb {
+        WorkingEncoding::LinearLight
+    } else {
+        WorkingEncoding::Standard
     };
-    let f = &bitmap.frame.format;
-    let (w, h) = (f.width, f.height);
-    if upload_fails {
-        // `texSubImage2D` failed: the storage stays zeroed.
-        return Ok((w as u32, h as u32, vec![0u8; w * h * 4]));
-    }
-    // Chromium's bitmap is one RGBA8 plane for every still class
-    // (`level1_bitmaps_are_rgba8` in `tests/threed_maps.rs` checks each
-    // fixture): another layout is an internal error, not a class.
-    if f.planes.len() != 1 || f.planes[0].format != pm_media::frame::PlaneFormat::Rgba8 {
-        debug_assert!(false, "a level 1 bitmap of layout {}", f.label);
-        return Err(MapError::Failed(format!(
-            "{}: the level 1 bitmap has layout {}",
-            path.display(),
-            f.label
-        )));
-    }
-    let mut out = vec![0u8; w * h * 4];
-    bitmap
-        .frame
-        .with_planes(|planes| {
-            let p = &planes[0];
-            for y in 0..h {
-                // SAFETY: the plane holds `height` rows of `stride` bytes.
-                let row = unsafe { std::slice::from_raw_parts(p.ptr.add(y * p.stride), w * 4) };
-                out[y * w * 4..(y + 1) * w * 4].copy_from_slice(row);
-            }
-        })
-        .map_err(|e| MapError::Failed(e.to_string()))?;
-    Ok((w as u32, h as u32, out))
+    let target = media
+        .image(
+            device,
+            queue,
+            pipelines,
+            encoder,
+            path,
+            working,
+            Precision::Float32,
+            None,
+        )
+        .map_err(|e| match e {
+            crate::media::MediaFailure::Unsupported(f) => MapError::Unsupported(f),
+            crate::media::MediaFailure::Failed(m) => MapError::Failed(m),
+        })?;
+    media.release_image(path, Precision::Float32, working);
+    Ok((target.texture, crate::media::deep_still(path)))
 }
 
 #[cfg(test)]

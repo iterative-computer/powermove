@@ -2361,6 +2361,7 @@ dependencies = [
  "bindgen",
  "blake3",
  "encoding_rs",
+ "half",
  "image",
  "libc",
  "md-5",

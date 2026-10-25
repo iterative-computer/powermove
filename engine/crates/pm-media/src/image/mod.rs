@@ -1,25 +1,24 @@
 //! Still and animated image readers (section 13 "Images"): libjpeg-turbo for
-//! JPEG (the decoder today's viewer uses); the `image` crate for PNG (8 and
-//! 16-bit), TIFF (8, 16, 32f), BMP, ICO, GIF, and WebP; ImageIO for
-//! HEIF/HEIC, AVIF, CMYK JPEG, animation frames, and anything else macOS
-//! reads; OpenEXR's C library for EXR; FFmpeg for DPX; resvg for SVG.
+//! JPEG (8 and 12-bit, lossless 2 to 16, arithmetic); the `image` crate for
+//! PNG (1 to 16-bit), TIFF, BMP, ICO, GIF, and WebP; dav1d for AVIF;
+//! ImageIO for HEIF/HEIC, CMYK with a profile, the TIFF models the `image`
+//! crate does not read, animation frames, and anything else macOS reads;
+//! OpenEXR's C library for EXR; FFmpeg for DPX; resvg for SVG.
 //!
-//! Pixels are returned as they are stored, never color managed: an RGBA
-//! plane in pool memory at the file's depth (8 or 16-bit integer, half or
-//! float), with the ICC profile classified for section 9 (sRGB-equivalent
-//! profiles pass through exactly). EXIF orientation is applied, as the
-//! browser applies it today.
+//! Pixels are returned as they are stored, at the file's depth: an RGBA
+//! plane in pool memory (8 or 16-bit integer, half or float), or AVIF's
+//! Y′CbCr planes. Color facts are returned as the file states them
+//! ([`ImageColor`]); only models with no RGB reading (CMYK, Lab, indexed
+//! TIFF) are converted, by ColorSync through their profile. Orientation is
+//! applied as Chromium shows it (WebP EXIF ignored; AVIF by the consumer).
 
 pub mod animation;
-pub mod avif_compat;
-pub mod compat;
-mod compat_color;
-mod compat_tiff;
+pub mod avif;
 pub mod exr;
 pub mod icc;
 pub mod imageio;
 pub mod jpeg;
-pub mod png_gamma;
+pub mod png_color;
 pub mod raster;
 pub mod sequence;
 pub mod svg;
@@ -45,7 +44,7 @@ pub enum ImageBackend {
     OpenExr,
     Ffmpeg,
     Resvg,
-    CrabbyAvif,
+    Dav1d,
 }
 
 /// Formats recognized from the first bytes of a file.
@@ -118,7 +117,10 @@ pub fn sniff(head: &[u8]) -> ImageFormat {
     }
 }
 
-/// How a still's values relate to light and to its alpha.
+/// How a still's values relate to light and to its alpha: the file's own
+/// color facts, as stored. Which of them applies is decided by the reader
+/// (PNG's chunk precedence, AVIF's `colr` boxes); the renderer turns them
+/// into a conversion.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageColor {
@@ -129,15 +131,57 @@ pub struct ImageColor {
     pub icc_class: Option<IccClass>,
     pub transfer: Transfer,
     pub alpha: AlphaMode,
-    /// OpenEXR `chromaticities` (red, green, blue, white x/y), when present;
-    /// absent means Rec.709 primaries.
+    /// Chromaticities (red, green, blue, white x/y): OpenEXR
+    /// `chromaticities`, PNG `cHRM`. Absent means the primaries come from
+    /// `cicp`, the profile, or Rec.709.
     pub chromaticities: Option<[f32; 8]>,
+    /// H.273 colour primaries, transfer characteristics, matrix
+    /// coefficients and full-range flag: PNG `cICP`, AVIF `colr nclx` (or
+    /// the AV1 sequence header). An ICC profile overrides its primaries and
+    /// transfer (AVIF); a PNG `cICP` overrides everything else.
+    pub cicp: Option<[u8; 4]>,
+    /// PNG `gAMA` when it is the transfer (no `cICP`, `iCCP` or `sRGB`):
+    /// the file gamma `g`, stored samples being linear light to the power
+    /// `g`.
+    pub gamma: Option<f32>,
+    /// Maximum luminance of the mastering display in cd/m² (PNG `mDCV`),
+    /// the content peak of a PQ still's tone map.
+    pub mastering_peak: Option<f64>,
+    /// H.273 `chroma_sample_loc_type` of Y′CbCr samples (AVIF), when known.
+    pub chroma_location: Option<u8>,
+}
+
+impl ImageColor {
+    /// No profile or color description: read as sRGB.
+    pub fn plain(transfer: Transfer, alpha: AlphaMode) -> ImageColor {
+        ImageColor {
+            icc: None,
+            icc_bytes: None,
+            icc_class: None,
+            transfer,
+            alpha,
+            chromaticities: None,
+            cicp: None,
+            gamma: None,
+            mastering_peak: None,
+            chroma_location: None,
+        }
+    }
+
+    /// With an embedded ICC profile, classified.
+    pub fn with_icc(mut self, icc: Option<Vec<u8>>) -> ImageColor {
+        self.icc_class = icc.as_deref().map(icc::classify);
+        self.icc_bytes = icc.as_ref().map(Vec::len);
+        self.icc = icc;
+        self
+    }
 }
 
 /// A decoded still (or one animation frame).
 #[derive(Clone, Debug)]
 pub struct StillImage {
-    /// One RGBA plane in pool memory (`Layout::Rgba`).
+    /// The samples in pool memory: one RGBA plane (`Layout::Rgba`), or
+    /// Y′CbCr planes with an optional alpha plane (`Layout::Planar`: AVIF).
     pub frame: DecodedFrame,
     pub format: ImageFormat,
     pub backend: ImageBackend,
@@ -145,8 +189,12 @@ pub struct StillImage {
     pub bit_depth: u8,
     pub float: bool,
     pub color: ImageColor,
-    /// EXIF orientation (1 to 8) that was applied.
+    /// EXIF orientation (1 to 8) the image is shown with.
     pub orientation: u8,
+    /// Whether `frame` already shows `orientation` (packed RGBA readers
+    /// permute their pixels). Planar AVIF samples are stored unoriented; the
+    /// consumer applies `orientation` after conversion.
+    pub oriented: bool,
 }
 
 /// Animation facts.
@@ -172,9 +220,8 @@ pub fn read(path: &Path, pool: &FramePool) -> Result<StillImage> {
         ImageFormat::Jpeg => jpeg::read(path, pool),
         ImageFormat::Svg => svg::read(path, pool),
         ImageFormat::Dpx => ffmpeg_still(path, pool),
-        ImageFormat::Heif | ImageFormat::Avif | ImageFormat::Other => {
-            imageio::read_frame(path, 0, pool, format)
-        }
+        ImageFormat::Avif => avif::read(path, pool),
+        ImageFormat::Heif | ImageFormat::Other => imageio::read_frame(path, 0, pool, format),
         // The `image` crate reads RGB and gray TIFFs only: it fails on
         // palette, YCbCr, and Lab, and turns CMYK into RGB without its
         // profile. ImageIO converts those through their profile.
@@ -207,7 +254,7 @@ pub fn read_animation_frame(path: &Path, index: usize, pool: &FramePool) -> Resu
 }
 
 /// Packed RGBA samples ready to place in pool memory.
-pub(crate) enum Rgba<'a> {
+pub enum Rgba<'a> {
     U8(&'a [u8]),
     U16(&'a [u16]),
     F16(&'a [u16]),
@@ -215,7 +262,7 @@ pub(crate) enum Rgba<'a> {
 }
 
 /// Copies packed RGBA rows into a pool frame (Metal-aligned rows).
-pub(crate) fn pool_rgba(
+pub fn pool_rgba(
     pool: &FramePool,
     w: usize,
     h: usize,
@@ -290,7 +337,7 @@ pub(crate) fn pool_rgba(
 }
 
 /// Applies EXIF orientation (1 to 8) to packed pixels of `c` components.
-pub(crate) fn orient<T: Copy>(
+pub fn orient<T: Copy>(
     px: &[T],
     w: usize,
     h: usize,
@@ -347,15 +394,9 @@ pub fn ffmpeg_still(path: &Path, pool: &FramePool) -> Result<StillImage> {
         backend: ImageBackend::Ffmpeg,
         bit_depth: bits,
         float: false,
-        color: ImageColor {
-            icc: None,
-            icc_bytes: None,
-            icc_class: None,
-            transfer: Transfer::DisplayE,
-            alpha: AlphaMode::Straight,
-            chromaticities: None,
-        },
+        color: ImageColor::plain(Transfer::DisplayE, AlphaMode::Straight),
         orientation: 1,
+        oriented: true,
         frame,
     })
 }

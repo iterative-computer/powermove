@@ -1,12 +1,13 @@
 // Display geometry of a converted source (footage.rs, `Geometry`): the
-// clean aperture crop, then quarter turns counterclockwise. Every output
+// clean aperture crop, a horizontal mirror, then quarter turns
+// counterclockwise. Every output
 // pixel copies one input pixel; nothing is resampled. `OUT_FORMAT` is
 // replaced with the working storage format.
 
 struct Params {
     // crop x, y, w, h (coded pixels).
     crop: vec4<u32>,
-    // quarter turns, output width, output height.
+    // quarter turns, output width, output height, mirror.
     turn: vec4<u32>,
 };
 
@@ -35,6 +36,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         default: {
             uv = id.xy;
         }
+    }
+    if (P.turn.w == 1u) {
+        uv.x = cw - 1u - uv.x;
     }
     let v = textureLoad(input, vec2<i32>(P.crop.xy + uv), 0);
     textureStore(out, vec2<i32>(id.xy), v);

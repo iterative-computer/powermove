@@ -182,9 +182,8 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         decode: SourceDecode,
     ) -> Result<(wgpu::Texture, (f64, f64)), String> {
-        // Source surfaces always read the native samples and resolved file
-        // interpretation. The compatibility bitmap belongs to authored
-        // level-1 layers, not to posters or other source-only consumers.
+        // Source surfaces read the native samples with the resolved file
+        // interpretation, as composition does.
         let default_interpretation = Interpretation::default();
         let interpretation = Some(interpretation.unwrap_or(&default_interpretation));
         if kind != pm_media::image::ImageFormat::Other {
@@ -198,7 +197,6 @@ impl Renderer {
                     WorkingEncoding::Standard,
                     Precision::Float16,
                     interpretation,
-                    false,
                 )
                 .map(|target| {
                     let size = (target.width() as f64, target.height() as f64);

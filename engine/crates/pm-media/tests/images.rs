@@ -62,12 +62,41 @@ fn e2e_still_fixtures() {
         ("still.tiff", ImageBackend::ImageCrate),
         ("still.webp", ImageBackend::ImageCrate),
         ("still.heic", ImageBackend::ImageIo),
-        ("still.avif", ImageBackend::ImageIo),
+        ("still.avif", ImageBackend::Dav1d),
     ] {
         let s = image::read(&f.join(name), &pool).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(s.backend, backend, "{name}");
         assert!(s.frame.format.width > 0 && s.frame.format.height > 0);
     }
+}
+
+/// Every AVIF fixture decodes through the native reader at its depth, as
+/// Y′CbCr planes with the container's color description, including those
+/// ImageIO rejects (deep alpha, no `pixi`).
+#[test]
+fn avif_fixtures_decode_natively_at_depth() {
+    let pool = FramePool::new(0);
+    let f = fixtures_dir();
+    for (name, bits, alpha, planes) in [
+        ("still.avif", 8, false, 3),
+        ("still-no-pixi.avif", 8, false, 3),
+        ("still-limited-range.avif", 8, false, 3),
+        ("still-avif-400-full.avif", 8, false, 3),
+        ("still-avif-444-full.avif", 8, false, 3),
+        ("still-red-limited-range-422-12bpc.avif", 12, false, 3),
+        ("still-red-with-alpha-12bpc.avif", 12, true, 4),
+        ("still-red-with-profile-12bpc.avif", 12, false, 3),
+        ("still-avif-icc-adobe-alpha.avif", 8, true, 4),
+    ] {
+        let s = image::read(&f.join(name), &pool).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(s.format, ImageFormat::Avif, "{name}");
+        assert_eq!(s.bit_depth, bits, "{name}");
+        assert_eq!(s.frame.format.planes.len(), planes, "{name}");
+        assert_eq!(s.color.alpha != AlphaMode::Opaque, alpha, "{name}");
+        assert!(s.color.cicp.is_some(), "{name}");
+    }
+    let icc = image::read(&f.join("still-avif-icc-adobe-alpha.avif"), &pool).unwrap();
+    assert_eq!(icc.color.icc_class, Some(IccClass::Other));
 }
 
 #[test]

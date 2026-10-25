@@ -94,15 +94,9 @@ impl SvgDocument {
             backend: ImageBackend::Resvg,
             bit_depth: 8,
             float: false,
-            color: ImageColor {
-                icc: None,
-                icc_bytes: None,
-                icc_class: None,
-                transfer: Transfer::DisplayE,
-                alpha: AlphaMode::Premultiplied,
-                chromaticities: None,
-            },
+            color: ImageColor::plain(Transfer::DisplayE, AlphaMode::Premultiplied),
             orientation: 1,
+            oriented: true,
         })
     }
 }
