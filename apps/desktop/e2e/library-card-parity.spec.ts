@@ -225,27 +225,33 @@ async function compare(page: Page, a: Buffer, b: Buffer) {
 }
 
 /**
- * The independent float reference judges every pixel. Interior authored
- * colors stay within one code of today; changed edge pixels must be at least
- * as close to the reference, allowing half a code for final quantization.
+ * gate-policy.md's pixel classes against the independent float reference,
+ * for a half-float working frame encoded once to 8 bits. Interior pixels
+ * (today's 3×3 span ≤ 8) stay within one code of today. Over the edge
+ * pixels the engine's mean distance from the reference is at most today's
+ * plus the half-float precision bound (2⁻¹¹ of full scale); its max and
+ * p99.9, whole codes of an 8-bit capture, at most today's plus that bound
+ * rounded up to one code. No pixel is further from the reference than
+ * today's by more than one code. Interior statistics are reported.
  */
+const HALF_FLOAT_CV = 255 / 2048;
+
 async function compareToReference(page: Page, today: Buffer, engine: Buffer, reference: Buffer) {
-  return page.evaluate(async ({ a, b, r }) => {
+  return page.evaluate(async ({ a, b, r, bound }) => {
     const load = async (data: string) => { const img = new Image(); img.src = `data:image/png;base64,${data}`; await img.decode(); return img; };
     const images = [await load(a), await load(b), await load(r)];
     const [w, h] = [images[0]!.naturalWidth, images[0]!.naturalHeight];
-    if (images.some(img => img.naturalWidth !== w || img.naturalHeight !== h)) return { size: false, interior: -1, edgeWorse: -1, worseBy: -1 };
+    if (images.some(img => img.naturalWidth !== w || img.naturalHeight !== h)) return { size: false };
     const pixels = (img: HTMLImageElement) => {
       const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
       const context = canvas.getContext('2d')!; context.drawImage(img, 0, 0);
       return context.getImageData(0, 0, w, h).data;
     };
     const [t, e, ref] = images.map(pixels) as [Uint8ClampedArray, Uint8ClampedArray, Uint8ClampedArray];
-    let interior = 0, interiorWorse = 0, edge = 0, edgeWorse = 0, worseBy = 0;
-    const before: number[] = [], after: number[] = [];
+    const classes = { interior: { today: [] as number[], engine: [] as number[] }, edge: { today: [] as number[], engine: [] as number[] } };
+    let interior = 0, worseBy = 0;
     for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4;
-      if (t[i] === e[i] && t[i + 1] === e[i + 1] && t[i + 2] === e[i + 2] && t[i + 3] === e[i + 3]) continue;
       let span = 0;
       for (let c = 0; c < 3; c++) {
         let lo = 255, hi = 0;
@@ -254,31 +260,30 @@ async function compareToReference(page: Page, today: Buffer, engine: Buffer, ref
         }
         span = Math.max(span, hi - lo);
       }
-      let oldError = 0, newError = 0, by = 0, changed = 0;
+      let old = 0, now = 0, changed = 0;
       for (let c = 0; c < 4; c++) {
-        const old = Math.abs(t[i + c]! - ref[i + c]!);
-        const now = Math.abs(e[i + c]! - ref[i + c]!);
-        oldError = Math.max(oldError, old); newError = Math.max(newError, now);
-        by = Math.max(by, now - old);
+        old = Math.max(old, Math.abs(t[i + c]! - ref[i + c]!));
+        now = Math.max(now, Math.abs(e[i + c]! - ref[i + c]!));
         changed = Math.max(changed, Math.abs(e[i + c]! - t[i + c]!));
       }
-      before.push(oldError); after.push(newError);
-      if (span <= 8) {
-        if (changed > 1) interior++;
-        if (by > .5) interiorWorse++;
-      } else {
-        edge++;
-        if (by > .5) { edgeWorse++; worseBy = Math.max(worseBy, by); }
-      }
+      const cls = span <= 8 ? classes.interior : classes.edge;
+      cls.today.push(old); cls.engine.push(now);
+      if (span <= 8 && changed > 1) interior++;
+      worseBy = Math.max(worseBy, now - old);
     }
     const stats = (values: number[]) => {
-      values.sort((a, b) => a - b);
+      values.sort((p, q) => p - q);
       return { max: values.at(-1) ?? 0, p999: values[Math.floor((values.length - 1) * .999)] ?? 0,
-        mean: values.reduce((a, b) => a + b, 0) / Math.max(1, values.length) };
+        mean: values.reduce((p, q) => p + q, 0) / Math.max(1, values.length) };
     };
-    return { size: true, interior, interiorWorse, edgeWorse, worseBy, edge,
-      before: stats(before), after: stats(after) };
-  }, { a: today.toString('base64'), b: engine.toString('base64'), r: reference.toString('base64') });
+    const judged = Object.fromEntries(Object.entries(classes).map(([name, c]) => {
+      const [today, engine] = [stats(c.today), stats(c.engine)];
+      const within = engine.mean <= today.mean + bound
+        && (['max', 'p999'] as const).every(k => engine[k] <= today[k] + Math.ceil(bound));
+      return [name, { today, engine, within }];
+    }));
+    return { size: true, interior, worseBy, classes: judged };
+  }, { a: today.toString('base64'), b: engine.toString('base64'), r: reference.toString('base64'), bound: HALF_FLOAT_CV });
 }
 
 const cases: Array<{ theme: string; variant: ViewerVariant; scene: Scene }> = [
@@ -303,8 +308,11 @@ for (const { theme, variant, scene } of cases) {
     });
     await testInfo.attach('comparison', { body: JSON.stringify(result), contentType: 'application/json' });
     if (scene === '2d' || scene === '2d-fit') expect(result).toEqual({ size: true, differing: 0, max: 0 });
-    else expect(result, `${scene} in ${theme}, ${variant.name}`).toMatchObject({
-      size: true, interior: 0, interiorWorse: 0, edgeWorse: 0,
-    });
+    else {
+      expect(result, `${scene} in ${theme}, ${variant.name}`).toMatchObject({
+        size: true, interior: 0, classes: { edge: { within: true } },
+      });
+      expect((result as { worseBy: number }).worseBy, 'one code per pixel at most').toBeLessThanOrEqual(1);
+    }
   });
 }
