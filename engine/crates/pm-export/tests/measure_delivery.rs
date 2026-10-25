@@ -167,6 +167,7 @@ fn renderer_for(path: &Path) -> Renderer {
     let mut r = Renderer::headless().unwrap();
     let mut c = r.video_color(path).unwrap();
     c.matrix = MatrixCoefficients::Bt709;
+    c.primaries = pm_protocol::color::Primaries::Bt709;
     r.interpret(path, Some(c));
     r
 }

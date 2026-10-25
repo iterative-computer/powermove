@@ -891,7 +891,7 @@ impl Composer {
                 } else {
                     pm_render::sampling::Sampling::Final
                 },
-                video_end: pm_render::VideoEnd::Preview,
+                output_kind: pm_render::OutputKind::Preview,
             };
             let format = self.renderer.device_target_format(doc, &request);
             let reuse = self.scratch.as_ref().is_some_and(|t| {

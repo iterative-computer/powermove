@@ -85,6 +85,8 @@ for 75 frames at 320×180.
 
 ## Decoders
 
+Every surface reads a decoded frame the same way: [video-parity.md](video-parity.md).
+
 | Codec | Backends, in order |
 |---|---|
 | ProRes (all) | VideoToolbox only (amendment 13) |
@@ -328,7 +330,7 @@ Existing GIF/APNG/WebP/AVIF and numbered-sequence imports store a WebM.
 The composition renderer identifies the actual EBML bytes, validates the
 video source and renders that rendition through its ordinary video path.
 It uses `sequencePlaybackTime`'s CFR slots, 1e-7 boundary epsilon, 1 ms seek
-inset and final-slot hold, rather than ordinary video's 40 ms end padding.
+inset and final-slot hold. Container video uses native source timestamps.
 An untagged rendition keeps the converter's BT.601 matrix even at HD sizes;
 explicit file and Interpret Footage matrices take precedence. This source
 reading is part of the converted-frame cache key and disables YUV pass-through

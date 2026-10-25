@@ -4,6 +4,7 @@
 
 pub mod alpha;
 pub mod decoder;
+mod sps;
 
 use crate::error::{MediaError, Result};
 use crate::sys::ffmpeg as ff;
@@ -74,12 +75,54 @@ impl Input {
     /// Opens and probes a file (`avformat_find_stream_info`).
     pub fn open(path: &Path) -> Result<Input> {
         let inp = Self::open_raw(path)?;
+        // MP4/MOV H.264 whose SPS says everything the probe needs: the
+        // probe parses headers only (`sps`), instead of decoding a picture.
+        let headers: Vec<Option<sps::SpsFacts>> = (0..inp.streams())
+            .map(|i| {
+                (inp.format_name().starts_with("mov,") && inp.codec_id(i) == ff::AV_CODEC_ID_H264)
+                    .then(|| sps::from_avcc(&inp.extradata(i)))
+                    .flatten()
+                    .filter(|f| pix_fmt_of(f).is_some())
+            })
+            .collect();
         unsafe {
-            check(
-                ff::avformat_find_stream_info(inp.fmt, ptr::null_mut()),
-                "stream info",
-            )?
-        };
+            let mut options: Vec<*mut ff::AVDictionary> = vec![ptr::null_mut(); headers.len()];
+            for (o, h) in options.iter_mut().zip(&headers) {
+                // FFmpeg's own default for the probe's decoders.
+                ff::av_dict_set(o, c"threads".as_ptr(), c"1".as_ptr(), 0);
+                if h.is_some() {
+                    ff::av_dict_set(o, c"skip_frame".as_ptr(), c"all".as_ptr(), 0);
+                }
+            }
+            let r = ff::avformat_find_stream_info(inp.fmt, options.as_mut_ptr());
+            for o in &mut options {
+                ff::av_dict_free(o);
+            }
+            check(r, "stream info")?;
+            for (i, h) in headers.iter().enumerate() {
+                let Some(h) = h else { continue };
+                let par = inp.par(i);
+                let name = std::ffi::CString::new(pix_fmt_of(h).expect("filtered")).unwrap();
+                (*par).format = ff::av_get_pix_fmt(name.as_ptr()) as _;
+                (*par).color_range = match h.full_range {
+                    Some(true) => ff::AVCOL_RANGE_JPEG,
+                    Some(false) => ff::AVCOL_RANGE_MPEG,
+                    None => ff::AVCOL_RANGE_UNSPECIFIED,
+                };
+                let [p, t, m] = h.colour.unwrap_or([2, 2, 2]);
+                (*par).color_primaries = p as _;
+                (*par).color_trc = t as _;
+                (*par).color_space = m as _;
+                (*par).chroma_location = h.chroma_location.map_or(0, |l| l + 1) as _;
+                (*par).sample_aspect_ratio = ff::AVRational {
+                    num: h.sample_aspect.0,
+                    den: h.sample_aspect.1,
+                };
+                (*par).field_order = ff::AV_FIELD_PROGRESSIVE;
+                (*par).width = h.width;
+                (*par).height = h.height;
+            }
+        }
         Ok(inp)
     }
 
@@ -380,6 +423,25 @@ impl Input {
             }
         }
     }
+}
+
+/// The pixel format FFmpeg's H.264 decoder picks for an SPS: `yuvj` for
+/// full-range 8-bit, `gbrp` for RGB 4:4:4. None for monochrome, which the
+/// decoder's own probe decides.
+fn pix_fmt_of(f: &sps::SpsFacts) -> Option<String> {
+    let rgb = f.chroma_format == 3 && f.colour.is_some_and(|c| c[2] == 0);
+    let base = match f.chroma_format {
+        1 => "yuv420p",
+        2 => "yuv422p",
+        3 if rgb => "gbrp",
+        3 => "yuv444p",
+        _ => return None,
+    };
+    Some(match f.bit_depth {
+        8 if f.full_range == Some(true) && !rgb => base.replacen("yuv", "yuvj", 1),
+        8 => base.to_string(),
+        d => format!("{base}{d}le"),
+    })
 }
 
 /// A compressed sample ready for a decoder.
@@ -786,5 +848,55 @@ impl PacketReader {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FFmpeg's full probe, decoding the first picture.
+    fn decoded_probe(path: &Path) -> Input {
+        let inp = Input::open_raw(path).unwrap();
+        unsafe {
+            check(
+                ff::avformat_find_stream_info(inp.fmt, ptr::null_mut()),
+                "stream info",
+            )
+        }
+        .unwrap();
+        inp
+    }
+
+    #[test]
+    fn h264_headers_say_what_the_decoded_probe_says() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files: Vec<_> = [
+            "../apps/desktop/e2e/fixtures",
+            "crates/pm-render/tests/fixtures/video",
+        ]
+        .iter()
+        .flat_map(|d| std::fs::read_dir(root.join(d)).unwrap())
+        .map(|e| e.unwrap().path())
+        .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("mp4" | "mov")))
+        .collect();
+        files.sort();
+        let mut compared = 0;
+        for path in files {
+            let fast = Input::open(&path).unwrap();
+            let Some(v) = fast.best_video() else { continue };
+            if fast.codec_id(v) != ff::AV_CODEC_ID_H264 {
+                continue;
+            }
+            assert!(sps::from_avcc(&fast.extradata(v)).is_some(), "{path:?}");
+            assert_eq!(
+                fast.codec_info(v),
+                decoded_probe(&path).codec_info(v),
+                "{path:?}"
+            );
+            compared += 1;
+        }
+        // Untagged, VUI-tagged, partly tagged, full range and cropped clips.
+        assert!(compared >= 7, "{compared}");
     }
 }

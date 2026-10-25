@@ -716,7 +716,6 @@ mod tests {
             },
             InputFormat::V420,
             &ConvertParams {
-                legacy_png: true,
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
                 dither: false,
@@ -743,7 +742,6 @@ mod tests {
             },
             InputFormat::Y416,
             &ConvertParams {
-                legacy_png: true,
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
                 dither: false,

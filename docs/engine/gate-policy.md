@@ -55,9 +55,8 @@ values from pm-eval, all math from pm-reference. It models backgrounds and 2D so
 today, leaves image boxes unreferenced, and anything else the whole frame.
 
 `tests/corpus.rs` (G-C2) is the model conversion; its gated frame must equal the export
-frame. Its one known exception is `PREVIEW_EXPORT_PENDING`: video end padding differs
-between viewer and export (M-R1). An entry fails once it passes or, on a full run, if it
-was not measured.
+frame, and the paused preview must equal that export. Video selects from source timestamps
+on every surface, holding the last source frame without browser seek padding.
 
 ## Who converts what
 

@@ -460,7 +460,7 @@ fn offline_export_matches_the_same_project_with_missing_layers_hidden() {
 }
 
 #[test]
-fn png_byte_compatibility_follows_the_frozen_document() {
+fn png_straight_colour_is_the_working_float_divided_by_alpha_at_every_level() {
     let mut renderer = Renderer::headless().unwrap();
     for compat in [1, 2] {
         let mut solid = layer(
@@ -495,14 +495,9 @@ fn png_byte_compatibility_follows_the_frozen_document() {
         .unwrap();
         let rgba = output.frames[0].planes[0].u8().unwrap();
         let center = ((H / 2 * W + W / 2) * 4) as usize;
-        assert_eq!(
-            &rgba[center..center + 4],
-            if compat == 1 {
-                &[0, 0, 0, 1]
-            } else {
-                &[51, 102, 153, 1]
-            }
-        );
+        // #336699 at 0.3% opacity: one alpha code, and the colour recovered
+        // from the float (no 8-bit truncation first).
+        assert_eq!(&rgba[center..center + 4], &[51, 102, 153, 1], "compat {compat}");
     }
 }
 
@@ -555,7 +550,6 @@ fn the_pipeline_matches_rendering_and_converting_each_frame() {
             },
             InputFormat::V420,
             &convert::ConvertParams {
-                legacy_png: true,
                 working: WorkingEncoding::Standard,
                 alpha: AlphaOutput::None,
                 dither: true,
@@ -1186,13 +1180,27 @@ fn measure_heavy_precomp_band_cost() {
 
 #[test]
 fn export_uses_the_apps_audio_index_playhead_instead_of_its_range_start() {
-    let mut precomp = layer("nested", "precomp", json!({
-        "comp": "inner", "audioGain": 1,
-        "trim": keys(json!(0), &[(0.0, json!(0)), (2.0, json!(0.346))])
-    }), 0.0, 0.0, 2.0);
+    let mut precomp = layer(
+        "nested",
+        "precomp",
+        json!({
+            "comp": "inner", "audioGain": 1,
+            "trim": keys(json!(0), &[(0.0, json!(0)), (2.0, json!(0.346))])
+        }),
+        0.0,
+        0.0,
+        2.0,
+    );
     precomp["from"] = json!(0);
     let mut nested = project(W, H, 2.0, no_fill(), vec![precomp]);
-    composition(&mut nested, "inner", W, H, 2.0, vec![audio("tone", "tone", 0.5, 2.0)]);
+    composition(
+        &mut nested,
+        "inner",
+        W,
+        H,
+        2.0,
+        vec![audio("tone", "tone", 0.5, 2.0)],
+    );
     asset(&mut nested, "tone", "audio", "wav", 0, 0, 2.0);
     let mut flat_clip = audio("tone", "tone", 0.5, 2.0);
     flat_clip["d"]["trim"] = json!(0.173);
@@ -1207,12 +1215,27 @@ fn export_uses_the_apps_audio_index_playhead_instead_of_its_range_start() {
         media.insert("tone", fixture("tone.wav"));
         let job = job(doc, media, s, PathBuf::from("/unused.mp4"));
         let plan = plan_export(&job).unwrap();
-        run_export_into(&mut renderer, &job, plan, MemorySink::default(),
-            &Unrestricted, &AtomicBool::new(false), &mut no_progress()).unwrap().audio
+        run_export_into(
+            &mut renderer,
+            &job,
+            plan,
+            MemorySink::default(),
+            &Unrestricted,
+            &AtomicBool::new(false),
+            &mut no_progress(),
+        )
+        .unwrap()
+        .audio
     };
     let expected = render(&flat, None);
     let indexed = render(&nested, Some(seconds(1.0)));
     let range_start = render(&nested, None);
-    assert!(indexed == expected, "index trim(1 s) = 0.173, independent of range 0.7 s");
-    assert!(indexed != range_start, "the field must reach the export mixer");
+    assert!(
+        indexed == expected,
+        "index trim(1 s) = 0.173, independent of range 0.7 s"
+    );
+    assert!(
+        indexed != range_start,
+        "the field must reach the export mixer"
+    );
 }

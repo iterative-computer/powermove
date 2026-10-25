@@ -8,7 +8,9 @@ use std::time::Instant;
 
 mod chrome;
 mod layer_raster;
+mod media_prepare;
 pub use layer_raster::{LayerPixels, LayerRaster};
+pub use media_prepare::MediaPreparation;
 
 use pm_eval::{Comp, Evaluator};
 use pm_gpu::{Target, TargetPool, working_format};
@@ -224,7 +226,6 @@ fn build_options(
         blur: crate::motion::resolve(comp, request.motion_blur),
         sampling: request.sampling,
         shader_fallback,
-        video_end: request.video_end,
         preview: preview_window(comp, request),
         origin: request.origin,
     }
@@ -240,7 +241,7 @@ fn preview_window(
 ) -> Option<crate::compat_crop::PreviewWindow> {
     if request.export
         || !(comp.at_root() || comp.is_open_canonical())
-        || !matches!(request.video_end, crate::request::VideoEnd::Preview)
+        || !matches!(request.output_kind, crate::request::OutputKind::Preview)
     {
         return None;
     }
@@ -1832,6 +1833,9 @@ impl Renderer {
         if let Some(bracket) = &self.bracket {
             bracket.begin(&mut encoder);
         }
+        // Video sources this frame meets for the first time open together.
+        self.media
+            .open_cold(&media_prepare::planned_videos(&plan), request.export);
         // Exports never draw stand-ins (docs/engine/scrub.md).
         self.media.stand_ins.clear();
         let scrub = self.media.scrub;

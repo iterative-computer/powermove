@@ -310,8 +310,8 @@ fn color_tags_and_defaults() {
     assert_eq!(c.interpreted.primaries, Primaries::Bt601_525);
     assert_eq!(c.interpreted.matrix, MatrixCoefficients::Bt601);
     assert!(matches!(c.origins.primaries, Origin::Default { .. }));
-    // DNxHR's frame header carries its matrix; the primaries are untagged
-    // and 640×360 is SD by height.
+    // DNxHR's frame header carries its Rec.709 matrix; its primaries are
+    // untagged and 640×360 is SD: SMPTE 170M.
     let c = color("video/dnxhr-hq.mov");
     assert_eq!(c.interpreted.primaries, Primaries::Bt601_525);
     assert!(matches!(c.origins.primaries, Origin::Default { .. }));
@@ -327,7 +327,11 @@ fn color_tags_and_defaults() {
     }
     let c = color("video/dv-pal.dv");
     if c.tagged.primaries.is_none() {
-        assert_eq!(c.interpreted.primaries, Primaries::Bt601_625, "576 lines");
+        assert_eq!(
+            c.interpreted.primaries,
+            Primaries::Bt601_625,
+            "576-line PAL: BT.470BG"
+        );
     }
     // MJPEG is full range by rule; untagged chroma is sited left.
     let c = color("video/mjpeg-420.mov");

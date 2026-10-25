@@ -1,20 +1,14 @@
-//! The last frames of a video clip (Phase 2 gate D1): today's
-//! `videoPlaybackTime(asset, time, endPadding)` keeps a source time at
-//! least `endPadding` before the clip's end. The viewer's compositor seeks
-//! with 0.04 s; exports and agent stills run `prepareFrame` first, which
-//! passes `1 / PM.proj.fps`, so they keep every frame of a clip that ends
-//! with the composition. `RenderRequest::video_end` carries the output kind;
-//! these tests render a 20-frame H.264 clip of 20 distinct levels (the clip
-//! `e2e/export-video-frames.spec.ts` makes) in a project of its length at
-//! 10, 24, 25, 30, and 60 fps and read back which source frame each output
-//! frame shows, against today's rule for each kind.
+//! Source timestamps select video frames on every output surface. Browser
+//! seek padding must never hide the last frame or make preview differ from
+//! export. Distinct grey frames prove selection at matching and mixed
+//! source/composition rates, in direct layers and nested compositions.
 
 mod support;
 
 use pm_protocol::color::Precision;
 use pm_protocol::common::Size;
 use pm_protocol::frame::FramePurpose;
-use pm_render::{MapResolver, RenderRequest, Renderer, VideoEnd};
+use pm_render::{MapResolver, OutputKind, RenderRequest, Renderer};
 use serde_json::json;
 use support::doc::*;
 use support::ticks;
@@ -48,7 +42,14 @@ fn steps_clip(path: &std::path::Path, fps: u32) {
     let mut child = std::process::Command::new(ffmpeg())
         .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24"])
         .args(["-s", &format!("{SIDE}x{SIDE}"), "-r", &fps.to_string()])
-        .args(["-i", "pipe:0", "-c:v", "h264_videotoolbox", "-allow_sw", "1"])
+        .args([
+            "-i",
+            "pipe:0",
+            "-c:v",
+            "h264_videotoolbox",
+            "-allow_sw",
+            "1",
+        ])
         .args(["-b:v", "8M", "-pix_fmt", "yuv420p"])
         .args(["-color_primaries", "bt709", "-color_trc", "bt709"])
         .args(["-colorspace", "bt709"])
@@ -60,11 +61,10 @@ fn steps_clip(path: &std::path::Path, fps: u32) {
     assert!(child.wait().unwrap().success());
 }
 
-/// The project the spec builds: `fps`, 20 frames long, one video layer
-/// over the whole frame (centered: the anchor is the layer's center) for
-/// the whole composition.
-fn document(fps: u32) -> pm_model::Document {
-    let dur = FRAMES as f64 / f64::from(fps);
+/// The layer outlasts the source so the final frame must hold.
+fn document(source_fps: u32, comp_fps: u32, nested: bool) -> serde_json::Value {
+    let source_dur = FRAMES as f64 / f64::from(source_fps);
+    let dur = source_dur + 1.0;
     let v = layer(
         "v",
         "video",
@@ -73,43 +73,60 @@ fn document(fps: u32) -> pm_model::Document {
         f64::from(SIDE) / 2.0,
         dur,
     );
-    let mut doc = project(SIDE, SIDE, dur, no_fill(), vec![v]);
-    doc["fps"] = json!(fps);
-    asset(&mut doc, "clip", "video", "mp4", SIDE, SIDE, dur);
-    doc["assets"]["clip"]["fps"] = json!(fps);
-    load(&doc)
+    let mut doc = if nested {
+        let pre = layer(
+            "pre",
+            "precomp",
+            json!({"comp":"inner","w":SIDE,"h":SIDE}),
+            0.0,
+            0.0,
+            dur,
+        );
+        let mut doc = project(SIDE, SIDE, dur, no_fill(), vec![pre]);
+        composition(&mut doc, "inner", SIDE, SIDE, dur, vec![v]);
+        doc["comps"]["inner"]["fps"] = json!(25);
+        doc
+    } else {
+        project(SIDE, SIDE, dur, no_fill(), vec![v])
+    };
+    doc["fps"] = json!(comp_fps);
+    asset(&mut doc, "clip", "video", "mp4", SIDE, SIDE, source_dur);
+    doc["assets"]["clip"]["fps"] = json!(source_fps);
+    doc
 }
 
 /// The source frame each composition frame shows, read from the center
 /// pixel's level.
 fn shown(
     renderer: &mut Renderer,
-    fps: u32,
-    video_end: VideoEnd,
+    source_fps: u32,
+    document: &pm_model::Document,
+    output_kind: OutputKind,
     path: &std::path::Path,
 ) -> Vec<usize> {
-    let doc = document(fps);
     let mut resolver = MapResolver::default();
     resolver.paths.insert("clip".into(), path.to_path_buf());
     let request = RenderRequest {
-        video_end,
+        output_kind,
+        export: output_kind == OutputKind::Final,
         ..RenderRequest::at_scale(Size::new(SIDE, SIDE), 1.0, Precision::Float16)
     };
-    (0..FRAMES)
+    (0..FRAMES + 2)
         .map(|n| {
-            let t = n as f64 / f64::from(fps);
+            let t = n as f64 / f64::from(source_fps);
             let frame = renderer
-                .render(&doc, "Ptest-root", ticks(t), &request, &resolver)
+                .render(document, "Ptest-root", ticks(t), &request, &resolver)
                 .expect("render");
             assert!(frame.failures.is_empty(), "{:?}", frame.failures);
             let rgba = renderer.read_rgba(&frame).unwrap();
+            renderer.recycle(frame);
             let center = ((SIDE / 2) * SIDE + SIDE / 2) as usize * 4;
             let code = f64::from(rgba[center]) * 255.0;
             let (i, error) = (0..FRAMES)
                 .map(|i| (i, (code - level(i)).abs()))
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .unwrap();
-            assert!(error < 5.0, "{fps} fps frame {n}: code {code:.1}");
+            assert!(error < 5.0, "{source_fps} fps frame {n}: code {code:.1}");
             i
         })
         .collect()
@@ -137,27 +154,94 @@ fn today(fps: u32, padding: f64) -> Vec<usize> {
 }
 
 #[test]
-fn exports_keep_the_last_frames_and_the_viewer_pads_like_today() {
-    let dir = std::env::temp_dir().join(format!("pm-render-video-end-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut renderer = Renderer::headless().unwrap();
-    let every: Vec<usize> = (0..FRAMES).collect();
-    for fps in [10, 24, 25, 30, 60] {
-        let path = dir.join(format!("steps-{fps}.mp4"));
-        steps_clip(&path, fps);
-        // Exports and agent stills: `prepareFrame`'s `1 / fps`.
-        let final_frames = shown(&mut renderer, fps, VideoEnd::Final, &path);
-        assert_eq!(
-            final_frames,
-            today(fps, 1.0 / f64::from(fps)),
-            "{fps} fps, final"
-        );
-        assert_eq!(final_frames, every, "{fps} fps: an export keeps every frame");
-        // The viewer: the compositor's 0.04 s.
-        let preview = shown(&mut renderer, fps, VideoEnd::Preview, &path);
-        assert_eq!(preview, today(fps, 0.04), "{fps} fps, preview");
+fn every_surface_keeps_last_frames_at_matching_and_mixed_rates() {
+    struct Clean(std::path::PathBuf);
+    impl Drop for Clean {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
-    std::fs::remove_dir_all(&dir).ok();
+    let dir =
+        Clean(std::env::temp_dir().join(format!("pm-render-video-end-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    // Separate surfaces cannot answer from each other's converted-frame cache.
+    let mut preview = Renderer::headless().unwrap();
+    let mut export = Renderer::headless().unwrap();
+    let expected: Vec<usize> = (0..FRAMES + 2).map(|n| n.min(FRAMES - 1)).collect();
+    for source_fps in [10, 24, 25, 30, 60, 120] {
+        let path = dir.0.join(format!("steps-{source_fps}.mp4"));
+        steps_clip(&path, source_fps);
+        let mut rates = vec![source_fps, 10, 120];
+        rates.sort_unstable();
+        rates.dedup();
+        for comp_fps in rates {
+            for nested in [false, true] {
+                let doc = load(&document(source_fps, comp_fps, nested));
+                for (renderer, kind) in [
+                    (&mut preview, OutputKind::Preview),
+                    (&mut export, OutputKind::Final),
+                ] {
+                    assert_eq!(
+                        shown(renderer, source_fps, &doc, kind, &path),
+                        expected,
+                        "{source_fps} fps source, {comp_fps} fps comp, nested={nested}, {kind:?}",
+                    );
+                }
+            }
+        }
+        if source_fps == 60 {
+            for nested in [false, true] {
+                for (name, trim, speed, remap) in [
+                    ("trimmed double speed", 5.0 / 60.0, 2.0, None),
+                    ("reverse from final frame", 19.0 / 60.0, -1.0, None),
+                    ("remapped final frame", 0.0, 0.0, Some(19.0 / 60.0)),
+                ] {
+                    let mut value = document(source_fps, 30, nested);
+                    let video = if nested {
+                        &mut value["comps"]["inner"]["layers"][0]
+                    } else {
+                        &mut value["layers"][0]
+                    };
+                    video["d"]["trim"] = json!(trim);
+                    video["d"]["speed"] = json!(speed);
+                    if let Some(t) = remap {
+                        video["d"]["timeRemap"] = json!(true);
+                        video["d"]["sourceTime"] = ch(json!(t));
+                    }
+                    let expected: Vec<usize> = (0..FRAMES + 2)
+                        .map(|n| {
+                            let source = remap.unwrap_or(trim + n as f64 / 60.0 * speed);
+                            ((source * 60.0 + 1e-6).floor().max(0.0) as usize).min(FRAMES - 1)
+                        })
+                        .collect();
+                    let doc = load(&value);
+                    for (renderer, kind) in [
+                        (&mut preview, OutputKind::Preview),
+                        (&mut export, OutputKind::Final),
+                    ] {
+                        assert_eq!(
+                            shown(renderer, source_fps, &doc, kind, &path),
+                            expected,
+                            "{name}, nested={nested}, {kind:?}"
+                        );
+                    }
+                }
+            }
+        }
+        let old = today(source_fps, 0.04);
+        let mut errors: Vec<_> = old
+            .iter()
+            .enumerate()
+            .map(|(n, &frame)| n.abs_diff(frame))
+            .collect();
+        errors.sort_unstable();
+        eprintln!(
+            "VIDEO-END {source_fps} fps: old max={} p99.9={} mean={:.3}; native=0,0,0 source frames",
+            errors[FRAMES - 1],
+            errors[FRAMES - 1],
+            errors.iter().sum::<usize>() as f64 / FRAMES as f64,
+        );
+    }
 }
 
 #[test]
@@ -177,11 +261,14 @@ fn todays_padding_hides_the_last_frames_only_in_the_viewer_above_25_fps() {
 
 #[test]
 fn output_kinds_follow_the_frame_purpose() {
-    assert_eq!(VideoEnd::of(FramePurpose::Export), VideoEnd::Final);
-    assert_eq!(VideoEnd::of(FramePurpose::AgentCapture), VideoEnd::Final);
-    assert_eq!(VideoEnd::of(FramePurpose::Viewer), VideoEnd::Preview);
-    assert_eq!(VideoEnd::of(FramePurpose::Scrub), VideoEnd::Preview);
-    assert_eq!(VideoEnd::of(FramePurpose::Thumbnail), VideoEnd::Preview);
+    assert_eq!(OutputKind::of(FramePurpose::Export), OutputKind::Final);
+    assert_eq!(
+        OutputKind::of(FramePurpose::AgentCapture),
+        OutputKind::Final
+    );
+    assert_eq!(OutputKind::of(FramePurpose::Viewer), OutputKind::Preview);
+    assert_eq!(OutputKind::of(FramePurpose::Scrub), OutputKind::Preview);
+    assert_eq!(OutputKind::of(FramePurpose::Thumbnail), OutputKind::Preview);
     let sized = RenderRequest::sized(Size::new(SIDE, SIDE), Precision::Float16);
-    assert_eq!(sized.video_end, VideoEnd::Preview);
+    assert_eq!(sized.output_kind, OutputKind::Preview);
 }

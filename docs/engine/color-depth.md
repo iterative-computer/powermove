@@ -120,19 +120,21 @@ The video/3D gate (`color-depth-media.ts`, `color_depth_media`) captures
 scaling, rotation and partial opacity, and a visible three.js cube with a
 translucent 2D overlay, each at all three depths. Source Canvas pixels are
 recorded separately from composition sampling. The flat video and 3D samples
-match output bytes and raw float values. The detailed source revealed a
-Chromium/native YUV conversion difference at all depths. The dedicated
-video-parity lane owns that engine-wide source issue; the depth lane retains
-all six failing comparisons and their source evidence. No tolerance is applied
-to that gate.
+match output bytes and raw float values. The detailed source differs from
+Chromium's YUV conversion at all depths by design: video now has one reading,
+proven against an f64 reference rather than Chromium's bytes
+([video-parity.md](video-parity.md)), so those six comparisons measure
+closeness to that reference, not byte equality.
 
 `color-depth-alpha.ts` captures actual legacy transparent PNGs with
 identical overlapping solids and a blurred layer at depths 8, 16 and 32.
 Every readback and PNG contains 113 alpha codes. All three premultiplied
 frames match, including raw floats. Decoded PNGs differ at 176 / 2,968 / 179
-pixels respectively, each by one RGB code with unchanged alpha. This now
-observes the shared level-1 Canvas conversion issue at all depths; it remains
-routed to the video/image lane, with each strict export failure retained.
+pixels respectively, each by one RGB code with unchanged alpha. Transparent
+8-bit PNG export now divides the premultiplied working floats by alpha and
+rounds once, instead of reproducing Canvas2D's truncated 8-bit unpremultiply,
+so a translucent pixel is within half a code of the f64 value
+([quality-ledger.md](quality-ledger.md)).
 Fresh rotated text sources and compositions are exact at all three depths,
 including runner retention with zero differing byte codes or binary32 bits.
 Capture preparation happens outside the Electron lock; prebuilt opt-in
