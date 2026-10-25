@@ -7,6 +7,7 @@ import { ffmpegBinary } from './helpers/ffmpeg';
 
 const frames = 4, width = 128, height = 96;
 const ffmpeg = ffmpegBinary;
+test.use({ desktopLaunchOptions: { env: { POWERMOVE_NEW_ENGINE: '0' } } });
 const formats = [
   { format: 'mp4', alpha: false }, { format: 'prores', alpha: true },
   { format: 'png', alpha: false }, { format: 'png', alpha: true }, { format: 'webm', alpha: false },
@@ -51,6 +52,9 @@ async function maskProject(session: LaunchedApp, alpha = false, paths = false, g
     PM.GL.renderToPixels(0, 128, 96, { transparent: true, mblur: false, mbSamples: 1, shutter: .5 });
     for (const key of programs) if (!PM.GL.progs.get(key)?.pr || PM.GL.errors.has(key)) throw new Error('Mask preflight failed: ' + key);
     (window as any).__staticMaskFixture = { layer, owner, add, subtract, programs, rotation: structuredClone(layer.p.rotation) };
+    // Setup uses the frame-capture route for deterministic preflight. Real
+    // exports must own that route themselves, including the concurrency guard.
+    PM.agentFrameCapture = false;
   }, { alpha, paths, grouped });
 }
 
@@ -100,6 +104,9 @@ for (const { format, alpha } of formats) test(`retains freshly compiled and warm
       PM.GL.renderToPixels(0, 128, 96, { opaque: true, topDownOpaque: true, mblur: false, mbSamples: 1, shutter: .5 });
       for (const key of fixture.programs) if (!PM.GL.progs.get(key)?.pr || PM.GL.errors.has(key))
         throw new Error('Static mask program preflight failed: ' + key);
+      // Automatic preview can restore full quality after setup clears its
+      // capture flag. Give this export its intended alpha quality explicitly.
+      PM.AutomaticPreview?.cancel(); PM.quality = alpha ? .5 : 1;
       const pixels = PM.GL.renderToPixels, render = PM.GL.render, encode = HTMLCanvasElement.prototype.toBlob;
       const videoEncode = VideoEncoder.prototype.encode;
       const factories = ['createOpaqueReadback', 'createAlphaReadback', 'createHalfReadback', 'createFloatReadback'].map(name => [name, PM.GL[name]] as const);

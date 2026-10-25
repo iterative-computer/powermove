@@ -437,34 +437,6 @@ impl Thread {
                 interpretation.as_ref()
             },
         );
-        let svg_request = match pm_render::Renderer::source_is_svg(&path) {
-            Ok(true) if color != SourceColor::Compositor => {
-                let intrinsic = (
-                    pm_eval::node::finite_number(pm_eval::node::member(record, "w")).unwrap_or(0.0),
-                    pm_eval::node::finite_number(pm_eval::node::member(record, "h")).unwrap_or(0.0),
-                );
-                match pm_render::Renderer::source_svg_request(
-                    &path,
-                    asset.as_str(),
-                    job.request.output_size,
-                    fit,
-                    intrinsic,
-                ) {
-                    Ok(request) => Some(request),
-                    Err(error) => {
-                        self.stats().snapshot_failures += 1;
-                        self.snapshot_error(&job, ErrorCode::Internal, &error);
-                        return;
-                    }
-                }
-            }
-            Ok(_) => None,
-            Err(error) => {
-                self.stats().snapshot_failures += 1;
-                self.snapshot_error(&job, ErrorCode::MediaOffline, &error);
-                return;
-            }
-        };
         let sampling = if self
             .source_intent
             .get(&job.key)
@@ -480,14 +452,7 @@ impl Thread {
         // Coded planes are packed straight into their payload (a shared
         // segment for any real frame): one copy from the decoder's buffer.
         let mut written = None;
-        let painted = if let Some(request) = &svg_request {
-            composer.renderer().source_svg_rgba8(
-                &request.key,
-                job.request.output_size,
-                fit,
-                interpretation.as_ref(),
-            )
-        } else if color == SourceColor::Compositor {
+        let painted = if color == SourceColor::Compositor {
             let planes = match footage {
                 Some(_) => Ok(None),
                 // Coded planes up to four times the shown pixels; beyond that
@@ -555,47 +520,23 @@ impl Thread {
                 )
                 .map(Some)
         };
-        if let (Some(request), Ok(None)) = (&svg_request, &painted) {
-            let key = &request.key;
-            if self.svg.has_failed(key) {
-                self.stats().snapshot_failures += 1;
-                self.snapshot_error(
-                    &job,
-                    ErrorCode::Internal,
-                    "The window could not draw this source SVG's Chromium raster.",
-                );
-                return;
-            }
-            if job.request.uploaded.contains(&key.upload_key()) {
-                self.svg.expect(job.key, key, now());
-                self.snapshots.requeue(job);
-            } else {
-                self.stats().snapshot_needs += 1;
-                let mut envelope = Envelope::new(Message::Response {
-                    id: job.id,
-                    body: Response::Snapshot(Box::new(SnapshotOutcome::NeedsRenderer {
-                        revision,
-                        fallback: Vec::new(),
-                        compat: Vec::new(),
-                        svg: vec![request.clone()],
-                    })),
-                });
-                envelope.revision = Some(revision);
-                self.send(job.host, envelope);
-            }
-            return;
-        }
         let pixels = match painted {
             Ok(Some(pixels)) => {
                 if coded_video.is_some() {
                     pixels
-                } else if svg_request.is_some() {
-                    super::super::snapshot::encode_straight_rgba8_unorm(&pixels, job.request.pixels)
                 } else {
                     super::super::snapshot::encode_rgba8_unorm(&pixels, job.request.pixels)
                 }
             }
-            Ok(None) => unreachable!("handled missing source SVG above"),
+            Ok(None) => {
+                self.stats().snapshot_failures += 1;
+                self.snapshot_error(
+                    &job,
+                    ErrorCode::Internal,
+                    "The native source returned no pixels",
+                );
+                return;
+            }
             Err(error) => {
                 self.stats().snapshot_failures += 1;
                 self.snapshot_error(

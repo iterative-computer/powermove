@@ -1895,7 +1895,7 @@ The canvas fills its CSS box (`V.inner`, or the crop's box), and Chromium
 composites it there: the box snapped to whole device pixels (each edge
 rounded, as Blink snaps a replaced element's content box) and the 8-bit
 canvas sampled bilinearly, without mipmaps, clamped at its edges. The
-compositor picks every raster (text, shapes, SVG buckets) at that canvas's
+compositor picks every raster (text, shapes, SVG images) at that canvas's
 `outputScale`.
 
 **The engine.** The viewer computes the same geometry before it sends the
@@ -1906,9 +1906,9 @@ sends the one a `render.gl.resize` caller sized. pm-node's
 `compose::canvas_placement`:
 
 - renders the frame at the canvas's size and today's `outputScale` (the
-  canvas over its crop), so every layer, effect and level 1 SVG bucket is
-  drawn at today's resolution; only the canvas texels the visible frame
-  pixels read are rendered;
+  canvas over its crop), so every layer and effect is drawn at today's
+  resolution; only the canvas texels the visible frame pixels read are
+  rendered;
 - stores the region as today's 8-bit opaque canvas (`Rgba8Unorm`,
   composited over black), then scales it into the box snapped as Blink snaps
   it, with hardware bilinear sampling clamped at the canvas edges, into the
@@ -1922,7 +1922,7 @@ preview viewport (`scaledWorld`), the origin unrounded, and its background
 (`backgroundView`) and effect coordinates (`effectViewportCoordinates`)
 follow the same origin. pm-render now has that origin
 (`RenderRequest::origin`): every level 1 placement goes through it
-(`scaled_world`, `vector_world`: shapes, text, SVG buckets, solids, images,
+(`scaled_world`, `vector_world`: shapes, text, SVG images, solids, images,
 video), as do 2.5D planes, masks, local level 2 content, groups, mattes and
 motion-blur accumulations; a precomp renders its own target from (0, 0) as
 today's nested `renderProject` does. The level's `OutputView` gives the
@@ -2111,7 +2111,7 @@ pm-vector `canvas2d` pass; `corpus.rs` 354 frames, 5 failed, all video
 class (`motion/blur-video` at 0.5 and 1.2 s, max 255; `retime/speed` at
 2.9 s, max 3; `space25d/precomps` at 1.5 and 2.6 s, max 7 and 9), failing
 identically (same pixel counts and maxima) at the branch's pre-V1b head,
-so not V1b's. The svg bucket grid: 950 of 950 views pick today's bucket.
+so not V1b's.
 E2e after V1b: `engine-svg.spec.ts` 6 of 7 (E1 unchanged: 56,037 and
 59,892 values off by 1 CV), `engine-render-transport.spec.ts` 7 of 7, the
 `viewer-*` specs 21 of 23 (the two `viewer-resize.spec.ts` failures that

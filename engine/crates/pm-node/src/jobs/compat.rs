@@ -190,7 +190,6 @@ impl pm_export::render::FramePost for ContextFrames {
             source: CompatSource::CompatContext,
             scale: 1.0,
             revision: self.compat.revision,
-            svg: None,
             frame: Some(pm_protocol::snapshot::CompatFrameInput {
                 width,
                 height,
@@ -281,9 +280,6 @@ impl CompatRasters for JobCompat {
             source,
             scale,
             revision: self.revision,
-            // Layer producers only: SVG rasters have their own source
-            // (`pm_render::vector::svg_rasters::SvgRasterSource`).
-            svg: None,
             frame: None,
             blender: None,
         };

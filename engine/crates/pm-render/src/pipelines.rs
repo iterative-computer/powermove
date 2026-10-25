@@ -4,22 +4,23 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// A pipeline compiled on first use. The factory owns only handles from its
 /// device; neither it nor the device keeps a reference to this wrapper.
-pub(crate) struct Lazy<T> {
-    pipeline: OnceLock<T>,
-    create: Mutex<Option<Box<dyn FnOnce() -> T + Send>>>,
+pub(crate) struct LazyPipeline<P> {
+    pipeline: OnceLock<P>,
+    create: Mutex<Option<Box<dyn FnOnce() -> P + Send>>>,
 }
 
-pub(crate) type LazyRenderPipeline = Lazy<wgpu::RenderPipeline>;
+pub(crate) type LazyRenderPipeline = LazyPipeline<wgpu::RenderPipeline>;
+pub(crate) type LazyComputePipeline = LazyPipeline<wgpu::ComputePipeline>;
 
-impl<T> Lazy<T> {
-    pub(crate) fn new(create: impl FnOnce() -> T + Send + 'static) -> Self {
+impl<P> LazyPipeline<P> {
+    pub(crate) fn new(create: impl FnOnce() -> P + Send + 'static) -> Self {
         Self {
             pipeline: OnceLock::new(),
             create: Mutex::new(Some(Box::new(create))),
         }
     }
 
-    pub(crate) fn get(&self) -> &T {
+    pub(crate) fn get(&self) -> &P {
         self.pipeline.get_or_init(|| {
             // OnceLock admits one initializer. Take the factory before running
             // it so its captured device, module, and layout handles drop as
@@ -111,9 +112,11 @@ pub struct Pipelines {
     pub(crate) ops: crate::composite::gpu::OpPipelines,
     draw: [LazyRenderPipeline; 3],
     scene: [LazyRenderPipeline; 3],
+    scene_add: [LazyRenderPipeline; 3],
+    rect: [LazyRenderPipeline; 3],
     solid: [LazyRenderPipeline; 3],
     draw_add: [LazyRenderPipeline; 3],
-    scene_add: [LazyRenderPipeline; 3],
+    rect_add: [LazyRenderPipeline; 3],
     solid_add: [LazyRenderPipeline; 3],
     background: [LazyRenderPipeline; 3],
     flip: [LazyRenderPipeline; 3],
@@ -139,15 +142,74 @@ fn format_index(format: wgpu::TextureFormat) -> usize {
 
 impl Pipelines {
     pub fn new(device: &wgpu::Device) -> Pipelines {
+        // Keep the analytic solid functions out of the module compiled for
+        // texture, background and flip pipelines. Their first use otherwise
+        // clones the entire solid WGSL AST for unrelated draws.
+        let (shared, tail) = include_str!("shaders/composite.wgsl")
+            .split_once("// Solid layers:")
+            .expect("solid shader section");
+        // Solid pipelines need only the quad uniform and vertex output from
+        // the shared section. Texture sampling and color conversion belong
+        // to the compositing module; parsing/cloning them here costs cold
+        // renderer allocations even for an ordinary rectangle.
+        let (solid_header, _) = shared
+            .split_once("// Solid module header ends here.")
+            .expect("solid module header");
+        let (_, vertex_output_tail) = shared
+            .split_once("// Vertex output starts.")
+            .expect("vertex output section");
+        let (vertex_output, _) = vertex_output_tail
+            .split_once("// Vertex output ends.")
+            .expect("vertex output end");
+        let solid_shared = format!("{solid_header}\n{vertex_output}");
+        let (solid_body, other_body) = tail
+            .split_once("// `FRAG_BACKGROUND_FILL`")
+            .expect("background shader section");
+        let (rect_common, rounded_tail) = solid_body
+            .split_once("// Rounded-only circle helpers.")
+            .expect("rounded shader section");
+        let (rect_vertex, polygon_tail) = rect_common
+            .split_once("struct Poly {")
+            .expect("rectangle polygon section");
+        let (_, from_inverse) = rounded_tail
+            .split_once("// The inverse")
+            .expect("shared inverse section");
+        let (inverse_and_round, rect_fragment) = from_inverse
+            .split_once("// Rect-only fragment.")
+            .expect("rectangle shader section");
+        let (inverse, _) = inverse_and_round
+            .split_once("@fragment\nfn fs_solid")
+            .expect("rounded fragment section");
         let composite = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render composite"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}\n{}\n{}\n{}",
+                    "{}\n{}// `FRAG_BACKGROUND_FILL`{}",
                     pm_color::wgsl::COLOR,
-                    crate::scene3d::NEAREST_HALF_WGSL,
-                    include_str!("shaders/composite.wgsl"),
-                    include_str!("shaders/composite_half.wgsl")
+                    shared,
+                    other_body,
+                )
+                .into(),
+            ),
+        });
+        let solid_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pm-render analytic solid"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{solid_shared}\n// Solid layers:{solid_body}").into(),
+            ),
+        });
+        let rect_vertex_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pm-render rectangle vertex"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{solid_shared}\n// Solid layers:{rect_vertex}").into(),
+            ),
+        });
+        let rect_fragment_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pm-render rectangle fragment"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "{}\nstruct Poly {{{}// The inverse{}// Rect-only fragment.{}",
+                    solid_shared, polygon_tail, inverse, rect_fragment,
                 )
                 .into(),
             ),
@@ -242,16 +304,31 @@ impl Pipelines {
             },
         };
         let scene_module = Arc::new(OnceLock::<wgpu::ShaderModule>::new());
+        let half_modules = Arc::new(HalfModules::new(
+            format!("{}\n// `FRAG_BACKGROUND_FILL`{}", shared, other_body),
+            format!("{solid_shared}\n// Solid layers:{solid_body}"),
+            format!(
+                "{}\nstruct Poly {{{}// The inverse{}// Rect-only fragment.{}",
+                solid_shared, polygon_tail, inverse, rect_fragment,
+            ),
+        ));
         let blended = |layout: &wgpu::PipelineLayout,
                        entry: &'static str,
                        format: wgpu::TextureFormat,
                        blend: wgpu::BlendState| {
             let device = device.clone();
-            let composite = composite.clone();
+            let (vertex_shader, fragment_shader) = match entry {
+                "fs_solid" => (solid_shader.clone(), solid_shader.clone()),
+                "fs_rect" => (rect_vertex_shader.clone(), rect_fragment_shader.clone()),
+                _ => (composite.clone(), composite.clone()),
+            };
             let layout = layout.clone();
             let scene_module = scene_module.clone();
+            let half_modules = half_modules.clone();
             LazyRenderPipeline::new(move || {
-                let module = if entry == "fs_scene" {
+                // A linear 3D source compiles the scene output curve; an
+                // RGBA16F target stores the nearest half of each value.
+                let fragment_shader = if entry == "fs_scene" {
                     scene_module.get_or_init(|| {
                         device.create_shader_module(wgpu::ShaderModuleDescriptor {
                             label: Some("pm-render scene composite"),
@@ -267,16 +344,24 @@ impl Pipelines {
                                 .into(),
                             ),
                         })
-                    })
+                    }).clone()
+                } else if format == wgpu::TextureFormat::Rgba16Float {
+                    half_modules.module(&device, entry)
                 } else {
-                    &composite
+                    fragment_shader
                 };
+                let vertex_shader = if entry == "fs_scene" { fragment_shader.clone() } else { vertex_shader };
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(entry),
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
-                        module,
-                        entry_point: Some("vs"),
+                        module: &vertex_shader,
+                        // Solids grow by their antialiased fringe.
+                        entry_point: Some(if entry == "fs_solid" || entry == "fs_rect" {
+                            "vs_solid"
+                        } else {
+                            "vs"
+                        }),
                         compilation_options: Default::default(),
                         buffers: &[],
                     },
@@ -288,8 +373,7 @@ impl Pipelines {
                     depth_stencil: None,
                     multisample: wgpu::MultisampleState::default(),
                     fragment: Some(wgpu::FragmentState {
-                        module,
-                        // RGBA16F stores the nearest half of every draw's value.
+                        module: &fragment_shader,
                         entry_point: Some(&if format == wgpu::TextureFormat::Rgba16Float {
                             format!("{entry}_half")
                         } else {
@@ -313,9 +397,11 @@ impl Pipelines {
             };
         let draw = TARGET_FORMATS.map(|f| pipeline(&draw_layout, "fs_draw", f));
         let scene = TARGET_FORMATS.map(|f| pipeline(&draw_layout, "fs_scene", f));
+        let scene_add = TARGET_FORMATS.map(|f| blended(&draw_layout, "fs_scene", f, add));
+        let rect = TARGET_FORMATS.map(|f| pipeline(&solid_layout, "fs_rect", f));
         let solid = TARGET_FORMATS.map(|f| pipeline(&solid_layout, "fs_solid", f));
         let draw_add = TARGET_FORMATS.map(|f| blended(&draw_layout, "fs_draw", f, add));
-        let scene_add = TARGET_FORMATS.map(|f| blended(&draw_layout, "fs_scene", f, add));
+        let rect_add = TARGET_FORMATS.map(|f| blended(&solid_layout, "fs_rect", f, add));
         let solid_add = TARGET_FORMATS.map(|f| blended(&solid_layout, "fs_solid", f, add));
         let background = TARGET_FORMATS.map(|f| pipeline(&background_layout, "fs_background", f));
         let flip_pipeline = |format: wgpu::TextureFormat| {
@@ -508,9 +594,11 @@ impl Pipelines {
             linear,
             draw,
             scene,
+            scene_add,
+            rect,
             solid,
             draw_add,
-            scene_add,
+            rect_add,
             solid_add,
             background,
             flip,
@@ -562,6 +650,18 @@ impl Pipelines {
         }
     }
 
+    /// Exact area coverage for square-corner solids, without the disk shader.
+    pub fn rect_with(
+        &self,
+        format: wgpu::TextureFormat,
+        blend: PassBlend,
+    ) -> &wgpu::RenderPipeline {
+        match blend {
+            PassBlend::Over => self.rect[format_index(format)].get(),
+            PassBlend::Additive => self.rect_add[format_index(format)].get(),
+        }
+    }
+
     pub fn background(&self, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
         self.background[format_index(format)].get()
     }
@@ -578,7 +678,7 @@ impl Pipelines {
         let i = format_index(format);
         for pipeline in [
             &self.draw[i],
-            &self.solid[i],
+            &self.rect[i],
             &self.flip[i],
             &self.background[i],
         ] {
@@ -599,8 +699,10 @@ impl Pipelines {
     fn initialized_2d_pipelines(&self) -> usize {
         [
             &self.draw,
+            &self.rect,
             &self.solid,
             &self.draw_add,
+            &self.rect_add,
             &self.solid_add,
             &self.background,
             &self.flip,
@@ -609,6 +711,53 @@ impl Pipelines {
         .flat_map(|variants| variants.iter())
         .filter(|pipeline| pipeline.is_built())
         .count()
+    }
+}
+
+/// The 2D shader modules for RGBA16F targets: each fragment entry `fs_x`
+/// becomes `fs_x_value`, wrapped by `fs_x` and by `fs_x_half`, which stores
+/// the nearest half (Metal's render-target conversion truncates). Compiled on
+/// first use of a half-float target.
+struct HalfModules {
+    sources: [(String, OnceLock<wgpu::ShaderModule>); 3],
+}
+
+impl HalfModules {
+    fn new(composite: String, solid: String, rect: String) -> HalfModules {
+        HalfModules {
+            sources: [composite, solid, rect].map(|s| (s, OnceLock::new())),
+        }
+    }
+
+    fn module(&self, device: &wgpu::Device, entry: &str) -> wgpu::ShaderModule {
+        let (source, module) = &self.sources[match entry {
+            "fs_solid" => 1,
+            "fs_rect" => 2,
+            _ => 0,
+        }];
+        module
+            .get_or_init(|| {
+                let mut wgsl = format!(
+                    "{}\n{}\n{}",
+                    pm_color::wgsl::COLOR,
+                    crate::scene3d::NEAREST_HALF_WGSL,
+                    source
+                );
+                for name in ["fs_draw", "fs_background", "fs_solid", "fs_rect"] {
+                    let entry = format!("@fragment\nfn {name}(in: VsOut) -> @location(0) vec4<f32> {{");
+                    if wgsl.contains(&entry) {
+                        wgsl = wgsl.replace(&entry, &format!("fn {name}_value(in: VsOut) -> vec4<f32> {{"));
+                        wgsl.push_str(&format!(
+                            "\n@fragment fn {name}_half(in: VsOut) -> @location(0) vec4<f32> {{ return pm_scene_half_color({name}_value(in)); }}\n"
+                        ));
+                    }
+                }
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("pm-render half-float 2D"),
+                    source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+                })
+            })
+            .clone()
     }
 }
 
@@ -638,7 +787,7 @@ mod tests {
         pipelines.solid_with(wgpu::TextureFormat::Rgba32Float, PassBlend::Additive);
         assert_eq!(pipelines.initialized_2d_pipelines(), 2);
         eprintln!(
-            "lazy 2D pipelines: construct={construction:?} first={first_use:?} repeat={repeat:?} built=2/18"
+            "lazy 2D pipelines: construct={construction:?} first={first_use:?} repeat={repeat:?} built=2/24"
         );
 
         let captured = std::sync::Arc::new(());
@@ -697,10 +846,18 @@ mod tests {
         }
         for format in TARGET_FORMATS {
             timed!(format!("2D draw {format:?}"), pipelines.draw(format));
+            timed!(
+                format!("2D rectangle {format:?}"),
+                pipelines.rect_with(format, PassBlend::Over)
+            );
             timed!(format!("2D solid {format:?}"), pipelines.solid(format));
             timed!(
                 format!("2D draw additive {format:?}"),
                 pipelines.draw_with(format, PassBlend::Additive)
+            );
+            timed!(
+                format!("2D rectangle additive {format:?}"),
+                pipelines.rect_with(format, PassBlend::Additive)
             );
             timed!(
                 format!("2D solid additive {format:?}"),
@@ -712,16 +869,16 @@ mod tests {
             );
             timed!(format!("2D flip {format:?}"), pipelines.flip(format));
         }
-        assert_eq!(pipelines.initialized_2d_pipelines(), 18);
+        assert_eq!(pipelines.initialized_2d_pipelines(), 24);
         times.extend(pipelines.ops.probe_all());
         times.extend(pipelines.ops.path_masks.probe_all());
         times.extend(pipelines.resample.probe_all());
         times.extend(text.probe_all());
-        // 18 2D, 21 composite (7 ops), 6 resample draws and 3 mip writers
-        // over rgba16float, rgba32float and colordepth's rgba8unorm; 10 path
-        // masks and 4 text paints.
-        assert_eq!(times.len(), 62);
-        assert_eq!(built(), 62);
+        // 24 2D, 21 composite (7 ops), 6 resample draws and 3 mip writers
+        // over rgba16float, rgba32float and colordepth's rgba8unorm; path
+        // masks and 6 text outline/image/blur.
+        assert_eq!(times.len(), 72);
+        assert_eq!(built(), times.len());
         for (name, duration) in times {
             eprintln!("lazy pipeline first use: {name}={duration:?}");
         }

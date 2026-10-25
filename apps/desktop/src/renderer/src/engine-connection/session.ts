@@ -16,7 +16,7 @@
  * viewer (capability routing, section 21); a frame means the engine draws
  * it.
  */
-import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, SvgRasterRequest, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
+import type { AudioMessage, ClockSample, RenderStats, DefinitionsApplied, DefinitionsUpdate, Envelope, ErrorDetail, FailureReport, FrameDescriptor, PatchOrigin, ProjectColor, Request, SurfacePool, TransportCommand, ViewerState } from '../../../shared/engine-protocol';
 import { limitUtf8 } from '../../../shared/protocol-strings';
 import { documentId } from '../../../shared/engine-document-id';
 import type { EngineConnection, Log } from './connection';
@@ -144,8 +144,6 @@ export type SessionOptions = {
   definitionsRetryMs?: number;
   /** The decision 19 shader fallback runner (created on the first request when absent). */
   fallbackRunner?: () => FallbackRunner;
-  /** Level 1 SVG rasters the engine asks this window for (svg-rasters.ts). */
-  svgRasters?: () => { answer(target: { post(event: Record<string, unknown> & { type: string }): boolean }, requests: readonly SvgRasterRequest[]): Promise<void> } | null;
 };
 
 export const DEFAULT_COLOR: ProjectColor = { mode: 'standard', linearBlending: false, precision: 'float16', blendDomain: 'hdrSafe' };
@@ -604,16 +602,7 @@ export class DocumentSession {
         return;
       }
       case 'compat': {
-        if (event['compat'] === 'needs') { this.options.onCompat?.(event); return; }
-        // Level 1 SVG rasters a frame drew without (decision S1).
-        if (event['compat'] !== 'svgRequests') return;
-        const requests = (event['requests'] as SvgRasterRequest[]) ?? [];
-        const rasters = this.options.svgRasters?.();
-        if (!rasters) {
-          for (const r of requests) this.post({ type: 'compat', compat: 'svgFailed', key: r.key, reason: 'unavailable', message: 'This window draws no SVG rasters.' });
-          return;
-        }
-        void rasters.answer(this, requests);
+        if (event['compat'] === 'needs') this.options.onCompat?.(event);
         return;
       }
       case 'failure': {

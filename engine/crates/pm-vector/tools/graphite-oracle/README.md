@@ -49,12 +49,6 @@ remaps the separate texture/sampler bindings to the common draw layout.
 It uses Tint's single-entry-point writer with symbol renaming; the host
 bounds every patch access by its vertex and instance draw ranges.
 
-`counts.cpp` independently calls Skia's `LinearTolerances`, Wang formulae
-and `FixedCount{Wedges,Strokes}::VertexCount`. Build it against the same
-Skia library with `-ffp-contract=off`. It reports the line, quad, cubic and
-rational-conic allocation counts at scales 1 and 5, with round, bevel and
-miter joins. These synthetic records contain no fonts or captured pixels.
-
 `sdf.cpp` calls the pinned CPU `SkGenerateDistanceFieldFromA8Image` on eight
 synthetic A8 masks. Its FNV-1a hashes check the complete padded atlas bytes
 in pm-text's `tests/distance_fields.rs`, independently of GPU interpolation.

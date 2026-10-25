@@ -16,7 +16,7 @@ The monitor presents native video through `SourceVideoPresenter`: decoded
 planes with the shared colour reading, or an engine-converted sRGB frame when
 that reading requires native conversion. Its private video element consumes a
 native MediaStream, not a media URL. Stills use engine-rendered pixels in an
-image surface. SVG sources currently use the existing SVG raster bridge.
+image surface. SVG sources paint natively through the renderer's vector cache.
 Coded planes are packed once, from the decoder's buffer straight into the
 snapshot's shared-memory segment, in a WebCodecs buffer layout (NV12, I420A,
 I422 or I420P10). Every source frame is a buffer-backed `VideoFrame`: an

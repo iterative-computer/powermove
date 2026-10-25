@@ -67,6 +67,43 @@ runs for every such frame, regardless of whether its Float16 centroid passes.
 A case where today is closer to the reference than the engine fails. Report it; never
 widen a bound to pass it.
 
+Each interior pixel in G-C2 and the non-text regions of `text_corpus` retains
+legacy equality within 1 CV, or proves a correction directly against the authored
+f64 value: within 1 CV of it, with error exceeding today's by at most the storage
+precision bound. This alternate proof applies only to pixels outside the original
+legacy bound; a correction elsewhere never tightens an already passing pixel. It proves the solid radius even where today's ignored radius
+leaves a flat, wrong corner far from the corrected contour. Original capture
+distances remain in the report; geometry and authored paint are still exact.
+
+## Owned pending reference gaps
+
+When a stricter reference exposes an unmodelled effect or compositing defect,
+`pm-render/tests/fixtures/corpus-pending.json` records its anonymous frame ID,
+owner (L6 effects or L4 compositing), failed numeric checks and a digest of all
+measured engine, capture and reference samples. These entries are reviewed
+individually; recording observations does not admit them or pass the gate.
+
+Every pending frame is still rendered and measured. A changed measurement, new
+failure, missing full-run measurement or resolved entry fails for owner review.
+Only failures wholly in unreferenced pixels, including the existing 3D class
+until L4 supplies its reference, are eligible. Whole-frame text composition
+uses the same ratchet only when its authored text-only projection matches and passes the paired isolated
+text capture at the unchanged 2 CV bar, or every differing text pixel lies
+in the independent mask-edge band. Missing paired evidence stays blocking;
+the isolated measurement is included in the pending checks. Projection follows
+the capture converter and ignores only generated effect-keyframe transport IDs;
+text values, layout, masks, animators, effects and retained transforms stay exact. Authored geometry,
+preview/export identity, render errors and modelled vector coverage remain
+blocking. Pending entries never change a global bound.
+
+L3 content inside a pending composition also runs the default independent
+own-layer corpus gate: authored outlines, opacity, masks and shutter samples
+at float32, with path-mask storage asserted at R16Float. Effective 2.5D content
+is checked locally before L4 projection. These proofs retain the full-frame
+pending measurement and identify only its surrounding L4/L6 reference gap.
+Selecting captures with `PM_ENGINE_CORPUS` never disables the full-run
+not-measured check.
+
 ## The reference
 
 `engine/crates/pm-reference` (tests only) computes in f64 from the standards and the
@@ -76,12 +113,17 @@ Gaussian (`gaussian`), sRGB, BT.709 and BT.1886, PQ, HLG, H.273 matrices, ranges
 primaries, and ICC matrix/TRC profiles with optional unclipped conversion (`color`).
 `tests/engine_formulas.rs` cross-checks it against pm-color.
 `pm-render/tests/support/reference.rs` builds a document's reference frame: authored
-values from pm-eval; independent f64 coverage, compositing, and declared mip-zero
-still sampling. It models backgrounds, 2D solids, supported level-1 stills,
-parametric masks, group boundaries, precomps, and track mattes. Child sources
-are painted from authored layers in f64 before parent sampling; blends stay in
-f64 until the opaque sRGB comparison boundary. Unsupported content remains
-explicitly unreferenced.
+values from pm-eval, all math from pm-reference. It models backgrounds, 2D solids,
+vectors, supported level-1 stills (declared mip-zero sampling), motion-blur
+coverage, parametric and path masks, group boundaries, precomps and track mattes.
+Child sources are painted from authored layers in f64 before parent sampling;
+blends stay in f64 until the opaque sRGB comparison boundary. Supported SVG paths,
+gradients, normal source-over groups and clips use direct f64 paint and coverage
+on a shared 16× grid, resolved per image before layer compositing. Other SVG
+constructs use an independent 32× resvg reference whose RGBA8 paint quantization
+is a stated limitation; it is not a converged f64 paint reference. Content it
+cannot model is unreferenced over its complete affected footprint, including
+transparent effect input pixels.
 
 `tests/corpus.rs` (G-C2) is the model conversion; its gated frame must equal the export
 frame, and the paused preview must equal that export. Video selects from source timestamps

@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use crate::BenchReport;
 use crate::fixtures::{self, ROOT, Synthetic};
 
+
 /// The viewer's device-pixel size in the Phase 2 rows (a 1496 × 904 stage
 /// at DPR 2).
 pub const VIEW: (u32, u32) = (1496, 904);
@@ -103,6 +104,8 @@ pub fn all() -> Vec<Bench> {
         ("import_3d_600k", import_3d_600k),
         ("blend_stack_cold", blend_stack_cold),
         ("text_cold", text_cold),
+        ("playback_shapes_200", playback_shapes_200),
+        ("playback_svg_animated", playback_svg_animated),
     ]
 }
 
@@ -348,6 +351,68 @@ pub fn playback(ctx: &Ctx, name: &str, layers: usize, frames: u32) -> BenchRepor
         .collect();
     let m = measured(scope);
     report(name, "frames", m, wall, f.summary.clone())
+}
+
+/// Playback: 60 consecutive frames of 200 animated shape layers (the
+/// synthetic project with shapes for solids).
+pub fn playback_shapes_200(ctx: &Ctx) -> BenchReport {
+    let f = fixtures::synthetic(Synthetic {
+        shapes: true,
+        ..Synthetic::new(200)
+    });
+    let mut v = Viewer::new(ctx, &f.doc, &f.media);
+    v.composer.set_playing(true);
+    let fps = 30.0;
+    for k in 0..2 {
+        v.frame(ticks(f64::from(k) / fps));
+    }
+    let scope = Scope::begin();
+    let wall = (2..62)
+        .map(|k| v.frame(ticks(f64::from(k) / fps)))
+        .collect();
+    let m = measured(scope);
+    report("playback_shapes_200", "frames", m, wall, f.summary.clone())
+}
+
+/// A moving, rotating SVG image (gradient, clip path and blur filter)
+/// playing in the real viewer compositor. Playback frames reproject the
+/// SVG's persistent source raster: no frame repaints it. The notes carry
+/// resvg's CPU time for the same document at the image's device size,
+/// outside the counter scope (the per-frame bar the timing gate compares).
+pub fn playback_svg_animated(ctx: &Ctx) -> BenchReport {
+    let f = fixtures::animated_svg();
+    let mut v = Viewer::new(ctx, &f.doc, &f.media);
+    v.composer.set_playing(true);
+    let fps = 30.0;
+    for k in 0..2 {
+        v.frame(ticks(f64::from(k) / fps));
+    }
+    let scope = Scope::begin();
+    let wall: Vec<_> = (2..62)
+        .map(|k| v.frame(ticks(f64::from(k) / fps)))
+        .collect();
+    let m = measured(scope);
+    let hits = m.0.get(pm_perf::Counter::SvgRasterHits);
+    let misses = m.0.get(pm_perf::Counter::SvgRasterMisses);
+    assert_eq!(hits, 60, "every playback frame reuses the source raster");
+    assert_eq!(misses, 0, "a playback frame repainted the source raster");
+
+    let (svg, _) = pm_render::vector::svg::document(&f.media["art"]).expect("SVG parses");
+    // The 180 × 101.25 box at 125% in a 640 × 360 composition, fitted into
+    // VIEW (×1496/640): the device size resvg draws each frame.
+    let (rw, rh) = (526, 296);
+    let mut resvg: Vec<f64> = (0..wall.len())
+        .map(|_| {
+            let start = Instant::now();
+            std::hint::black_box(svg.raster(rw, rh));
+            start.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    resvg.sort_by(f64::total_cmp);
+    let mut notes = f.summary.clone();
+    notes["resvg_p50_ms"] = json!(resvg[resvg.len() / 2]);
+    notes["resvg_size"] = json!([rw, rh]);
+    report("playback_svg_animated", "frames", m, wall, notes)
 }
 
 /// A layer drag, paused: 60 moves of one solid, each a new revision drawn

@@ -368,7 +368,7 @@ pub(crate) struct Resampler {
     trilinear: wgpu::Sampler,
     /// `[format][blend]`: rgba16float, rgba32float, rgba8unorm × over, additive.
     draw: [[crate::pipelines::LazyRenderPipeline; 2]; 3],
-    down: [crate::pipelines::Lazy<wgpu::ComputePipeline>; 3],
+    down: [crate::pipelines::LazyComputePipeline; 3],
 }
 
 const FORMATS: [wgpu::TextureFormat; 3] = [
@@ -557,7 +557,7 @@ impl Resampler {
                 }
                 _ => ("rgba8unorm", "fn store(c: vec4<f32>) -> vec4<f32> { return c; }"),
             };
-            crate::pipelines::Lazy::new(move || {
+            crate::pipelines::LazyPipeline::new(move || {
                 let source = format!(
                     "{}\n{store}\n{}",
                     crate::scene3d::NEAREST_HALF_WGSL,

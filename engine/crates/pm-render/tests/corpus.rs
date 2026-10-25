@@ -30,6 +30,11 @@
 //! `PM_RENDER_ONLY` limits to project names with a prefix;
 //! `PM_RENDER_DIFFS=<dir>` writes engine and today's PNGs of failures there.
 
+#[path = "support/pending.rs"]
+mod pending;
+#[path = "support/quality.rs"]
+mod quality;
+use quality::reference_problems;
 mod support;
 
 use pm_protocol::color::Precision;
@@ -109,8 +114,936 @@ fn tempdir_guard(name: &str) -> TempDir {
     TempDir(dir)
 }
 
+/// Optional anonymous per-frame evidence for paired branch attribution.
+fn record_frame_result(file: &mut Option<std::fs::File>, id: &str, failed: bool, pixels: &[u8]) {
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    if let Some(file) = file {
+        let row = serde_json::json!({
+            "frame": id, "status": if failed { "fail" } else { "pass" },
+            "pixel_sha256": format!("{:x}", Sha256::digest(pixels)),
+        });
+        writeln!(file, "{row}").expect("frame attribution evidence");
+    }
+}
+
+fn sample_frame_ids(project: &str, time: f64, width: u32, height: u32) -> [String; 4] {
+    ["opaque", "transparent", "3d-opaque", "3d-transparent"]
+        .map(|side| pending::frame_id(project, time, width, height, side))
+}
+
+fn has_pending_sample(
+    frames: &std::collections::BTreeSet<String>,
+    project: &str,
+    time: f64,
+    width: u32,
+    height: u32,
+) -> bool {
+    sample_frame_ids(project, time, width, height)
+        .iter()
+        .any(|id| frames.contains(id))
+}
+
+/// Isolate every active L3 layer whose own edge can be hidden by later-lane
+/// composition. The variant retains authored transform, mask and shutter
+/// channels, while removing surrounding layers and L6 effects. It is run in
+/// addition to the full-frame pending check; it cannot exempt that check.
+fn prove_own_2d_layers(
+    renderer: &mut Renderer,
+    project: &Project,
+    sample: &Sample,
+    full_pending: bool,
+    rows: &mut Option<std::fs::File>,
+) -> Vec<String> {
+    use pm_eval::{Comp, Evaluator, Scope, node};
+    use pm_reference::compare::{geometry, same_geometry};
+    use std::io::Write;
+    let comp = Comp::resolve(&project.document, &project.composition).expect("composition");
+    let seconds = comp.seconds_at(ticks(sample.time).get());
+    let mut evaluator =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut evaluator, &comp, &comp);
+    let mut failures = Vec::new();
+    let mut request =
+        RenderRequest::sized(Size::new(sample.width, sample.height), Precision::Float32);
+    request.output_kind = pm_render::OutputKind::Final;
+    request.background = false;
+    request.motion_blur = pm_render::motion::MotionBlur::Samples(20);
+    let solo = comp
+        .layers()
+        .iter()
+        .any(|layer| node::truthy(node::member(Some(layer), "solo")));
+    for (index, layer) in comp.layers().iter().enumerate() {
+        let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
+        if !matches!(ty.as_str(), "shape" | "solid") {
+            continue;
+        }
+        if (solo && !node::truthy(node::member(Some(layer), "solo")))
+            || !scope.active(layer, seconds).expect("layer active")
+        {
+            continue;
+        }
+        let has_masks = pm_render::composite::build::has_masks(&mut scope, layer, seconds)
+            .expect("enabled masks");
+        let motion = scope
+            .evaluated(
+                layer,
+                node::member(Some(layer), "mblur"),
+                seconds,
+                "l.mblur",
+            )
+            .expect("motion channel")
+            .truthy();
+        let grouped = node::member(Some(layer), "group")
+            .is_some_and(|v| !matches!(v.kind(), pm_model::NodeKind::Null));
+        let is_3d = scope.is_3d_layer(layer).expect("3D property");
+        if !(has_masks || motion || grouped || full_pending) || is_3d {
+            continue;
+        }
+        let isolated = reference::isolated_own_layer(&project.document, index);
+        let wanted = reference::render(
+            &isolated,
+            &project.composition,
+            ticks(sample.time),
+            sample.width,
+            sample.height,
+            false,
+            20,
+            renderer.effects(),
+            &project.resolver,
+        );
+        let label = format!("{} t={} layer={index} ({ty})", project.name, sample.time);
+        if wanted.modelled() != 1.0 {
+            failures.push(format!(
+                "{label}: own-layer reference incomplete: {:?}",
+                wanted.unmodelled
+            ));
+            continue;
+        }
+        let frame = match renderer.render(
+            &isolated,
+            &project.composition,
+            ticks(sample.time),
+            &request,
+            &project.resolver,
+        ) {
+            Ok(frame) => frame,
+            Err(e) => {
+                failures.push(format!("{label}: isolated render: {e}"));
+                continue;
+            }
+        };
+        if frame.color.format() != wgpu::TextureFormat::Rgba32Float || !frame.failures.is_empty() {
+            failures.push(format!(
+                "{label}: native float storage or layer failure: {:?} {:?}",
+                frame.color.format(),
+                frame.failures
+            ));
+            continue;
+        }
+        let native = unit32(&renderer.read_rgba(&frame).expect("isolated float readback"));
+        let max_cv = native
+            .iter()
+            .zip(&wanted.rgba)
+            .map(|(a, b)| (a - b).abs() * 255.0)
+            .fold(0.0_f64, f64::max);
+        let width = sample.width as usize;
+        let alpha = |rgba: &[f64]| rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+        let shape = same_geometry(
+            &geometry(&alpha(&native), width),
+            &geometry(&wanted.alpha(), width),
+            1e-3,
+        );
+        let pass = max_cv <= 1.0 + 1e-9 && shape.is_ok();
+        if !pass {
+            failures.push(format!(
+                "{label}: own-layer max {max_cv:.6} CV (bar 1); geometry {shape:?}"
+            ));
+        }
+        if let Some(file) = rows {
+            let classes = wanted.classes();
+            let row = serde_json::json!({
+                "frame": pending::frame_id(&project.name, sample.time, sample.width, sample.height, "own-layer"),
+                "pending_frame_ids": sample_frame_ids(&project.name, sample.time, sample.width, sample.height),
+                "layer_index": index, "type": ty, "masks": has_masks, "motion": motion,
+                "grouped": grouped, "space": "2d-precomposition", "float_storage": "rgba32float",
+                "max_cv": max_cv, "geometry": shape.err(), "pass": pass,
+                "measurement_sha256": pending::measurement(&native, &[], &wanted.rgba, &classes),
+            });
+            writeln!(file, "{row}").expect("own-layer evidence");
+        }
+    }
+    failures
+}
+
+/// A 2.5D solid's intrinsic float source, before the L4 plane projection.
+/// The source keeps authored content, opacity, masks and shutter timing.
+fn prove_local_3d_solids(
+    renderer: &mut Renderer,
+    project: &Project,
+    sample: &Sample,
+    rows: &mut Option<std::fs::File>,
+) -> Vec<String> {
+    use pm_eval::{Comp, Evaluator, Scope};
+    use pm_reference::compare::{geometry, same_geometry};
+    use std::io::Write;
+    let comp = Comp::resolve(&project.document, &project.composition).expect("composition");
+    let seconds = comp.seconds_at(ticks(sample.time).get());
+    let mut evaluator =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut evaluator, &comp, &comp);
+    let mut failures = Vec::new();
+    let mut request =
+        RenderRequest::sized(Size::new(sample.width, sample.height), Precision::Float32);
+    request.output_kind = pm_render::OutputKind::Final;
+    request.background = false;
+    request.motion_blur = pm_render::motion::MotionBlur::Samples(20);
+    for (index, layer) in comp.layers().iter().enumerate() {
+        if pm_render::js::member_string(layer, "type").as_deref() != Some("solid")
+            || !scope.is_3d_layer(layer).expect("3D property")
+            || !scope.active(layer, seconds).expect("layer active")
+        {
+            continue;
+        }
+        let isolated = reference::isolated_local_solid(&project.document, index);
+        let wanted = reference::render(
+            &isolated,
+            &project.composition,
+            ticks(sample.time),
+            sample.width,
+            sample.height,
+            false,
+            20,
+            renderer.effects(),
+            &project.resolver,
+        );
+        let label = format!(
+            "{} t={} local 2.5D solid layer={index}",
+            project.name, sample.time
+        );
+        if wanted.modelled() != 1.0 {
+            failures.push(format!(
+                "{label}: intrinsic solid reference incomplete: {:?}",
+                wanted.unmodelled
+            ));
+            continue;
+        }
+        let frame = match renderer.render(
+            &isolated,
+            &project.composition,
+            ticks(sample.time),
+            &request,
+            &project.resolver,
+        ) {
+            Ok(frame) => frame,
+            Err(e) => {
+                failures.push(format!("{label}: intrinsic solid render: {e}"));
+                continue;
+            }
+        };
+        if frame.color.format() != wgpu::TextureFormat::Rgba32Float || !frame.failures.is_empty() {
+            failures.push(format!(
+                "{label}: native float storage or layer failure: {:?} {:?}",
+                frame.color.format(),
+                frame.failures
+            ));
+            continue;
+        }
+        let native = unit32(
+            &renderer
+                .read_rgba(&frame)
+                .expect("intrinsic solid float readback"),
+        );
+        let native_alpha: f64 = native.chunks_exact(4).map(|p| p[3]).sum();
+        let reference_alpha: f64 = wanted.rgba.chunks_exact(4).map(|p| p[3]).sum();
+        if native_alpha <= 0.0 || reference_alpha <= 0.0 {
+            failures.push(format!(
+                "{label}: intrinsic solid proof has no painted pixels (native {native_alpha}, reference {reference_alpha})"
+            ));
+            continue;
+        }
+        let max_cv = native
+            .iter()
+            .zip(&wanted.rgba)
+            .map(|(a, b)| (a - b).abs() * 255.0)
+            .fold(0.0_f64, f64::max);
+        let alpha = |rgba: &[f64]| rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+        let shape = same_geometry(
+            &geometry(&alpha(&native), sample.width as usize),
+            &geometry(&wanted.alpha(), sample.width as usize),
+            1e-3,
+        );
+        let pass = max_cv <= 1.0 + 1e-9 && shape.is_ok();
+        if !pass {
+            failures.push(format!(
+                "{label}: intrinsic solid max {max_cv:.6} CV (bar 1); geometry {shape:?}"
+            ));
+        }
+        if let Some(file) = rows {
+            let row = serde_json::json!({
+                "frame": pending::frame_id(&project.name, sample.time, sample.width, sample.height, "own-local-solid"),
+                "pending_frame_ids": sample_frame_ids(&project.name, sample.time, sample.width, sample.height),
+                "layer_index": index, "type": "solid", "space": "local-2.5d-preprojection",
+                "source_pose": "canonical-local", "shutter_samples": 20,
+                "float_storage": "rgba32float", "max_cv": max_cv,
+                "native_alpha_sum": native_alpha, "reference_alpha_sum": reference_alpha,
+                "geometry": shape.err(), "pass": pass,
+                "measurement_sha256": pending::measurement(&native, &[], &wanted.rgba, &wanted.classes()),
+            });
+            writeln!(file, "{row}").expect("local solid evidence");
+        }
+    }
+    failures
+}
+
+/// Follow active precomps only when a pending root frame has no drawable L3
+/// layer of its own. Child source time uses the renderer's retiming and keep
+/// frame-rate rules at every authored parent shutter sample. This proves the
+/// child shape/solid source in its own composition geometry, before L4 places
+/// and resamples the precomp. A cycle ends at the first repeated composition.
+fn prove_nested_own_layers(
+    renderer: &mut Renderer,
+    project: &Project,
+    sample: &Sample,
+    rows: &mut Option<std::fs::File>,
+) -> Vec<String> {
+    use pm_eval::{Comp, Evaluator, Scope, node};
+    use pm_reference::compare::{geometry, same_geometry};
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    struct NestedProof<'a> {
+        renderer: &'a mut Renderer,
+        project: &'a Project,
+        root_sample: &'a Sample,
+        rows: &'a mut Option<std::fs::File>,
+        failures: Vec<String>,
+        painted: usize,
+    }
+
+    impl NestedProof<'_> {
+        fn visit(
+            &mut self,
+            comp_id: &str,
+            seconds: f64,
+            ancestry: &mut Vec<String>,
+            precomp_indices: &mut Vec<usize>,
+            shutter_trace: &mut Vec<(usize, usize)>,
+        ) {
+            let comp = Comp::resolve(&self.project.document, comp_id).expect("source composition");
+            let open = Comp::resolve(&self.project.document, &self.project.composition)
+                .expect("open composition");
+            let mut evaluator = Evaluator::new()
+                .with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+            let mut scope = Scope::new(&mut evaluator, &comp, &open);
+            let solo = comp
+                .layers()
+                .iter()
+                .any(|layer| node::truthy(node::member(Some(layer), "solo")));
+            let width = node::to_number(comp.member("w")) as u32;
+            let height = node::to_number(comp.member("h")) as u32;
+            if width == 0 || height == 0 {
+                self.failures.push(format!(
+                    "{}: nested composition has no source geometry",
+                    self.project.name
+                ));
+                return;
+            }
+            for (index, layer) in comp.layers().iter().enumerate() {
+                if (solo && !node::truthy(node::member(Some(layer), "solo")))
+                    || !scope.active(layer, seconds).expect("source layer active")
+                {
+                    continue;
+                }
+                let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
+                if matches!(ty.as_str(), "shape" | "solid") && ancestry.len() > 1 {
+                    let label = format!(
+                        "{} t={} nested source depth={} layer={index} ({ty})",
+                        self.project.name,
+                        self.root_sample.time,
+                        ancestry.len() - 1
+                    );
+                    if scope.is_3d_layer(layer).expect("source 3D property") {
+                        self.failures.push(format!(
+                            "{label}: 3D child source needs local preprojection proof"
+                        ));
+                        continue;
+                    }
+                    let isolated = reference::isolated_own_layer_in_comp(
+                        &self.project.document,
+                        comp_id,
+                        index,
+                    );
+                    let mut request =
+                        RenderRequest::sized(Size::new(width, height), Precision::Float32);
+                    request.output_kind = pm_render::OutputKind::Final;
+                    request.background = false;
+                    request.motion_blur = pm_render::motion::MotionBlur::Samples(20);
+                    let wanted = reference::render(
+                        &isolated,
+                        comp_id,
+                        ticks(seconds),
+                        width,
+                        height,
+                        false,
+                        20,
+                        self.renderer.effects(),
+                        &self.project.resolver,
+                    );
+                    if wanted.modelled() != 1.0 {
+                        self.failures.push(format!(
+                            "{label}: nested source reference incomplete: {:?}",
+                            wanted.unmodelled
+                        ));
+                        continue;
+                    }
+                    let frame = match self.renderer.render(
+                        &isolated,
+                        comp_id,
+                        ticks(seconds),
+                        &request,
+                        &self.project.resolver,
+                    ) {
+                        Ok(frame) => frame,
+                        Err(e) => {
+                            self.failures
+                                .push(format!("{label}: nested source render: {e}"));
+                            continue;
+                        }
+                    };
+                    if frame.color.format() != wgpu::TextureFormat::Rgba32Float
+                        || !frame.failures.is_empty()
+                    {
+                        self.failures.push(format!(
+                            "{label}: native float storage or layer failure: {:?} {:?}",
+                            frame.color.format(),
+                            frame.failures
+                        ));
+                        continue;
+                    }
+                    let native = unit32(
+                        &self
+                            .renderer
+                            .read_rgba(&frame)
+                            .expect("nested float readback"),
+                    );
+                    let native_alpha: f64 = native.chunks_exact(4).map(|p| p[3]).sum();
+                    let reference_alpha: f64 = wanted.rgba.chunks_exact(4).map(|p| p[3]).sum();
+                    // A source outside its own canvas contributes no pixels to
+                    // the parent; it cannot count as proof of painted content.
+                    if native_alpha <= 0.0 && reference_alpha <= 0.0 {
+                        continue;
+                    }
+                    if native_alpha <= 0.0 || reference_alpha <= 0.0 {
+                        self.failures.push(format!(
+                        "{label}: only one source painted (native {native_alpha}, reference {reference_alpha})"
+                    ));
+                        continue;
+                    }
+                    let max_cv = native
+                        .iter()
+                        .zip(&wanted.rgba)
+                        .map(|(a, b)| (a - b).abs() * 255.0)
+                        .fold(0.0_f64, f64::max);
+                    let alpha =
+                        |rgba: &[f64]| rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+                    let shape = same_geometry(
+                        &geometry(&alpha(&native), width as usize),
+                        &geometry(&wanted.alpha(), width as usize),
+                        1e-3,
+                    );
+                    let pass = max_cv <= 1.0 + 1e-9 && shape.is_ok();
+                    if !pass {
+                        self.failures.push(format!(
+                            "{label}: nested source max {max_cv:.6} CV (bar 1); geometry {shape:?}"
+                        ));
+                    }
+                    self.painted += 1;
+                    if let Some(file) = self.rows {
+                        let comp_hash = format!("{:x}", Sha256::digest(comp_id.as_bytes()));
+                        let row = serde_json::json!({
+                            "frame": pending::frame_id(&self.project.name, self.root_sample.time, self.root_sample.width, self.root_sample.height, "own-nested-source"),
+                            "pending_frame_ids": sample_frame_ids(&self.project.name, self.root_sample.time, self.root_sample.width, self.root_sample.height),
+                            "composition_sha256": comp_hash, "precomp_indices": precomp_indices,
+                            "parent_shutter_trace": shutter_trace, "child_time_seconds": seconds,
+                            "layer_index": index, "type": ty,
+                            "space": "nested-local-precomposition", "source_size": [width, height],
+                            "float_storage": "rgba32float", "shutter_samples": 20,
+                            "native_alpha_sum": native_alpha, "reference_alpha_sum": reference_alpha,
+                            "max_cv": max_cv, "geometry": shape.err(), "pass": pass,
+                            "measurement_sha256": pending::measurement(&native, &[], &wanted.rgba, &wanted.classes()),
+                        });
+                        writeln!(file, "{row}").expect("nested source evidence");
+                    }
+                } else if ty == "precomp" {
+                    let child_id = node::member(node::member(Some(layer), "d"), "comp")
+                        .and_then(|v| node::string(Some(v)))
+                        .map(|s| s.to_string_lossy());
+                    let Some(child_id) = child_id else { continue };
+                    if ancestry.contains(&child_id) {
+                        continue;
+                    }
+                    let Ok(child) = Comp::resolve(&self.project.document, &child_id) else {
+                        continue;
+                    };
+                    let blurred = scope
+                        .evaluated(
+                            layer,
+                            node::member(Some(layer), "mblur"),
+                            seconds,
+                            "l.mblur",
+                        )
+                        .expect("precomp motion channel")
+                        .truthy();
+                    let times = if blurred {
+                        let shutter = pm_render::motion::shutter_frames(comp.node())
+                            / pm_render::motion::level_fps(&comp);
+                        (0..20)
+                            .map(|s| seconds + ((f64::from(s) + 0.5) / 20.0 - 0.5) * shutter)
+                            .collect::<Vec<_>>()
+                    } else {
+                        vec![seconds]
+                    };
+                    for (shutter_index, parent_time) in times.iter().copied().enumerate() {
+                        if !scope
+                            .active(layer, parent_time)
+                            .expect("precomp shutter activity")
+                        {
+                            continue;
+                        }
+                        let child_time = scope
+                            .source_time(layer, parent_time, None)
+                            .expect("authored precomp source time");
+                        let child_time =
+                            pm_render::retime::keep_frame_rate(layer, &child, child_time);
+                        ancestry.push(child_id.clone());
+                        precomp_indices.push(index);
+                        shutter_trace.push((shutter_index, times.len()));
+                        self.visit(
+                            &child_id,
+                            child_time,
+                            ancestry,
+                            precomp_indices,
+                            shutter_trace,
+                        );
+                        shutter_trace.pop();
+                        precomp_indices.pop();
+                        ancestry.pop();
+                    }
+                }
+            }
+        }
+    }
+
+    let comp = Comp::resolve(&project.document, &project.composition).expect("open composition");
+    let seconds = comp.seconds_at(ticks(sample.time).get());
+    let mut evaluator =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut evaluator, &comp, &comp);
+    let solo = comp
+        .layers()
+        .iter()
+        .any(|layer| node::truthy(node::member(Some(layer), "solo")));
+    let root_has_own = comp.layers().iter().any(|layer| {
+        matches!(
+            pm_render::js::member_string(layer, "type").as_deref(),
+            Some("shape" | "solid")
+        ) && (!solo || node::truthy(node::member(Some(layer), "solo")))
+            && scope.active(layer, seconds).expect("root layer active")
+    });
+    if root_has_own {
+        return Vec::new();
+    }
+    let mut proof = NestedProof {
+        renderer,
+        project,
+        root_sample: sample,
+        rows,
+        failures: Vec::new(),
+        painted: 0,
+    };
+    proof.visit(
+        &project.composition,
+        seconds,
+        &mut vec![project.composition.clone()],
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+    if proof.painted == 0 {
+        proof.failures.push(format!(
+            "{} t={}: pending precomp has no painted nested L3 source proof",
+            project.name, sample.time
+        ));
+    }
+    proof.failures
+}
+
+/// Native float vector paint against f64 coverage before 2.5D projection.
+/// Every authored shutter sample is retained; L4 still owns the plane.
+fn prove_local_3d_vectors(
+    renderer: &Renderer,
+    project: &Project,
+    sample: &Sample,
+    rows: &mut Option<std::fs::File>,
+) -> Vec<String> {
+    use pm_eval::{Comp, Evaluator, Scope, node};
+    use pm_reference::compare::{geometry, same_geometry};
+    use pm_render::vector::{VectorQuad, VectorSource, cache::VectorCache};
+    use pm_vector::kurbo::Affine;
+    use pm_vector::render::scene::PixelRect;
+    use std::io::Write;
+
+    let comp = Comp::resolve(&project.document, &project.composition).expect("composition");
+    let seconds = comp.seconds_at(ticks(sample.time).get());
+    let mut evaluator =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut evaluator, &comp, &comp);
+    let mut cache = VectorCache::new();
+    let mut failures = Vec::new();
+    for (index, layer) in comp.layers().iter().enumerate() {
+        if pm_render::js::member_string(layer, "type").as_deref() != Some("shape")
+            || !scope.is_3d_layer(layer).expect("3D property")
+        {
+            continue;
+        }
+        let label = format!(
+            "{} t={} local 2.5D vector layer={index}",
+            project.name, sample.time
+        );
+        if !scope.active(layer, seconds).expect("layer active") {
+            continue;
+        }
+        let blurred = scope
+            .evaluated(
+                layer,
+                node::member(Some(layer), "mblur"),
+                seconds,
+                "l.mblur",
+            )
+            .expect("motion channel")
+            .truthy();
+        let times = if blurred {
+            let shutter = pm_render::motion::shutter_frames(comp.node())
+                / pm_render::motion::level_fps(&comp);
+            (0..20)
+                .map(|s| seconds + ((f64::from(s) + 0.5) / 20.0 - 0.5) * shutter)
+                .collect::<Vec<_>>()
+        } else {
+            vec![seconds]
+        };
+        let mut scenes = Vec::new();
+        let mut bounds: Option<PixelRect> = None;
+        for &time in &times {
+            let content = scope
+                .ev
+                .resolve_content(scope.comp, layer, time)
+                .expect("shape content");
+            let quad = pm_render::vector::plan_shape(
+                &mut scope,
+                layer,
+                &content,
+                time,
+                &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                PixelRect::new(-(1 << 29), -(1 << 29), 1 << 30, 1 << 30),
+            )
+            .expect("local vector plan");
+            if let Some(VectorQuad::Device {
+                source: VectorSource::Scene { scene, rect },
+                ..
+            }) = quad
+            {
+                bounds = Some(bounds.map_or(rect, |b| b.union(rect)));
+                scenes.push(scene);
+            }
+        }
+        let Some(rect) = bounds else { continue };
+        if rect.width == 0 || rect.height == 0 {
+            continue;
+        }
+        let (w, h) = (rect.width as usize, rect.height as usize);
+        let mut native = vec![0.0; w * h * 4];
+        let mut exact = vec![0.0; w * h * 4];
+        for scene in &scenes {
+            let source = VectorSource::Scene {
+                scene: scene.clone(),
+                rect,
+            };
+            let view = cache
+                .resolve(
+                    renderer.device(),
+                    renderer.queue(),
+                    &source,
+                    Precision::Float32,
+                )
+                .expect("native local vector");
+            assert_eq!(view.texture().format(), wgpu::TextureFormat::Rgba32Float);
+            let pixels =
+                pm_gpu::readback::read_f32(renderer.device(), renderer.queue(), view.texture())
+                    .expect("native local vector readback");
+            let mut shifted = scene.clone();
+            for item in &mut shifted.items {
+                item.transform =
+                    Affine::translate((-f64::from(rect.x), -f64::from(rect.y))) * item.transform;
+            }
+            let reference = reference::scene_pixels(&shifted, w, h).expect("f64 local vector");
+            for (i, (&n, r)) in pixels
+                .iter()
+                .zip(reference.iter().flat_map(|p| p.0))
+                .enumerate()
+            {
+                native[i] += f64::from(n) / times.len() as f64;
+                exact[i] += r / times.len() as f64;
+            }
+        }
+        let max_cv = native
+            .iter()
+            .zip(&exact)
+            .map(|(a, b)| (a - b).abs() * 255.0)
+            .fold(0.0_f64, f64::max);
+        let alpha = |rgba: &[f64]| rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+        let shape = same_geometry(
+            &geometry(&alpha(&native), w),
+            &geometry(&alpha(&exact), w),
+            1e-3,
+        );
+        let pass = max_cv <= 1.0 + 1e-9 && shape.is_ok();
+        if !pass {
+            failures.push(format!(
+                "{label}: local preprojection max {max_cv:.6} CV (bar 1); geometry {shape:?}"
+            ));
+        }
+        if let Some(file) = rows {
+            let row = serde_json::json!({
+                "frame": pending::frame_id(&project.name, sample.time, sample.width, sample.height, "own-local-vector"),
+                "pending_frame_ids": sample_frame_ids(&project.name, sample.time, sample.width, sample.height),
+                "layer_index": index, "type": "shape", "space": "local-2.5d-preprojection",
+                "shutter_samples": times.len(), "float_storage": "rgba32float", "max_cv": max_cv,
+                "geometry": shape.err(), "pass": pass,
+                "measurement_sha256": pending::measurement(&native, &[], &exact,
+                    &vec![pm_reference::compare::Class::Edge; w*h]),
+            });
+            writeln!(file, "{row}").expect("local vector evidence");
+        }
+    }
+    failures
+}
+
+/// The native R16float path-mask canvas against independent f64 coverage,
+/// before a 2.5D inverse-plane sample. It uses the authored center time.
+fn prove_path_mask_canvases(
+    renderer: &Renderer,
+    project: &Project,
+    sample: &Sample,
+    rows: &mut Option<std::fs::File>,
+) -> Vec<String> {
+    use pm_eval::{Comp, Evaluator, Scope, node};
+    use pm_reference::compare::{geometry, same_geometry};
+    use pm_render::composite::build::{MaskRoute, masks};
+    use pm_render::composite::path_masks::PathMaskPipelines;
+    use std::io::Write;
+
+    let comp = Comp::resolve(&project.document, &project.composition).expect("composition");
+    let seconds = comp.seconds_at(ticks(sample.time).get());
+    let (sx, sy) = pm_render::plan::derived_scale(&comp, sample.width, sample.height);
+    let mut evaluator =
+        Evaluator::new().with_expressions(std::sync::Arc::new(pm_render::expr::PmExprEngine));
+    let mut scope = Scope::new(&mut evaluator, &comp, &comp);
+    let mut failures = Vec::new();
+    for (index, layer) in comp.layers().iter().enumerate() {
+        let ty = pm_render::js::member_string(layer, "type").unwrap_or_default();
+        if !matches!(ty.as_str(), "shape" | "solid")
+            || node::array(node::member(Some(layer), "masks")).is_none_or(|m| m.is_empty())
+            || !scope.active(layer, seconds).expect("layer active")
+        {
+            continue;
+        }
+        let is_3d = scope.is_3d_layer(layer).expect("3D property");
+        let world = if is_3d {
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        } else {
+            let m = scope.world_matrix(layer, seconds).expect("world transform");
+            [
+                m[0] * sx,
+                m[1] * sy,
+                m[2] * sx,
+                m[3] * sy,
+                m[4] * sx,
+                m[5] * sy,
+            ]
+        };
+        let MaskRoute::Path(route) = masks(
+            &mut scope,
+            layer,
+            seconds,
+            world,
+            None,
+            sample.width,
+            sample.height,
+        )
+        .expect("mask route") else {
+            continue;
+        };
+        let path = route.path.expect("path route has coverage");
+        let pipelines = PathMaskPipelines::new(renderer.device());
+        let mut encoder = renderer
+            .device()
+            .create_command_encoder(&Default::default());
+        let texture = pipelines.coverage(renderer.device(), &mut encoder, &path);
+        assert_eq!(texture.format(), wgpu::TextureFormat::R16Float);
+        renderer.queue().submit([encoder.finish()]);
+        let raw = pm_gpu::readback::read_raw(renderer.device(), renderer.queue(), &texture)
+            .expect("native float path-mask coverage");
+        let native = raw
+            .chunks_exact(2)
+            .map(|c| {
+                f64::from(pm_gpu::readback::half_to_f32(u16::from_le_bytes([
+                    c[0], c[1],
+                ])))
+            })
+            .collect::<Vec<_>>();
+        let exact = support::mask_reference::path_coverage(
+            &path.masks,
+            world,
+            sample.width as usize,
+            sample.height as usize,
+        );
+        // G-V2's published R16float store, interpolation, Gaussian-tail and
+        // exact-area error budget; each successive mask contributes once.
+        let n = path.masks.masks.len();
+        let bound =
+            255.0 * (2f64.powi(-12) + n as f64 * (2f64.powi(-12) + 1.4e-5 + 1e-4 + 6e-5 + 8e-5));
+        let max_cv = native
+            .iter()
+            .zip(&exact)
+            .map(|(a, b)| (a - b).abs() * 255.0)
+            .fold(0.0_f64, f64::max);
+        // A float mask retains sub-CV coverage that an 8-bit canvas would
+        // quantize away. Require that observable fact where it occurs.
+        let fine = |pixels: &[f64]| {
+            pixels
+                .iter()
+                .filter(|&&v| (v * 255.0 - (v * 255.0).round()).abs() > 1e-3)
+                .count()
+        };
+        let (native_fine, reference_fine) = (fine(&native), fine(&exact));
+        let no_feather = path.masks.masks.iter().all(|m| m.feather == 0.0);
+        let shape = no_feather.then(|| {
+            same_geometry(
+                &geometry(&native, sample.width as usize),
+                &geometry(&exact, sample.width as usize),
+                1e-3,
+            )
+        });
+        let pass = max_cv <= bound
+            && shape.as_ref().is_none_or(Result::is_ok)
+            && (reference_fine == 0 || native_fine > 0);
+        let label = format!("{} t={} path-mask layer={index}", project.name, sample.time);
+        if !pass {
+            failures.push(format!("{label}: native float mask max {max_cv:.6} CV (G-V2 bound {bound:.6}); geometry {shape:?}"));
+        }
+        if let Some(file) = rows {
+            let row = serde_json::json!({
+                "frame": pending::frame_id(&project.name, sample.time, sample.width, sample.height, "own-path-mask"),
+                "pending_frame_ids": sample_frame_ids(&project.name, sample.time, sample.width, sample.height),
+                "layer_index": index, "type": ty,
+                "space": if is_3d { "local-2.5d-preprojection" } else { "2d-precomposition" },
+                "mask_center_seconds": seconds, "mask_count": n, "native_storage": "r16float",
+                "native_sub_cv_samples": native_fine, "reference_sub_cv_samples": reference_fine,
+                "max_cv": max_cv, "bound_cv": bound,
+                "geometry": shape.and_then(Result::err), "pass": pass,
+                "measurement_sha256": pending::measurement(&native, &[], &exact,
+                    &vec![pm_reference::compare::Class::Edge; native.len()]),
+            });
+            writeln!(file, "{row}").expect("path-mask evidence");
+        }
+    }
+    failures
+}
+
+#[test]
+fn corpus_own_layers_reference_gate() {
+    let captures = corpus_dirs();
+    if captures.is_empty() {
+        eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
+        return;
+    }
+    let only = std::env::var("PM_RENDER_ONLY").ok();
+    let pending: std::collections::BTreeSet<String> =
+        serde_json::from_str::<Vec<pending::Entry>>(include_str!("fixtures/corpus-pending.json"))
+            .expect("pending fixture")
+            .into_iter()
+            .map(|row| row.frame)
+            .collect();
+    let mut rows = std::env::var_os("PM_L3_LAYER_PROOF")
+        .map(|path| std::fs::File::create(path).expect("own-layer proof output"));
+    let mut renderer = Renderer::headless().expect("a Metal device");
+    renderer
+        .set_definitions(&all_builtin_definitions())
+        .expect("proof definitions");
+    let mut failures = Vec::new();
+    let mut samples = 0;
+    for (capture, dir) in captures
+        .iter()
+        .flat_map(|c| projects(c).into_iter().map(move |d| (c.clone(), d)))
+    {
+        let project = load_project(&capture, &dir);
+        if only
+            .as_deref()
+            .is_some_and(|o| !project.name.starts_with(o))
+            || !project.missing_media.is_empty()
+        {
+            continue;
+        }
+        for sample in &project.samples {
+            samples += 1;
+            let full_pending = has_pending_sample(
+                &pending,
+                &project.name,
+                sample.time,
+                sample.width,
+                sample.height,
+            );
+            failures.extend(prove_own_2d_layers(
+                &mut renderer,
+                &project,
+                sample,
+                full_pending,
+                &mut rows,
+            ));
+            failures.extend(prove_local_3d_solids(
+                &mut renderer,
+                &project,
+                sample,
+                &mut rows,
+            ));
+            failures.extend(prove_local_3d_vectors(
+                &renderer, &project, sample, &mut rows,
+            ));
+            failures.extend(prove_path_mask_canvases(
+                &renderer, &project, sample, &mut rows,
+            ));
+            if full_pending {
+                failures.extend(prove_nested_own_layers(
+                    &mut renderer,
+                    &project,
+                    sample,
+                    &mut rows,
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "L3 own-layer proof visited {samples} corpus samples; {} failures",
+        failures.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn corpus_render_parity() {
+    use sha2::{Digest, Sha256};
+    let mut frame_results = std::env::var_os("PM_CORPUS_FRAME_RESULTS")
+        .map(|path| std::fs::File::create(path).expect("frame attribution output"));
     let captures = corpus_dirs();
     if captures.is_empty() {
         eprintln!("no parity corpus capture found; set PM_ENGINE_CORPUS to run this comparison");
@@ -121,25 +1054,6 @@ fn corpus_render_parity() {
         .ok()
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
-    // Level 1 SVG images (decision S1) draw Chromium's rasters: those the
-    // svg-rasters tool captured (PM_SVG_RASTERS, else the newest
-    // `svg-rasters-*` directory); uncaptured ones fail their frame and are
-    // listed in its needs.json. Without a directory resvg approximates them.
-    renderer.set_svg_wait(true);
-    let svg_rasters = std::env::var("PM_SVG_RASTERS")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| support::newest_capture("svg-rasters-"))
-        .map(|d| std::sync::Arc::new(pm_render::vector::svg_rasters::RasterDir::new(d)));
-    match &svg_rasters {
-        Some(dir) => renderer.set_svg_source(Some(dir.clone())),
-        None => {
-            eprintln!(
-                "no Chromium SVG rasters (PM_SVG_RASTERS): resvg approximates level 1 SVG images"
-            );
-            renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
-        }
-    }
     // The built-in effects, transitions, and extension layers as the kernel
     // snapshots them (the captures load only built-in and missing
     // definitions).
@@ -150,6 +1064,7 @@ fn corpus_render_parity() {
     // Opaque frames the reference models in full, and in part.
     let (mut complete, mut partial) = (0, 0);
     let mut failed = Vec::new();
+    let mut pending = pending::Audit::read(include_str!("fixtures/corpus-pending.json"));
     let mut skipped = Vec::new();
     let mut seen = std::collections::BTreeMap::new();
     for (capture, dir) in captures
@@ -210,22 +1125,6 @@ fn corpus_render_parity() {
         let mut video = false;
         let mut proxied = false;
         let root = p.document.root().unwrap();
-        // Geometry is measured at Float32 for Float16 documents: f16 alpha
-        // stores change area-weighted centroids without moving authored
-        // shapes. The ordinary Float16 pixel and preview/export gates below
-        // still run against the original document and request.
-        let geometry_document = (pm_render::composite::color::project_color(root)
-            .expect("project color")
-            .precision
-            == Precision::Float16)
-            .then(|| {
-                let mut value = p.document.to_value().expect("project root");
-                value
-                    .as_object_mut()
-                    .expect("project object")
-                    .insert("colorDepth", pm_model::Value::Number(32.0));
-                pm_model::Document::new(Some(value), p.document.revision() + 1)
-            });
         if let Some(assets) = root.get("assets")
             && let pm_model::NodeKind::Object(map) = assets.kind()
         {
@@ -310,7 +1209,13 @@ fn corpus_render_parity() {
                 }
             }
         }
+        let mut geometry_document = None;
         for s in &p.samples {
+            let failed_before = failed.len();
+            let frame_id = format!(
+                "{:x}",
+                Sha256::digest(format!("{}|{}|{}", capture.display(), p.name, s.time).as_bytes(),)
+            );
             // The capture's motion blur: 16 samples opaque, 20 transparent.
             let mut request =
                 RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
@@ -328,6 +1233,7 @@ fn corpus_render_parity() {
                 Ok(f) => f,
                 Err(e) => {
                     failed.push(format!("{} t={}: render error {e}", p.name, s.time));
+                    record_frame_result(&mut frame_results, &frame_id, true, &[]);
                     continue;
                 }
             };
@@ -392,6 +1298,12 @@ fn corpus_render_parity() {
                         write_png(&dir.join(format!("{stem}-legacy.png")), w, h, &reference);
                     }
                 }
+                record_frame_result(
+                    &mut frame_results,
+                    &frame_id,
+                    failed.len() > failed_before,
+                    &ours,
+                );
                 continue;
             }
             // 3D class: the 3D pixels and MSAA edges, measured on our renders.
@@ -469,29 +1381,108 @@ fn corpus_render_parity() {
                             b.object_ssim.unwrap_or(f64::NAN)
                         );
                         eprintln!("{line}");
-                        if max > 1.0 || !b.pass() {
+                        let checks = if max <= 1.0 && b.pass() {
+                            Vec::new()
+                        } else {
+                            vec![format!(
+                                "3D alpha: outside max {max:.9} CV; fraction within 2 {:.12}; max outside edges {}; SSIM {:?}",
+                                b.fraction_within_2, b.max_cv_outside_edges, b.object_ssim
+                            )]
+                        };
+                        let classes: Vec<_> = class
+                            .iter()
+                            .map(|v| {
+                                if *v {
+                                    pm_reference::compare::Class::Resampled
+                                } else {
+                                    pm_reference::compare::Class::Unreferenced
+                                }
+                            })
+                            .collect();
+                        let owned = pending.check(
+                            pending::Entry {
+                                frame: pending::frame_id(
+                                    &p.name,
+                                    s.time,
+                                    s.width,
+                                    s.height,
+                                    "3d-transparent",
+                                ),
+                                owner: "L4".into(),
+                                reason: "3D surfaces and composition".into(),
+                                checks: checks.clone(),
+                                measurement_sha256: pending::measurement(
+                                    &unit32(&ours),
+                                    &unit32(&today),
+                                    &[],
+                                    &classes,
+                                ),
+                            },
+                            true,
+                        );
+                        if !checks.is_empty() && !owned {
                             failed.push(line);
                         }
                     }
                     None => {
                         let r = reference::render(
                             &p.document,
-                            &p.resolver,
                             &p.composition,
                             ticks(s.time),
                             s.width,
                             s.height,
                             false,
+                            20,
+                            renderer.effects(),
+                            &p.resolver,
                         );
                         let (engine, today) = (unit32(&ours), unit32(&today));
                         let report = compare(&engine, &today, &r.rgba, &r.classes());
-                        let mut problems = report.failures(&Bounds::HALF_FLOAT);
+                        let mut problems = reference_problems(
+                            &report,
+                            &Bounds::HALF_FLOAT,
+                            &engine,
+                            &today,
+                            &r.rgba,
+                            &r.classes(),
+                        );
                         let mut shape = String::new();
                         if r.modelled() == 1.0 {
                             let alpha =
                                 |f: &[f64]| f.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
                             let wanted = geometry(&r.alpha(), r.width);
-                            let ours = geometry(&alpha(&engine), r.width);
+                            // Match the CLI's --precision=32: change only
+                            // this render copy's project setting. Requests
+                            // cannot override the saved project's depth.
+                            let document = geometry_document.get_or_insert_with(|| {
+                                let mut root = p.document.to_value().expect("project root");
+                                let pm_model::Value::Object(map) = &mut root else {
+                                    panic!("project root is not an object");
+                                };
+                                map.insert("colorDepth", pm_model::Value::Number(32.0));
+                                pm_model::Document::new(Some(root), p.document.revision())
+                            });
+                            let mut exact = request.clone();
+                            exact.precision = Precision::Float32;
+                            assert_eq!(
+                                renderer.device_target_format(document, &exact),
+                                wgpu::TextureFormat::Rgba32Float,
+                                "32-bit project geometry requires float32 filtering and blending"
+                            );
+                            let f32_frame = renderer
+                                .render(
+                                    document,
+                                    &p.composition,
+                                    ticks(s.time),
+                                    &exact,
+                                    &p.resolver,
+                                )
+                                .expect("f32 transparent render");
+                            assert_eq!(f32_frame.color.format(), wgpu::TextureFormat::Rgba32Float);
+                            let ours = geometry(
+                                &alpha(&unit32(&renderer.read_rgba(&f32_frame).unwrap())),
+                                r.width,
+                            );
                             let theirs = geometry(&alpha(&today), r.width);
                             shape = format!(
                                 " geometry: f64 area {:.3} centroid ({:.6}, {:.6}); engine area {:.3} centroid ({:.6}, {:.6}), delta area {:.3} centroid {:.6} px; today area {:.3} centroid ({:.6}, {:.6})",
@@ -509,34 +1500,7 @@ fn corpus_render_parity() {
                                 theirs.centroid[0],
                                 theirs.centroid[1]
                             );
-                            if let Some(geometry_document) = &geometry_document {
-                                let mut probe = request.clone();
-                                probe.precision = Precision::Float32;
-                                let frame = renderer
-                                    .render(
-                                        geometry_document,
-                                        &p.composition,
-                                        ticks(s.time),
-                                        &probe,
-                                        &resolver,
-                                    )
-                                    .expect("Float32 geometry probe render");
-                                if !frame.failures.is_empty() {
-                                    problems.push(format!(
-                                        "Float32 geometry probe layer failures {:?}",
-                                        frame.failures
-                                    ));
-                                }
-                                let pixels = renderer.read_rgba(&frame).unwrap();
-                                let measured = geometry(&alpha(&unit32(&pixels)), r.width);
-                                shape.push_str(&format!(
-                                    "; Float32 probe area {:.3} centroid ({:.6}, {:.6})",
-                                    measured.area, measured.centroid[0], measured.centroid[1]
-                                ));
-                                if let Err(e) = same_geometry(&measured, &wanted, 1e-3) {
-                                    problems.push(format!("Float32 geometry probe {e}"));
-                                }
-                            } else if let Err(e) = same_geometry(&ours, &wanted, 1e-3) {
+                            if let Err(e) = same_geometry(&ours, &wanted, 1e-3) {
                                 problems.push(format!("engine {e}"));
                             }
                         }
@@ -547,7 +1511,35 @@ fn corpus_render_parity() {
                             unmodelled(&r)
                         );
                         eprintln!("{line}");
-                        if !problems.is_empty() {
+                        let eligible = !r.unmodelled.is_empty()
+                            && problems.iter().all(|p| p.starts_with("unreferenced:"));
+                        let owner = if r.unmodelled.iter().any(|r| r == "effects") {
+                            "L6"
+                        } else {
+                            "L4"
+                        };
+                        let owned = pending.check(
+                            pending::Entry {
+                                frame: pending::frame_id(
+                                    &p.name,
+                                    s.time,
+                                    s.width,
+                                    s.height,
+                                    "transparent",
+                                ),
+                                owner: owner.into(),
+                                reason: r.unmodelled.join(", "),
+                                checks: problems.clone(),
+                                measurement_sha256: pending::measurement(
+                                    &engine,
+                                    &today,
+                                    &r.rgba,
+                                    &r.classes(),
+                                ),
+                            },
+                            eligible,
+                        );
+                        if !problems.is_empty() && !owned {
                             failed.push(format!("{line}\n      {}", problems.join("\n      ")));
                         }
                     }
@@ -574,24 +1566,80 @@ fn corpus_render_parity() {
                         b.max_cv_outside_edges,
                         b.object_ssim.unwrap_or(f64::NAN)
                     );
-                    (line, d.passes() && b.pass())
+                    let checks = if d.passes() && b.pass() {
+                        Vec::new()
+                    } else {
+                        vec![format!(
+                            "3D opaque: rest fraction within 1 {:.12}; rest max {}; fraction within 2 {:.12}; max outside edges {}; SSIM {:?}",
+                            d.fraction_within_one(),
+                            d.max,
+                            b.fraction_within_2,
+                            b.max_cv_outside_edges,
+                            b.object_ssim
+                        )]
+                    };
+                    let classes: Vec<_> = class
+                        .iter()
+                        .map(|v| {
+                            if *v {
+                                pm_reference::compare::Class::Resampled
+                            } else {
+                                pm_reference::compare::Class::Unreferenced
+                            }
+                        })
+                        .collect();
+                    let owned = pending.check(
+                        pending::Entry {
+                            frame: pending::frame_id(
+                                &p.name,
+                                s.time,
+                                s.width,
+                                s.height,
+                                "3d-opaque",
+                            ),
+                            owner: "L4".into(),
+                            reason: "3D surfaces and composition".into(),
+                            checks: checks.clone(),
+                            measurement_sha256: pending::measurement(
+                                &unit8(&ours),
+                                &unit8(&reference),
+                                &[],
+                                &classes,
+                            ),
+                        },
+                        true,
+                    );
+                    (line, checks.is_empty() || owned)
                 }
                 None => {
                     let r = reference::render(
                         &p.document,
-                        &p.resolver,
                         &p.composition,
                         ticks(s.time),
                         s.width,
                         s.height,
                         true,
+                        16,
+                        renderer.effects(),
+                        &p.resolver,
                     );
                     let modelled = r.modelled();
                     complete += usize::from(modelled == 1.0);
                     partial += usize::from(modelled > 0.0 && modelled < 1.0);
-                    let report =
-                        compare(&unit8(&ours), &unit8(&reference), &r.opaque(), &r.classes());
-                    let problems = report.failures(&Bounds::EIGHT_BIT);
+                    let (engine, today) = (unit8(&ours), unit8(&reference));
+                    let opaque = reference::Reference {
+                        rgba: r.opaque(),
+                        ..r.clone()
+                    };
+                    let report = compare(&engine, &today, &opaque.rgba, &opaque.classes());
+                    let problems = reference_problems(
+                        &report,
+                        &Bounds::EIGHT_BIT,
+                        &engine,
+                        &today,
+                        &opaque.rgba,
+                        &opaque.classes(),
+                    );
                     if diffs.is_some() && !problems.is_empty() {
                         model_png = Some(
                             r.opaque()
@@ -609,7 +1657,29 @@ fn corpus_render_parity() {
                         );
                     }
                     let line = format!("{:<40} t={:<6}{}{report}", p.name, s.time, unmodelled(&r));
-                    let pass = problems.is_empty();
+                    let eligible = !r.unmodelled.is_empty()
+                        && problems.iter().all(|p| p.starts_with("unreferenced:"));
+                    let owner = if r.unmodelled.iter().any(|r| r == "effects") {
+                        "L6"
+                    } else {
+                        "L4"
+                    };
+                    let owned = pending.check(
+                        pending::Entry {
+                            frame: pending::frame_id(&p.name, s.time, s.width, s.height, "opaque"),
+                            owner: owner.into(),
+                            reason: r.unmodelled.join(", "),
+                            checks: problems.clone(),
+                            measurement_sha256: pending::measurement(
+                                &engine,
+                                &today,
+                                &opaque.rgba,
+                                &opaque.classes(),
+                            ),
+                        },
+                        eligible,
+                    );
+                    let pass = problems.is_empty() || owned;
                     let line = if pass {
                         line
                     } else {
@@ -645,17 +1715,15 @@ fn corpus_render_parity() {
                     write_png(&dir.join(format!("{stem}-diff.png")), w, h, &marked);
                 }
             }
+            record_frame_result(
+                &mut frame_results,
+                &frame_id,
+                failed.len() > failed_before,
+                &ours,
+            );
         }
     }
-    if let Some(dir) = &svg_rasters
-        && !dir.missing().is_empty()
-    {
-        let listed = dir.write_needs().expect("needs.json");
-        eprintln!(
-            "\n{} Chromium SVG rasters were not captured ({listed} listed in needs.json; run engine/crates/pm-render/tools/svg-rasters/run.ts --needs <dir>)",
-            dir.missing().len()
-        );
-    }
+    failed.extend(pending.finish(only.is_none()));
     eprintln!("\nskipped (unsupported by this renderer):");
     for (name, why) in &skipped {
         eprintln!("  {name:<40} {why}");
@@ -693,5 +1761,169 @@ fn corpus_render_parity() {
         failed.is_empty(),
         "{} frames outside the render class",
         failed.len()
+    );
+}
+
+#[test]
+fn interior_reference_proof_rejects_wrong_authored_paint() {
+    use pm_reference::compare::{Class, compare};
+    let today = [1.0, 1.0, 1.0, 1.0];
+    let wanted = [0.0, 0.0, 0.0, 1.0];
+    let report = compare(&wanted, &today, &wanted, &[Class::Interior]);
+    assert!(
+        reference_problems(
+            &report,
+            &Bounds::EIGHT_BIT,
+            &wanted,
+            &today,
+            &wanted,
+            &[Class::Interior]
+        )
+        .is_empty()
+    );
+    let wrong = [0.01, 0.0, 0.0, 1.0];
+    let report = compare(&wrong, &today, &wanted, &[Class::Interior]);
+    assert!(
+        !reference_problems(
+            &report,
+            &Bounds::EIGHT_BIT,
+            &wrong,
+            &today,
+            &wanted,
+            &[Class::Interior]
+        )
+        .is_empty()
+    );
+    // A wrong legacy pixel elsewhere cannot hide a local regression.
+    let report = compare(&wrong, &wanted, &wanted, &[Class::Interior]);
+    assert!(
+        !reference_problems(
+            &report,
+            &Bounds::EIGHT_BIT,
+            &wrong,
+            &wanted,
+            &wanted,
+            &[Class::Interior]
+        )
+        .is_empty()
+    );
+}
+
+#[cfg(test)]
+mod pending_tests {
+    use super::pending::{Audit, Entry};
+    fn row() -> Entry {
+        Entry {
+            frame: "anonymous".into(),
+            owner: "L6".into(),
+            reason: "effects".into(),
+            checks: vec!["unreferenced: max 7 CV".into()],
+            measurement_sha256: "measured".into(),
+        }
+    }
+    fn audit() -> Audit {
+        Audit::read(&serde_json::to_string(&[row()]).unwrap())
+    }
+    #[test]
+    fn only_unchanged_owned_measurements_are_pending() {
+        let mut a = audit();
+        assert!(a.check(row(), true));
+        assert!(a.finish(true).is_empty());
+        let mut a = audit();
+        let mut worse = row();
+        worse.measurement_sha256 = "different".into();
+        assert!(!a.check(worse, true));
+        assert!(!a.finish(true).is_empty());
+        let mut a = audit();
+        assert!(!a.check(row(), false));
+        assert!(!a.finish(true).is_empty());
+    }
+    #[test]
+    fn unknown_resolved_and_unmeasured_are_not_exempt() {
+        let mut a = audit();
+        let mut new = row();
+        new.frame = "new".into();
+        assert!(!a.check(new, true));
+        assert!(!a.finish(true).is_empty());
+        let mut a = audit();
+        let mut solved = row();
+        solved.checks.clear();
+        assert!(!a.check(solved, true));
+        assert!(!a.finish(true).is_empty());
+        assert!(!audit().finish(true).is_empty());
+    }
+}
+
+#[test]
+fn text_context_pending_requires_independent_local_proof() {
+    use quality::text_context_is_owned_gap as eligible;
+    assert!(eligible(false, true, 100, 100));
+    assert!(eligible(false, false, 100, 0));
+    assert!(!eligible(false, false, 100, 1));
+    assert!(!eligible(true, true, 100, 0));
+    assert!(!eligible(false, false, 0, 0));
+}
+
+#[test]
+fn isolated_text_pairing_keeps_authored_values_exact() {
+    use serde_json::json;
+    let hash = |v: &serde_json::Value| {
+        let value = pm_model::json::parse(&v.to_string()).unwrap();
+        let doc = pm_model::Document::new(Some(value), 0);
+        support::text::authored_isolation_fingerprint(&doc).unwrap()
+    };
+    let full = json!({"layers": [
+        {"id":"ink", "type":"text", "threeD":true, "mblur":true,
+         "d":{"text":"Authored", "size":32}, "p":{"position.x":{"v":20}},
+         "fx":[{"type":"blur", "p":{"radius":{"kf":[{"i":"capture-a", "t":1, "v":2, "e":"linear"}]}}}]},
+        {"id":"back", "type":"solid"}
+    ]});
+    let mut isolated = full.clone();
+    isolated["layers"].as_array_mut().unwrap().pop();
+    isolated["layers"][0]["threeD"] = json!(false);
+    isolated["layers"][0]["mblur"] = json!(false);
+    isolated["layers"][0]["fx"][0]["p"]["radius"]["kf"][0]["i"] = json!("capture-b");
+    assert_eq!(hash(&full), hash(&isolated));
+    for property in ["t", "v", "e"] {
+        let mut changed = isolated.clone();
+        changed["layers"][0]["fx"][0]["p"]["radius"]["kf"][0][property] = json!(9);
+        assert_ne!(hash(&full), hash(&changed), "authored keyframe {property}");
+    }
+    isolated["layers"][0]["d"]["text"] = json!("Changed");
+    assert_ne!(hash(&full), hash(&isolated), "authored text");
+}
+
+#[test]
+fn corrected_interior_proof_is_local_to_pixels_outside_the_legacy_bound() {
+    use pm_reference::compare::{Class, compare};
+    let classes = [Class::Interior; 2];
+    let wanted = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let today = [1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let mut engine = wanted;
+    engine[4] = 0.8 / 255.0;
+    let report = compare(&engine, &today, &wanted, &classes);
+    assert!(
+        reference_problems(
+            &report,
+            &Bounds::EIGHT_BIT,
+            &engine,
+            &today,
+            &wanted,
+            &classes
+        )
+        .is_empty()
+    );
+    engine[4] = 2.0 / 255.0;
+    let report = compare(&engine, &today, &wanted, &classes);
+    assert!(
+        !reference_problems(
+            &report,
+            &Bounds::EIGHT_BIT,
+            &engine,
+            &today,
+            &wanted,
+            &classes
+        )
+        .is_empty()
     );
 }

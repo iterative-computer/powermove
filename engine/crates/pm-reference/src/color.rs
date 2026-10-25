@@ -603,6 +603,26 @@ pub fn convert(src: &MatrixTrc, dst: &MatrixTrc, rgb: [f64; 3], extent: Extent) 
     dst.from_pcs(src.to_pcs(rgb, extent), extent)
 }
 
+/// The BT.2390 EETF (Report ITU-R BT.2390, §5.4.1) on a PQ signal, from
+/// content mastered at `source_peak` cd/m² to a display peaking at
+/// `target_peak` cd/m², black at zero (no toe): identity below the knee
+/// KS = 1.5·maxLum − 0.5, a Hermite spline to maxLum above it.
+pub fn eetf_bt2390(e: f64, source_peak: f64, target_peak: f64) -> f64 {
+    let pw = Transfer::Pq.from_linear(source_peak / 10_000.0);
+    let max_lum = Transfer::Pq.from_linear(target_peak / 10_000.0) / pw;
+    let e1 = (e / pw).clamp(0.0, 1.0);
+    let ks = 1.5 * max_lum - 0.5;
+    let e2 = if e1 < ks {
+        e1
+    } else {
+        let t = (e1 - ks) / (1.0 - ks);
+        (2.0 * t.powi(3) - 3.0 * t.powi(2) + 1.0) * ks
+            + (t.powi(3) - 2.0 * t.powi(2) + t) * (1.0 - ks)
+            + (-2.0 * t.powi(3) + 3.0 * t.powi(2)) * max_lum
+    };
+    e2 * pw
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,24 +768,4 @@ mod tests {
         let white = p.to_pcs([1.0; 3], Extent::Clip);
         assert!((white[1] - 1.0).abs() < 1e-3);
     }
-}
-
-/// The BT.2390 EETF (Report ITU-R BT.2390, §5.4.1) on a PQ signal, from
-/// content mastered at `source_peak` cd/m² to a display peaking at
-/// `target_peak` cd/m², black at zero (no toe): identity below the knee
-/// KS = 1.5·maxLum − 0.5, a Hermite spline to maxLum above it.
-pub fn eetf_bt2390(e: f64, source_peak: f64, target_peak: f64) -> f64 {
-    let pw = Transfer::Pq.from_linear(source_peak / 10_000.0);
-    let max_lum = Transfer::Pq.from_linear(target_peak / 10_000.0) / pw;
-    let e1 = (e / pw).clamp(0.0, 1.0);
-    let ks = 1.5 * max_lum - 0.5;
-    let e2 = if e1 < ks {
-        e1
-    } else {
-        let t = (e1 - ks) / (1.0 - ks);
-        (2.0 * t.powi(3) - 3.0 * t.powi(2) + 1.0) * ks
-            + (t.powi(3) - 2.0 * t.powi(2) + t) * (1.0 - ks)
-            + (-2.0 * t.powi(3) + 3.0 * t.powi(2)) * max_lum
-    };
-    e2 * pw
 }

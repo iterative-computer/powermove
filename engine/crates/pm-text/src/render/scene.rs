@@ -1,33 +1,26 @@
-//! The text scene: what a text raster (or a level 2 output region) paints,
-//! as an ordered list of items in device pixels.
-//!
-//! Each item is either *coverage* (glyph outlines filled or stroked, or a
-//! filled path such as a caption box), which Vello rasterizes as 8-bit
-//! coverage and the paint pass multiplies by the item's color in float, or
-//! a color *image* (an emoji bitmap), which the paint pass samples. Items
-//! composite in order with premultiplied source-over, exactly as the
-//! canvas calls they stand for (`fillText`, `strokeText`, `fill`, each with
-//! its `globalAlpha` and `filter: blur()`).
+//! Ordered exact-outline coverage and color glyph draws in device space.
 
+use std::collections::HashMap;
+use std::mem::size_of;
 use std::sync::Arc;
 
-use kurbo::{Affine, BezPath, Rect, Shape, Stroke};
+use i_overlay::core::fill_rule::FillRule;
+use i_overlay::core::overlay_rule::OverlayRule;
+use i_overlay::float::overlay::FloatOverlay;
+use kurbo::{Affine, BezPath, PathEl, Rect, Shape, Stroke, StrokeOpts};
 
 use super::bitmap::{Bitmaps, Rgba8, has_bitmaps};
 use super::color::Rgba;
-use super::outline::{Coords, FaceRef, GlyphStyle, Outline, Outlines};
-use super::profile::Profile;
+use super::colr::{Program, RgbaF32};
+use super::outline::{Coords, FaceRef, GlyphStyle, Outlines, synthetic_bold_width};
 use crate::compat::PlacedGlyph;
 
-/// How a coverage path is drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PathStyle {
     Fill,
-    /// `strokeText` and `stroke()`: width in the path's space.
     Stroke(Stroke),
 }
 
-/// A path placed in device space.
 #[derive(Clone, Debug)]
 pub struct PlacedPath {
     pub path: Arc<BezPath>,
@@ -35,71 +28,772 @@ pub struct PlacedPath {
     pub style: PathStyle,
 }
 
-/// What an item paints.
+/// Maximum curve-to-line deviation in device pixels before area integration.
+/// The CPU comparison uses the same cached geometry.
+pub const COVERAGE_TOLERANCE: f64 = 1e-4;
+const SMALL_COVERAGE_TOLERANCE: f64 = 1e-5;
+const SMALL_COVERAGE_EXTENT: f64 = 32.0;
+
+pub(crate) fn flatten_device_path(path: &BezPath) -> BezPath {
+    let mut lines = BezPath::new();
+    kurbo::flatten(path.iter(), COVERAGE_TOLERANCE, |el| lines.push(el));
+    lines
+}
+
+fn device_coverage_tolerance(extent: f64) -> f64 {
+    if extent.is_finite() && extent <= SMALL_COVERAGE_EXTENT {
+        SMALL_COVERAGE_TOLERANCE
+    } else {
+        COVERAGE_TOLERANCE
+    }
+}
+
+fn path_coverage_tolerance(path: &BezPath, transform: Affine) -> f64 {
+    let bounds = transform.transform_rect_bbox(path.bounding_box());
+    device_coverage_tolerance(bounds.width().max(bounds.height()))
+}
+
+fn local_coverage_tolerance(transform: Affine, device_tolerance: f64) -> f64 {
+    let scale = transform.spectral_norm();
+    if scale.is_finite() && scale > 0.0 {
+        device_tolerance / scale
+    } else {
+        device_tolerance
+    }
+}
+
+/// Return a line-only fill path in page coordinates for one coverage draw.
+/// Strokes expand in local space before the full affine is applied, so
+/// nonuniform transforms preserve their authored stroke shape.
+pub fn coverage_path(placed: &PlacedPath, to_page: Affine) -> BezPath {
+    let transform = to_page * placed.transform;
+    let tolerance = path_coverage_tolerance(&placed.path, transform);
+    match &placed.style {
+        PathStyle::Fill => flatten_transformed(&placed.path, transform, tolerance),
+        PathStyle::Stroke(stroke) => {
+            let path = kurbo::stroke(
+                placed.path.iter(),
+                stroke,
+                &StrokeOpts::default(),
+                local_coverage_tolerance(transform, tolerance),
+            );
+            flatten_transformed(&path, transform, tolerance)
+        }
+    }
+}
+
+fn flatten_transformed(path: &BezPath, transform: Affine, tolerance: f64) -> BezPath {
+    let mut count = 0usize;
+    kurbo::flatten(path.iter().map(|el| transform * el), tolerance, |_| {
+        count += 1
+    });
+    let mut lines = BezPath::from_vec(Vec::with_capacity(count));
+    kurbo::flatten(path.iter().map(|el| transform * el), tolerance, |el| {
+        lines.push(el)
+    });
+    lines
+}
+
+/// Reusable nonzero resolver for line-only device paths. The area rasterizers
+/// need nonoverlapping filled boundaries: overlapping source contours would
+/// count their shared pixels twice.
+pub(crate) struct NonzeroResolver {
+    // Element indices borrow the candidate path only during certification;
+    // coordinate contours are materialized only for the union fallback.
+    raw_contours: Vec<Vec<u32>>,
+    contours: Vec<Vec<[f64; 2]>>,
+    edges: Vec<ContourEdge>,
+    active_edges: Vec<u32>,
+    overlay: FloatOverlay<[f64; 2], i64>,
+    peak_estimate: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ContourEdge {
+    contour: u32,
+    index: u32,
+}
+
+impl ContourEdge {
+    fn endpoints(self, contours: &[Vec<u32>], elements: &[PathEl]) -> ([f64; 2], [f64; 2]) {
+        let contour = &contours[self.contour as usize];
+        let index = self.index as usize;
+        (
+            raw_point(elements, contour[index]),
+            raw_point(elements, contour[(index + 1) % contour.len()]),
+        )
+    }
+
+    fn min_x(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
+        let (a, b) = self.endpoints(contours, elements);
+        a[0].min(b[0])
+    }
+
+    fn max_x(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
+        let (a, b) = self.endpoints(contours, elements);
+        a[0].max(b[0])
+    }
+
+    fn min_y(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
+        let (a, b) = self.endpoints(contours, elements);
+        a[1].min(b[1])
+    }
+
+    fn max_y(self, contours: &[Vec<u32>], elements: &[PathEl]) -> f64 {
+        let (a, b) = self.endpoints(contours, elements);
+        a[1].max(b[1])
+    }
+}
+
+fn raw_point(elements: &[PathEl], index: u32) -> [f64; 2] {
+    match elements[index as usize] {
+        PathEl::MoveTo(point) | PathEl::LineTo(point) => [point.x, point.y],
+        _ => unreachable!("raw contours contain only move and line points"),
+    }
+}
+
+fn contour_point_count(elements: &[PathEl], offset: usize) -> usize {
+    let mut count = 1;
+    for next in &elements[offset + 1..] {
+        match *next {
+            PathEl::LineTo(_) => count += 1,
+            PathEl::MoveTo(_) | PathEl::ClosePath => break,
+            _ => {}
+        }
+    }
+    count
+}
+
+/// A strict sign is a proof; zero, overflow, and cancellation are unknown.
+/// The margin is wider than the standard floating-point orientation bound.
+fn orientation_sign(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> Option<i32> {
+    let (ax, ay) = (a[0] - c[0], a[1] - c[1]);
+    let (bx, by) = (b[0] - c[0], b[1] - c[1]);
+    let (left, right) = (ax * by, ay * bx);
+    let det = left - right;
+    let sum = left.abs() + right.abs();
+    if !det.is_finite() || !sum.is_finite() {
+        return None;
+    }
+    let margin = (64.0 * f64::EPSILON * sum).max(f64::MIN_POSITIVE);
+    (det.abs() > margin).then_some(if det > 0.0 { 1 } else { -1 })
+}
+
+/// A forward continuation meets the preceding edge only at their shared
+/// endpoint, including when their turn is too small to certify separately.
+fn certified_forward(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> bool {
+    let (ux, uy) = (b[0] - a[0], b[1] - a[1]);
+    let (vx, vy) = (c[0] - b[0], c[1] - b[1]);
+    let (horizontal, vertical) = (ux * vx, uy * vy);
+    let dot = horizontal + vertical;
+    let sum = horizontal.abs() + vertical.abs();
+    if !dot.is_finite() || !sum.is_finite() {
+        return false;
+    }
+    let margin = (64.0 * f64::EPSILON * sum).max(f64::MIN_POSITIVE);
+    dot > margin
+}
+
+fn certified_separate(
+    a: ContourEdge,
+    b: ContourEdge,
+    contours: &[Vec<u32>],
+    elements: &[PathEl],
+) -> bool {
+    let (a_start, a_end) = a.endpoints(contours, elements);
+    let (b_start, b_end) = b.endpoints(contours, elements);
+    let a0 = orientation_sign(a_start, a_end, b_start);
+    let a1 = orientation_sign(a_start, a_end, b_end);
+    if a0.is_some() && a0 == a1 {
+        return true;
+    }
+    let b0 = orientation_sign(b_start, b_end, a_start);
+    let b1 = orientation_sign(b_start, b_end, a_end);
+    b0.is_some() && b0 == b1
+}
+
+fn certified_area_sign(contour: &[u32], elements: &[PathEl]) -> Option<i32> {
+    let origin = raw_point(elements, contour[0]);
+    let mut sum = 0.0;
+    let mut magnitude = 0.0;
+    for pair in contour[1..].windows(2) {
+        let (a, b) = (raw_point(elements, pair[0]), raw_point(elements, pair[1]));
+        let left = (a[0] - origin[0]) * (b[1] - origin[1]);
+        let right = (a[1] - origin[1]) * (b[0] - origin[0]);
+        let term = left - right;
+        if !term.is_finite() || !left.is_finite() || !right.is_finite() {
+            return None;
+        }
+        sum += term;
+        magnitude += left.abs() + right.abs();
+    }
+    if !sum.is_finite() || !magnitude.is_finite() {
+        return None;
+    }
+    let margin = (64.0 * contour.len() as f64 * f64::EPSILON * magnitude).max(f64::MIN_POSITIVE);
+    (sum.abs() > margin).then_some(if sum > 0.0 { 1 } else { -1 })
+}
+
+/// Winding of a simple contour at a point certified to be off its boundary.
+fn certified_winding(contour: &[u32], elements: &[PathEl], point: [f64; 2]) -> Option<i32> {
+    let mut winding = 0i32;
+    for index in 0..contour.len() {
+        let a = raw_point(elements, contour[index]);
+        let b = raw_point(elements, contour[(index + 1) % contour.len()]);
+        if a[1] <= point[1] && point[1] < b[1] {
+            if orientation_sign(a, b, point)? > 0 {
+                winding = winding.checked_add(1)?;
+            }
+        } else if b[1] <= point[1] && point[1] < a[1] {
+            if orientation_sign(a, b, point)? < 0 {
+                winding = winding.checked_sub(1)?;
+            }
+        }
+    }
+    Some(winding)
+}
+
+impl Default for NonzeroResolver {
+    fn default() -> Self {
+        Self {
+            raw_contours: Vec::new(),
+            contours: Vec::new(),
+            edges: Vec::new(),
+            active_edges: Vec::new(),
+            overlay: FloatOverlay::new_empty(Default::default(), Default::default(), 0),
+            peak_estimate: 0,
+        }
+    }
+}
+
+impl NonzeroResolver {
+    fn start_raw_contour(&mut self, index: usize, point: u32, point_count: usize) {
+        if index == self.raw_contours.len() {
+            self.raw_contours.push(Vec::new());
+        }
+        let contour = &mut self.raw_contours[index];
+        contour.clear();
+        if contour.capacity() < point_count {
+            contour.reserve_exact(point_count);
+        }
+        contour.push(point);
+    }
+
+    fn finish_raw_contour(&mut self, index: &mut usize, open: &mut bool, elements: &[PathEl]) {
+        if !*open {
+            return;
+        }
+        let contour = &mut self.raw_contours[*index];
+        if let (Some(&first), Some(&last)) = (contour.first(), contour.last()) {
+            if raw_point(elements, first) == raw_point(elements, last) {
+                contour.pop();
+            }
+        }
+        if contour.len() >= 3 {
+            *index += 1;
+        }
+        *open = false;
+    }
+
+    fn parse_raw(&mut self, lines: &BezPath) -> (usize, bool) {
+        let elements = lines.elements();
+        if u32::try_from(elements.len()).is_err() {
+            return (0, false);
+        }
+        let (mut active, mut open) = (0usize, false);
+        let mut explicit_simple = true;
+        for (offset, el) in elements.iter().enumerate() {
+            match *el {
+                PathEl::MoveTo(_) => {
+                    explicit_simple &= !open;
+                    self.finish_raw_contour(&mut active, &mut open, elements);
+                    self.start_raw_contour(
+                        active,
+                        offset as u32,
+                        contour_point_count(elements, offset),
+                    );
+                    open = true;
+                }
+                PathEl::LineTo(_) if open => {
+                    let point = raw_point(elements, offset as u32);
+                    let contour = &mut self.raw_contours[active];
+                    if contour
+                        .last()
+                        .is_none_or(|&last| raw_point(elements, last) != point)
+                    {
+                        contour.push(offset as u32);
+                    }
+                }
+                PathEl::LineTo(_) => explicit_simple = false,
+                PathEl::ClosePath => {
+                    explicit_simple &= open && self.raw_contours[active].len() >= 3;
+                    self.finish_raw_contour(&mut active, &mut open, elements);
+                }
+                PathEl::QuadTo(..) | PathEl::CurveTo(..) => {
+                    unreachable!("coverage paths were flattened before nonzero resolution")
+                }
+            }
+        }
+        explicit_simple &= !open;
+        self.finish_raw_contour(&mut active, &mut open, elements);
+        (active, explicit_simple && active != 0)
+    }
+
+    fn start_contour(&mut self, index: usize, point: [f64; 2], point_count: usize) {
+        if index == self.contours.len() {
+            self.contours.push(Vec::new());
+        }
+        let contour = &mut self.contours[index];
+        contour.clear();
+        if contour.capacity() < point_count {
+            contour.reserve_exact(point_count);
+        }
+        contour.push(point);
+    }
+
+    fn finish_contour(&mut self, index: &mut usize, open: &mut bool) {
+        if !*open {
+            return;
+        }
+        let contour = &mut self.contours[*index];
+        if contour.first() == contour.last() {
+            contour.pop();
+        }
+        if contour.len() >= 3 {
+            *index += 1;
+        }
+        *open = false;
+    }
+
+    fn parse(&mut self, lines: &BezPath) -> (usize, bool) {
+        let (mut active, mut open) = (0usize, false);
+        let mut explicit_simple = true;
+        let elements = lines.elements();
+        for (offset, el) in elements.iter().enumerate() {
+            match *el {
+                PathEl::MoveTo(p) => {
+                    explicit_simple &= !open;
+                    self.finish_contour(&mut active, &mut open);
+                    self.start_contour(active, [p.x, p.y], contour_point_count(elements, offset));
+                    open = true;
+                }
+                PathEl::LineTo(p) if open => {
+                    let point = [p.x, p.y];
+                    let contour = &mut self.contours[active];
+                    if contour.last() != Some(&point) {
+                        contour.push(point);
+                    }
+                }
+                PathEl::LineTo(_) => explicit_simple = false,
+                PathEl::ClosePath => {
+                    explicit_simple &= open && self.contours[active].len() >= 3;
+                    self.finish_contour(&mut active, &mut open);
+                }
+                PathEl::QuadTo(..) | PathEl::CurveTo(..) => {
+                    unreachable!("coverage paths were flattened before nonzero resolution")
+                }
+            }
+        }
+        explicit_simple &= !open;
+        self.finish_contour(&mut active, &mut open);
+        (active, explicit_simple && active != 0)
+    }
+
+    pub(crate) fn resolve(&mut self, lines: &BezPath) -> BezPath {
+        let (active, _) = self.parse(lines);
+        self.overlay_active(active)
+    }
+
+    /// Preserve the owned path only when its raw contours already describe
+    /// the exact nonzero filled boundary. Any uncertified case uses i_overlay.
+    pub(crate) fn resolve_owned(&mut self, lines: BezPath) -> BezPath {
+        let (active, explicit_simple) = self.parse_raw(&lines);
+        if explicit_simple && self.certifies_raw_boundary(&lines, active) {
+            return lines;
+        }
+        let (active, _) = self.parse(&lines);
+        self.overlay_active(active)
+    }
+
+    fn overlay_active(&mut self, active: usize) -> BezPath {
+        if active == 0 {
+            return BezPath::new();
+        }
+        self.overlay.reinit_with_subj(&self.contours[..active]);
+        let shapes = self
+            .overlay
+            .overlay(OverlayRule::Subject, FillRule::NonZero);
+        let mut resolved = BezPath::new();
+        for contour in shapes.iter().flat_map(|shape| shape.iter()) {
+            if let Some(first) = contour.first() {
+                resolved.move_to((first[0], first[1]));
+                for point in &contour[1..] {
+                    resolved.line_to((point[0], point[1]));
+                }
+                resolved.close_path();
+            }
+        }
+        resolved
+    }
+
+    /// Certify simple, nonintersecting contours whose winding is either zero
+    /// or one common sign everywhere. This last condition matters for area
+    /// integration: adjacent opposite-winding outer contours can cancel in a
+    /// pixel even though their boundaries never intersect.
+    fn certifies_raw_boundary(&mut self, lines: &BezPath, count: usize) -> bool {
+        self.edges.clear();
+        self.active_edges.clear();
+        let elements = lines.elements();
+        // Every edge reference and active-list index must be representable.
+        // Large paths use the ordinary union resolver instead of truncating.
+        if u32::try_from(count).is_err()
+            || self.raw_contours[..count]
+                .iter()
+                .any(|contour| u32::try_from(contour.len()).is_err())
+        {
+            return false;
+        }
+        let Some(edge_count) = self.raw_contours[..count]
+            .iter()
+            .try_fold(0usize, |sum, contour| sum.checked_add(contour.len()))
+        else {
+            return false;
+        };
+        if u32::try_from(edge_count).is_err() {
+            return false;
+        }
+        if self.edges.capacity() < edge_count {
+            self.edges.reserve_exact(edge_count);
+        }
+        for (contour_index, contour) in self.raw_contours[..count].iter().enumerate() {
+            if contour.len() < 3
+                || contour
+                    .iter()
+                    .any(|&point| raw_point(elements, point).iter().any(|v| !v.is_finite()))
+            {
+                return false;
+            }
+            for index in 0..contour.len() {
+                let a = raw_point(elements, contour[index]);
+                let b = raw_point(elements, contour[(index + 1) % contour.len()]);
+                let c = raw_point(elements, contour[(index + 2) % contour.len()]);
+                if a == b || (orientation_sign(a, b, c).is_none() && !certified_forward(a, b, c)) {
+                    return false;
+                }
+                self.edges.push(ContourEdge {
+                    contour: contour_index as u32,
+                    index: index as u32,
+                });
+            }
+        }
+        let contours = &self.raw_contours;
+        self.edges.sort_unstable_by(|a, b| {
+            a.min_x(contours, elements)
+                .total_cmp(&b.min_x(contours, elements))
+        });
+        for index in 0..self.edges.len() {
+            let edge = self.edges[index];
+            self.active_edges.retain(|&other| {
+                self.edges[other as usize].max_x(contours, elements)
+                    >= edge.min_x(contours, elements)
+            });
+            for &other_index in &self.active_edges {
+                let other = self.edges[other_index as usize];
+                if edge.max_y(contours, elements) < other.min_y(contours, elements)
+                    || other.max_y(contours, elements) < edge.min_y(contours, elements)
+                {
+                    continue;
+                }
+                if edge.contour == other.contour {
+                    let length = contours[edge.contour as usize].len();
+                    if (edge.index as usize + 1) % length == other.index as usize
+                        || (other.index as usize + 1) % length == edge.index as usize
+                    {
+                        // Their sole shared endpoint and strict turn or
+                        // forward continuation were certified above.
+                        continue;
+                    }
+                }
+                if !certified_separate(edge, other, contours, elements) {
+                    return false;
+                }
+            }
+            self.active_edges.push(index as u32);
+        }
+
+        let mut common_sign = 0i32;
+        for (index, contour) in contours[..count].iter().enumerate() {
+            let sign = match certified_area_sign(contour, elements) {
+                Some(sign) => sign,
+                None => return false,
+            };
+            let probe = raw_point(elements, contour[0]);
+            let mut outside = 0i32;
+            for (other_index, other) in contours[..count].iter().enumerate() {
+                if index == other_index {
+                    continue;
+                }
+                let winding = match certified_winding(other, elements, probe) {
+                    Some(winding) => winding,
+                    None => return false,
+                };
+                outside = match outside.checked_add(winding) {
+                    Some(winding) => winding,
+                    None => return false,
+                };
+            }
+            let inside = match outside.checked_add(sign) {
+                Some(winding) => winding,
+                None => return false,
+            };
+            if (outside == 0) == (inside == 0) {
+                return false;
+            }
+            let filled_sign = if outside == 0 { inside } else { outside };
+            if common_sign == 0 {
+                common_sign = filled_sign;
+            } else if common_sign != filled_sign {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// i_overlay does not expose its internal capacities. Retain only one
+    /// resolver, and discard it after unusually large input/output jobs. The
+    /// estimate covers reusable contours plus a conservative allowance for
+    /// i_overlay's segment, split, graph, and extraction buffers.
+    pub(crate) fn trim_after(
+        &mut self,
+        input_elements: usize,
+        output_elements: usize,
+        limit: usize,
+    ) {
+        let contour_bytes = self.raw_contours.capacity() * size_of::<Vec<u32>>()
+            + self
+                .raw_contours
+                .iter()
+                .map(|contour| contour.capacity() * size_of::<u32>())
+                .sum::<usize>()
+            + self.contours.capacity() * size_of::<Vec<[f64; 2]>>()
+            + self
+                .contours
+                .iter()
+                .map(|contour| contour.capacity() * size_of::<[f64; 2]>())
+                .sum::<usize>();
+        let certificate_bytes = self.edges.capacity() * size_of::<ContourEdge>()
+            + self.active_edges.capacity() * size_of::<u32>();
+        let overlay_allowance = input_elements
+            .max(output_elements)
+            .saturating_mul(16 * size_of::<[f64; 2]>());
+        self.peak_estimate = self.peak_estimate.max(
+            contour_bytes
+                .saturating_add(certificate_bytes)
+                .saturating_add(overlay_allowance),
+        );
+        if self.peak_estimate > limit {
+            *self = Self::default();
+        }
+    }
+}
+
+/// Maximum retained path payload in the default cross-frame cache.
+pub const COVERAGE_PATH_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct CoverageKey {
+    source: usize,
+    linear: [u64; 4],
+}
+
+struct CoverageEntry {
+    // Retaining the source makes its pointer identity safe as a cache key.
+    source: Arc<BezPath>,
+    style: PathStyle,
+    lines: Arc<BezPath>,
+    bytes: usize,
+    used: u64,
+}
+
+/// Bounded LRU of line-only coverage geometry after the placed path's
+/// linear transform. Glyph and atlas translations are applied after lookup.
+pub struct CoveragePathCache {
+    entries: HashMap<CoverageKey, Vec<CoverageEntry>>,
+    resolver: NonzeroResolver,
+    bytes: usize,
+    limit: usize,
+    tick: u64,
+}
+
+impl Default for CoveragePathCache {
+    fn default() -> Self {
+        Self::new(COVERAGE_PATH_CACHE_BYTES)
+    }
+}
+
+impl CoveragePathCache {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            resolver: NonzeroResolver::default(),
+            bytes: 0,
+            limit,
+            tick: 0,
+        }
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.values().map(Vec::len).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.resolver = NonzeroResolver::default();
+        self.bytes = 0;
+        self.tick = 0;
+    }
+
+    fn oldest(&self) -> Option<(CoverageKey, usize)> {
+        self.entries
+            .iter()
+            .flat_map(|(key, bucket)| {
+                bucket
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, entry)| (*key, index, entry.used))
+            })
+            .min_by_key(|(_, _, used)| *used)
+            .map(|(key, index, _)| (key, index))
+    }
+
+    fn evict_oldest(&mut self) {
+        let Some((key, index)) = self.oldest() else {
+            return;
+        };
+        let bucket = self.entries.get_mut(&key).expect("oldest entry exists");
+        let entry = bucket.swap_remove(index);
+        let empty = bucket.is_empty();
+        self.bytes -= entry.bytes;
+        if empty {
+            self.entries.remove(&key);
+        }
+    }
+
+    /// Reuse line-only geometry for the same retained source, linear affine,
+    /// and stroke style. Apply `placed.transform`'s translation separately
+    /// when drawing the returned Arc. It remains valid after eviction.
+    pub fn get(&mut self, placed: &PlacedPath) -> Arc<BezPath> {
+        self.tick = self.tick.wrapping_add(1);
+        let [a, b, c, d, _, _] = placed.transform.as_coeffs();
+        let key = CoverageKey {
+            source: Arc::as_ptr(&placed.path) as usize,
+            linear: [a.to_bits(), b.to_bits(), c.to_bits(), d.to_bits()],
+        };
+        if let Some(hit) = self.entries.get_mut(&key).and_then(|bucket| {
+            bucket.iter_mut().find(|entry| {
+                Arc::ptr_eq(&entry.source, &placed.path) && entry.style == placed.style
+            })
+        }) {
+            hit.used = self.tick;
+            return hit.lines.clone();
+        }
+        let linear = PlacedPath {
+            transform: Affine::new([a, b, c, d, 0.0, 0.0]),
+            ..placed.clone()
+        };
+        let raw = coverage_path(&linear, Affine::IDENTITY);
+        let input_elements = raw.elements().len();
+        let elements = self.resolver.resolve_owned(raw).into_elements();
+        self.resolver.trim_after(
+            input_elements,
+            elements.len(),
+            self.limit.min(COVERAGE_PATH_CACHE_BYTES),
+        );
+        let line_capacity = elements.capacity();
+        let lines = Arc::new(BezPath::from_vec(elements));
+        let bytes = (placed.path.elements().len() + line_capacity)
+            .saturating_mul(size_of::<kurbo::PathEl>())
+            .saturating_add(size_of::<CoverageEntry>() + size_of::<CoverageKey>());
+        if bytes <= self.limit {
+            while self.bytes > self.limit - bytes {
+                self.evict_oldest();
+            }
+            self.entries.entry(key).or_default().push(CoverageEntry {
+                source: placed.path.clone(),
+                style: placed.style.clone(),
+                lines: lines.clone(),
+                bytes,
+                used: self.tick,
+            });
+            self.bytes += bytes;
+        }
+        lines
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ImagePixels {
+    Rgba8(Arc<Rgba8>),
+    WorkingF32(Arc<RgbaF32>),
+    Colr(Arc<Program>),
+}
+
+impl ImagePixels {
+    pub fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Rgba8(i) => (i.width, i.height),
+            Self::WorkingF32(i) => (i.width, i.height),
+            Self::Colr(i) => (i.width, i.height),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ItemContent {
     Coverage {
         paths: Vec<PlacedPath>,
-        /// The coverage curve the paint pass applies (`profile::Curve`).
-        curve: super::profile::Curve,
     },
     Image {
-        image: Arc<Rgba8>,
-        /// Image pixels to device px.
+        image: ImagePixels,
         transform: Affine,
-    },
-    /// A glyph's preblended A8 coverage. Paint is applied when the glyph
-    /// reaches the canvas, rather than quantized into a colored word image.
-    GlyphMask {
-        mask: Arc<GlyphMask>,
-        image: Arc<Rgba8>,
-        transform: Affine,
-    },
-    Graphite {
-        image: Arc<Rgba8>,
-        transform: Affine,
-        raster: Arc<super::graphite::Raster>,
-        /// The canonical glyph path draws this raster holds, in order, when
-        /// it came from the [`PathRasterizer`]: [`resolve_canvas_pass`]
-        /// redraws them with the rest of the canvas's render pass.
-        paths: Option<Arc<[PathDraw]>>,
     },
 }
 
-/// One canvas draw.
 #[derive(Clone, Debug)]
 pub struct Item {
     pub content: ItemContent,
-    /// Straight E-encoded RGBA (`fillStyle`); images ignore the color but
-    /// keep its alpha.
+    /// Straight E-encoded paint color; image draws use its alpha.
     pub color: Rgba,
-    /// `globalAlpha`.
     pub opacity: f64,
-    /// `filter: blur(σ px)` in device px (0 for none).
+    /// Gaussian sigma in device pixels.
     pub blur: f64,
-    /// Device-space bounds of the ink before blur (conservative).
+    /// Conservative pre-blur device-space ink box.
     pub bounds: Rect,
 }
 
 impl Item {
-    /// The device rect the item can touch, blur included.
     pub fn reach(&self) -> Rect {
         let pad = blur_radius(self.blur) as f64 + 1.0;
         self.bounds.inflate(pad, pad)
     }
 }
 
-/// The kernel radius of a Gaussian blur of `sigma` px (3σ, as Skia's
-/// Gaussian blur samples it).
 pub fn blur_radius(sigma: f64) -> u32 {
-    if sigma > 0.0 {
-        (3.0 * sigma).ceil() as u32
+    if sigma > 0.0 && sigma.is_finite() {
+        (8.0 * sigma).ceil().min(u32::MAX as f64) as u32
     } else {
         0
     }
 }
 
-/// A scene in a target of `width` × `height` device px.
 #[derive(Clone, Debug, Default)]
 pub struct TextScene {
     pub width: u32,
@@ -108,534 +802,238 @@ pub struct TextScene {
 }
 
 impl TextScene {
-    /// The union of every item's reach, clipped to the target, in whole
-    /// pixels (`None` when nothing draws).
     pub fn ink(&self) -> Option<[u32; 4]> {
         let mut r: Option<Rect> = None;
         for item in &self.items {
-            let reach = item.reach();
-            r = Some(r.map_or(reach, |u| u.union(reach)));
+            let b = item.reach();
+            r = Some(r.map_or(b, |old| old.union(b)));
         }
-        let r = r?.intersect(Rect::new(
-            0.0,
-            0.0,
-            f64::from(self.width),
-            f64::from(self.height),
-        ));
+        let r = r?.intersect(Rect::new(0.0, 0.0, self.width as f64, self.height as f64));
         if r.width() <= 0.0 || r.height() <= 0.0 {
             return None;
         }
-        let x0 = r.x0.floor().max(0.0) as u32;
-        let y0 = r.y0.floor().max(0.0) as u32;
-        let x1 = (r.x1.ceil() as u32).min(self.width);
-        let y1 = (r.y1.ceil() as u32).min(self.height);
-        (x1 > x0 && y1 > y0).then_some([x0, y0, x1, y1])
+        Some([
+            r.x0.floor().max(0.0) as u32,
+            r.y0.floor().max(0.0) as u32,
+            r.x1.ceil().min(self.width as f64) as u32,
+            r.y1.ceil().min(self.height as f64) as u32,
+        ])
     }
 }
 
-/// One shaped run to draw: a face, its size and location, and glyphs in
-/// the run's layout space.
 #[derive(Clone, Copy)]
 pub struct Run<'a> {
     pub face: FaceRef<'a>,
     pub size: f32,
     pub coords: Coords<'a>,
     pub synthetic_bold: bool,
-    /// Skia's synthetic italic (level 1).
     pub synthetic_italic: bool,
-    /// Synthesized oblique angle in degrees (level 2, Parley's), 0 for none.
     pub oblique: f64,
     pub glyphs: &'a [PlacedGlyph],
-    /// For color bitmap faces: the size CoreText draws their glyphs at, for
-    /// this run's device size (`FontResolver::em_advance`), when it differs
-    /// from the device size.
     pub bitmap_size: Option<f32>,
 }
 
-/// A glyph's mask as the platform's text rasterizer makes it (CoreGraphics
-/// on macOS, `cgmask`), before the paint's preblend.
-#[derive(Debug)]
-pub struct GlyphMask {
-    pub width: u32,
-    pub height: u32,
-    /// The mask's top-left pixel relative to the glyph's whole-pixel origin
-    /// (x right, y down; the origin is the pixel corner left of the pen on
-    /// the baseline).
-    pub left: i32,
-    pub top: i32,
-    /// Coverage before the preblend, row by row.
-    pub coverage: Vec<u8>,
-}
-
-/// How a platform glyph mask is drawn.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MaskStyle {
-    /// The glyph's offset right of a whole pixel, in quarter pixels.
-    pub quarter: u8,
-    /// Skia's synthetic italic: `x' = x + skew × y` with y down (0: none).
-    pub skew: f32,
-}
-
-/// Where level 1 glyph masks come from when the platform rasterizes them as
-/// Canvas2D does (`cgmask` on macOS).
-pub trait MaskSource {
-    /// The mask of `glyph` of `face` at `size` device px and variation
-    /// `coords`, drawn in `style`; `bounds` is the glyph's outline box at
-    /// that size (device px, y down).
-    fn mask(
-        &mut self,
-        face: FaceRef<'_>,
-        coords: &[(u32, f32)],
-        glyph: u16,
-        size: f32,
-        style: MaskStyle,
-        bounds: Rect,
-    ) -> Option<Arc<GlyphMask>>;
-    /// The preblend table for straight E-encoded paint `rgb`.
-    fn preblend(&self, rgb: [f64; 3]) -> [u8; 256];
-    /// The mask of a glyph Skia draws from its path (synthesized bold,
-    /// `strokeText`): `glyph` of `face` at `size` device px and variation
-    /// `coords` in `style` (quarter offset, skew), with `frame` applied in
-    /// user space (the device transform is a uniform `scale`). `None` when
-    /// the platform does not draw glyphs this way.
-    #[cfg(feature = "cg-masks")]
-    #[allow(clippy::too_many_arguments)]
-    fn path_mask(
-        &mut self,
-        face: FaceRef<'_>,
-        coords: &[(u32, f32)],
-        glyph: u16,
-        size: f32,
-        style: MaskStyle,
-        scale: f32,
-        frame: super::skpath::Frame,
-    ) -> Option<Arc<GlyphMask>> {
-        let _ = (face, coords, glyph, size, style, scale, frame);
-        None
-    }
-    /// The mask of `glyph` at text size `size` under the device 2×2
-    /// `post` (`[scaleX, skewY, skewX, scaleY]`, kept to 1/1024) with the
-    /// synthetic skew `skew`, at quarter offsets `sub` in x and y, as the
-    /// platform generates glyphs under a rotated, skewed or non-uniform
-    /// matrix. `None` when the platform does not draw glyphs this way. A
-    /// mask over 256 px (beyond `fitsInAtlasDirect`) may carry its bounds
-    /// only, with empty `coverage`: the scene draws that glyph as a path.
-    #[cfg(feature = "cg-masks")]
-    #[allow(clippy::too_many_arguments)]
-    fn matrix_mask(
-        &mut self,
-        face: FaceRef<'_>,
-        coords: &[(u32, f32)],
-        glyph: u16,
-        size: f32,
-        post: [f32; 4],
-        skew: f32,
-        sub: (u8, u8),
-    ) -> Option<Arc<GlyphMask>> {
-        let _ = (face, coords, glyph, size, post, skew, sub);
-        None
-    }
-    /// A glyph's outline as Skia draws text as paths
-    /// (`SkStrikeSpec::MakePath`): the platform's outline at the canonical
-    /// 64 px (`SkFontPriv::kCanonicalTextSizeForPaths`), y down, no
-    /// subpixel offset. `None` when the platform does not provide it.
-    #[cfg(feature = "cg-masks")]
-    fn canonical_path(
-        &mut self,
-        face: FaceRef<'_>,
-        coords: &[(u32, f32)],
-        glyph: u16,
-        skew: f32,
-    ) -> Option<Arc<pm_skia_path::Path>> {
-        let _ = (face, coords, glyph, skew);
-        None
-    }
-    /// The distance field of `glyph` as the GPU canvas's distance-field
-    /// text generates it (`sdf`): CoreGraphics' smoothed mask at the strike
-    /// size `strike` (256 px; 162 at exactly 162) with the synthetic skew
-    /// `skew`, linearized, no preblend. `None` when the platform does not
-    /// provide it.
-    /// `frame` (strike px) is the glyph's path frame when Skia generates
-    /// the strike's A8 from the path: synthesized bold, `strokeText`.
-    #[cfg(feature = "cg-masks")]
-    fn sdf_glyph(
-        &mut self,
-        face: FaceRef<'_>,
-        coords: &[(u32, f32)],
-        glyph: u16,
-        strike: f32,
-        skew: f32,
-        frame: Option<super::skpath::Frame>,
-    ) -> Option<Arc<super::sdf::SdfGlyph>> {
-        let _ = (face, coords, glyph, strike, skew, frame);
-        None
-    }
-    /// The mask gamma of path-generated masks for paint `rgb` (no
-    /// CoreGraphics linearization).
-    fn path_preblend(&self, rgb: [f64; 3]) -> [u8; 256] {
-        let _ = rgb;
-        std::array::from_fn(|i| i as u8)
-    }
-    /// A color glyph (`sbix` emoji) as the platform draws it at `size`
-    /// device px, `quarter`/4 px right of a whole pixel: a premultiplied
-    /// image and its top-left pixel relative to the whole-pixel origin.
-    /// `em` is the size of the glyph's em box (`FontResolver::em_advance`).
-    fn color(
-        &mut self,
-        face: FaceRef<'_>,
-        glyph: u16,
-        size: f32,
-        quarter: u8,
-        em: f32,
-    ) -> Option<(Arc<Rgba8>, i32, i32)> {
-        let _ = (face, glyph, size, quarter, em);
-        None
-    }
-    /// Forget everything drawn so far: the fonts behind the faces' ids
-    /// changed (ids are never reused, so this frees memory; it is not
-    /// needed for correctness).
-    fn reset(&mut self) {}
-}
-
-pub use pm_skia_path::PathVerb as CanonicalVerb;
-
-/// A canonical platform outline and its exact Graphite draw matrix.
-#[derive(Clone)]
-pub struct PathGlyph {
-    pub path: Arc<pm_skia_path::Path>,
-    pub matrix: [f32; 6],
-    /// None for a fill; otherwise stroke width in the path's space.
-    pub stroke: Option<f32>,
-}
-
-/// One `fillText`/`strokeText` call's canonical glyph paths, as the
-/// [`PathRasterizer`] received them.
-#[derive(Clone)]
-pub struct PathDraw {
-    pub glyphs: Vec<PathGlyph>,
-    pub viewport: (u32, u32),
-    pub color: Rgba,
-    pub opacity: f64,
-    pub blur: f64,
-}
-
-impl std::fmt::Debug for PathDraw {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PathDraw")
-            .field("glyphs", &self.glyphs.len())
-            .field("viewport", &self.viewport)
-            .field("blur", &self.blur)
-            .finish()
-    }
-}
-
-/// The host's Canvas2D path renderer. Kept at this seam because pm-vector
-/// also consumes pm-text; text must not acquire a reverse dependency.
-pub trait PathRasterizer {
-    /// Draws `draws` in order into one Graphite render pass of the canvas
-    /// (one target, blended per sample when multisampled). Every draw has
-    /// the same viewport and blur. `multisample_pass`: a draw outside
-    /// `draws` makes the pass multisampled, even if none of these needs
-    /// MSAA (Graphite picks the sample count per render pass, from
-    /// `DrawList`'s requirement).
-    fn raster_pass(&self, draws: &[PathDraw], multisample_pass: bool) -> Option<Item>;
-
-    /// One `fillText`/`strokeText` call's glyph paths in a pass of their
-    /// own.
-    fn raster(
-        &self,
-        paths: &[PathGlyph],
-        viewport: (u32, u32),
-        color: Rgba,
-        opacity: f64,
-        blur: f64,
-    ) -> Option<Item> {
-        self.raster_pass(
-            &[PathDraw {
-                glyphs: paths.to_vec(),
-                viewport,
-                color,
-                opacity,
-                blur,
-            }],
-            false,
-        )
-    }
-}
-
-/// What a glyph draw needs: the caches and the profile.
-pub struct Painter<'c> {
-    pub outlines: &'c mut Outlines,
-    pub bitmaps: &'c mut Bitmaps,
-    /// Level 1 glyph masks from the platform rasterizer, when it has one;
-    /// glyphs Canvas2D draws from masks are then drawn from these.
-    pub masks: Option<&'c mut dyn MaskSource>,
-    /// Full Canvas2D backing dimensions used by Graphite's device-to-NDC
-    /// and viewport round trip before subpixel snapping.
-    pub viewport: Option<(u32, u32)>,
-    pub path_rasterizer: Option<&'c dyn PathRasterizer>,
-    pub profile: Profile,
-    /// What the scene could not draw (color vector glyphs): the renderer
-    /// refuses such a layer rather than drawing it wrong.
+pub struct Painter<'a> {
+    pub outlines: &'a mut Outlines,
+    pub bitmaps: &'a mut Bitmaps,
     pub unsupported: Vec<String>,
 }
 
-/// A layout-to-device transform split into a uniform scale (the device
-/// font size factor) and the residual linear part.
-#[derive(Clone, Copy, Debug)]
-struct Placement {
-    m: Affine,
-    scale: f64,
-    residual: Affine,
-    axis_aligned: bool,
-}
-
-impl Placement {
-    /// A glyph's device origin as Skia maps it for `drawTextBlob` at
-    /// `origin`: the canvas matrix in `f32`, pre-translated by the blob's
-    /// origin (`SkMatrix::preTranslate`), then the glyph's blob position
-    /// mapped (`SkMatrix::mapPoints`), all in `f32` (Chromium builds Skia
-    /// without floating-point contraction).
-    fn glyph_origin(&self, origin: (f64, f64), g: (f64, f64)) -> kurbo::Point {
-        let [sx, ky, kx, sy, tx, ty] = self.m.as_coeffs().map(|v| v as f32);
-        let (ox, oy) = (origin.0 as f32, origin.1 as f32);
-        let translate_only = sx == 1.0 && sy == 1.0 && kx == 0.0 && ky == 0.0;
-        let (tx, ty) = if translate_only {
-            (tx + ox, ty + oy)
-        } else {
-            (tx + (sx * ox + kx * oy), ty + (ky * ox + sy * oy))
-        };
-        let (gx, gy) = (g.0 as f32, g.1 as f32);
-        kurbo::Point::new(
-            f64::from(gx * sx + gy * kx + tx),
-            f64::from(gy * sy + gx * ky + ty),
-        )
-    }
-
-    /// The matrix a glyph's path draws with (`PathOpSubmitter`): the canvas
-    /// matrix in `f32` concatenated with a translation to the glyph's
-    /// position (blob origin plus glyph offset) and the strike-to-source
-    /// scale, as `[a, b, c, d, e, f]`.
-    #[cfg(feature = "cg-masks")]
-    fn glyph_matrix(&self, origin: (f64, f64), g: (f64, f64), scale: f32) -> [f32; 6] {
-        let [a, b, c, d, e, f] = self.m.as_coeffs().map(|v| v as f32);
-        let px = g.0 as f32 + origin.0 as f32;
-        let py = g.1 as f32 + origin.1 as f32;
-        [
-            a * scale,
-            b * scale,
-            c * scale,
-            d * scale,
-            a * px + c * py + e,
-            b * px + d * py + f,
-        ]
-    }
-
-    /// The device scale a glyph strike is made for: Skia's descriptor
-    /// keeps the device matrix to 1/1024 (`sk_relax` in
-    /// `SkScalerContext::MakeRecAndEffects`), so glyph masks of a scaled
-    /// word are generated at `size × relax(scale)`, not at the exact scale.
-    fn strike_scale(&self) -> f32 {
-        let x = self.scale as f32;
-        (x * 1024.0 + 0.5).floor() / 1024.0
-    }
-
-    /// The device 2×2 as the strike descriptor keeps it (each entry to
-    /// 1/1024, `sk_relax`), `[scaleX, skewY, skewX, scaleY]`.
-    #[cfg(feature = "cg-masks")]
-    fn relaxed_post(&self) -> [f32; 4] {
-        let [a, b, c, d, _, _] = self.m.as_coeffs();
-        let relax = |v: f64| ((v as f32) * 1024.0 + 0.5).floor() / 1024.0;
-        [relax(a), relax(b), relax(c), relax(d)]
-    }
-
-    /// A distance-field glyph's quad as `prepare_for_SDFT_drawing` and
-    /// Graphite's `VertexFiller` place it: the glyph position mapped into
-    /// strike space by the creation matrix (`1 / strikeToSourceScale`, in
-    /// `f32`) plus the field's bounds inset by 2, drawn through the canvas
-    /// matrix pre-translated by the blob origin and post-scaled by the
-    /// creation matrix's inverse (`[a, b, c, d, e, f]`).
-    #[cfg(feature = "cg-masks")]
-    fn sdf_placement(
-        &self,
-        origin: (f64, f64),
-        g: (f64, f64),
-        text_size: f32,
-        strike: f32,
-        field: &super::sdf::SdfGlyph,
-    ) -> ((f32, f32), [f32; 6]) {
-        let to_source = text_size / strike;
-        let creation = 1.0 / to_source;
-        let inverse = 1.0 / creation;
-        let mapped = (g.0 as f32 * creation, g.1 as f32 * creation);
-        let inset = super::sdf::INSET as f32;
-        let left_top = (
-            (field.left as f32 + inset) + mapped.0,
-            (field.top as f32 + inset) + mapped.1,
-        );
-        let [a, b, c, d, e, f] = self.m.as_coeffs().map(|v| v as f32);
-        let (ox, oy) = (origin.0 as f32, origin.1 as f32);
-        (
-            left_top,
-            [
-                a * inverse,
-                b * inverse,
-                c * inverse,
-                d * inverse,
-                a * ox + c * oy + e,
-                b * ox + d * oy + f,
-            ],
-        )
-    }
-
-    /// `SkMatrix::getMaxScale` of the 2×2 (the largest singular value).
-    fn max_scale(&self) -> f32 {
-        let [a, b, c, d, _, _] = self.m.as_coeffs();
-        // Singular values of [[a, c], [b, d]].
-        let s1 = a * a + b * b;
-        let s2 = c * c + d * d;
-        let s12 = a * c + b * d;
-        let mean = (s1 + s2) / 2.0;
-        let diff = ((s1 - s2) / 2.0).hypot(s12);
-        ((mean + diff).max(0.0).sqrt()) as f32
-    }
-
-    fn of(m: Affine) -> Placement {
-        let [a, b, c, d, _, _] = m.as_coeffs();
-        let det = a * d - b * c;
-        let scale = det.abs().sqrt();
-        let scale = if scale.is_finite() && scale > 0.0 {
-            scale
-        } else {
-            0.0
-        };
-        let residual = if scale > 0.0 {
-            Affine::new([a / scale, b / scale, c / scale, d / scale, 0.0, 0.0])
-        } else {
-            Affine::IDENTITY
-        };
-        let axis_aligned =
-            b == 0.0 && c == 0.0 && a > 0.0 && d > 0.0 && (a - d).abs() <= 1e-9 * a.abs();
-        Placement {
-            m,
-            scale,
-            residual,
-            axis_aligned,
-        }
+fn skew(run: &Run<'_>) -> f64 {
+    if run.synthetic_italic {
+        super::outline::SYNTHETIC_ITALIC_SKEW
+    } else if run.oblique != 0.0 {
+        -run.oblique.to_radians().tan()
+    } else {
+        0.0
     }
 }
 
-/// The GPU canvas's distance-field strike size for text of `size` under
-/// the placement's matrix, or `None` outside its range
-/// (`SubRunControl::isSDFT`, `getSDFFont` on macOS): from 162 to 256 device
-/// px, 256 excluded (`SkFontPriv::ApproximateTransformedTextSize`;
-/// `SubRunContainer` draws text at or above the maximum size as paths), the
-/// 162 px strike at exactly 162 and the 256 px strike above.
-fn sdf_strike(size: f32, place: &Placement) -> Option<f32> {
-    let approx = size * place.max_scale();
-    if !(approx.is_finite() && approx > 0.0) {
+fn device_scale(m: Affine) -> f64 {
+    let [a, b, c, d, _, _] = m.as_coeffs();
+    let scale = (a * d - b * c).abs().sqrt();
+    if scale.is_finite() { scale } else { 0.0 }
+}
+
+fn device_residual(m: Affine, scale: f64) -> Affine {
+    let [a, b, c, d, _, _] = m.as_coeffs();
+    Affine::new([a / scale, b / scale, c / scale, d / scale, 0.0, 0.0])
+}
+
+fn image_bounds(transform: Affine, width: u32, height: u32) -> Rect {
+    transform.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))
+}
+
+/// The drawn area of a bitmap or COLR glyph relative to its baseline
+/// origin at device scale 1, from the draw path's own placement: the
+/// strike's nonzero texels and reconstruction reach for a bitmap face
+/// (`bitmap::ink_bounds`; `bitmap_size` is the resolved full-em size the
+/// painter passes, the requested `size` when absent), or the unrounded
+/// painted/clip bounds of the COLR program. `None` means the glyph is an
+/// ordinary outline; `Some(None)` that it draws nothing.
+pub fn drawn_color_glyph_ink(
+    face: FaceRef<'_>,
+    coords: Coords<'_>,
+    glyph: u32,
+    size: f32,
+    skew: f64,
+    bitmap_size: Option<f32>,
+) -> Option<Option<Rect>> {
+    if has_bitmaps(face)
+        && let Some(ink) = super::bitmap::ink_bounds(face, glyph, size, bitmap_size.unwrap_or(size))
+    {
+        return Some(ink);
+    }
+    if !super::bitmap::is_colr_glyph(face, glyph) {
         return None;
     }
-    if (162.0..256.0).contains(&approx) {
-        Some(if approx <= 162.0 { 162.0 } else { 256.0 })
-    } else {
-        None
-    }
-}
-
-fn union(r: &mut Option<Rect>, b: Rect) {
-    *r = Some(r.map_or(b, |u| u.union(b)));
+    // The painter draws nothing for a program it cannot build.
+    let program = super::colr::Cache::default()
+        .get(super::colr::ColrRequest {
+            face,
+            coords,
+            id: glyph,
+            size,
+            skew: skew as f32,
+            linear: Affine::IDENTITY,
+            origin: (0.0, 0.0),
+            foreground: [1.0; 4],
+        })
+        .ok()
+        .flatten();
+    Some(program.map(|p| p.painted_bounds))
 }
 
 impl Painter<'_> {
-    /// MakePath preserves synthetic skew/bold at the canonical 64 px.
-    /// Its scaler builds a framed outline, then Graphite fills that path.
-    #[cfg(feature = "cg-masks")]
-    fn canonical_glyph(
-        &mut self,
-        run: &Run<'_>,
-        coords: &[(u32, f32)],
-        glyph: u16,
-    ) -> Option<Arc<pm_skia_path::Path>> {
-        let skew = skew_of(run) as f32;
-        let path = self
-            .masks
-            .as_deref_mut()?
-            .canonical_path(run.face, coords, glyph, skew)?;
-        if !run.synthetic_bold {
-            return Some(path);
-        }
-        // The Mac scaler applies the font transform in CoreGraphics
-        // before converting the path to f32. A later shear loses bits.
-        let path = super::skpath::framed(path.as_ref(), super::skpath::Frame::fake_bold(64.0))?;
-        Some(Arc::new(path))
-    }
-
-    /// A glyph drawn as its canonical 64 px platform path under the
-    /// glyph's matrix (Skia's path sub run).
-    #[cfg(feature = "cg-masks")]
-    fn canonical_path_glyph(
-        &mut self,
-        run: &Run<'_>,
-        coords: &[(u32, f32)],
-        glyph: u16,
-        place: &Placement,
-        origin: (f64, f64),
-        position: (f64, f64),
-    ) -> Option<PathGlyph> {
-        let path = self.canonical_glyph(run, coords, glyph)?;
-        Some(PathGlyph {
-            path,
-            matrix: place.glyph_matrix(origin, position, run.size / 64.0),
-            stroke: None,
-        })
-    }
-
-    /// The direct mask `m` of a glyph, or, when Skia's atlas rejects it
-    /// (`SkGlyphDigest::fitsInAtlasDirect`), the glyph's canonical path:
-    /// rejected direct-mask glyphs fall through to the path sub run.
-    #[cfg(feature = "cg-masks")]
     #[allow(clippy::too_many_arguments)]
-    fn direct_mask_or_path(
+    fn draw(
         &mut self,
-        m: Arc<GlyphMask>,
-        at: (i64, i64, bool),
-        run: &Run<'_>,
-        coords: &[(u32, f32)],
-        glyph: u16,
-        place: &Placement,
+        out: &mut Vec<Item>,
+        runs: &[Run<'_>],
         origin: (f64, f64),
-        position: (f64, f64),
-        platform: &mut Vec<(i64, i64, Arc<GlyphMask>, bool)>,
-        canonical: &mut Vec<PathGlyph>,
+        m: Affine,
+        stroke: Option<f64>,
+        color: Rgba,
+        opacity: f64,
+        blur: f64,
     ) {
-        if fits_atlas_direct(&m) {
-            platform.push((at.0, at.1, m, at.2));
-        } else if let Some(p) =
-            self.canonical_path_glyph(run, coords, glyph, place, origin, position)
-        {
-            canonical.push(p);
-        } else {
-            self.unsupported
-                .push("canonical platform glyph path unavailable".into());
+        let scale = device_scale(m);
+        if scale <= 0.0 || !scale.is_finite() {
+            return;
+        }
+        let residual = device_residual(m, scale);
+        for run in runs {
+            let device_size = f64::from(run.size) * scale;
+            let style = GlyphStyle {
+                size: run.size,
+                synthetic_bold: if run.synthetic_bold {
+                    let outset = synthetic_bold_width(f64::from(run.size)) / 2.0;
+                    (outset, outset)
+                } else {
+                    (0.0, 0.0)
+                },
+                skew: skew(run),
+                expand_tolerance: if run.synthetic_bold {
+                    local_coverage_tolerance(
+                        m * Affine::skew(skew(run), 0.0),
+                        device_coverage_tolerance(device_size),
+                    )
+                } else {
+                    0.0
+                },
+            };
+            for glyph in run.glyphs {
+                let glyph_origin = m * kurbo::Point::new(origin.0 + glyph.x, origin.1 + glyph.y);
+                let bitmap_size = run.bitmap_size.unwrap_or(device_size as f32);
+                if has_bitmaps(run.face)
+                    && let Some(bitmap) =
+                        self.bitmaps
+                            .get(run.face, glyph.id, device_size as f32, bitmap_size)
+                {
+                    let transform = Affine::translate((glyph_origin.x, glyph_origin.y))
+                        * residual
+                        * bitmap.transform;
+                    let image = ImagePixels::Rgba8(bitmap.image.clone());
+                    let (w, h) = image.dimensions();
+                    out.push(Item {
+                        bounds: image_bounds(transform, w, h),
+                        content: ItemContent::Image { image, transform },
+                        color,
+                        opacity,
+                        blur,
+                    });
+                    continue;
+                }
+                if super::bitmap::is_colr_glyph(run.face, glyph.id) {
+                    let [a, b, c, d, _, _] = m.as_coeffs();
+                    let linear = Affine::new([a, b, c, d, 0.0, 0.0]);
+                    match self.bitmaps.colr.get(super::colr::ColrRequest {
+                        face: run.face,
+                        coords: run.coords,
+                        id: glyph.id,
+                        size: run.size,
+                        skew: skew(run) as f32,
+                        linear,
+                        origin: (glyph_origin.x, glyph_origin.y),
+                        // Fill-style alpha is applied once to the completed
+                        // color glyph, including palette-only paints.
+                        foreground: [color[0], color[1], color[2], 1.0],
+                    }) {
+                        Ok(Some(program)) => {
+                            let transform =
+                                Affine::translate((glyph_origin.x.floor(), glyph_origin.y.floor()))
+                                    * program.transform;
+                            let image = ImagePixels::Colr(program);
+                            let (w, h) = image.dimensions();
+                            out.push(Item {
+                                bounds: image_bounds(transform, w, h),
+                                content: ItemContent::Image { image, transform },
+                                // Canvas fill-style alpha applies to the whole
+                                // color glyph, including palette-only paints.
+                                color,
+                                opacity,
+                                blur,
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(e) => self.unsupported.push(format!("COLR: {e}")),
+                    }
+                    continue;
+                }
+                let Some(outline) = self.outlines.get(run.face, run.coords, glyph.id, style) else {
+                    continue;
+                };
+                let transform = m * Affine::translate((origin.0 + glyph.x, origin.1 + glyph.y));
+                let path_style = if let Some(width) = stroke {
+                    PathStyle::Stroke(
+                        Stroke::new(width)
+                            .with_join(kurbo::Join::Round)
+                            .with_miter_limit(2.0),
+                    )
+                } else {
+                    PathStyle::Fill
+                };
+                let mut b = transform.transform_rect_bbox(outline.bounds);
+                if let Some(width) = stroke {
+                    b = b.inflate(width * scale / 2.0, width * scale / 2.0);
+                }
+                out.push(Item {
+                    content: ItemContent::Coverage {
+                        paths: vec![PlacedPath {
+                            path: outline.path.clone(),
+                            transform,
+                            style: path_style,
+                        }],
+                    },
+                    color,
+                    opacity,
+                    blur,
+                    bounds: b,
+                });
+            }
         }
     }
 
-    /// The fake-bold outset per side for a synthesized bold run.
-    fn fake_bold(&self, synthetic: bool, device_size: f64) -> (f64, f64) {
-        if synthetic {
-            let x = self.profile.fake_bold * device_size;
-            (x, x * self.profile.fake_bold_y)
-        } else {
-            (0.0, 0.0)
-        }
-    }
-
-    /// `fillText` of the runs with `fillStyle = color`, `globalAlpha =
-    /// opacity`, `filter: blur(blur px)`, the context transform `m` (layout
-    /// px to device px), and the text origin `origin` in layout px. Outline
-    /// glyphs form one coverage item; color bitmap glyphs follow as image
-    /// items.
     #[allow(clippy::too_many_arguments)]
     pub fn fill_text(
         &mut self,
@@ -647,470 +1045,9 @@ impl Painter<'_> {
         opacity: f64,
         blur: f64,
     ) {
-        let place = Placement::of(m);
-        if place.scale == 0.0 {
-            return;
-        }
-        // Glyphs drawn from smoothed masks (the profile's expansion, offset,
-        // and curve) and glyphs drawn as plain paths (Skia draws a glyph as a
-        // path when its size or its bounding box exceeds the atlas limit).
-        let mut mask = (Vec::new(), None::<Rect>);
-        let mut path = (Vec::new(), None::<Rect>);
-        let mut images = Vec::new();
-        #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
-        let mut canonical_glyphs = Vec::new();
-        // Platform masks of this call, at whole device pixels; `true` for
-        // masks Skia generates from paths (their own gamma table).
-        let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
-        // Glyphs drawn as distance-field text (coverage per pixel).
-        #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
-        let mut sdf_glyphs: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
-        #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
-        let mut native_sdf = Vec::new();
-        let mut curve_size = 0.0f64;
-        for run in runs {
-            let device_size = f64::from(run.size) * place.scale;
-            let dsize = device_size as f32;
-            let bitmap_face = has_bitmaps(run.face);
-            let color_face = bitmap_face && super::bitmap::has_color_bitmaps(run.face);
-            // Canvas2D draws Apple Color Emoji lower than CoreGraphics does,
-            // by whole pixels (`apple_emoji_shift`, measured on `fit-emoji`).
-            let emoji_shift = if color_face && super::bitmap::is_apple_color_emoji(run.face) {
-                Some(
-                    super::bitmap::apple_emoji_shift(dsize, run.bitmap_size.unwrap_or(dsize))
-                        as i32,
-                )
-            } else {
-                None
-            };
-            let colr = super::bitmap::has_colr(run.face);
-            // Distance-field text: the strike size, when this run's device
-            // size is in the GPU canvas's SDFT range.
-            let sdf_strike = if self.masks.is_some() {
-                sdf_strike(run.size, &place)
-            } else {
-                None
-            };
-            let large = self.profile.is_large(device_size);
-            let (ex, ey) = if large {
-                (self.profile.large.expand_x, self.profile.large.expand_y)
-            } else {
-                self.profile.expansion(device_size, false)
-            };
-            let bold = self.fake_bold(run.synthetic_bold, device_size);
-            let style = GlyphStyle {
-                size: dsize,
-                synthetic_bold: bold,
-                skew: skew_of(run),
-                expand: (ex, ey),
-            };
-            let plain = GlyphStyle {
-                expand: (0.0, 0.0),
-                ..style
-            };
-            for g in run.glyphs {
-                let p = place.glyph_origin(origin, (g.x, g.y));
-                let bsize = run.bitmap_size.unwrap_or(dsize);
-                if color_face
-                    && place.axis_aligned
-                    && let Some(item) =
-                        self.color_glyph(run, g.id, p, bsize, emoji_shift, color, opacity, blur)
-                {
-                    images.push(item);
-                    continue;
-                }
-                if bitmap_face && let Some(bmp) = self.bitmaps.get(run.face, g.id, dsize, bsize) {
-                    let (x, y) = if place.axis_aligned {
-                        self.profile.bitmap_position(p.x, p.y, device_size)
-                    } else {
-                        (p.x, p.y)
-                    };
-                    let t = Affine::translate((x, y)) * place.residual * bmp.transform;
-                    let b = t.transform_rect_bbox(Rect::new(
-                        0.0,
-                        0.0,
-                        f64::from(bmp.image.width),
-                        f64::from(bmp.image.height),
-                    ));
-                    images.push(Item {
-                        content: ItemContent::Image {
-                            image: bmp.image.clone(),
-                            transform: t,
-                        },
-                        color,
-                        opacity,
-                        blur,
-                        bounds: b,
-                    });
-                    continue;
-                }
-                if colr && super::bitmap::is_colr_glyph(run.face, g.id) {
-                    #[cfg(feature = "cg-masks")]
-                    match self.bitmaps.colr.get(
-                        run.face,
-                        run.coords,
-                        g.id,
-                        dsize,
-                        skew_of(run) as f32,
-                        color,
-                    ) {
-                        Ok(Some(glyph)) => {
-                            let t = Affine::translate(((p.x + 0.125).floor(), (p.y + 0.5).floor()))
-                                * place.residual
-                                * glyph.transform;
-                            images.push(Item {
-                                bounds: t.transform_rect_bbox(Rect::new(
-                                    0.0,
-                                    0.0,
-                                    glyph.image.width as f64,
-                                    glyph.image.height as f64,
-                                )),
-                                content: ItemContent::Image {
-                                    image: glyph.image.clone(),
-                                    transform: t,
-                                },
-                                color,
-                                opacity,
-                                blur,
-                            });
-                        }
-                        Ok(None) => {}
-                        Err(error) => self.unsupported.push(format!("COLR: {error}")),
-                    }
-                    #[cfg(not(feature = "cg-masks"))]
-                    self.unsupported.push("COLR rasterizer unavailable".into());
-                    continue;
-                }
-                let Some(bare) = self.outlines.get(run.face, run.coords, g.id, plain) else {
-                    continue;
-                };
-                // `SubRunContainer::MakeInAlloc` (Skia m152,
-                // src/text/gpu/SubRunContainer.cpp) tries SDFT and direct
-                // masks only while `ApproximateTransformedTextSize` (the
-                // size times `getMaxScale`) is below `maxMaskSize`, Graphite's
-                // `fGlyphsAsPathsFontSize` (256 on macOS); the rest falls to
-                // the path sub run. Under a skew or a non-uniform scale that
-                // exceeds the uniform device size.
-                let as_path = self.profile.glyph_as_path(device_size, bare.bounds)
-                    || (self.masks.is_some()
-                        && !place.axis_aligned
-                        && self
-                            .profile
-                            .as_path(f64::from(run.size * place.max_scale())));
-                // A glyph whose distance field is beyond the atlas is drawn
-                // as a direct mask when its mask fits (`SubRunContainer`
-                // hands the SDFT run's rejects to the direct mask case).
-                #[cfg(feature = "cg-masks")]
-                let mut sdf_rejected = false;
-                #[cfg(feature = "cg-masks")]
-                if let (Some(strike), Coords::User(coords), Some(masks)) =
-                    (sdf_strike, run.coords, self.masks.as_deref_mut())
-                    && let Some(field) = masks.sdf_glyph(
-                        run.face,
-                        coords,
-                        g.id as u16,
-                        strike,
-                        skew_of(run) as f32,
-                        run.synthetic_bold
-                            .then(|| super::skpath::Frame::fake_bold(strike)),
-                    )
-                {
-                    // A field beyond the atlas is drawn as its path
-                    // (`SkGlyphDigest::fitsInAtlasDirect`).
-                    if field.width.max(field.height) <= 256 {
-                        let (left_top, matrix) =
-                            place.sdf_placement(origin, (g.x, g.y), run.size, strike, &field);
-                        if let Some(cov) =
-                            super::sdf::draw(&field, left_top, matrix, super::sdf::APPLE_GPU)
-                        {
-                            sdf_glyphs.push(cov);
-                            native_sdf.push(super::graphite::Geometry::Sdf {
-                                font_size: run.size.to_bits(),
-                                field,
-                                left_top,
-                                matrix,
-                            });
-                        }
-                        continue;
-                    }
-                    sdf_rejected = true;
-                }
-                #[cfg(not(feature = "cg-masks"))]
-                let _ = sdf_strike;
-                // Beyond the atlas, the GPU canvas draws a glyph as its path,
-                // 4× multisampled, at its exact position.
-                if as_path && self.masks.is_some() {
-                    // As the GPU canvas tessellates the platform's outline at
-                    // the canonical 64 px under the glyph's matrix.
-                    #[cfg(feature = "cg-masks")]
-                    if let Coords::User(coords) = run.coords
-                        && let Some(glyph) = self.canonical_path_glyph(
-                            run,
-                            coords,
-                            g.id as u16,
-                            &place,
-                            origin,
-                            (g.x, g.y),
-                        )
-                    {
-                        canonical_glyphs.push(glyph);
-                        continue;
-                    }
-                    self.unsupported
-                        .push("canonical platform glyph path unavailable".into());
-                    continue;
-                }
-                // Synthesized bold: Skia draws the glyph image from its path
-                // with a stroke-and-fill frame (`skpath`).
-                #[cfg(feature = "cg-masks")]
-                let large = large && !sdf_rejected;
-                #[cfg(feature = "cg-masks")]
-                if !as_path
-                    && !large
-                    && place.axis_aligned
-                    && run.synthetic_bold
-                    && let Some(masks) = self.masks.as_deref_mut()
-                {
-                    let (x, y) = self.profile.snap.apply(p.x, p.y);
-                    let ix = x.floor();
-                    let quarter = (((x - ix) * 4.0).round()).clamp(0.0, 3.0);
-                    let skew = skew_of(run);
-                    let Coords::User(coords) = run.coords else {
-                        continue;
-                    };
-                    if let Some(m) = masks.path_mask(
-                        run.face,
-                        coords,
-                        g.id as u16,
-                        run.size * place.strike_scale(),
-                        MaskStyle {
-                            quarter: quarter as u8,
-                            skew: skew as f32,
-                        },
-                        place.strike_scale(),
-                        super::skpath::Frame::fake_bold(run.size),
-                    ) {
-                        self.direct_mask_or_path(
-                            m,
-                            (ix as i64, y as i64, true),
-                            run,
-                            coords,
-                            g.id as u16,
-                            &place,
-                            origin,
-                            (g.x, g.y),
-                            &mut platform,
-                            &mut canonical_glyphs,
-                        );
-                    }
-                    continue;
-                }
-                if !as_path
-                    && !large
-                    && place.axis_aligned
-                    && !run.synthetic_bold
-                    && let (Some(masks), Coords::User(coords)) =
-                        (self.masks.as_deref_mut(), run.coords)
-                {
-                    let (x, y) = self.profile.snap.apply(p.x, p.y);
-                    let ix = x.floor();
-                    let style = MaskStyle {
-                        quarter: (((x - ix) * 4.0).round() as i64).clamp(0, 3) as u8,
-                        skew: skew_of(run) as f32,
-                    };
-                    let grow_x = f64::from(style.skew).abs()
-                        * bare.bounds.y0.abs().max(bare.bounds.y1.abs());
-                    if let Some(m) = masks.mask(
-                        run.face,
-                        coords,
-                        g.id as u16,
-                        run.size * place.strike_scale(),
-                        style,
-                        bare.bounds.inflate(grow_x, 0.0),
-                    ) {
-                        #[cfg(feature = "cg-masks")]
-                        self.direct_mask_or_path(
-                            m,
-                            (ix as i64, y as i64, false),
-                            run,
-                            coords,
-                            g.id as u16,
-                            &place,
-                            origin,
-                            (g.x, g.y),
-                            &mut platform,
-                            &mut canonical_glyphs,
-                        );
-                        #[cfg(not(feature = "cg-masks"))]
-                        platform.push((ix as i64, y as i64, m, false));
-                    }
-                    continue;
-                }
-                // Under a rotated, skewed or non-uniform matrix Skia still
-                // draws glyph masks, generated with the whole matrix and
-                // positioned to quarter pixels in x and y.
-                #[cfg(feature = "cg-masks")]
-                if !as_path
-                    && !large
-                    && !place.axis_aligned
-                    && !run.synthetic_bold
-                    && let (Some(masks), Coords::User(coords)) =
-                        (self.masks.as_deref_mut(), run.coords)
-                {
-                    let qx = (p.x * 4.0 + 0.5).floor() / 4.0;
-                    let qy = (p.y * 4.0 + 0.5).floor() / 4.0;
-                    let (ix, iy) = (qx.floor(), qy.floor());
-                    let sub = (((qx - ix) * 4.0) as u8, ((qy - iy) * 4.0) as u8);
-                    if let Some(m) = masks.matrix_mask(
-                        run.face,
-                        coords,
-                        g.id as u16,
-                        run.size,
-                        place.relaxed_post(),
-                        skew_of(run) as f32,
-                        sub,
-                    ) {
-                        // A skew or rotation can widen a glyph's mask past
-                        // the atlas even when its upright outline fits.
-                        self.direct_mask_or_path(
-                            m,
-                            (ix as i64, iy as i64, false),
-                            run,
-                            coords,
-                            g.id as u16,
-                            &place,
-                            origin,
-                            (g.x, g.y),
-                            &mut platform,
-                            &mut canonical_glyphs,
-                        );
-                    }
-                    continue;
-                }
-                let dy = if as_path {
-                    0.0
-                } else if large {
-                    self.profile.large.dy
-                } else {
-                    self.profile.dy(device_size, false)
-                };
-                let outline = if as_path || (ex == 0.0 && ey == 0.0) {
-                    bare
-                } else {
-                    let Some(o) = self.outlines.get(run.face, run.coords, g.id, style) else {
-                        continue;
-                    };
-                    o
-                };
-                let (x, y) = if place.axis_aligned && (as_path || !large) {
-                    let (x, y) = self.profile.snap.apply(p.x, p.y);
-                    (x, y + dy)
-                } else if place.axis_aligned {
-                    (p.x, p.y + dy)
-                } else {
-                    let d = if self.profile.device_space_offset {
-                        kurbo::Point::new(0.0, dy)
-                    } else {
-                        place.residual * kurbo::Point::new(0.0, dy)
-                    };
-                    (p.x + d.x, p.y + d.y)
-                };
-                let t = Affine::translate((x, y)) * place.residual;
-                let target = if as_path || large {
-                    &mut path
-                } else {
-                    &mut mask
-                };
-                union(&mut target.1, t.transform_rect_bbox(outline.bounds));
-                target.0.push(placed(&outline, t, PathStyle::Fill));
-                if let Some(width) = outline.dilate {
-                    let stroke = Stroke::new(width).with_join(kurbo::Join::Round);
-                    target
-                        .0
-                        .push(placed(&outline, t, PathStyle::Stroke(stroke)));
-                }
-                if !as_path {
-                    curve_size = curve_size.max(device_size);
-                }
-            }
-        }
-        if !platform.is_empty()
-            && let Some(masks) = self.masks.as_deref_mut()
-        {
-            let rgb = [color[0], color[1], color[2]];
-            out.extend(mask_image(
-                &platform,
-                [&masks.preblend(rgb), &masks.path_preblend(rgb)],
-                color,
-                opacity,
-                blur,
-            ));
-        }
-        if !sdf_glyphs.is_empty() {
-            out.extend(
-                sdf_image(sdf_glyphs, color, opacity, blur).and_then(|item| {
-                    native_sdf_item(item, native_sdf, self.viewport, color, opacity)
-                }),
-            );
-        }
-        if let Some(bounds) = mask.1 {
-            out.push(Item {
-                content: ItemContent::Coverage {
-                    paths: mask.0,
-                    curve: self
-                        .profile
-                        .curve(curve_size, [color[0], color[1], color[2]]),
-                },
-                color,
-                opacity,
-                blur,
-                bounds,
-            });
-        }
-        if let Some(bounds) = path.1 {
-            let mut curve = super::profile::LINEAR;
-            let g = self.profile.large.gamma;
-            if g != 1.0 {
-                for v in &mut curve {
-                    *v = super::profile::coverage_curve(f64::from(*v), g) as f32;
-                }
-            }
-            out.push(Item {
-                content: ItemContent::Coverage {
-                    paths: path.0,
-                    curve,
-                },
-                color,
-                opacity,
-                blur,
-                bounds,
-            });
-        }
-        if !canonical_glyphs.is_empty() {
-            if let (Some(renderer), Some(viewport)) = (self.path_rasterizer, self.viewport) {
-                if let Some(item) =
-                    renderer.raster(&canonical_glyphs, viewport, color, opacity, blur)
-                {
-                    out.push(item);
-                }
-            } else {
-                self.unsupported
-                    .push("Canvas2D glyph path renderer unavailable".into());
-            }
-        }
-        // ARGB glyphs are drawn one by one into the canvas's RGBA8
-        // destination. Preserve rounding when out-of-base COLR layers of
-        // adjacent glyphs overlap, before the float composition pass.
-        if runs.iter().any(|r| super::bitmap::has_colr(r.face)) {
-            out.extend(flatten_color_glyphs(images, color, opacity, blur));
-        } else {
-            out.extend(images);
-        }
+        self.draw(out, runs, origin, m, None, color, opacity, blur);
     }
 
-    /// `strokeText` of the runs with `lineWidth = width` (layout px), round
-    /// joins, and miter limit 2 (the captions context). Color bitmap glyphs
-    /// have no outline to stroke: on macOS their image is drawn again.
     #[allow(clippy::too_many_arguments)]
     pub fn stroke_text(
         &mut self,
@@ -1122,987 +1059,15 @@ impl Painter<'_> {
         color: Rgba,
         opacity: f64,
     ) {
-        let place = Placement::of(m);
-        if place.scale == 0.0 || width <= 0.0 {
-            return;
-        }
-        if runs.iter().any(|r| {
-            r.glyphs
-                .iter()
-                .any(|g| super::bitmap::is_colr_glyph(r.face, g.id))
-        }) {
-            for run in runs {
-                for glyph in run.glyphs {
-                    let single = Run {
-                        glyphs: std::slice::from_ref(glyph),
-                        ..*run
-                    };
-                    if super::bitmap::is_colr_glyph(run.face, glyph.id) {
-                        self.fill_text(out, &[single], origin, m, color, opacity, 0.0);
-                    } else {
-                        self.stroke_text(out, &[single], origin, m, width, color, opacity);
-                    }
-                }
-            }
-            return;
-        }
-        #[cfg(feature = "cg-masks")]
-        if place.axis_aligned
-            && self.masks.is_some()
-            && self.stroke_masks(out, runs, origin, &place, width, color, opacity)
-        {
-            return;
-        }
-        let device_width = width * place.scale + 2.0 * self.profile.stroke.widen;
-        let stroke = Stroke::new(device_width)
-            .with_join(kurbo::Join::Round)
-            .with_miter_limit(2.0);
-        let half = device_width / 2.0 + 1.0;
-        let mut paths = Vec::new();
-        #[cfg_attr(not(feature = "cg-masks"), allow(unused_mut))]
-        let mut canonical_glyphs = Vec::new();
-        let mut bounds: Option<Rect> = None;
-        for run in runs {
-            let device_size = f64::from(run.size) * place.scale;
-            let style = GlyphStyle {
-                size: device_size as f32,
-                synthetic_bold: self.fake_bold(run.synthetic_bold, device_size),
-                skew: skew_of(run),
-                expand: (0.0, 0.0),
-            };
-            let bitmap_face = has_bitmaps(run.face);
-            for g in run.glyphs {
-                let bsize = run.bitmap_size.unwrap_or(device_size as f32);
-                if bitmap_face
-                    && self
-                        .bitmaps
-                        .get(run.face, g.id, device_size as f32, bsize)
-                        .is_some()
-                {
-                    continue;
-                }
-                #[cfg(feature = "cg-masks")]
-                if self.masks.is_some()
-                    && self.path_rasterizer.is_some()
-                    && self.viewport.is_some()
-                    && let Coords::User(coords) = run.coords
-                    && let Some(local) = self.canonical_glyph(run, coords, g.id as u16)
-                {
-                    // PathOpSubmitter::needsExactCTM: stroke the path in
-                    // source space, leaving the canvas CTM unchanged.
-                    let scale = run.size / 64.0;
-                    let source = pm_skia_path::Transform::from_row(
-                        scale,
-                        0.0,
-                        0.0,
-                        scale,
-                        origin.0 as f32 + g.x as f32,
-                        origin.1 as f32 + g.y as f32,
-                    );
-                    let Some(local) = local.as_ref().clone().transform(source) else {
-                        continue;
-                    };
-                    canonical_glyphs.push(PathGlyph {
-                        path: Arc::new(local),
-                        matrix: m.as_coeffs().map(|v| v as f32),
-                        stroke: Some(width as f32),
-                    });
-                    continue;
-                }
-                let Some(outline) = self.outlines.get(run.face, run.coords, g.id, style) else {
-                    continue;
-                };
-                let p = place.glyph_origin(origin, (g.x, g.y));
-                let (x, y) = if place.axis_aligned {
-                    self.profile.stroke_position(p.x, p.y)
-                } else {
-                    (p.x, p.y)
-                };
-                let t = Affine::translate((x, y)) * place.residual;
-                union(
-                    &mut bounds,
-                    t.transform_rect_bbox(outline.bounds).inflate(half, half),
-                );
-                paths.push(placed(&outline, t, PathStyle::Stroke(stroke.clone())));
-            }
-        }
-        if !canonical_glyphs.is_empty()
-            && let (Some(renderer), Some(viewport)) = (self.path_rasterizer, self.viewport)
-            && let Some(item) = renderer.raster(&canonical_glyphs, viewport, color, opacity, 0.0)
-        {
-            out.push(item);
-        }
-        if let Some(bounds) = bounds {
-            out.push(Item {
-                content: ItemContent::Coverage {
-                    paths,
-                    curve: stroke_curve(self.profile.stroke.gamma),
-                },
-                color,
-                opacity,
-                blur: 0.0,
-                bounds,
-            });
+        if width > 0.0 {
+            self.draw(out, runs, origin, m, Some(width), color, opacity, 0.0);
         }
     }
 }
 
-impl Painter<'_> {
-    /// [`resolve_canvas_pass`] with this painter's path renderer, after the
-    /// canvas's draws are recorded into `out`.
-    pub fn resolve_canvas_pass(&self, out: &mut Vec<Item>, multisampled: bool) {
-        if let Some(renderer) = self.path_rasterizer {
-            resolve_canvas_pass(out, renderer, multisampled);
-        }
-    }
-}
-
-/// Resolves a Canvas2D raster's Graphite render pass once all of its draws
-/// are recorded in `out`.
-///
-/// Chromium replays the canvas's recording into one Graphite render pass and
-/// snaps it at the read. Graphite picks the pass's sample count once: 4 when
-/// any of its draws needs MSAA (`DrawList` tracks the requirement,
-/// `DrawContext::flush` uses it). A filtered draw renders in its save layer's
-/// own pass, which only its own draws decide; its layer is composited into
-/// the canvas pass as an image.
-///
-/// Each `fillText`/`strokeText` call's glyph paths were rasterized as a pass
-/// of their own. Here the unfiltered path draws of the canvas pass are drawn
-/// again together, in order, into one target:
-///
-/// - When the pass is multisampled (`multisampled`: by a draw outside `out`,
-///   such as a caption box, or by any unfiltered path draw in `out`),
-///   analytic draws cover samples rather than pixel centers at their mesh
-///   edges (an animator's rectangular glyphs, Arial `l` and `.`, next to
-///   tessellated glyphs), and overlapping draws blend per sample before the
-///   resolve (two rotated Zapfino `g`s whose edges share a pixel).
-/// - Single-sampled, the draws blend into one N32 target in order.
-///
-/// The merged pass takes the place of the group's first draw, which moves
-/// the later draws before the items drawn between them. That is exact where
-/// those items have no ink under a later draw. In the box around pixels
-/// where they do, every draw keeps its own place and pass (a crop of the
-/// same viewport). An item whose pixels are unknown here (filtered, or
-/// vector coverage) within reach of a later draw ends the group.
-///
-/// Direct-mask quads are pixel aligned and distance-field quads end two
-/// texels outside the field's padded ink, so their pixels do not depend on
-/// the pass's sample count; they keep their own items.
-pub fn resolve_canvas_pass(out: &mut Vec<Item>, renderer: &dyn PathRasterizer, multisampled: bool) {
-    let unfiltered = |item: &Item| item.blur <= 0.0;
-    let multisampled = multisampled
-        || out.iter().any(|item| {
-            unfiltered(item)
-                && matches!(&item.content, ItemContent::Graphite { raster, .. } if raster.multisampled)
-        });
-    let path_draws = |item: &Item| match &item.content {
-        ItemContent::Graphite {
-            paths: Some(paths),
-            raster,
-            ..
-        } if unfiltered(item) => Some((paths.clone(), raster.multisampled)),
-        _ => None,
-    };
-    // Groups of path items drawn as one pass, in item order. A path draw
-    // joins the previous group unless an item between them is filtered or
-    // drawn by the paint pass in a way whose pixels are unknown here (it
-    // cannot be ordered pixel by pixel).
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    for i in 0..out.len() {
-        if path_draws(&out[i]).is_none() {
-            continue;
-        }
-        let joins = groups.last().is_some_and(|group| {
-            (group[0]..i)
-                .filter(|j| !group.contains(j))
-                .all(|j| ink_overlap(&out[j], &out[i]).is_some())
-        });
-        if joins {
-            groups.last_mut().expect("checked").push(i);
-        } else {
-            groups.push(vec![i]);
-        }
-    }
-    let mut replaced: Vec<Option<Vec<Item>>> = vec![None; out.len()];
-    for group in groups {
-        let members: Vec<_> = group.iter().filter_map(|&i| path_draws(&out[i])).collect();
-        // A member drawn alone, in a pass with the canvas's sample count.
-        let alone = |k: usize| -> Option<Item> {
-            if members[k].1 == multisampled {
-                Some(out[group[k]].clone())
-            } else {
-                renderer.raster_pass(&members[k].0, multisampled)
-            }
-        };
-        if group.len() == 1 {
-            if !members[0].1 && multisampled {
-                replaced[group[0]] = Some(alone(0).into_iter().collect());
-            }
-            continue;
-        }
-        let draws: Vec<PathDraw> = members
-            .iter()
-            .flat_map(|(paths, _)| paths.iter().cloned())
-            .collect();
-        let Some(merged) = renderer.raster_pass(&draws, multisampled) else {
-            continue;
-        };
-        // Pixels where a later member's ink meets the ink of an item drawn
-        // between the group's first member and it. The merged pass moves
-        // that member before the item; outside this box it commutes with
-        // it. Inside, every member keeps its own place and pass.
-        let mut conflict: Option<[i64; 4]> = None;
-        for &m in &group[1..] {
-            for j in (group[0]..m).filter(|j| !group.contains(j)) {
-                if let Some(Some(r)) = ink_overlap(&out[j], &out[m]) {
-                    conflict = Some(conflict.map_or(r, |c| {
-                        [c[0].min(r[0]), c[1].min(r[1]), c[2].max(r[2]), c[3].max(r[3])]
-                    }));
-                }
-            }
-        }
-        let Some(k) = conflict else {
-            replaced[group[0]] = Some(vec![merged]);
-            for &i in &group[1..] {
-                replaced[i] = Some(Vec::new());
-            }
-            continue;
-        };
-        // One pixel more each side: the pixel footprints above are of the
-        // CPU primitive images.
-        let k = [k[0] - 1, k[1] - 1, k[2] + 1, k[3] + 1];
-        let b = merged.bounds;
-        let (bx0, by0, bx1, by1) = (
-            b.x0.floor() as i64,
-            b.y0.floor() as i64,
-            b.x1.ceil() as i64,
-            b.y1.ceil() as i64,
-        );
-        let mut first: Vec<Item> = [
-            [bx0, by0, bx1, k[1]],
-            [bx0, k[3], bx1, by1],
-            [bx0, k[1], k[0], k[3]],
-            [k[2], k[1], bx1, k[3]],
-        ]
-        .into_iter()
-        .filter_map(|r| crop_item(&merged, r))
-        .collect();
-        for (n, &i) in group.iter().enumerate() {
-            let inside = alone(n).and_then(|item| crop_item(&item, k));
-            if n == 0 {
-                first.extend(inside);
-            } else {
-                replaced[i] = Some(inside.into_iter().collect());
-            }
-        }
-        replaced[group[0]] = Some(first);
-    }
-    if replaced.iter().all(Option::is_none) {
-        return;
-    }
-    let items = std::mem::take(out);
-    for (item, replacement) in items.into_iter().zip(replaced) {
-        match replacement {
-            Some(items) => out.extend(items),
-            None => out.push(item),
-        }
-    }
-}
-
-/// An unfiltered pixel image at a whole-pixel offset: its pixels and the
-/// device position of its first pixel.
-fn item_pixels(item: &Item) -> Option<(&Rgba8, i64, i64)> {
-    if item.blur > 0.0 {
-        return None;
-    }
-    let (image, transform) = match &item.content {
-        ItemContent::Image { image, transform }
-        | ItemContent::GlyphMask {
-            image, transform, ..
-        }
-        | ItemContent::Graphite {
-            image, transform, ..
-        } => (image, transform),
-        ItemContent::Coverage { .. } => return None,
-    };
-    let [a, b, c, d, e, f] = transform.as_coeffs();
-    let whole = |v: f64| v == v.round();
-    (a == 1.0 && b == 0.0 && c == 0.0 && d == 1.0 && whole(e) && whole(f))
-        .then(|| (image.as_ref(), e as i64, f as i64))
-}
-
-/// Where two draws can both put ink: `None` when that is unknown (a
-/// filtered or vector coverage draw within reach), `Some(None)` when no
-/// pixel has ink from both, else the device box of those pixels.
-fn ink_overlap(a: &Item, b: &Item) -> Option<Option<[i64; 4]>> {
-    let reach = a.reach().intersect(b.reach());
-    if reach.width() <= 0.0 || reach.height() <= 0.0 {
-        return Some(None);
-    }
-    let ((ia, ax, ay), (ib, bx, by)) = (item_pixels(a)?, item_pixels(b)?);
-    let x0 = ax.max(bx);
-    let y0 = ay.max(by);
-    let x1 = (ax + i64::from(ia.width)).min(bx + i64::from(ib.width));
-    let y1 = (ay + i64::from(ia.height)).min(by + i64::from(ib.height));
-    let ink = |image: &Rgba8, x: i64, y: i64| {
-        let i = (y as usize * image.width as usize + x as usize) * 4;
-        image.data[i..i + 4] != [0; 4]
-    };
-    let mut found: Option<[i64; 4]> = None;
-    for y in y0..y1 {
-        for x in x0..x1 {
-            if ink(ia, x - ax, y - ay) && ink(ib, x - bx, y - by) {
-                found = Some(found.map_or([x, y, x + 1, y + 1], |f| {
-                    [f[0].min(x), f[1].min(y), f[2].max(x + 1), f[3].max(y + 1)]
-                }));
-            }
-        }
-    }
-    Some(found)
-}
-
-/// An unfiltered path raster restricted to the device box `r`: the same
-/// draws, a smaller crop of the pass's viewport.
-fn crop_item(item: &Item, r: [i64; 4]) -> Option<Item> {
-    let ItemContent::Graphite {
-        image,
-        raster,
-        paths,
-        ..
-    } = &item.content
-    else {
-        return None;
-    };
-    let c = raster.crop.map(i64::from);
-    let crop = [c[0].max(r[0]), c[1].max(r[1]), c[2].min(r[2]), c[3].min(r[3])];
-    if crop[2] <= crop[0] || crop[3] <= crop[1] {
-        return None;
-    }
-    let width = (crop[2] - crop[0]) as usize;
-    let mut data = Vec::with_capacity(width * (crop[3] - crop[1]) as usize * 4);
-    for y in crop[1]..crop[3] {
-        let i = ((y - c[1]) as usize * image.width as usize + (crop[0] - c[0]) as usize) * 4;
-        data.extend_from_slice(&image.data[i..i + width * 4]);
-    }
-    let crop32 = crop.map(|v| v as u32);
-    Some(Item {
-        content: ItemContent::Graphite {
-            image: Arc::new(Rgba8 {
-                width: width as u32,
-                height: (crop[3] - crop[1]) as u32,
-                data,
-            }),
-            transform: Affine::translate((crop[0] as f64, crop[1] as f64)),
-            raster: Arc::new(super::graphite::Raster {
-                crop: crop32,
-                ..raster.as_ref().clone()
-            }),
-            paths: paths.clone(),
-        },
-        bounds: Rect::new(
-            crop[0] as f64,
-            crop[1] as f64,
-            crop[2] as f64,
-            crop[3] as f64,
-        ),
-        ..item.clone()
-    })
-}
-
-impl Painter<'_> {
-    /// A color bitmap glyph as the platform draws it (CoreGraphics, the
-    /// whole-pixel position and quarter offset, Apple Color Emoji's shift),
-    /// with the paint's alpha; `None` when the platform does not draw it.
-    #[allow(clippy::too_many_arguments)]
-    fn color_glyph(
-        &mut self,
-        run: &Run<'_>,
-        glyph: u32,
-        p: kurbo::Point,
-        bsize: f32,
-        emoji_shift: Option<i32>,
-        color: Rgba,
-        opacity: f64,
-        blur: f64,
-    ) -> Option<Item> {
-        let masks = self.masks.as_deref_mut()?;
-        let (x, y) = self.profile.snap.apply(p.x, p.y);
-        let ix = x.floor();
-        let quarter = (((x - ix) * 4.0).round() as i64).clamp(0, 3) as u8;
-        // Drawn at the em size CoreText uses for the strike.
-        let shift = emoji_shift.unwrap_or(0);
-        let (image, left, top) = masks
-            .color(run.face, glyph as u16, bsize, quarter, bsize)
-            .map(|(i, l, t)| (i, l + ix as i32, t + y as i32 + shift))?;
-        let t = Affine::translate((f64::from(left), f64::from(top)));
-        let b = Rect::new(
-            f64::from(left),
-            f64::from(top),
-            f64::from(left) + f64::from(image.width),
-            f64::from(top) + f64::from(image.height),
-        );
-        Some(Item {
-            content: ItemContent::Image {
-                image,
-                transform: t,
-            },
-            color,
-            opacity,
-            blur,
-            bounds: b,
-        })
-    }
-
-    /// `strokeText` as Skia draws it on macOS: each glyph's image generated
-    /// from its path with a stroke frame (`skpath`), at the glyph's
-    /// quarter-pixel position, through the path mask gamma of the stroke
-    /// color, composited like `fillText`'s masks. `false` (nothing pushed)
-    /// when a glyph is beyond the atlas (Skia strokes such text as paths).
-    #[cfg(feature = "cg-masks")]
-    #[allow(clippy::too_many_arguments)]
-    fn stroke_masks(
-        &mut self,
-        out: &mut Vec<Item>,
-        runs: &[Run<'_>],
-        origin: (f64, f64),
-        place: &Placement,
-        width: f64,
-        color: Rgba,
-        opacity: f64,
-    ) -> bool {
-        let frame = super::skpath::Frame {
-            width: width as f32,
-            fill: false,
-            join: pm_skia_path::LineJoin::Round,
-            miter_limit: 2.0,
-        };
-        // `SubRunContainer`: text at or beyond the 256 px maximum draws
-        // paths, not glyph images.
-        if runs
-            .iter()
-            .any(|r| f64::from(r.size) * place.scale >= 256.0)
-        {
-            return false;
-        }
-        let mut platform: Vec<(i64, i64, Arc<GlyphMask>, bool)> = Vec::new();
-        let mut sdf_quads: Vec<(i64, i64, usize, usize, Vec<f32>)> = Vec::new();
-        let mut native_sdf = Vec::new();
-        let mut images = Vec::new();
-        for run in runs {
-            let device_size = f64::from(run.size) * place.scale;
-            let skew = skew_of(run);
-            let bitmap_face = has_bitmaps(run.face);
-            let color_face = bitmap_face && super::bitmap::has_color_bitmaps(run.face);
-            let emoji_shift =
-                (color_face && super::bitmap::is_apple_color_emoji(run.face)).then(|| {
-                    let dsize = device_size as f32;
-                    super::bitmap::apple_emoji_shift(dsize, run.bitmap_size.unwrap_or(dsize)) as i32
-                });
-            for g in run.glyphs {
-                let bsize = run.bitmap_size.unwrap_or(device_size as f32);
-                let p = place.glyph_origin(origin, (g.x, g.y));
-                if bitmap_face
-                    && self
-                        .bitmaps
-                        .get(run.face, g.id, device_size as f32, bsize)
-                        .is_some()
-                {
-                    // A color glyph has no path to frame: Skia draws its
-                    // image in the stroke pass too (with the stroke paint's
-                    // alpha), so the fill pass draws it over itself.
-                    if color_face {
-                        let Some(item) =
-                            self.color_glyph(run, g.id, p, bsize, emoji_shift, color, opacity, 0.0)
-                        else {
-                            return false;
-                        };
-                        images.push(item);
-                    }
-                    continue;
-                }
-                let Coords::User(coords) = run.coords else {
-                    return false;
-                };
-                // A wide stroke from 162 to 256 px is distance-field text
-                // too (`SubRunControl::isSDFT`): the strike's A8 is the
-                // glyph's path framed with the stroke scaled into strike
-                // space (`dfPaint.setStrokeWidth(width / strikeToSourceScale)`).
-                if let Some(strike) = sdf_strike(run.size, place) {
-                    let to_source = run.size / strike;
-                    let mut sdf_frame = super::skpath::Frame {
-                        width: frame.width / to_source,
-                        ..frame
-                    };
-                    if run.synthetic_bold {
-                        sdf_frame.width += super::skpath::Frame::fake_bold(strike).width;
-                    }
-                    let Some(masks) = self.masks.as_deref_mut() else {
-                        return false;
-                    };
-                    let Some(field) = masks.sdf_glyph(
-                        run.face,
-                        coords,
-                        g.id as u16,
-                        strike,
-                        skew as f32,
-                        Some(sdf_frame),
-                    ) else {
-                        continue;
-                    };
-                    if field.width.max(field.height) > 256 {
-                        return false;
-                    }
-                    let (left_top, matrix) =
-                        place.sdf_placement(origin, (g.x, g.y), run.size, strike, &field);
-                    if let Some(cov) =
-                        super::sdf::draw(&field, left_top, matrix, super::sdf::APPLE_GPU)
-                    {
-                        sdf_quads.push(cov);
-                        native_sdf.push(super::graphite::Geometry::Sdf {
-                            font_size: run.size.to_bits(),
-                            field,
-                            left_top,
-                            matrix,
-                        });
-                    }
-                    continue;
-                }
-                let (x, y) = self.profile.snap.apply(p.x, p.y);
-                let ix = x.floor();
-                let quarter = (((x - ix) * 4.0).round()).clamp(0.0, 3.0);
-                // A synthesized bold run strokes its emboldened path: the
-                // fake bold frame and the stroke add (Skia adds the widths).
-                let frame = if run.synthetic_bold {
-                    super::skpath::Frame {
-                        width: frame.width + super::skpath::Frame::fake_bold(run.size).width,
-                        ..frame
-                    }
-                } else {
-                    frame
-                };
-                let Some(masks) = self.masks.as_deref_mut() else {
-                    return false;
-                };
-                let Some(m) = masks.path_mask(
-                    run.face,
-                    coords,
-                    g.id as u16,
-                    run.size * place.strike_scale(),
-                    MaskStyle {
-                        quarter: quarter as u8,
-                        skew: skew as f32,
-                    },
-                    place.strike_scale(),
-                    frame,
-                ) else {
-                    continue;
-                };
-                // Glyph images beyond the atlas are drawn as paths.
-                if !fits_atlas_direct(&m) {
-                    return false;
-                }
-                platform.push((ix as i64, y as i64, m, true));
-            }
-        }
-        if !platform.is_empty()
-            && let Some(masks) = self.masks.as_deref_mut()
-        {
-            let rgb = [color[0], color[1], color[2]];
-            out.extend(mask_image(
-                &platform,
-                [&masks.preblend(rgb), &masks.path_preblend(rgb)],
-                color,
-                opacity,
-                0.0,
-            ));
-        }
-        if !sdf_quads.is_empty() {
-            out.extend(
-                sdf_image(sdf_quads, color, opacity, 0.0).and_then(|item| {
-                    native_sdf_item(item, native_sdf, self.viewport, color, opacity)
-                }),
-            );
-        }
-        out.extend(images);
-        true
-    }
-}
-
-/// One RGBA8 canvas draw from whole-pixel color glyph images.
-fn flatten_color_glyphs(items: Vec<Item>, color: Rgba, opacity: f64, blur: f64) -> Vec<Item> {
-    if items.is_empty() {
-        return items;
-    }
-    let translated = items.iter().all(|item| match &item.content {
-        ItemContent::Image { transform, .. } => {
-            let [a, b, c, d, x, y] = transform.as_coeffs();
-            [a, b, c, d] == [1.0, 0.0, 0.0, 1.0] && x.fract() == 0.0 && y.fract() == 0.0
-        }
-        _ => false,
-    });
-    if !translated {
-        return items;
-    }
-    let bounds = items
-        .iter()
-        .map(|i| i.bounds)
-        .reduce(|a, b| a.union(b))
-        .unwrap();
-    let left = bounds.x0.floor() as i64;
-    let top = bounds.y0.floor() as i64;
-    let width = (bounds.x1.ceil() as i64 - left) as usize;
-    let height = (bounds.y1.ceil() as i64 - top) as usize;
-    if width > 8192 || height > 8192 {
-        return items;
-    }
-    let alpha = (color[3] * opacity).clamp(0.0, 1.0) as f32;
-    let mut data = vec![0u8; width * height * 4];
-    for item in items {
-        let ItemContent::Image { image, transform } = item.content else {
-            unreachable!()
-        };
-        let [_, _, _, _, x, y] = transform.as_coeffs();
-        let x = x as i64 - left;
-        let y = y as i64 - top;
-        for sy in 0..image.height as usize {
-            for sx in 0..image.width as usize {
-                let src = &image.data[(sy * image.width as usize + sx) * 4..][..4];
-                let dst = &mut data[((sy + y as usize) * width + sx + x as usize) * 4..][..4];
-                let a = src[3] as f32 / 255.0 * alpha;
-                for c in 0..4 {
-                    dst[c] = (src[c] as f32 * alpha + dst[c] as f32 * (1.0 - a))
-                        .round()
-                        .clamp(0.0, 255.0) as u8;
-                }
-            }
-        }
-    }
-    vec![Item {
-        content: ItemContent::Image {
-            image: Arc::new(Rgba8 {
-                width: width as u32,
-                height: height as u32,
-                data,
-            }),
-            transform: Affine::translate((left as f64, top as f64)),
-        },
-        color: [1.0; 4],
-        opacity: 1.0,
-        blur,
-        bounds,
-    }]
-}
-
-/// Keep source distance fields until the native fragment pass; the CPU
-/// image remains the platform-independent reference for the same item.
-fn native_sdf_item(
-    mut item: Item,
-    geometry: Vec<super::graphite::Geometry>,
-    viewport: Option<(u32, u32)>,
-    color: Rgba,
-    opacity: f64,
-) -> Option<Item> {
-    let Some((width, height)) = viewport else {
-        return Some(item);
-    };
-    // Filter layers include the kernel's outset, just as the path adapter.
-    let pad = blur_radius(item.blur);
-    let b = item.bounds;
-    let crop = [
-        (b.x0 + pad as f64).max(0.) as u32,
-        (b.y0 + pad as f64).max(0.) as u32,
-        (b.x1 + pad as f64).min((width + 2 * pad) as f64) as u32,
-        (b.y1 + pad as f64).min((height + 2 * pad) as f64) as u32,
-    ];
-    if crop[0] >= crop[2] || crop[1] >= crop[3] {
-        return None;
-    }
-    let ItemContent::Image { image, .. } = &item.content else {
-        return Some(item);
-    };
-    let (cw, ch) = (crop[2] - crop[0], crop[3] - crop[1]);
-    let (ox, oy) = (
-        (crop[0] as f64 - pad as f64 - b.x0) as usize,
-        (crop[1] as f64 - pad as f64 - b.y0) as usize,
-    );
-    let mut data = Vec::with_capacity((cw * ch * 4) as usize);
-    for y in 0..ch as usize {
-        let i = ((oy + y) * image.width as usize + ox) * 4;
-        data.extend_from_slice(&image.data[i..i + cw as usize * 4]);
-    }
-    let alpha = (color[3] * opacity) as f32;
-    let paint = [
-        color[0] as f32 * alpha,
-        color[1] as f32 * alpha,
-        color[2] as f32 * alpha,
-        alpha,
-    ];
-    let draws = geometry
-        .into_iter()
-        .map(|mut geometry| {
-            if let super::graphite::Geometry::Sdf { matrix, .. } = &mut geometry {
-                matrix[4] += pad as f32;
-                matrix[5] += pad as f32;
-            }
-            super::graphite::Draw {
-                geometry,
-                color: paint,
-            }
-        })
-        .collect();
-    item.bounds = Rect::new(
-        crop[0] as f64 - pad as f64,
-        crop[1] as f64 - pad as f64,
-        crop[2] as f64 - pad as f64,
-        crop[3] as f64 - pad as f64,
-    );
-    item.content = ItemContent::Graphite {
-        image: Arc::new(Rgba8 {
-            width: cw,
-            height: ch,
-            data,
-        }),
-        transform: Affine::translate((item.bounds.x0, item.bounds.y0)),
-        paths: None,
-        raster: Arc::new(super::graphite::Raster {
-            width: width + 2 * pad,
-            height: height + 2 * pad,
-            crop,
-            multisampled: false,
-            draws,
-        }),
-    };
-    Some(item)
-}
-
-/// Distance-field glyph coverage (`sdf::draw`) as one image item, each
-/// glyph blended source-over into the 8-bit target with its unquantized
-/// coverage (the fragment's value), quantized after every glyph, as the GPU
-/// canvas blends glyph quads.
-fn sdf_image(
-    quads: Vec<(i64, i64, usize, usize, Vec<f32>)>,
-    color: Rgba,
-    opacity: f64,
-    blur: f64,
-) -> Option<Item> {
-    let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
-    for (x, y, w, h, _) in &quads {
-        x0 = x0.min(*x);
-        y0 = y0.min(*y);
-        x1 = x1.max(x + *w as i64);
-        y1 = y1.max(y + *h as i64);
-    }
-    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
-    if w == 0 || h == 0 || w > 16384 || h > 16384 {
-        return None;
-    }
-    let a = (color[3].clamp(0.0, 1.0) * opacity.clamp(0.0, 1.0)) as f32;
-    let rgb = [color[0], color[1], color[2]].map(|c| c as f32);
-    let mut data = vec![0u8; w * h * 4];
-    for (qx, qy, qw, qh, cov) in &quads {
-        let (ox, oy) = ((qx - x0) as usize, (qy - y0) as usize);
-        for row in 0..*qh {
-            let src = &cov[row * qw..(row + 1) * qw];
-            let start = ((oy + row) * w + ox) * 4;
-            let dst = &mut data[start..start + qw * 4];
-            for (d, &c) in dst.chunks_exact_mut(4).zip(src) {
-                if c <= 0.0 {
-                    continue;
-                }
-                let sa = c * a;
-                let keep = 1.0 - sa;
-                for k in 0..3 {
-                    let v = rgb[k] * sa + f32::from(d[k]) / 255.0 * keep;
-                    d[k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
-                }
-                let v = sa + f32::from(d[3]) / 255.0 * keep;
-                d[3] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    let image = Arc::new(Rgba8 {
-        width: w as u32,
-        height: h as u32,
-        data,
-    });
-    Some(Item {
-        content: ItemContent::Image {
-            image,
-            transform: Affine::translate((x0 as f64, y0 as f64)),
-        },
-        color: [1.0, 1.0, 1.0, 1.0],
-        opacity: 1.0,
-        blur,
-        bounds: Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64),
-    })
-}
-
-/// Ordered platform glyph masks of a `fillText` call, using the paint's
-/// preblend table. Filtered calls instead retain their N32 save layer.
-/// `SkGlyphDigest::fitsInAtlasDirect`: Skia places a direct glyph mask in
-/// its atlas only when `maxDimension() <= kSkSideTooBigForAtlas` (256).
-#[cfg(feature = "cg-masks")]
-fn fits_atlas_direct(m: &GlyphMask) -> bool {
-    m.width.max(m.height) <= 256
-}
-
-/// Whether `m` holds its pixels (an atlas-rejected mask may carry its
-/// bounds only).
-fn has_coverage(m: &GlyphMask) -> bool {
-    m.coverage.len() == m.width as usize * m.height as usize
-}
-
-fn mask_image(
-    masks: &[(i64, i64, Arc<GlyphMask>, bool)],
-    tables: [&[u8; 256]; 2],
-    color: Rgba,
-    opacity: f64,
-    blur: f64,
-) -> Vec<Item> {
-    // A filtered fillText has a transparent N32 save layer. Unfiltered
-    // glyphs instead blend directly into the existing canvas, in order.
-    if blur > 0.0 {
-        return mask_save_layer(masks, tables, color, opacity, blur)
-            .into_iter()
-            .collect();
-    }
-    masks
-        .iter()
-        .filter_map(|(x, y, mask, path)| {
-            if mask.width == 0 || mask.height == 0 || !has_coverage(mask) {
-                return None;
-            }
-            let table = tables[usize::from(*path)];
-            let image = Arc::new(Rgba8 {
-                width: mask.width,
-                height: mask.height,
-                data: mask
-                    .coverage
-                    .iter()
-                    .flat_map(|&c| [table[c as usize]; 4])
-                    .collect(),
-            });
-            let left = *x + i64::from(mask.left);
-            let top = *y + i64::from(mask.top);
-            Some(Item {
-                content: ItemContent::GlyphMask {
-                    mask: mask.clone(),
-                    image,
-                    transform: Affine::translate((left as f64, top as f64)),
-                },
-                color,
-                opacity,
-                blur,
-                bounds: Rect::new(
-                    left as f64,
-                    top as f64,
-                    (left + i64::from(mask.width)) as f64,
-                    (top + i64::from(mask.height)) as f64,
-                ),
-            })
-        })
-        .collect()
-}
-
-fn mask_save_layer(
-    masks: &[(i64, i64, Arc<GlyphMask>, bool)],
-    tables: [&[u8; 256]; 2],
-    color: Rgba,
-    opacity: f64,
-    blur: f64,
-) -> Option<Item> {
-    let (mut x0, mut y0, mut x1, mut y1) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
-    let masks: Vec<_> = masks.iter().filter(|(.., m, _)| has_coverage(m)).collect();
-    for (x, y, m, _) in &masks {
-        x0 = x0.min(x + i64::from(m.left));
-        y0 = y0.min(y + i64::from(m.top));
-        x1 = x1.max(x + i64::from(m.left) + i64::from(m.width));
-        y1 = y1.max(y + i64::from(m.top) + i64::from(m.height));
-    }
-    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
-    if w == 0 || h == 0 || w > 16384 || h > 16384 {
-        return None;
-    }
-    // Each glyph quad is blended source-over into the 8-bit canvas with the
-    // paint's color and alpha (`globalAlpha` included): overlapping glyphs
-    // of a translucent paint build up, and the target is quantized after
-    // every glyph, as the GPU canvas blends them.
-    let a = (color[3].clamp(0.0, 1.0) * opacity.clamp(0.0, 1.0)) as f32;
-    // A CSS Color 4 paint outside sRGB stays unclamped (Skia's
-    // `SkColor4f`); the target clamps what is written.
-    let rgb = [color[0], color[1], color[2]].map(|c| c as f32);
-    let mut data = vec![0u8; w * h * 4];
-    for (x, y, m, path) in masks {
-        let table = tables[usize::from(*path)];
-        let ox = (x + i64::from(m.left) - x0) as usize;
-        let oy = (y + i64::from(m.top) - y0) as usize;
-        for row in 0..m.height as usize {
-            let src = &m.coverage[row * m.width as usize..(row + 1) * m.width as usize];
-            let start = ((oy + row) * w + ox) * 4;
-            let dst = &mut data[start..start + m.width as usize * 4];
-            for (d, &c) in dst.chunks_exact_mut(4).zip(src) {
-                if c == 0 {
-                    continue;
-                }
-                let sa = f32::from(table[c as usize]) / 255.0 * a;
-                let keep = 1.0 - sa;
-                for k in 0..3 {
-                    let v = rgb[k] * sa + f32::from(d[k]) / 255.0 * keep;
-                    d[k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
-                }
-                let v = sa + f32::from(d[3]) / 255.0 * keep;
-                d[3] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    let image = Arc::new(Rgba8 {
-        width: w as u32,
-        height: h as u32,
-        data,
-    });
-    let transform = Affine::translate((x0 as f64, y0 as f64));
-    Some(Item {
-        content: ItemContent::Image { image, transform },
-        // The image holds the color and `globalAlpha`.
-        color: [1.0, 1.0, 1.0, 1.0],
-        opacity: 1.0,
-        blur,
-        bounds: Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64),
-    })
-}
-
-/// The shear of a run's synthesized italic or oblique.
-fn skew_of(run: &Run<'_>) -> f64 {
-    if run.synthetic_italic {
-        super::outline::SYNTHETIC_ITALIC_SKEW
-    } else if run.oblique != 0.0 {
-        -run.oblique.to_radians().tan()
-    } else {
-        0.0
-    }
-}
-
-fn stroke_curve(gamma: f64) -> super::profile::Curve {
-    let mut c = super::profile::LINEAR;
-    for v in &mut c {
-        *v = super::profile::coverage_curve(f64::from(*v), gamma) as f32;
-    }
-    c
-}
-
-fn placed(outline: &Outline, transform: Affine, style: PathStyle) -> PlacedPath {
-    PlacedPath {
-        path: outline.path.clone(),
-        transform,
-        style,
-    }
-}
-
-/// A filled path (`fill()` with the nonzero rule) in layout px through `m`.
 pub fn fill_path(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<Item> {
     let bounds = m.transform_rect_bbox(path.bounding_box());
-    if bounds.width() <= 0.0 && bounds.height() <= 0.0 {
+    if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
         return None;
     }
     Some(Item {
@@ -2112,7 +1077,6 @@ pub fn fill_path(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<
                 transform: m,
                 style: PathStyle::Fill,
             }],
-            curve: super::profile::LINEAR,
         },
         color,
         opacity,
@@ -2121,190 +1085,7 @@ pub fn fill_path(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<
     })
 }
 
-/// The sample positions of a 4× multisampled pixel (the standard pattern
-/// of Metal, D3D, and Vulkan), in pixel units from its top-left corner.
-const MSAA4: [(f64, f64); 4] = [
-    (0.375, 0.125),
-    (0.875, 0.375),
-    (0.125, 0.625),
-    (0.625, 0.875),
-];
-
-/// `fill()` of a path as Chromium's GPU canvas fills it: 4× multisampled
-/// coverage (a quarter per sample inside the path, nonzero winding), as a
-/// premultiplied image item in `color` (measured on the caption boxes,
-/// whose edge pixels take only the values 0, 1/4, 1/2, 3/4, 1).
-pub fn fill_path_msaa(path: BezPath, m: Affine, color: Rgba, opacity: f64) -> Option<Item> {
-    let path = m * path;
-    msaa_item(
-        path.bounding_box(),
-        |p| path.winding(p) != 0,
-        color,
-        opacity,
-    )
-}
-
-/// [`fill_path_msaa`] of the canvas `roundedRect(x, y, w, h, r)` through
-/// `m` (a translation and uniform scale), with exact circular corners
-/// (Skia's `arcTo` makes conics, which are exact circles).
-pub fn fill_rounded_rect_msaa(
-    rect: (f64, f64, f64, f64, f64),
-    m: Affine,
-    color: Rgba,
-    opacity: f64,
-) -> Option<Item> {
-    let (x, y, w, h, r) = rect;
-    let [a, b, c, d, e, f] = m.as_coeffs();
-    if b != 0.0 || c != 0.0 || a <= 0.0 || (a - d).abs() > 1e-12 * a {
-        return fill_path_msaa(rounded_rect(x, y, w, h, r), m, color, opacity);
-    }
-    // `roundedRect` of `captions/render.ts`: `arcTo` corners, each a
-    // quarter conic (`SkPath::arcTo`), in user space as Skia gets them.
-    let radius = r.min(w / 2.0).min(h / 2.0).max(0.0) as f32;
-    let (fx, fy, fw, fh) = (x as f32, y as f32, w as f32, h as f32);
-    let weight = (0.5f32).sqrt();
-    let corners = [
-        (
-            (fx + fw, fy),
-            (fx + fw - radius, fy),
-            (fx + fw, fy + radius),
-        ),
-        (
-            (fx + fw, fy + fh),
-            (fx + fw, fy + fh - radius),
-            (fx + fw - radius, fy + fh),
-        ),
-        (
-            (fx, fy + fh),
-            (fx + radius, fy + fh),
-            (fx, fy + fh - radius),
-        ),
-        ((fx, fy), (fx, fy + radius), (fx + radius, fy)),
-    ];
-    let (a32, e32, f32_) = (a as f32, e as f32, f as f32);
-    // Graphite tessellates a conic at T = k / 2^L, L from Wang's formula for
-    // conics at precision 4 in device space, evaluated in local space.
-    let mut poly: Vec<(f64, f64)> = Vec::new();
-    for (p1, p0, p2) in corners {
-        let dev = |p: (f32, f32)| (p.0 * a32, p.1 * a32);
-        let (q0, q1, q2) = (dev(p0), dev(p1), dev(p2));
-        let cx = 0.5 * (q0.0.min(q1.0).min(q2.0) + q0.0.max(q1.0).max(q2.0));
-        let cy = 0.5 * (q0.1.min(q1.1).min(q2.1) + q0.1.max(q1.1).max(q2.1));
-        let c = |q: (f32, f32)| (q.0 - cx, q.1 - cy);
-        let (c0, c1, c2) = (c(q0), c(q1), c(q2));
-        let d = |q: (f32, f32)| q.0 * q.0 + q.1 * q.1;
-        let max_len = d(c0).max(d(c1)).max(d(c2)).sqrt();
-        let dp = (
-            -2.0 * weight * c1.0 + c0.0 + c2.0,
-            -2.0 * weight * c1.1 + c0.1 + c2.1,
-        );
-        let dw = (-2.0 * weight + 2.0).abs();
-        let rp = (max_len * 4.0 - 1.0).max(0.0);
-        let numer = d(dp).sqrt() * 4.0 + rp * dw;
-        let denom = 4.0 * weight.min(1.0);
-        let n2 = numer / denom;
-        let level = if n2 <= 1.0 {
-            0
-        } else {
-            ((n2.log2().ceil() as i32) + 1) >> 1
-        }
-        .clamp(0, 5);
-        let segments = 1 << level;
-        let p1w = (p1.0 * weight, p1.1 * weight);
-        let mix = |a: f32, b: f32, t: f32| (b - a).mul_add(t, a);
-        for k in 0..=segments {
-            let t = (k << (5 - level)) as f32 / 32.0;
-            let (lx, ly) = if k == 0 {
-                p0
-            } else if k == segments {
-                p2
-            } else {
-                let ab = (mix(p0.0, p1w.0, t), mix(p0.1, p1w.1, t));
-                let bc = (mix(p1w.0, p2.0, t), mix(p1w.1, p2.1, t));
-                let abc = (mix(ab.0, bc.0, t), mix(ab.1, bc.1, t));
-                let u = mix(1.0, weight, t);
-                let v = weight + 1.0 - u;
-                let uv = mix(u, v, t);
-                (abc.0 / uv, abc.1 / uv)
-            };
-            // The rasterizer snaps vertices to 1/256 px.
-            let snap = |v: f32| f64::from((v * 256.0).round() / 256.0);
-            poly.push((snap(lx.mul_add(a32, e32)), snap(ly.mul_add(a32, f32_))));
-        }
-    }
-    let (x0, y0, x1, y1) = (x * a + e, y * a + f, (x + w) * a + e, (y + h) * a + f);
-    let inside = |p: kurbo::Point| {
-        // Nonzero winding of the closed polygon.
-        let mut winding = 0i32;
-        for i in 0..poly.len() {
-            let (ax, ay) = poly[i];
-            let (bx, by) = poly[(i + 1) % poly.len()];
-            if ay <= p.y {
-                if by > p.y && (bx - ax) * (p.y - ay) - (p.x - ax) * (by - ay) > 0.0 {
-                    winding += 1;
-                }
-            } else if by <= p.y && (bx - ax) * (p.y - ay) - (p.x - ax) * (by - ay) < 0.0 {
-                winding -= 1;
-            }
-        }
-        winding != 0
-    };
-    msaa_item(Rect::new(x0, y0, x1, y1), inside, color, opacity)
-}
-
-fn msaa_item(
-    b: Rect,
-    inside: impl Fn(kurbo::Point) -> bool,
-    color: Rgba,
-    opacity: f64,
-) -> Option<Item> {
-    if !(b.width() > 0.0 && b.height() > 0.0) {
-        return None;
-    }
-    let (x0, y0) = (b.x0.floor() as i64, b.y0.floor() as i64);
-    let (x1, y1) = (b.x1.ceil() as i64, b.y1.ceil() as i64);
-    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
-    if w == 0 || h == 0 || w > 16384 || h > 16384 {
-        return None;
-    }
-    let a = color[3].clamp(0.0, 1.0) as f32;
-    let mut data = Vec::with_capacity(w * h * 4);
-    for py in 0..h {
-        for px in 0..w {
-            let n = MSAA4
-                .iter()
-                .filter(|(sx, sy)| {
-                    inside(kurbo::Point::new(
-                        (x0 + px as i64) as f64 + sx,
-                        (y0 + py as i64) as f64 + sy,
-                    ))
-                })
-                .count();
-            let alpha = a * n as f32 / 4.0;
-            for c in &color[..3] {
-                data.push((c.clamp(0.0, 1.0) as f32 * alpha * 255.0).round() as u8);
-            }
-            data.push((alpha * 255.0).round() as u8);
-        }
-    }
-    Some(Item {
-        content: ItemContent::Image {
-            image: Arc::new(Rgba8 {
-                width: w as u32,
-                height: h as u32,
-                data,
-            }),
-            transform: Affine::translate((x0 as f64, y0 as f64)),
-        },
-        color: [1.0, 1.0, 1.0, 1.0],
-        opacity,
-        blur: 0.0,
-        bounds: Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64),
-    })
-}
-
-/// The canvas `roundedRect` of `captions/render.ts`: `moveTo(x + r, y)`
-/// and four `arcTo` corners with `r = max(0, min(r, w / 2, h / 2))`.
+/// Analytic outline of the authored rounded caption rectangle.
 pub fn rounded_rect(x: f64, y: f64, w: f64, h: f64, r: f64) -> BezPath {
     let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
     let mut p = BezPath::new();
@@ -2316,8 +1097,6 @@ pub fn rounded_rect(x: f64, y: f64, w: f64, h: f64, r: f64) -> BezPath {
         p.close_path();
         return p;
     }
-    // Circular quarter arcs as cubics (Skia converts arcTo to conics; the
-    // two agree within 0.03% of r).
     const K: f64 = 0.552_284_749_830_793_4;
     let k = r * K;
     p.move_to((x + r, y));
@@ -2340,396 +1119,344 @@ pub fn rounded_rect(x: f64, y: f64, w: f64, h: f64, r: f64) -> BezPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use i_overlay::float::simplify::SimplifyShape;
 
-    #[test]
-    fn placements_split_scale() {
-        let p = Placement::of(Affine::scale(2.0));
-        assert_eq!(p.scale, 2.0);
-        assert!(p.axis_aligned);
-        let p = Placement::of(Affine::rotate(0.3) * Affine::scale(3.0));
-        assert!((p.scale - 3.0).abs() < 1e-12);
-        assert!(!p.axis_aligned);
-    }
-
-    #[test]
-    fn the_scene_ink_covers_items_and_their_blur() {
-        let mut s = TextScene {
-            width: 100,
-            height: 50,
-            items: vec![],
-        };
-        assert_eq!(s.ink(), None);
-        s.items.push(
-            fill_path(
-                rounded_rect(10.5, 10.5, 20.0, 10.0, 3.0),
-                Affine::IDENTITY,
-                [1.0; 4],
-                1.0,
-            )
-            .unwrap(),
-        );
-        assert_eq!(s.ink(), Some([9, 9, 32, 22]));
-        s.items[0].blur = 2.0;
-        assert_eq!(s.ink(), Some([3, 3, 38, 28]));
-    }
-
-    /// `font` with a `COLR` (version 0) and `CPAL` table that make `glyph`
-    /// a color vector glyph of one red layer (itself).
-    fn with_colr(font: &[u8], glyph: u16) -> Vec<u8> {
-        let be16 = |v: u16| v.to_be_bytes();
-        let be32 = |v: u32| v.to_be_bytes();
-        let mut colr = Vec::new();
-        colr.extend(be16(0)); // version
-        colr.extend(be16(1)); // numBaseGlyphRecords
-        colr.extend(be32(14)); // baseGlyphRecordsOffset
-        colr.extend(be32(20)); // layerRecordsOffset
-        colr.extend(be16(1)); // numLayerRecords
-        colr.extend(be16(glyph));
-        colr.extend(be16(0)); // firstLayerIndex
-        colr.extend(be16(1)); // numLayers
-        colr.extend(be16(glyph));
-        colr.extend(be16(0)); // paletteIndex
-        let mut cpal = Vec::new();
-        cpal.extend(be16(0)); // version
-        cpal.extend(be16(1)); // numPaletteEntries
-        cpal.extend(be16(1)); // numPalettes
-        cpal.extend(be16(1)); // numColorRecords
-        cpal.extend(be32(14)); // colorRecordsArrayOffset
-        cpal.extend(be16(0)); // colorRecordIndices[0]
-        cpal.extend([0, 0, 255, 255]); // BGRA red
-        let n = usize::from(u16::from_be_bytes([font[4], font[5]]));
-        let mut tables: Vec<([u8; 4], Vec<u8>)> = (0..n)
-            .map(|i| {
-                let r = &font[12 + 16 * i..28 + 16 * i];
-                let off = u32::from_be_bytes([r[8], r[9], r[10], r[11]]) as usize;
-                let len = u32::from_be_bytes([r[12], r[13], r[14], r[15]]) as usize;
-                ([r[0], r[1], r[2], r[3]], font[off..off + len].to_vec())
-            })
-            .collect();
-        tables.push((*b"COLR", colr));
-        tables.push((*b"CPAL", cpal));
-        tables.sort_by_key(|t| t.0);
-        let mut out = font[..4].to_vec();
-        out.extend(be16(tables.len() as u16));
-        out.extend([0; 6]); // searchRange etc. (unused by the reader)
-        let mut offset = 12 + 16 * tables.len();
-        let mut body = Vec::new();
-        for (tag, data) in &tables {
-            out.extend(tag);
-            out.extend(be32(0)); // checksum (not verified)
-            out.extend(be32(offset as u32));
-            out.extend(be32(data.len() as u32));
-            let mut padded = data.clone();
-            padded.resize(data.len().div_ceil(4) * 4, 0);
-            offset += padded.len();
-            body.extend(padded);
-        }
-        out.extend(body);
-        out
-    }
-
-    /// Glyph images beyond Skia's direct-mask atlas draw as paths, never as
-    /// masks (the GPU atlas holds 512 px plots). This covers the
-    /// `fitsInAtlasDirect` gate only: a glyph whose mask is over 256 px is
-    /// rejected to the path sub run (Arial 'H' at 75 px, 2x, under an 80
-    /// degree animator skew; a Zapfino glyph that fits upright, rotated 45
-    /// degrees). The skew case is also far above the
-    /// `ApproximateTransformedTextSize` gate (about 860 px), so it passes
-    /// with either gate alone; the rotation keeps the largest scale at 2
-    /// (100 px), so only `fitsInAtlasDirect` sends it to paths. A nearly
-    /// upright rotation keeps the direct mask. The size gate on its own is
-    /// covered by `transformed_text_at_the_path_size_draws_as_paths`.
-    #[cfg(all(feature = "cg-masks", target_os = "macos"))]
-    #[test]
-    fn glyph_images_beyond_the_atlas_draw_as_paths() {
-        use skrifa::MetadataProvider;
-        use std::cell::RefCell;
-        struct Recorder(RefCell<Vec<usize>>);
-        impl PathRasterizer for Recorder {
-            fn raster_pass(&self, draws: &[PathDraw], _: bool) -> Option<Item> {
-                for draw in draws {
-                    self.0.borrow_mut().push(draw.glyphs.len());
+    fn fresh_union(contours: &[Vec<[f64; 2]>]) -> BezPath {
+        let shapes = contours.simplify_shape_as::<i64>(FillRule::NonZero);
+        let mut path = BezPath::new();
+        for contour in shapes.iter().flat_map(|shape| shape.iter()) {
+            if let Some(first) = contour.first() {
+                path.move_to((first[0], first[1]));
+                for point in &contour[1..] {
+                    path.line_to((point[0], point[1]));
                 }
-                None
+                path.close_path();
             }
         }
-        let font = |name: &str| {
-            std::fs::read(format!("/System/Library/Fonts/Supplemental/{name}.ttf"))
-                .expect("ships with macOS")
-        };
-        let (arial, zapfino) = (font("Arial"), font("Zapfino"));
-        let draw = |data: &[u8], ch: char, size: f32, m: Affine| {
-            let face = FaceRef {
-                data,
-                index: 0,
-                id: 1,
-            };
-            let id = skrifa::FontRef::new(data)
-                .unwrap()
-                .charmap()
-                .map(ch)
-                .unwrap()
-                .to_u32();
-            let glyphs = [PlacedGlyph { id, x: 0.0, y: 0.0 }];
-            let mut outlines = Outlines::new();
-            let mut bitmaps = Bitmaps::new();
-            let mut masks = super::super::cgmask::CgMasks::new();
-            let recorder = Recorder(RefCell::new(Vec::new()));
-            let mut painter = Painter {
-                outlines: &mut outlines,
-                bitmaps: &mut bitmaps,
-                masks: Some(&mut masks),
-                viewport: Some((2000, 1000)),
-                path_rasterizer: Some(&recorder),
-                profile: Profile::CANVAS2D,
-                unsupported: Vec::new(),
-            };
-            let run = Run {
-                face,
-                size,
-                coords: Coords::User(&[]),
-                synthetic_bold: false,
-                synthetic_italic: false,
-                oblique: 0.0,
-                glyphs: &glyphs,
-                bitmap_size: None,
-            };
-            let mut items = Vec::new();
-            painter.fill_text(
-                &mut items,
-                &[run],
-                (300.0, 300.0),
-                m,
-                [0.0, 0.0, 0.0, 1.0],
-                1.0,
-                0.0,
-            );
-            let masks: Vec<(u32, u32)> = items
-                .iter()
-                .filter_map(|i| match &i.content {
-                    ItemContent::GlyphMask { mask, .. } => Some((mask.width, mask.height)),
-                    _ => None,
-                })
-                .collect();
-            let unsupported = painter.unsupported;
-            (masks, recorder.0.into_inner(), unsupported)
-        };
-        let skew = 80f64.to_radians().tan();
-        let rotated = |deg: f64| Affine::scale(2.0) * Affine::rotate(deg.to_radians());
-        for (name, data, ch, size, m) in [
-            (
-                "skew",
-                &arial,
-                'H',
-                75.0,
-                Affine::new([2.0, 0.0, 2.0 * skew, 2.0, 0.0, 0.0]),
-            ),
-            ("rotation", &zapfino, 'g', 50.0, rotated(45.0)),
-        ] {
-            let (masks, paths, unsupported) = draw(data, ch, size, m);
-            assert!(unsupported.is_empty(), "{name}: {unsupported:?}");
-            assert!(
-                masks.is_empty(),
-                "{name}: a mask beyond the atlas: {masks:?}"
-            );
-            assert_eq!(paths, [1], "{name}: drawn as its canonical path");
+        path
+    }
+
+    fn line_contours(contours: &[Vec<[f64; 2]>]) -> BezPath {
+        let mut path = BezPath::new();
+        for contour in contours {
+            path.move_to((contour[0][0], contour[0][1]));
+            for point in &contour[1..] {
+                path.line_to((point[0], point[1]));
+            }
+            path.close_path();
         }
-        let (masks, paths, unsupported) = draw(&zapfino, 'g', 50.0, rotated(1.0));
+        path
+    }
+
+    fn assert_union_semantics(contours: &[Vec<[f64; 2]>], certified: bool) {
+        let raw = line_contours(contours);
+        let mut resolver = NonzeroResolver::default();
+        let (count, clean) = resolver.parse_raw(&raw);
+        assert!(clean);
+        assert_eq!(resolver.certifies_raw_boundary(&raw, count), certified);
+        let resolved = resolver.resolve_owned(raw);
+        let fresh = fresh_union(contours);
+        for y in -2..13 {
+            for x in -2..17 {
+                let point = kurbo::Point::new(x as f64 * 0.25 + 0.125, y as f64 * 0.25 + 0.125);
+                assert_eq!(resolved.winding(point).abs(), fresh.winding(point).abs());
+            }
+        }
+        assert!((resolved.area().abs() - fresh.area().abs()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn certified_nonzero_boundary_handles_separate_and_nested_contours() {
+        let outer = vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        let separate = vec![[2.25, 0.125], [3.25, 0.125], [3.25, 1.125], [2.25, 1.125]];
+        assert_union_semantics(&[outer.clone(), separate.clone()], true);
+        let raw = line_contours(&[outer.clone(), separate.clone()]);
+        let raw_buffer = raw.elements().as_ptr();
+        let preserved = NonzeroResolver::default().resolve_owned(raw);
+        assert_eq!(preserved.elements().as_ptr(), raw_buffer);
+        let opposite: Vec<_> = separate.into_iter().rev().collect();
+        // Separate opposite-winding contours would cancel in a shared pixel.
+        assert_union_semantics(&[outer.clone(), opposite], false);
+
+        let hole = vec![[0.5, 0.5], [0.5, 1.5], [1.5, 1.5], [1.5, 0.5]];
+        assert_union_semantics(&[outer.clone(), hole.clone()], true);
+        assert_union_semantics(&[outer, hole.into_iter().rev().collect()], false);
+    }
+
+    #[test]
+    fn certified_nonzero_boundary_rejects_crossings_and_touches() {
+        let rect = vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        let crossing = vec![[1.0, -0.5], [3.0, -0.5], [3.0, 1.5], [1.0, 1.5]];
+        assert_union_semantics(&[rect.clone(), crossing], false);
+        let touching = vec![[2.0, 2.0], [3.0, 2.0], [3.0, 3.0], [2.0, 3.0]];
+        assert_union_semantics(&[rect, touching], false);
+        let bowtie = vec![[0.0, 0.0], [2.0, 2.0], [0.0, 2.0], [2.0, 0.0]];
+        assert_union_semantics(&[bowtie], false);
+        let backtrack = vec![[0.0, 0.0], [2.0, 0.0], [1.0, 0.0], [1.0, 2.0], [0.0, 2.0]];
+        assert_union_semantics(&[backtrack], false);
+    }
+
+    #[test]
+    fn certified_forward_continuations_preserve_simple_boundaries() {
+        let forward = vec![[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        assert_union_semantics(&[forward], true);
+
+        let a = [0.0, 0.0];
+        let b = [1.0, 1.0];
+        let near_collinear = [2.0, 2.0 + 1e-15];
+        assert!(orientation_sign(a, b, near_collinear).is_none());
+        assert!(certified_forward(a, b, near_collinear));
+        assert!(!certified_forward([0.0, 0.0], [2.0, 0.0], [1.0, 0.0]));
+    }
+
+    #[test]
+    fn duplicate_endpoints_do_not_prevent_boundary_certification() {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.line_to((2.0, 0.0));
+        path.line_to((2.0, 0.0));
+        path.line_to((2.0, 2.0));
+        path.line_to((0.0, 2.0));
+        path.line_to((0.0, 0.0));
+        path.close_path();
+        let buffer = path.elements().as_ptr();
+        let resolved = NonzeroResolver::default().resolve_owned(path);
+        assert_eq!(resolved.elements().as_ptr(), buffer);
+        assert_eq!(resolved.area(), 4.0);
+        assert_eq!(resolved.winding(kurbo::Point::new(1.0, 1.0)), 1);
+    }
+
+    #[test]
+    fn exact_fractional_placement_is_retained() {
+        let path = rounded_rect(0.0, 0.0, 1.0, 1.0, 0.0);
+        let item = fill_path(path, Affine::translate((0.125, 0.375)), [1.0; 4], 1.0).unwrap();
+        assert_eq!(item.bounds.x0, 0.125);
+        assert_eq!(item.bounds.y0, 0.375);
+    }
+
+    #[test]
+    fn coverage_flatten_reserves_exact_line_count() {
+        let mut curve = BezPath::new();
+        curve.move_to((0.0, 0.0));
+        curve.curve_to((0.25, 2.0), (1.75, -2.0), (2.0, 0.0));
+        curve.close_path();
+        let placed = PlacedPath {
+            path: Arc::new(curve),
+            transform: Affine::translate((0.125, 0.375)),
+            style: PathStyle::Fill,
+        };
+        let elements = coverage_path(&placed, Affine::IDENTITY).into_elements();
+        assert_eq!(elements.len(), elements.capacity());
+    }
+
+    #[test]
+    fn small_device_outlines_use_tighter_curve_tolerance() {
+        let mut curve = BezPath::new();
+        curve.move_to((0.0, 0.0));
+        curve.curve_to((3.0, 14.0), (11.0, -14.0), (14.0, 0.0));
+        curve.close_path();
+        let source = Arc::new(curve);
+        let small = PlacedPath {
+            path: source.clone(),
+            transform: Affine::IDENTITY,
+            style: PathStyle::Fill,
+        };
+        let large = PlacedPath {
+            path: source,
+            transform: Affine::scale(7.0),
+            style: PathStyle::Fill,
+        };
+        assert_eq!(path_coverage_tolerance(&small.path, small.transform), 1e-5);
+        assert_eq!(path_coverage_tolerance(&large.path, large.transform), 1e-4);
+        let small_lines = coverage_path(&small, Affine::IDENTITY);
+        let mut expected = BezPath::new();
+        kurbo::flatten(small.path.iter(), 1e-5, |el| expected.push(el));
+        assert_eq!(small_lines.elements(), expected.elements());
+        assert!(small_lines.elements().len() > 3);
+    }
+
+    #[test]
+    fn blur_reach_uses_eight_sigma() {
+        assert_eq!(blur_radius(2.25), 18);
+    }
+
+    #[test]
+    fn stroked_path_expands_before_nonuniform_world_transform() {
+        let mut line = BezPath::new();
+        line.move_to((1.0, 2.0));
+        line.line_to((3.0, 2.0));
+        let placed = PlacedPath {
+            path: Arc::new(line),
+            transform: Affine::scale_non_uniform(10.0, 2.0),
+            style: PathStyle::Stroke(Stroke::new(2.0)),
+        };
+        let path = coverage_path(&placed, Affine::translate((5.0, 7.0)));
+        assert!(path.elements().iter().all(|el| matches!(
+            el,
+            kurbo::PathEl::MoveTo(_) | kurbo::PathEl::LineTo(_) | kurbo::PathEl::ClosePath
+        )));
+        let b = path.bounding_box();
+        // Kurbo's default round caps extend one local pixel past each end.
+        assert!((b.x0 - 5.0).abs() < 1e-8 && (b.x1 - 45.0).abs() < 1e-8);
+        assert!((b.y0 - 9.0).abs() < 1e-8 && (b.y1 - 13.0).abs() < 1e-8);
         assert!(
-            unsupported.is_empty() && paths.is_empty(),
-            "{unsupported:?}"
+            (local_coverage_tolerance(placed.transform, SMALL_COVERAGE_TOLERANCE)
+                - SMALL_COVERAGE_TOLERANCE / 10.0)
+                .abs()
+                < 1e-12
         );
-        assert_eq!(masks.len(), 1);
-        assert!(masks[0].0.max(masks[0].1) <= 256, "{masks:?}");
-    }
-
-    /// The `ApproximateTransformedTextSize` gate on its own. Skia m152
-    /// `SubRunContainer::MakeInAlloc` tries masks and distance fields only
-    /// while the text size times `SkMatrix::getMaxScale` is below
-    /// `maxMaskSize` (Graphite's `fGlyphsAsPathsFontSize`, 256 on macOS);
-    /// at or above it every outline glyph of the run is a path sub run, even
-    /// when each glyph's mask would fit the atlas. Here every mask is well
-    /// under 256 px and the uniform device size (`sqrt|det|`) is below the
-    /// large and distance-field ranges, so only the largest-scale term sends
-    /// the glyphs to paths. Controls just below the size stay in the atlas
-    /// (as distance fields: 162 to 256 px is the SDFT range).
-    #[cfg(all(feature = "cg-masks", target_os = "macos"))]
-    #[test]
-    fn transformed_text_at_the_path_size_draws_as_paths() {
-        use skrifa::MetadataProvider;
-        use std::cell::RefCell;
-        struct Recorder(RefCell<Vec<usize>>);
-        impl PathRasterizer for Recorder {
-            fn raster_pass(&self, draws: &[PathDraw], _: bool) -> Option<Item> {
-                for draw in draws {
-                    self.0.borrow_mut().push(draw.glyphs.len());
-                }
-                None
-            }
-        }
-        let arial = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf")
-            .expect("ships with macOS");
-        let face = FaceRef {
-            data: &arial,
-            index: 0,
-            id: 1,
-        };
-        let charmap = skrifa::FontRef::new(&arial).unwrap().charmap();
-        let skewed = |deg: f64| {
-            let k = deg.to_radians().tan();
-            Affine::new([2.0, 0.0, 2.0 * k, 2.0, 0.0, 0.0])
-        };
-        let stretched = |sx: f64| Affine::scale(2.0) * Affine::scale_non_uniform(sx, 1.0);
-        // (name, size, matrix, at the path size)
-        let cases = [
-            ("skew 60", 60.0, skewed(60.0), true),
-            ("scale 2.8x1", 48.0, stretched(2.8), true),
-            ("skew 55", 60.0, skewed(55.0), false),
-            ("scale 2.5x1", 48.0, stretched(2.5), false),
-        ];
-        for (name, size, m, at_path_size) in cases {
-            let place = Placement::of(m);
-            let approx = size * place.max_scale();
-            let device = f64::from(size) * place.scale;
-            assert_eq!(approx >= 256.0, at_path_size, "{name}: approx {approx}");
-            assert!(
-                !Profile::CANVAS2D.as_path(device) && !Profile::CANVAS2D.is_large(device),
-                "{name}: device size {device}"
-            );
-            assert_eq!(sdf_strike(size, &place).is_none(), at_path_size, "{name}");
-            for ch in ['.', 'i', 'l'] {
-                let id = charmap.map(ch).unwrap().to_u32();
-                let mut masks = super::super::cgmask::CgMasks::new();
-                // The mask Skia would gauge for this glyph fits the atlas.
-                let gauge = masks
-                    .matrix_mask(
-                        face,
-                        &[],
-                        id as u16,
-                        size,
-                        place.relaxed_post(),
-                        0.0,
-                        (0, 0),
-                    )
-                    .expect("a matrix mask");
-                assert!(
-                    gauge.width.max(gauge.height) < 256,
-                    "{name} {ch:?}: {}x{}",
-                    gauge.width,
-                    gauge.height
-                );
-                let glyphs = [PlacedGlyph { id, x: 0.0, y: 0.0 }];
-                let mut outlines = Outlines::new();
-                let mut bitmaps = Bitmaps::new();
-                let recorder = Recorder(RefCell::new(Vec::new()));
-                let mut painter = Painter {
-                    outlines: &mut outlines,
-                    bitmaps: &mut bitmaps,
-                    masks: Some(&mut masks),
-                    viewport: Some((2000, 1000)),
-                    path_rasterizer: Some(&recorder),
-                    profile: Profile::CANVAS2D,
-                    unsupported: Vec::new(),
-                };
-                let run = Run {
-                    face,
-                    size,
-                    coords: Coords::User(&[]),
-                    synthetic_bold: false,
-                    synthetic_italic: false,
-                    oblique: 0.0,
-                    glyphs: &glyphs,
-                    bitmap_size: None,
-                };
-                let mut items = Vec::new();
-                painter.fill_text(
-                    &mut items,
-                    &[run],
-                    (300.0, 300.0),
-                    m,
-                    [0.0, 0.0, 0.0, 1.0],
-                    1.0,
-                    0.0,
-                );
-                assert!(painter.unsupported.is_empty(), "{:?}", painter.unsupported);
-                let masks = items
-                    .iter()
-                    .filter(|i| matches!(i.content, ItemContent::GlyphMask { .. }))
-                    .count();
-                let paths = recorder.0.into_inner();
-                if at_path_size {
-                    assert_eq!(masks, 0, "{name} {ch:?}: no mask at the path size");
-                    assert_eq!(paths, [1], "{name} {ch:?}: drawn as its canonical path");
-                } else {
-                    assert!(!items.is_empty(), "{name} {ch:?}: drawn below it");
-                    assert!(paths.is_empty(), "{name} {ch:?}: {paths:?}");
-                }
-            }
-        }
     }
 
     #[test]
-    fn color_vector_glyphs_draw_in_their_palette() {
-        use skrifa::MetadataProvider;
-        let Ok(arial) = std::fs::read("/System/Library/Fonts/Supplemental/Arial.ttf") else {
-            eprintln!("Arial is not installed; skipped");
-            return;
+    fn flattened_coverage_cache_reuses_and_bounds_retained_paths() {
+        let mut curve = BezPath::new();
+        curve.move_to((0.0, 0.0));
+        curve.quad_to((4.0, 8.0), (8.0, 0.0));
+        curve.close_path();
+        let source = Arc::new(curve);
+        let first = PlacedPath {
+            path: source.clone(),
+            transform: Affine::IDENTITY,
+            style: PathStyle::Fill,
         };
-        let font = skrifa::FontRef::new(&arial).unwrap();
-        let a = font.charmap().map('A').unwrap().to_u32();
-        let b = font.charmap().map('B').unwrap().to_u32();
-        let colr = with_colr(&arial, a as u16);
-        let face = FaceRef {
-            data: &colr,
-            index: 0,
-            id: 1,
+        let shifted = PlacedPath {
+            transform: Affine::translate((0.25, 0.0)),
+            ..first.clone()
         };
-        assert!(super::super::bitmap::has_colr(face));
-        assert!(super::super::bitmap::is_colr_glyph(face, a));
-        assert!(!super::super::bitmap::is_colr_glyph(face, b));
-        let draw = |glyphs: &[PlacedGlyph]| {
-            let mut outlines = Outlines::new();
-            let mut bitmaps = Bitmaps::new();
-            let mut painter = Painter {
-                outlines: &mut outlines,
-                bitmaps: &mut bitmaps,
-                masks: None,
-                viewport: None,
-                path_rasterizer: None,
-                profile: Profile::CANVAS2D,
-                unsupported: Vec::new(),
-            };
-            let run = Run {
-                face,
-                size: 40.0,
-                coords: Coords::User(&[]),
-                synthetic_bold: false,
-                synthetic_italic: false,
-                oblique: 0.0,
-                glyphs,
-                bitmap_size: None,
-            };
-            let mut items = Vec::new();
-            painter.fill_text(
-                &mut items,
-                &[run],
-                (0.0, 40.0),
-                Affine::IDENTITY,
-                [0.0, 0.0, 0.0, 1.0],
-                1.0,
-                0.0,
-            );
-            (items.len(), painter.unsupported)
+        let scaled = PlacedPath {
+            transform: Affine::scale_non_uniform(1.1, 1.0),
+            ..first.clone()
         };
-        let glyph = |id| PlacedGlyph { id, x: 0.0, y: 0.0 };
-        // A plain glyph of the face draws.
-        let (n, unsupported) = draw(&[glyph(b)]);
-        assert!(n > 0 && unsupported.is_empty(), "{unsupported:?}");
-        // A COLR glyph contributes its palette image, not the base outline.
-        let (n, unsupported) = draw(&[glyph(b), glyph(a)]);
-        #[cfg(feature = "cg-masks")]
-        assert!(n >= 2 && unsupported.is_empty(), "{unsupported:?}");
-        #[cfg(not(feature = "cg-masks"))]
-        assert!(!unsupported.is_empty());
+        let stroked = PlacedPath {
+            style: PathStyle::Stroke(Stroke::new(1.0)),
+            ..first.clone()
+        };
+        let mut unlimited = CoveragePathCache::new(usize::MAX);
+        let lines = unlimited.get(&first);
+        assert!(Arc::ptr_eq(&lines, &unlimited.get(&first)));
+        assert!(Arc::ptr_eq(&lines, &unlimited.get(&shifted)));
+        assert!(!Arc::ptr_eq(&lines, &unlimited.get(&scaled)));
+        assert!(!Arc::ptr_eq(&lines, &unlimited.get(&stroked)));
+
+        let mut probe = CoveragePathCache::new(usize::MAX);
+        probe.get(&first);
+        let one_entry_bytes = probe.bytes();
+        let mut limited = CoveragePathCache::new(one_entry_bytes);
+        let old = limited.get(&first);
+        assert!(Arc::ptr_eq(&old, &limited.get(&first)));
+        let same_shape_new_source = PlacedPath {
+            path: Arc::new((*source).clone()),
+            ..first.clone()
+        };
+        limited.get(&same_shape_new_source);
+        assert!(limited.bytes() <= one_entry_bytes);
+        assert!(!Arc::ptr_eq(&old, &limited.get(&first)));
+    }
+
+    #[test]
+    fn cached_nonzero_contours_cover_overlap_once() {
+        let mut components = BezPath::new();
+        components.move_to((0.0, 0.0));
+        components.line_to((2.0, 0.0));
+        components.line_to((2.0, 2.0));
+        components.line_to((0.0, 2.0));
+        components.close_path();
+        components.move_to((1.0, 0.0));
+        components.line_to((3.0, 0.0));
+        components.line_to((3.0, 2.0));
+        components.line_to((1.0, 2.0));
+        components.close_path();
+        let placed = PlacedPath {
+            path: Arc::new(components),
+            transform: Affine::IDENTITY,
+            style: PathStyle::Fill,
+        };
+        let raw = coverage_path(&placed, Affine::IDENTITY);
+        assert_eq!(raw.winding(kurbo::Point::new(1.5, 1.0)), 2);
+        let mut cache = CoveragePathCache::default();
+        let resolved = cache.get(&placed);
+        assert_eq!(resolved.winding(kurbo::Point::new(1.5, 1.0)), 1);
+        assert!((resolved.area().abs() - 6.0).abs() < 1e-9);
+        assert_eq!(resolved.winding(kurbo::Point::new(3.5, 1.0)), 0);
+        let shifted = PlacedPath {
+            transform: Affine::translate((0.375, 0.125)),
+            ..placed
+        };
+        assert!(Arc::ptr_eq(&resolved, &cache.get(&shifted)));
+    }
+
+    #[test]
+    fn cached_nonzero_stroke_resolves_crossing_segments() {
+        let mut crossing = BezPath::new();
+        crossing.move_to((0.0, 1.0));
+        crossing.line_to((4.0, 1.0));
+        crossing.move_to((2.0, -1.0));
+        crossing.line_to((2.0, 3.0));
+        let placed = PlacedPath {
+            path: Arc::new(crossing),
+            transform: Affine::IDENTITY,
+            style: PathStyle::Stroke(Stroke::new(1.0)),
+        };
+        let raw = coverage_path(&placed, Affine::IDENTITY);
+        assert_eq!(raw.winding(kurbo::Point::new(2.0, 1.0)).abs(), 2);
+        let resolved = CoveragePathCache::default().get(&placed);
+        assert_eq!(resolved.winding(kurbo::Point::new(2.0, 1.0)).abs(), 1);
+    }
+
+    #[test]
+    fn nonzero_resolver_reuse_matches_fresh_for_compound_and_self_intersecting_paths() {
+        let mut compound = BezPath::new();
+        for (x0, x1) in [(0.0, 2.0), (1.0, 3.0)] {
+            compound.move_to((x0, 0.0));
+            compound.line_to((x1, 0.0));
+            compound.line_to((x1, 2.0));
+            compound.line_to((x0, 2.0));
+            compound.close_path();
+        }
+        let mut crossing = BezPath::new();
+        crossing.move_to((0.0, 0.0));
+        crossing.line_to((3.0, 3.0));
+        crossing.line_to((0.0, 3.0));
+        crossing.line_to((3.0, 0.0));
+        crossing.close_path();
+
+        let expected_compound = fresh_union(&[
+            vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]],
+            vec![[1.0, 0.0], [3.0, 0.0], [3.0, 2.0], [1.0, 2.0]],
+        ]);
+        let expected_crossing =
+            fresh_union(&[vec![[0.0, 0.0], [3.0, 3.0], [0.0, 3.0], [3.0, 0.0]]]);
+
+        let mut reused = NonzeroResolver::default();
+        for (path, fresh) in [
+            (&compound, &expected_compound),
+            (&crossing, &expected_crossing),
+            (&compound, &expected_compound),
+            (&crossing, &expected_crossing),
+        ] {
+            let actual = reused.resolve(path);
+            assert_eq!(actual.elements(), fresh.elements());
+            for y in 0..7 {
+                for x in 0..7 {
+                    let point = kurbo::Point::new(x as f64 * 0.5 + 0.25, y as f64 * 0.5 + 0.25);
+                    assert_eq!(actual.winding(point), fresh.winding(point));
+                }
+            }
+        }
+        let resolved_compound = reused.resolve(&compound);
+        assert!((resolved_compound.area().abs() - 6.0).abs() < 1e-9);
+        let resolved_crossing = reused.resolve(&crossing);
+        assert_eq!(
+            resolved_crossing.winding(kurbo::Point::new(1.5, 0.5)).abs(),
+            1
+        );
+        assert_eq!(
+            resolved_crossing.winding(kurbo::Point::new(1.5, 2.5)).abs(),
+            1
+        );
+        assert_eq!(resolved_crossing.winding(kurbo::Point::new(0.5, 1.5)), 0);
+
+        reused.trim_after(1, 1, 0);
+        assert!(reused.contours.is_empty());
     }
 }

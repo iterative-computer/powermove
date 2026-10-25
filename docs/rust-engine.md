@@ -453,7 +453,7 @@ while it is still selectable.
 | `fpsRational` | Exact composition rates | Ignored safely |
 | `minReaderVersion` (root) | Older builds refuse instead of overwriting | Read by the Phase 0 guard |
 | `requiresEngine: "native"` (root) | Set when a native-only feature is used | Legacy refuses the project |
-| Layer `compat` | 1 for layers created before cutover: their authored-intent choices (today's text layout and metrics; solid radius ignored, decision SOLID-RADIUS-1); 2 for new layers. Rendering quality is the same at both levels (amendment 22). Duplicate, paste, split, pre-compose, and clone keep the source's level | Ignored safely (level 1 behavior) |
+| Layer `compat` | 1 for layers created before cutover: their authored-intent choices (today's text layout and metrics; the solid radius the inspector edits is honoured at both levels, decision SOLID-RADIUS-1); 2 for new layers. Rendering quality is the same at both levels (amendment 22). Duplicate, paste, split, pre-compose, and clone keep the source's level | Ignored safely (level 1 behavior) |
 | Asset `link` | Linked-media reference | Requires native |
 | Asset `interpret` | Interpretation overrides | Requires native |
 | Asset `storage` | `copied` or `linked` | Requires native when `linked` |

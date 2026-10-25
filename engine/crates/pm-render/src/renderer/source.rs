@@ -9,8 +9,6 @@ use pm_media::interpret::Interpretation;
 use pm_protocol::color::{Precision, WorkingEncoding};
 use pm_protocol::common::{Size, TICKS_PER_SECOND, Ticks};
 use pm_protocol::snapshot::SourceFit;
-use pm_protocol::svg_raster::{SvgRasterKey, SvgRasterRequest};
-use sha2::{Digest, Sha256};
 
 use crate::media::MediaFailure;
 use crate::pipelines::{PassBlend, UNIFORM_STRIDE, bytes_of};
@@ -26,6 +24,13 @@ use super::Renderer;
 /// frames; a large one-off snapshot does not pin an oversized allocation.
 const MAX_REUSED_SOURCE_BYTES: u64 = 16 << 20;
 const MAX_SOURCE_BATCH: usize = 16;
+
+#[derive(Clone, Copy)]
+struct SourceDecode {
+    exact_worker: bool,
+    sequence: bool,
+    sampling: Sampling,
+}
 
 #[derive(Default)]
 pub(super) struct SourceReuse {
@@ -49,14 +54,6 @@ impl SourceReuse {
 }
 
 impl Renderer {
-    pub fn source_is_svg(path: &Path) -> Result<bool, String> {
-        let mut head = [0u8; 512];
-        let n = std::fs::File::open(path)
-            .and_then(|mut file| file.read(&mut head))
-            .map_err(|e| e.to_string())?;
-        Ok(pm_media::image::sniff(&head[..n]) == pm_media::image::ImageFormat::Svg)
-    }
-
     /// A source frame in top-down premultiplied RGBA8 display pixels.
     /// The output is independent of a composition's color settings.
     #[allow(clippy::too_many_arguments)]
@@ -75,9 +72,11 @@ impl Renderer {
             output,
             fit,
             interpretation,
-            true,
-            sequence,
-            Sampling::Final,
+            SourceDecode {
+                exact_worker: true,
+                sequence,
+                sampling: Sampling::Final,
+            },
         )
     }
 
@@ -86,6 +85,7 @@ impl Renderer {
     /// per-file override and the image-sequence rule, from the exact worker.
     /// The source monitor draws footage this way whenever Chromium cannot
     /// present the coded planes with the same reading.
+    #[allow(clippy::too_many_arguments)]
     pub fn source_rgba8_composed(
         &mut self,
         path: &Path,
@@ -102,9 +102,11 @@ impl Renderer {
             output,
             fit,
             Some(interpretation),
-            true,
-            sequence,
-            sampling,
+            SourceDecode {
+                exact_worker: true,
+                sequence,
+                sampling,
+            },
         )
     }
 
@@ -124,9 +126,11 @@ impl Renderer {
             output,
             fit,
             interpretation,
-            false,
-            sequence,
-            Sampling::Final,
+            SourceDecode {
+                exact_worker: false,
+                sequence,
+                sampling: Sampling::Final,
+            },
         )
     }
 
@@ -137,9 +141,7 @@ impl Renderer {
         output: Size,
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
-        exact_worker: bool,
-        sequence: bool,
-        sampling: Sampling,
+        decode: SourceDecode,
     ) -> Result<Vec<u8>, String> {
         let mut head = [0u8; 512];
         let n = std::fs::File::open(path)
@@ -147,25 +149,15 @@ impl Renderer {
             .map_err(|e| e.to_string())?;
         let kind = pm_media::image::sniff(&head[..n]);
         if kind == pm_media::image::ImageFormat::Svg {
-            return Err(
-                "Source SVG needs a Chromium raster; the native source path has none".into(),
-            );
+            return self.source_svg_native(path, output, fit, interpretation);
         }
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("pm source snapshot"),
             });
-        let source = self.source_texture(
-            path,
-            time,
-            interpretation,
-            kind,
-            &mut encoder,
-            exact_worker,
-            sequence,
-        )?;
-        self.draw_source_target(source, output, fit, sampling, encoder)
+        let source = self.source_texture(path, time, interpretation, kind, &mut encoder, decode)?;
+        self.draw_source_target(source, output, fit, decode.sampling, encoder)
     }
 
     fn source_texture(
@@ -175,9 +167,8 @@ impl Renderer {
         interpretation: Option<&Interpretation>,
         kind: pm_media::image::ImageFormat,
         encoder: &mut wgpu::CommandEncoder,
-        exact_worker: bool,
-        sequence: bool,
-    ) -> Result<(Target, (f64, f64)), String> {
+        decode: SourceDecode,
+    ) -> Result<(wgpu::Texture, (f64, f64)), String> {
         // Source surfaces always read the native samples and resolved file
         // interpretation. The compatibility bitmap belongs to authored
         // level-1 layers, not to posters or other source-only consumers.
@@ -198,7 +189,7 @@ impl Renderer {
                 )
                 .map(|target| {
                     let size = (target.width() as f64, target.height() as f64);
-                    (target, size)
+                    (target.texture, size)
                 })
                 .map_err(media_error)
         } else {
@@ -215,8 +206,8 @@ impl Renderer {
                 WorkingEncoding::Standard,
                 Precision::Float16,
                 interpretation,
-                sequence,
-                exact_worker,
+                decode.sequence,
+                decode.exact_worker,
             );
             let target = video
                 .map_err(media_error)?
@@ -226,7 +217,7 @@ impl Renderer {
                 interpretation,
                 (target.width(), target.height()),
             );
-            Ok((target, size))
+            Ok((target.texture, size))
         }
     }
 
@@ -268,7 +259,8 @@ impl Renderer {
             .map_err(|e| e.to_string())?;
         let kind = pm_media::image::sniff(&head[..n]);
         if kind == pm_media::image::ImageFormat::Svg {
-            return Err("Source SVG needs a Chromium raster".into());
+            let frame = self.source_svg_native(path, output, fit, interpretation)?;
+            return Ok(vec![frame; times.len()]);
         }
         let row = output.width as usize * 4;
         let padded = row.div_ceil(256) * 256;
@@ -306,8 +298,11 @@ impl Renderer {
                 interpretation,
                 kind,
                 &mut encoder,
-                false,
-                sequence,
+                SourceDecode {
+                    exact_worker: false,
+                    sequence,
+                    sampling: Sampling::Final,
+                },
             )?;
             self.record_source_draw(&source, output, fit, Sampling::Final, &target, &mut encoder);
             encoder.copy_texture_to_buffer(
@@ -361,71 +356,68 @@ impl Renderer {
         Ok(frames)
     }
 
-    /// The exact-size Chromium raster of a source SVG, keyed by its bytes.
-    pub fn source_svg_request(
-        path: &Path,
-        asset: &str,
-        output: Size,
-        fit: SourceFit,
-        intrinsic: (f64, f64),
-    ) -> Result<SvgRasterRequest, String> {
-        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-        let mut file = std::io::BufReader::new(file);
-        let mut digest = Sha256::new();
-        let mut chunk = [0u8; 8192];
-        loop {
-            let n = file.read(&mut chunk).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            digest.update(&chunk[..n]);
-        }
-        let (sw, sh) = intrinsic;
-        if !(sw.is_finite() && sh.is_finite() && sw > 0.0 && sh > 0.0) {
-            return Err("The source SVG has no valid intrinsic size".into());
-        }
-        let key = SvgRasterKey {
-            content: format!("{:x}", digest.finalize()),
-            texture: None,
-            source_fit: Some(fit),
-            width: output.width,
-            height: output.height,
-        };
-        key.validate()
-            .map_err(|e| format!("Source SVG raster: {e}"))?;
-        Ok(SvgRasterRequest {
-            key,
-            asset: asset.to_owned(),
-        })
-    }
-
-    /// The source SVG's final Canvas2D pixels, already straight RGBA8. The
-    /// Chromium host drew the fitted image directly into the output canvas;
-    /// a second GPU fit would move fractional edges and unpremultiply twice.
-    pub fn source_svg_rgba8(
+    /// Fit and draw SVG source pixels through the same native vector cache
+    /// used by composition. No document window, host raster or wire request
+    /// participates; source output resolves to premultiplied display RGBA8.
+    fn source_svg_native(
         &mut self,
-        key: &SvgRasterKey,
+        path: &Path,
         output: Size,
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
-    ) -> Result<Option<Vec<u8>>, String> {
+    ) -> Result<Vec<u8>, String> {
+        use pm_vector::kurbo::Affine;
+        use pm_vector::render::scene::PixelRect;
         if interpretation.is_some_and(|value| !value.is_empty()) {
             return Err(
-                "A source SVG interpretation cannot be applied to the Chromium raster".into(),
+                "A source SVG interpretation cannot be applied to authored SVG paint".into(),
             );
         }
-        if key.source_fit != Some(fit) || key.width != output.width || key.height != output.height {
-            return Err("The source SVG raster has another output size or fit".into());
-        }
-        let Some(pixels) = self.vector.svg.get(key) else {
-            return Ok(None);
+        let (doc, stamp) = crate::vector::svg::document(path)?;
+        let (sw, sh) = doc.size();
+        let (w, h) = (f64::from(output.width), f64::from(output.height));
+        let (sx, sy) = match fit {
+            SourceFit::Stretch => (w / sw, h / sh),
+            SourceFit::Contain => {
+                let scale = (w / sw).min(h / sh);
+                (scale, scale)
+            }
+            SourceFit::Cover => {
+                let scale = (w / sw).max(h / sh);
+                (scale, scale)
+            }
         };
-        Ok(Some(pixels.as_ref().clone()))
+        let transform = Affine::translate(((w - sw * sx) * 0.5, (h - sh * sy) * 0.5))
+            * Affine::scale_non_uniform(sx, sy);
+        let source = crate::vector::VectorSource::SvgRaster {
+            path: path.to_owned(),
+            stamp,
+            transform: transform.as_coeffs(),
+            rect: PixelRect::new(0, 0, output.width, output.height),
+            clip: [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]],
+            playback: false,
+        };
+        self.vector.begin_frame();
+        let view = self
+            .vector
+            .resolve(&self.device, &self.queue, &source, Precision::Float32)?;
+        let encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm native SVG source"),
+            });
+        self.draw_source_target(
+            (view.texture().clone(), (w, h)),
+            output,
+            SourceFit::Stretch,
+            Sampling::Final,
+            encoder,
+        )
     }
 
     fn draw_source_target(
         &mut self,
-        source: (Target, (f64, f64)),
+        source: (wgpu::Texture, (f64, f64)),
         output: Size,
         fit: SourceFit,
         sampling: Sampling,
@@ -496,7 +488,7 @@ impl Renderer {
 
     fn record_source_draw(
         &mut self,
-        source: &(Target, (f64, f64)),
+        source: &(wgpu::Texture, (f64, f64)),
         output: Size,
         fit: SourceFit,
         sampling: Sampling,
@@ -521,7 +513,7 @@ impl Renderer {
         // playback's trilinear filter and Final's bounded-support Lanczos-3,
         // rebuilt each draw into the renderer's pooled tail storage. Never
         // read back or build mips on the CPU.
-        let texture = &source.0.texture;
+        let texture = &source.0;
         let levels = mip_levels(&affine, uv, texture, sampling);
         // Each source draw is its own pass after its levels: the previous
         // draw's reads precede this rebuild in queue order, so its tail is free.

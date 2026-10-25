@@ -46,10 +46,10 @@ impl SchemaInterner {
         // Replace collisions/expired entries without adding duplicate FIFO
         // slots. A collision merely loses a sharing opportunity.
         if !self.schemas.contains_key(&hash) {
-            if self.schemas.len() == MAX_SCHEMAS {
-                if let Some(oldest) = self.order.pop_front() {
-                    self.schemas.remove(&oldest);
-                }
+            if self.schemas.len() == MAX_SCHEMAS
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.schemas.remove(&oldest);
             }
             self.order.push_back(hash);
         }

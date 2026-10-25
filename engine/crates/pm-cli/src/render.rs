@@ -92,9 +92,6 @@ pub struct Options {
     pub ui_scale: Option<f32>,
     /// Parameter values supplied by the CLI user, parsed as JSON.
     pub parameters: Vec<(String, Value)>,
-    /// With no Chromium helper, draw level 1 SVG images with resvg (an
-    /// approximation, named in a notice) instead of failing.
-    pub approximate_svg: bool,
 }
 
 fn usage(m: impl Into<String>) -> Failure {
@@ -633,7 +630,6 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         document: &job.document,
         composition: &job.composition,
         ui_scale: options.ui_scale,
-        approximate_svg: options.approximate_svg,
         definitions: options.definitions.as_deref(),
     })?;
     let headless = not_headless(&renderer, &job.document, &job.composition, &*job.media);
@@ -685,16 +681,11 @@ pub fn run(options: &Options) -> Result<serde_json::Value, Failure> {
         })?;
     let r = &delivered.report;
     let seconds = started.elapsed().as_secs_f64();
-    let approximate = renderer.svg_approximated();
-    if approximate > 0 {
-        eprintln!("{}", approximate_svg_notice(approximate));
-    }
     Ok(serde_json::json!({
         "path": delivered.path,
         "missingMedia": missing_media.iter().map(|clip| serde_json::json!({
             "asset": clip.asset, "name": clip.name
         })).collect::<Vec<_>>(),
-        "approximateSvg": approximate,
         "audioDecoder": if decoder_notice.is_some() { "powermove-ffmpeg" } else { "today" },
         "audioDecoderNotice": decoder_notice,
         "codec": r.codec,
@@ -726,8 +717,6 @@ pub(crate) struct HeadlessSetup<'a> {
     pub composition: &'a str,
     /// The editor's display scale factor (`crate::fonts`).
     pub ui_scale: Option<f32>,
-    /// With no Chromium helper, draw level 1 SVG images with resvg.
-    pub approximate_svg: bool,
     /// A definition set snapshot file (`--definitions`), else the built-ins.
     pub definitions: Option<&'a Path>,
 }
@@ -749,8 +738,6 @@ pub(crate) struct Headless {
 ///   to the WebGL runner, or has not verified, never draws natively: with a
 ///   helper it runs in the on-demand Chromium (the same ANGLE path as the
 ///   desktop's runner), else it is reported as not headless-renderable;
-/// - level 1 SVG images go to the same Chromium (decision S1), else fail
-///   with `svg-chromium-unavailable` unless `approximate_svg`;
 /// - the definitions are the snapshot's, or the built-ins with a warning.
 pub(crate) fn headless_renderer(setup: &HeadlessSetup<'_>) -> Result<Headless, Failure> {
     let mut renderer = Renderer::headless().map_err(|e| Failure::Failed(e.to_string()))?;
@@ -766,11 +753,6 @@ pub(crate) fn headless_renderer(setup: &HeadlessSetup<'_>) -> Result<Headless, F
         &mut renderer,
         setup.ui_scale.unwrap_or(crate::fonts::DEFAULT_UI_SCALE),
     );
-    // Level 1 SVG images (decision S1): the helper's on-demand Chromium, as
-    // the hidden host draws them; with no helper, a named failure unless
-    // --approximate-svg accepts resvg's approximation (reported by the
-    // caller from `svg_approximated`).
-    crate::angle::configure_svg(&mut renderer, angle_host.as_ref(), setup.approximate_svg);
     let (definitions, source) = definitions(setup.definitions)?;
     if setup.definitions.is_none() {
         warn_built_in(setup.document, setup.composition);
@@ -871,17 +853,6 @@ fn definitions(
             .map_err(|e| usage(format!("{}: {}: {e}", path.display(), d.id.as_str())))?;
     }
     Ok((set, path.display().to_string()))
-}
-
-/// The named notice for level 1 SVG images pm-cli drew with resvg: the app
-/// draws them with Chromium (decision S1), so these pixels are close to,
-/// not the same as, the app's.
-pub fn approximate_svg_notice(draws: u64) -> String {
-    format!(
-        "pm-cli: notice (approximate SVG): {draws} level 1 SVG image draw(s) were rasterized by \
-         resvg, not Chromium; the app draws SVG images with Chromium, so these pixels approximate \
-         an export from the app"
-    )
 }
 
 fn absolute(p: &Path) -> Result<PathBuf, Failure> {

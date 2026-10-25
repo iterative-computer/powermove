@@ -101,7 +101,7 @@ enum Job {
     Read(Work),
     Refresh(RefreshWork),
     Persist(PersistWork),
-    Retire(Box<Retired>),
+    Retire(Retired),
 }
 
 struct RefreshWork {
@@ -212,7 +212,7 @@ impl RootIdentity {
             NodeKind::Array(items) => Self::Array(Arc::downgrade(items)),
             NodeKind::Object(map) => Self::Object(Arc::downgrade(map)),
             NodeKind::String(text)
-                if text.as_bytes().len() <= 2 * std::mem::size_of::<usize>() - 1 =>
+                if text.as_bytes().len() < 2 * std::mem::size_of::<usize>() =>
             {
                 let mut bytes = [0; 2 * std::mem::size_of::<usize>() - 1];
                 bytes[..text.as_bytes().len()].copy_from_slice(text.as_bytes());
@@ -673,7 +673,7 @@ pub struct NativeKernels {
     generation: u64,
     reply_special: bool,
     metrics: Arc<ReaderMetrics>,
-    retired: Vec<Box<Retired>>,
+    retired: Vec<Retired>,
 }
 impl NativeKernels {
     pub fn new(process: EngineProcess) -> Self {
@@ -710,15 +710,15 @@ impl NativeKernels {
         }
         let bytes = value.bytes();
         self.metrics.retired.fetch_add(bytes, Ordering::Relaxed);
-        let retired = Box::new(Retired {
+        let retired = Retired {
             value: Some(value),
             bytes,
             metrics: self.metrics.clone(),
-        });
+        };
         self.flush_retired();
         if let Some(sender) = self.reader.as_ref().and_then(|r| r.input.as_ref()) {
             match sender.try_send(Job::Retire(retired)) {
-                Ok(()) => return,
+                Ok(()) => {}
                 Err(TrySendError::Full(Job::Retire(retired))) => {
                     if self.retired.len() < MAX_DEFERRED_RETIREMENTS {
                         self.retired.push(retired);
@@ -726,9 +726,8 @@ impl NativeKernels {
                     // Bound memory even under repeated legacy synchronous
                     // replacements while ingestion occupies the reader. The
                     // overflow is freed here rather than accumulating trees.
-                    return;
                 }
-                Err(_) => return,
+                Err(_) => {}
             }
         }
     }

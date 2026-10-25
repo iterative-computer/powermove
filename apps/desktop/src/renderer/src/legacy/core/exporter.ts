@@ -602,15 +602,6 @@ async function run(opts: any) {
       throw new Error(`The new engine can’t export this project yet, and the current exporter doesn’t write ${formatInfo(opts.format).label}. Choose ProRes 4444, H.264, WebM VP9, or PNG.`);
     }
     opts = { ...opts, format: legacy };
-    if (opts.format !== 'json') {
-      const pending = [p], checked = new Set<any>();
-      while (pending.length) {
-        const comp: any = pending.pop();
-        if (!comp || checked.has(comp)) continue;
-        checked.add(comp);
-        pending.push(...Object.values(comp.comps || {}));
-      }
-    }
     if (opts.format === 'prores' || (opts.format === 'mp4' && bridge?.render)) {
       if (!bridge?.render) throw new Error('The native encoder requires the updated desktop runtime.');
       nativeToken = await bridge.render.start({

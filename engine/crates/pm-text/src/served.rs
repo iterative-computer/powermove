@@ -263,6 +263,9 @@ impl FontResolver for ServedResolver {
     fn em_advance(&mut self, face: FaceId, size: f32) -> Option<f32> {
         self.answer(Query::em_advance(face, size))?.advance
     }
+    fn sbix_metric_rect(&mut self, face: FaceId, glyph: u32, size: f32) -> Option<[f64; 4]> {
+        self.answer(Query::sbix_metric(face, glyph, size))?.rect
+    }
 }
 
 /// Serves queries from a registry on the calling thread (`pm-cli`, tests):

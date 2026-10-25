@@ -9,7 +9,9 @@ depth/ID remain exact document answers.
 ## Color
 
 Object and whole-scene color draw into multisampled `Rgba16Float` in linear sRGB.
-Hardware resolves the four samples in linear light. Opaque draws write straight shader
+After the last draw each sample is weighted by 1/(1 + L), L the luminance the tone curve
+sees (`scene3d::karis`), and hardware resolves the four samples in linear light; the
+seam undoes the weighting. Opaque draws write straight shader
 color; transparent draws blend into a premultiplied linear target. The resolved target
 stays linear and untoned. `Rendered3d::color_space` carries the scene exposure and
 optional authored display background to the 2D compositor. At that seam, the compositor

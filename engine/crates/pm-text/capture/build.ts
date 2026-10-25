@@ -6,7 +6,7 @@ const root = process.argv[2];
 if (!root) throw new Error('usage: bun build.ts <root>');
 const outDir = join(root, 'capture');
 mkdirSync(outDir, { recursive: true });
-for (const [name, entry] of [['measure', 'page.ts'], ['render', 'render-page.ts']] as const) {
+for (const [name, entry] of [['measure', 'page.ts']] as const) {
   const result = await Bun.build({ entrypoints: [join(import.meta.dir, entry)], target: 'browser', format: 'iife', minify: false });
   if (!result.success) { console.error(result.logs); process.exit(1); }
   writeFileSync(join(outDir, `${name}.js`), await result.outputs[0]!.text());

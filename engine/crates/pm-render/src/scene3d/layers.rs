@@ -135,12 +135,11 @@ impl TextureSource for DocumentTextures<'_> {
         }
     }
 
-    fn svg(&self, asset: &str) -> Option<pm_protocol::svg_raster::SvgRasterRequest> {
+    fn svg(&self, asset: &str) -> Option<(u32, u32)> {
         let record = node::member(node::member(Some(self.root), "assets"), asset)?;
         if !node::is_str(node::member(Some(record), "format"), "svg") {
             return None;
         }
-        let path = self.assets.path(asset, Some(record))?;
         let size = |field| {
             node::number(node::member(Some(record), field))
                 .unwrap_or(1.0)
@@ -149,20 +148,10 @@ impl TextureSource for DocumentTextures<'_> {
         };
         let (w, h) = (size("w"), size("h"));
         let scale = (16384.0 / f64::from(w.max(h))).min(1.0);
-        let (width, height) = (
+        Some((
             (f64::from(w) * scale).floor() as u32,
             (f64::from(h) * scale).floor() as u32,
-        );
-        Some(pm_protocol::svg_raster::SvgRasterRequest {
-            asset: asset.to_owned(),
-            key: pm_protocol::svg_raster::SvgRasterKey {
-                content: crate::vector::svg::content_hash(&path).ok()?,
-                texture: Some(true),
-                source_fit: None,
-                width,
-                height,
-            },
-        })
+        ))
     }
 }
 
@@ -634,8 +623,8 @@ pub(crate) fn check_legacy_scene(
 /// still meets the level 1 image check ([`crate::media::probe_image`]),
 /// and without media, the recorded container
 /// ([`crate::stills::static_format`]), as for image layers. SVG maps are
-/// Chromium's raster (decision S1); offline and unreadable maps are
-/// today's missing textures at draw time.
+/// drawn natively; offline and unreadable maps are today's missing
+/// textures at draw time.
 fn check_maps(
     root: &Node,
     object: Option<&Node>,

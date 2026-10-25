@@ -1,35 +1,35 @@
 //! SVG images (plan section 10, `image` (SVG); docs/engine/vector.md,
 //! "SVG images").
 //!
-//! Today an SVG asset is an `<img>` drawn into a canvas per size bucket
-//! (`rasterSvgAsset`: `drawImage(img, 0, 0, width, height)`, the bucket
-//! chosen by `svgRasterDimensions` from the layer's display transform).
+//! An SVG image is parsed once by usvg (with `<text>` laid out against the
+//! system fonts, loaded once per process and only for documents with text)
+//! and drawn through the native float painter when its features and GPU
+//! limits allow:
 //!
-//! - [`svg_raster_dimensions`] is that bucket choice.
-//! - [`SvgDocument::raster`] is the bucket raster, drawn by resvg: the
-//!   SVG's user space stretched over the bucket as `drawImage` stretches the
-//!   image. It is not Chromium's rasterization (Blink paints SVG shapes
-//!   through Skia's analytic and multisampled renderers); the measured
-//!   difference is in docs/engine/vector.md.
-//! - [`SvgDocument::scene`] is the SVG as vectors for `compat` level 2:
-//!   solid fills and strokes become coverage items rendered at output
-//!   resolution; anything else (gradients, patterns, clips, masks, filters,
-//!   group opacity, blend modes, embedded images) is drawn by resvg at
-//!   output resolution ([`SvgDocument::raster_device`]), clipped as the
-//!   image's box and viewport clip it.
-//!
-//! The production renderer still gates SVG text. The diagnostic
-//! [`SvgDocument::raster_compat_with_text`] shapes and paints resolved text
-//! spans through the caller's pm-text resolver, never usvg glyph outlines.
+//! - [`SvgDocument::gpu_paintable`] documents (paths with solid or gradient
+//!   paint, groups with opacity and blend modes, clip paths, masks, text,
+//!   Gaussian blur and offset filters) are
+//!   extracted as ordered float paint operations ([`SvgDocument::float_scene`]);
+//! - unsupported filters, patterns, embedded images and `crispEdges` use resvg
+//!   ([`SvgDocument::raster_device`]).
 //!
 //! As in an `<img>`, an SVG image loads no external resources: only
 //! `data:` URLs resolve.
 
-use kurbo::{Affine, BezPath, Cap, Join, Stroke};
+use kurbo::{Affine, BezPath};
+use std::collections::HashMap;
 
 use super::svg_depth::{MAX_ELEMENT_DEPTH, element_depth, with_stack};
-use crate::canvas2d::shape::Bitmap;
-use crate::render::scene::{CoverageItem, CoverageScene, FillRule, ItemStyle, PixelRect};
+use crate::render::scene::PixelRect;
+
+#[path = "svg_float.rs"]
+mod svg_float;
+pub use svg_float::{
+    FloatDraw, FloatFilter, FloatGradient, FloatGroup, FloatNode, FloatPaint, FloatStop,
+};
+pub use usvg::NonZeroRect as SvgRect;
+pub use usvg::filter as usvg_filter;
+pub use usvg::{BlendMode, SpreadMethod};
 
 /// Why an SVG could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,15 +43,23 @@ impl core::fmt::Display for SvgError {
 
 impl std::error::Error for SvgError {}
 
+/// Premultiplied RGBA8 pixels, top-down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SvgRaster {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 /// A parsed SVG.
 pub struct SvgDocument {
     /// Dropped on a stack sized to `depth` (see `Drop`).
-    tree: core::mem::ManuallyDrop<usvg::Tree>,
-    has_text: bool,
-    data: Vec<u8>,
+    pub(crate) tree: core::mem::ManuallyDrop<usvg::Tree>,
     /// The element nesting ([`super::svg_depth::element_depth`]): recursive
     /// work over the tree runs on a stack sized to it.
-    depth: usize,
+    pub(crate) depth: usize,
+    gpu: bool,
+    pub(crate) filter_res: HashMap<String, Option<[u32; 2]>>,
 }
 
 impl Drop for SvgDocument {
@@ -65,12 +73,32 @@ impl Drop for SvgDocument {
 
 impl core::fmt::Debug for SvgDocument {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let (w, h) = self.size();
         f.debug_struct("SvgDocument")
-            .field("size", &(w, h))
-            .field("has_text", &self.has_text)
+            .field("size", &self.size())
+            .field("gpu", &self.gpu)
             .finish()
     }
+}
+
+/// The system font database, loaded on first use (the first document with
+/// `<text>`), once per process, with Chrome's macOS generic families (CSS
+/// Fonts 4 §2 leaves them to the user agent). Text is laid out by usvg
+/// (fontdb matching, rustybuzz shaping) and drawn as its outlines.
+fn fonts() -> std::sync::Arc<usvg::fontdb::Database> {
+    static FONTS: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let mut db = usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            db.set_serif_family("Times");
+            db.set_sans_serif_family("Helvetica");
+            db.set_monospace_family("Courier");
+            db.set_cursive_family("Apple Chancery");
+            db.set_fantasy_family("Papyrus");
+            std::sync::Arc::new(db)
+        })
+        .clone()
 }
 
 fn options(text: bool) -> usvg::Options<'static> {
@@ -81,24 +109,23 @@ fn options(text: bool) -> usvg::Options<'static> {
         },
         ..usvg::Options::default()
     };
+    // The initial CSS font size affects `em`/`ex` lengths even in a document
+    // without a text element. Loading font faces remains lazy.
+    options.font_family = "Times".into();
+    options.font_size = 16.0;
     if text {
-        static FONTS: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> = std::sync::OnceLock::new();
-        options.fontdb = FONTS
-            .get_or_init(|| {
-                let mut db = usvg::fontdb::Database::new();
-                db.load_system_fonts();
-                std::sync::Arc::new(db)
-            })
-            .clone();
+        options.fontdb = fonts();
     }
     options
 }
 
 impl SvgDocument {
-    /// Parses SVG bytes (SVGZ is not read: usvg's compression feature is
-    /// off). The nesting is scanned first without recursion: deeper than
-    /// [`MAX_ELEMENT_DEPTH`] is an error (Chromium shows a broken image),
-    /// and a deep document parses on a stack sized to its nesting.
+    /// Parses SVG bytes (UTF-8; SVGZ is not read), reading the XML as
+    /// Chromium's parser does where roxmltree is stricter
+    /// ([`super::svg_xml`]). The nesting is scanned first without
+    /// recursion: deeper than [`MAX_ELEMENT_DEPTH`] is an error (Chromium
+    /// shows a broken image), and a deep document parses on a stack sized
+    /// to its nesting.
     pub fn parse(data: &[u8]) -> Result<Self, SvgError> {
         let depth = element_depth(data);
         if depth > MAX_ELEMENT_DEPTH {
@@ -106,17 +133,34 @@ impl SvgDocument {
                 "elements nest {depth} deep; Chromium's XML parser stops at {MAX_ELEMENT_DEPTH}"
             )));
         }
-        let (tree, has_text) = with_stack(depth, || {
-            let has_text = contains_text(data);
-            usvg::Tree::from_data(data, &options(has_text))
-                .map(|tree| (tree, has_text))
-                .map_err(|e| SvgError(e.to_string()))
+        if data.starts_with(&[0x1f, 0x8b]) {
+            return Err(SvgError("SVGZ (gzip) is not read".into()));
+        }
+        let text = std::str::from_utf8(data).map_err(|_| SvgError("not UTF-8".into()))?;
+        let (tree, gpu, filter_res) = with_stack(depth, || {
+            let xml =
+                |e: usvg::roxmltree::Error| SvgError(format!("SVG data parsing failed cause {e}"));
+            let text = super::svg_xml::libxml2_text(text).map_err(xml)?;
+            let doc = super::svg_xml::parse(&text).map_err(xml)?;
+            let filter_res = filter_resolutions(&doc)?;
+            let unsupported_edge_mode = doc.descendants().any(|n| {
+                n.is_element()
+                    && n.tag_name().name() == "feGaussianBlur"
+                    && n.attribute("edgeMode").is_some_and(|v| v != "none")
+            });
+            let text_nodes = doc
+                .descendants()
+                .any(|n| n.is_element() && n.tag_name().name() == "text");
+            let tree = usvg::Tree::from_xmltree(&doc, &options(text_nodes))
+                .map_err(|e| SvgError(e.to_string()))?;
+            let gpu = paintable_group(tree.root()) && !unsupported_edge_mode;
+            Ok::<_, SvgError>((tree, gpu, filter_res))
         })?;
         Ok(Self {
             tree: core::mem::ManuallyDrop::new(tree),
-            has_text,
-            data: data.to_vec(),
             depth,
+            gpu,
+            filter_res,
         })
     }
 
@@ -131,27 +175,66 @@ impl SvgDocument {
         (f64::from(s.width()), f64::from(s.height()))
     }
 
-    /// Whether the SVG has `<text>` (production text gate remains).
-    pub fn has_text(&self) -> bool {
-        self.has_text
+    /// Raw glyph outlines after usvg shapes text, before the renderer's
+    /// flattening and disjoint-contour resolution. This gives the SVG gate
+    /// independent geometry for exact f64 coverage of the authored text.
+    pub fn raw_text_fill_paths(&self) -> Vec<(kurbo::BezPath, bool)> {
+        fn visit(
+            group: &usvg::Group,
+            parent: kurbo::Affine,
+            in_text: bool,
+            out: &mut Vec<(kurbo::BezPath, bool)>,
+        ) {
+            let t = parent * affine(group.transform());
+            for node in group.children() {
+                match node {
+                    usvg::Node::Group(g) => visit(g, t, in_text, out),
+                    usvg::Node::Text(text) => visit(text.flattened(), t, true, out),
+                    usvg::Node::Path(path) if in_text => {
+                        if let Some(fill) = path.fill() {
+                            out.push((
+                                t * bez(path.data()),
+                                fill.rule() == usvg::FillRule::EvenOdd,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        with_stack(self.depth, || {
+            let mut paths = Vec::new();
+            visit(self.tree.root(), kurbo::Affine::IDENTITY, false, &mut paths);
+            paths
+        })
     }
 
-    /// `drawImage(img, 0, 0, width, height)` into a cleared canvas: the
-    /// SVG's user space stretched over `width` × `height`, premultiplied
-    /// RGBA8, top-down.
-    pub fn raster(&self, width: u32, height: u32) -> Bitmap {
+    /// Whether the float painter can draw every part of the document. Gaussian
+    /// blur and offset filters are supported; patterns, embedded images,
+    /// unsupported filters and `crispEdges` shapes are not.
+    pub fn gpu_paintable(&self) -> bool {
+        self.gpu
+    }
+
+    /// The SVG's user space stretched over `width` × `height` (an `<img>`
+    /// drawn at that size), by resvg.
+    pub fn raster(&self, width: u32, height: u32) -> SvgRaster {
         let (sw, sh) = self.size();
         let t = Affine::scale_non_uniform(f64::from(width) / sw, f64::from(height) / sh);
         self.raster_device(t, PixelRect::new(0, 0, width, height), None)
     }
 
     /// The SVG under `transform` (user units to device pixels), drawn by
-    /// resvg into the device rectangle `rect`: premultiplied RGBA8,
-    /// top-down, `rect.width` × `rect.height`. `clip` (a closed polygon in
+    /// resvg into the device rectangle `rect`. `clip` (a closed polygon in
     /// device pixels) limits it, antialiased.
-    pub fn raster_device(&self, transform: Affine, rect: PixelRect, clip: Option<&[kurbo::Point]>) -> Bitmap {
+    pub fn raster_device(
+        &self,
+        transform: Affine,
+        rect: PixelRect,
+        clip: Option<&[kurbo::Point]>,
+    ) -> SvgRaster {
         let (w, h) = (rect.width.max(1), rect.height.max(1));
-        let empty = || Bitmap {
+        let empty = || SvgRaster {
             width: w,
             height: h,
             rgba: vec![0; (w * h * 4) as usize],
@@ -193,51 +276,11 @@ impl SvgDocument {
             );
             pixmap.apply_mask(&mask);
         }
-        Bitmap {
+        SvgRaster {
             width: w,
             height: h,
             rgba: pixmap.take(),
         }
-    }
-
-    pub fn raster_compat(&self, width: u32, height: u32) -> Result<Bitmap, SvgError> {
-        if self.has_text {
-            return Err(SvgError("SVG text needs pm-text".into()));
-        }
-
-        let data = &self.data;
-        with_stack(self.depth, move || {
-            let (annotated, elements) = crate::canvas2d::svg::annotate(data)?;
-            let tree = usvg::Tree::from_data(&annotated, &options(false)).map_err(|e| SvgError(e.to_string()))?;
-            crate::canvas2d::svg::raster(&tree, &elements, width, height, &mut |_, _, _, _| {
-                Err(SvgError("SVG text needs pm-text".into()))
-            })
-        })
-    }
-
-    /// Bucket paint with text shaped and rasterized by the caller's pm-text
-    /// font resolver. This diagnostic API does not retire the level-1 gate.
-    pub fn raster_compat_with_text<R: pm_text::font::FontResolver>(
-        &self,
-        width: u32,
-        height: u32,
-        compat: &mut pm_text::compat::Compat<R>,
-    ) -> Result<Bitmap, SvgError> {
-        // The caller's resolver cannot move to another thread: deep
-        // documents are refused here rather than recursing on its stack.
-        if self.depth > super::svg_depth::INLINE_DEPTH {
-            return Err(SvgError(format!(
-                "elements nest {} deep (diagnostic text rasters stop at {})",
-                self.depth,
-                super::svg_depth::INLINE_DEPTH
-            )));
-        }
-        let (annotated, elements) = crate::canvas2d::svg::annotate(&self.data)?;
-        let tree = usvg::Tree::from_data(&annotated, &options(self.has_text)).map_err(|e| SvgError(e.to_string()))?;
-        let mut renderer = crate::canvas2d::svg_text::TextRenderer::new(compat);
-        crate::canvas2d::svg::raster(&tree, &elements, width, height, &mut move |t, m, w, h| {
-            renderer.raster(t, m, w, h)
-        })
     }
 
     /// User-space bounds of everything the SVG draws (strokes and filter
@@ -256,39 +299,99 @@ impl SvgDocument {
             f64::from(b.bottom()),
         ))
     }
+}
 
-    /// The SVG as coverage items under `transform` (user units to device
-    /// pixels), or `None` when it draws anything but solid fills and strokes
-    /// in plain groups.
-    pub fn scene(&self, transform: Affine) -> Option<CoverageScene> {
-        let root = self.tree.root();
-        with_stack(self.depth, move || {
-            let mut scene = CoverageScene::default();
-            push_group(root, transform, &mut scene)?;
-            Some(scene)
+fn paintable_group(g: &usvg::Group) -> bool {
+    g.filters().iter().all(|f| {
+        f.primitives().iter().all(|p| {
+            matches!(
+                p.kind(),
+                usvg::filter::Kind::GaussianBlur(_) | usvg::filter::Kind::Offset(_)
+            )
         })
+    }) && g.clip_path().is_none_or(paintable_clip)
+        && g.mask().is_none_or(paintable_mask)
+        && g.children().iter().all(|node| match node {
+            usvg::Node::Group(g) => paintable_group(g),
+            usvg::Node::Path(p) => {
+                p.rendering_mode().use_shape_antialiasing()
+                    && p.fill()
+                        .is_none_or(|f| !matches!(f.paint(), usvg::Paint::Pattern(_)))
+                    && p.stroke()
+                        .is_none_or(|s| !matches!(s.paint(), usvg::Paint::Pattern(_)))
+            }
+            usvg::Node::Image(_) => false,
+            usvg::Node::Text(t) => paintable_group(t.flattened()),
+        })
+}
+
+/// `usvg` discards SVG 1.1 filterRes. Retain it after XML normalization,
+/// including href inheritance, so the renderer can use the authored grid.
+fn filter_resolutions(
+    doc: &usvg::roxmltree::Document<'_>,
+) -> Result<HashMap<String, Option<[u32; 2]>>, SvgError> {
+    let filters: HashMap<_, _> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "filter")
+        .filter_map(|n| n.attribute("id").map(|id| (id.to_owned(), n)))
+        .collect();
+    let mut result = HashMap::new();
+    for (id, node) in &filters {
+        let mut seen = std::collections::HashSet::new();
+        let mut current = Some(*node);
+        while let Some(n) = current {
+            let Some(key) = n.attribute("id") else { break };
+            if !seen.insert(key) {
+                break;
+            }
+            if let Some(raw) = n.attribute("filterRes") {
+                let values: Vec<_> = raw
+                    .split(|c: char| c.is_ascii_whitespace() || c == ',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::parse::<f64>)
+                    .collect();
+                if values
+                    .iter()
+                    .any(|value| value.as_ref().is_ok_and(|v| *v < 0.0))
+                {
+                    return Err(SvgError(format!("negative SVG filterRes on filter {id}")));
+                }
+                let parsed = match values.as_slice() {
+                    [Ok(x)] => Some((*x, *x)),
+                    [Ok(x), Ok(y)] => Some((*x, *y)),
+                    _ => None,
+                }
+                .and_then(|(x, y)| {
+                    (x.is_finite()
+                        && y.is_finite()
+                        && x > 0.0
+                        && y > 0.0
+                        && x < u32::MAX as f64
+                        && y < u32::MAX as f64)
+                        .then_some([x as u32, y as u32])
+                });
+                result.insert(id.clone(), parsed.filter(|v| v[0] > 0 && v[1] > 0));
+                break;
+            }
+            current = n
+                .attributes()
+                .find(|a| a.name() == "href")
+                .and_then(|a| a.value().strip_prefix('#'))
+                .and_then(|target| filters.get(target).copied());
+        }
     }
+    Ok(result)
 }
 
-/// Whether the document has a `<text>` element.
-fn contains_text(data: &[u8]) -> bool {
-    let Ok(s) = std::str::from_utf8(data) else {
-        return false;
-    };
-    let Ok(doc) = usvg::roxmltree::Document::parse_with_options(
-        s,
-        usvg::roxmltree::ParsingOptions {
-            allow_dtd: true,
-            ..Default::default()
-        },
-    ) else {
-        return false;
-    };
-    doc.descendants()
-        .any(|n| n.is_element() && n.tag_name().name() == "text")
+fn paintable_clip(c: &usvg::ClipPath) -> bool {
+    paintable_group(c.root()) && c.clip_path().is_none_or(paintable_clip)
 }
 
-fn affine(t: tiny_skia::Transform) -> Affine {
+fn paintable_mask(m: &usvg::Mask) -> bool {
+    paintable_group(m.root()) && m.mask().is_none_or(paintable_mask)
+}
+
+pub(crate) fn affine(t: tiny_skia::Transform) -> Affine {
     Affine::new([
         f64::from(t.sx),
         f64::from(t.ky),
@@ -315,198 +418,35 @@ pub(crate) fn bez(path: &tiny_skia::Path) -> BezPath {
     out
 }
 
-fn solid(paint: &usvg::Paint, opacity: f32) -> Option<[f32; 4]> {
-    match paint {
-        usvg::Paint::Color(c) => Some([
-            f32::from(c.red) / 255.0,
-            f32::from(c.green) / 255.0,
-            f32::from(c.blue) / 255.0,
-            opacity,
-        ]),
-        _ => None,
-    }
-}
-
-fn push_group(group: &usvg::Group, transform: Affine, scene: &mut CoverageScene) -> Option<()> {
-    if group.opacity().get() < 1.0
-        || group.clip_path().is_some()
-        || group.mask().is_some()
-        || !group.filters().is_empty()
-        || group.blend_mode() != usvg::BlendMode::Normal
-    {
-        return None;
-    }
-    for node in group.children() {
-        match node {
-            usvg::Node::Group(g) => push_group(g, transform, scene)?,
-            usvg::Node::Path(p) => push_path(p, transform, scene)?,
-            // Embedded images and (text off) text are not vectors here.
-            usvg::Node::Image(_) | usvg::Node::Text(_) => return None,
-        }
-    }
-    Some(())
-}
-
-fn push_path(p: &usvg::Path, transform: Affine, scene: &mut CoverageScene) -> Option<()> {
-    if !p.is_visible() {
-        return Some(());
-    }
-    // `shape-rendering: crispEdges` turns antialiasing off: resvg draws it.
-    if p.rendering_mode() == usvg::ShapeRendering::CrispEdges {
-        return None;
-    }
-    let path = bez(p.data());
-    let t = transform * affine(p.abs_transform());
-    let fill = match p.fill() {
-        Some(f) => Some(CoverageItem {
-            path: path.clone(),
-            transform: t,
-            style: ItemStyle::Fill(match f.rule() {
-                usvg::FillRule::NonZero => FillRule::NonZero,
-                usvg::FillRule::EvenOdd => FillRule::EvenOdd,
-            }),
-            color: solid(f.paint(), f.opacity().get())?,
-        }),
-        None => None,
-    };
-    let stroke = match p.stroke() {
-        Some(s) => {
-            let join = match s.linejoin() {
-                usvg::LineJoin::Miter | usvg::LineJoin::MiterClip => Join::Miter,
-                usvg::LineJoin::Round => Join::Round,
-                usvg::LineJoin::Bevel => Join::Bevel,
-            };
-            let cap = match s.linecap() {
-                usvg::LineCap::Butt => Cap::Butt,
-                usvg::LineCap::Round => Cap::Round,
-                usvg::LineCap::Square => Cap::Square,
-            };
-            let mut style = Stroke::new(f64::from(s.width().get()))
-                .with_join(join)
-                .with_caps(cap)
-                .with_miter_limit(f64::from(s.miterlimit().get()));
-            if let Some(dashes) = s.dasharray() {
-                style = style.with_dashes(f64::from(s.dashoffset()), dashes.iter().map(|d| f64::from(*d)));
-            }
-            Some(CoverageItem {
-                path: path.clone(),
-                transform: t,
-                style: ItemStyle::Stroke(style),
-                color: solid(s.paint(), s.opacity().get())?,
-            })
-        }
-        None => None,
-    };
-    let (first, second) = match p.paint_order() {
-        usvg::PaintOrder::FillAndStroke => (fill, stroke),
-        usvg::PaintOrder::StrokeAndFill => (stroke, fill),
-    };
-    scene.items.extend(first);
-    scene.items.extend(second);
-    Some(())
-}
-
-/// `svgRasterDimensions(sourceWidth, sourceHeight, boxWidth, boxHeight,
-/// matrix, maxDimension = 8192)` (legacy/gl/compositor.ts): the bucket a
-/// layer's SVG is rasterized at, keeping the source aspect ratio. Returns
-/// `(width, height, scale)`.
-pub fn svg_raster_dimensions(
-    source_width: f64,
-    source_height: f64,
-    box_width: f64,
-    box_height: f64,
-    matrix: &[f64; 6],
-    max_dimension: f64,
-) -> (u32, u32, f64) {
-    use crate::js;
-    let num = |v: f64, d: f64| if v.is_nan() || v == 0.0 { d } else { v };
-    let sw = js::max(1.0, num(source_width, 1.0));
-    let sh = js::max(1.0, num(source_height, 1.0));
-    let bw = js::max(1.0, num(box_width, sw));
-    let bh = js::max(1.0, num(box_height, sh));
-    let limit = js::max(1.0, num(max_dimension, 8192.0));
-    let box_density = js::max(bw / sw, bh / sh);
-    let max_scale = js::max(0.25, limit / js::max(sw, sh));
-    let requested = continuous_raster_scale(matrix, box_density, max_scale);
-    let mut width = js::max(1.0, libm::ceil(sw * requested));
-    let mut height = js::max(1.0, libm::ceil(sh * requested));
-    if js::max(width, height) > limit {
-        let ratio = limit / js::max(width, height);
-        width = js::max(1.0, libm::floor(width * ratio));
-        height = js::max(1.0, libm::floor(height * ratio));
-    }
-    (width as u32, height as u32, width / sw)
-}
-
-/// `continuousRasterScale(matrix, density, maxScale)`.
-fn continuous_raster_scale(m: &[f64; 6], density: f64, max_scale: f64) -> f64 {
-    use crate::js;
-    let n = |v: f64| if v.is_nan() { 0.0 } else { v };
-    let (m0, m1, m2, m3) = (n(m[0]), n(m[1]), n(m[2]), n(m[3]));
-    let aa = m0 * m0 + m1 * m1;
-    let bb = m0 * m2 + m1 * m3;
-    let cc = m2 * m2 + m3 * m3;
-    let discriminant = js::max(0.0, (aa - cc) * (aa - cc) + 4.0 * bb * bb).sqrt();
-    let largest = js::max(0.0, (aa + cc + discriminant) / 2.0).sqrt();
-    let density = if density.is_nan() || density == 0.0 {
-        1.0
-    } else {
-        density
-    };
-    let requested = largest * js::max(0.01, density);
-    let max_scale = if max_scale.is_nan() || max_scale == 0.0 {
-        32.0
-    } else {
-        max_scale
-    };
-    let bounded = js::max(0.25, js::min(js::max(0.25, max_scale), requested));
-    libm::ceil(bounded * 4.0 - 1e-9) / 4.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// compositor.test.ts's expectations.
     #[test]
-    fn raster_dimensions_follow_the_compositor() {
-        assert_eq!(
-            svg_raster_dimensions(100.0, 50.0, 400.0, 200.0, &[2.0, 0.0, 0.0, 2.0, 0.0, 0.0], 8192.0),
-            (800, 400, 8.0)
-        );
-        assert_eq!(
-            svg_raster_dimensions(100.0, 50.0, 400.0, 400.0, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 8192.0),
-            (800, 400, 8.0)
-        );
-        assert_eq!(
-            svg_raster_dimensions(100.0, 50.0, 20_000.0, 10_000.0, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 8192.0),
-            (8192, 4096, 81.92)
-        );
+    fn what_float_can_paint() {
+        let gpu = |svg: &str| SvgDocument::parse(svg.as_bytes()).unwrap().gpu_paintable();
+        assert!(gpu(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><defs><linearGradient id="g"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient><clipPath id="c"><circle cx="5" cy="5" r="4"/></clipPath><mask id="m"><rect width="10" height="5" fill="#fff"/></mask></defs><g opacity="0.5" clip-path="url(#c)" mask="url(#m)" style="mix-blend-mode:multiply"><rect width="10" height="10" fill="url(#g)" stroke="#f00" stroke-dasharray="1 1"/></g></svg>"##
+        ));
+        assert!(gpu(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feGaussianBlur stdDeviation="1"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
+        ));
+        assert!(!gpu(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feGaussianBlur stdDeviation="1" edgeMode="wrap"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
+        ));
+        assert!(!gpu(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><filter id="f"><feColorMatrix type="saturate" values="0.5"/></filter><rect width="10" height="10" filter="url(#f)"/></svg>"##
+        ));
+        assert!(!gpu(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><pattern id="p" width="2" height="2" patternUnits="userSpaceOnUse"><rect width="1" height="1"/></pattern><rect width="10" height="10" fill="url(#p)"/></svg>"##
+        ));
+        assert!(!gpu(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" shape-rendering="crispEdges"/></svg>"##
+        ));
     }
 
     #[test]
-    fn solid_svgs_become_vectors() {
-        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50">
-            <rect x="10" y="10" width="30" height="20" fill="#ff0000" fill-opacity="0.5" stroke="#00ff00" stroke-width="2"/>
-            <g transform="translate(50 0)"><circle cx="20" cy="25" r="10" fill="#0000ff"/></g>
-        </svg>"##;
-        let doc = SvgDocument::parse(svg).unwrap();
-        assert_eq!(doc.size(), (100.0, 50.0));
-        assert!(!doc.has_text());
-        let scene = doc.scene(Affine::scale(2.0)).unwrap();
-        assert_eq!(scene.items.len(), 3);
-        assert_eq!(scene.items[0].color, [1.0, 0.0, 0.0, 0.5]);
-        assert!(matches!(scene.items[1].style, ItemStyle::Stroke(_)));
-        let b = scene.items[2].device_bounds().unwrap();
-        assert!((b.x0 - 120.0).abs() < 1e-3 && (b.x1 - 160.0).abs() < 1e-3, "{b:?}");
-    }
-
-    #[test]
-    fn gradients_text_and_external_images_are_reported() {
-        let gradient = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><defs><linearGradient id="g"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#000"/></linearGradient></defs><rect width="10" height="10" fill="url(#g)"/></svg>"##;
-        assert!(SvgDocument::parse(gradient).unwrap().scene(Affine::IDENTITY).is_none());
-        let text = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text x="1" y="8">a</text></svg>"##;
-        assert!(SvgDocument::parse(text).unwrap().has_text());
+    fn external_images_resolve_to_nothing() {
         // An external file reference resolves to nothing (as in an <img>).
         let external = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 10 10"><image width="10" height="10" xlink:href="/etc/hosts"/></svg>"##;
         let doc = SvgDocument::parse(external).unwrap();
@@ -523,6 +463,14 @@ mod tests {
         assert_eq!(b.rgba[(5 * 40 + 30) * 4 + 3], 0);
     }
 
+    #[test]
+    fn initial_font_size_applies_to_geometry_without_text() {
+        let lengths = SvgDocument::parse(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1ex"><rect width="16" height="8"/></svg>"#,
+        ).unwrap();
+        assert_eq!(lengths.size(), (16.0, 8.0));
+    }
+
     fn nested(levels: usize) -> String {
         // `levels` elements in all: the root and levels − 2 groups around a rect.
         let groups = levels - 2;
@@ -533,11 +481,10 @@ mod tests {
         )
     }
 
-    /// Engine worker threads have 2 MiB. usvg converts at most 1,024
-    /// levels (deeper is its `NodesLimitReached` error); a document that
-    /// deep parses, draws (resvg and the level 2 scene), and drops there,
-    /// one at Chromium's limit fails cleanly, and one past it is refused
-    /// before anything recursive runs.
+    /// Engine worker threads have 2 MiB. A document 1,000 levels deep
+    /// parses, draws, and drops there; one at Chromium's limit (its plain
+    /// groups read away past usvg's 1,024 levels) draws as Chromium does,
+    /// and one past it is refused before anything recursive runs.
     #[test]
     fn deep_documents_are_safe_on_a_small_stack() {
         let deep = nested(1000);
@@ -550,18 +497,19 @@ mod tests {
             .spawn(move || {
                 let doc = SvgDocument::parse(deep.as_bytes()).unwrap();
                 assert_eq!(doc.depth(), 1000);
+                assert!(doc.gpu_paintable());
                 let b = doc.raster(8, 8);
                 assert_eq!(&b.rgba[..4], &[0x4C, 0x8D, 0xFF, 255]);
-                assert_eq!(doc.scene(Affine::IDENTITY).map(|s| s.items.len()), Some(1));
                 assert!(doc.user_bounds().is_some());
+                assert!(doc.float_scene(Affine::IDENTITY, &[]).is_some());
                 drop(doc);
                 // Shallow enough to run on this thread itself.
                 let doc = SvgDocument::parse(inline.as_bytes()).unwrap();
                 assert_eq!(doc.raster(4, 4).rgba[3], 255);
-                assert!(doc.scene(Affine::IDENTITY).is_some());
                 drop(doc);
-                let e = SvgDocument::parse(limit.as_bytes()).unwrap_err();
-                assert!(e.0.contains("limit"), "{e}");
+                let doc = SvgDocument::parse(limit.as_bytes()).unwrap();
+                assert_eq!(&doc.raster(4, 4).rgba[..4], &[0x4C, 0x8D, 0xFF, 255]);
+                drop(doc);
                 let e = SvgDocument::parse(too_deep.as_bytes()).unwrap_err();
                 assert!(e.0.contains("nest 5001 deep"), "{e}");
             })

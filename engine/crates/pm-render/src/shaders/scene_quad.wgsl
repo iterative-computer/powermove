@@ -3,7 +3,9 @@
 // encoding. The pipeline selector uses this only for scene draws.
 fn scene_fragment(in: VsOut) -> vec4<f32> {
     let c = sample_quad(in);
-    return scene_output(c, q.scene.w, vec4<f32>(q.scene.rgb, q.color.w), (q.color.z < 2.5), (q.res.z > 0.5)) * q.color.x;
+    let flags = u32(q.color.w + 0.5);
+    let background = vec4<f32>(q.scene.rgb, f32(flags & 1u));
+    return scene_output(c, q.scene.w, background, (q.color.z < 2.5), ((flags & 2u) != 0u)) * q.color.x;
 }
 
 @fragment

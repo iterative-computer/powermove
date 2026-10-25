@@ -19,7 +19,6 @@ use pm_protocol::host::{
 use pm_protocol::priority::{BrowserRenditionFormat, JobSpec, JobState, SubmitJob};
 use pm_protocol::snapshot::{SnapshotPixels, SourceColor, SourceFit};
 use pm_render::Renderer;
-use pm_render::vector::svg_rasters::{SvgRasterNeed, SvgRasterSource};
 
 use super::gate::LaneGate;
 use super::{Shared, destination, job_error, note, resolve_media, status_event, status_of};
@@ -284,35 +283,6 @@ fn filmstrip(
         .iter()
         .map(|&time| pm_render::footage::source_time(record, time, interpretation.as_ref()))
         .collect();
-    let svg = if Renderer::source_is_svg(source)? {
-        if interpretation.is_some() {
-            return Err(
-                "A source SVG interpretation cannot be applied to the Chromium raster".into(),
-            );
-        }
-        let intrinsic = (
-            pm_eval::node::finite_number(pm_eval::node::member(record, "w")).unwrap_or(0.0),
-            pm_eval::node::finite_number(pm_eval::node::member(record, "h")).unwrap_or(0.0),
-        );
-        let request = Renderer::source_svg_request(source, asset, size, fit, intrinsic)?;
-        if !renderer.has_svg_raster(&request.key) {
-            if cancel.load(Ordering::Relaxed) {
-                return Err("cancelled".into());
-            }
-            let rasters = super::svg::HostSvgRasters::new(Arc::clone(shared), document);
-            let need = SvgRasterNeed {
-                request: request.clone(),
-                path: source.to_owned(),
-                composition: "source".into(),
-                layer: asset.into(),
-            };
-            let pixels = rasters.fetch(&need)?;
-            renderer.put_svg_raster(request.key.clone(), pixels)?;
-        }
-        Some(request.key)
-    } else {
-        None
-    };
     let mut file = BufWriter::new(
         OpenOptions::new()
             .write(true)
@@ -330,25 +300,12 @@ fn filmstrip(
         // The gate may grant fewer frames during playback, down to one.
         // Bound idle submissions too, so a higher-priority waiter gets its
         // turn between short chunks rather than after an entire filmstrip.
-        let limit = if svg.is_some() {
-            1
-        } else {
-            Renderer::source_batch_limit(size)
-        };
+        let limit = Renderer::source_batch_limit(size);
         let requested = limit.min(times.len() - index) as u32;
         let admitted = gate.admit(pass, requested, cancel).ok_or("cancelled")?;
         let count = admitted.min(requested) as usize;
         let started = Instant::now();
-        let frames = if let Some(key) = &svg {
-            renderer
-                .source_svg_rgba8(key, size, fit, interpretation.as_ref())
-                .and_then(|pixels| {
-                    pixels.ok_or_else(|| {
-                        "The source SVG raster was evicted before drawing".to_owned()
-                    })
-                })
-                .map(|pixels| vec![pixels])
-        } else if count == 1 {
+        let frames = if count == 1 {
             let frame = if times.len() == 1 && !gate.gate.is_playing() {
                 // A real one-frame preparation also warms the same exact
                 // Export decoder/cache used by interactive source seeks.
@@ -388,11 +345,7 @@ fn filmstrip(
             return Err("cancelled".into());
         }
         for (offset, pixels) in frames?.into_iter().enumerate() {
-            let pixels = if svg.is_some() {
-                pixels
-            } else {
-                straight_source_pixels(pixels)
-            };
+            let pixels = straight_source_pixels(pixels);
             file.write_all(&pixels).map_err(|e| e.to_string())?;
             bytes += pixels.len() as u64;
             shared.status(host, job, |r| {

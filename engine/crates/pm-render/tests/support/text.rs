@@ -2,6 +2,22 @@
 
 #![allow(dead_code)]
 
+/// Select a coverage implementation for whole-corpus comparisons. This is
+/// test configuration; production always uses the renderer's default.
+pub fn configure_coverage(renderer: &mut pm_render::Renderer) {
+    use pm_render::text::gpu::Coverage;
+    if let Ok(mode) = std::env::var("PM_TEXT_COVERAGE") {
+        let coverage = match mode.as_str() {
+            "auto" => Coverage::Auto,
+            "area" => Coverage::Area,
+            "direct" => Coverage::Direct,
+            "cpu" => Coverage::Cpu,
+            _ => panic!("PM_TEXT_COVERAGE must be auto, area, direct, or cpu"),
+        };
+        renderer.text_gpu().set_coverage(coverage);
+    }
+}
+
 /// `(ink SSIM, full SSIM, ink ratio)`: `pm_render::parity::text_ssim`.
 pub fn ink_ssim(reference: &[u8], test: &[u8], w: usize, h: usize) -> (f64, f64, f64) {
     pm_render::parity::text_ssim(reference, test, w, h)
@@ -26,10 +42,7 @@ pub fn png_rgba(px: &[u8], unpremultiply: bool) -> Vec<u8> {
         .collect()
 }
 
-#[path = "main_thread_fonts.rs"]
-mod main_thread_fonts;
-#[cfg(target_os = "macos")]
-pub use main_thread_fonts::MainThreadFonts;
+include!("main_thread_fonts.rs");
 
 /// One face of a font file as its own font (collections split).
 #[cfg(target_os = "macos")]
@@ -135,6 +148,112 @@ pub fn has_text(doc: &pm_model::Document) -> bool {
         .any(|l| l.iter().any(is_text_layer))
 }
 
+/// Fingerprint the authored layers after the corpus `textOnly` projection.
+/// This retains text, captions, groups, precompositions and nulls, including
+/// their transforms, masks, animators and built-in effects. The capture
+/// generates new IDs for effect-parameter keyframes when it rebuilds a
+/// project; those transport IDs alone are excluded from the hash. Keyframe
+/// times, values, easing and all other authored fields remain included.
+pub fn authored_isolation_fingerprint(doc: &pm_model::Document) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    fn projected_layers(layers: Option<&pm_model::Value>) -> Vec<pm_model::Value> {
+        let mut kept: Vec<_> = layers
+            .and_then(pm_model::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|layer| {
+                matches!(
+                    layer
+                        .as_object()
+                        .and_then(|object| object.get("type"))
+                        .and_then(pm_model::Value::as_str),
+                    Some("text" | "captions" | "group" | "precomp" | "null")
+                )
+            })
+            .cloned()
+            .collect();
+        let ids: std::collections::BTreeSet<_> = kept
+            .iter()
+            .filter_map(|layer| layer.as_object()?.get("id")?.as_str().map(str::to_owned))
+            .collect();
+        for layer in &mut kept {
+            let object = layer.as_object_mut().expect("kept layer object");
+            object.insert("threeD", pm_model::Value::Bool(false));
+            object.insert("mblur", pm_model::Value::Bool(false));
+            if object
+                .get("parent")
+                .and_then(pm_model::Value::as_str)
+                .is_some_and(|id| !ids.contains(id))
+            {
+                object.remove("parent");
+            }
+            if object
+                .get("matteSource")
+                .and_then(pm_model::Value::as_str)
+                .is_some_and(|id| !ids.contains(id))
+            {
+                object.insert("matteSource", pm_model::Value::Null);
+            }
+            if let Some(fx) = object.get_mut("fx").and_then(pm_model::Value::as_array_mut) {
+                fx.retain(|effect| {
+                    effect
+                        .as_object()
+                        .and_then(|effect| effect.get("type"))
+                        .and_then(pm_model::Value::as_str)
+                        != Some("typewriter")
+                });
+                for effect in fx {
+                    let Some(params) = effect
+                        .as_object_mut()
+                        .and_then(|effect| effect.get_mut("p"))
+                        .and_then(pm_model::Value::as_object_mut)
+                    else {
+                        continue;
+                    };
+                    for (_, channel) in params.iter_mut() {
+                        if let Some(keyframes) = channel
+                            .as_object_mut()
+                            .and_then(|channel| channel.get_mut("kf"))
+                            .and_then(pm_model::Value::as_array_mut)
+                        {
+                            for keyframe in keyframes {
+                                if let Some(object) = keyframe.as_object_mut() {
+                                    object.remove("i");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        kept
+    }
+
+    let root = doc.to_value()?;
+    let object = root.as_object()?;
+    let mut selected = pm_model::json::Map::new();
+    let root_layers = projected_layers(object.get("layers"));
+    let mut found = root_layers.iter().any(is_text_layer);
+    selected.insert("layers", pm_model::Value::Array(root_layers));
+    let mut comps = pm_model::json::Map::new();
+    if let Some(all_comps) = object.get("comps").and_then(pm_model::Value::as_object) {
+        for (id, comp) in all_comps {
+            let layers = projected_layers(comp.as_object().and_then(|comp| comp.get("layers")));
+            if !layers.is_empty() {
+                found |= layers.iter().any(is_text_layer);
+                comps.insert(id.clone(), pm_model::Value::Array(layers));
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+    selected.insert("comps", pm_model::Value::Object(comps));
+    let canonical = pm_model::json::to_canonical_string(&pm_model::Value::Object(selected));
+    Some(format!("{:x}", Sha256::digest(canonical.as_bytes())))
+}
+
 /// The document with every text and captions layer at opacity 0 (drawn by
 /// nothing, every other layer unchanged).
 pub fn without_text(doc: &pm_model::Document) -> pm_model::Document {
@@ -154,6 +273,17 @@ pub fn without_text(doc: &pm_model::Document) -> pm_model::Document {
             ch.insert("expr", pm_model::Value::Null);
             p.insert("opacity", pm_model::Value::Object(ch));
         }
+    }
+    pm_model::Document::new(Some(root), doc.revision() + 1)
+}
+
+/// The composition's authored background without any layer (every layer
+/// list emptied, precompositions included). Used to verify that a nontext
+/// layer cannot influence modeled text pixels.
+pub fn background_only(doc: &pm_model::Document) -> pm_model::Document {
+    let mut root = doc.to_value().expect("a document");
+    for list in layer_lists(&mut root) {
+        list.clear();
     }
     pm_model::Document::new(Some(root), doc.revision() + 1)
 }

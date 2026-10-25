@@ -119,6 +119,8 @@ impl Frame {
             anchor_x: -r.x0,
             anchor_y: -r.y0,
             selection: s,
+            // Level 2 is the engine's own: it anchors on its resting ink.
+            anchor_box: s,
         }
     }
 }
@@ -616,10 +618,7 @@ mod tests {
             p: content(&[(key, value)]),
         };
         // "ab\u{301}cd efgh": a combining mark keeps its grapheme whole.
-        let d = content(&[
-            ("text", "ab\u{301}cd efgh".into()),
-            ("size", 40.0.into()),
-        ]);
+        let d = content(&[("text", "ab\u{301}cd efgh".into()), ("size", 40.0.into())]);
         let styles = [
             style(1.0, 6.0, "size", 50.0.into()),
             style(4.0, 9.0, "tracking", 4.0.into()),
@@ -687,11 +686,11 @@ mod tests {
             sources: vec![0, 1],
         };
         let mut measure = CompatMeasure::new(test_fonts::Fonts::new());
-        // The outline-less fallback would give the space a box.
+        // Nothing is drawn for a glyph without outline or color source.
         assert!(
             measure
                 .level2_ink(&data, &run, test_fonts::EM_SPACE)
-                .is_some()
+                .is_none()
         );
         let draw = Draw {
             run,

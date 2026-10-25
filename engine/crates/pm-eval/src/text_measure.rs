@@ -8,10 +8,17 @@
 //! outline in font units scaled by `size / unitsPerEm`, placed at the glyph's
 //! pen position and baseline offset.
 //!
+//! Color glyphs (`sbix`/`CBDT` strikes, `COLR`) report what the renderer
+//! draws, from the painter's own placement
+//! (`pm_text::render::scene::drawn_color_glyph_ink`): the strike's nonzero
+//! texels at the full-em size CoreText draws it at, or the COLR paint bounds
+//! (TEXT-INK-1). Typography anchoring instead keeps Blink's measurement
+//! (`MeasuredLine::anchor_ink`): Skia's glyph metrics from CoreText's
+//! rectangle for path-less `sbix` glyphs, the outline box otherwise.
+//!
 //! Outlines come from the face's own bytes (`FaceInfo::data`). The
 //! metrics-and-shaping subsets `pm-wasm` receives have no outline tables, so
-//! glyphs without an outline (subsets, bitmap emoji) contribute no ink there;
-//! see `docs/engine/pm-eval-layers.md`.
+//! ink answers need whole faces there; see `docs/engine/pm-eval-layers.md`.
 
 use std::collections::HashMap;
 
@@ -36,6 +43,22 @@ pub(crate) fn level2_ink(
     run: &pm_text::level2::Run,
     glyph: u32,
 ) -> Option<[f64; 4]> {
+    let skew = -libm::tan(f64::from(run.skew) * core::f64::consts::PI / 180.0);
+    // Color glyphs: the level 2 painter's strike or COLR program placement.
+    if let Some(r) = pm_text::render::scene::drawn_color_glyph_ink(
+        pm_text::render::outline::FaceRef {
+            data: data.as_slice(),
+            index: 0,
+            id: data.id(),
+        },
+        pm_text::render::outline::Coords::Normalized(&run.coords),
+        glyph,
+        run.size,
+        skew,
+        None,
+    ) {
+        return r.map(|r| [r.x0, r.y0, r.x1, r.y1]);
+    }
     let font = FontRef::new(data.as_slice()).ok()?;
     let coords: Vec<_> = run
         .coords
@@ -55,20 +78,8 @@ pub(crate) fn level2_ink(
             .ok()?;
     }
     if !pen.any {
-        // Color bitmap glyphs have no outline; their advance and the font's
-        // ascent/descent form their typographic box. Spaces have no ink.
-        let metrics = font.glyph_metrics(Size::new(run.size), coords.as_slice());
-        let advance = metrics.advance_width(GlyphId::new(glyph))?;
-        let metrics = font.metrics(Size::new(run.size), coords.as_slice());
-        if font.charmap().map(' ') == Some(GlyphId::new(glyph)) {
-            return None;
-        }
-        return Some([
-            0.0,
-            -f64::from(metrics.ascent),
-            f64::from(advance),
-            -f64::from(metrics.descent),
-        ]);
+        // Nothing is drawn for a glyph with neither outline nor color source.
+        return None;
     }
     let mut ink = [
         f64::from(pen.b[0]),
@@ -82,7 +93,6 @@ pub(crate) fn level2_ink(
         let y = x * 0.925;
         ink = [ink[0] - x, ink[1] - y, ink[2] + x, ink[3] + y];
     }
-    let skew = -libm::tan(f64::from(run.skew) * core::f64::consts::PI / 180.0);
     let (a, b) = (skew * ink[1], skew * ink[3]);
     ink[0] += a.min(b);
     ink[2] += a.max(b);
@@ -94,6 +104,9 @@ type GlyphBox = Option<([f32; 4], f32)>;
 
 /// A face, glyph, and variation coordinates (tag, value bits).
 type BoxKey = (FaceId, u32, Vec<(u32, u32)>);
+/// A color face, glyph, size bits, and variation coordinates.
+type ColorBoxKey = (FaceId, u32, u32, Vec<(u32, u32)>);
+const COLOR_BOX_LIMIT_ENTRIES: usize = 4096;
 
 const LEVEL2_GLYPH_LIMIT_ENTRIES: usize = 16_384;
 const LEVEL2_GLYPH_LIMIT_BYTES: usize = 2 * 1024 * 1024;
@@ -171,6 +184,7 @@ pub struct Level2CacheStats {
 pub struct CompatMeasure<R: FontResolver> {
     compat: Compat<R>,
     boxes: HashMap<BoxKey, GlyphBox>,
+    color_boxes: HashMap<ColorBoxKey, Option<RectF>>,
     level2: level2::Level2Cache,
     level2_boxes: lru::Lru<Level2GlyphKey, Option<[f64; 4]>>,
     level2_glyph_hits: u64,
@@ -182,6 +196,7 @@ impl<R: FontResolver> CompatMeasure<R> {
         CompatMeasure {
             compat: Compat::new(resolver),
             boxes: HashMap::new(),
+            color_boxes: HashMap::new(),
             level2: level2::Level2Cache::default(),
             level2_boxes: lru::Lru::default(),
             level2_glyph_hits: 0,
@@ -244,6 +259,120 @@ impl<R: FontResolver> CompatMeasure<R> {
         let computed = outline_box(info.data.as_slice(), info.index, glyph, coords);
         self.boxes.insert(key, computed);
         computed
+    }
+
+    /// The drawn box of a color glyph relative to its pen origin (y down),
+    /// placed as the level 1 painter places it; `None` for outline glyphs.
+    fn color_box(
+        &mut self,
+        face: FaceId,
+        glyph: u32,
+        size: f32,
+        coords: &[(u32, f32)],
+    ) -> Option<RectF> {
+        let facts = &self.compat.resolver().face(face).facts;
+        if !facts.has_color_table {
+            return None;
+        }
+        let sbix = facts.has_sbix;
+        let key = (
+            face,
+            glyph,
+            size.to_bits(),
+            coords.iter().map(|(t, v)| (*t, v.to_bits())).collect(),
+        );
+        if let Some(b) = self.color_boxes.get(&key) {
+            return *b;
+        }
+        // The painter draws `sbix` strikes at CoreText's full-em size.
+        let em = if sbix {
+            self.compat.resolver_mut().em_advance(face, size)
+        } else {
+            None
+        };
+        let info = self.compat.resolver().face(face);
+        let skew = if info.synthetic_italic {
+            pm_text::render::outline::SYNTHETIC_ITALIC_SKEW
+        } else {
+            0.0
+        };
+        let computed = pm_text::render::scene::drawn_color_glyph_ink(
+            pm_text::render::outline::FaceRef::of(info),
+            pm_text::render::outline::Coords::User(coords),
+            glyph,
+            size,
+            skew,
+            em,
+        )
+        .map(|ink| {
+            // Something drawn has a box; nothing drawn has an empty one.
+            ink.map_or_else(RectF::default, |r| {
+                RectF::from_sk(r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32)
+            })
+        });
+        if self.color_boxes.len() >= COLOR_BOX_LIMIT_ENTRIES {
+            self.color_boxes.clear();
+        }
+        self.color_boxes.insert(key, computed);
+        computed
+    }
+
+    /// The box Canvas measured for an `sbix` glyph CoreText draws without a
+    /// path: Skia's glyph metrics (`SkScalerContext_Mac::generateMetrics`)
+    /// from CoreText's bounding rectangle, through the transform, rounded
+    /// out and outset 1 px, on the canonical 64 px strike scaled back when
+    /// the text is too large for the glyph cache (`SkStrikeSpec::
+    /// MakeCanonicalized`). `None` when Blink measures the glyph's path.
+    /// Typography anchoring uses this box, so anchors saved in today's app
+    /// keep their placement; selections show the drawn ink.
+    fn sbix_metric_box(&mut self, face: FaceId, glyph: u32, size: f32) -> Option<RectF> {
+        let info = self.compat.resolver().face(face);
+        if !info.facts.has_sbix {
+            return None;
+        }
+        let skew = if info.synthetic_italic {
+            pm_text::render::outline::SYNTHETIC_ITALIC_SKEW as f32
+        } else {
+            0.0
+        };
+        // `ShouldDrawAsPath`: either column of the text matrix longer than
+        // the 256 px atlas side.
+        let limit = 256.0f32 * 256.0;
+        let as_path = size * size > limit || (skew * size) * (skew * size) + size * size > limit;
+        let (strike, scale) = if as_path {
+            (64.0, size / 64.0)
+        } else {
+            (size, 1.0)
+        };
+        let [x, y, w, h] = self
+            .compat
+            .resolver_mut()
+            .sbix_metric_rect(face, glyph, strike)?;
+        if w <= 0.0 || h <= 0.0 {
+            return Some(RectF::default());
+        }
+        // `CGRectApplyAffineTransform` with the skew (`x + skew × y`, y down).
+        let skew = f64::from(skew);
+        let (top, bottom) = (-(y + h), -y);
+        let (a, b) = (skew * top, skew * bottom);
+        let left = x + a.min(b);
+        let right = x + w + a.max(b);
+        // `SkRect::MakeXYWH` in float, `roundOut`, `outset(1, 1)`.
+        let (l, t) = (left as f32, top as f32);
+        let r = l + (right - left) as f32;
+        let bt = t + (bottom - top) as f32;
+        let i = [
+            l.floor() - 1.0,
+            t.floor() - 1.0,
+            r.ceil() + 1.0,
+            bt.ceil() + 1.0,
+        ];
+        Some(RectF::from_sk(
+            i[0] * scale,
+            i[1] * scale,
+            i[2] * scale,
+            i[3] * scale,
+        ))
     }
 }
 
@@ -470,11 +599,15 @@ impl<R: FontResolver> CompatMeasure<R> {
     /// placed at its pen origin, an `InlineLayoutUnit` (16.16 fixed point)
     /// starting at the run's advance rounded up and advanced by the glyph
     /// advances exactly, converted to `float` per glyph.
-    fn ink(&mut self, measured: &pm_text::blink::measure::Measured) -> RectF {
-        let mut ink = RectF::default();
+    ///
+    /// Returns the drawn ink and the box typography anchoring measures
+    /// (Canvas's: [`Self::sbix_metric_box`] for path-less `sbix` glyphs);
+    /// the two differ only for color glyphs.
+    fn ink(&mut self, measured: &pm_text::blink::measure::Measured) -> (RectF, RectF) {
+        let (mut ink, mut anchor_ink) = (RectF::default(), RectF::default());
         let mut xpos = 0.0f32;
         for item in &measured.items {
-            let mut item_ink = RectF::default();
+            let (mut item_ink, mut item_anchor) = (RectF::default(), RectF::default());
             let mut run_advance = 0.0f32;
             let rtl = item.runs.iter().any(|r| r.rtl);
             let runs: Vec<&pm_text::blink::shaper::Run> = if rtl {
@@ -483,27 +616,52 @@ impl<R: FontResolver> CompatMeasure<R> {
                 item.runs.iter().collect()
             };
             for run in runs {
-                let mut bounds = GlyphBounds::default();
+                let (mut bounds, mut anchor_bounds) =
+                    (GlyphBounds::default(), GlyphBounds::default());
                 // `InlineLayoutUnit::FromFloatCeil(run_advance)`.
                 let mut origin = (run_advance * 65536.0).ceil() as i64;
                 for g in &run.glyphs {
-                    if g.glyph != UNMATCHED_VS_GLYPH
-                        && let Some((b, upem)) = self.glyph_box(run.face, g.glyph, &run.coords)
-                    {
-                        let [l, t, r, bt] = skia_glyph_rect(b, upem, run.size);
+                    if g.glyph != UNMATCHED_VS_GLYPH {
+                        let path = |m: &mut Self| {
+                            m.glyph_box(run.face, g.glyph, &run.coords)
+                                .map(|(b, upem)| {
+                                    let [l, t, r, bt] = skia_glyph_rect(b, upem, run.size);
+                                    RectF::from_sk(l, t, r, bt)
+                                })
+                        };
+                        let drawn = self.color_box(run.face, g.glyph, run.size, &run.coords);
+                        let measured = self.sbix_metric_box(run.face, g.glyph, run.size);
+                        let (drawn, measured) = match (drawn, measured) {
+                            (Some(d), Some(m)) => (Some(d), Some(m)),
+                            (Some(d), None) => (Some(d), path(self)),
+                            (None, Some(m)) => (path(self), Some(m)),
+                            (None, None) => {
+                                let p = path(self);
+                                (p, p)
+                            }
+                        };
+                        let pen = origin as f32 / 65536.0;
                         let offset = (fixed_to_float(g.x_offset), -fixed_to_float(g.y_offset));
-                        bounds.unite(RectF::from_sk(l, t, r, bt), origin as f32 / 65536.0, offset);
+                        if let Some(glyph) = drawn {
+                            bounds.unite(glyph, pen, offset);
+                        }
+                        if let Some(glyph) = measured {
+                            anchor_bounds.unite(glyph, pen, offset);
+                        }
                     }
                     origin += i64::from(g.advance);
                 }
                 item_ink.union(&bounds.build());
+                item_anchor.union(&anchor_bounds.build());
                 run_advance += run.width;
             }
             item_ink.offset(xpos, 0.0);
+            item_anchor.offset(xpos, 0.0);
             ink.union(&item_ink);
+            anchor_ink.union(&item_anchor);
             xpos += item.width;
         }
-        ink
+        (ink, anchor_ink)
     }
 }
 
@@ -605,17 +763,20 @@ impl<R: FontResolver> TextMeasure for CompatMeasure<R> {
         shaped
             .into_iter()
             .map(|(text, measured)| {
-                let r = self.ink(&measured);
-                let ink = [
-                    f64::from(r.x),
-                    f64::from(r.y),
-                    f64::from(r.right()),
-                    f64::from(r.bottom()),
-                ];
+                let (ink, anchor_ink) = self.ink(&measured);
+                let edges = |r: RectF| {
+                    [
+                        f64::from(r.x),
+                        f64::from(r.y),
+                        f64::from(r.right()),
+                        f64::from(r.bottom()),
+                    ]
+                };
                 MeasuredLine {
                     text,
                     width: f64::from(measured.width),
-                    ink,
+                    ink: edges(ink),
+                    anchor_ink: edges(anchor_ink),
                 }
             })
             .collect()

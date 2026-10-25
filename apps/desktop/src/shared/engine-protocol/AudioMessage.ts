@@ -17,8 +17,4 @@ export type AudioMessage = { "audio": "monitor", solo: Array<string>, } | { "aud
  * Echoed by the decoder so replaced sources and resyncs cannot
  * accept a prior request's envelope.
  */
-request?: Seq, } | { "audio": "peaks" } & AudioPeaks | { "audio": "sourceMonitor", asset: AssetId | null, time: Ticks, playing: boolean, generation: number, } | { "audio": "sourceStatus", asset: AssetId, time: Ticks, playing: boolean, generation: number, 
-/**
- * Original media's presentation endpoint; absent when unavailable.
- */
-duration?: Ticks, levels: ChannelLevels, error?: string, };
+request?: Seq, } | { "audio": "peaks" } & AudioPeaks | { "audio": "sourceMonitor", asset: AssetId | null, time: Ticks, playing: boolean, generation: number, } | { "audio": "sourceStatus", asset: AssetId, time: Ticks, playing: boolean, generation: number, duration?: Ticks, levels: ChannelLevels, error?: string, };

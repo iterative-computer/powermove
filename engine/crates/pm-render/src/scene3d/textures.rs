@@ -333,8 +333,28 @@ impl Textures {
         Ok(t)
     }
 
-    /// Installs Chromium's SVG map bytes into the ordinary map cache.
-    /// The key includes the source file version, as it does for decoded stills.
+    /// Whether the map of `path`'s current version is cached.
+    pub fn has_map(&mut self, path: &Path, srgb: bool) -> bool {
+        let Some((len, modified)) = stamp(path) else {
+            return false;
+        };
+        let key = MapKey {
+            path: path.to_path_buf(),
+            len,
+            modified,
+            srgb,
+        };
+        match self.maps.get_mut(&key) {
+            Some(e) => {
+                e.used = self.generation;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Installs an SVG map's pixels into the ordinary map cache. The key
+    /// includes the source file version, as it does for decoded stills.
     #[allow(clippy::too_many_arguments)]
     pub fn put_svg(
         &mut self,

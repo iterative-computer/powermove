@@ -1,14 +1,13 @@
 /** Standalone CLI runner. Its authenticated loopback service is cheap; Chromium
  * starts only when pm-cli encounters a pinned or unverified user program
- * (`POST /`) or a level 1 SVG image (`POST /svg`, decision S1: the raster the
- * hidden host's tab draws, from the same module). */
+ * (`POST /`). */
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
 import { encodeFrame, decodeFrame } from '../../shared/wire';
-import type { ShaderFallbackRequest, SvgRasterKey } from '../../shared/engine-protocol';
+import type { ShaderFallbackRequest } from '../../shared/engine-protocol';
 
 export async function angleService(distDir: string, env: NodeJS.ProcessEnv) {
   let browser: Browser | null = null, page: Promise<Page> | null = null, closed = false;
@@ -23,25 +22,15 @@ export async function angleService(distDir: string, env: NodeJS.ProcessEnv) {
     const page = await context.newPage();
     await page.setContent('<!doctype html><title>Powermove ANGLE runner</title>');
     await page.addScriptTag({ type: 'module', content: await readFile(path.join(distDir, 'renderer/engine/native-host.js'), 'utf8') });
-    await page.waitForFunction(() => typeof (globalThis as any).runNativeShader === 'function' && typeof (globalThis as any).runNativeSvgRaster === 'function');
+    await page.waitForFunction(() => typeof (globalThis as any).runNativeShader === 'function');
     return page;
   })().catch(async error => { await browser?.close().catch(() => {}); browser = null; page = null; throw error; });
   const server = createServer(async (request, response) => {
     const answer = (value: unknown) => { const bytes = encodeFrame(value); response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': bytes.length, Connection: 'close' }); response.end(bytes); };
-    if (request.method !== 'POST' || (request.url !== '/' && request.url !== '/svg') || request.headers.authorization !== `Bearer ${token}`) { response.writeHead(403); response.end(); return; }
+    if (request.method !== 'POST' || request.url !== '/' || request.headers.authorization !== `Bearer ${token}`) { response.writeHead(403); response.end(); return; }
     try {
       const chunks: Buffer[] = []; let size = 0;
       for await (const chunk of request) { size += chunk.length; if (size > 1024 ** 3) throw new Error('Shader inputs exceed 1 GB'); chunks.push(chunk); }
-      if (request.url === '/svg') {
-        const job = decodeFrame(Buffer.concat(chunks)) as { key: SvgRasterKey; svg: Uint8Array };
-        const { content, width, height, texture } = job.key ?? {};
-        const maxEdge = texture === true ? 16384 : 8192;
-        if (typeof content !== 'string' || !/^[0-9a-f]{64}$/.test(content) || (texture !== undefined && texture !== true) || !Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > maxEdge || height > maxEdge || !(job.svg instanceof Uint8Array)) throw new Error('invalid SVG raster request');
-        const current = await open();
-        const result = await current.evaluate(async ({ key, svg }) => (globalThis as any).runNativeSvgRaster(key, svg), { key: job.key, svg: Buffer.from(job.svg).toString('base64') });
-        answer(result.ok ? { ok: true, pixels: Buffer.from(result.pixels, 'base64') } : result);
-        return;
-      }
       const job = decodeFrame(Buffer.concat(chunks)) as { request: ShaderFallbackRequest; textures: Uint8Array[] };
       const current = await open();
       const result = await current.evaluate(async ({ request, textures }) => (globalThis as any).runNativeShader(request, textures),

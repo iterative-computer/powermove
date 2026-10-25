@@ -1,2253 +1,260 @@
-# Text and captions rendering
+# Text rendering
 
-Design notes for glyph rendering in `engine/crates/pm-text` (`render`
-module) and text and captions layers in `engine/crates/pm-render`
-(`text` module). Plan: section 12, section 10 (text and captions rows),
-section 25 (text class), amendments 10 and 19. Spike: `docs/engine/spikes/S4.md`.
-Layout (level 1 `compat`, level 2 on Parley, the font registry) is described
-in `docs/engine/text.md`; word states, animator poses, raster boxes, and font
-anchors are `pm-eval`'s (`docs/engine/pm-eval-layers.md`).
+Text uses one raster pipeline at both compatibility levels: exact outline
+coverage in output pixels, followed by ordered float paint. Compatibility
+selects layout, not raster quality. The font registry and layout contract
+are described in [text.md](text.md).
+
+## Authored layout
+
+Level 1 keeps `Compat::line_runs` and Blink measurement over HarfRust.
+Advances, UTF-16 wrapping, baseline (`size × 0.82`), leading, tracking,
+effective size, variation coordinates, optical sizing and window font-cache
+seeds are unchanged. Range typography and animator poses still come from
+`pm-eval`. Level 2 uses the shared Parley frame for layout, carets, bounds,
+picks and painting.
+
+The painter takes each run's exact layout positions through the layer's
+world matrix. It does not snap glyph origins, relax strike sizes, or choose
+a raster-density bucket. Production layers use `Quad::Device`; transforms
+therefore affect outline coverage directly at the requested output size.
+The compatibility raster service still paints the requested layer canvas
+and density, preserving its geometry and crop contract.
+
+Layout is an exact gate independent of pixels. Raster improvements must
+never be accepted as a reason for changing an advance or line break.
+
+Ink boxes describe what is drawn, at both levels (TEXT-INK-1). Outline
+glyphs keep their control boxes; level 1 keeps Blink's canonical-path
+arithmetic for them. A color glyph's box is its drawn area from the
+painter's own placement (`scene::drawn_color_glyph_ink`, shared by native
+and WASM): the strike's nonzero texels at the full-em size with the
+authored Apple shift, grown by the bilinear reach when enlarged, or the
+COLR painted and clip bounds. A device pixel is nonzero exactly when its
+square meets that box. Canvas measured emoji by CoreText's metric
+rectangle rounded out and outset 1 px; selections do not show that slack.
+Typography anchoring is placement, so it keeps Canvas's box
+(`MeasuredLine::anchor_ink`, `TextRaster::anchor_box`): recorded
+`fontAnchorBounds` are that box, and saved layers render where today's app
+renders them. Advances and line breaks are unchanged.
 
 ## What is drawn
 
-| Feature | Status | Evidence |
-|---|---|---|
-| Text layers, `compat` level 1: every text property (font, weight, size, tracking, leading, alignment, italic, color, paragraph boxes, `fontAxis.*` variable axes, project fonts, synthesized bold and italic) | Drawn | `tests/text_raster.rs`, `tests/text_corpus.rs` |
-| Text animators (stagger, range, wave; characters, words, lines; position, scale, rotation, skew, opacity, blur, color, tracking) and range styles | Drawn | `tests/text_corpus.rs` (`text/animator-*`, `text/range-styles`) |
-| Captions: every preset, box, stroke, highlight, highlight scale, pop and fade word animations, text case | Drawn | `tests/text_raster.rs` (`caption-*`), `tests/text_corpus.rs` (`captions/*`) |
-| Level 1 glyphs on macOS from CoreGraphics masks, as Canvas2D draws them (below, "Glyph masks"): every axis-aligned glyph below the large-text size, synthesized italic included | Drawn, pixel-identical on the corpus | `tests/text_raster.rs` (`families`, `weights`, `italic`, `scripts`, `tracking`, `paragraph`, `colors`, `sizes`), `tests/text_corpus.rs` |
-| Apple Color Emoji (`sbix`), drawn by CoreGraphics and placed as Canvas2D places it | Drawn, pixel-identical | `emoji` group (6 to 160 px) |
-| Caption boxes, 4× multisampled as the GPU canvas fills paths | Drawn (3 to 9 pixels per case still differ at the corners) | `caption-boxed`, `caption-paper` |
-| RTL and complex scripts the level 1 layout shapes (Arabic, Hebrew, Devanagari, Thai, CJK) | Drawn | `scripts` group |
-| `compat` level 2 text and captions, at output resolution | Drawn; text includes range typography, animators and typography anchoring through the shared evaluated frame | `tests/text_level2.rs`, `tests/text_level2_semantics.rs` |
-| Text and caption colors: hex, `rgb()`/`rgba()`, `hsl()`/`hsla()`, `hwb()`, named colors, `transparent`; rejected strings keep the style `save()` restored, as the canvas does | Drawn | `pm_text::render::color` tests (values checked against Chromium's `fillStyle`), `tests/text_colors.rs` |
-| CSS Color 4/5 (`lab`, `lch`, `oklab`, `oklch`, `color`, `color-mix`, relative colors, `calc`, `currentcolor`) and detached-canvas system colors | Drawn; invalid `light-dark()` retains the restored paint, as today | `tests/text_colors.rs`, closure capture (74 colors) |
-| Color vector glyphs (`COLR` v0 and v1) | Fontations paint graph rasterized natively; all 12 captured runs meet 1 CV, v0 is byte-identical at all five captured sizes | `render/colr.rs`, `tests/text_raster.rs` |
-| Text and captions without configured fonts | Refused (`Feature::Text`). The interactive engine, the job engine, and `pm-cli` give their renderers fonts (`docs/engine/text.md`, "Fonts on render threads") | `tests/text_gpu.rs`, `pm-node/tests/fonts.rs` |
-| A registry question the host's font service left unanswered | Refused (`Feature::Text`, "the font registry did not answer"), never drawn in another font | `pm_text::served` tests |
+Plain text paints every wrapped line with its layout alignment and baseline.
+Animated text uses the existing evaluated range font, color, opacity,
+transform and blur for each posed unit. Equal poses may share a draw, but
+source-over order remains authored order.
 
-Text and captions have no shadow property today (drop shadow is an effect).
+Captions paint the rounded box, then each word's stroke and fill. Word
+opacity and scale act about its center. Caption stroke width remains
+`2 × stroke × size / styleSize`, with round joins and miter limit 2.
+Hidden captions draw nothing, including in snapshot and export requests.
 
-## How a layer is drawn
+Rejected CSS fill setters keep the restored style: plain text starts with
+its default; an animated glyph starts with black; caption fill restores
+the box fill, or black without a box. Invalid `hexToRgba` output follows
+the same rejection rule. Unsupported styles report a text failure rather
+than silently substituting a color.
 
-`plan.rs` dispatches `text` and `captions` to `crate::text` (`text_quad`).
+## Outlines and coverage
 
-**Level 1** reproduces today's compositor: a canvas raster of the layer at
-the density `continuousRasterScale(scaledWorld)` asks for (the layer's
-largest singular value in quarter steps, 0.25 to 32; ported exactly in
-`continuous_raster_scale`), sampled bilinearly through the layer's quad with
-hard UV edges. Canvas sizes and densities follow `textRasterGeometry`
-(`min(scale, 8192 / w, 8192 / h)`), `rasterAnimatedText`, and the captions
-rasterizer's `draw` (`max(0.05, min(scale, 8192 / w, 8192 / h))`). The canvas
-is a `TextScene` of ordered draws in device pixels:
+Skrifa reads each glyph outline at its run's variation location. Paths and
+placement use kurbo f64 geometry. User coordinates at level 1 and normalized
+coordinates at level 2 keep their original meanings. Font identity, glyph,
+size, variation and synthetic style participate in outline cache identity;
+a font-generation change drops the old outlines and bitmap glyphs.
 
-- `rasterText`: one `fillText` per wrapped line (`Compat::line_runs`), at
-  `(g.x, pad + lh × i + size × 0.82)`, `fillStyle = d.color || '#fff'`.
-- `rasterAnimatedText`: one `fillText(g.text, 0, 0)` per posed glyph
-  (opacity above 0) through `density · translate(−x0, −y0) · translate(x,
-  baseline) · glyph matrix`, with `globalAlpha`, `filter: blur(blur × density
-  px)`, the range-styled font, and `fillStyle = g.color ?? g.style.color`.
-  Each glyph draws between `save()` and `restore()`, so a color the setter
-  rejects leaves the canvas default, black (never the previous glyph's
-  color). `pm_eval`'s `animated_raster_glyphs` gives the
-  glyphs with the range-font advance shift and the canvas box.
-- Captions `draw`: the box (`roundedRect`, `hexToRgba(boxColor,
-  boxOpacity)`), then per word `strokeText` (2 × stroke × size / style size,
-  round joins, miter limit 2) and `fillText` (fill or highlight color), each
-  word with its state's alpha and scale about the word's center. Each word
-  draws between `save()` and `restore()`: a rejected fill or highlight color
-  draws in the box fill (black without a box), and a `hexToRgba` string
-  holding `NaN` (a short or non-hex code) is rejected the same way, so a box
-  fills and a stroke strokes black.
+Synthetic italic retains the y-down shear `−1/4`. Synthetic bold retains
+the authored framing width:
 
-A color string a layer's draws need is classified by
-`pm_text::render::color::classify`: parsed to the 8-bit sRGB value the
-canvas stores, rejected (the setter keeps the restored style), or
-unsupported (a valid CSS color the parser does not reproduce). Unsupported
-colors refuse the layer (`Feature::Text`) in `render` and in
-`Renderer::text_raster`, which drains the refusal so it never lands on a
-later layer.
+```
+t = clamp((size − 9) / 27, 0, 1)
+width = size × (1/24 + (1/32 − 1/24) × t)
+```
 
-Only the part of the canvas that holds ink is allocated (`TextScene::ink`,
-whole canvas pixels); the quad shrinks to that crop, which samples
-identically because the rest of the canvas is transparent.
+The outline is filled and framed with that width, using kurbo geometry.
+Caption strokes also use kurbo, rather than a fixed-point or A8-mask
+stroker. Path tolerances are measured in device pixels.
 
-**Level 2** (`compat ≥ 2`) draws without a raster: level 2 layout (Parley,
-`pm_eval::text_level2`) through the layer's world matrix (size anchor
-included) straight into output pixels, with the CoreText profile and exact
-positions (`Quad::Device`). Level 2 captions use the same caption frame at
-output resolution. Range typography participates in layout before selectors
-and glyph transforms. The same frame supplies bounds and picks. The
-compatibility raster API paints that frame at the requested density too.
+Eligible outlines paint their pixel area directly from cached glyph-local
+contours and a conservative row-to-edge index. Whole and fractional placement
+are separated before f32 upload. Curves are flattened within 1e-4 device
+pixels, or 1e-5 for outlines no larger than 32 device pixels. A geometric
+certificate preserves already disjoint nonzero boundaries; uncertain paths
+use the nonzero union resolver.
 
-## Rendering
+Large or compound draws use the shared R32Float area renderer. Its cells
+align with device pixels, retain 1/16384 pixel coordinate precision and tile
+large items. Both paths use the same resolved f64 line geometry and ordered
+paint. A bounded 8 MiB path cache is independent of glyph translation, and
+an 8 MiB GPU geometry cache retains compact row-indexed contours. The explicit
+CPU comparison mode uses `vello_cpu`; its 8-bit coverage is not production
+precision. Coverage has no luminance preblend or stem dilation.
 
-`pm_text::render`:
+**TEXT-RASTER-1:** exact outline coverage replaces the previous CoreText
+smoothing fit, CoreGraphics masks, Skia preblend tables and distance-field
+band. Removing that raster darkening is an explicit renderer decision;
+it does not alter font selection, layout or synthetic-bold amount.
 
-- `outline`: Skrifa outlines at device size and variation location (user
-  coordinates for level 1, normalized for level 2), Skia's synthetic italic
-  (`skewX = −1/4`) or Parley's oblique, synthesized bold, and the profile's
-  expansion (`kurbo::expand_path`, round joins, zero-area contours dropped).
-  Where expansion misbehaves (cusps in Marker Felt produced points 30 px
-  away) the glyph is drawn as fill plus a round-joined stroke of the
-  expansion width: the exact dilation. Cached per face, glyph, size,
-  location, and style.
-- `bitmap`: color bitmap glyphs (below), decoded, premultiplied, resampled.
-- `scene`: `Painter::fill_text`, `stroke_text`, `fill_path`; items are
-  *coverage* (paths and a coverage curve) or *images*, each with a color,
-  `globalAlpha`, and blur.
-- `atlas`: coverage cells 1:1 with device pixels at integer offsets, packed
-  in pages of at most 4096 px; larger items are tiled with clips.
-- `cpu`, `paint`: `vello_cpu` coverage pages and the float paint pass on the
-  CPU (the reference for the GPU pass and the fitting tool's renderer).
-- `coretext` (macOS, feature `coretext-reference`): the CoreText reference
-  rasterizer for the level 2 gate and the review sheets.
+## Paint and blend domain
 
-`pm_render::text::gpu::TextGpu`:
+CSS colors retain their parsed float values through painting. The sRGB8
+output rule is CSS Color 4 binary-search gamut mapping with local MINDE:
+constant OKLCh lightness and hue, chroma reduction, deltaEOK JND 0.02.
+`pm_color::css_srgb` and `wgsl::CSS_GAMUT` provide that boundary operation.
+Float and wide-gamut working values remain extended. Alpha is applied after
+mapping the straight output color; ordinary in-gamut values stay exact.
 
-- **Coverage:** Vello 0.11 (`AaConfig::Area`) renders every coverage cell in
-  white into `Rgba8Unorm` pages; alpha is coverage. Vello submits its own
-  command buffers, so pages are pool targets returned only after the frame
-  is submitted (a later layer never overwrites a page an earlier paint pass
-  still reads). If Vello cannot start, the same pages come from `vello_cpu`
-  (`Coverage::Cpu` forces it).
-- **Float paint** (`shaders/text.wgsl`): items composite in order with
-  premultiplied source-over at working precision (`rgba16float` or
-  `rgba32float`). Coverage items paint `color × curve(coverage)` (the curve
-  is 17 points, linear between them); image items sample a padded
-  premultiplied image bilinearly. A blurred item is painted alone into a
-  layer of its reach, blurred by a separable Gaussian (radius 3σ), and
-  composited.
-- **Raster cache:** painted rasters are kept by content key (a 128-bit hash
-  of the scene, its crop, and the font generation) up to 192 MB, so static
-  text is not repainted every frame.
+Coverage multiplies paint alpha. Ordered premultiplied source-over runs in
+float at working precision. It does not quantize after each glyph. The
+project's existing blend-domain selection controls color compositing;
+coverage itself never carries a color-space transfer. Color glyph images
+retain premultiplication throughout filtering and paint.
 
-## Profiles (amendment 10)
+The GPU paint pass is `pm-render/src/shaders/text.wgsl`. Its CPU counterpart
+checks paint arithmetic over known coverage. A CPU/GPU agreement check is
+an implementation check, not the independent raster-quality reference.
 
-`pm_text::render::profile::Profile` holds, per device font size (linear
-between points), horizontal and vertical outline expansion, a vertical ink
-offset, and an exponent applied after the coverage curve; coverage curves
-for white and for black paint mixed by `luma^mix`; positioning (Skia's
-quarter-pixel x and rounded y, or exact); the size above which glyphs draw as
-plain paths; a large-text regime; the stroke pass; synthesized bold.
+Animator text blur retains its authored sigma, transformed to output pixels
+by the world scale. A separable Gaussian paints and filters a float save
+layer, including ink outside the output rectangle that can contribute
+through the kernel. The kernel uses erf CDF differences, reaches
+`ceil(8 × sigma)` pixels, and is not renormalized. Transparent samples
+outside the source are zero. It uses neither the old quantized downscale
+plan nor an 8-bit save layer.
 
-### Canvas2D (level 1)
+## Color glyphs
 
-Measured, not assumed:
+COLR v0/v1 keeps Fontations' paint graph as an authored command program:
+palette and foreground colors, transforms, clips, solid/linear/radial/sweep
+paints, layer order and composite modes. The consumer rasterizes the program
+in its working encoding before upload. Stable content keys include every
+command, color and transform. The independent reference interprets the same
+commands with separate f64 coverage, paint and blend formulas. Integer N32
+span blitters are not part of the renderer.
 
-- **Coverage curve** (`CANVAS2D_LIGHT`): the bottom edge of Menlo's full
-  block, which CoreGraphics smoothing does not move, at 8 to 40 px in 1/4 px
-  steps (`text-probe`): plain coverage 1/4, 1/2, and 3/4 become 0.39, 0.71,
-  and 0.93 for white paint, the same at every size. Black paint is almost
-  linear (0.22, 0.46, 0.72; `CANVAS2D_DARK`); paint in between mixes by luma
-  (Skia's luminance-dependent mask "preblend").
-- **Dilation:** the block's side edges grow by about 0.005 × size; its top
-  edge grows upward (0.09 px at 8 px to 0.47 px at 40 px) and its bottom edge
-  not at all, so the profile expands vertically and moves the ink up by the
-  same amount. The per-size values (`CANVAS2D_POINTS`) were fitted on
-  `text-fit` (10 families × 2 weights × 24 sizes, white) by coordinate search
-  of mean ink SSIM, then smoothed; the expansion saturates at 0.305 px from
-  64 px.
-- **Paths:** text at or above 256 device px (`SubRunContainer` draws masks
-  and distance fields only below `maxMaskSize`, 256), or a glyph whose
-  plain bounds plus one pixel exceed 256 px in either dimension, draws as a
-  plain path (Menlo's 1.03 em full block switches at 250 px, its H at 260
-  px).
-- **Large text:** from 162 px, glyphs sit at exact positions (no y rounding;
-  the H at 170 px sits 0.4 px below a rounded baseline) with expansion
-  0.425 / 0.325 px, offset −0.303 px, exponent 0.962, and the linear curve
-  (mean SSIM 0.991 on the H at 170 to 250 px).
-- **Strokes** (caption `strokeText`): Skia strokes the path itself; fitted on
-  `fit-stroke` (7 sizes × 6 widths): width −0.05 px, exponent 0.612 (mean
-  0.992).
-- **Synthesized bold:** an outset of 0.00875 × size per side (vertical 0.925
-  of horizontal), fitted on the `synthetic` cases; Skia's 1/24 to 1/32
-  interpolation was 30% too heavy at 14 px.
+Color bitmap glyphs retain their authored placement at both levels. Apple
+Color Emoji uses the face's full-em advance at the requested size, including
+the small-size advance differences. Its existing whole-pixel downward
+`apple_emoji_shift` remains. Minification clips each inverse output-pixel quadrilateral against source
+texel squares and integrates premultiplied values in the working domain.
+This also handles transforms that shrink one axis while enlarging another.
+Enlargement uses centered bilinear reconstruction. Transforms use the exact glyph
+position. Emoji size and shift are geometry, separate from the filter.
 
-### CoreText (level 2)
+## Storage and lifetime
 
-S4's CoreGraphics fit (expansion `min(0.0175 × size, 0.34)`, the ink up by
-the same, exact positions) plus a dark-paint curve `1 − (1 − c)^0.55` mixed by
-`luma^1.4`, measured against CoreText on the `colors` cases.
+Coverage pages are temporary frame resources. Coverage and paint record
+into the same frame command encoder. A page returns to the target pool
+after submission; another layer cannot overwrite coverage still in use.
 
-Posed glyphs (textl2 round 2, `device_space_offset`): under a rotated,
-skewed or scaled matrix the smoothing's upward ink offset stays in device
-space, as CoreText grows glyphs toward the top of the bitmap whatever their
-orientation. Measured with `render_posed` on Georgia 40 px "Motion type"
-rotated by the layer (ink SSIM against CoreText, before → after):
+Painted rasters retain only bounded ink crops, keyed by scene contents,
+crop, working encoding and font generation. A private target pool and 4 MiB
+raster cache reuse exact dimensions. Evicted targets can be recycled only
+at the next frame, after the prior submission; at most 2 MiB waits for that
+handoff. Explicit trimming releases handles without destroying textures that
+recorded commands may still reference. No full level 1 backing canvas,
+platform mask atlas, SDF atlas or per-glyph N32 paint image remains.
 
-| rotation | 0° | 10° | 20° | 30° | 40° | 90° | 180° |
-|---|---|---|---|---|---|---|---|
-| before | 0.9963 | 0.9942 | 0.9881 | 0.9776 | 0.9743 | 0.8974 | 0.8426 |
-| after | 0.9963 | 0.9961 | 0.9950 | 0.9926 | 0.9967 | 0.9961 | 0.9962 |
-
-CoreGraphics also weakens its smoothing toward 45° and drops it at 45°
-(coverage ratio smoothed/unsmoothed 1.29 at 37.5°, 1.18 at 42.5°, 1.00 at
-45°, symmetric about 45°). The engine keeps its smoothing continuous, so an
-animated rotation never pops; at 45° its ink is 24% heavier than CoreText's
-(ink SSIM 0.832, 42.5° 0.983). This is a level 2 decision, not a fitted
-behaviour; see Gaps.
-
-## Color bitmap glyphs (emoji)
-
-Canvas2D placement is the rule for both levels (amendment 10). Measured on
-`fit-emoji` (😀 and 🇰🇷 at every size from 6 to 64 px):
-
-- CoreText draws Apple Color Emoji at the face's full-em advance for the
-  requested size (`FontResolver::em_advance`: 8 px at 6 px, 15 at 12, 20 at
-  16, 22 at 20, the size itself from 24 px), not at the requested size.
-- The downward shift is whole pixels: `size / 8` rounded with halves down
-  from 20 px; below, the measured 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4 for
-  6 to 19 px (`apple_emoji_shift`). With these, every pixel matches at strike
-  sizes (SSIM 1.000 at 16, 24, 32, 40, 48, 52 px).
-- The strike image is downscaled with Lanczos-2, the closest of area,
-  linear, Mitchell, Lanczos-2, and Lanczos-3: SSIM ≥ 0.98 from 10 px; 0.92 to
-  0.96 at 6 to 9 px.
-- Level 2 (CoreText profile, `bitmap_snap`): CoreText draws color bitmap
-  glyphs at the nearest device pixel (measured on Apple Color Emoji at 24,
-  37, 40 and 64 px with quarter-pixel phases: centroid error 0.25 to 0.5 px
-  with exact positions, under 0.01 px rounded). The amendment's Canvas2D
-  shift still applies.
-
-## Glyph masks (level 1, macOS)
-
-Measured on 2026-10-18 and now the level 1 path: Canvas2D's glyph masks are
-CoreGraphics' own coverage, mapped through a per-color table. pm-text draws
-the same masks (`render::cgmask`, feature `cg-masks`, on by default in
-pm-render on macOS):
-
-- **Masks.** Each glyph is drawn by CoreGraphics (`CTFontDrawGlyphs`) into a
-  32-bit RGB bitmap, black on white, antialiased, with subpixel positioning
-  on and quantization off, at the glyph's quarter-pixel offset (Skia's
-  subpixel positioning: x to the nearest quarter, y rounded), and the mask
-  is `255 − luminance`. The CTFont is the face's own bytes at the device
-  size with its variation coordinates (`opsz` included). Placed 1:1 at the
-  whole device pixel, the masks equal Canvas2D's: on every capture case
-  the map from our raw coverage to Canvas2D's is a function (each raw value
-  gives one value), so geometry, smoothing, and positions match exactly.
-  An alpha-only context gives the same coverage (smoothing has no effect on
-  macOS 27).
-- **Tables.** That function depends on the paint color through four tables
-  (`render::mask_tables`, measured: every coverage value 1 to 255 seen on
-  the fit capture's 10 colors, no ambiguous entry, monotonic). The table is
-  picked by Skia's Mac luminance rule (`luminance_bucket`): the paint color
-  canonicalized (top 3 bits replicated per channel), halved (the Mac scaler
-  for smoothed text without subpixel coverage), canonicalized again,
-  reduced to one luminance (`(54r + 183g + 19b) >> 8`), canonicalized; its
-  top bits are the bucket, 0 to 3 (halving leaves no higher bucket).
-  Verified on 14 colors (black, primaries, grays, yellow, cyan, the
-  captions' gold and red). Skia's `SkMaskGamma` correcting LUT does not fit
-  the tables for any gamma and contrast tried, so they are kept as data and
-  must be measured again if an Electron update changes them
-  (`tests/text_raster.rs` fails then).
-- **Compositing.** A `fillText` call's masks become one premultiplied image
-  item: each glyph blended source-over into an 8-bit target with the
-  paint's color and alpha (`globalAlpha` included), quantized after every
-  glyph, as the GPU canvas blends glyph quads one by one. Overlapping
-  glyphs of a translucent paint build up (the whisper preset, `#00000099`
-  strokes, `#FFFFFF80` text).
-- **Glyph origins** are mapped as Skia maps a text blob: the canvas matrix
-  in `f32`, pre-translated by the blob origin (`SkMatrix::preTranslate`),
-  then each glyph position, all in `f32` (`Placement::glyph_origin`).
-- **Color glyphs.** Color bitmap faces (`sbix`, `CBDT`; not monochrome
-  `EBDT`, which draw as masks) are drawn by CoreGraphics into a
-  premultiplied RGBA bitmap at the em size CoreText uses for the strike
-  (`FontResolver::em_advance`), then moved down by the measured whole-pixel
-  shift for Apple Color Emoji (`apple_emoji_shift`): every emoji case from
-  6 to 160 px is pixel-identical.
-- **Synthesized italic** is Skia's text-matrix shear, drawn by CoreGraphics
-  about the glyph origin: exact.
-- **Glyph frames: synthesized bold and `strokeText`** (2026-10-18). Skia
-  draws a glyph image from its path when the glyph has a frame
-  (`SkScalerContext::internalGetPath`, `GenerateImageFromPath`): the
-  CoreGraphics outline at the device size (4× in x, then ¼, plus the
-  quarter offset), mapped back to user space, framed with `SkStroke`
-  (fake bold: stroke-and-fill of `size × interp(size, {9, 36}, {1/24,
-  1/32})`, miter; captions: `lineWidth`, round joins, miter limit 2),
-  mapped to device space, filled 4× horizontally into A8 and packed
-  (`pack4xHToMask`, the mask is generated "from LCD"), then Skia's mask
-  gamma for the paint's luminance bucket (`skpath::skia_mask_gamma`; the
-  measured tables are this gamma over CoreGraphics' linearized coverage,
-  checked for every entry). The fill is a port of Skia m149's analytic
-  rasterizer (`render::skaaa`: `SkScan_AAAPath`, analytic edges, the
-  edge builder and sort, in its 16.16 fixed point). The stroker is
-  `pm-skia-path` (tiny-skia-path 0.12 with conics kept, as `SkPath` keeps
-  them): round joins and caps stay conics through the device transform and
-  the 4× sampling and are cut into quads only at edge building
-  (`SkAutoConicToQuads`, ¼ px, Skia's own subdivision), which is what made
-  every caption outline exact. A synthesized bold run under `strokeText`
-  strokes with the two widths added. A color bitmap glyph has no outline
-  to frame: Skia draws its image in the stroke pass as well, so the fill
-  draws it over itself (its antialiased rim thickens); the engine does the
-  same.
-- **Strike scale.** Skia's strike descriptor keeps the device matrix to
-  1/1024 (`sk_relax`), so a scaled word (caption highlight and pop, the pop
-  and pulse animators) has its masks generated at `size × relax(scale)`
-  (`Placement::strike_scale`); positions keep the exact matrix.
-- **Rotated, skewed and non-uniformly scaled glyphs** are masks too: the
-  Mac scaler's `computeMatrices(kVertical)` of the strike (the relaxed
-  device 2×2, a Givens rotation, the vertical scale as the CTFont size,
-  the rest as CoreGraphics' text matrix), bounds from
-  `CTFontGetBoundingRectsForGlyphs` through it, quarter-pixel positions in
-  x and y (`cgmask::StrikeMatrix`, `draw_transformed`).
-- **Caption boxes** are `roundedRect`'s path (`arcTo` corners, quarter
-  conics), tessellated as Graphite tessellates a conic (`T = k / 2^L`, `L`
-  from Wang's formula at precision 4 in device space, De Casteljau in
-  local space), vertices snapped to the rasterizer's 1/256 px, then the
-  standard 4-sample pattern with nonzero winding.
-- **Glyphs beyond the atlas** (over 256 px, or a bounding box over 256 px)
-  are drawn as Skia draws text as paths: the CoreText outline at the
-  canonical 64 px (`MaskSource::canonical_path`), under the glyph's matrix
-  (the canvas matrix, the glyph position, `size / 64`), each quad as its
-  cubic, cubics cut at `T = k / 2^L` (Wang's formula), vertices snapped to
-  1/256 px, 4 samples per pixel (`scene::tessellated_coverage`).
-
-- **Paths at exactly the sample positions:** multisampled path coverage
-  counts a sample that lies exactly on an edge by the rasterizer's
-  top-left rule (a crossing at the sample's x counts). Text at 256 px puts
-  the canonical 64 px outline at a scale of exactly 4, so vertices land on
-  sample positions; with the strict comparison 1,491 pixels were a sample
-  off.
-
-The outline path with the Canvas2D profile (below) remains only for
-platforms without CoreGraphics.
-
-## Distance-field text (162 to 256 px, level 1)
-
-2026-10-18 (third pass). Chromium's GPU canvas draws text whose device
-size (`SkFontPriv::ApproximateTransformedTextSize`: the text size times the
-matrix's largest scale) is at least 162 and below 256 px as distance-field
-text (`SubRunControl::isSDFT`, `getSDFFont` on macOS). pm-text does the
-same (`render::sdf`, `MaskSource::sdf_glyph`):
-
-- **Strike.** One strike per glyph at 256 px (162 px for text at exactly
-  162), the text matrix the identity: CoreGraphics draws the glyph with
-  smoothing on (the strike's `kNormal` hinting) into Skia's glyph bounds
-  (the CoreText bounding box rounded out, one pixel more each side), the
-  pixels are linearized (`gLinearCoverageFromCGLCDValue`, `(v² + 128) /
-  255`) and reduced to luminance without the paint's preblend (the SDF mask
-  filter ignores it). Synthesized bold and wide strokes generate the A8
-  from the glyph's path framed in strike space instead
-  (`skpath::frame_a8`: fake bold at the strike's size, the stroke width
-  divided by the strike-to-source scale; plain A8, no LCD).
-- **Field.** `SkGenerateDistanceFieldFromA8Image` ported line for line
-  (`sdf::distance_field`: Gustavson's edge distances, Danielsson's 8SSEDT
-  with Skia's pointer walk, `pack_distance_field_val<4>`), padded by 4.
-- **Placement.** `prepare_for_SDFT_drawing`: the glyph position mapped by
-  the creation matrix (`1 / strikeToSourceScale`, in `f32`), the field's
-  bounds inset by 2; the quad drawn through the canvas matrix
-  pre-translated by the blob origin and scaled by the creation matrix's
-  inverse (Graphite's `VertexFiller`). A field over 256 texels is drawn as
-  a direct mask when the mask fits (the SDFT run's rejects go to the direct
-  mask case), else as a path.
-- **Fragment.** Emulated per pixel (`sdf::draw`): vertices snapped to 1/256
-  px, texture coordinates interpolated over the strip's triangles,
-  bilinear filtering with 8-bit weights rounded to nearest, `dist =
-  7.96875 (texel − 128/255)` in half precision (the one half operation the
-  captures show rounding), derivatives over 2×2 quads, `afw = 0.65
-  |J·n|`, `smoothstep(−afw, afw, dist)` (no gamma adjustment on Mac),
-  each glyph blended source-over into the 8-bit target with that
-  unquantized coverage, quantized after every glyph. Fitted on the
-  three main-capture cases: snapping to 1/128 or 1/512 px, truncated, 9-bit
-  or exact weights, and the whole fragment in half each leave pixels 2 code
-  values off; this model leaves none (and 4,400 to 2,300 pixels 1 off per
-  case, within the gate).
-
-## Text colors (CSS Color 4 and 5)
-
-`render::color4` (third pass) ports Blink's color model so a text color is
-the `SkColor4f` Chromium paints with: `lab()`, `lch()`, `oklab()`,
-`oklch()`, `color()` in every predefined space (sRGB, linear sRGB, Display
-P3, A98, ProPhoto, Rec. 2020, XYZ D50/D65), `color-mix()` (missing and
-analogous components, premultiplied interpolation, hue methods, percentage
-normalization), relative colors (`rgb(from …)` with channel keywords and
-`calc()`, `min()`, `max()`, `clamp()`), `none`, `currentcolor` (black: the
-raster canvas is never in the document) and the system colors measured on
-the closure capture (`CanvasText`, `Canvas`, `LinkText`, `GrayText`;
-`AccentColor` is not a color to the canvas and keeps the previous style).
-Round 4 also captures the remaining detached-canvas system colors.
-Conversions follow `ui/gfx/color_conversions.cc` and skcms (its own `powf`
-approximation where `Color::ToSRGB` uses it for linear sRGB); gamut mapping
-is not baked in (`kBakedGamutMapping` off, as the capture's out-of-gamut
-`oklch()` shows). Colors outside sRGB stay unclamped through the glyph
-blend; the 8-bit target clamps them. The round 4 capture has 74 color
-cases, including all the previously unmeasured system names. The detached
-canvas rejects `light-dark()` in both native light and dark themes, so it
-keeps the restored paint. Highlight is `rgba(128, 188, 254, 0.6)` in both
-themes; it is not opaque.
+The font registry retains its existing window/session seed scoping. Both
+preview and export use the originating window's layout seeds. Changing a
+font generation invalidates glyph resources before the next layer.
 
 ## Routing
 
-`pm_render::unsupported` and `unsupported_with_media` describe a renderer
-without fonts and list text and captions layers (`Feature::Text`).
-`unsupported_with_fonts` and `Renderer::unsupported_with_media` describe a
-renderer with fonts (`Renderer::set_text_fonts`), where they are drawn. The
-viewer presenter (`ViewDocument::set_fonts`), the job engine
-(`StillRouting::with_fonts`, `plan_export_with_fonts`), and `pm-cli` use the
-check with fonts when their renderers have them, so text and captions no
-longer route there.
-The textl2 lane removes the animated/range-styled and typography-anchored
-level 2 refusal after implementing them in the shared evaluated frame.
-`text_level2_semantics` exercises thirteen native corpus projects and
-fails actual forbidden routing; renderer and geometry failures remain named
-failures. Production served fonts supply their Parley layouts lazily.
-`Renderer::set_captions_hidden` is `PM.captionsHidden`
-(exports with `captionsBurn: false`).
+A renderer with fonts paints text and captions natively. `Renderer::set_text_fonts`
+installs the host's full-font provider; the viewer, job engine and CLI use
+the same path. A renderer without fonts, an unanswered font query or an
+unsupported color reports a named text failure. The extension raster
+service and deprecated compatibility APIs remain available while the Use
+New Engine setting exists.
 
-## Round 4 verification
+Level 2's shared evaluated frame remains the source for interaction and
+painting: resting styled ink anchors typography, posed ink sizes the
+compatibility raster, and the padded resting selection supports bounds and
+picks even while staggered text is hidden. See [text.md](text.md) for those
+semantics.
 
-2026-10-18/19, Apple M4 Max, macOS 27, Electron 44 / Chromium 152.
-The gates no longer load any of the three pin files. Raster failures mean
-pixels outside 1 CV; composed text failures mean pixels outside 2 CV.
-All refusal pins were removed too.
+## Quality gates
 
-After merging integration at `e9a80939` (merge `d42913bf`), the rebuilt
-addons speak unchanged protocol `protocol-c137021c07039329`. Debug and
-release raster runs agree:
-main 495 cases, 468 within the bound and 27 failing; closure 116 cases,
-110 within the bound and 6 failing; zero refused. The 27 variable-font
-cases are now pixel-identical (maximum channel difference 0). CoreText
-instancing now follows `SkTypeface_mac_ct`: non-hidden variable fonts are
-created from a descriptor at size 0 with every axis's default or clamped
-value, then copied at the device size with `NSCTFontOpticalSizeAttribute`
-and `NSCTFontUnscaledTrackingAttribute`. Creating the varied CGFont first
-was a different CoreText path. Hidden system faces retain their direct
-CGFont path, avoiding descriptor fallback to Times.
+The text pixel gates explicitly replace byte equality with today's app
+with [gate-policy.md](gate-policy.md)'s reference-closeness rule. Today's
+captures remain a witness; they are not the raster target. The historical
+FONTS-R residual ratchet is superseded by that policy and must not return.
 
-The closure set includes all 74 captured color cases (all within 1 CV),
-12 COLR runs (10 within 1 CV, 2 failing), and the independent distance-field
-cases (4 failing). COLR uses Fontations' paint graph, font-unit paths,
-CPAL colors, layer bounds, transforms/clips and premultiplied compositing.
-No CoreGraphics color-font approximation is used.
+The independent reference uses f64 compositing and supersampled outline
+coverage from `pm-reference`, at exact layout positions. It judges engine
+and today against the same reference, including maximum, p99.9, mean and
+per-pixel regression bounds. Reference-unmodelled content keeps its prior
+bound against today; it must be reported rather than silently excluded.
+No case may hide a worse maximum behind a better mean. A 32-cell reference
+miss triggers whole-image refinement through 256–2048 cells. Consecutive
+references must converge within 1e-4 on geometry and 0.01 CV per modeled
+channel; the selected whole image faces the original gate bounds. G-T1
+records separate raw float and mapped sRGB8 results.
 
-The real project's 45 text-in-isolation samples are now included. Before
-the merge, the full release corpus compared 412 frames, 405 within 2 CV,
-7 failing, with zero projects left unpaired with a comparison. The full
-merged release run compares 477 frames: 467 within 2 CV, 10 failing, zero
-not compared. It now draws the original real project too (45 samples,
-42 within 2 CV). Its failures at 16/18/24 seconds are 2/727/1,550 pixels
-beyond 2 CV, maximum Δ 38/33/49; the corresponding isolated failures are
-3/924/1,550 pixels, maximum Δ 44/43/49. The extra three failures are the
-original real frames, not new isolation failures. The pre-merge full debug
-run completes all 412 frames with the same seven failures; merged debug
-verification also reruns the animator-blur project. The failures
-were the two animator-blur times, each also present in the isolation set,
-and real-project times 16, 18 and 24 seconds. This corrects the previous
-claim, which omitted the entire `real/` tree. Isolation validates the
-reduced text project, not all effects or non-text content of the original.
+- `pm-text` layout tests and the layout-only corpus comparison keep line
+  breaks, advances and glyph positions exact.
+- `text_raster` checks requested raster geometry and reference quality on
+  captured plain text, captions, color glyphs and transformed text.
+- `text_corpus` checks composed text, with the original projects and the
+  text-isolated witnesses both counted. Non-text pixels take G-C2's f64
+  proof. Text the reference cannot model yet fails unless it is a measured
+  owned pending entry (`fixtures/text-corpus-pending.json`, owners L4/L6),
+  admitted only when the same authored text passes the outline reference in
+  isolation or every pixel over today's 2 CV bar lies in a mask band.
+- `text_gpu`, `text_colors`, `text_level2` and `text_level2_semantics` check
+  paint precision, color semantics, transformations and interaction.
+- `pm-text`'s bitmap test holds color-glyph ink to the painted pixels at
+  several sizes and sub-pixel phases; `pm-eval`'s `color_ink` holds level 1
+  measurement to it; G-T5 checks the installed app's selection and font
+  anchor against its own drawn pixels.
+- G-C2 checks the complete frame and preview/export contract.
+- `pm-reference` tests the independent coverage, color and blend formulas.
 
-The full app run with the rebuilt addons after the merge passed 20 of 21
-tests: the 19 existing text/export/typing cases and the new census playback benchmark passed;
-the new census-derived seed comparison failed and remains a blocker.
-Typing p95 was 18.4 ms (96 px title), 21.1 ms (48 px paragraph), and
-20.1 ms (24 px system-ui), 60 keys each, zero missed. These meet 33 ms;
-a legacy typing baseline was not measured in this round.
+Measured corrections and their current evidence belong in
+[quality-ledger.md](quality-ledger.md). Captures, per-case measurements and
+review images stay outside Git. A failing or incomplete reference class
+remains a gap in the lane report; a changed raster alone never qualifies it.
 
-The playback benchmark uses a 1,000-layer timeline for ten seconds in
-each engine. Legacy: 1,186 animation-frame intervals, p50 8.3 ms, p95
-9.5 ms, one interval above 1.5× median. New engine: 1,201 intervals,
-p50 8.3 ms, p95 9.3 ms, zero above 1.5× median. The census added 299
-scans visiting 301 nodes in 15.4 ms total (about 0.0515 ms per scan),
-with no new reports during playback; maximum scan 1.3 ms includes startup.
-The scan timer excludes mutation-handler overhead; the frame timings
-include it. This run shows no added long frames, not a universal guarantee
-under every extension or density.
+## Reproduction
 
-The font-service, pm-text, pm-cli ink and pm-wasm seed tests pass in debug
-and release. Static startup-seed eval parity still reports zero mismatches
-across 6,162 text layouts / 74,032 units and 1,815,420 native/wasm replies;
-it does not establish that the live census is correct. The variable-font
-bounds class remains 405 bounds plus 405 selections, maximum 1.191e-4 px.
-Touched TypeScript tests: 101 passed; svelte-check: zero errors and one
-pre-existing warning. Release tests and addons use LTO disabled (Gaps).
-
-## Earlier measurements (rounds 1–3)
-
-**2026-10-18 (third pass: distance-field text, CSS Color 4, the closure
-capture)**, Apple M4 Max, macOS 27, Electron 44 / Chromium 152, addon built
-at the pass's head without LTO (see Gaps).
-
-`tests/text_raster.rs` gates two captures now:
-
-| Capture | Cases | Exact (within 1 code value) | Pinned | Refused |
-|---|---:|---:|---:|---:|
-| main (`text-raster-20261016-061928`) | 495 | 462 (second pass: 459) | 33 | 0 |
-| closure (`text-closure-20261018-205749`) | 78 | 62 | 4 | 12 (`COLR`) |
-
-- The three 162 to 256 px main cases are exact (were 31,975, 30,632 and
-  16,169 pixels off, max Δ 148, 147, 126).
-- Closure capture: distance-field text at 161, 162, 163, 180, 210, 255,
-  256 and 257 px, five families, densities 2, 0.5 and 2.75, colors,
-  scripts, tracking, a paragraph, synthetic italic: exact except
-  `sdf-sizes-0004` (210 px: 4 pixels by 2), `sdf-synthetic-0016`
-  (synthesized bold at 200 px: 16 pixels by up to 6), `sdf-caption-0027` (a 6 px stroke at 180 px: 12 pixels by up
-  to 21) and `sdf-caption-0028` (`pop` at 160 px: 3 pixels by up to 5).
-  All 36 CSS Color 4 and 5 colors are exact; the 12 `COLR` cases are
-  refused (Gaps).
-- `text_corpus`: 237 frames, 235 exact within 2 code values, 0 failed,
-  0 not compared (unchanged; the two `animator-blur` frames stay pinned).
-  The isolated-text half compares text without its effects and with a
-  parent or matte source that is not kept removed (so at another
-  transform): it proves the text, not the user's frame.
-- `text_level2`: 400 cases and 20 layers, 0 below their gate. `text_gpu`:
-  GPU paint pass vs CPU reference max |Δ| 0. `text_colors`: pass (CSS Color
-  4 colors draw; `light-dark()` and unmeasured system colors refuse).
-- E2E with `POWERMOVE_NEW_ENGINE=1` under the lock, `--workers=1`, addon
-  and app built at `3e679840`, every test checking afterwards that the
-  viewer routed to the engine with no refused layer, no presenter layer
-  failure and no render error (`e2e/helpers/engine-drew.ts`): 19 of 19
-  passed: `canvas-text` 6, `captions` 2 (subtitles import, edit, burn into
-  frames, export), `font-anchor` 1, `split-text` 4, `text-animators` 1,
-  `text-layout-resize` 2, and the three typing measurements. An earlier
-  run failed `font-anchor` because the check judged a session still
-  `pending` after the test replaced the project; the check now waits for
-  the session to settle.
-- Canvas text typing in the app with the engine drawing
-  (`native-engine-text-typing.spec.ts`, 60 keys each, 0 missed, route
-  `engine`, 0 layer failures, 0 render errors): title 96 px p95 18.5 ms
-  (p50 11.7, max 19.5); paragraph 48 px in a 1,400 px box p95 21.6 ms (p50
-  18.8, max 23.8); `system-ui` 24 px p95 18.1 ms (p50 11.6, max 24.2).
-  Target ≤ 33 ms. (A run an hour earlier, same code but the
-  distance-field blend: 18.8, 19.8, 12.9 ms.) Load average during the
-  run: 6.2 to 6.7 (other lanes' work on the machine).
-
-**2026-10-18 (second pass: glyph frames, blending, exactness gates)**, Apple
-M4 Max, macOS 27, references from Electron 44 / Chromium 152.
-
-`tests/text_raster.rs` now gates on exactness (every channel of every
-pixel within 1 code value), with the remaining cases pinned
-(`tests/fixtures/text-raster-pins.json`: the most pixels beyond 1 code
-value and the largest difference; pins only shrink):
-
-| Group | Cases | Exact | Pinned: most pixels off / max Δ |
-|---|---:|---:|---|
-| families, weights, italic, scripts, tracking, paragraph, emoji | 302 | 302 | |
-| colors | 21 | 21 | (`#FFFFFF80` now exact) |
-| synthetic (italic and bold) | 6 | 4 | bold: 1 and 7 pixels by 2 (was ink SSIM 0.9288, max Δ 220) |
-| variable | 27 | 21 | 6 to 448 pixels by 2 to 6 |
-| sizes, sizes-regular | 48 | 46 | the two 200 px cases: 31,975 and 30,632 pixels, max Δ 148 |
-| density | 24 | 23 | the 192 px case: 16,169 pixels, max Δ 126 |
-| large (paths over 256 px) | 2 | 2 | (were 332 and 341 pixels, max Δ 128) |
-| caption strokes | 26 | 24 | 2 and 7 pixels by 2 and 4 (were max Δ 98 to 170) |
-| caption presets, word states, scripts | 39 | 16 | boxed: all exact; classic, whisper, paper, fade: 1 to 2 pixels by 2; spotlight: 2 pixels by 3; pop: 2 of 6 exact, the rest 2 to 75 pixels by 2 to 13 |
-| **All** | **495** | **459** | 36 pinned (first pass: 414 exact) |
-
-`tests/text_corpus.rs` now gates on exactness too (every text pixel within
-2 code values; the now-deleted `tests/fixtures/text-corpus-pins.json`).
-This historical run omitted `real/`; it did not establish zero escapes:
-the 35 projects refused for features outside text are compared through
-their text in isolation (`text-iso-20261018-175328-e9f22842`). 237 frames,
-235 exact, 0 failed, 0 not compared. All 111 isolated frames are exact
-(effects on text: blur, glow, shadow, color, levels and the rest; 2.5D and
-motion-blurred text drawn flat and sharp). Every caption, scaled (`pop`,
-`pulse`) and rotated (`tumble`) animator frame is exact; pinned are only
-two `animator-blur` frames (1 and 5 pixels by 3). `captions/middle-lines`
-(0.9892 before) is exact.
-
-**2026-10-18, glyph masks and fonts on render threads** (Apple M4 Max,
-macOS 27, references from Electron 44 / Chromium 152).
-
-Level 1 rasters against Canvas2D (`tests/text_raster.rs`, 495 cases;
-"exact" is every channel of every pixel within 1 code value):
-
-| Group | Cases | Exact | Max Δ | Min ink SSIM | Before (min SSIM) |
-|---|---:|---:|---:|---:|---:|
-| families | 102 | 102 | 0 | 1.0000 | 0.94 to 1.0 |
-| weights | 108 | 108 | 0 | 1.0000 | |
-| italic (real faces) | 16 | 16 | 0 | 1.0000 | |
-| scripts (RTL, complex, CJK) | 42 | 42 | 0 | 1.0000 | |
-| tracking, paragraph | 14 | 14 | 0 | 1.0000 | |
-| emoji (6 to 160 px) | 20 | 20 | 0 | 1.0000 | 0.92 to 0.965 |
-| colors | 21 | 19 | 8 | 1.0000 | |
-| sizes, sizes-regular (8 to 200 px) | 48 | 46 | 148 | 0.9835 | 0.871 (small text) |
-| variable (`fontAxis.*`) | 27 | 21 | 6 | 1.0000 | |
-| density (0.25 to 4) | 24 | 23 | 126 | 0.9921 | |
-| synthetic (italic, bold) | 6 | 3 (italic) | 220 | 0.9288 (bold) | 0.9288 |
-| large (300 px device, paths) | 2 | 0 | 128 | 0.9978 (about 330 pixels off) | 0.9933 |
-| captions (all presets, strokes) | 65 | 0 | 170 | 0.9881 | 0.985 |
-| **All** | **495** | **414** | | | 0 exact |
-
-Every case at or below 18 px device size is exact (the cases that are not
-are the 200 px sizes and the 192 px density case, which draw in the
-large-text regime). Colors and variable fonts differ by at most 8 and 6
-code values on 2 to 448 pixels (premultiplied rounding at alpha 0x80;
-CoreText's own variation instancing in Chromium's CTFont).
-
-Whole frames (`tests/text_corpus.rs`, served fonts with the capture's
-seeds, built-in definitions, text routing forbidden): 126 frames, 0 failed;
-static text frames text-pixel SSIM 1.0000 with every other pixel exact;
-captions 0.9892 to 0.9999 (strokes) and animator frames with rotated or
-scaled glyphs 0.9978 to 0.9999 (outline path); projects not compared are
-refused only for features outside text (SVG images, path masks, motion
-blur, 2.5D, one extension effect with no definition).
-
-Evaluation (`pm-cli parity eval --wasm`, corpus v1): native and pm-wasm
-1,891,448 values compared, 0 mismatched, 0 tolerance questions (810 in the
-variable-font ink class, max 1.191e-4 px); text sub-gate 6,162 layouts,
-identical breaks, max advance error 0.000000 px.
-
-Canvas text typing, end to end in the app with "Use New Engine" on and the
-engine drawing the text (`e2e/native-engine-text-typing.spec.ts`, 60
-keystrokes each; keydown to the first animation frame showing an engine
-frame of a newer revision; 1920 × 1080; the window on a 2x display): a 96 px
-title p50 11.6 ms, p95 16.7 ms; a 48 px paragraph in a 1400 px box p50 11.2
-ms, p95 19.6 ms; 24 px `system-ui` p50 11.4 ms, p95 13.1 ms (the row's gate
-is p95 ≤ 33 ms). Every keystroke routed to the engine, with no layer
-failures or render errors; the hub served 3 to 4 registry round trips per
-run.
-
-E2E with "Use New Engine" on (`POWERMOVE_NEW_ENGINE=1`, `--workers=1`):
-`canvas-text`, `captions` (import, edit, burn-in export, export back),
-`font-anchor`, `split-text`, `text-animators`, `text-layout-resize`: 16 of
-16 pass. `engine-fonts-integration.mjs` (real utility processes): both
-engines get a font port, the job engine answers with the mirrored project
-font, and each engine replays project fonts after a SIGKILL (about 0.33 s).
-
-Earlier measurements (2026-10-16), before the glyph masks: Apple M4 Max,
-macOS 27, Electron 44 (Chromium 152) for references, machine load 9 to 20. Captures (private, not in the
-repository): `text-raster-20261016-061928` (495 cases),
-`text-fit-20261016-062639` (700), `text-probe-20261016-065257` and
-`text-probe-20261016-072821` (194), corpus `v1-20261012-230504`.
-
-**Level 1 rasters against Canvas2D** (`tests/text_raster.rs`, ink SSIM):
-
-| Cases | Count | ≥ 0.98 | Min | Mean |
-|---|---:|---:|---:|---:|
-| Text above 18 px device size | 240 | 237 | 0.929 | 0.995 |
-| Captions (every preset and state; 26 stroke cases) | 65 | 65 | 0.985 | 0.993 |
-| Text at 8 to 18 px | 190 | 113 | 0.871 | 0.979 |
-
-The three failures above 18 px: synthesized bold at 36 and 80 px (0.951,
-0.929) and mixed emoji at 20 px (0.965).
-
-**Whole frames against the legacy renderer** (`tests/text_corpus.rs`): 91
-frames of 24 corpus projects (every `text/*` project, including all eleven
-animators, range styles, and variable axes, and every `captions/*` project)
-all pass: text pixels SSIM min 0.989, every other pixel exact (max 0 CV).
-Rerun 2026-10-17 after merging the wave 4 lanes: the corpus now holds 31
-projects with text (the 24 above plus `animation/interpolation`,
-`composition/fps-*`, `layers/null-parenting` and `retiming/precomp`), 123
-frames, all pass, text SSIM min 0.989, every other pixel exact.
-
-**Level 2 against CoreText with smoothing** (`tests/text_level2.rs`): 400
-outline-text cases at their exact positions: 399 ≥ 0.98 (min 0.9799, black
-at 48 px; group means 0.985 to 0.997). 20 level 2 layers rendered through the
-renderer (4 families, scales 0.75 to 2, three alignments, black and colored
-text): all ≥ 0.99 (min 0.9907).
-
-**GPU path** (`tests/text_gpu.rs`): the paint pass against the CPU reference
-over the same coverage, max |Δ| ≤ 1e-6 (blurred animator, emoji, stroked
-caption with box); Vello against `vello_cpu` coverage, ink SSIM ≥ 0.9994;
-deterministic; served from the cache.
-
-**Colors** (`tests/text_colors.rs`, rerun 2026-10-16 after the fill-style
-fix): `hsl()`, `hsla()`, `hwb()` scenes equal their hex scenes; rejected
-colors draw the restored style in plain text, range styles, caption fill,
-highlight, box and stroke; six unsupported colors refuse in `text_raster` and
-`render` and leave nothing for the next layer. The color parser's values are
-those Chromium's `fillStyle` reports (Electron 44, checked 2026-10-16). The
-rerun of `text_raster`, `text_corpus`, `text_level2` and `text_gpu` after the
-fix gave the numbers above unchanged.
-
-The parser refuses every form it is not sure of rather than guess
-(2026-10-17): `none` in the legacy comma syntax, `rgb()` channels mixing
-numbers and percentages, split tokens such as `50 %`, and non-finite alpha
-are `Unsupported`, so no such string draws as a parsed color or as the
-fallback. Percentage `rgb()` channels round to 8 bits as number channels do
-(`rgb(100%, 0%, 50%)` is `#ff0080`). Rerun after this change on the merged
-branch: `text_colors` all cases as above; `text_raster` 495 cases, 80 pinned,
-0 failed, captions min 0.985; `text_level2` 400 cases and 20 layers, 0 below
-their gate (min 0.9799, layers min 0.9907); `text_gpu` max |Δ| ≤ 1e-6, ink
-SSIM ≥ 0.9994; `text_corpus` 123 frames, 0 failed.
-
-Every numeric component (channel, alpha, hue, percentage, in either branch)
-is checked against the CSS `<number>` token grammar before it is parsed
-(2026-10-18): an optional sign, digits with an optional fraction or a
-fraction alone, an optional exponent. Rust's float parser also takes `5.`,
-`inf`, `infinity` and `NaN`, so before this `rgb(0 0 0 / NaN%)` parsed to a
-NaN alpha and `rgb(0 0 0 / inf%)` to opaque, where the canvas keeps the
-previous style; both, and `rgb(5., 0, 0)`, `rgb(1e, 0, 0)` and values that
-overflow to infinity, are now `Unsupported`. Valid spellings (`+1`, `.5`,
-`2e0`, `5e-1`, `1.2e2deg`) parse to the same values as before. Rerun:
-`pm_text` lib 50/50; `text_colors` all cases equal or refused as above;
-`text_raster` 495 cases, 80 pinned, 0 failed, captions min 0.985;
-`text_level2` 400 cases and 20 layers, 0 below their gate; `text_corpus`
-123 frames, 0 failed, text SSIM min 0.9890, other pixels max 0.
-
-**Typing** (`examples/text_typing.rs`, the engine's share: layout, scene,
-coverage, paint, composite at 1920 × 1080, GPU finished; 71 keystrokes): a
-96 px title p50 1.39 ms, p95 2.18 ms; a 48 px paragraph in a 1400 px box p50
-1.85 ms, p95 3.16 ms; 36 px p50 1.26 ms, p95 1.75 ms. Rerun 2026-10-16 23:30
-(load 9.6 to 11.6): p95 1.65, 3.49 and 1.79 ms; an independent rerun under
-load measured p95 2.7, 4.2 and 2.2 ms, and a rerun on 2026-10-17 (load
-about 11) p95 2.51, 4.34 and 2.66 ms, so expect ±1 ms with machine load. The viewer bridge and
-the editor's own handling are not included; the section 25 row is end to
-end (Phase 3a gate).
-
-## Review sheets
-
-Round 4: `~/Library/Application Support/Powermove Engine Corpus/review/text-round4-20261018/index.html`
-contains 147 sheets: all 27 variable cases, all 12 COLR cases, all 74 colors,
-every remaining raster failure, and the three earlier distance-field fixes.
-Seven contact sheets, the real-project sheets and the three live-seed
-sheets were visually inspected by the implementation worker; this is not Jude's acceptance. The three
-real-project failures are in
-`.../review/text-round4-real-20261018/index.html` (16, 18 and 24 seconds).
-Live-seed diagnostic sheets are in
-`.../review/text-round4-seeds-20261018/index.html`: 30 px / weight 600
-(4,917 pixels beyond 1 CV; width 462 vs 422), 30 px / weight 500 (4,751;
-453 vs 413), and 20 px / weight 400 (2,136; 295 vs 289), all maximum Δ 255.
-These use the actual window's reported seeds and a captured page canvas;
-they are visible layout failures, not AA residuals. The final merged corpus
-has eight additional sheets in
-`.../review/text-round4-final-corpus-20261018/index.html`: all three
-original real frames, their three isolated counterparts, and both blur
-frames. Their contact sheet was visually inspected. Full and isolated
-outputs now have distinct names so one cannot overwrite the other's
-review evidence. References, engine images and difference images stay
-outside Git.
-
-2026-10-18 (third pass), regenerated at the pass's head:
-`~/Library/Application Support/Powermove Engine Corpus/review/text-sidebyside-20261018c-main/index.html`
-(the three distance-field cases this pass changed and every pinned case,
-36 sheets) and `.../review/text-sidebyside-20261018c-closure/index.html`
-(every closure case the engine draws, 66 sheets). Canvas2D top, engine
-middle, differences beyond 1 code value ×4 bottom. They supersede
-`text-sidebyside-20261018b`.
-
-2026-10-18 (glyph masks): `~/Library/Application Support/Powermove Engine
-Corpus/review/text-1792322940/index.html`, 420 sheets (every text case:
-today's Canvas2D, engine level 1, CoreText with smoothing, engine level 2),
-regenerated after the change; it supersedes the sheets below.
-
-
-`cargo run --release -p pm-render --example text_review` writes one sheet per
-text case (rows: today's Canvas2D, engine level 1, CoreText with smoothing,
-engine level 2) and an `index.html` with the scores. Emoji cases are marked:
-the engine places emoji as Canvas2D does at both levels (amendment 10), so
-their level 2 vs CoreText score is low by design (row 4 compares with row 1,
-not row 3). Sheets for Jude's text review (420 cases): `~/Library/Application Support/Powermove Engine
-Corpus/review/text-1792218705/index.html` (regenerated 2026-10-16 with the
-emoji notes; supersedes `text-1792139695`).
-
-## Tools and reproduction
+Build outside the machine-wide Electron lock:
 
 ```sh
 source engine/env.sh
-# Canvas2D references (hidden Electron, never focused; private corpus)
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts            # text-raster-*
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set fit  # text-fit-*
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set probe
-python3 engine/crates/pm-text/capture/colr-fonts.py "$HOME/Library/Application Support/Powermove Engine Corpus/fonts"   # needs fontTools
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set closure   # text-closure-*
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/render.ts --set paths     # text-paths-*
-# The real project's text layers as source textures (needs a text-iso-* capture and the built app)
-~/Library/Caches/powermove-engine/bin/pm-electron-lock bun engine/crates/pm-text/capture/source.ts               # text-source-*
 cd engine
-cargo test --release -p pm-render --test text_raster   # newest text-raster-, text-closure-, text-paths-, text-source-; PM_TEXT_RASTER, PM_TEXT_ONLY, PM_TEXT_DIFFS, PM_TEXT_DUMP, PM_TEXT_PROFILE, PM_TEXT_COVERAGE=cpu, PM_TEXT_REPORT
-cargo test --release -p pm-render --test text_corpus   # PM_ENGINE_CORPUS, PM_TEXT_ONLY, PM_TEXT_DIFFS
-cargo test --release -p pm-render --test text_level2   # PM_TEXT_ONLY, PM_TEXT_DIFFS
-cargo test --release -p pm-render --test text_gpu
-cargo test --release -p pm-render --test text_colors
-cargo run --release -p pm-render --example text_fit -- <capture> sizes|dark|stroke|bold|emoji|probe|large|mid|score [profile.json]
-cargo run --release -p pm-render --example text_review
-cargo run --release -p pm-render --example text_typing
+cargo check --workspace
+cargo clippy --workspace --all-targets
+cargo test -p pm-text --features render,corpus-tools
+cargo test -p pm-eval --test color_ink
+cargo test -p pm-render
+cargo test -p pm-reference
+cargo run -p pm-protocol --bin pm-protocol-gen -- --check
+cargo run -p pm-perfbench --example perfbench -- text_cold typing_60
 ```
 
-The capture pages draw with today's code: `createCaptionRasterizer` from
-`captions/render.ts` itself; `textGeometry`, `textRasterGeometry`, and
-`rasterText` copied from `raster.ts` (private to its `install`); each canvas
-is read back through a WebGL texture uploaded as `texFor` uploads it.
+`text_cold` and `typing_60` retain downward-only counter ratchets. Engine
+wall-clock numbers under shared machine load are diagnostic. Paired app
+latency is qualified only in the orchestrator's quiet window, without
+loosening the existing threshold.
 
-## Round 5: scaled glyphs, stroke precision and live cache identity
-
-The scaled real-project trace uses the production `legacy/gl/raster.ts`
-and compositor. At 16/18 seconds the roughly 105 px layer has world scale
-3.39832, quarter-step raster density 3.5 and a 5688×991 backing canvas.
-At 24 seconds the 73.813 px layer has scale 6.92835, density 7 and a
-2366×1540 canvas. Legacy caps density by 8192 divided by each logical
-geometry dimension; it rasterizes at that density, then bilinearly samples
-that texture over the logical box. It uses LINEAR min/mag filtering and no
-mipmaps. World-scale changes select `ceil(scale*4 - 1e-9)/4`, clamped
-to 0.25–32. The effective density is part of the raster key: a new bucket
-rerasterizes; movement within a bucket reuses the bitmap. There is no extra
-temporal hysteresis. Above the 8192 cap, equal effective densities share
-the raster even when requested scale changes. Content, geometry, variation,
-text-animator state and preview cropping also participate in that key.
-The native engine already has this raster-then-composite order;
-changing to layout-size or final-device-size glyph rendering would be wrong.
-
-The large crisp-versus-soft stem mismatch instead came from
-[`Device::drawPath`](https://github.com/google/skia/blob/chrome/m152/src/gpu/graphite/Device.cpp): Skia recognizes a rectangular glyph contour and selects
-[`AnalyticRRectRenderStep`](https://github.com/google/skia/blob/chrome/m152/src/gpu/graphite/render/AnalyticRRectRenderStep.cpp), whose continuous edge coverage differs from the
-four-sample path renderer. Native text now recognizes the same rectangular
-contours and uses analytic edge distances and half coverage. Curved contours
-retain Graphite's tessellation, including its full-canvas viewport round
-trip. CPU quadratic-to-cubic conversion and shader interpolation retain
-their different arithmetic (`PatchWriter::mix` versus shader `mix`).
-The 18/24-second original-frame differences shrink from 727/1550 pixels to
-single-digit counts; unresolved single-sample curved-edge differences still
-fail the gate. Captured source textures independently reduce from 636/636
-and 1114 differing pixels to 7/7/3 pixels beyond 1 CV.
-
-Two source-level differences in the stroke port are corrected:
-[`SkPoint::setLength`](https://github.com/google/skia/blob/chrome/m152/src/core/SkPoint.cpp) multiplies each coordinate by its double scale before
-rounding, and [`SkPathStroker`](https://github.com/google/skia/blob/chrome/m152/src/core/SkStroke.cpp) keeps tangent vectors directly instead of
-adding/subtracting endpoints. The endpoint round trip lost precision and
-changed stroke control points. Together they close the captured
-`sdf-synthetic-0016`, `sdf-caption-0027` and `sdf-caption-0028` failures,
-plus classic, fade, spotlight and several other small caption residuals.
-The main raster gate improves from 468/495 to 484/495; closure improves
-from 110/116 to 113/116, at the existing 1 CV bound. Chromium explicitly
-sets `SK_SUPPORT_LEGACY_CONIC_CHOP` in its
-[SkUserConfig](https://chromium.googlesource.com/chromium/src/+/HEAD/skia/config/SkUserConfig.h),
-so the modern upstream conic chop experiment was discarded and Chromium's
-configured order is retained. Caption-pop remains unresolved.
-
-The live font-cache correction is documented in `text.md`: full platform
-identity distinguishes DOM optimizeLegibility from canvas auto while
-preserving valid 24/26 sharing. The seed e2e's 23 rows match the page's
-Canvas2D advances within 0.00001526 px, including the previously wrong
-20/400 and 30/500/600 entries. The typing harness additionally supports
-`PM_TEXT_TYPING_PAIRED=1`, running legacy and native for each scenario with
-the same input/RAF sampling. Legacy completion requires a successful draw
-of the changed resolved text; animated property objects are not compared
-by reference.
-
-The final app matrix passes **21/21**, including caption burn-in export,
-engine-drew checks, live seeds, the 1000-layer playback benchmark and typing.
-Native typing p95 in that run is 19.2/19.6/14.0 ms for title/paragraph/system
-text (60 keys each, no misses). The paired run passes **6/6** and measures:
-
-| Scenario | Legacy p95 | Native p95 | Native minus legacy |
-|---|---:|---:|---:|
-| Title, 96 px | 8.4 ms | 18.8 ms | +10.4 ms |
-| Paragraph, 48 px | 7.8 ms | 13.5 ms | +5.7 ms |
-| System UI, 24 px | 7.9 ms | 13.2 ms | +5.3 ms |
-
-Each run has 60 samples and zero misses; display scan-out is excluded.
-The scenarios use the same harness and project load on the shared machine.
-Background one-minute load varies from 12.0 to 25.4 across the paired run;
-this is a measured comparison, not a controlled idle-machine claim.
-Native meets the 33 ms budget but does **not** meet no regression versus
-legacy. The asynchronous engine/layout/frame-bridge path needs profiling;
-this measurement does not attribute the difference specifically to census
-work. In 10 seconds of 1000-layer playback, legacy/native RAF p95 is
-9.9/9.8 ms, with 1190/1202 callbacks and 1/0 long intervals. The census adds
-300 scans, 301 visited nodes and 17.9 ms aggregate scan time; startup's
-maximum individual scan is 2.3 ms. Playback shows no measured regression.
-
-Both debug and release run all 611 raster cases and all 477 corpus frames.
-The raster results agree (597 pass, 14 fail); the corpus results agree
-(467 within 2 CV, 10 fail, no comparison escapes). The font checks pass:
-77 pm-text unit tests, 5200 layout cases, 26 registry checks, and 9 level 2
-layout tests in each profile; pm-node's 65 library tests also pass in each.
-CLI tests use its binary target: 28 unit tests and 5 render tests pass in
-both profiles, including decoded text-ink validation. Native/wasm evaluation
-has zero mismatches over 6162 layouts and 74032 units, and all 1,815,420
-native/wasm replies agree. TypeScript checks pass 102 tests; Svelte reports
-zero errors and one existing IconCropper warning. These are non-LTO builds.
-
-Review evidence stays outside Git in the private corpus review directory,
-`review/text-round5-20261018/index.html`: before/after sheets for every
-changed captured raster and all remaining failures, a corrected-stem
-magnification, and contact pages reviewed after generation. Per-case
-counts, maximum deltas and image paths are in the round 5 JSON report;
-visible (`max >3 CV` or `>10` pixels) and sub-visible entries are listed
-separately. Both classes still fail their original gates.
-
-## Round 6: shared Canvas2D paths and image filters
-
-Level 1 canonical glyph paths now go through
-`pm_vector::canvas2d::Context`, including its rectangle/convex/path dispatch,
-Graphite tessellation, original backing-canvas viewport, 1/256-pixel vertex
-snapping, sample decisions, stroker and per-sample N32 blend/resolve. The
-text-specific copy of the Graphite tessellator and analytic rectangle
-rasterizer is removed. `PathRasterizer` is a small host interface in
-pm-text, implemented by pm-vector, which already depends on pm-text for
-SVG text. It avoids a circular dependency and keeps a single path renderer.
-
-Canonical glyphs of a draw share one recorded pass. Resolving each glyph
-separately was wrong for analytic rectangular glyphs next to curved paths:
-the curved draw requests MSAA for the pass, including the rectangle's
-triangle coverage at its corners (textexact2 round 3 extends this to every
-unfiltered path draw of the canvas). Device-space region rendering keeps the
-full canvas's viewport round trip before cropping; its regression test
-compares a crop byte for byte with the full canvas for curved fills,
-rectangles and round strokes. Canonical fake-bold outlines are framed at
-64 px and filled through the same renderer. Strokes above the strike limit
-follow the `needsExactCTM` branch in `PathOpSubmitter`: the canonical
-outline is first transformed into source space, then stroked with the
-unchanged canvas CTM.
-`SkFont::setupForAsPaths` re-enables subpixel positioning; the Mac scaler's
-4× horizontal path query is therefore retained for the canonical strike too.
-
-The small caption-stroke hypothesis has a different result. Chromium's
-[SubRunContainer](https://github.com/google/skia/blob/chrome/m152/src/text/gpu/SubRunContainer.cpp)
-tries the SDF/direct-mask routes before the ordinary path route when the
-device text size is below the maximum strike size. A nonzero-width stroke
-does not bypass these routes. At 54 and 82 px, the requested colored-stroke
-and pop cases therefore use
-[SkScalerContext::GenerateImageFromPath](https://github.com/google/skia/blob/chrome/m152/src/core/SkScalerContext.cpp),
-with CPU analytic coverage, horizontal LCD filtering and mask gamma. They
-retain that route; moving them to Graphite would change today's rendering.
-Their remaining CPU outline/coverage differences were strict failures in
-Round 6; FONTS-R below supersedes that blocker classification.
-A counterfactual run forcing the six pop cases through Graphite produced
-1,009–11,151 pixels beyond 1 CV (max 156–214), compared with 0–74 pixels
-(max 0–13) on the production mask route. The counterfactual is not shipped
-and is not counted among the production residuals.
-
-Text animator blur now uses `pm_vector::canvas2d::filter::BlurPlan` and the
-existing path-mask GPU executor/shader, parameterized for premultiplied
-RGBA8. It shares the scale selection, quantized rescale steps, paired taps,
-2D/1D selection, transparent borders and final sampling with path masks.
-The initial N32 save layer includes ink outside the output canvas that can
-reach it through the filter. Canvas bounds select the filter plan; clipping
-to the raster crop happens after filtering. Filter results are retained by
-the encoder, rather than returned as unaccounted targets to the target pool.
-The old text-only float Gaussian shader is removed.
-
-The CPU reference uses the same plan and a measured Metal UNORM8 sampler:
-weights round to 1/256, interpolation operates on integer channel values,
-and the result rounds to 1/16 of a code value before normalization. An
-independent GPU test sweeps every horizontal weight bucket, with nontrivial
-interpolation on both axes and four input channels. Normalizing bytes
-before interpolation changes halfway cases.
-The CPU model also preserves source origins, border coordinates and N32
-storage after each pass. The existing float paint bound remains unchanged.
-All 54 path-mask capture canvases remain bit-exact after the RGBA extension.
-
-Typing performance remains owned by the performance lane. The committed
-paired harness (`fad1e567`) and the round 5 measurements above are retained.
-To rerun the same legacy/native comparison after building the current addons:
+Before the app gates, build the addons and renderer in `apps/desktop`.
+The bridge must exist at `engine/target/pm-bridge/pm_bridge.node`; removing
+`engine/target` removes the development bridge too.
 
 ```sh
 cd apps/desktop
-PM_TEXT_TYPING_PAIRED=1 PM_TEXT_TYPING_MEASURE=1 \
+bun run build:engine
+bun run build
+POWERMOVE_NEW_ENGINE=1 \
   ~/Library/Caches/powermove-engine/bin/pm-electron-lock \
-  bunx playwright test e2e/native-engine-text-typing.spec.ts --workers=1
+  bunx playwright test --config playwright.consumers.config.ts --workers=1 \
+  e2e/canvas-text.spec.ts e2e/captions.spec.ts e2e/font-anchor.spec.ts \
+  e2e/split-text.spec.ts e2e/text-animators.spec.ts \
+  e2e/text-layout-resize.spec.ts e2e/native-engine-text-level2.spec.ts
 ```
 
-The independent `capture/render.ts --set paths` set adds two 320 px caption
-strokes (plain and oblique/highlighted at density 1.25) and two 300 px
-synthetic faces. Both synthetic captures are byte-identical, including the
-pre-quantization skew correction. The large strokes expose two further
-strict failures: `path-stroke-0000`, 154 pixels beyond 1 CV, max 4;
-`path-stroke-0001`, one pixel, max 64. The first is a straight analytic
-stroke edge (153 alpha deltas of −3 and one of −4); the second is a single
-sample change. Sharing the renderer does not establish closure of those
-previously uncaptured coordinates. Both remain unpinned.
-
-Fresh app verification after merging document-host integration `f89a239e`:
-22/22 Playwright tests pass with the native engine enabled, one worker and
-the machine-wide Electron lock, including caption burn-in export, editor
-boot/revival, split/resize/anchor/animation, the live seed comparison and
-large-timeline census. The seed test compares 23 rows with a maximum width
-error of 0.00001525879 px, within its unchanged 0.001 px bound. Targeted
-Vitest: 102/102; svelte-check: no errors and one existing cropper warning.
-Native typing p95 is 12.7/13.1/13.5 ms over 60 keys each, zero missed keys.
-This is an absolute measurement; the round 5 paired regression remains
-assigned to the performance lane.
-
-The debug and release gates retain the original bounds and no accepted pins:
-
-| Gate | Within bound | Remaining failures |
-| --- | ---: | ---: |
-| Main raster, 1 CV | 484/495 | 11 |
-| Closure raster, 1 CV | 113/116 | 3 |
-| Composed corpus, 2 CV | 473/477 | 4 |
-| Source textures, 1 CV | 0/3 | 3 |
-| Independent path cases, 1 CV | 2/4 | 2 |
-
-The debug main/closure/source runs produce the same 614 engine RGBA hashes
-as release. All 477 composed corpus score rows also agree across profiles.
-pm-text's 78 unit tests pass in both profiles, including the
-canonical-path skew cache check, alongside the full 5,200-case layout corpus
-and registry checks.
-
-The original 12 visible checks are reduced to 10; the independent path
-capture adds two more. Across all captures there are 12 visible and 11
-sub-visible strict failures. Here “visible” means max >3 CV or more than
-10 pixels beyond the comparison's bound. It does not permit the remaining
-smaller errors. All 12 COLR cases draw; two retain 1/5 pixels at max 2 CV.
-All 27 variable-font cases remain byte-identical; all 74 color cases meet
-1 CV. The three requested SDF stroke/bold cases remain within 1 CV.
-
-Fresh `pm-cli parity eval --wasm`: 1,891,448 compared, zero mismatches or
-questions; native/wasm identity: 1,815,420 replies, zero differences. The
-named variable-font ink class remains unchanged (405 bounds and 405 raster
-selections, max 1.191e-4 px).
-
-Round 6 measurements and every remaining side-by-side are recorded in the
-lane report. The round 5 counts above remain historical.
-
-## Round 7: FONTS-R residual ratchet
-
-Orchestrator decision **FONTS-R** (2026-10-19), after side-by-side inspection
-of `caption-pop-0459` and `real_powermove-ad-18`, classifies the 23 remaining
-Round 6 residual checks as visually identical edge-sample decisions, not
-owner-rule blockers. This supersedes their earlier blocker classification.
-It does not claim byte equality or change a pixel tolerance.
-
-The ratchet that held these measurements (`tests/fixtures/text-residuals.json`,
-`tests/support/text_residuals.rs`, `tests/text_residuals.rs`) is removed by
-the gate policy ([gate-policy.md](gate-policy.md)): it could only tighten
-toward today's pixels, so it blocked every correctness fix. `text_raster` and
-`text_corpus` keep their 1 CV and 2 CV bounds until the text lane converts
-them to the reference comparison.
-
-Round 7 image gates pass in debug and release (integration snapshot
-`a80796f9`, including dochost `f89a239e` and compclose `e9a80939`):
-
-| Gate | Total | Original strict bound | Strict | FONTS-R snapshots | Failed/refused |
-|---|---:|---:|---:|---:|---:|
-| Main raster | 495 | 1 CV | 484 | 11 | 0 |
-| Closure raster | 116 | 1 CV | 113 | 3 | 0 |
-| Actual source textures | 3 | 1 CV | 0 | 3 | 0 |
-| Independent large paths | 4 | 1 CV | 2 | 2 | 0 |
-| Composed text, original and isolation | 477 | 2 CV | 473 | 4 | 0 |
-| Total per profile | 1095 | unchanged | 1072 | 23 | 0 |
-
-The fresh app matrix passes 22/22, including caption burn-in, live window
-seeds and document-host boot. The affected TypeScript suite passes 264 tests
-in 14 files with no skips; the six ratchet contract tests pass in both Rust
-profiles. Release validation uses `CARGO_PROFILE_RELEASE_LTO=false` for the
-missing-bitcode link failure (pm-media's bundled CrabbyAvif archive, not the
-cache; fixed since, see release-build.md); it does not verify shipping LTO.
-
-The follow-up **textexact** lane owns reducing these measurements to zero
-before beta: line-for-line ports of Skia's CPU AAA scan converter and
-SkStroke for glyph masks, Graphite's stroke tessellation for large-path
-cases, and the Fontations COLR route. Keep the SDF edge residual in its
-coverage list too. Lower the ratchet after each measured improvement and
-retain the original references. These ports are not started in Round 7.
-
-The Round 7 integration merge also retains the window-scoped served-font
-provider when installing the bridge lane's `RenderFonts`. Both viewer frames
-and frame/layer snapshots select their originating port/session's seeds.
-Main-owned fallback snapshot sessions wait for their window's seed-owner
-binding before sending the document and release that binding on close.
-An engine restart clears every old-launch binding before session ids can be
-reused, so one window's stale close cannot erase another window's new owner.
-A rejected binding refuses the capture. The scoped
-provider reports a failed registry query through the bridge's font-health
-boundary, so later fallback queries in that frame fail immediately and a later
-frame can retry. The incoming unscoped broker API remains available for its
-independent callers; exports and jobs retain the served hub.
-
-The merged bridge's app-capture path initially omitted `PM.captionsHidden`,
-so the existing burn-in e2e found identical shown/hidden frames. Round 7 carries
-that state per snapshot request through the typed IPC/protocol and restores
-normal visibility for the next capture or viewer frame. A visibility change
-also clears draw reuse. The burn-in test now checks shown → hidden → shown,
-and transport/IPC/protocol tests cover the flag's default and forwarding.
-
-## Round 8: capture sets and the UI font census
-
-Fixes:
-
-- `text_raster` gates the newest capture of four sets: `text-raster-*`,
-  `text-closure-*`, `text-paths-*` and `text-source-*`.
-  [`capture/source.ts`](../../engine/crates/pm-text/capture/source.ts) is
-  the committed generator of the source-texture set: the real project's
-  text layers (default: `real/powermove-ad` from the newest `text-iso-*`
-  capture, times 16, 18 and 24 s) rasterized by today's app at the density
-  their world transform asks for, written into the corpus directory. It is
-  the round 5 tool, unchanged in what it draws and reads back.
-
-Also in round 8, the UI font census keeps each canvas context's
-descriptions by state (font, text rendering, stretch, and for a connected
-canvas a style generation bumped by every font-relevant mutation; at most
-64 per context). Repeated `measureText`/`fillText`/`strokeText` with a known
-state no longer parse the font or read the computed style, and a
-description already recorded no longer flushes pending DOM scans; a new
-one still flushes pending DOM text first, keeping first-creator order. The
-opt-in `native-engine-font-census-perf.spec.ts` now also measures 30,000
-connected-canvas `measureText` calls cycling three fonts. Two runs, without
-and with the census: steady 46.3/59.1 ms and 47.3/64.0 ms (before this
-change: 52.7/202.2 ms); with DOM text changing every 100 calls,
-616.9/618.7 ms and 665.0/678.3 ms. Playback of the 1,000-layer timeline:
-p95 9.9 ms without and 9.7 ms with the census in the final run.
-
-The svgcompat merge (integration `c3c5f8b7`) lifted the SVG image refusal,
-so `text_corpus` now compares the corpus projects with SVG images in full
-instead of only through their text in isolation (576 frames, up from 477).
-Without an SVG source those images drew wrong and 94 frames failed on the
-background around their text; `text_corpus` now draws them from Chromium's
-rasters (`svg-rasters-*`), as `tests/corpus.rs` does.
-
-Round 8 measurements (integration `c3c5f8b7` merged; release with
-`CARGO_PROFILE_RELEASE_LTO=false`):
-
-| Gate | Total | Original strict bound | Strict | FONTS-R snapshots | Failed/refused |
-|---|---:|---:|---:|---:|---:|
-| Main raster (`text-raster-20261016-061928`) | 495 | 1 CV | 484 | 11 | 0 |
-| Closure raster (`text-closure-20261019-025637`) | 116 | 1 CV | 113 | 3 | 0 |
-| Large paths (`text-paths-20261018-round6`) | 4 | 1 CV | 2 | 2 | 0 |
-| Source textures (`text-source-20261019-092139`) | 3 | 1 CV | 0 | 3 | 0 |
-| Composed text, original and isolation | 576 | 2 CV | 572 | 4 | 0 |
-
-All four raster sets ran in one default `text_raster` run, in release and
-in debug (debug: same counts). Every measured value equals its budget. The
-new source-texture capture, made by `capture/source.ts`, is byte-identical
-to the round 5 capture (all three `.rgba` files and the cases). Before it
-existed, the default run failed with the three source-texture entries
-"not measured", as intended. A `PM_TEXT_ONLY=caption-pop` run passes and
-reports 15 entries unchecked. The twelve contract tests pass in both
-profiles. The app matrix (`canvas-text`, `captions` with burn-in,
-`document-host-boot`, `font-anchor`, font census, font seeds, typing,
-`split-text`, `text-animators`, `text-layout-resize`) passes 23/23 with
-the native engine on (the two opt-in census measurements included), one
-worker, under the Electron lock. Native typing p95 in that run:
-13.8 / 18.3 / 14.7 ms (title 96 px, paragraph, `system-ui` 24 px), zero
-missed keys; the paired comparison with legacy stays with the performance
-lane.
-
-## Level 2 semantic closure (textl2)
-
-The shared `pm-eval` frame now shapes range typography before wrapping,
-poses glyphs for range/stagger/wave animators, and anchors the resting styled
-ink. Native painting, compatibility raster output, bounds, picks and caret
-queries use this frame. The level 2 text capability refusals are removed.
-Level 1 paths and all approved FONTS-R limits are unchanged.
-
-Verification on macOS, 2026-10-19:
-
-- `text_level2_semantics`: all eight shared synthetic projects, four times
-  each (32 frames), actual forbidden-routing assertion, no rendering or
-  geometry failure. Sixteen CoreText comparisons have minimum ink SSIM
-  **0.9931**, above the existing **0.98** requirement. Exact translation
-  invariants and resting-anchor movement pass. The compatibility raster API
-  paints all eight projects too.
-- The unchanged release text gates pass **618 raster cases** and **576
-  composed frames**, with all **23 FONTS-R measurements identical** and all
-  **12 ratchet contract tests passing**. GPU text, emoji, blur, captions,
-  colors and the original level 2 smoke gate pass. No tolerance, residual
-  fixture or reference capture was changed.
-- Range layout/UTF-16/subset tests: **10 passing** in debug and release.
-  Cold-font/query tests: **5 passing** in debug and release. The evaluation
-  corpus reports no mismatched text layouts (**6162**), bounds (**2157**) or
-  raster metrics (**2157**); layer parity and all **11** layer-unit tests pass.
-- With the new-engine and native-font flags on, the app matrix passes
-  **17/17**: canvas editing, captions/burn-in, font anchoring, split text,
-  animators, resizing, and the new native level 2 test. The latter takes
-  **24 snapshots** across all eight projects and checks native bounds,
-  glyph/caret layout and picks with **zero geometry fallback increments**.
-- Corpus validation/generation tests: **22 passing**; corpus typecheck
-  passes. Project sanitizer tests: **14 passing**. Svelte check reports
-  **0 errors**, with its existing IconCropper warning.
-- Both native addons load after the release build, and the WASM build
-  succeeds. These release checks use `CARGO_PROFILE_RELEASE_LTO=false`;
-  the shipping LTO profile was not verified by this lane.
-
-The native text subset is generated with `--native-text` (see `text.md`)
-and is also included in `allProjects`. It runs unconditionally against
-CoreText and semantic invariants. Existing Canvas2D level 1 captures remain
-unchanged. Range
-indices are UTF-16 and snap to grapheme starts; a shaped ligature follows
-its first logical grapheme's pose. Those are deliberate level 2 semantics.
-
-### Round 2 (review fixes, 2026-10-19)
-
-- Split glyph runs: Parley cuts a run where only line height (or another
-  non-shaping style) changes; every glyph run took the whole run's sources
-  from the start, so range colors and poses landed on the wrong characters.
-  Fixed in `pm_text::level2` (see `text.md`); covered by layout tests and
-  the `range-leading` project (color bands from caret edges, per-character
-  selector lifts against the frame without animators).
-- Selection: bounds and picks use a resting box again, so stagger-in text
-  is selectable at its first frame. Round 3 below restores the authored
-  paragraph dimensions and interaction padding too; posed ink sizes the
-  compatibility raster.
-- Anchor edits start from the resting box (`text_anchor_box`); Pan Behind
-  keeps the resting text in place under any animator.
-- Posed glyphs keep CoreText's upward smoothing offset in device space;
-  color bitmap glyphs sit at whole device pixels (both CoreText profile
-  only; level 1 profiles unchanged).
-- The semantic gate draws every frame with CoreText through each run's
-  pose (`CoreTextReference::render_posed`), opacity, color and blur and
-  holds all 52 frames to the unchanged 0.98 ink SSIM floor.
-
-Verification on macOS (debug unless stated):
-
-- `text_level2_semantics`: 13 projects × 4 times = **52 frames** pass. Minimum
-  CoreText ink SSIM by pose class: rotation/scale/skew **0.9924** (57 frame
-  classes), blur **0.9966**, partial opacity **0.9965**, translation
-  **0.9894**, resting **0.9905**. Unturned 2.5D plane against flat: maximum
-  mean alpha difference **0.0014 CV**, boxes within 1 px. Pan Behind keeps
-  the resting text in place on **8** anchored frames. Every frame picks at
-  its selection's center, the hidden stagger frame included.
-  After merging the ltofix lane, the same gate and the 12 layout tests
-  pass in the release profile with thin LTO (no profile override), with
-  identical minima.
-- `pm-text` level 2 layout: **12** tests (two new: split glyph runs by line
-  height and tracking, split RTL runs and the lam-alef ligature).
-- Level 1 unchanged (debug): **618 raster cases** (495 + 116 + 4 + 3) and
-  **576 composed frames** pass; the **23 FONTS-R** measurement lines are
-  identical to round 1's; **12/12** ratchet contracts; `text_gpu`,
-  `text_colors` and the original `text_level2` smoke gate (400 cases, 20
-  layers, none below 0.98) pass.
-- Evaluation corpus: 0 mismatches in every class (textLayout 6162, bounds
-  text 2157, textRaster 2157, textAnimators/Glyphs/Styles 57 each); layer
-  units 11/11.
-- Native-on app matrix under the Electron lock, one worker: **18/18**
-  (the level 2 corpus test now picks every project at every time, and the
-  new Pan Behind test).
-- `pm-wasm` queries 8/8, `pm-edit` tests, corpus 24/24, project sanitizer
-  15/15, Svelte check 0 errors (the existing IconCropper warning). WASM is
-  4,802,045 bytes (1,614,982 gzipped) after this round and the merges.
-
-### Round 3 (interaction and cache review fixes, 2026-10-19)
-
-Bounds and picks preserve today's resting interaction contract: point ink
-plus `clamp(size * .055, 3, 12)` on every edge; an authored paragraph box
-(explicit height or base line height times the line count) plus that pad;
-and a one-pixel column plus the pad for blank point text. Resting ink stays
-separate for typography anchoring. Range styles retain their coverage of
-posed ink. Native and app checks cover all three paragraph alignments,
-automatic and explicit height, 8px point text, and cold blank-text picks.
-The cold empty case exposed Parley's internal one-byte sentinel line:
-collecting it as an authored source range panicked in native and WASM.
-Empty layouts now retain the font metrics and expose one caret, with no
-sentinel glyphs or source units; a shaping test also covers empty after a
-nonempty layout.
-
-`CompatMeasure` keeps one Parley layout context and reuses collections with
-the exact ordered face/family signature. Split faces have true LRU eviction
-at 32 entries or 256 MiB, enforced even on an overbudget current request.
-Eviction drops every collection and cached layout referring to the face.
-Layouts and glyph boxes each have a 2 MiB payload bound. Collection keys and
-per-face aliases have separate bounds; parsed collection metadata, original
-resolver storage, active frames and transient TTC extraction buffers are
-outside those payload counters (see `text.md`). Glyph outlines are measured
-once for both resting and posed geometry, then reused across queries and
-frames. Range controls are also evaluated once; level 1 keeps its original
-evaluation order and measurement path.
-
-All thirteen level 2 projects now belong to `allProjects`; default corpus
-routing checks see them. The sampling gate rejects a revived level 2 text
-routing reason for animated, styled and anchored text. The paired Rust
-timing harness alternates level order for static frames, animated frames and
-typing mutations, reporting queries separately from GPU-complete rendering.
-The shared Electron lock was unavailable within the requested 20-minute
-window, so the browser key-event/bridge/presentation typing pair is deferred
-to the measurement window. Engine-only typing mutations are measured by the
-Rust pair; they do not establish full app typing latency.
-
-Verification on Apple M4 Max/macOS, using the shipping thin-LTO release
-profile without an override:
-
-- Sampling **7/7**. Level 1: **618 raster cases**, **576 composed frames**,
-  all **23 FONTS-R measurement lines identical** to the previous run and
-  **12/12 ratchet contracts**. No capture, fixture or tolerance changed.
-- Level 2: **52 native frames** and **10 interaction cases** pass, with no
-  forbidden routing. CoreText ink SSIM minima remain **0.9924** for linear
-  poses, **0.9966** for blur, **0.9965** for partial opacity, **0.9894** for
-  translation and **0.9905** for resting text. Unturned plane mean alpha
-  difference remains at most **0.0014 CV**; all **8** anchor-edit frames
-  preserve resting text. Every project's warm check reuses registrations
-  and layout.
-- The semantic corpus retains **8 faces**, **220,769,364 bytes (210.54
-  MiB)**, of which **192,570,796 bytes (183.65 MiB)** are TTC copies. Its
-  maximum total face/layout/glyph payload is **220,917,208 bytes (210.68
-  MiB)**, below the **260 MiB** combined payload ceiling. At completion:
-  **6 collections**, **28 layouts / 131,572 bytes**, and **99 glyph boxes /
-  16,272 bytes**. Collection metadata, keys/aliases, original resolver fonts,
-  active frames and transient extraction allocations are outside those
-  payload figures. Overbudget and entry/byte eviction paths have separate
-  synthetic-font tests.
-- Evaluation library **34/34**, pm-text library **35/35**, level 2 layout
-  **12/12**, WASM queries **8/8**, corpus validation **22/22** and corpus
-  typecheck pass. The evaluation corpus has zero mismatches in every class
-  (6,162 text layouts, 2,157 text bounds and 2,157 raster metrics); layer
-  parity and all **11** layer-unit tests pass.
-- Both native addons load and agree on the protocol. WASM validates at
-  **5,370,806 bytes (1,746,504 gzipped)**. This is the integrated branch's
-  size; there is no clean integration-baseline size comparison for this run.
-- Native-on app matrix under the Electron lock, one worker: **19/19** in
-  39.4 seconds. It includes the original 17 tests, Pan Behind with an actual
-  anchor-channel assertion, and all ten interaction cases in a fresh
-  session, with no new native geometry fallbacks.
-
-Paired engine timings at 1920×1080, Float16, compare the same authored text
-at compatibility 1 and 2 in the native renderer. Each sample runs bounds,
-caret layout, geometry and pick queries, then renders through GPU completion.
-Twenty warmups precede three passes; level order alternates per sample.
-Static/animated rows have 360 samples per level and typing has 213. One-minute
-machine load was 4.38 before and 3.77 after. Values below are combined p95
-milliseconds, **level 1 → level 2**:
-
-| Text | Static frame | Animated frame | Typing mutation |
-|---|---:|---:|---:|
-| Title 96px | 3.52 → 1.28 | 15.86 → 2.53 | 3.38 → 1.84 |
-| Paragraph 48px | 6.37 → 1.31 | 16.03 → 2.52 | 6.02 → 1.89 |
-| Caption-size 24px | 4.44 → 1.47 | 21.93 → 2.70 | 4.08 → 2.02 |
-| Range typography 40px | 11.32 → 3.35 | 12.87 → 5.36 | 10.30 → 3.70 |
-
-Query p95 and combined p95 improve in all twelve pairs. Rendering alone
-improves in all eight static/animated pairs and three typing pairs. The
-remaining caption typing render-only component is **1.1220 → 1.5198 ms**
-(**35.4% slower**, 0.40 ms); the first run reproduced that direction. The
-orchestrator accepted it (TEXTL2-2, 2026-10-19): the user-felt combined cost
-decides, and the same keystroke's combined p95 improves from 4.08 to
-2.02 ms. These timings exclude browser events, IPC and presentation; they do
-not replace the deferred legacy/native app typing pair.
-
-### Round 4 (uncovered characters and capture routing, 2026-10-19)
-
-- **Uncovered characters draw.** Round 3 refused a level 2 layout with any
-  cluster no face covers (`text whose fonts are not loaded`), so one such
-  character failed the whole layer and every bounds, pick, raster and caret
-  query threw; the CoreText registry skips LastResort, so this hit any
-  uncovered character. The layout now keeps the character and draws the
-  primary face's `.notdef`, as level 1 (`FirstCandidateForNotdef`) and
-  today's engine do (see `text.md`). A `text-level2/notdef` corpus case
-  (U+0378 in Georgia under a range style and a keyframed character
-  animator), a measure test and an app test cover it. `pm-cli render` of
-  the reviewer's word-transform repro, of the same text with no animators,
-  and of that text at level 1 all draw the box.
-- **Legacy captures leave level 2 out.** Today's engine ignores `compat`,
-  so its capture of a level 2 project is a level 1 picture the level 1
-  gates would fail by design. `capture.ts` leaves those projects to the
-  semantic gate (`legacy-capture.ts`, manifest `nativeOnly`), and
-  `text_corpus` and the evaluation corpus route any level 2 document an
-  older capture holds to the semantic gate after the routing check:
-  counted, listed and failing when the semantic gate does not judge it. No
-  level 1 gate gained an exemption or tolerance.
-- **Level 2 captions** draw with `Profile::CORETEXT`, so they inherit this
-  lane's `device_space_offset: true` (the smoothing offset of a rotated or
-  skewed glyph stays in device space) and `bitmap_snap: Round` (axis-aligned
-  color bitmap glyphs, emoji, at whole device pixels, as CoreText draws
-  them). Level 1 captions and text keep the Canvas2D profile, where both
-  fields are off. The semantic gate now pins the caption snap (same pixels
-  for x.3 and x.4, a one-pixel move at x.7); removing the snap fails it.
-- **Paragraph box edges** follow `raster.ts` exactly for degenerate and
-  fractional boxes (see `text.md`).
-- **Style spans** are built once per change of the covering styles instead
-  of per grapheme: 5,000 characters under three styles take 0.20 ms per
-  build instead of 6.0 ms (release, M4 Max, 10 builds each).
-
-Verification (shipping thin-LTO release profile):
-
-- Level 2: `text_level2_semantics` passes **14 projects × 4 times = 56
-  native frames** (the notdef case at ink SSIM 0.9950 to 0.9970), the 10
-  interaction cases, the routing contract and the caption snap. Minima are
-  unchanged: linear pose **0.9924**, blur **0.9966**, partial opacity
-  **0.9965**, translation **0.9894**, resting **0.9905**; plane mean alpha
-  difference at most **0.0014 CV**; 8 anchor-edit frames. `text_level2`
-  smoke: 400 cases and 20 level 2 layers, none below 0.98. Sampling **7/7**.
-- Level 1: `text_raster` **618 cases** (495 + 116 + 4 + 3, 9 FONTS-R
-  ratcheted, 0 failed) and `text_corpus` **576 composed frames** (572 exact
-  within 2 CV, 4 FONTS-R ratcheted, 0 failed; 0 level 2 projects in the
-  captures). The 13 FONTS-R lines are identical to round 3's; the other ten
-  round 3 lines are the residuals the textexact lane retired, and the
-  ratchet fixture equals `feat/native-engine`'s.
-- Evaluation corpus (`v0-20261012`): 0 mismatches in every class (6,162
-  text layouts, 2,157 text bounds, 2,157 raster metrics, 57 animator, glyph
-  and style queries each); 0 level 2 projects routed.
-- `pm-eval` library **38/38**, `pm-text` library **35/35** and level 2
-  layout **12/12**, WASM queries **8/8**, corpus tests **25/25**, corpus
-  typecheck and `generate.ts --check` (252 projects, 0 invalid); clippy on
-  `pm-eval`, `pm-text` and `pm-render` with all targets is clean.
-- Rebuilt both addons (bridge 1.3 MB loads, node 36.2 MB speaks
-  `protocol-25292d6fdfffb933`) and WASM (5,448,126 bytes, 1,770,822
-  gzipped), installed at `engine/target/pm-bridge/pm_bridge.node` where
-  development runs load the bridge. Native-on app matrix under the Electron
-  lock, one worker: **20/20** (canvas text, captions, font anchor, the four
-  level 2 tests including the new `.notdef` test, split text, animators,
-  layout resize).
-- An integration checkout that has no `engine/target/pm-bridge` must run
-  `bun run build:engine` in `apps/desktop` (or set
-  `POWERMOVE_PM_BRIDGE=apps/desktop/native/pm_bridge.node`) before the
-  native-font e2e; otherwise the queries answer `fonts` and the session
-  stays `pending`.
-
-## Textexact: source ports and ten retired residuals
-
-The textexact pass ports Skia chrome/m152 at
-`747cf654ed6f864f4402e7d6eb54a6ede60141e5`, retaining the source's
-floating-point operation order and Chromium's
-`SK_SUPPORT_LEGACY_CONIC_CHOP` configuration. It changes no fitted profile,
-pixel bound, capture, route or allowed-difference list.
-
-- `pm-skia-path` now strokes incoming rational conics directly, using
-  `conicPerpRay`, `compareQuadConic`, recursion limits and terminal-line
-  behavior from that source. The earlier pre-stroke conversion to quads
-  is removed; device-space scan conversion still chops conics as Skia does.
-- Closed rectangular glyphs use `SkStroke::strokeRect`, including round,
-  bevel and miter joins, winding, collapsed interiors and stroke-and-fill.
-  The analytic mask filler uses Skia's control-polygon convexity test,
-  convex edge walk and small fat-rectangle path. Against the independently
-  built source, all 25 framed glyph records and masks of the captured
-  caption-pop case agree exactly. The two rectangle glyphs had previously
-  taken the general stroker.
-- Solid COLR glyph layers draw into N32 through the analytic fill's ordered
-  spans. In particular, `SkARGB32_Blitter::blitAntiH2` combines multiplication
-  and addition before quantization; flattening those spans into an A8 mask
-  first loses its rounding. The existing clipped-mask route remains for
-  outer clips. Nine captured COLR glyph images agree byte-for-byte with
-  the independently built source. All five v0 capture sizes now have
-  maximum channel delta zero; the captured v1 linear gradients meet 1 CV.
-
-Public synthetic source-oracle tests need no private fonts or captures:
-ten bitwise stroke records (five rational conics, five rectangle frames)
-and eight shapes checked as A8 masks and as two-layer N32 images.
-`pm-skia-path/tests/skia-{conic,rect}-oracle.cpp` and
-`pm-text/tools/skia-{mask,color}-oracle.cpp` regenerate their reference
-hashes with the pinned Skia source and `-ffp-contract=off`.
-
-Ten ratchet entries are removed: four caption-pop, one colored caption
-stroke, three whisper and both COLR cases. Their rows are also removed
-from the immutable `APPROVED` ceiling; a contract test prevents restoring
-them through a fixture-only edit. Thirteen snapshots remain, down from
-23. Full debug and release measurements with
-`CARGO_PROFILE_RELEASE_LTO=false` for release:
-
-| Gate | Total | Original strict bound | Strict | FONTS-R snapshots | Text failures/refusals |
-|---|---:|---:|---:|---:|---:|
-| Main raster | 495 | 1 CV | 492 | 3 | 0 |
-| Closure raster | 116 | 1 CV | 115 | 1 | 0 |
-| Large paths | 4 | 1 CV | 2 | 2 | 0 |
-| Source textures | 3 | 1 CV | 0 | 3 | 0 |
-| Composed text, original and isolation | 576 | 2 CV | 572 | 4 | 0 |
-
-`text_colors`, `path_masks`, the 13 ratchet contracts and the source-oracle
-tests pass in both debug and release. Canvas2D passes in both profiles:
-503 bit-identical, 22 within 1 CV and four pre-existing exceptions (529
-total). Those four exceptions are unchanged by this pass. `text_corpus`
-still reports the non-text `effects/extension-typewriter` refusal (no
-definition for effect `typewriter`), comparing its text in isolation as
-before. The zero-failure counts above qualify the text class, not that
-missing effect definition. The refreshed 23-test app matrix has 20 passing
-checks; the three typing cases did not produce valid measurements.
-Diagnostics are in the private lane report. This pass adds no new typing
-latency qualification; the round 8 values above remain historical.
-
-### Textexact round 2: review fixes
-
-Four further line-for-line corrections against the same pinned source:
-
-- Black COLR layers. `SkBlitter::Choose` (SkBlitter.cpp:750-756) gives an
-  `SK_ColorBLACK` paint `SkARGB32_Black_Blitter`, whose `blitAntiH2`
-  (SkBlitter_ARGB32.cpp:1724-1730) is `(a << 24) + SkAlphaMulQ(dst,
-  256 - a)`, not the opaque `SkFastFourByteInterp`. The two-pixel span of
-  the RLE route (glyph images wider than the 32-px mask, so most caption-size
-  COLR glyphs) now takes that branch for a paint of exactly (0, 0, 0, 255):
-  a palette `#000000FF` or foreground index `0xFFFF` with black text.
-  `blitAntiH`, `blitV` and the A8 `blitMask` (`blit_mask_d32_a8_black` on
-  NEON) already agreed with the black blitter's arithmetic, and
-  `blitAntiV2` is not reached by the analytic filler. The analytic-mask
-  fixture's `solidLayers` now draws red then translucent blue, black alone
-  and black over translucent blue; each of the eight shapes has one
-  `rgbaHashes` entry per set from the C++ oracle
-  (`pm-text/tools/skia-color-oracle-hashes.py` regenerates them). The red and
-  blue hashes are unchanged; the previous code fails the black sets
-  (`convex-quad` first).
-- Convexity. `pm-skia-path`'s classification is now
-  `SkPathPriv::ComputeConvexity` (SkPathPriv.cpp:422-648): trailing moves
-  are trimmed, every point is sign-checked and `Convexicator::addPt` keeps
-  the first vector only while `fLastVec` is still zero. A contour that
-  doubles back to its start before its first turn is now concave, as in
-  Skia; the earlier code followed the older `SkPath::computeConvexity`.
-  21 classifications come from `pm-skia-path/tests/skia-convex-oracle.cpp`.
-  The previous code fails three of them.
-- `ignoreCenter`. For stroke-and-fill (fake bold) of a convex, line-only,
-  closed path, `SkStroke::strokePath` (SkStroke.cpp:1460-1516) sets
-  `canIgnoreCenter`. Then `finishContour` (SkStroke.cpp:362-368) keeps
-  only the larger of the outer and inner offsets, and the source path is
-  not added. `framed()` previously emitted outer, reversed inner and source.
-  Coverage under winding is the same, but edge accumulation differs (for
-  example `/` in sans fonts under synthetic bold). Five path records
-  (both windings, miter, bevel and round joins, a miter limit that bevels)
-  match `pm-skia-path/tests/skia-center-oracle.cpp` bitwise.
-- One rectangle recognizer. `Path::is_rect` ports
-  `SkPathPriv::IsRectContour` with `allowPartial == false`
-  (SkPathPriv.cpp:80-253). That function is behind both `SkPath::isRect`
-  (strokeRect's closed-rectangle test) and `SkPathRaw::isRect`
-  (`try_blit_fat_anti_rect`). It replaces the two hand-rolled near-duplicates
-  in `pm-skia-path` and `pm-text`. It also accepts what they rejected: a
-  trailing move, an open three-sided contour (fat rectangles only), and the
-  rectangle given by the recognized corners. 20 results come from
-  `pm-skia-path/tests/skia-rect-contour-oracle.cpp`.
-
-The oracles were rebuilt from a fresh checkout of the pinned revision with
-the same `-ffp-contract=off` and `SK_SUPPORT_LEGACY_CONIC_CHOP` flags (CPU
-only, `skia_use_partition_alloc = false`). The rebuilt library reproduces
-every earlier rectangle, conic and N32 hash exactly.
-
-The full text gates were re-run in debug and release (release with
-`CARGO_PROFILE_RELEASE_LTO=false`). Every per-case line of `text_raster`,
-`text_corpus`, Canvas2D and `path_masks` is identical to the round above,
-so no captured case reaches the black blitter or the ignored center: main
-raster 495 (492 within 1 CV, 3 FONTS-R), closure 116 (115, 1), large paths
-4 (2, 2), source textures 3 (0, 3), composed 576 (572 within 2 CV, 4),
-zero failures or text refusals. Canvas2D is 529 (503 bit-identical, 22
-within 1 CV, 4 pre-existing exceptions), and `text_colors` and the 13
-ratchet contracts pass. The ratchet is unchanged: these fixes close no
-residual and raise no budget. The new synthetic oracles cover black COLR
-spans, the center-ignoring stroker and the convexity and rectangle
-classifications.
-
-## Textexact2: Chromium 152 GPU and N32 execution
-
-This round retires the thirteen remaining FONTS-R snapshots. Both the JSON
-case list and the immutable `APPROVED` table are empty; contract tests reject
-restoring any retired raster or corpus measurement. The original raster
-bound remains 1 CV and the composed-text bound remains 2 CV. Captures,
-profiles and routing decisions are unchanged.
-
-The native renderer now executes Graphite's analytic rectangle/rrect,
-fixed-count filled-curve and stroked-curve render steps on the GPU. Instance
-attributes, pre-chop/deferred tessellation allocation counts, middle-out
-vertices and indices follow the pinned source. Path unions use stencil and
-per-sample blending into desktop BGRA N32, with Metal's standard four-sample
-pattern and hardware resolve. Full canvas viewports are retained before
-cropping; shrinking a viewport changes interpolation and AA rounding.
-
-Electron 44.0.0 / Chromium 152.0.7977.54 pins Skia
-`b6d106297ff9ef2ff8094033695d045e87775581` and Dawn
-`571752c9cb3ed36a3194854374984427794c4dda`. The relevant shader modules
-and render-step sources agree with the independently built chrome/m152
-Skia `747cf654ed6f864f4402e7d6eb54a6ede60141e5`. Chromium disables
-Graphite ShaderF16 by default: its Dawn shaders execute this arithmetic in
-f32, despite the SkSL source's half declarations. The checked-in WGSL comes
-from the pinned Skia compiler; the production Metal stages come from that
-WGSL through the pinned Tint writer, using Dawn's relaxed math mode.
-Hidden diagnostic Electron runs confirmed the backend, source and buffer
-layout. Regeneration instructions and source licenses accompany the oracles.
-
-Unfiltered A8 glyphs retain coverage until their draw reaches the canvas.
-Paint and source-over blending happen directly into N32, eliminating the
-extra colored word-image quantization that caused the paper-caption pixel.
-Filtered draws retain their N32 save layer. Level 2 keeps its floating-point
-canvas. N32 readback explicitly converts BGRA storage into RGBA channels.
-
-The SDF path samples the source-generated R8 atlas with the source f32
-shader. A8 masks and distance fields share the skyline allocation history;
-original font-size identity is retained alongside the common SDF strike.
-A diagnostic sequence proved why both matter: the same 255 px glyph shader
-produces alpha 87 with a fresh atlas and the captured 89 after the preceding
-161/162/163/180/210 px draws. Repeating a size reuses its coordinates. The
-native sequence now reproduces all eight size captures byte-for-byte,
-including the retired `sdf-sizes-0004` and the previously newly failing
-`sdf-sizes-0005`. Direct masks still use their cached paint textures, while
-participating in the shared A8 allocator; this preserves their existing
-sampling path.
-
-Blink narrows the canvas draw origin before alignment and keeps glyph
-positions relative to the text blob. Canvas translate/scale/concat also
-narrow every argument and use SkM44's operation order. Preserving those
-boundaries closes the large-path sample disagreements and their composed
-frames; baking the origin into each glyph or concatenating in f64 changes
-one or more MSAA samples. Independent synthetic SkM44 records test both
-caption and animated-glyph operation sequences.
-
-Public independent oracles cover tessellation counts, eight complete
-synthetic padded distance fields, thirty skyline allocations and two
-Canvas matrix sequences. Private glyph checks also compared the actual
-padded fields and canonical outlines with pinned Skia, without putting
-fonts, captures or machine logs in Git. Final debug/release and app results
-are recorded in the lane report; no unobserved run is implied here.
-
-| Gate | Debug | Release (shipping thin-LTO) |
-|---|---:|---:|
-| Main raster, 1 CV | 495/495 strict | 495/495 strict |
-| Closure raster, 1 CV | 116/116 strict | 116/116 strict |
-| Large paths, 1 CV | 4/4 strict | 4/4 strict |
-| Source textures, 1 CV | 3/3 byte-identical | 3/3 byte-identical |
-| Composed text, 2 CV | 576/576 strict | 576/576 strict |
-| Ratchet contracts | 13 pass | 13 pass |
-| Canvas2D | 529, existing gate passes | 529, existing gate passes |
-| Path masks, text colors, GPU paint, level 2 | Pass | Pass |
-
-The 113 pm-render, 78 pm-vector and 78 pm-text unit checks pass in both
-profiles, including the new source oracles. All fourteen generated shader
-files reproduce byte-for-byte; the fifteenth file is the hand-written
-primitive input. All eight Metal stages compile with Metal 4.0.
-Canvas2D retains its four pre-existing exceptions; none is added or changed.
-The composed corpus retains the pre-existing non-text typewriter-definition
-refusal, comparing that project's text in isolation. These text results do
-not qualify the missing custom effect. Test-only SVG fixtures now clean up
-their own directories; the changed tests leave no files in a scoped temp
-root in either profile.
-
-The hidden app now replays all thirteen retired cases with Use New Engine
-off and on: nine source rasters through the public kernel `render.raster`
-API and four composed/isolated frames through `render.renderFrameTo`.
-All twenty-six setting comparisons meet the unchanged bounds. Every native
-case has the same maximum CV error as the Rust gate: eight source rasters
-are byte-identical, the remaining path stroke differs by at most 1 CV,
-and the four frames have maxima 2, 2, 2 and 1 CV. Raw snapshot bytes and
-the returned Canvas2D surfaces agree. Native versus freshly captured legacy
-app pixels also meets each case's original bound. The legacy app's SDF
-draw history produces twenty-nine 1-CV differences from the standalone
-capture; the native SDF raster remains byte-identical to the Rust reference.
-These comparisons do not add an exception or change a budget. The twelve
-app parity checks pass on Electron 44 / Chromium 152.
-
-This app replay exposed a layer-raster snapshot bug outside the direct
-Rust raster gate: `TextPlan::crop` stores edges, while `LayerPixels::Float`
-and the snapshot transport require an origin and extent. Passing the edges
-as extents changed the source row stride when restoring the padded canvas.
-The layer-raster adapter now converts the rectangle at that boundary. The
-served-font snapshot regression independently copies the expected cropped
-rows into a full canvas, instead of sharing the placement helper with the
-implementation.
-
-App integration now passes all twenty non-latency text cases. Separate native
-typing responsiveness checks cover sixty keys each in a 96 px title, a 48 px
-paragraph and 24 px system-ui text: every key reaches a newer presented
-revision, the resulting text is exact, and render/layer failures remain zero.
-The title's final document and displayed revision agree, with no pending
-key, protocol request, patch batch or fallback raster.
-
-The apparent fifteen-minute typing stall was the harness's machine-load
-wait before Electron launched. Measurement preconditions now fail immediately;
-quiet-machine waiting belongs outside the Electron lock. The busy-machine
-guard regression returns before launching the app. A distinct
-`PM_TEXT_TYPING_DIAGNOSE=1` mode exercises responsiveness under contention
-without qualifying the unchanged 33 ms latency target. A missed frame now
-fails after five seconds and saves the pending key, recent frames/batches,
-renderer and engine state, console and hidden-window capture. Fixture
-startup, shutdown and disposable-profile cleanup have their own lifecycle
-timeout; interaction deadlines are unchanged. All six canvas-editing checks
-pass after separating that cleanup from the interaction budget. The 33 ms
-typing measurement remains unqualified under machine contention.
-
-### Textexact2 round 2: glyph images beyond the atlas
-
-Review found a crash the shared A8 atlas introduced. Every unfiltered direct
-mask reserved atlas space, and `Atlas::allocate` ended in an `expect` that
-the glyph fits a 512 px plot. A transformed glyph could exceed that while
-its upright outline passed the scene's bounds check. For example, an
-animator skew near its 80° clamp on 75 px text at 2x gives a mask over
-600 px wide, which panicked the native render thread. Before textexact2,
-the same mask was composited as an image. Neither is what Chromium does.
-
-`SubRunContainer` (Skia m152, the pinned source) has two gates, now ported
-for level 1 canvas text under a non-axis-aligned matrix:
-
-- Masks and distance fields are drawn only while
-  `ApproximateTransformedTextSize` is below 256. That size is the text
-  size times `SkMatrix::getMaxScale`, the largest singular value. A skew
-  or non-uniform scale makes it larger than the uniform device size
-  (`sqrt|det|`) the scene previously used. At or above 256, every glyph of
-  the run draws in the path sub run: the canonical 64 px platform outline
-  under the glyph's matrix. Axis-aligned text is unchanged; for it, the
-  two sizes are equal.
-
-  Source, verified for Canvas2D in Chromium 152 (tag 152.0.7977.89, whose
-  `DEPS` pins Skia `b6d106297ff9ef2ff8094033695d045e87775581`; the files
-  below are byte-identical at the textexact pin `747cf654`):
-  - [`src/text/gpu/SubRunContainer.cpp`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/text/gpu/SubRunContainer.cpp#L1403-L1445),
-    `SubRunContainer::MakeInAlloc`: `maxMaskSize = subRunControl->maxSize()`;
-    per run, `approximateDeviceTextSize =
-    SkFontPriv::ApproximateTransformedTextSize(runFont, positionMatrix, ...)`;
-    the SDFT and direct-mask cases run only inside
-    `if (... && approximateDeviceTextSize < maxMaskSize)`. Otherwise the
-    whole run reaches the drawable and then the path case
-    (`SkStrikeSpec::MakePath`, `PathSubRun`), and outline glyphs end there.
-  - [`src/core/SkFont.cpp`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/core/SkFont.cpp#L372-L375):
-    without perspective, `ApproximateTransformedTextSize` returns
-    `font.getSize() * matrix.getMaxScale()`.
-  - [`src/text/gpu/SubRunControl.h`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/text/gpu/SubRunControl.h#L56)
-    `maxSize()` returns `fMaxDistanceFieldFontSize`, which
-    [`src/gpu/graphite/Caps.cpp`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/src/gpu/graphite/Caps.cpp#L365-L374)
-    `Caps::getSubRunControl` sets to `glyphsAsPathsFontSize()`, from
-    [`ContextOptions::fGlyphsAsPathsFontSize`](https://github.com/google/skia/blob/b6d106297ff9ef2ff8094033695d045e87775581/include/gpu/graphite/ContextOptions.h#L84-L92):
-    256 under `SK_BUILD_FOR_MAC`.
-  - Chromium's
-    [`GetDefaultGraphiteContextOptions`](https://chromium.googlesource.com/chromium/src/+/refs/tags/152.0.7977.89/gpu/command_buffer/service/skia_utils.cc)
-    does not override `fGlyphsAsPathsFontSize`.
-
-  The position matrix is the canvas transform including the raster
-  density, so an accelerated Canvas2D `fillText` under a skew animator is
-  routed by it. A 100 px title at 2x under a 30° skew (largest scale
-  1.33, size 266, every glyph mask under 256 px) draws as paths in
-  Chromium and in the engine; before this gate the engine drew it in the
-  large-text regime.
-- A direct mask over `kSkSideTooBigForAtlas` (256 px in either dimension,
-  `SkGlyphDigest::fitsInAtlasDirect`) is rejected to the same path sub run.
-  An example is a Zapfino glyph that fits upright but is rotated 45°. This
-  applies to plain, synthetic-bold and transformed masks, as
-  `strokeText` already did. CoreGraphics no longer rasterizes such a mask:
-  `matrix_mask` returns its bounds only, with empty coverage. The
-  previous 4096 px cap had dropped those glyphs silently.
-
-The atlas no longer panics. Allocation is fallible. A mask or field larger
-than a plot is never placed and never resets the atlas generation, so
-placements of fitting glyphs (and the SDF history they feed) are
-unaffected. If a distance field over a plot ever reached the native
-Graphite executor, it would keep the CPU primitive image. The scene emits
-fields only up to 256 px.
-
-Regression tests:
-
-- `transformed_text_at_the_path_size_draws_as_paths` (pm-text) covers the
-  size gate alone. Arial `.`, `i` and `l` at 60 px under 2x and a 60° skew
-  (size 262.7) and at 48 px under 2 × scale(2.8, 1) (size 268.8) draw as
-  canonical paths, although each glyph's matrix mask is under 256 px and
-  the uniform device size (120 and 160.6 px) is below the large and
-  distance-field ranges. Controls at a 55° skew and scale(2.5, 1) (233.1
-  and 240) stay in the atlas. With the `max_scale` term removed, the test
-  fails on the first case (`skew 60 '.'`: a mask instead of a path).
-- `glyph_images_beyond_the_atlas_draw_as_paths` (pm-text) covers
-  `fitsInAtlasDirect`. Its 45° Zapfino rotation keeps the largest scale at
-  2 (100 px), so only the mask-size gate sends it to paths. The 80° skew
-  of 75 px `H` is also above the size gate (about 860 px), so it passes
-  with either gate alone; so does `text_gpu`'s skew80 render. A nearly
-  upright rotation keeps its mask.
-- `glyphs_beyond_a_plot_are_never_placed` (pm-render atlas, 624×114 and
-  64×4096 masks and a 513 px field) and `text_gpu`'s skew80/rotated
-  renders through the full GPU path. Without the fix, the last one panics
-  at the old `expect`.
-
-Chromium pixel reference (2026-10-22, Apple M4 Max, Electron 44 /
-Chromium 152, under `pm-electron-lock`). `capture/transformed-project.ts`
-writes four Arial "Hill." layers at layer scale 200% under a skew
-animator at time 0; `capture/source.ts --project ... --times 0 --out
-text-transformed-<stamp>` rasterizes them with today's app
-(`PM.raster`, density 2). Compared through `text_raster`
-(`PM_TEXT_RASTER=<capture>`):
-
-| Case | Size × max scale | Route | Pixels > 1 CV (max) | Without the gate |
-|---|---|---|---|---|
-| 60 px, skew 60° | 262.7 | paths | 6 (19 CV) | 2657 (217 CV), ink SSIM 0.906 |
-| 100 px, skew 30° | 265.9 | paths | 7 (24 CV) | 2644 (201 CV), ink SSIM 0.951 |
-| 60 px, skew 55° | 233.1 | distance fields | 3 (2 CV) | 8 (3 CV) |
-| 100 px, skew 20° | 239.7 | distance fields | 0 (1 CV) | 0 (1 CV) |
-
-The gate is confirmed: Chromium draws both path-size cases as paths, and
-without the gate the engine differs on about 2650 pixels. The residuals
-in the table were closed in round 3 (below), and the capture set is now
-gated; the table records the state before round 3.
-
-The exactness wording for the thirteen retired cases: eight are
-byte-identical, and five are within their original strict bounds but not
-exact. These are `path-stroke-0001` (1 CV) and the composed and text-only
-frames at t16/t18 (maxima 2, 2, 2, 1 CV, the 2 CV bound).
-
-Determinism. Native SDF pixels depend on the process-wide atlas history,
-as in Chromium. A distance field's atlas texel position changes f32
-interpolation, so `sdf-sizes-0004` matches only after the preceding
-161–210 px draws. Preview and export pixels of 162–256 px text can
-therefore depend on what was drawn before in the same process. The text
-raster cache key does not include atlas placement, so a cached raster
-keeps the placement of its first draw. Exports are reproducible for the
-same draw order, not across arbitrary orders. Matching Chromium exactly
-requires this, and it is disclosed rather than changed.
-
-Unmeasured performance risk in the native Graphite executor (`Gpu::render`):
-
-- Each draw is its own render pass that loads and stores the full
-  canvas-viewport target.
-- MSAA color and depth/stencil attachments are allocated per raster at full
-  viewport size, without pooling.
-- Uniform, storage and vertex buffers and bind groups are created per
-  draw.
-- Atlas lookups are linear scans until the four-page generation reset.
-
-Frame time and memory for large or animated text (for example a 5688×991
-viewport at 4× MSAA) are unmeasured; the performance lane owns them.
-
-The app-level replay of the thirteen cases is now in the repository as
-`e2e/native-engine-text-app-parity.spec.ts`. Every identifier and capture
-path comes from a private manifest named by `PM_TEXT_APP_PARITY`; without
-it, the spec skips. The e2e session fixture now attaches each test's
-`session-teardown` durations (app close and profile cleanup), so a slow
-native shutdown shows up as a number, not only as a fixture timeout.
-
-Round 2 measurements (2026-10-22, release thin-LTO gates, release addon):
-
-| Check | Result |
-|---|---|
-| `text_raster` (main, closure, large paths, source) | 495, 116, 4, 3: all within 1 CV, 0 ratcheted, 0 failed |
-| `text_corpus` | 576/576 within 2 CV; every per-frame line identical to the previous qualified run |
-| `text_gpu` (incl. skew80/rotated), `text_colors`, `text_level2` | pass |
-| pm-text (cg-masks) / pm-render lib / pm-vector `render` (debug) | 79 / 114 / 78 + integration, pass |
-| App replay, 18 tests (12 parity + 6 canvas-text), host load about 8–10 | 18/18 |
-
-The app parity rows are unchanged from the first textexact2 run. Natively,
-eight rasters are byte-identical; `path-stroke-0001` has max 1 CV over
-1065 px; the composed and isolated t16/t18 frames have maxima 2, 2, 2 and
-1 CV over 1262, 1331, 860 and 984 px. All are within their strict bounds.
-With the setting off, everything is identical except the legacy SDF
-history's 29 px of 1 CV on `sdf-sizes-0004`. Teardown in this run: app
-close took 55–774 ms and profile cleanup 4–10 ms. The roughly 30 s
-teardowns seen at load 53–67 were not reproduced at this load, so their
-cause remains undiagnosed.
-
-Before round 3, none of the gated captures had a rotated or skewed glyph.
-Round 3 adds the `text-transformed-*` set, which covers both gates with
-captured Chromium pixels (below).
-
-
-All thirteen previous FONTS-R residuals meet their original strict bounds
-in the full comparisons above. No residual budget remains. Full
-qualification results and any outstanding measurement gaps are in the
-textexact2 lane report. Every case retains its original strict bound.
-
-- COLR v0's two residuals are closed by ordered N32 span blending above.
-  Whole-pixel placement uses the text blob's 1/8-pixel x bias.
-  Radial/sweep paints, composite modes,
-  rotations and clipping have implementation coverage but no captured
-  pixel-parity evidence beyond the linear-gradient and v0 captures; do not
-  treat them as a closed parity class. Black solid layers (palette black or
-  black foreground) match Skia's black blitter in the synthetic N32
-  oracle, but none of the captured COLR glyphs has a black layer.
-- The real project's t16/18/24 source textures are byte-identical in the
-  source-texture gates. Its composed and isolated t16/18 frames meet the
-  unchanged 2-CV bound. Other platform/Chromium versions remain unmeasured.
-- Viewports larger than the GPU's maximum 2D texture dimension retain the
-  CPU primitive reference. The SDF atlas uses bounded generations when all
-  four pages fill, preserving already-encoded texture reads; it does not
-  reproduce Chromium's complete memory-pressure eviction/draw-token policy.
-  Those oversized and eviction paths lack independent captured parity.
-- Skewed, rotated or non-uniformly scaled canvas text follows Skia's
-  `ApproximateTransformedTextSize` and `fitsInAtlasDirect` gates (round 2),
-  pixel-qualified at 1 CV by the gated `text-transformed-*` capture
-  (round 3). Within a box around pixels where an item drawn between two
-  path draws of the same canvas has ink under the later one, the path
-  draws keep separate passes; per-sample blending of such an item with
-  two path draws that share an edge pixel inside that box is not modelled
-  (no capture reaches it).
-- The CPU SDF reference retains its earlier half-precision draw emulation;
-  native GPU rendering uses the f32 Dawn shader. CPU-only SDF parity has
-  not been newly qualified by this round.
-- Animator blur now meets the unchanged 2-CV corpus bound through the
-  shared quantized Graphite plan/executor, including isolation and the
-  original project. It no longer uses the text-only float Gaussian.
-- Paired typing is slower than today's renderer by 5.3–10.4 ms at p95,
-  although every native scenario remains under 33 ms. The performance lane
-  owns the full engine's no-regression typing requirement. The paired
-  measurement exposes the gap alongside the absolute budget.
-- Level 2 semantics are implemented by **textl2** (see `text.md`). Its
-  native-only corpus and app checks are separate from the level 1 captures;
-  existing projects retain their compatibility level and FONTS-R budgets.
-- **TEXTL2-1 (owner decision):** retain continuous font smoothing near
-  45° so an animated rotation does not pop. CoreGraphics drops smoothing at
-  45° and 135°, so level 2 text is heavier there (measured ink SSIM 0.832 at
-  45°, 0.983 at 42.5°). This accepted level 2 design choice also applies to
-  level 2 captions through their CoreText profile; level 1 profiles are
-  unchanged.
-- The full browser key-event/bridge/presentation typing pair for level 2 is
-  deferred to the measurement window because the shared lock was unavailable
-  within 20 minutes. The Rust pair measures engine work only.
-- **TEXTL2-2 (closed by orchestrator decision, 2026-10-19):** caption
-  typing's render-only component rises from 1.1220 to 1.5198 ms p95 while
-  the combined engine work improves from 4.0787 to 2.0188 ms; the combined
-  user-felt cost decides, so the component is accepted. The TTC face-copy
-  pool (about 210 MiB of the 256 MiB cap) is follow-up F4.
-- A level 2 working set larger than the 256 MiB face budget is released on
-  return and may split again on the next request. The corpus stays below
-  that budget; overbudget correctness is tested, but its frame latency and
-  full process RSS are unmeasured. TTC extraction still copies a face and
-  temporarily holds both table buffers and the assembled face.
-- `Feature::Text` remains for a renderer without fonts, unparsed styles or
-  an unanswered registry query; the derouter owns retiring that machinery.
-- Font-cache entries from pseudo-element text and cache purges under
-  memory pressure remain unmodelled. Canvas operations in workers and
-  offscreen text scrolling into view without a DOM mutation are also
-  unobserved. Arbitrary custom CSS needs further independent captures.
-  The previous live-seed mismatch is closed; the current e2e validates
-  23 rows, including equal-key DOM and canvas creation orders.
-- A page-only web font (for example a font loaded by onboarding) need not
-  be present in the engine's registry. Project fonts remain fully served.
-- The measured mask tables, emoji placement and SDF GPU arithmetic are
-  specific to this Apple-silicon/macOS/Electron reference. Other machines
-  and Chromium updates need their own captured comparisons.
-- `text_raster` and `text_corpus` still pass vacuously on a machine without
-  the private corpus directory (CI): the captures are renders of system
-  fonts and a private project and cannot be committed. On a machine with
-  the directory, a full run fails for any FONTS-R entry it did not measure.
-- The earlier non-LTO measurements used `CARGO_PROFILE_RELEASE_LTO=false`
-  for test and addon builds because thin-LTO links
-  reported missing bitcode. The cause was pm-media bundling CrabbyAvif's
-  Rust staticlib into its rlib, not the compile cache; the shipping profile
-  is verified since, see [release-build.md](release-build.md).
-- Textexact2's release gates and native addons use the shipping thin-LTO
-  profile; earlier rounds' non-LTO results remain historical.
-
-### Textexact2 round 3: one render pass per canvas
-
-Review of round 2 found the transformed-size capture outside the gated
-sets: two path-size cases failed the strict bound (6 and 7 pixels, up to
-24 CV) and the 55° distance-field control had 3 pixels at 2 CV. A
-glyph beyond the atlas under a rotation or skew had no captured pixels.
-
-**Cause of the path residuals.** Every pixel over the bound was on a glyph
-drawn as an analytic rectangle: Arial `l` and `.` are rectangles, so
-`Device::drawPath` sends their canonical paths to `AnalyticRRectRenderStep`
-(`SkPath::isRect`). The tessellated glyphs (`H`, `i`) need MSAA. Chromium
-replays the canvas into one Graphite render pass, and Graphite picks one
-sample count per pass: `DrawList` records whether any draw needs MSAA and
-`DrawContext::flush` multisamples the whole pass. The rectangles of an
-animator's per-glyph `fillText` calls are therefore rasterized per sample
-at their mesh edges. The engine rasterized each call's paths in a pass of
-its own, so a call holding only rectangles resolved pixel centers: the
-acute corners of the skewed rectangles lost samples (for example alpha 62
-instead of 79, and 0 instead of 18 below a baseline corner). Forcing
-those passes multisampled made both cases exact before any other change.
-
-**Fix.** `scene::resolve_canvas_pass` runs after a canvas's draws are
-recorded (animated text, plain text, captions, `render::text_raster`):
-
-- The pass is multisampled when any unfiltered path draw needs MSAA, or
-  when the caller says so (a caption box is a tessellated fill).
-- Unfiltered path draws are drawn again together, in order, into one
-  target (`PathRasterizer::raster_pass`; `Context::multisample_pass`
-  marks a pass multisampled for draws recorded elsewhere). Overlapping
-  draws then blend per sample before the resolve, as in Chromium. The
-  Zapfino capture below needs this: two rotated `g`s share edge pixels
-  whose samples they cover between them (alpha 223 per item composite,
-  255 per sample).
-- The merged pass takes the place of the first draw. Where an item drawn
-  between them (a direct mask, an image) has ink under a later path
-  draw, the draws keep their own places and passes inside the box around
-  those pixels; the rest of the merged pass is emitted as crops of the
-  same viewport around that box. A filtered or vector-coverage item
-  within reach of a later draw ends the group.
-- A filtered `fillText` keeps its save layer's own pass.
-- Direct-mask quads are pixel aligned and distance-field quads end two
-  texels outside the field's padded ink, so neither depends on the pass's
-  sample count; they keep their items.
-
-**Distance-field control.** The 55° residual is atlas history. The app
-capture of round 2 loaded the project visibly, so its preview drew the
-text into Chromium's shared glyph atlas before `PM.raster` ran. All three
-pixels sit on the right edge of `H`'s field quad, where the derivative of
-the distance uses a helper pixel that samples beyond the field, into
-whatever the atlas holds next to it. `source.ts --hide-layers` now loads
-the project with every layer hidden, so the atlas holds only the captured
-rasters, in capture order, as `text_raster` replays them. With hidden
-layers the 55° case is within 1 CV. Captured again without hiding (the
-preview variant, kept outside the corpus), the same 3 pixels at 2 CV
-return: the difference follows Chromium's history, not the shader.
-Reordering the engine's own history moves three other pixels of that case
-by 1 CV and leaves these three unchanged.
-
-**Capture.** `capture/transformed-project.ts` now writes eight layers:
-the four Arial cases, Arial at 75 px under 80° (`text_gpu`'s skew80),
-and Zapfino "gag" at 50 px rotated 45°, skewed 30° and rotated 1°. At
-2x the Zapfino sizes are 100 and 133 px, below the distance-field range;
-each `g` is a direct mask whose transformed image exceeds 256 px, so it
-draws as its canonical path (`fitsInAtlasDirect`), while each `a` stays a
-mask. The 1° control keeps every mask. `text-transformed-*` is now one of
-`text_raster`'s gated sets.
-
-Chromium reference: 2026-10-23, Apple M4 Max, Electron 44 / Chromium 152,
-`source.ts --hide-layers` under `pm-electron-lock`. Release (thin-LTO)
-`text_raster`, strict 1 CV, no ratchet entries:
-
-| Case | Route | Before round 3 | Round 3 |
-|---|---|---|---|
-| Arial 60 px, skew 60° | paths (size 262.7) | 6 px (19 CV) | 0 (max 1) |
-| Arial 60 px, skew 55° | distance fields | 3 px (2 CV), visible preview | 0 (max 1) |
-| Arial 100 px, skew 30° | paths (size 265.9) | 7 px (24 CV) | 0 (max 0) |
-| Arial 100 px, skew 20° | distance fields | 0 (max 1) | 0 (max 1) |
-| Arial 75 px, skew 80° | paths (size gate) | not captured | 0 (max 1) |
-| Zapfino 50 px, rotated 45° | `g` paths, `a` mask | not captured; 2 px (32 CV) with per-item passes | 0 (max 1) |
-| Zapfino 50 px, skew 30° | `g` paths, `a` mask | not captured | 0 (max 1) |
-| Zapfino 50 px, rotated 1° | masks | not captured | 0 (max 0) |
-
-Regression tests (pm-vector `canvas2d::text`):
-
-- `a_multisampled_pass_draws_earlier_analytic_glyphs_per_sample`: a
-  skewed rectangle and an `H` outline drawn by separate calls differ from
-  one call at the rectangle's corners; after `resolve_canvas_pass` they
-  are byte-identical to one call. A filtered call keeps its own pass; a
-  caller-multisampled pass redraws a lone rectangle.
-- `overlapping_draws_of_a_pass_blend_per_sample`: two concave halves with
-  a slanted seam composite with a lighter seam per item, and exactly as
-  one pass after resolution.
-- `a_pass_keeps_the_order_of_items_between_its_draws`: an image between
-  two path draws merges them when it is disjoint from the later one; under
-  an opaque later draw the result equals the one-pass draw; under a
-  translucent one, the image's box keeps the original order pixel for
-  pixel and the rest is the merged pass.
-
-App replay (2026-10-23, release thin-LTO addon, hidden app,
-`native-engine-text-app-parity.spec.ts` with a private manifest that adds
-the transformed set, replayed in capture order): with Use New Engine on,
-all eight transformed rasters are within 1 CV of the capture (maxima 0–1,
-0 pixels over), and the earlier paper, distance-field, path, source,
-composed and isolated groups still pass: 7 of 7 "on" tests. With the
-setting off, today's renderer differs from its own capture on the 55°
-distance-field case: 3 pixels at 2 CV (5 pixels in a second session). The
-app session's own text (UI, preview) fills Chromium's glyph atlas first,
-so today's pixels for that case vary between sessions by up to 2 CV on
-distance-field quad edges. That is a property of today's renderer; the
-gated capture fixes the history (hidden layers) and the engine reproduces
-it. The off-mode check of that case fails the 1-CV bound and is reported,
-not loosened.
-
-The CPU primitive images of Graphite items (kept for viewports beyond the
-GPU texture limit) are not exact. Forcing them for every case: the main
-set still passes; `sdf-sizes-0004` (4 px, 2 CV), `path-stroke-0000`
-(154 px, 4 CV), the three source textures (2 px each, up to 13 CV) and five
-transformed cases (up to 32 CV) fail. Only the native executor is
-qualified; those viewports remain an open gap, unchanged by this round.
-
-## Changes outside the lane
-
-2026-10-23 (lane ne-textexact2, round 3):
-
-- `pm-vector/src/canvas2d/context.rs` (shared Canvas2D): `multisample_pass`
-  marks a context's pass multisampled for draws recorded elsewhere; the
-  existing per-op MSAA decision is unchanged otherwise.
-- `pm-vector/Cargo.toml`: `pm-skia-path` as a dev-dependency (test paths).
-- `pm-render/tests/text_raster.rs`: the `text-transformed-*` gated set.
-
-2026-10-22 (lane ne-textexact2, round 2):
-
-- `apps/desktop/e2e/helpers/app.ts`: `LaunchedApp.teardown` records the
-  app close and profile cleanup durations; the session fixture attaches
-  them (`session-teardown`) to every test.
-- `apps/desktop/e2e/native-engine-text-app-parity.spec.ts` (new): the
-  manifest-driven app parity replay.
-
-2026-10-21 (lane ne-textexact2):
-
-- `pm-gpu/src/readback.rs` and `tests/readback.rs`: BGRA N32 readback
-  returns RGBA channels; a two-pixel test covers both storage formats.
-- `pm-render/src/vector/{svg,svg_rasters}.rs`: test-only scoped fixture
-  cleanup. Product SVG rendering is unchanged.
-- `apps/desktop/e2e/helpers/app.ts`: the `session` fixture has its own
-  60 s timeout, separate from the test's deadline. This applies to every
-  e2e spec. App shutdown and profile cleanup had taken about 30 s under
-  load, failing four canvas-text tests in teardown. That slow teardown
-  was not diagnosed; round 2 records its durations.
-- `pm-render/src/renderer/layer_raster.rs`: the text crop converts
-  `TextPlan::crop` edges to the `[x, y, w, h]` origin and extent that
-  `LayerPixels::Float` documents. This is the app crop-stride fix.
-- `pm-node/tests/render_fonts.rs`: served-font snapshot regression for
-  that crop, with independently placed expected rows.
-- `pm-vector/src/canvas2d/{context,stroke,mod,text}.rs` and the new
-  `native.rs`: the `native_paths` opt-in (`retain_native_paths`) that hands
-  Canvas2D glyph paths to the native Graphite executor. `context.rs` and
-  `stroke.rs` also carry large rustfmt-only reformatting.
-
-2026-10-19 (lane ne-textl2, round 4):
-
-- `engine/corpus/src/{capture,legacy-capture}.ts` and
-  `engine/corpus/test/corpus.test.ts`: the legacy capture leaves level 2
-  text projects to the semantic gate and lists them in its manifest.
-- `pm-render/tests/{text_corpus,support/text}.rs` and
-  `pm-eval/tests/corpus.rs`: route level 2 documents a capture still holds
-  to the semantic gate, counted and asserted. No level 1 comparison,
-  tolerance or ratchet entry changed.
-- `engine/corpus/fixtures/text-level2.json`: the `notdef` case (shared
-  with the app test and the semantic gate).
-
-2026-10-19 (lane ne-textl2, round 3):
-
-- Corpus catalog/test, `sampling.rs` and `composite.md`: include the native
-  text projects in default corpus gates and reject the removed routing
-  reason for animated, styled and anchored text.
-- `native-engine-text-typing.spec.ts`: optional level 2/native versus level
-  1/legacy pair, native font flag, authored paragraph channels, and an
-  explicit argument for the page-side `mode` value. The browser timing pair
-  remains deferred; listing the cases only checks harness compilation.
-- `pm-wasm/src/engine.rs`: forward the ink probe to the shared glyph-box
-  cache. The project type's compatibility comment now describes the
-  sanitizer's existing text-only rule.
-
-2026-10-19 (lane ne-textl2, round 2):
-
-- `pm-text/src/render/{profile,scene}.rs`: CoreText-profile-only flags
-  (`device_space_offset`, `bitmap_snap`, `Snap::Round`); the Canvas2D and
-  plain profiles keep their behaviour. `pm-render/examples/text_fit.rs`
-  fills the new fields from its base profile.
-- `pm-text/src/render/coretext.rs`: `CoreTextReference::render_posed`
-  (additive; `render` is unchanged and delegates with no transforms).
-- `pm-render/Cargo.toml`: `pm-edit` dev-dependency (anchor edits in the
-  semantic gate).
-- `apps/desktop/src/renderer/src/core/validate/project.ts`: explicit
-  `compat` is kept on text layers only.
-- `engine/corpus/test/corpus.test.ts`: the native catalog has 13 projects.
-
-2026-10-19 (lane ne-textl2):
-
-- `apps/desktop/src/renderer/src/core/{types,validate}/project.ts`:
-  retain explicit layer compatibility through project sanitizing and save
-  round trips; absent compatibility stays absent for existing projects.
-- `engine/corpus/src/{generate,projects/index}.ts`: expose the separate
-  native text catalog and its generation switch, preserving the legacy
-  capture list.
-- `apps/desktop/scripts/build-engine-addon.mjs`: install each built addon
-  through a same-directory temporary file and atomic rename. An overlapping
-  app run exposed in-place binary replacement; addon verification and the
-  complete 17-test app rerun pass with atomic installation.
-
-2026-10-19 (lane ne-textexact):
-
-- `apps/desktop/e2e/native-engine-text-typing.spec.ts`: pass `mode` into
-  the browser-side result callback. Playwright callbacks do not retain the
-  test runner's closure; trace collection must use the explicit argument.
-  This changes only the measurement harness.
-
-2026-10-19 (lane ne-fonts, round 8):
-
-- `pm-render/tests/svg_corpus.rs` (svgcompat): seeds the font cache with
-  `app_ui_font_cache_seeds(&[dpr])`, as `text_corpus` and `pm-cli parity`
-  do (the merged struct gained `cacheKey`; the old literal no longer
-  compiled).
-- `pm-cli/src/{render,scope}.rs`, `pm-node/src/jobs/mod.rs`,
-  `apps/desktop/src/renderer/src/engine-connection/{install,render-transport.test}.ts`:
-  merge resolutions keeping both the font installation/seed scope and the
-  SVG rasterizer/source; `scope.rs` sets the resvg rasterizer on the one
-  renderer that has fonts. Protocol TypeScript regenerated.
-- `pm-render/tests/support/mod.rs`: `corpus_root()`.
-
-2026-10-19 (lane ne-fonts, round 7):
-
-- `pm-render/tests/{text_raster,text_corpus}.rs`: shared FONTS-R
-  enforcement (since removed, see round 7). Pixel references and strict
-  bounds are unchanged.
-- `pm-node/src/{lib.rs,fonts/{mod,render}.rs,present/{mod,document,render}.rs}`:
-  reconcile bridge integration with the existing scoped font hub; propagate
-  the window seed scope to snapshots and retain named font failures.
-  `tests/{render_fonts,snapshot}.rs` retain the owner-aware attach signature.
-- `apps/desktop/src/preload/index.ts`: retain seed-change notifications alongside
-  the bridge's new capture types.
-- `pm-protocol/src/{snapshot,samples}.rs`, generated TypeScript and the snapshot
-  wire fixture: additive per-capture `captionsHidden`, default false.
-  `docs/engine/rfcs/16-render-transport.md` records the field and API options.
-- `apps/desktop/src/renderer/src/engine-connection/{install,app-captures,render-transport}.ts`
-  and `apps/desktop/src/main/engine/{snapshots,window-sessions,index}.ts`:
-  carry and validate caption visibility, and bind main-owned snapshot sessions
-  to the window's font seeds. Their tests cover defaults, forwarding, overrides
-  and refusal when the window seeds are not accepted.
-- `pm-node/src/present/render.rs` and `pm-render/src/renderer.rs`: scope caption
-  hiding to one capture and invalidate cached draws when visibility changes.
-  `e2e/captions.spec.ts` checks shown → hidden → shown without changing its bound.
-
-2026-10-18 (lane ne-fonts, round 6):
-
-- `pm-vector/src/canvas2d/{context,analytic,text,mod}.rs`: shared path
-  adapter and region rendering with the full backing-canvas viewport.
-  `svg_text.rs` initializes the optional adapter for its existing consumer.
-- `pm-vector/src/canvas2d/filter.rs`: RGBA CPU reference for the existing
-  Graphite blur plan and independently verified UNORM8 sampling arithmetic.
-- `pm-render/src/composite/path_masks.{rs,wgsl}`: parameterize the existing
-  GPU executor for R8 or premultiplied RGBA8; retain the path-mask behavior.
-- `pm-render/src/shaders/text.wgsl`: remove the text-only float Gaussian
-  entry point after switching text image filters to the shared executor.
-- `pm-render/examples/text_review.rs` and `pm-render/tests/text_level2.rs`:
-  initialize the painter's optional path adapter; no level 2 semantics.
-- `apps/desktop/src/renderer/src/engine-doc/{install.ts,strict.test.ts}`:
-  preserve seed application during the document-host attach/revive merge,
-  and retain initial seeds and change callbacks for synchronous whole-face
-  providers. The first post-merge live census caught this integration
-  regression; the new unit test exercises both seed deliveries.
-
-2026-10-18 (lane ne-fonts, round 5):
-
-- `pm-skia-path/src/{lib,stroker}.rs`: Skia normalization and tangent-vector
-  arithmetic used by text glyph frames; its upstream unit suite passes.
-- `pm-render/examples/text_review.rs`, `pm-render/tests/text_level2.rs` and
-  `pm-vector/src/canvas2d/svg_text.rs`: initialize the painter's optional
-  backing-canvas viewport. The SVG consumer has no supplied canvas size.
-- `pm-eval/tests/corpus.rs` and `pm-node/src/fonts/hub.rs`: legacy/static
-  seed literals initialize the optional complete cache identity.
-- `apps/desktop/e2e/native-engine-text-typing.spec.ts`: paired legacy/native
-  measurement using the same harness and scenarios.
-
-2026-10-18 (lane ne-fonts, round 4):
-
-- `apps/desktop/src/main/engine/{index,agent-jobs,render-queue}.ts`: carry
-  the queue's starting window to its font session while that window is
-  open; renderer ids are runtime-only and never persisted across relaunch.
-- `apps/desktop/src/renderer/src/engine-doc/{install,fonts}.ts`: a changed
-  seed set invalidates editor answers and redraws the overlays; an old
-  startup reply cannot replace a later seeds-changed notification.
-- `apps/desktop/src/renderer/src/legacy/bootstrap.ts`: start observing
-  canvas font assignments before engines and extensions install.
-- `apps/desktop/e2e/helpers/engine-drew.ts`: a missing main-process report
-  fails the gate. New seed-order and large-timeline census measurements
-  accompany the existing text typing benchmark.
-- `engine/corpus/src/capture.ts`: `--text-only` reduces the real project
-  too. The CLI exits after closing its capture session.
-- `engine/crates/pm-render/tests/support/mod.rs`: discover `real/` as well
-  as `projects/`, preserving the `real/` prefix in comparison names.
-- `engine/crates/pm-cli/tests/render.rs`: verify actual white text ink in a
-  decoded PNG over a black background, rather than only file existence.
-- `engine/crates/pm-vector/src/canvas2d/svg_text.rs`: the earlier lane's
-  one-line `masks: None` initializer (omitted from earlier lists).
-
-2026-10-18 (lane ne-fonts, third pass):
-
-- `apps/desktop/src/preload/index.ts` (bridge's file, one line):
-  `reportUiFonts` on `engineFonts` (`engine-fonts:ui-fonts`).
-- `apps/desktop/src/renderer/src/legacy/bootstrap.ts` (one entry): the UI
-  font census.
-- `apps/desktop/src/main/engine/index.ts` (small): the census channel and
-  the window list for the seeds.
-- `apps/desktop/src/main/engine/agent-jobs.ts`: an export whose window's
-  seeds the job engine never takes does not start.
-- `engine/crates/pm-cli/tests/render.rs`: text renders with the host's
-  fonts; exit 3 is tested with a project color setting from a later
-  version.
-- `apps/desktop/e2e/helpers/engine-drew.ts`: fails when the status API is
-  missing; waits for the session to settle.
-
-2026-10-18 (lane ne-fonts, second pass):
-
-- `engine/crates/pm-skia-path/` (new crate): tiny-skia-path 0.12.0 with
-  conics kept, BSD-3-Clause.
-- `apps/desktop/src/main/engine/{native-engine,engine-process,ports,agent-jobs,index}.ts`
-  (small): `connect` names the window (`owner`); agent jobs tell the job
-  engine's font client the window of each session.
-- `engine/crates/pm-node/src/{lib,node}.rs`, `present/render.rs`,
-  `jobs/mod.rs` (small): `attach` takes the owner; views and job work set
-  the seed scope.
-- `engine/corpus/src/{capture,text-only}.ts`: `--text-only`.
-- `apps/desktop/e2e/{canvas-text,captions,font-anchor,split-text,text-animators,text-layout-resize}.spec.ts`:
-  an `afterEach` that, with the new engine on, checks the engine drew the
-  text (`e2e/helpers/engine-drew.ts`).
-
-2026-10-18 (lane ne-fonts):
-
-- `engine/crates/pm-node/src/present/{render,document,mod}.rs`: the
-  presenter's renderer gets the engine's fonts (`ThreadConfig::fonts`,
-  `TextFontsHub`), and the view's capability check uses fonts
-  (`ViewDocument::set_fonts`).
-- `engine/crates/pm-node/src/jobs/mod.rs`: lanes' renderers get fonts
-  (`JobEngineService::start_with_fonts`); stills and exports route with
-  fonts.
-- `engine/crates/pm-node/src/lib.rs`: the font hub, the service created
-  with the host, both engines serving fonts, shutdown order.
-- `engine/crates/pm-export/src/render.rs`: `plan_export_with_fonts`,
-  `StillRouting::with_fonts`.
-- `engine/crates/pm-cli/src/{fonts,render,scope,main}.rs`: fonts for
-  `render` and `scope`, `--ui-scale`; `src/parity/*` and
-  `scripts/parity-wasm.mjs`: pm-wasm gets the seeds, the variable-font ink
-  tolerance class.
-- `engine/crates/pm-wasm/src/{engine,abi}.rs`: `pm_fonts_seeds`.
-- `apps/desktop/src/main/engine/index.ts` (small): the job engine's font
-  client and the seeds tracker.
-- `apps/desktop/src/preload/index.ts` (bridge's file, small): `seeds` and
-  `onSeedsChanged` on `engineFonts`.
-- `apps/desktop/src/renderer/src/engine-doc/{install,fonts,wasm}.ts`: the
-  window's seeds into pm-wasm.
-
-Earlier:
-
-- `engine/crates/pm-eval/src/text_geom.rs`: `animated_raster_glyphs`
-  exposes the glyphs and canvas box `rasterAnimatedText` paints (the raster
-  placement is unchanged; the evaluation corpus still matches with 0
-  mismatches).
-- `engine/crates/pm-render/src/{plan,exec,renderer,capability,lib,parity}.rs`:
-  the text source, dispatch, device quad, executor arm, renderer API,
-  routing (`Feature::Text`, `unsupported_with_fonts`), and
-  `parity::text_ssim`.
-- `engine/crates/pm-render/tests/{headless,corpus}.rs`,
-  `tests/support/mod.rs`: the capability assertion for text, and text
-  projects left to the text class.
-- `engine/crates/pm-node/src/present/document.rs`: the `Feature::Text` arm
-  of `describe`.
-- `engine/crates/pm-text/capture/build.ts`: one entry for the rendering
-  capture page.
-- `engine/Cargo.lock`: Vello, `vello_cpu` and their dependencies.
-- `docs/engine/pm-render.md`: one table row.
+Only the actual Electron/Playwright invocation holds the lock. Use the
+consumers configuration to avoid rebuilding inside it. Disposable profiles
+and harness temporary directories must be removed on success and failure.
