@@ -69,7 +69,7 @@ async function project(session: LaunchedApp, fixture: Fixture): Promise<void> {
     shape.p['opacity'].v = 62;
     shape.p['position.x'].v = f.width * 0.08;
     shape.p['position.x'].kf = [PM.KF(0, f.width * 0.08), PM.KF(f.dur, -f.width * 0.12)];
-    PM.proj.layers.push(shape);
+    PM.proj.layers.unshift(shape); // above the solid
     PM.ProjectIndex.invalidate();
     PM.bus.emit('project');
     PM.bus.emit('layers');

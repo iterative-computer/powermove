@@ -35,9 +35,13 @@ function one(probeResult: Probe, kind: 'video' | 'audio'): Stream | null {
   return probeResult.streams.find(stream => stream.codec_type === kind) ?? null;
 }
 
-/** Decoded frames as 16-bit RGBA (alpha as coded; opaque formats at full). */
+/** Decoded frames as 16-bit RGBA (alpha as coded; opaque formats at full).
+ *  zimg converts with the exact BT.709 limited-range matrix (bilinear chroma
+ *  at the tagged siting); swscale's tables are off by up to a code, more than
+ *  the difference this gate measures. */
 function frames16(input: string): Buffer {
   return execFileSync(ffmpegBinary, ['-v', 'error', '-i', input, '-map', '0:v:0', '-fps_mode', 'passthrough',
+    '-vf', 'zscale=matrixin=709:rangein=limited:range=full:filter=bilinear,format=gbrap16le',
     '-f', 'rawvideo', '-pix_fmt', 'rgba64le', 'pipe:1'], { maxBuffer: MAX_BUFFER });
 }
 
