@@ -22,14 +22,7 @@ pub(crate) const FLAG_MATTE_LUMA: i32 = 4;
 pub(crate) const FLAG_MATTE_INVERTED: i32 = 8;
 pub(crate) const FLAG_LINEAR: i32 = 16;
 pub(crate) const FLAG_BLEND_IN_E: i32 = 32;
-pub(crate) const FLAG_HALF: i32 = 64;
 pub(crate) const FLAG_PATH_MASKS: i32 = 128;
-/// The device stores `rgba16float` outputs rounded to nearest (else toward
-/// zero; `super::half_store`).
-pub(crate) const FLAG_HALF_NEAREST: i32 = 256;
-/// Fused steps must retain the separate RGBA8 writes of the WebGL pipeline.
-pub(crate) const FLAG_UNORM8: i32 = 512;
-
 /// Which fragment entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
@@ -39,6 +32,10 @@ pub(crate) enum Op {
     Composite,
     /// A rectangle copy.
     Copy,
+    /// Decode an encoded raster before filtering in linear light.
+    DecodeSource,
+    /// Resolve scene-linear 3D into the project working encoding.
+    SceneOutput,
     /// The final row flip, encoding linear light with E.
     EncodeFlip,
 }
@@ -62,16 +59,15 @@ pub(crate) struct OpPipelines {
     coverage_sampler: wgpu::Sampler,
     /// The path mask coverage passes (`super::path_masks`).
     pub path_masks: super::path_masks::PathMaskPipelines,
-    /// How the device stores `rgba16float` outputs, probed once.
-    half_nearest: std::sync::OnceLock<bool>,
 }
 
 impl OpPipelines {
     pub fn new(device: &wgpu::Device) -> OpPipelines {
         let code = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             pm_color::wgsl::COLOR,
             pm_color::wgsl::BLEND,
+            include_str!("../shaders/scene_output.wgsl"),
             include_str!("ops.wgsl")
         );
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -128,11 +124,20 @@ impl OpPipelines {
             immediate_size: 0,
         });
         let mut pipelines = Vec::new();
-        for op in [Op::Layer, Op::Composite, Op::Copy, Op::EncodeFlip] {
+        for op in [
+            Op::Layer,
+            Op::Composite,
+            Op::Copy,
+            Op::DecodeSource,
+            Op::SceneOutput,
+            Op::EncodeFlip,
+        ] {
             let entry = match op {
                 Op::Layer => "fs_layer",
                 Op::Composite => "fs_composite",
                 Op::Copy => "fs_copy",
+                Op::SceneOutput => "fs_scene_output",
+                Op::DecodeSource => "fs_decode_source",
                 Op::EncodeFlip => "fs_encode_flip",
             };
             for format in FORMATS {
@@ -201,16 +206,7 @@ impl OpPipelines {
             no_coverage,
             coverage_sampler,
             path_masks: super::path_masks::PathMaskPipelines::new(device),
-            half_nearest: std::sync::OnceLock::new(),
         }
-    }
-
-    /// Whether `rgba16float` targets store rounded to nearest on this
-    /// device (probed on first use; else toward zero).
-    pub fn half_nearest(&self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
-        *self
-            .half_nearest
-            .get_or_init(|| super::half_store::rounds_to_nearest(device, queue))
     }
 
     pub fn get(&self, op: Op, format: wgpu::TextureFormat) -> &wgpu::RenderPipeline {
@@ -258,7 +254,7 @@ impl OpPipelines {
         viewport: Option<[f32; 4]>,
     ) {
         self.run_with_coverage(
-            device, queue, encoder, op, uniform, a, b, None, target, format, viewport,
+            device, queue, encoder, op, uniform, a, b, None, target, format, viewport, None,
         );
     }
 
@@ -277,6 +273,7 @@ impl OpPipelines {
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
         viewport: Option<[f32; 4]>,
+        scissor: Option<[u32; 4]>,
     ) {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pm composite op"),
@@ -320,7 +317,11 @@ impl OpPipelines {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: if scissor.is_some() {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -331,6 +332,9 @@ impl OpPipelines {
         });
         if let Some([x, y, w, h]) = viewport {
             pass.set_viewport(x, y, w, h, 0.0, 1.0);
+        }
+        if let Some([x, y, w, h]) = scissor {
+            pass.set_scissor_rect(x, y, w, h);
         }
         pass.set_pipeline(self.get(op, format));
         pass.set_bind_group(0, &bind, &[]);

@@ -872,12 +872,6 @@ pub(crate) fn layer_draw<'d>(
     let id = js::layer_id(layer);
     let full = [f64::from(width), 0.0, 0.0, f64::from(height), 0.0, 0.0];
     let ty = js::layer_type(layer);
-    // Level 2 raster content: images, video, precomps, and shader and
-    // extension layer output (`crate::shader_layers` renders it at the
-    // density it is drawn at).
-    let level2_type =
-        crate::sampling::samples_layer_type(&ty) || matches!(ty.as_str(), "shader" | "extension");
-    let level2 = crate::sampling::is_level2(layer).then_some(b.sampling);
     let draw = match quad {
         Quad::Solid {
             rgb,
@@ -910,15 +904,18 @@ pub(crate) fn layer_draw<'d>(
         } => {
             let plane = crate::space25d::projected(scope, layer, time, scale, w, h, ax, ay)?
                 .map(|p| plane_at_origin(p, b.origin));
-            // Level 2 image, video, and precomp content is resampled; other
-            // level 2 content draws at output resolution (`crate::vector`,
-            // `crate::text`), except on a plane, where its layer-space raster
-            // is resampled too (`crate::space25d::local`).
-            let level2 = level2.filter(|_| level2_type || plane.is_some());
+            // Raster layers use one sampler regardless of compatibility.
+            // Text/vector canvas raster removal belongs to their coverage
+            // renderers; existing level-2 plane rasters also use this sampler.
+            let sampling = (matches!(
+                ty.as_str(),
+                "image" | "video" | "precomp" | "shader" | "extension"
+            ) || (plane.is_some() && crate::sampling::is_level2(layer)))
+            .then_some(b.sampling);
             Draw {
                 layer: id.clone(),
                 matrix: mul(&world, &[w, 0.0, 0.0, h, -ax, -ay]),
-                content: placed(Content::Texture { source, uv, alpha }, plane, level2),
+                content: placed(Content::Texture { source, uv, alpha }, plane, sampling),
             }
         }
         Quad::Screen { source } => Draw {

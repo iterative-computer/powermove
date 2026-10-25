@@ -15,10 +15,9 @@
 //! - [`textures`]: material maps, shadow-map samplers, LTC tables.
 //! - [`legacy`]: legacy `scene3d` and OBJ mesh layers.
 //!
-//! A 3D layer's output is premultiplied, E-encoded RGBA8 (the WebGL
-//! canvas), drawn into the 2D graph per layer so masks, effects, opacity,
-//! and blending stay per layer; with linear blending on, the compositor's
-//! draw of it unpremultiplies, decodes, and re-premultiplies (section 9).
+//! A 3D object or scene layer resolves premultiplied linear RGBA16F. The
+//! compositing seam tone maps and encodes once before 2D masks and effects.
+//! Legacy OBJ mesh layers retain their own encoded output contract.
 
 pub mod describe;
 pub mod gltf;
@@ -26,13 +25,13 @@ pub mod gpu;
 pub mod layers;
 pub mod legacy;
 pub mod lights;
-pub mod model;
 pub(crate) mod metadata;
+pub mod model;
 pub mod textures;
 
 use std::sync::Arc;
 
-pub use gpu::{Error3d, MathMode, Rendered3d, Resident3d, SAMPLES, Scene3dRenderer};
+pub use gpu::{Error3d, MathMode, OutputColor3d, Rendered3d, Resident3d, SAMPLES, Scene3dRenderer};
 pub use model::{
     Camera3d, Light3d, LightKind, Look, Material3d, MaterialKind, Materials, Mesh3d, Object3d,
     Projection, Scene3d, Texture3d,

@@ -10,15 +10,6 @@
 // (composite.wgsl); `view` turns a fragment position into top-down
 // full-frame output pixels.
 
-struct Quad {
-    m0: vec4<f32>,
-    m1: vec4<f32>,
-    m2: vec4<f32>,
-    res: vec4<f32>,
-    uv: vec4<f32>,
-    color: vec4<f32>,
-};
-
 struct Resample {
     // Output pixel (top-down, full frame) to unit quad, column-major.
     inv0: vec4<f32>,
@@ -39,9 +30,9 @@ struct Resample {
     // Content polygon edges, unit normals: a·x + b·y + c ≥ 0 inside, with
     // (x, y) relative to `origin`.
     edges: array<vec4<f32>, 6>,
+    bounds: vec4<f32>,
 };
 
-@group(0) @binding(0) var<uniform> q: Quad;
 @group(1) @binding(0) var src: texture_2d<f32>;
 @group(1) @binding(1) var trilinear: sampler;
 @group(1) @binding(2) var<uniform> r: Resample;
@@ -53,10 +44,10 @@ struct VsOut {
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> VsOut {
     let a = vec2<f32>(f32(i & 1u), f32(i >> 1u));
-    let m = mat3x3<f32>(q.m0.xyz, q.m1.xyz, q.m2.xyz);
-    let p = m * vec3<f32>(a, 1.0);
+    let p = r.bounds.xy + a * r.bounds.zw;
+    let size = vec2<f32>(r.view.w, r.tex.w);
     var o: VsOut;
-    o.pos = vec4<f32>((p.x / q.res.x) * 2.0 - p.z, (p.y / q.res.y) * 2.0 - p.z, 0.0, p.z);
+    o.pos = vec4<f32>(p / size * 2.0 - vec2<f32>(1.0), 0.0, 1.0);
     return o;
 }
 
@@ -64,6 +55,17 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 // `origin`) inside the polygon: Sutherland–Hodgman against each edge in
 // coordinates relative to the pixel center, then the shoelace formula.
 fn coverage(c: vec2<f32>) -> f32 {
+    // Most pixels are wholly inside or outside the convex content polygon.
+    // Test the pixel square's support against every half-plane before clipping.
+    var interior = true;
+    for (var e = 0u; e < u32(r.params.w); e++) {
+        let normal = r.edges[e].xy;
+        let d = r.edges[e].z + dot(normal, c);
+        let radius = 0.5 * (abs(normal.x) + abs(normal.y));
+        if (d < -radius) { return 0.0; }
+        interior = interior && d >= radius;
+    }
+    if (interior) { return 1.0; }
     var poly: array<vec2<f32>, 12>;
     var next: array<vec2<f32>, 12>;
     poly[0] = vec2<f32>(-0.5, -0.5);

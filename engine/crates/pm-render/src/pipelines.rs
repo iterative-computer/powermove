@@ -49,6 +49,7 @@ pub struct QuadUniform {
     pub res: [f32; 4],
     pub uv: [f32; 4],
     pub color: [f32; 4],
+    pub scene: [f32; 4],
 }
 
 /// `Fill` in `composite.wgsl`.
@@ -138,8 +139,9 @@ impl Pipelines {
             label: Some("pm-render composite"),
             source: wgpu::ShaderSource::Wgsl(
                 format!(
-                    "{}\n{}",
+                    "{}\n{}\n{}",
                     pm_color::wgsl::COLOR,
+                    include_str!("shaders/scene_output.wgsl"),
                     include_str!("shaders/composite.wgsl")
                 )
                 .into(),

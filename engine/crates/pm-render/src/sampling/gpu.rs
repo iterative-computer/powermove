@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 
-use crate::pipelines::{PassBlend, QuadUniform, bytes_of};
+use crate::pipelines::PassBlend;
 
 use super::Sampling;
 
@@ -19,6 +19,7 @@ pub(crate) struct ResampleUniform {
     pub tex: [f32; 4],
     pub origin: [f32; 4],
     pub edges: [[f32; 4]; MAX_EDGES],
+    pub bounds: [f32; 4],
 }
 
 /// A quad clipped at the camera plane has at most 5 edges.
@@ -32,16 +33,44 @@ pub(crate) struct Pyramid {
     pub width: u32,
     pub height: u32,
     pub levels: u32,
+    steps: Option<std::sync::Arc<Vec<MipStep>>>,
 }
 
-/// Pyramids of stills, kept across frames (their textures are the media
-/// cache's, which never change content).
+struct MipStep {
+    target: wgpu::TextureView,
+    bind: wgpu::BindGroup,
+}
+
+impl Pyramid {
+    /// Borrow the source directly when the declared kernel uses mip zero.
+    /// No copy, additional quantization, or retained pyramid allocation.
+    pub fn base(source: &wgpu::Texture, view: Option<&wgpu::TextureView>) -> Self {
+        Self {
+            texture: source.clone(),
+            view: view.cloned().unwrap_or_else(|| {
+                source.create_view(&wgpu::TextureViewDescriptor {
+                    base_mip_level: 0,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            }),
+            width: source.width(),
+            height: source.height(),
+            levels: 1,
+            steps: None,
+        }
+    }
+}
+
+/// Pyramid storage kept across frames. Still texels remain valid; dynamic
+/// sources regenerate their texels before each use.
 pub(crate) struct PyramidCache {
     entries: VecDeque<(wgpu::Texture, Pyramid)>,
 }
 
 /// Stills whose pyramids are kept.
 const CACHED_PYRAMIDS: usize = 16;
+const CACHED_PYRAMID_BYTES: u64 = 128 * 1024 * 1024;
 
 impl PyramidCache {
     pub fn new() -> PyramidCache {
@@ -59,8 +88,12 @@ impl PyramidCache {
     }
 
     fn put(&mut self, source: wgpu::Texture, pyramid: Pyramid) {
+        self.entries.retain(|(t, _)| *t != source);
         self.entries.push_front((source, pyramid));
         self.entries.truncate(CACHED_PYRAMIDS);
+        while self.bytes() > CACHED_PYRAMID_BYTES {
+            self.entries.pop_back();
+        }
     }
 
     /// Drops every kept pyramid.
@@ -73,12 +106,17 @@ impl PyramidCache {
         self.entries
             .iter()
             .map(|(_, p)| {
-                let px = u64::from(p.width) * u64::from(p.height);
-                let texel = match p.texture.format() {
-                    wgpu::TextureFormat::Rgba32Float => 16,
-                    _ => 8,
-                };
-                px * texel * 4 / 3
+                let px: u64 = (0..p.levels)
+                    .map(|level| {
+                        u64::from((p.width >> level).max(1)) * u64::from((p.height >> level).max(1))
+                    })
+                    .sum();
+                let texel = p
+                    .texture
+                    .format()
+                    .block_copy_size(None)
+                    .expect("uncompressed raster format");
+                px * u64::from(texel)
             })
             .sum()
     }
@@ -149,10 +187,10 @@ impl Resampler {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
+                            has_dynamic_offset: true,
                             min_binding_size: wgpu::BufferSize::new(
                                 size_of::<ResampleUniform>() as u64
                             ),
@@ -274,54 +312,65 @@ impl Resampler {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::Texture,
+        levels: u32,
         still: bool,
         cache: &mut PyramidCache,
     ) -> Pyramid {
-        if still && let Some(p) = cache.get(source) {
-            return p;
+        let kept = cache.get(source).filter(|p| p.levels >= levels);
+        if still && let Some(p) = &kept {
+            return p.clone();
         }
         let (width, height) = (source.width().max(1), source.height().max(1));
-        let levels = 32 - width.max(height).leading_zeros();
+        let levels = kept.as_ref().map_or(levels, |p| p.levels);
         let format = source.format();
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("pm level 2 pyramid"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: levels,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let level_view = |level: u32| {
-            texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("pm pyramid level"),
-                base_mip_level: level,
-                mip_level_count: Some(1),
-                ..Default::default()
+        // Dynamic composition targets reuse storage but regenerate texels.
+        // Static source texels can reuse both storage and content.
+        let texture = kept.as_ref().map(|p| p.texture.clone()).unwrap_or_else(|| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("pm raster pyramid"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: levels,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
             })
-        };
+        });
         let i = format_index(format);
-        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut above = source_view;
-        for level in 0..levels {
-            let target = level_view(level);
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let steps = kept.as_ref().and_then(|p| p.steps.clone()).unwrap_or_else(|| {
+            let mut above = source.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut steps = Vec::with_capacity(levels as usize);
+            for level in 0..levels {
+                let target = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("pm pyramid level"),
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                });
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("pm pyramid"),
                 layout: &self.mip_layout,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::TextureView(&above),
                 }],
-            });
+                });
+                above = target.clone();
+                steps.push(MipStep { target, bind });
+            }
+            std::sync::Arc::new(steps)
+        });
+        for (level, step) in steps.iter().enumerate() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("pm pyramid level"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target,
+                    view: &step.target,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -339,21 +388,22 @@ impl Resampler {
             } else {
                 self.down[i].get()
             });
-            pass.set_bind_group(0, &bind, &[]);
+            pass.set_bind_group(0, &step.bind, &[]);
             pass.draw(0..4, 0..1);
             drop(pass);
-            above = target;
         }
         let pyramid = Pyramid {
-            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            view: kept
+                .as_ref()
+                .map(|p| p.view.clone())
+                .unwrap_or_else(|| texture.create_view(&Default::default())),
             texture,
             width,
             height,
             levels,
+            steps: Some(steps),
         };
-        if still {
-            cache.put(source.clone(), pyramid.clone());
-        }
+        cache.put(source.clone(), pyramid.clone());
         pyramid
     }
 
@@ -394,39 +444,22 @@ impl Resampler {
         times
     }
 
-    /// The bind group of one draw (its pyramid and uniform).
+    /// The source binding over the pass's shared dynamic-uniform buffer.
     pub fn bind(
         &self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        cache: &mut crate::binds::BindCache,
         pyramid: &Pyramid,
-        uniform: &ResampleUniform,
+        buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pm resample"),
-            size: size_of::<ResampleUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&buffer, 0, bytes_of(uniform));
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pm resample"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&pyramid.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.trilinear),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buffer.as_entire_binding(),
-                },
-            ],
-        })
+        cache.resample(
+            device,
+            &self.layout,
+            &self.trilinear,
+            &pyramid.view,
+            buffer,
+            size_of::<ResampleUniform>() as u64,
+        )
     }
 }
 
@@ -618,6 +651,7 @@ impl Placement {
             ],
             origin: [self.bounds[0] as f32, self.bounds[1] as f32, 0.0, 0.0],
             edges: [[0.0; 4]; MAX_EDGES],
+            bounds: [0.0; 4],
         };
         // Unit normals, relative to the bounds' (integer) origin.
         let (ox, oy) = (self.bounds[0], self.bounds[1]);
@@ -628,20 +662,6 @@ impl Placement {
             u.edges[k] = [a as f32, b as f32, c as f32, 0.0];
         }
         u
-    }
-}
-
-/// The vertex uniform of a level 2 draw: the bounds quad.
-pub(crate) fn bounds_quad(bounds: [f64; 6], width: u32, height: u32) -> QuadUniform {
-    QuadUniform {
-        m: [
-            [bounds[0] as f32, bounds[1] as f32, 0.0, 0.0],
-            [bounds[2] as f32, bounds[3] as f32, 0.0, 0.0],
-            [bounds[4] as f32, bounds[5] as f32, 1.0, 0.0],
-        ],
-        res: [width as f32, height as f32, 0.0, 0.0],
-        uv: [0.0, 0.0, 1.0, 1.0],
-        color: [0.0; 4],
     }
 }
 

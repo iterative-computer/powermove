@@ -98,7 +98,6 @@ fn adjust(draw: &mut DrawDesc, projection: &Mat4, fragment: &str) {
     {
         *p = projection.to_vec();
     }
-    draw.state.hdr = true;
     draw.state.blend = false;
     draw.state.depth_write = true;
     draw.state.depth_test = true;

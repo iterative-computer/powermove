@@ -1,7 +1,7 @@
 //! `WebGLPrograms.getParameters` for the materials the 3D pass draws:
 //! `MeshStandardMaterial` (primitives, meshes, slots), `MeshBasicMaterial`
 //! (the missing-model box), and the shadow pass's `MeshDepthMaterial`
-//! (RGBA packing) and `MeshDistanceMaterial` (point lights). Each returns
+//! and `MeshDistanceMaterial` (point lights). Each returns
 //! the [`Parameters`] three.js r180 derives for the same material, object,
 //! light state, and render target, so [`super::program::sources`] gives
 //! the program text WebGL receives.
@@ -81,7 +81,8 @@ fn apply_side(p: &mut Parameters, side: Side) {
     p.flip_sided = side == Side::Back;
 }
 
-/// A `MeshStandardMaterial` drawn to the canvas (ACES Filmic, sRGB output).
+/// A `MeshStandardMaterial` drawn in linear light; the scene output pass
+/// applies ACES Filmic and encoding after translucency and MSAA resolve.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Standard {
     pub name: String,
@@ -102,9 +103,9 @@ pub fn standard(m: &Standard) -> Result<Parameters, String> {
         fragment_shader: chunk("meshphysical_frag")
             .ok_or("meshphysical_frag")?
             .into(),
-        tone_mapping: ToneMapping::AcesFilmic,
+        tone_mapping: ToneMapping::None,
         opaque: !m.transparent,
-        output_srgb: true,
+        output_srgb: false,
         map: m.maps.color,
         map_uv: uv(m.maps.color),
         normal_map: m.maps.normal,
@@ -137,9 +138,9 @@ pub fn basic(
         shader_name: name.into(),
         vertex_shader: chunk("meshbasic_vert").ok_or("meshbasic_vert")?.into(),
         fragment_shader: chunk("meshbasic_frag").ok_or("meshbasic_frag")?.into(),
-        tone_mapping: ToneMapping::AcesFilmic,
+        tone_mapping: ToneMapping::None,
         opaque: !transparent,
-        output_srgb: true,
+        output_srgb: false,
         ..Parameters::default()
     };
     apply_side(&mut p, side);
@@ -147,8 +148,17 @@ pub fn basic(
     Ok(p)
 }
 
-/// `MeshDepthMaterial({ depthPacking: RGBADepthPacking })` drawn into a
-/// shadow map (a render target: linear output, no tone mapping). `side` is
+/// Depth-only caster fragments retain r180's map and alpha rejection; the
+/// hardware depth attachment stores full-precision depth.
+pub fn shadow_fragment(point: bool) -> &'static str {
+    if point {
+        "#define DISTANCE\nuniform vec3 referencePosition;\nuniform float nearDistance;\nuniform float farDistance;\nvarying vec3 vWorldPosition;\n#include <common>\n#include <uv_pars_fragment>\n#include <map_pars_fragment>\n#include <alphamap_pars_fragment>\n#include <alphatest_pars_fragment>\n#include <alphahash_pars_fragment>\n#include <clipping_planes_pars_fragment>\nvoid main() {\n vec4 diffuseColor = vec4(1.0);\n #include <clipping_planes_fragment>\n #include <map_fragment>\n #include <alphamap_fragment>\n #include <alphatest_fragment>\n #include <alphahash_fragment>\n float dist = length(vWorldPosition - referencePosition);\n gl_FragDepth = clamp((dist - nearDistance) / (farDistance - nearDistance), 0.0, 1.0);\n}\n"
+    } else {
+        "#include <common>\n#include <uv_pars_fragment>\n#include <map_pars_fragment>\n#include <alphamap_pars_fragment>\n#include <alphatest_pars_fragment>\n#include <alphahash_pars_fragment>\n#include <clipping_planes_pars_fragment>\nvoid main() {\n vec4 diffuseColor = vec4(1.0);\n #include <clipping_planes_fragment>\n #include <map_fragment>\n #include <alphamap_fragment>\n #include <alphatest_fragment>\n #include <alphahash_fragment>\n gl_FragDepth = gl_FragCoord.z;\n}\n"
+    }
+}
+
+/// `MeshDepthMaterial` drawn into a depth-only shadow map. `side` is
 /// already the shadow side; `map` is whether the caster's material has a
 /// color map (`getDepthMaterial` copies `material.map`; the depth fragment
 /// samples it but packs only depth).
@@ -157,12 +167,10 @@ pub fn depth_rgba(side: Side, map: bool, lights: &LightCounts) -> Result<Paramet
         shader_type: "MeshDepthMaterial".into(),
         shader_name: String::new(),
         vertex_shader: chunk("depth_vert").ok_or("depth_vert")?.into(),
-        fragment_shader: chunk("depth_frag").ok_or("depth_frag")?.into(),
+        fragment_shader: shadow_fragment(false).into(),
         tone_mapping: ToneMapping::None,
         opaque: true,
         output_srgb: false,
-        use_depth_packing: true,
-        depth_packing: 3201,
         map,
         map_uv: uv(map),
         ..Parameters::default()
@@ -181,9 +189,7 @@ pub fn distance(side: Side, map: bool, lights: &LightCounts) -> Result<Parameter
         vertex_shader: chunk("distanceRGBA_vert")
             .ok_or("distanceRGBA_vert")?
             .into(),
-        fragment_shader: chunk("distanceRGBA_frag")
-            .ok_or("distanceRGBA_frag")?
-            .into(),
+        fragment_shader: shadow_fragment(true).into(),
         tone_mapping: ToneMapping::None,
         opaque: true,
         output_srgb: false,

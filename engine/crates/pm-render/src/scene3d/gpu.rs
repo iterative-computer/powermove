@@ -1,7 +1,7 @@
 //! Executes the 3D pass on the GPU: three.js r180's programs (generated
 //! by [`crate::three::program`], translated through `pm_gpu::glsl` and, for
 //! Metal's safe math, `pm_gpu::msl`), the passes [`super::describe`] lays
-//! out, 4× MSAA into RGBA8 with a resolve (the WebGL canvas), the shared
+//! out, 4× MSAA into linear RGBA16F with hardware resolve, the shared
 //! depth prepass kept between the layers of one depth set, shadow maps,
 //! material maps, and the linear view depth of the depth and id surface.
 
@@ -139,6 +139,12 @@ fn constant_attribute_bit(name: &str) -> u16 {
     }
 }
 
+fn is_shadow_binding(name: &str) -> bool {
+    name.starts_with("directionalShadowMap")
+        || name.starts_with("spotShadowMap")
+        || name.starts_with("pointShadowMap")
+}
+
 fn constant_attributes(geometry: &super::model::Geometry3d) -> u16 {
     [
         "normal",
@@ -203,7 +209,6 @@ struct Attachments {
 
 struct ShadowTarget {
     size: (u32, u32),
-    color: wgpu::TextureView,
     depth: wgpu::TextureView,
 }
 
@@ -293,12 +298,27 @@ struct DepthSurface {
     layout: wgpu::BindGroupLayout,
 }
 
-/// The pass output: premultiplied 8-bit color (E codes) and, when asked,
+/// Encoding of the 3D color target at the compositing seam.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OutputColor3d {
+    /// Premultiplied linear scene light. Apply the authored ACES Filmic curve
+    /// once after the 3D blend and resolve, then encode once. The optional
+    /// background is an authored display color and bypasses tone mapping.
+    LinearScene {
+        exposure: f32,
+        background: Option<[f32; 3]>,
+    },
+    /// The legacy OBJ mesh pass already yields encoded color.
+    Encoded,
+}
+
+/// The pass output: premultiplied color and, when asked,
 /// linear view depth (`r32float`, +inf where nothing drew), both in GL row
 /// order.
 pub struct Rendered3d {
     pub color: Target,
     pub depth: Option<Target>,
+    pub color_space: OutputColor3d,
 }
 
 /// GPU state of the 3D pass, kept across frames.
@@ -625,7 +645,30 @@ impl Scene3dRenderer {
         device: &wgpu::Device,
         params: &Parameters,
     ) -> Result<(u64, Arc<Compiled>), String> {
-        let (vs, fs) = sources(params)?;
+        let (vs, mut fs) = sources(params)?;
+        // Shadow caster programs inherit the scene's light counts, but their
+        // depth-only fragment has no shadow lookup to specialize. Only color
+        // programs that actually sample a shadow map need comparison samplers.
+        if params.shadow_map_enabled && fs.contains("float texture2DCompare(") {
+            for name in ["directionalShadowMap", "spotShadowMap", "pointShadowMap"] {
+                fs = fs.replace(
+                    &format!("sampler2D {name}"),
+                    &format!("sampler2DShadow {name}"),
+                );
+            }
+            fs = fs.replace("sampler2D shadowMap", "sampler2DShadow shadowMap");
+            let start = fs
+                .find("float texture2DCompare(")
+                .ok_or("shadow comparison function")?;
+            let end = fs[start..]
+                .find("vec2 texture2DDistribution(")
+                .map(|i| start + i)
+                .ok_or("shadow comparison end")?;
+            fs.replace_range(
+                start..end,
+                "float texture2DCompare( sampler2DShadow depths, vec2 uv, float compare ) {\n return texture( depths, vec3( uv, compare ) );\n}\n",
+            );
+        }
         // The sampler specialization and binding layout are part of the
         // translation.
         let mode = format!("{:?} preprocess 1 specialize 1 compact 1", self.math);
@@ -809,11 +852,16 @@ impl Scene3dRenderer {
             count: None,
         }];
         for (name, t, _) in &sorted {
+            let depth = is_shadow_binding(name);
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: *t,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    sample_type: if depth {
+                        wgpu::TextureSampleType::Depth
+                    } else {
+                        wgpu::TextureSampleType::Float { filterable: true }
+                    },
                     view_dimension: if name == "morphTargetsTexture" {
                         wgpu::TextureViewDimension::D2Array
                     } else {
@@ -824,11 +872,15 @@ impl Scene3dRenderer {
                 count: None,
             });
         }
-        for (_, _, s) in &sorted {
+        for (name, _, s) in &sorted {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: *s,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ty: wgpu::BindingType::Sampler(if is_shadow_binding(name) {
+                    wgpu::SamplerBindingType::Comparison
+                } else {
+                    wgpu::SamplerBindingType::Filtering
+                }),
                 count: None,
             });
         }
@@ -999,7 +1051,7 @@ impl Scene3dRenderer {
             width,
             height,
             samples,
-            color: make(wgpu::TextureFormat::Rgba8Unorm, "3d msaa color"),
+            color: make(wgpu::TextureFormat::Rgba16Float, "3d msaa color"),
             depth: make(wgpu::TextureFormat::Depth32Float, "3d msaa depth"),
         });
         self.prepass = None;
@@ -1009,38 +1061,27 @@ impl Scene3dRenderer {
         if matches!(self.shadows.get(&light), Some(t) if t.size == size) {
             return;
         }
-        let make = |format: wgpu::TextureFormat, usage: wgpu::TextureUsages, label: &str| {
-            device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some(label),
-                    size: wgpu::Extent3d {
-                        width: size.0,
-                        height: size.1,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage,
-                    view_formats: &[],
-                })
-                .create_view(&wgpu::TextureViewDescriptor::default())
-        };
         self.shadows.insert(
             light,
             ShadowTarget {
                 size,
-                color: make(
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                    "3d shadow map",
-                ),
-                depth: make(
-                    wgpu::TextureFormat::Depth32Float,
-                    wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    "3d shadow depth",
-                ),
+                depth: device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("3d shadow depth"),
+                        size: wgpu::Extent3d {
+                            width: size.0,
+                            height: size.1,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Depth32Float,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    })
+                    .create_view(&wgpu::TextureViewDescriptor::default()),
             },
         );
     }
@@ -1180,22 +1221,22 @@ impl Scene3dRenderer {
                 module: &compiled.fragment,
                 entry_point: compiled.fragment_entry.as_deref(),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: if state.hdr {
-                        wgpu::TextureFormat::Rgba16Float
-                    } else {
-                        wgpu::TextureFormat::Rgba8Unorm
-                    },
-                    blend,
-                    write_mask: if state.color_write {
-                        state.color_mask.map_or(
-                            wgpu::ColorWrites::ALL,
-                            wgpu::ColorWrites::from_bits_truncate,
-                        )
-                    } else {
-                        wgpu::ColorWrites::empty()
-                    },
-                })],
+                targets: &if state.shadow {
+                    vec![]
+                } else {
+                    vec![Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend,
+                        write_mask: if state.color_write {
+                            state.color_mask.map_or(
+                                wgpu::ColorWrites::ALL,
+                                wgpu::ColorWrites::from_bits_truncate,
+                            )
+                        } else {
+                            wgpu::ColorWrites::empty()
+                        },
+                    })]
+                },
             }),
             multiview_mask: None,
             cache: None,
@@ -1309,9 +1350,9 @@ impl Scene3dRenderer {
                     self.shadows
                         .get(light)
                         .ok_or("a shadow map that was not rendered")?
-                        .color
+                        .depth
                         .clone(),
-                    self.textures.clamp_nearest.clone().expect("samplers"),
+                    self.textures.shadow_compare.clone().expect("samplers"),
                 ),
                 Some(TextureRef::Gltf(m)) => {
                     self.gltf.map(device, queue, encoder, &mut self.textures, m)
@@ -1449,20 +1490,12 @@ impl Scene3dRenderer {
                 let t = &self.shadows[light];
                 let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("3d shadow map"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &t.color,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
+                    color_attachments: &[],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &t.depth,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Discard,
+                            store: wgpu::StoreOp::Store,
                         }),
                         stencil_ops: None,
                     }),
@@ -1781,7 +1814,11 @@ impl Scene3dRenderer {
                     .legacy
                     .render(device, queue, encoder, pool, mesh, self.samples, precision)
                     .map_err(Error3d::Failed)?;
-                Ok(Rendered3d { color, depth: None })
+                Ok(Rendered3d {
+                    color,
+                    depth: None,
+                    color_space: OutputColor3d::Encoded,
+                })
             }
         }
     }
@@ -1801,7 +1838,7 @@ impl Scene3dRenderer {
             device,
             w,
             h,
-            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba16Float,
             wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
@@ -1882,7 +1919,23 @@ impl Scene3dRenderer {
         } else {
             None
         };
-        Ok(Rendered3d { color: out, depth })
+        // A color pass for a non-occluding layer may write its own depth so
+        // its back surface stays hidden. Rebuild the shared prepass before
+        // another layer uses it.
+        if !scene.objects[object].occludes || scene.objects[object].layer_opacity < 0.999 {
+            self.prepass = None;
+        }
+        Ok(Rendered3d {
+            color: out,
+            depth,
+            color_space: OutputColor3d::LinearScene {
+                exposure: scene.exposure as f32,
+                background: background
+                    .then_some(scene.background)
+                    .flatten()
+                    .map(|c| c.map(|v| super::super::three::math::linear_to_srgb(v) as f32)),
+            },
+        })
     }
 
     fn render_whole(
@@ -1937,7 +1990,16 @@ impl Scene3dRenderer {
         } else {
             None
         };
-        Ok(Rendered3d { color: out, depth })
+        Ok(Rendered3d {
+            color: out,
+            depth,
+            color_space: OutputColor3d::LinearScene {
+                exposure: scene.exposure as f32,
+                background: scene
+                    .background
+                    .map(|c| c.map(|v| super::super::three::math::linear_to_srgb(v) as f32)),
+            },
+        })
     }
 
     fn depth_surface_pipeline(&mut self, device: &wgpu::Device) {

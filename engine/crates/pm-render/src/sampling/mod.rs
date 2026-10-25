@@ -1,12 +1,8 @@
 //! Sampling and antialiasing (plan section 8, "Sampling and
 //! antialiasing"; section 2's antialiasing bar).
 //!
-//! Level 1 content (`compat` 1, every layer created before cutover) keeps
-//! today's sampling: no mipmaps, bilinear, hard edges at the UV window, the
-//! rasterizer's pixel-center coverage (`composite.wgsl`, `fs_draw`).
-//!
-//! Level 2 raster content (image, video, and precomp layers with `compat`
-//! ≥ 2) is resampled with a declared kernel and analytic coverage edges:
+//! All raster content uses the same declared kernel and analytic coverage,
+//! independently of its authored compatibility level.
 //!
 //! - **Playback** ([`Sampling::Playback`], frames while playing and scrub
 //!   frames): trilinear filtering over a box-filtered mip pyramid, the
@@ -32,7 +28,7 @@ use pm_model::Node;
 
 pub mod gpu;
 
-/// Which resampler level 2 content uses.
+/// Which resampler raster content uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Sampling {
     /// Trilinear (mipmapped) during playback.
@@ -46,12 +42,6 @@ pub enum Sampling {
 pub fn is_level2(layer: &Node) -> bool {
     let c = node::to_number(node::member(Some(layer), "compat"));
     c >= 2.0
-}
-
-/// Level 2 layer types whose raster content this module samples (vectors,
-/// text, and solids at level 2 belong to their own renderers).
-pub fn samples_layer_type(ty: &str) -> bool {
-    matches!(ty, "image" | "video" | "precomp")
 }
 
 /// The largest edge of a continuously rasterized precomp target.

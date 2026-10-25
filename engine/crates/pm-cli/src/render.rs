@@ -16,7 +16,7 @@ use pm_export::render::{
     ExportJob, JobError, MediaPaths, Progress, Unrestricted, composition_size,
 };
 use pm_model::{Document, Value};
-use pm_protocol::color::{OutputColor, Precision, QuickTimeTag};
+use pm_protocol::color::{OutputColor, QuickTimeTag};
 use pm_protocol::common::{FrameRate, Size, TickRange, Ticks};
 use pm_protocol::priority::{
     AlphaOutput, AudioCoding, Container, DeliveryOptions, ExportFormat, ExportSettings,

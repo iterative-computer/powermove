@@ -24,8 +24,8 @@
 //!
 //! The plan carries these steps as [`Node`]s (a [`crate::plan::Content`]
 //! variant); [`exec`] runs them, splitting the target's render pass at
-//! each node. Every intermediate keeps the legacy storage roundings (each
-//! pass writes the working format), so Standard output matches today's.
+//! each node. Fused arithmetic stays in f32; precision changes only at an
+//! actual working-format store.
 //!
 //! Design notes: `docs/engine/composite.md`.
 
@@ -34,7 +34,6 @@ pub mod color;
 pub mod effects;
 pub(crate) mod exec;
 pub(crate) mod gpu;
-pub mod half_store;
 pub mod path_masks;
 pub mod region;
 

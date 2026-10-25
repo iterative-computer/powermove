@@ -29,6 +29,8 @@ struct Quad {
     // is in GL row order, z = 1 when it holds premultiplied E values to be
     // read into linear light.
     color: vec4<f32>,
+    // Display background RGB and authored exposure for a linear 3D source.
+    scene: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> q: Quad;
@@ -63,7 +65,9 @@ fn fs_draw(in: VsOut) -> @location(0) vec4<f32> {
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         c = vec4<f32>(0.0);
     }
-    if (q.color.z > 0.5) {
+    if (q.color.z > 1.5) {
+        c = scene_output(c, q.scene.w, vec4<f32>(q.scene.rgb, q.color.w), q.color.z < 2.5);
+    } else if (q.color.z > 0.5) {
         c = pm_premultiplied_e_to_linear(c);
     }
     return c * q.color.x;
