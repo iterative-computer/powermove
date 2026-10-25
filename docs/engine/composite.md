@@ -4,7 +4,9 @@ The graph preserves the document's nine blend formulas, masks, mattes, group
 boundaries, adjustment layers, effect order, opacity and timing. Standard projects
 composite premultiplied display values; linear projects decode inputs and encode
 the finished frame. Gradients retain their authored interpolation space. Project
-color depth selects RGBA8, RGBA16F or RGBA32F storage.
+color depth selects delivery depth and float precision. Eight-bit delivery uses
+RGBA16F intermediates so extended colors survive to gamut mapping; 16/32-bit
+projects use RGBA16F/RGBA32F.
 
 A layer boundary draws content, applies masks, runs effects, applies its matte,
 then composites. Fused mask/matte arithmetic stays in f32 until an actual texture
@@ -26,7 +28,10 @@ every compatibility level. Final and paused frames use the declared Lanczos-3
 kernel with its anti-ringing clamp; playback uses trilinear filtering. Quad edges
 use exact pixel-area coverage. Draws whose kernel reads only mip zero borrow the
 source directly; minification uses a box-filtered pyramid. Retained pyramids
-are bounded by both 16 sources and 128 MiB; dynamic texels regenerate before use.
+are bounded by both 16 sources and 128 MiB. Mip zero borrows the source; physical
+levels retain only a float downsample tail. The first box level can be evaluated
+in the draw. Known source revisions reuse texels; changed or unknown revisions
+regenerate before use.
 Authored text layout, vector geometry and extension raster override semantics
 remain separate contracts.
 
@@ -46,6 +51,12 @@ The output boundary applies the authored ACES curve once after 3D blending and
 resolve, joins the display-referred background in linear light, and encodes once
 for Standard compositing. Masks and effects then run in their existing layer
 order. Legacy OBJ shader output has a separate encoded contract.
+
+At an 8-bit sRGB output, the shared CSS Color 4 mapper reduces OKLCh chroma
+before final quantization. It operates on straight encoded RGB, then restores
+premultiplication when requested. Float and Display P3 outputs retain their
+extended values. BT.709-tagged delivery converts the mapped sRGB result to the
+declared transfer. Genuine byte rasters retain their existing byte contract.
 
 The correctness gates are described in [gate-policy.md](gate-policy.md).
 `tests/composite.rs` guards formulas, isolation, region equivalence, exact identity

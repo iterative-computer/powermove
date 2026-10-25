@@ -19,8 +19,8 @@ use pm_protocol::color::{BlendMode, WorkingEncoding};
 
 use super::effects::{Covered, EffectContext, Padding, PreparedEffects, PreparedTransition};
 use super::gpu::{
-    FLAG_BLEND_IN_E, FLAG_LINEAR, FLAG_MASKS, FLAG_MATTE, FLAG_MATTE_INVERTED, FLAG_MATTE_LUMA,
-    FLAG_PATH_MASKS, Op, OpUniform,
+    FLAG_BLEND_IN_E, FLAG_FLIP, FLAG_LINEAR, FLAG_MASKS, FLAG_MATTE, FLAG_MATTE_INVERTED,
+    FLAG_MATTE_LUMA, FLAG_PATH_MASKS, FLAG_SRGB8, Op, OpUniform,
 };
 use super::region::Region;
 use super::{AdjustmentNode, LayerNode, Masks, Matte, Node};
@@ -50,6 +50,19 @@ fn full_quad(full: (u32, u32)) -> [[f32; 4]; 3] {
 /// No intermediate mask/effect target owns the layer image.
 fn unmasked(n: &LayerNode) -> bool {
     n.masks.is_none() && n.matte.is_none() && n.effects.is_none() && n.transition.is_none()
+}
+
+/// A quad whose pixels have unit area coverage even with analytic solid
+/// edges. Other quads retain their layer target so fractional and rotated
+/// edge coverage is applied before the blend.
+fn full_pixel_solid(matrix: [f64; 6]) -> bool {
+    let [a, b, c, d, x, y] = matrix;
+    b == 0.0
+        && c == 0.0
+        && [a, d, x, y].into_iter().all(f64::is_finite)
+        && [x, x + a, y, y + d]
+            .into_iter()
+            .all(|edge| edge == edge.round())
 }
 
 /// Conservative device bounds, including the sampler's analytic edge support.
@@ -282,6 +295,26 @@ impl Exec<'_> {
                     let Some(covered) = layer_rect(n, rect, full) else {
                         continue;
                     };
+                    if !self.depth_id
+                        && unmasked(n)
+                        && n.blend != BlendMode::Normal
+                        && let [draw] = n.content.as_slice()
+                        && let Content::Solid(color) = &draw.content
+                        && full_pixel_solid(draw.matrix)
+                    {
+                        self.blend_solid_region(
+                            encoder,
+                            draw.matrix,
+                            *color,
+                            covered,
+                            &acc,
+                            rect,
+                            full,
+                            n.blend,
+                            n.alpha,
+                        );
+                        continue;
+                    }
                     let Some((res, depth)) = self.layer_node(encoder, plan, n, covered, &acc)
                     else {
                         continue;
@@ -427,6 +460,75 @@ impl Exec<'_> {
         blend: BlendMode,
         alpha: f64,
     ) {
+        let (destination, x, y) =
+            self.snapshot_blend_destination(encoder, covered, acc, rect, full);
+        let mut u = self.composite_uniform(full, blend, alpha);
+        u.off = [-x, -y, -x, -y];
+        self.pipelines.ops.run_with_coverage(
+            self.device,
+            self.queue,
+            encoder,
+            Op::Composite,
+            &u,
+            &source.view,
+            Some(&destination.view),
+            None,
+            &acc.view,
+            acc.format(),
+            Self::viewport(rect, full),
+            Some([x as u32, y as u32, covered.width, covered.height]),
+        );
+        self.release(destination);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn blend_solid_region(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        matrix: [f64; 6],
+        color: [f64; 4],
+        covered: Region,
+        acc: &Target,
+        rect: Region,
+        full: (u32, u32),
+        blend: BlendMode,
+        alpha: f64,
+    ) {
+        let (destination, x, y) =
+            self.snapshot_blend_destination(encoder, covered, acc, rect, full);
+        let mut u = self.composite_uniform(full, blend, alpha);
+        u.m = [
+            [matrix[0] as f32, matrix[1] as f32, 0.0, 0.0],
+            [matrix[2] as f32, matrix[3] as f32, 0.0, 0.0],
+            [matrix[4] as f32, matrix[5] as f32, 1.0, 0.0],
+        ];
+        u.g[0] = super::color::premultiplied_to_working(color, self.working).map(|c| c as f32);
+        u.off = [0, 0, -x, -y];
+        self.pipelines.ops.run_with_coverage(
+            self.device,
+            self.queue,
+            encoder,
+            Op::SolidComposite,
+            &u,
+            &destination.view,
+            Some(&destination.view),
+            None,
+            &acc.view,
+            acc.format(),
+            Self::viewport(rect, full),
+            Some([x as u32, y as u32, covered.width, covered.height]),
+        );
+        self.release(destination);
+    }
+
+    fn snapshot_blend_destination(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        covered: Region,
+        acc: &Target,
+        rect: Region,
+        full: (u32, u32),
+    ) -> (Target, i32, i32) {
         let destination = self.take_scoped(covered);
         let (x, y) = covered.texel_offset(rect, full.1);
         encoder.copy_texture_to_texture(
@@ -445,23 +547,7 @@ impl Exec<'_> {
                 depth_or_array_layers: 1,
             },
         );
-        let mut u = self.composite_uniform(full, blend, alpha);
-        u.off = [-x, -y, -x, -y];
-        self.pipelines.ops.run_with_coverage(
-            self.device,
-            self.queue,
-            encoder,
-            Op::Composite,
-            &u,
-            &source.view,
-            Some(&destination.view),
-            None,
-            &acc.view,
-            acc.format(),
-            Self::viewport(rect, full),
-            Some([x as u32, y as u32, covered.width, covered.height]),
-        );
-        self.release(destination);
+        (destination, x, y)
     }
 
     /// `FRAG_COMPOSITE`'s uniforms. Every input covers the pass rectangle.
@@ -788,18 +874,28 @@ impl Exec<'_> {
     /// target, encoding linear light with E (section 9: "E⁻¹ on input,
     /// linear blending, E on output"). Frames leave the renderer as
     /// premultiplied E values in every working encoding.
-    pub(crate) fn flip_color(
+    pub(crate) fn finish_color(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         source: &Target,
         target: &Target,
+        flip: bool,
     ) {
-        if self.working == WorkingEncoding::Standard {
+        if self.working == WorkingEncoding::Standard
+            && target.format() != wgpu::TextureFormat::Rgba8Unorm
+            && flip
+        {
             self.flip(encoder, source, target);
             return;
         }
         let size = (target.width(), target.height());
-        let u = self.op_uniform(size);
+        let mut u = self.op_uniform(size);
+        if flip {
+            u.i[1] |= FLAG_FLIP;
+        }
+        if target.format() == wgpu::TextureFormat::Rgba8Unorm {
+            u.i[1] |= FLAG_SRGB8;
+        }
         self.run_op(
             encoder,
             Op::EncodeFlip,

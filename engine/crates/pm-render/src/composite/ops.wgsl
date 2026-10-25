@@ -39,8 +39,10 @@ const FLAG_MATTE_LUMA: i32 = 4;
 const FLAG_MATTE_INVERTED: i32 = 8;
 const FLAG_LINEAR: i32 = 16;
 const FLAG_BLEND_IN_E: i32 = 32;
+const FLAG_SRGB8: i32 = 64;
 // Bezier path masks: the layer times today's coverage canvas (`tcov`).
 const FLAG_PATH_MASKS: i32 = 128;
+const FLAG_FLIP: i32 = 256;
 
 @group(0) @binding(0) var<uniform> op: Op;
 @group(0) @binding(1) var ta: texture_2d<f32>;
@@ -181,8 +183,19 @@ fn fs_layer(in: VsOut) -> @location(0) vec4<f32> {
 // source is translucent (docs/engine/composite.md).
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
-    var s = load_a(in.pos);
-    let d = load_b(in.pos);
+    return composite_color(load_a(in.pos), load_b(in.pos));
+}
+
+// A single solid can use its actual quad as this pass's geometry. The
+// destination is still snapped to covered bounds, but no source texture is
+// needed. This shares the blend arithmetic with all other layer sources.
+@fragment
+fn fs_solid_composite(in: VsOut) -> @location(0) vec4<f32> {
+    return composite_color(op.g[0], load_b(in.pos));
+}
+
+fn composite_color(source: vec4<f32>, d: vec4<f32>) -> vec4<f32> {
+    var s = source;
     s.a *= op.f.x;
     s = vec4<f32>(s.rgb * op.f.x, s.a);
     // A transparent source is the exact identity, including additive RGB.
@@ -217,13 +230,22 @@ fn fs_copy(in: VsOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_encode_flip(in: VsOut) -> @location(0) vec4<f32> {
     let h = i32(textureDimensions(ta).y);
-    let at = vec2<i32>(i32(in.pos.x), h - 1 - i32(in.pos.y));
-    let c = textureLoad(ta, at, 0);
+    var at = vec2<i32>(in.pos.xy);
+    if (has(FLAG_FLIP)) { at.y = h - 1 - at.y; }
+    var c = textureLoad(ta, at, 0);
     if (has(FLAG_LINEAR)) {
         if (c.a > 1.0 || !pm_may_unpremultiply(c.a)) {
-            return vec4<f32>(pm_e_encode3(c.rgb), c.a);
+            c = vec4<f32>(pm_e_encode3(c.rgb), c.a);
+        } else {
+            c = pm_premultiplied_linear_to_e(c);
         }
-        return pm_premultiplied_linear_to_e(c);
+    }
+    if (has(FLAG_SRGB8)) {
+        var rgb = pm_css_gamut_srgb(c.rgb);
+        if (c.a <= 1.0 && pm_may_unpremultiply(c.a)) {
+            rgb = pm_css_gamut_srgb(c.rgb / c.a) * c.a;
+        }
+        c = vec4<f32>(rgb, c.a);
     }
     return c;
 }

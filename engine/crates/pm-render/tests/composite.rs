@@ -1249,10 +1249,10 @@ fn blend_stack_cold_texture_bytes_do_not_exceed_today() {
     let before = pm_perf::snapshot();
     let target = pm_gpu::Target::new(
         renderer.device(),
-        "cold blend output",
+        "cold blend working frame",
         320,
         180,
-        wgpu::TextureFormat::Rgba8Unorm,
+        renderer.device_target_format(&doc, &request),
         pm_gpu::target::working_usage(),
     );
     let (frame, _) = renderer

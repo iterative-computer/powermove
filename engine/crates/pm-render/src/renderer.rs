@@ -1353,7 +1353,7 @@ impl Renderer {
             Some(Ok(c)) => effective_precision(request.precision, c.precision),
             _ => request.precision,
         };
-        working_format(precision)
+        working_format(storage_precision(precision))
     }
 
     /// The actual output format on this device. Main's compositor falls
@@ -1889,12 +1889,14 @@ impl Renderer {
             };
             // Generic renders flip GL rows into the caller's top-down target.
             // Standard snapshots draw directly into their readback target.
-            let pooled_gl_rows = (rows == SnapshotRows::TopDown).then(|| {
+            let pooled_gl_rows = (rows == SnapshotRows::TopDown
+                || target.format() != working_format(precision))
+            .then(|| {
                 exec.pool.take(
                     exec.device,
                     size.width,
                     size.height,
-                    target.format(),
+                    working_format(precision),
                     pm_gpu::target::working_usage(),
                 )
             });
@@ -1906,7 +1908,7 @@ impl Renderer {
                     composition: composition.to_owned(),
                     width: size.width,
                     height: size.height,
-                    format: target.format(),
+                    format: gl_rows.format(),
                     region,
                     precision,
                     working: color.working,
@@ -1942,8 +1944,8 @@ impl Renderer {
                 && exec.effects.fallback.fatal.is_none()
                 && !held
                 && !svg_waits;
-            if complete && rows == SnapshotRows::TopDown {
-                exec.flip_color(&mut encoder, gl_rows, target);
+            if complete && pooled_gl_rows.is_some() {
+                exec.finish_color(&mut encoder, gl_rows, target, rows == SnapshotRows::TopDown);
             }
             if let Some(gl_rows) = pooled_gl_rows {
                 exec.taken.push(gl_rows);
@@ -2417,8 +2419,17 @@ pub fn effective_precision(_request: Precision, project: Precision) -> Precision
 /// The shipped compositor's hardware fallback: 32 → 16 on devices without
 /// float32 filtering and blending. The saved project depth is unchanged.
 fn available_precision(precision: Precision, float32: bool) -> Precision {
-    match (precision, float32) {
+    match (storage_precision(precision), float32) {
         (Precision::Float32, false) => Precision::Float16,
+        (storage, _) => storage,
+    }
+}
+
+/// Eight-bit delivery still needs floating intermediates: CSS gamut mapping
+/// must see extended values before the final display or encoder quantization.
+fn storage_precision(precision: Precision) -> Precision {
+    match precision {
+        Precision::Unorm8 => Precision::Float16,
         _ => precision,
     }
 }
@@ -2427,17 +2438,21 @@ fn available_precision(precision: Precision, float32: bool) -> Precision {
 mod depth_device_tests {
     use super::*;
     #[test]
-    fn float32_hardware_fallback_matches_main_without_promoting_other_depths() {
+    fn storage_preserves_extended_color_until_output_and_handles_float32_fallback() {
+        assert_eq!(
+            available_precision(Precision::Unorm8, true),
+            Precision::Float16
+        );
         assert_eq!(
             available_precision(Precision::Float32, false),
             Precision::Float16
         );
-        for depth in [Precision::Unorm8, Precision::Float16, Precision::Float32] {
+        for depth in [Precision::Float16, Precision::Float32] {
             assert_eq!(available_precision(depth, true), depth);
         }
         assert_eq!(
             available_precision(Precision::Unorm8, false),
-            Precision::Unorm8
+            Precision::Float16
         );
         assert_eq!(
             available_precision(Precision::Float16, false),

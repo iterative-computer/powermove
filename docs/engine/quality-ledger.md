@@ -33,6 +33,22 @@ Then one row per correction:
 
 Rewrite a row when its numbers change. Keep no round history here.
 
+## SDR output gamut
+
+- **Reference:** CSS Color 4 OKLCh chroma reduction with deltaEOK JND 0.02,
+  independently evaluated in f64 by `pm-reference`. Mapping operates on straight
+  encoded sRGB before output alpha and quantization. BT.709 output tags retain
+  their declared transfer; float and Display P3 outputs keep extended RGB.
+- **Gate:** `pm-render/tests/color_depth.rs` retains an extended shader value
+  through a depth-8 project's float frame, then verifies ordinary and snapshot
+  byte targets against the independent mapped result. CPU output, viewer alpha,
+  and exact GPU encoder half-byte rounding have separate boundary tests.
+- **Units:** CV; maximum, p99.9 and mean per-pixel error on the uniform fixture.
+
+| Correction (standard) | Clipped output vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Preserve extended color to one CSS Color 4 gamut mapping | 159.970, 159.970, 159.970 | 0.066, 0.066, 0.066 | Extended red shader, 8-bit ordinary and snapshot output |
+
 ## 3D output and Library cards
 
 The scene pass now resolves RGBA16F samples in linear light and defers the

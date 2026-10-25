@@ -1,5 +1,5 @@
-//! Project depth must control all intermediate writes, including exports
-//! whose caller still requests the former automatic float32 promotion.
+//! Project depth controls float precision. Eight-bit delivery retains extended
+//! color in float until its final CSS gamut mapping and byte quantization.
 mod support;
 
 use pm_gpu::Target;
@@ -39,10 +39,10 @@ fn project_depth_overrides_requests_and_rekeys_targets() {
     let mut r = Renderer::headless().unwrap();
     let req = RenderRequest::sized(Size::new(64, 32), Precision::Float32);
     for (depth, format, bpp) in [
-        (8, wgpu::TextureFormat::Rgba8Unorm, 4),
+        (8, wgpu::TextureFormat::Rgba16Float, 8),
         (32, wgpu::TextureFormat::Rgba32Float, 16),
         (16, wgpu::TextureFormat::Rgba16Float, 8),
-        (8, wgpu::TextureFormat::Rgba8Unorm, 4),
+        (8, wgpu::TextureFormat::Rgba16Float, 8),
     ] {
         let doc = load(&document(depth));
         assert_eq!(Renderer::target_format(&doc, &req), format);
@@ -59,13 +59,6 @@ fn project_depth_overrides_requests_and_rekeys_targets() {
         assert_eq!(frame.color.format(), format);
         assert_eq!(frame.color.bytes(), 64 * 32 * bpp);
         let first = r.read_rgba(&frame).unwrap();
-        if depth == 8 {
-            assert!(
-                first
-                    .iter()
-                    .all(|v| (v * 255.0 - (v * 255.0).round()).abs() < 0.0001)
-            );
-        }
         let target = Target::new(
             r.device(),
             "depth caller",
@@ -101,11 +94,93 @@ fn explicit_depth_replaces_the_old_precision_floor() {
         assert_eq!(
             Renderer::target_format(&doc, &req),
             pm_gpu::target::working_format(match depth {
-                8 => Precision::Unorm8,
                 32 => Precision::Float32,
                 _ => Precision::Float16,
             })
         );
+    }
+}
+
+#[test]
+fn eight_bit_delivery_maps_extended_color_after_float_compositing() {
+    let shader = layer(
+        "extended",
+        "shader",
+        json!({"code":"void main(){ fragColor = vec4(1.4, 0.0, 0.0, 1.0); }",
+            "uniforms":{},"w":8,"h":8}),
+        0.0,
+        0.0,
+        1.0,
+    );
+    let mut value = project(8, 8, 1.0, no_fill(), vec![shader]);
+    value["colorDepth"] = json!(8);
+    let doc = load(&value);
+    let request = RenderRequest::sized(Size::new(8, 8), Precision::Unorm8);
+    let assets = MapResolver::default();
+    let mut renderer = Renderer::headless().unwrap();
+    let frame = renderer
+        .render(&doc, "Ptest-root", support::ticks(0.0), &request, &assets)
+        .unwrap();
+    assert!(frame.failures.is_empty(), "{:?}", frame.failures);
+    let pixels = renderer.read_rgba(&frame).unwrap();
+    for p in pixels.chunks_exact(4) {
+        assert!(p[0] > 1.39 && p[1] == 0.0 && p[2] == 0.0, "{p:?}");
+    }
+    let target = Target::new(
+        renderer.device(),
+        "mapped byte output",
+        8,
+        8,
+        wgpu::TextureFormat::Rgba8Unorm,
+        pm_gpu::target::working_usage(),
+    );
+    let reference = pm_reference::color::css_gamut_map_srgb([1.4, 0.0, 0.0]);
+    let expected = reference.map(|v| (v * 255.0).round_ties_even() as u8);
+    let error = |rgb: [f64; 3]| {
+        rgb.into_iter()
+            .zip(reference)
+            .map(|(a, b)| (a - b).abs() * 255.0)
+            .fold(0.0f64, f64::max)
+    };
+    eprintln!(
+        "CSS output max error: clipped {:.6} CV; mapped {:.6} CV",
+        error([1.0, 0.0, 0.0]),
+        error(expected.map(|v| f64::from(v) / 255.0))
+    );
+    for snapshot in [false, true] {
+        if snapshot {
+            renderer
+                .render_snapshot_into(
+                    &doc,
+                    "Ptest-root",
+                    support::ticks(0.0),
+                    &request,
+                    &assets,
+                    &target,
+                )
+                .unwrap();
+        } else {
+            renderer
+                .render_into(
+                    &doc,
+                    "Ptest-root",
+                    support::ticks(0.0),
+                    &request,
+                    &assets,
+                    &target,
+                    None,
+                )
+                .unwrap();
+        }
+        let actual =
+            pm_gpu::readback::read_f32(renderer.device(), renderer.queue(), &target.texture)
+                .unwrap();
+        for p in actual.chunks_exact(4) {
+            assert_eq!(
+                [p[0], p[1], p[2]].map(|v| (v * 255.0).round() as u8),
+                expected
+            );
+        }
     }
 }
 

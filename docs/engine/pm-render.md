@@ -467,24 +467,15 @@ output share the matrix.
   and baseline TIFF encoder, a Display P3 ICC profile, and WebP, AVIF, and
   HEIC derived with `cwebp` and `sips`).
 
-## 8-bit working target routing
+## Output depth and gamut mapping
 
-At project color depth 8, working composition targets and their intermediate
-passes use `Rgba8Unorm`. The source conversion writes directly to RGBA8 so
-that half-float rounding cannot precede its byte quantization. Resampling
-pyramids, footage orientation, level 2 vector paint, text paint, and legacy
-OBJ mesh outputs use the same target format. Source bitmaps that were already
-RGBA8 remain separate cache entries from float source textures; their format
-alone does not indicate the composition's precision. Three.js scene canvas
-and the 3D object-id/depth planes keep their own formats.
-Compatibility video keeps its centered bilinear chroma reconstruction;
-interpreted video written into an RGBA8 working target keeps native siting
-and filtering.
+Eight-bit delivery keeps composition intermediates in RGBA16F. This preserves
+extended RGB until the final sRGB boundary, where CSS Color 4 gamut mapping runs
+on straight encoded values before optional premultiplication and quantization.
+Float and Display P3 delivery skip that mapper. Project depths 16 and 32 retain
+their float storage, including sampled sources and 3D output.
 
-The WebGL shader fallback request carries the working color depth. At depth
-8 its existing 16-bit wire slots carry exact byte codes, so the runner uploads
-and renders into RGBA8 and reads `UNSIGNED_BYTE`; no half-float stage precedes
-the working target. Older requests omit the field and continue to use RGBA16F.
-The targeted WebGL runner check preserves 24,576 byte codes across readback,
-three passes and depth switches. Full shader-corpus qualification at all
-depths remains required; see `color-depth.md` for current blockers.
+The renderer returns premultiplied E-encoded frames. CPU snapshot and export
+encoders share one output-pixel conversion. Explicit byte render targets use the
+same shared WGSL mapper in the final color pass. Existing byte compatibility
+rasters retain their API representation; their source values are not remapped.
