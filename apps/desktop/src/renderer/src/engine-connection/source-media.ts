@@ -359,6 +359,7 @@ export class SourceMonitor extends EventTarget {
   private frameAbort: AbortController | null = null;
   private readonly cancel = new AbortController();
   private readonly resize: ResizeObserver;
+  private resolution: MediaQueryList | null = null;
   private cssWidth = 0;
   private cssHeight = 0;
   private imageUrl: string | null = null;
@@ -389,8 +390,23 @@ export class SourceMonitor extends EventTarget {
       void this.paint();
     });
     this.resize.observe(this.surface, { box: 'border-box' });
+    this.watchResolution();
     void this.command(false);
     queueMicrotask(() => { if (this.surface.isConnected) void this.paint(); });
+  }
+
+  private readonly resolutionChanged = (): void => {
+    this.resolution?.removeEventListener('change', this.resolutionChanged);
+    this.resolution = null;
+    if (this.disposed) return;
+    this.watchResolution();
+    void this.paint();
+  };
+
+  private watchResolution(): void {
+    if (typeof matchMedia !== 'function') return;
+    this.resolution = matchMedia(`(resolution: ${devicePixelRatio || 1}dppx)`);
+    this.resolution.addEventListener('change', this.resolutionChanged);
   }
 
   get paused(): boolean { return !this.advancing; }
@@ -428,7 +444,10 @@ export class SourceMonitor extends EventTarget {
 
   pause(): void {
     this.at = this.currentTime;
-    this.advancing = false; void this.command(false);
+    this.advancing = false;
+    this.frameAbort?.abort();
+    // Submit paused transport intent before requesting the Final-quality frame.
+    void this.command(false).then(() => this.paint());
     if (this.frame) cancelAnimationFrame(this.frame); this.frame = 0;
     this.dispatchEvent(new Event('pause'));
   }
@@ -535,6 +554,7 @@ export class SourceMonitor extends EventTarget {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true; this.requested++; this.cancel.abort(); this.resize.disconnect();
+    this.resolution?.removeEventListener('change', this.resolutionChanged); this.resolution = null;
     if (this.frame) cancelAnimationFrame(this.frame); this.frame = 0;
     this.host.session()?.audio({ audio: 'sourceMonitor', generation: this.source.nextGeneration(), asset: null, time: 0, playing: false });
     if (this.imageUrl) { URL.revokeObjectURL(this.imageUrl); this.imageUrl = null; }

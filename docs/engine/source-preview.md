@@ -25,6 +25,14 @@ import, so the monitor no longer uses IOSurfaces. Main assigns each delivery
 timestamp before the raw VideoFrame is created. Startup replays retain that stamp, and presentation acknowledgements
 match it exactly: retiming a VideoFrame clone changes its JS wrapper but not
 the timestamp Chromium consumes from its underlying frame.
+When a coded source exceeds four times the monitor's device pixels, or its
+colour/geometry requires conversion, the engine resamples it before delivery.
+It uses composition's declared sampler: Lanczos-3 for paused frames and
+trilinear filtering for playback. A minified frame builds one mip pyramid on
+the GPU; unminified frames reuse the source texture directly. Pausing requests
+a Final-quality repaint. A rearmed resolution media query repaints a paused
+monitor when DPR alone changes, independently of CSS resizing.
+
 Source audio has a separate native voice and clock. Original stream facts
 define the monitor’s duration and audio presence; audio sample zero retains
 its presentation offset, and the clock continues through silent portions.
@@ -45,7 +53,7 @@ replacement releases that worker and its cached interpretation.
 
 Validation lives in `engine-source-refresh`, `engine-source-guard`,
 `engine-source-media`, `engine-source-compositor` and `engine-source-performance`
-under desktop `e2e`, plus Rust `source_snapshot` and presenter cancellation
+under desktop `e2e`, plus Rust `source_snapshot`, `sampling` and presenter cancellation
 tests. Colour corrections are measured against an independent reference in
 `quality-ledger.md`; legacy byte equality is not the correctness definition.
 The source performance gate measures alternating native/legacy app sessions
