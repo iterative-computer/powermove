@@ -408,11 +408,7 @@ fn displayed_pixels_prefer_supersampled_float_reference() {
                 _ => None,
             };
             let modeled = float_reference::display(&reference, plan.scene.exposure, background);
-            let engine = float_reference::display(
-                &actual,
-                plan.scene.exposure,
-                background,
-            );
+            let engine = float_reference::display(&actual, plan.scene.exposure, background);
             let (tw, th, today_bytes) =
                 support::read_png(&capture.join(&c.id).join(format!("{k}.msaa.png")));
             assert_eq!((tw, th), (w, h), "{}:{} today size", c.id, k);
@@ -430,10 +426,18 @@ fn displayed_pixels_prefer_supersampled_float_reference() {
             pool.give(out.color);
         }
     }
+    let selected_outputs: usize = cases.iter().map(|case| case.outputs.len()).sum();
     assert!(
-        compared >= 70,
-        "only {compared} independent references compared"
+        selected_outputs > 0,
+        "no independent scene references selected"
     );
+    assert_eq!(compared, selected_outputs);
+    if std::env::var("PM_SCENE3D_ONLY").is_err() {
+        assert!(
+            compared >= 70,
+            "only {compared} independent references compared"
+        );
+    }
     assert!(
         failures.is_empty(),
         "G-D1 independent displayed reference deviations:\n{}",

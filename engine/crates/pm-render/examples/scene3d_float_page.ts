@@ -23,17 +23,63 @@ function editorCamera(e: any) {
 // instead of relying on an ignored argument. Restore before the next output.
 function applyLook(scene: THREE.Scene, look: { wireframe?: boolean; xray?: boolean }) {
   const saved = new Map<THREE.Material, { wireframe?: boolean; transparent: boolean; opacity: number; depthWrite: boolean }>();
+  const triangles: { mesh: THREE.Mesh; geometry: THREE.BufferGeometry; material: THREE.Material | THREE.Material[] }[] = [];
   scene.traverse((child: any) => {
     if (!child.isMesh) return;
+    if (look.wireframe) {
+      const mesh = child as THREE.Mesh;
+      const original = mesh.geometry;
+      const geometry = original.index ? original.toNonIndexed() : original.clone();
+      const barycentric = new Float32Array(geometry.getAttribute('position').count * 3);
+      for (let i = 0; i < barycentric.length / 3; i++) barycentric[i * 3 + i % 3] = 1;
+      geometry.setAttribute('referenceBarycentric', new THREE.BufferAttribute(barycentric, 3));
+      triangles.push({ mesh, geometry: original, material: mesh.material });
+      mesh.geometry = geometry;
+      mesh.userData.floatWireframeReference = true;
+      const wireframeMaterial = (material: THREE.Material) => {
+        const copy = material.clone();
+        // Line primitives have undefined screen-space derivatives on Metal.
+        // Shade the original triangles with r180's material formula, then
+        // retain their one-pixel edges using analytic barycentric coverage.
+        // Discard after shading so normal, tangent and bump derivatives have
+        // valid neighboring triangle fragments.
+        copy.wireframe = false;
+        const originalCompile = copy.onBeforeCompile;
+        copy.onBeforeCompile = (shader, renderer) => {
+          originalCompile.call(copy, shader, renderer);
+          shader.vertexShader = shader.vertexShader.replace('void main() {',
+            'attribute vec3 referenceBarycentric; varying vec3 vReferenceBarycentric; void main() { vReferenceBarycentric = referenceBarycentric;');
+          shader.fragmentShader = shader.fragmentShader.replace('void main() {',
+            'varying vec3 vReferenceBarycentric; void main() {');
+          if (!shader.fragmentShader.includes('#include <opaque_fragment>'))
+            throw new Error(`wireframe reference cannot shade ${material.type}`);
+          shader.fragmentShader = shader.fragmentShader.replace('#include <opaque_fragment>',
+            'if (all(greaterThan(vReferenceBarycentric, 0.5 * fwidth(vReferenceBarycentric)))) discard;\n#include <opaque_fragment>');
+        };
+        return copy;
+      };
+      mesh.material = Array.isArray(mesh.material)
+        ? mesh.material.map(wireframeMaterial) : wireframeMaterial(mesh.material);
+    }
     for (const material of Array.isArray(child.material) ? child.material : [child.material]) {
       if (!material || saved.has(material)) continue;
       saved.set(material, { wireframe: material.wireframe, transparent: material.transparent,
         opacity: material.opacity, depthWrite: material.depthWrite });
-      if (look.wireframe) material.wireframe = true;
       if (look.xray) { material.transparent = true; material.opacity *= .45; material.depthWrite = false; }
     }
   });
-  return () => { for (const [material, previous] of saved) Object.assign(material, previous); };
+  return () => {
+    for (const [material, previous] of saved) Object.assign(material, previous);
+    for (const { mesh, geometry, material } of triangles) {
+      const temporary = mesh.geometry;
+      const temporaryMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      mesh.geometry = geometry;
+      mesh.material = material;
+      delete mesh.userData.floatWireframeReference;
+      temporary.dispose();
+      for (const m of temporaryMaterials) m.dispose();
+    }
+  };
 }
 
 // A WebGL line remains one framebuffer pixel wide when the target grows.
@@ -44,8 +90,7 @@ function needsJitter(scene: THREE.Scene) {
   let result = false;
   scene.traverse((child: any) => {
     if (child.isLine || child.isPoints || child.isSprite) result = true;
-    if (child.isMesh && (Array.isArray(child.material) ? child.material : [child.material])
-      .some((material: any) => material?.wireframe)) result = true;
+    if (child.isMesh && child.userData.floatWireframeReference) result = true;
   });
   return result;
 }
@@ -175,6 +220,9 @@ async function renderCase(c: any) {
       } finally {
         camera.clearViewOffset(); restore();
       }
+      const nonfinite = averaged.findIndex(value => !Number.isFinite(value));
+      if (nonfinite >= 0)
+        throw new Error(`${c.id}/${k}: nonfinite RGBA32F reference component ${nonfinite}`);
       const response = await fetch(`/out/${encodeURIComponent(c.id)}/${k}.rgba32f`,
         { method: 'POST', body: averaged.buffer });
       if (!response.ok) throw new Error(`write ${c.id}/${k}: ${response.status}`);

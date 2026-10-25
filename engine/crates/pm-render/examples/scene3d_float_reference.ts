@@ -73,7 +73,7 @@ try {
   writeFileSync(path.join(out, 'manifest.json'), JSON.stringify({
     three: '0.180.0', chromium: browser.version(), scale: 8, format: 'rgba32float',
     space: 'premultiplied linear sRGB', fixture: fixtureName,
-    sampling: '8x8 spatial; 8x8 subpixel camera jitter at native size for pixel-width lines and points',
+    sampling: '8x8 spatial; 8x8 subpixel camera jitter at native size for pixel-width lines and points; triangle barycentric one-pixel wireframe so r180 material derivatives are defined',
     look: 'authored editor material state applied explicitly',
     captureId: path.basename(source),
     cases: cases.map((c: any) => c.id), refused,
