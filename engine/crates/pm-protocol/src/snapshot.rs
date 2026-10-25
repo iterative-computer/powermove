@@ -31,7 +31,9 @@ use crate::common::{
     ByteSize, Bytes, CompositionId, Count, DocumentId, LayerId, PixelRect, Revision, Seq,
     SessionId, Size, Ticks,
 };
-use crate::frame::{FrameQuality, MAX_OUTPUT_DIMENSION};
+use crate::frame::{
+    FrameQuality, MAX_OUTPUT_DIMENSION, Projection, Shading3d, ViewOverride, ViewerCanvas,
+};
 use crate::host::PortId;
 use crate::validate::{Validate, Violation, ensure};
 use crate::version::ContractId;
@@ -165,6 +167,11 @@ pub struct SnapshotRequest {
     /// The viewer state the caller saw (`ViewerState::view_seq`), echoed in
     /// the result so a consumer can tie it to what was on screen.
     pub view_seq: Option<Seq>,
+    /// A frozen viewer's original canvas and preview view. When present,
+    /// render that canvas before its CSS box is scaled into the stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub viewer: Option<SnapshotViewer>,
     /// Longest the engine waits for the envelope's revision and for its
     /// turn before it answers `timeout` (milliseconds, 1 to
     /// [`MAX_SNAPSHOT_WAIT_MS`]).
@@ -199,6 +206,17 @@ pub struct SnapshotRequest {
     pub compat_uploaded: Vec<CompatNeed>,
 }
 
+/// Immutable view selected by a viewer snapshot. This never changes the
+/// session's live viewer state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotViewer {
+    pub view: Option<ViewOverride>,
+    pub canvas: ViewerCanvas,
+    pub view_seq: Seq,
+}
+
 impl SnapshotRequest {
     /// Bytes of the RGBA8 result at the output size (the most a `Layer`
     /// target returns).
@@ -231,6 +249,77 @@ impl Validate for SnapshotRequest {
                 self.output_size.width, self.output_size.height
             )
         })?;
+        if let Some(viewer) = &self.viewer {
+            let crop = viewer.canvas.crop;
+            let css = viewer.canvas.css;
+            let positive_rect = |r: crate::common::Rect| {
+                [r.x, r.y, r.width, r.height].iter().all(|v| v.is_finite())
+                    && r.width > 0.0
+                    && r.height > 0.0
+            };
+            ensure(
+                matches!(self.target, SnapshotTarget::Frame { .. }),
+                C,
+                || "a viewer snapshot must target a frame".into(),
+            )?;
+            ensure(
+                self.output_size == Size::new(viewer.canvas.width, viewer.canvas.height),
+                C,
+                || "viewer snapshot size must match its canvas backing size".into(),
+            )?;
+            ensure(
+                self.view_seq.is_none_or(|seq| seq == viewer.view_seq),
+                C,
+                || "viewer snapshot viewSeq conflicts with its pinned viewer".into(),
+            )?;
+            ensure(positive_rect(crop) && positive_rect(css), C, || {
+                "viewer snapshot canvas crop and CSS box must be finite and positive".into()
+            })?;
+            if let Some(view) = &viewer.view {
+                ensure(
+                    !view.xray || matches!(view.shading, Shading3d::Wireframe | Shading3d::Solid),
+                    C,
+                    || "X-ray applies in draft shading modes only".into(),
+                )?;
+                ensure(view.local_view.iter().all(|id| id.is_valid()), C, || {
+                    "invalid Local View layer id".into()
+                })?;
+                if let Some(camera) = &view.camera {
+                    ensure(camera.view.iter().all(|v| v.is_finite()), C, || {
+                        "viewer snapshot camera matrix must be finite".into()
+                    })?;
+                    let valid_projection = match camera.projection {
+                        Projection::Perspective {
+                            fov_y_degrees,
+                            near,
+                            far,
+                        } => {
+                            fov_y_degrees.is_finite()
+                                && fov_y_degrees > 0.0
+                                && fov_y_degrees < 180.0
+                                && near.is_finite()
+                                && near > 0.0
+                                && far.is_finite()
+                                && far > near
+                        }
+                        Projection::Orthographic {
+                            half_height,
+                            near,
+                            far,
+                        } => {
+                            half_height.is_finite()
+                                && half_height > 0.0
+                                && near.is_finite()
+                                && far.is_finite()
+                                && far > near
+                        }
+                    };
+                    ensure(valid_projection, C, || {
+                        "viewer snapshot camera projection is invalid".into()
+                    })?;
+                }
+            }
+        }
         ensure(
             (1..=MAX_SNAPSHOT_WAIT_MS).contains(&self.wait_ms),
             C,
@@ -463,7 +552,7 @@ impl Validate for SnapshotOutcome {
 pub struct SnapshotResult {
     /// The exact revision rendered (≥ the request's minimum).
     pub revision: Revision,
-    /// The request's `view_seq`, echoed.
+    /// The selected viewer's `view_seq`, or a legacy request's echoed `view_seq`.
     pub view_seq: Option<Seq>,
     pub width: u32,
     pub height: u32,
@@ -1152,6 +1241,34 @@ pub struct RenderStats {
     pub snapshot_us_max: u32,
     /// The revision of the newest frame presented.
     pub revision: Revision,
+    /// The session's audio playback health, once its audio started
+    /// (absent for a session that has not opened audio).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub audio: Option<AudioDiagnostics>,
+}
+
+/// A session's audio playback health in [`RenderStats`], for the status bar
+/// and the performance panel. Counters run since the session's audio
+/// started; a report goes out when any of them changes, paused or not.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct AudioDiagnostics {
+    /// Why no output device opened (the run follows the host clock).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub error: Option<String>,
+    /// Distinct playback problems, oldest first (at most 16): media that
+    /// did not resolve, mix and transport errors, and voices dropped to
+    /// silence after their source missed the bounded wait (issue A3).
+    pub problems: Vec<String>,
+    /// Segments a missing source block held (each counted once).
+    pub starved_renders: Count,
+    /// Device buffers the mixer did not fill in time (audible gaps).
+    pub underruns: Count,
+    /// Output device cycles that overran their real-time deadline.
+    pub device_overloads: Count,
 }
 
 /// A viewer frame's tag: the frame a consumer asks about (the depth and id
@@ -1184,6 +1301,7 @@ mod tests {
             pixels: SnapshotPixels::Opaque,
             class: SnapshotClass::Sync,
             view_seq: None,
+            viewer: None,
             wait_ms: 5_000,
             blender_wait_ms: 0,
             captions_hidden: false,
@@ -1245,6 +1363,163 @@ mod tests {
         value.as_object_mut().unwrap().remove("blenderWaitMs");
         let read: SnapshotRequest = serde_json::from_value(value).unwrap();
         assert_eq!(read.blender_wait_ms, 0);
+    }
+
+    #[test]
+    fn viewer_snapshot_pins_a_valid_canvas_and_sequence() {
+        use crate::common::Rect;
+        use crate::frame::ViewerCanvas;
+
+        let mut capture = request(320, 180);
+        capture.viewer = Some(SnapshotViewer {
+            view: None,
+            canvas: ViewerCanvas {
+                width: 320,
+                height: 180,
+                crop: Rect {
+                    x: 80.0,
+                    y: 40.0,
+                    width: 160.0,
+                    height: 90.0,
+                },
+                css: Rect {
+                    x: 8.0,
+                    y: 12.0,
+                    width: 640.0,
+                    height: 360.0,
+                },
+            },
+            view_seq: Seq::new(7).unwrap(),
+        });
+        assert!(capture.validate().is_ok());
+        let wire = rmp_serde::to_vec_named(&capture).unwrap();
+        let decoded: SnapshotRequest = rmp_serde::from_slice(&wire).unwrap();
+        assert_eq!(decoded, capture);
+
+        capture.view_seq = Some(Seq::new(6).unwrap());
+        assert!(capture.validate().is_err());
+        capture.view_seq = Some(Seq::new(7).unwrap());
+        capture.output_size.width = 319;
+        assert!(capture.validate().is_err());
+        capture.output_size.width = 320;
+        capture.viewer.as_mut().unwrap().canvas.crop.width = 0.0;
+        assert!(capture.validate().is_err());
+        capture.viewer.as_mut().unwrap().canvas.crop.width = f64::NAN;
+        assert!(capture.validate().is_err());
+        capture.viewer.as_mut().unwrap().canvas.crop.width = 160.0;
+        capture.viewer.as_mut().unwrap().canvas.css.height = 0.0;
+        assert!(capture.validate().is_err());
+        capture.viewer.as_mut().unwrap().canvas.css.height = 360.0;
+        capture.viewer.as_mut().unwrap().view = Some(ViewOverride {
+            camera: Some(crate::frame::EditorCamera {
+                view: crate::common::MAT4_IDENTITY,
+                projection: Projection::Orthographic {
+                    half_height: 3.0,
+                    near: -10.0,
+                    far: 10.0,
+                },
+            }),
+            shading: Shading3d::Solid,
+            xray: true,
+            local_view: vec!["L".into()],
+        });
+        assert!(
+            capture.validate().is_ok(),
+            "negative orthographic near is valid"
+        );
+        capture
+            .viewer
+            .as_mut()
+            .unwrap()
+            .view
+            .as_mut()
+            .unwrap()
+            .camera
+            .as_mut()
+            .unwrap()
+            .view[0] = f64::NAN;
+        assert!(capture.validate().is_err());
+        capture
+            .viewer
+            .as_mut()
+            .unwrap()
+            .view
+            .as_mut()
+            .unwrap()
+            .camera
+            .as_mut()
+            .unwrap()
+            .view[0] = 1.0;
+        capture
+            .viewer
+            .as_mut()
+            .unwrap()
+            .view
+            .as_mut()
+            .unwrap()
+            .camera
+            .as_mut()
+            .unwrap()
+            .projection = Projection::Perspective {
+            fov_y_degrees: 45.0,
+            near: 0.1,
+            far: 100.0,
+        };
+        assert!(capture.validate().is_ok());
+        capture
+            .viewer
+            .as_mut()
+            .unwrap()
+            .view
+            .as_mut()
+            .unwrap()
+            .camera
+            .as_mut()
+            .unwrap()
+            .projection = Projection::Perspective {
+            fov_y_degrees: 45.0,
+            near: 1.0,
+            far: 0.5,
+        };
+        assert!(capture.validate().is_err());
+        capture
+            .viewer
+            .as_mut()
+            .unwrap()
+            .view
+            .as_mut()
+            .unwrap()
+            .camera
+            .as_mut()
+            .unwrap()
+            .projection = Projection::Perspective {
+            fov_y_degrees: 45.0,
+            near: 0.1,
+            far: 100.0,
+        };
+        capture
+            .viewer
+            .as_mut()
+            .unwrap()
+            .view
+            .as_mut()
+            .unwrap()
+            .shading = Shading3d::Rendered;
+        assert!(capture.validate().is_err(), "X-ray requires draft shading");
+        capture.viewer.as_mut().unwrap().view.as_mut().unwrap().xray = false;
+        assert!(capture.validate().is_ok());
+        capture.target = SnapshotTarget::Layer {
+            layer: "L".into(),
+            scale: 1.0,
+            crop: None,
+            content: None,
+        };
+        assert!(capture.validate().is_err());
+
+        let old = serde_json::to_value(request(8, 8)).unwrap();
+        assert!(old.get("viewer").is_none());
+        let decoded: SnapshotRequest = serde_json::from_value(old).unwrap();
+        assert!(decoded.viewer.is_none());
     }
 
     #[test]

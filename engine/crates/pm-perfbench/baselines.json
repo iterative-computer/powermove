@@ -146,7 +146,7 @@
     "import_3d_600k": {
       "all_threads": {
         "cpu.heap_alloc_bytes": 50871009,
-        "cpu.heap_allocs": 109754,
+        "cpu.heap_allocs": 111919,
         "engine.comp_passes": 11,
         "engine.layers_planned": 33,
         "gpu.bind_group_binds": 88,
@@ -162,7 +162,7 @@
       },
       "thread": {
         "cpu.heap_alloc_bytes": 50870987,
-        "cpu.heap_allocs": 109754,
+        "cpu.heap_allocs": 111919,
         "engine.comp_passes": 11,
         "engine.layers_planned": 33,
         "gpu.bind_group_binds": 88,

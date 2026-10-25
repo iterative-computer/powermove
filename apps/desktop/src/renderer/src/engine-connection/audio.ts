@@ -30,7 +30,7 @@ export type LevelSource = {
   running(): boolean;
 };
 
-type AssetLike = { id?: string; type?: string; kind?: string; peaks?: ArrayLike<number> | null; hasAudio?: boolean; peaksSource?: string; audioDecodeError?: unknown };
+type AssetLike = { id?: string; type?: string; kind?: string; peaks?: ArrayLike<number> | null; hasAudio?: boolean; peaksSource?: string; audioDecodeError?: unknown; contentHash?: string; storageKey?: string; blob?: unknown; audioBlob?: unknown; link?: { hash?: string; path?: string } };
 
 export type EngineAudioHost = {
   /** The session the transport follows. */
@@ -39,6 +39,8 @@ export type EngineAudioHost = {
   driving(): boolean;
   /** The project's assets (`PM.assets.map`). */
   assets(): Iterable<AssetLike>;
+  /** The persisted source identity; restored live assets may lack hashes. */
+  source?(id: string): unknown;
   /** An asset's peaks changed: redraw what shows them. */
   peaksChanged(asset: AssetLike): void;
   now?(): number;
@@ -63,8 +65,10 @@ export class EngineAudio {
   /** The session the solo and the peak requests were sent on. */
   private sentOn: DocumentSession | null = null;
   /** Assets whose peaks were asked for on `sentOn`, or answered. */
-  private asked = new Set<string>();
+  private asked = new Map<string, number>();
+  private nextRequest = 0;
   private answered = new Map<string, AudioPeaks>();
+  private observed = new Map<string, { asset: AssetLike; source: string; blob: unknown }>();
 
   constructor(private readonly host: EngineAudioHost) {}
 
@@ -86,6 +90,10 @@ export class EngineAudio {
       }
       case 'peaks': {
         const { audio: _a, ...peaks } = message;
+        // Requests are generation-tagged across replacement, relink and
+        // full document resync, including work already running in the decoder.
+        this.observe();
+        if (!this.asked.has(peaks.asset) || peaks.request !== this.asked.get(peaks.asset)) return;
         if (peaks.error) {
           // Offline media (not resolved yet) or no sound: ask again at the
           // next sync (a route change, an asset change), not at once.
@@ -114,6 +122,7 @@ export class EngineAudio {
   /** The session the transport follows changed or became ready: sends the
    *  monitor solo and asks for the peaks of every asset with sound. */
   sync(): void {
+    this.observe();
     const session = this.host.session();
     if (!session || session.closed || session.id === null) return;
     if (session !== this.sentOn) {
@@ -125,14 +134,47 @@ export class EngineAudio {
     for (const asset of this.host.assets()) {
       const id = asset?.id;
       if (!id || this.asked.has(id) || !hasSound(asset)) continue;
-      this.asked.add(id);
+      const request = ++this.nextRequest;
+      this.asked.set(id, request);
       const known = this.answered.get(id);
       if (known && !known.error) {
         this.apply(known);
         continue;
       }
-      session.audio({ audio: 'peaksWanted', asset: id });
+      session.audio({ audio: 'peaksWanted', asset: id, request });
     }
+  }
+
+  private observe(): void {
+    const live = new Set<string>();
+    for (const asset of this.host.assets()) {
+      if (!asset.id) continue;
+      const id = asset.id;
+      live.add(id);
+      const source = JSON.stringify([asset.contentHash, asset.storageKey, asset.link?.hash, asset.link?.path, this.host.source?.(id)]);
+      const blob = asset.blob ?? asset.audioBlob;
+      const before = this.observed.get(id);
+      if (before && (before.asset !== asset || before.source !== source || before.blob !== blob)) {
+        this.forget(id);
+        if (asset.peaksSource === 'engine') {
+          asset.peaks = null;
+          delete asset.peaksSource;
+          this.host.peaksChanged(asset);
+        }
+      }
+      this.observed.set(id, { asset, source, blob });
+    }
+    for (const id of this.observed.keys()) if (!live.has(id)) {
+      this.forget(id);
+      this.observed.delete(id);
+    }
+  }
+
+  /** Retire outstanding waveform generations after a full document resync. Replay
+   * after acceptance even when the session and route did not change. */
+  resynced(): void {
+    this.asked.clear();
+    this.sync();
   }
 
   /** Every levels message (the measurements and tests). */

@@ -10,7 +10,7 @@
 import type { Project } from '../core/types/project';
 import { doc } from '../state/document.svelte';
 import { sel, setSelection } from '../state/selection.svelte';
-import { perf, transport, updateControlTime } from '../state/transport.svelte';
+import { perf, transport, updateAudioHealth, updateControlTime } from '../state/transport.svelte';
 import { frameBus } from './frame-bus';
 import { bridge as hostBridge } from '../kernel/bridge';
 import { frame, invalidate } from './invalidate';
@@ -22,6 +22,7 @@ const BUS_TO_TICK: Record<string, MutationKind> = {
   layers: 'structure',
   project: 'project',
   assets: 'assets',
+  'audio:peaks': 'assets',
   library: 'library',
   history: 'history',
   'draw:ui': 'values'
@@ -109,11 +110,14 @@ export function installLegacyRuntime(PM: LegacyPM): () => void {
   on('draw:status', () => {
     // With the new engine on, its stats replace GL.stats (presentation-events.ts).
     const engine = PM.EngineStats?.perf?.();
-    if (engine) {
-      Object.assign(perf, engine);
+    // Engine audio problems, dropouts and device failures (A5).
+    updateAudioHealth(engine ? (PM.EngineStats?.audio?.() ?? null) : null);
+    if (PM.EngineStats) {
+      Object.assign(perf, { ms: 0, fps: 0, draws: 0, passes: 0, progs: 0, raster: 0 }, engine ?? {}, { native: true });
       frameBus.emit('status');
       return;
     }
+    perf.native = false;
     const stats = PM.GL?.stats ?? {};
     perf.ms = PM.perf?.ms ?? stats.ms ?? 0;
     perf.fps = PM.perf?.fps ?? 0;

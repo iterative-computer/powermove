@@ -11,7 +11,7 @@ mod doc;
 use doc::ch;
 use pm_protocol::color::Precision;
 use pm_protocol::common::{Size, Ticks};
-use pm_render::{MapResolver, RenderRequest, Renderer, VideoEnd};
+use pm_render::{MapResolver, OutputKind, RenderRequest, Renderer};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -25,7 +25,7 @@ fn clip() -> PathBuf {
 fn render(renderer: &mut Renderer, doc: &Value, assets: &MapResolver) -> Vec<f32> {
     let request = RenderRequest {
         export: true,
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::at_scale(Size::new(W, H), 1.0, Precision::Float32)
     };
     let tick = Ticks::new(pm_time::TICKS_PER_SECOND * 5 / 8).unwrap();

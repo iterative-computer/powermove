@@ -41,9 +41,9 @@ departs from the standard, the standard wins. Cleanups against today are rows in
    (HLG through the OOTF for a 1000 cd/m² display, BT.2408's route to PQ
    light) and tone mapped with the BT.2390 EETF, per component in the PQ
    domain, from the content peak (mastering display, else 1000 cd/m²) to
-   SDR white at 203 cd/m² (`pm_color::tonemap`). HDR classes the gate
-   does not cover (metadata, Dolby Vision, other codecs) route to the
-   legacy renderer unless interpreted.
+   SDR white at 203 cd/m² (`pm_color::tonemap`). Unsupported HDR readings
+   report a named capability failure; the native-engine setting never
+   silently routes a frame to the legacy renderer.
 6. **Store.** The converted frame is stored at the project's working
    format, and never below half float for 10-bit or HDR sources.
 
@@ -52,6 +52,9 @@ departs from the standard, the standard wins. Cleanups against today are rows in
 - One reading: no surface, sampling mode or layer level changes a frame's
   colour. The converted-frame cache key holds the interpretation, never
   the surface.
+- Source timing comes from source timestamps or its conformed frame grid,
+  holding the last frame beyond the source end. No browser seek padding or
+  composition-rate offset hides the final frames (`tests/video_end.rs`).
 - Preview = export: the same composition time draws identical working
   values when playing, paused and exported (`tests/video_reading.rs`).
 - Depth is honoured: storage follows the project, deep sources never pass
@@ -77,9 +80,21 @@ and `pm-reference/tests/engine_formulas.rs` ties pm-color's matrices, EETF
 and range constants to it. `tests/video_compositing.rs` proves video
 reaches effects, blend modes and masks exactly as a still does.
 The shift from today's paused composition is reported for the ledger.
+`e2e/engine-video-end.spec.ts` checks the selected viewer surface, a pinned
+viewer snapshot and encoded MP4 at mixed source/composition rates, including
+a precomp and holding the final frame. `e2e/engine-video-superwhite.spec.ts`
+checks highlight recovery through exposure against an independent grey ramp.
 
 ## Performance
 
-`examples/video_bench.rs` times one clip (cold and prepared first frame,
-scrub P50/P95, paced playback drops and CPU, export) for a paired,
-alternating comparison with today's viewer. Results stay outside Git.
+`examples/video_bench.rs` isolates native decode and render costs (cold and
+prepared first frame, scrub P50/P95, paced playback drops and CPU, frames
+rendered for export). It does not include presentation or encoding. A
+synthetic WebGL upload comparison cannot establish shipped-app performance:
+acceptance requires paired, alternating runs through the actual viewer and
+exporter on a quiet machine. Results stay outside Git.
+
+Cold-source preparation uses temporary path sets above small-frame thresholds,
+so membership checks do not repeatedly scan every job or cached frame. It still
+queues one cold job per file: multiple uncached times from one file are not
+prepared in parallel. That startup case remains a profiling target.

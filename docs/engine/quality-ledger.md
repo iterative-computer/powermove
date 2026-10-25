@@ -81,11 +81,36 @@ engine (150) are both 0.50 away.
 | BT.2020 and Display P3 SDR converted once in float (BT.2087 linear light); today converts through two RGBA8 stores, or not at all while playing | 157, 106, 6.9 | 103, 57, 2.5 | H.264 and HEVC BT.2020, HEVC P3 |
 | Untagged SD primaries by BT.601 system (VIDEO-SD-1): 576 active lines BT.470BG, other SD sizes SMPTE 170M, converted to Rec.709 in linear light; tagged 170M likewise; today reads them as Rec.709 | 89, 79, 15 | 39, 26, 2.2 | SD clips with 170M or no primaries tag |
 | Untagged and partly tagged video read by the shared table: untagged SD VP9 BT.601, a lone Rec.709 matrix tag kept | 87, 81, 23 | 39, 28, 2.1 | untagged VP9, matrix-only H.264 |
-| Superwhites and sub-blacks kept through linearisation and primaries conversion for every SDR reading; clipped only by 8-bit storage or display (`superwhites_reach_effects_the_same_way_for_every_reading`) | SD highlights clipped before effects | SD and HD alike, to 1e-5 | `superwhite-*` |
+| Superwhites and sub-blacks kept through linearisation and primaries conversion, allowing exposure to recover highlights before display clips them | 8.233, 8.233, 0.935 | 0.500, 0.500, 0.135 | `superwhite-*`; displayed output of 32-bit projects |
 | PQ and HLG decoded per BT.2100 and tone mapped with the BT.2390 EETF to 203 cd/m² SDR white (HDR-1), in float; today: RGBA8 before Skia's RWTMO curve paused, untone-mapped playing | 255, 255, 42 | 170, 99, 2.1 | HEVC/AV1 PQ and HLG, P3 PQ |
 | VP9 alpha premultiplied in float (today: an 8-bit straight store, nearest chroma) | 120, 93, 11 | 27, 18, 1.1 | VP9 alpha |
 | HEVC alpha read as its `AlphaChannelMode` tag says (premultiplied, VIDEO-ALPHA-1); today ignores the tag | 172, 150, 71 | 37, 22, 1.7 | HEVC alpha |
-| ProRes 422 and 4444 decoded natively (today shows a VP9 rendition) | — | 0.03, 0.03, 0.02 | ProRes 422, 4444 with alpha |
+| ProRes 422 and 4444 decoded natively (today shows a VP9 rendition) | Not applicable to the original stream: Chromium cannot decode it; comparing the VP9 rendition would also measure transcode loss | 0.03, 0.03, 0.02 | ProRes 422, 4444 with alpha |
+
+The superwhite row measures 20 neutral band centers (Y′ 8, 16, 128, 235,
+250), at zero and −1 stop exposure, in SD and HD clips. The independent
+reference is `clamp(2^exposure × (Y′ − 16) / 219, 0, 1) × 255`.
+`e2e/engine-video-superwhite.spec.ts` reads the legacy compositor and native
+snapshot routes in Electron. Before display clipping, the Rust float-buffer
+gate measures max / p99.9 / mean 0.000067 / 0.000067 / 0.000009 CV against
+the unclipped reference over the same band centers.
+
+## Video endpoint selection
+
+- **Reference:** source frame timestamps and final-frame hold, independent of
+  composition rate. Each synthetic clip has 20 numbered grey frames.
+- **Gate:** `pm-render/tests/video_end.rs`, direct and nested compositions at
+  matching and mixed rates. Native frame identities are read from GPU output;
+  the legacy column evaluates the former 40 ms seek-padding rule, rather than
+  measuring a running browser. Units are source frames, sampled at all 20
+  source-frame starts. The hold after the source end is also tested.
+
+| Correction | Legacy rule vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Remove browser seek padding at 30 fps | 1, 1, 0.05 | 0, 0, 0 | direct and nested |
+| Remove browser seek padding at 60 fps | 2, 2, 0.15 | 0, 0, 0 | direct and nested |
+| Remove browser seek padding at 120 fps | 4, 4, 0.50 | 0, 0, 0 | direct and nested |
+| Preserve selection at 10, 24 and 25 fps | 0, 0, 0 | 0, 0, 0 | direct and nested |
 
 ## Transparent PNG export
 

@@ -205,18 +205,10 @@ pub fn canvas_placement(
     let snap = |v: f64| (v * dpr).round();
     let (x0, x1) = (snap(canvas.css.x), snap(canvas.css.x + canvas.css.width));
     let (y0, y1) = (snap(canvas.css.y), snap(canvas.css.y + canvas.css.height));
-    let whole = canvas.crop.x == 0.0
-        && canvas.crop.y == 0.0
-        && canvas.crop.width == width
-        && canvas.crop.height == height;
     let (w, h) = (f64::from(canvas.width), f64::from(canvas.height));
-    // `outputScale(W, H)`: the canvas over the composition part it holds.
-    let (sx, sy) = (w / canvas.crop.width, h / canvas.crop.height);
-    let (ox, oy) = if whole {
-        (0.0, 0.0)
-    } else {
-        (canvas.crop.x * sx, canvas.crop.y * sy)
-    };
+    let (scale, origin) = canvas_render_grid(canvas, width, height);
+    let (sx, sy) = scale.unwrap_or((w / width, h / height));
+    let (ox, oy) = origin.unwrap_or((0.0, 0.0));
     let output = Size::new(canvas.width, canvas.height);
     let fx = (x1 - x0) / w;
     let fy = (y1 - y0) / h;
@@ -264,13 +256,35 @@ pub fn canvas_placement(
         fx,
         fy,
         output,
-        scale: (!whole).then_some((sx, sy)),
-        origin: (!whole).then_some((ox, oy)),
+        scale,
+        origin,
         region,
         comp,
         clip,
         canvas: true,
     }
+}
+
+/// The unscaled backing canvas grid shared by live composition and pinned
+/// viewer snapshots. CSS placement only happens after this render.
+pub(crate) fn canvas_render_grid(
+    canvas: &pm_protocol::frame::ViewerCanvas,
+    width: f64,
+    height: f64,
+) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
+    let whole = canvas.crop.x == 0.0
+        && canvas.crop.y == 0.0
+        && canvas.crop.width == width
+        && canvas.crop.height == height;
+    if whole {
+        return (None, None);
+    }
+    let sx = f64::from(canvas.width) / canvas.crop.width;
+    let sy = f64::from(canvas.height) / canvas.crop.height;
+    (
+        Some((sx, sy)),
+        Some((canvas.crop.x * sx, canvas.crop.y * sy)),
+    )
 }
 
 /// What a composed frame reports.
@@ -877,7 +891,7 @@ impl Composer {
                 } else {
                     pm_render::sampling::Sampling::Final
                 },
-                video_end: pm_render::VideoEnd::Preview,
+                output_kind: pm_render::OutputKind::Preview,
             };
             let format = self.renderer.device_target_format(doc, &request);
             let reuse = self.scratch.as_ref().is_some_and(|t| {

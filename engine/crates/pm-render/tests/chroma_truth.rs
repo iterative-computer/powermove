@@ -18,7 +18,7 @@ use pm_media::frame::{DecodedFrame, Layout};
 use pm_media::vt::DecodePurpose;
 use pm_protocol::color::Precision;
 use pm_protocol::common::{Size, Ticks};
-use pm_render::{MapResolver, RenderRequest, Renderer, VideoEnd};
+use pm_render::{MapResolver, OutputKind, RenderRequest, Renderer};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -215,7 +215,7 @@ fn engine(path: PathBuf) -> Vec<[f64; 3]> {
     assets.paths.insert("clip".into(), path);
     let request = RenderRequest {
         export: true,
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
     };
     let mut renderer = Renderer::headless().unwrap();

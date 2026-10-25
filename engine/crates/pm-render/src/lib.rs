@@ -22,12 +22,12 @@
 //!   Cube included), and the decision 19 fallback runner.
 
 pub mod assets;
+mod binds;
 pub mod capability;
 pub mod compat;
 pub mod compat_crop;
 pub mod composite;
 pub mod effects;
-mod binds;
 mod error;
 mod exec;
 pub mod expr;
@@ -64,7 +64,7 @@ pub use renderer::{
     CommandBracket, Frame, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster,
     MediaPreparation, PassThrough, Rendered, Renderer, SnapshotRows, SvgWaiting, TextRaster,
 };
-pub use request::{RenderRequest, VideoEnd};
+pub use request::{OutputKind, RenderRequest};
 pub use shader_layers::all_builtin_definitions;
 
 mod pass_facts;

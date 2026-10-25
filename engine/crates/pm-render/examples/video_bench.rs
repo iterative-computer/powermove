@@ -21,7 +21,7 @@ mod doc;
 use pm_protocol::color::Precision;
 use pm_protocol::common::{Size, Ticks};
 use pm_render::sampling::Sampling;
-use pm_render::{MapResolver, RenderRequest, Renderer, VideoEnd};
+use pm_render::{MapResolver, OutputKind, RenderRequest, Renderer};
 use serde_json::json;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -65,7 +65,7 @@ impl Bench {
         let request = RenderRequest {
             export,
             sampling,
-            video_end: VideoEnd::Final,
+            output_kind: OutputKind::Final,
             ..RenderRequest::at_scale(Size::new(1920, 1080), 1.0, Precision::Float16)
         };
         let tick = Ticks::new((seconds * pm_time::TICKS_PER_SECOND as f64).round() as i64).unwrap();
@@ -177,7 +177,7 @@ fn main() {
     // index, decoder and selected frame); the first frame then draws.
     let prepared = bench_of(&paths(&prepared));
     let request = RenderRequest {
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::at_scale(Size::new(1920, 1080), 1.0, Precision::Float16)
     };
     let start = Instant::now();

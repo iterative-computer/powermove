@@ -573,13 +573,13 @@
       "code": "api.anim.touch()"
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1820",
+      "site": "apps/desktop/src/extensions/viewer/viewer.ts:1827",
       "class": "edit.mutate",
       "scope": "createViewerRuntime > bindStage > guarded(callback)",
       "code": "api.edit.mutate('Close path',()=>{if(path.p.closed.kf.length)api.anim.setKeyOn(path.p.closed,api.transport.time()-L.from,true);else path...."
     },
     {
-      "site": "apps/desktop/src/extensions/viewer/viewer.ts:2191",
+      "site": "apps/desktop/src/extensions/viewer/viewer.ts:2198",
       "class": "edit.mutate",
       "scope": "createViewerRuntime > createShape",
       "code": "api.edit.mutate('Draw mask', () => { const mask = api.model.mkMask(variant === 'ellipse' ? 'ellipse' : 'rect'); mask.p.x!.v = (first.x + ..."
@@ -765,31 +765,31 @@
       "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1352",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1365",
       "class": "project-swap",
       "scope": "install > switchProject",
       "code": "PM.proj = live ? live.project : prepared ? p : hydrate(p)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1359",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1372",
       "class": "doc.write",
       "scope": "install > switchProject",
       "code": "writeDocument(PM, [['name']], () => { PM.proj.name = name; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1737",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1750",
       "class": "asset-metadata",
       "scope": "install > importFiles",
       "code": "meta.folder = target"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1738",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1751",
       "class": "doc.touched",
       "scope": "install > importFiles",
       "code": "touchedDocument(PM, [['assets', result.asset.id, 'folder']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1749",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1762",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () ..."
@@ -1959,43 +1959,43 @@
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:478",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:491",
       "class": "project-write",
       "scope": "installHostMediaStore > relinked",
       "code": "project.edits = compactEditLog([...(Array.isArray(project.edits) ? project.edits : []), { id: PM.uid?.('edit') ?? `edit-${Date.now()}`, r..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:482",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:495",
       "class": "touch",
       "scope": "installHostMediaStore > relinked",
       "code": "PM.touch?.()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:518",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:531",
       "class": "project-write",
       "scope": "installHostMediaStore > setProjectStorage > apply > (anonymous)",
       "code": "PM.proj.media = media"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:518",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:531",
       "class": "project-write",
       "scope": "installHostMediaStore > setProjectStorage > apply > (anonymous)",
       "code": "delete PM.proj.media"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:520",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:533",
       "class": "hist.do",
       "scope": "installHostMediaStore > setProjectStorage",
       "code": "PM.hist.do('When importing', apply(next))"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:521",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:534",
       "class": "touch",
       "scope": "installHostMediaStore > setProjectStorage",
       "code": "PM.touch?.()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:571",
+      "site": "apps/desktop/src/renderer/src/media/host-media-store.ts:584",
       "class": "doc.touched",
       "scope": "installHostMediaStore > stamp",
       "code": "PM.doc?.touched?.([['requiresEngine']])"
@@ -2091,19 +2091,19 @@
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/runtime/install-legacy.ts:47",
+      "site": "apps/desktop/src/renderer/src/runtime/install-legacy.ts:48",
       "class": "project-replace",
       "scope": "installLegacyRuntime > replaceProject",
       "code": "PM.replaceProject(next)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/runtime/install-legacy.ts:48",
+      "site": "apps/desktop/src/renderer/src/runtime/install-legacy.ts:49",
       "class": "project-swap",
       "scope": "installLegacyRuntime > replaceProject",
       "code": "PM.proj = next"
     },
     {
-      "site": "apps/desktop/src/renderer/src/settings/install.ts:47",
+      "site": "apps/desktop/src/renderer/src/settings/install.ts:48",
       "class": "doc.write",
       "scope": "projectSettingsBridge > backgroundField > PM.fillField(callback)",
       "code": "writeDocument(PM, [['backgroundFill'], ['bg']], () => { PM.proj.backgroundFill = PM.normalizeFill(value, PM.proj.bg); PM.proj.bg = PM.pro..."

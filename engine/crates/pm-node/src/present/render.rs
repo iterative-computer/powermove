@@ -1174,7 +1174,7 @@ struct Thread {
     /// answers (shared with the renderer for the frame being drawn).
     compat: std::sync::Arc<std::sync::Mutex<super::compat::CompatStore>>,
     /// Waveform requests waiting for the host's media answer.
-    peaks_waiting: BTreeSet<(Key, String)>,
+    peaks_waiting: BTreeMap<(Key, String), Option<Seq>>,
     /// With the per-frame trace on: each session's revisions not shown yet
     /// (revision, posted, applied; host µs).
     doc_trace: BTreeMap<Key, Vec<[i64; 3]>>,
@@ -1213,6 +1213,8 @@ struct Rest {
     since: i64,
     /// Idle memory was released since then.
     released: bool,
+    /// The open documents' frame pipelines were compiled since then.
+    prewarmed: bool,
 }
 
 /// Definition sets prepared on the presenter thread before a GPU device exists.
@@ -1284,6 +1286,10 @@ impl PreparedDefinitions {
 /// textures, the cached snapshot attachment and staging buffers. They are
 /// recreated by the next frame (docs/engine/memory.md, "At rest").
 pub const REST_RELEASE_US: i64 = 2_000_000;
+
+/// How long the viewer rests before the open documents' frame pipelines
+/// are compiled ([`Thread::prewarm_at_rest`]).
+pub const PREWARM_REST_US: i64 = 250_000;
 
 /// Most waveform requests that wait for media answers at once.
 const MAX_PEAKS_WAITING: usize = 4096;
@@ -1397,7 +1403,7 @@ pub fn run(
         last_interactive: None,
         snapshot_costs: BTreeMap::new(),
         compat: Default::default(),
-        peaks_waiting: BTreeSet::new(),
+        peaks_waiting: BTreeMap::new(),
         doc_trace: BTreeMap::new(),
         work_start: 0,
         completer,
@@ -1522,6 +1528,41 @@ fn command_name(command: &Command) -> &'static str {
 }
 
 impl Thread {
+    /// Whether any frame, snapshot or request is in progress or waiting.
+    fn busy(&self) -> bool {
+        !self.pending_snapshots.is_empty()
+            || self.snapshots.waiting()
+            || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
+            || self.views.values().any(|v| {
+                v.clock.is_playing()
+                    || (v.dirty && v.state.headless != Some(true))
+                    || v.awaiting.is_some()
+                    || !v.requests.is_empty()
+            })
+    }
+
+    /// Compiles the frame pipelines of every viewed document once nothing
+    /// was drawn for [`PREWARM_REST_US`] ([`pm_render::Renderer::prewarm`]).
+    /// Pipelines are built on first use, so without this an import or the
+    /// first layer of an empty project pays for them in its frame. Once per
+    /// rest, never while anything is drawing.
+    fn prewarm_at_rest(&mut self) {
+        if self.busy() {
+            return;
+        }
+        self.rest.prewarmed = true;
+        let Some(composer) = self.gpu.as_mut().and_then(|g| g.composer.as_mut()) else {
+            return;
+        };
+        for (key, view) in &self.views {
+            if view.state.headless != Some(true)
+                && let Some(doc) = self.docs.get(key)
+            {
+                composer.renderer().prewarm(doc.document());
+            }
+        }
+    }
+
     /// Frees idle GPU memory once nothing was drawn for [`REST_RELEASE_US`]:
     /// the renderer's idle intermediate targets, viewer scratch textures,
     /// the cached snapshot attachment and staging buffers. Exported surface
@@ -1537,22 +1578,17 @@ impl Thread {
             self.rest = Rest {
                 seen,
                 since: now_us,
-                released: false,
+                ..Rest::default()
             };
             return;
+        }
+        if !self.rest.prewarmed && now_us - self.rest.since >= PREWARM_REST_US {
+            self.prewarm_at_rest();
         }
         if self.rest.released || now_us - self.rest.since < REST_RELEASE_US {
             return;
         }
-        let busy = !self.pending_snapshots.is_empty()
-            || self.snapshots.waiting()
-            || self.completer.as_ref().is_some_and(|c| c.in_flight() > 0)
-            || self.views.values().any(|v| {
-                v.clock.is_playing()
-                    || (v.dirty && v.state.headless != Some(true))
-                    || v.awaiting.is_some()
-                    || !v.requests.is_empty()
-            });
+        let busy = self.busy();
         let Some(gpu) = self.gpu.as_mut() else {
             self.rest.released = true;
             return;
@@ -2492,8 +2528,9 @@ impl Thread {
                 }
             }
             Command::Media { key, asset, path } => {
-                if self.peaks_waiting.remove(&(key, asset.clone())) {
-                    self.peaks.request(key, asset.clone(), path.clone());
+                if let Some(request) = self.peaks_waiting.remove(&(key, asset.clone())) {
+                    self.peaks
+                        .request(key, asset.clone(), path.clone(), request);
                 }
                 let doc = self.docs.entry(key).or_default();
                 doc.set_media(&asset, path);
@@ -2891,7 +2928,7 @@ impl Thread {
         self.auto_generation.remove(&key);
         self.snapshot_costs.remove(&key);
         self.compat_store().forget_session(key);
-        self.peaks_waiting.retain(|(k, _)| *k != key);
+        self.peaks_waiting.retain(|(k, _), _| *k != key);
         // A frame already submitted for readback is no longer in the
         // scheduler. Cancel its mapping too, before the session disappears.
         let (ended, live): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_snapshots)
@@ -3468,14 +3505,17 @@ impl Thread {
                     audio.send(AudioCtl::Solo(solo));
                 }
             }
-            AudioMessage::PeaksWanted { asset } => {
+            AudioMessage::PeaksWanted { asset, request } => {
                 // Asked before the host answered for the asset (a file just
                 // imported): wait for the answer rather than call it offline.
                 match self.docs.get(&key).and_then(|d| d.media().answer(&asset)) {
-                    Some(path) => self.peaks.request(key, asset, path),
+                    Some(path) => self.peaks.request(key, asset, path, request),
                     None => {
-                        if self.peaks_waiting.len() < MAX_PEAKS_WAITING {
-                            self.peaks_waiting.insert((key, asset));
+                        let pending = (key, asset);
+                        if self.peaks_waiting.contains_key(&pending)
+                            || self.peaks_waiting.len() < MAX_PEAKS_WAITING
+                        {
+                            self.peaks_waiting.insert(pending, request);
                         }
                     }
                 }
@@ -4662,8 +4702,12 @@ impl Thread {
                 trace_audio_transport("decided-without-deferred", key, view, None);
             }
         }
-        if let Some(link) = self.audio.get(&key) {
-            let status = link.status();
+        let status = self.audio.get(&key).map(AudioLink::status);
+        if let Some(view) = self.views.get_mut(&key) {
+            // The renderer's status bar and performance panel (A5).
+            view.costs.audio(status.as_ref());
+        }
+        if let Some(status) = status {
             self.stats().audio.insert(view_name(key), status);
         }
         route == Route::Engine
@@ -4848,6 +4892,7 @@ impl Thread {
             ) {
                 State::Waiting => {
                     view.external_wait = Some(wait);
+                    self.send_stats(key);
                     return;
                 }
                 State::Obsolete => {}
@@ -4959,8 +5004,10 @@ impl Thread {
             let Some(view) = self.views.get_mut(&key) else {
                 return;
             };
+            // Before its pool arrives a view draws nothing, but its audio
+            // status still reports (below).
             if view.pool.is_none() {
-                return;
+                break;
             }
             let t = now();
             let phase = Self::phase(&self.config, &view.state);
@@ -4973,7 +5020,7 @@ impl Thread {
                     {
                         self.stats().pool_waits += 1;
                         self.trace_event("pool wait", t, 0, k);
-                        return;
+                        break;
                     }
                     // Its answers are on their way and it can still be shown:
                     // it waits (an answer arriving wakes the thread).
@@ -5011,7 +5058,7 @@ impl Thread {
                     // frame follows when the raster arrives (never skip it
                     // merely because its asynchronous request was sent).
                     if rendered.is_none() && view.external_wait.is_some() {
-                        return;
+                        break;
                     }
                     // Waiting for the window's compatibility answers keeps
                     // this frame's slot too, rather than skipping a frame
@@ -6209,7 +6256,12 @@ impl Thread {
         costs.1 = costs.1.max(render_us);
         let result = SnapshotResult {
             revision,
-            view_seq: job.request.view_seq,
+            view_seq: job
+                .request
+                .viewer
+                .as_ref()
+                .map(|v| v.view_seq)
+                .or(job.request.view_seq),
             width,
             height,
             pixels: job.request.pixels,
@@ -6279,6 +6331,32 @@ impl Thread {
             );
             return;
         };
+        let viewer_grid = if let Some(viewer) = &job.request.viewer {
+            let comp =
+                match pm_eval::Comp::resolve(doc.document(), job.request.composition.as_str()) {
+                    Ok(comp) => comp,
+                    Err(_) => {
+                        self.stats().snapshot_failures += 1;
+                        self.snapshot_error(
+                            &job,
+                            ErrorCode::InvalidMessage,
+                            "The viewer snapshot has no composition.",
+                        );
+                        return;
+                    }
+                };
+            let number = |key: &str| {
+                let v = pm_eval::node::to_number(comp.member(key));
+                if v.is_finite() && v > 0.0 { v } else { 1.0 }
+            };
+            Some(super::compose::canvas_render_grid(
+                &viewer.canvas,
+                number("w"),
+                number("h"),
+            ))
+        } else {
+            None
+        };
         let (composer, readback, snapshot_target) =
             gpu.composer_and_snapshot_resources(&self.config, self.frame_cache, &mut self.prepared);
         // The session's definitions, without consuming the re-registrations
@@ -6300,28 +6378,50 @@ impl Thread {
             output_size: job.request.output_size,
             // Today's capture derives the scale from the composition size
             // (`W / comp.w`, `H / comp.h`).
-            scale: None,
+            scale: viewer_grid.and_then(|grid| grid.0),
             region: None,
-            preview_canvas: false,
+            // A pinned canvas is the live viewer's canvas: the same
+            // compatibility clip window and canvas density rules.
+            preview_canvas: job.request.viewer.is_some(),
             precision: pm_protocol::color::Precision::Float16,
             depth_id: false,
-            background,
-            export: purpose == pm_protocol::frame::FramePurpose::Export,
-            view: None,
-            motion_blur: if motion_blur == 0 {
+            background: if job.request.viewer.is_some() {
+                true
+            } else {
+                background
+            },
+            export: job.request.viewer.is_none()
+                && purpose == pm_protocol::frame::FramePurpose::Export,
+            view: job.request.viewer.as_ref().and_then(|v| v.view.clone()),
+            motion_blur: if job.request.viewer.is_some() {
+                pm_render::motion::MotionBlur::Kind(
+                    pm_protocol::frame::MotionBlurKind::PreviewPaused,
+                )
+            } else if motion_blur == 0 {
                 pm_render::motion::MotionBlur::Off
             } else {
                 pm_render::motion::MotionBlur::Samples(motion_blur)
             },
             sampling: pm_render::sampling::Sampling::Final,
-            video_end: pm_render::VideoEnd::of(purpose),
-            origin: None,
+            output_kind: if job.request.viewer.is_some() {
+                pm_render::OutputKind::Preview
+            } else {
+                pm_render::OutputKind::of(purpose)
+            },
+            origin: viewer_grid.and_then(|grid| grid.1),
         };
         let revision = Revision::new(doc.revision()).unwrap_or(Revision::ZERO);
         // The session's compatibility producers (the `raster` override).
         renderer.set_compat_rasters(compat_view(&self.compat, job.key, revision, None));
         let size = request.target_size();
-        let format = renderer.device_target_format(doc.document(), &request);
+        // The live viewer renders its region at the project's format, then
+        // places it in the display working texture before color conversion.
+        // A pinned canvas captures those display pixels.
+        let format = if job.request.viewer.is_some() {
+            pm_gpu::bridge_out::display::WORKING_FORMAT
+        } else {
+            renderer.device_target_format(doc.document(), &request)
+        };
         let target = snapshot_output_target(
             snapshot_target,
             renderer.device(),
@@ -6356,8 +6456,8 @@ impl Thread {
         // the window for them).
         let rendered = {
             let mut renderer = renderer.svg_waiting();
-            renderer
-                .render_snapshot_into_copy(
+            let rendered = if job.request.viewer.is_some() {
+                renderer.render_viewer_snapshot_into_copy(
                     doc.document(),
                     job.request.composition.as_str(),
                     job.request.time,
@@ -6366,7 +6466,18 @@ impl Thread {
                     &target,
                     &copy,
                 )
-                .map(|(_, rows)| (target.width(), target.height(), rows))
+            } else {
+                renderer.render_snapshot_into_copy(
+                    doc.document(),
+                    job.request.composition.as_str(),
+                    job.request.time,
+                    &request,
+                    doc.media(),
+                    &target,
+                    &copy,
+                )
+            };
+            rendered.map(|(_, rows)| (target.width(), target.height(), rows))
         };
         renderer.set_compat_rasters(None);
         if let Some(why) = self.config.fonts.as_ref().and_then(|f| f.after_render()) {
@@ -6935,7 +7046,7 @@ mod tests {
             last_interactive: None,
             snapshot_costs: BTreeMap::new(),
             compat: Default::default(),
-            peaks_waiting: BTreeSet::new(),
+            peaks_waiting: BTreeMap::new(),
             doc_trace: BTreeMap::new(),
             work_start: 0,
             completer: None,
@@ -7309,6 +7420,23 @@ mod tests {
     }
 
     #[test]
+    fn frame_pipelines_compile_once_per_rest_after_the_viewer_settles() {
+        let (mut thread, _) = preview_thread();
+        let t0 = 1_000_000;
+        thread.release_at_rest(t0);
+        thread.release_at_rest(t0 + PREWARM_REST_US - 1);
+        assert!(!thread.rest.prewarmed, "too early");
+        thread.release_at_rest(t0 + PREWARM_REST_US);
+        assert!(thread.rest.prewarmed);
+        // A frame starts a new rest, which compiles again once it settles.
+        thread.stats().frames += 1;
+        thread.release_at_rest(t0 + PREWARM_REST_US + 1);
+        assert!(!thread.rest.prewarmed);
+        thread.release_at_rest(t0 + 2 * PREWARM_REST_US + 1);
+        assert!(thread.rest.prewarmed);
+    }
+
+    #[test]
     fn idle_gpu_memory_goes_once_the_viewer_rests() {
         let (mut thread, _) = preview_thread();
         thread.docs.insert(preview_key(), ViewDocument::default());
@@ -7515,6 +7643,45 @@ mod tests {
             live.pool.surfaces[third.pool_index as usize]
                 .iosurface
                 .read()
+        );
+    }
+
+    #[test]
+    fn pending_waveforms_keep_latest_generation_even_at_capacity() {
+        let (mut thread, _) = preview_thread();
+        let key = preview_key();
+        for index in 0..MAX_PEAKS_WAITING {
+            thread.audio_message(
+                key,
+                AudioMessage::PeaksWanted {
+                    asset: format!("clip-{index}"),
+                    request: Some(Seq::new(1).unwrap()),
+                },
+            );
+        }
+        thread.audio_message(
+            key,
+            AudioMessage::PeaksWanted {
+                asset: "clip-0".into(),
+                request: Some(Seq::new(2).unwrap()),
+            },
+        );
+        thread.audio_message(
+            key,
+            AudioMessage::PeaksWanted {
+                asset: "beyond-capacity".into(),
+                request: Some(Seq::new(3).unwrap()),
+            },
+        );
+        assert_eq!(thread.peaks_waiting.len(), MAX_PEAKS_WAITING);
+        assert_eq!(
+            thread.peaks_waiting[&(key, "clip-0".into())],
+            Some(Seq::new(2).unwrap())
+        );
+        assert!(
+            !thread
+                .peaks_waiting
+                .contains_key(&(key, "beyond-capacity".into()))
         );
     }
 

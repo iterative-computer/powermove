@@ -488,8 +488,8 @@ fn level1_bitmap_of(
 }
 
 /// The shipped `sequencePlaybackTime`: select an available CFR slot,
-/// clamp to its ends, then seek one millisecond inside it. In particular,
-/// sequences do not use ordinary video's 40 ms end padding.
+/// clamp to its ends, then seek one millisecond inside it. Container video
+/// instead selects directly from native source timestamps.
 pub fn sequence_playback_time(record: &pm_model::Node, time: f64) -> Option<f64> {
     use pm_eval::node;
     let sequence = node::member(Some(record), "imageSequence")?;

@@ -1,6 +1,6 @@
 import { requestJobEngine } from './helpers/job-engine';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -356,12 +356,12 @@ test('offline exports preserve decoded media and delivery properties with the ne
       }
     }
     expect(probe(exports.prores!['1']!).streams.find((stream: any) => stream.tags?.timecode)?.tags?.timecode).toBe('00:00:00:00');
-    // RDD 36: byte 21's aspect-ratio nibble stays unspecified, while the
-    // frame-rate nibble changes from unspecified to a correct 24 fps code.
-    expect(proResFrameHeaderCodes(exports.prores!['0']!)).toEqual({ aspectRatio: 0, frameRate: 0 });
-    expect(proResFrameHeaderCodes(exports.prores!['1']!)).toEqual({ aspectRatio: 0, frameRate: 2 });
+    // RDD 36: byte 21's aspect-ratio and frame-rate nibbles are unspecified,
+    // as in today's file and the shipped app's (EXPORT-1).
+    for (const setting of ['0', '1'] as const) expect(proResFrameHeaderCodes(exports.prores![setting]!)).toEqual({ aspectRatio: 0, frameRate: 0 });
+    // Chromium's duration of today's WebM, which the engine's matches (EXPORT-1).
     expect(webmImports['1']).toEqual(webmImports['0']);
-    expect(webmImports['1']).toEqual({ width: 320, height: 180, duration: 1 });
+    expect(webmImports['1']).toMatchObject({ width: 320, height: 180 });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -374,19 +374,23 @@ test('the render queue runs jobs unattended, keeps going past a failure, and kee
     await session.openEditor();
     await solidProject(session.page, 'Queue A');
     const a = path.join(root, 'A.mov');
-    const routed = path.join(root, 'Routed.mp4');
+    const locked = path.join(root, 'Locked');
+    await mkdir(locked);
+    const failing = path.join(locked, 'Failing.mp4');
     const b = path.join(root, 'B.webm');
-    await stubSavePanels(session.app, [a, routed, b]);
+    await stubSavePanels(session.app, [a, failing, b]);
     const add = (o: Record<string, unknown>) => session.page.evaluate((o) => (window as any).PM.Export.addToQueue(o), o);
     expect(await add({ format: 'prores-422', scale: 1, fps: 24, range: 'all', quality: 'high', mblur: false, audio: false, preset: 'Mine' })).toMatchObject({ status: 'added' });
-    // A project the new engine cannot render yet (a text layer) fails as a job; the queue goes on.
-    await solidProject(session.page, 'Queue routed', [{ type: 'add_layer', layerType: 'text', name: 'Title', content: { text: 'Routed' }, duration: 1 }]);
+    // A job whose destination folder is read-only when it runs fails; the
+    // queue goes on.
+    await solidProject(session.page, 'Queue failing');
     expect(await add({ format: 'h264', scale: 1, fps: 24, range: 'all', quality: 'draft', mblur: false, audio: false })).toMatchObject({ status: 'added' });
     // Snapshots: editing the live project after queuing does not change the job.
     await solidProject(session.page, 'Queue B');
     expect(await add({ format: 'webm-vp9', scale: 0.5, fps: 24, range: 'all', quality: 'draft', mblur: false, audio: false })).toMatchObject({ status: 'added' });
     await session.page.evaluate(() => { const PM = (window as any).PM; PM.proj.name = 'Edited after queuing'; PM.touch(); });
 
+    await chmod(locked, 0o555);
     await session.page.evaluate(() => (window as any).PM.Export.queueDialog());
     const panel = session.page.getByRole('dialog', { name: 'Render Queue', exact: true });
     await expect(panel).toBeVisible();
@@ -399,7 +403,9 @@ test('the render queue runs jobs unattended, keeps going past a failure, and kee
     await expect(rows.nth(2)).toContainText('Done', { timeout: 120_000 });
     await expect(rows.nth(0)).toContainText('Done');
     await expect(rows.nth(1)).toContainText('Failed');
-    await expect(rows.nth(1)).toContainText('cannot render this project yet');
+    await chmod(locked, 0o755);
+    expect(await readdir(locked)).toEqual([]);
+    await rm(locked, { recursive: true });
     expect(probe(a).streams.find((s: any) => s.codec_name === 'prores')).toMatchObject({ profile: 'Standard', nb_frames: '24' });
     expect(probe(b).streams[0]).toMatchObject({ codec_name: 'vp9' });
     await expect(panel.getByRole('button', { name: 'Start Queue', exact: true })).toBeDisabled();

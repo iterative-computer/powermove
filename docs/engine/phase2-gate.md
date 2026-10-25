@@ -575,12 +575,10 @@ means, with Sharma's vectors checked before measuring). Neither opens a window.
 Notes appended on 2026-10-16 (`feat/ne-correct`, `docs/engine/gate-fixes.md`); the
 measured results above are as they were.
 
-- **D1, fixed after the gate (2026-10-16).** `pm-render` pads video source times per
-  output kind as today does (`RenderRequest::video_end`: 0.04 s for the viewer, scrubs,
-  and thumbnails; `1 / fps` for exports and agent stills, `prepareFrame`'s padding).
-  `pm-render/tests/video_end.rs` renders a 20-frame clip at 10, 24, 25, 30, and 60 fps
-  for both kinds against today's rule (fails at 30 fps without the fix). With
-  `POWERMOVE_NEW_ENGINE=1`, `export-video-frames.spec.ts` passes 9 of 9.
+- **D1:** source timestamps select video frames on every surface, without
+  browser seek padding. `pm-render/tests/video_end.rs` checks the last frames
+  at matching and mixed rates, including nested compositions. Current policy
+  and evidence are in `video-parity.md` and `quality-ledger.md`.
 - **D2, fixed after the gate (2026-10-16).** A project installed by assigning `PM.proj`
   now lays the viewer out after the engine loads it, as opening a project does, so the
   viewer's state names the new composition and it plays on the engine clock. The Play

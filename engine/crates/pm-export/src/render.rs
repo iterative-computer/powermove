@@ -36,7 +36,7 @@ use pm_protocol::priority::{
     AlphaOutput as WireAlpha, AudioCoding, Container as WireContainer, ExportFormat,
     ExportSettings, ProResProfile as WireProRes, WebmCodec,
 };
-use pm_render::{RenderError, RenderRequest, Renderer, VideoEnd};
+use pm_render::{OutputKind, RenderError, RenderRequest, Renderer};
 use pm_time::Rate;
 
 use crate::Error;
@@ -1117,8 +1117,7 @@ fn plan_export_checked(
             pm_render::motion::MotionBlur::Off
         },
         sampling: pm_render::sampling::Sampling::Final,
-        // `prepareFrame`'s end padding: the last frame of a clip is kept.
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         origin: None,
     };
     Ok(ExportPlan {
@@ -1713,9 +1712,8 @@ pub fn render_still(
     routing.check(renderer, document, composition, media)?;
     let (cw, ch) = composition_size(document, composition)?;
     let size = still_size(cw, ch, max_dimension);
-    // Today's agent stills run `prepareFrame` first (`snapshotAsync`).
     let request = RenderRequest {
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::sized(size, Precision::Float16)
     };
     let frame = render_frame(

@@ -176,7 +176,7 @@ test('web export plays independently and matches editor frames', async ({ sessio
       const canvas = (window as any).testCanvas;
       return [canvas.width, canvas.height];
     })).toEqual([640, 360]);
-    const controls = await page.evaluate(async textId => {
+    const changed = await page.evaluate(async textId => {
       const player = (window as any).testPlayer;
       await player.seek(.5);
       const before = (window as any).testCanvas.toDataURL();
@@ -185,22 +185,37 @@ test('web export plays independently and matches editor frames', async ({ sessio
       await player.seek(.5);
       const changed = before !== (window as any).testCanvas.toDataURL();
       player.play();
-      await new Promise(resolve => setTimeout(resolve, 120));
+      return changed;
+    }, exported.textId);
+    await expect.poll(() => page.evaluate(() => (window as any).testPlayer.currentTime)).toBeGreaterThan(.5);
+    const advanced = await page.evaluate(async () => {
+      const player = (window as any).testPlayer;
       player.pause();
       const advanced = player.currentTime > .5;
       player.loop = false;
       await player.seek(1.95); player.play();
-      await new Promise(resolve => setTimeout(resolve, 200));
+      return advanced;
+    });
+    // Wait for the actual transport transitions, within the existing assertion
+    // and test budgets, rather than sampling a queued render after a fixed sleep.
+    await expect.poll(() => page.evaluate(() => (window as any).testPlayer.playing)).toBe(false);
+    const stopped = await page.evaluate(async () => {
+      const player = (window as any).testPlayer;
       const stopped = !player.playing;
       player.loop = true; await player.seek(1.95); player.play();
-      await new Promise(resolve => setTimeout(resolve, 200)); player.pause();
+      return stopped;
+    });
+    await expect.poll(() => page.evaluate(() => (window as any).testPlayer.currentTime)).toBeLessThan(1);
+    const { looped, rejected } = await page.evaluate(async () => {
+      const player = (window as any).testPlayer;
+      player.pause();
       const looped = player.currentTime < 1;
       let rejected = false;
       try { await player.setParameter('accent', 12); } catch { rejected = true; }
       player.destroy();
-      return { advanced, stopped, looped, rejected, changed };
-    }, exported.textId);
-    expect(controls).toEqual({ advanced: true, stopped: true, looped: true, rejected: true, changed: true });
+      return { looped, rejected };
+    });
+    expect({ advanced, stopped, looped, rejected, changed }).toEqual({ advanced: true, stopped: true, looped: true, rejected: true, changed: true });
     const retina = await browser.newPage({ deviceScaleFactor: 2 });
     await retina.goto(`http://127.0.0.1:${port}`);
     await expect(retina.locator('#play')).toBeEnabled();

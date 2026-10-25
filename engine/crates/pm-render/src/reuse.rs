@@ -86,7 +86,6 @@ pub struct ReuseStats {
 pub(crate) struct BuildKey {
     pub sampling: crate::sampling::Sampling,
     pub blur: Option<crate::motion::Blur>,
-    pub video_padding: u64,
     pub view_override: bool,
     /// The output origin (bits): every draw of the top level and its
     /// groups moves with it.

@@ -16,6 +16,7 @@ import SelectField from './SelectField.svelte';
 import TextField from './TextField.svelte';
 import ToggleField from './ToggleField.svelte';
 import type { EditBinding } from './gesture';
+import { installPointerFocus } from './pointer-focus';
 
 const mounted: object[] = [];
 
@@ -531,6 +532,94 @@ describe('picker drafts', () => {
     await vi.waitFor(() => expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#0A84FF' })));
     expect(open).toHaveBeenCalledOnce();
     expect(document.body.querySelector<HTMLInputElement>('.cp-value')!.value).toBe('#0A84FF / 100%');
+  });
+
+  it('ColorField keeps Escape in the picker after a pointer-clicked eyedropper sample', async () => {
+    const dispose = installPointerFocus();
+    const global = vi.fn();
+    window.addEventListener('keydown', global);
+    try {
+      (window as Window & { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper = class {
+        open() { return Promise.resolve({ sRGBHex: '#0a84ff' }); }
+      };
+      const { api, Edit } = fakeAPI();
+      const target = render(ColorField, { api, get: () => '#ff6b1a', edit: commandEdit('Color'), label: 'Color' });
+      target.querySelector<HTMLButtonElement>('button.color-field')!.click();
+      await tick();
+
+      const eyedropper = document.body.querySelector<HTMLButtonElement>('[aria-label="Sample screen color"]')!;
+      eyedropper.focus();
+      eyedropper.dispatchEvent(new MouseEvent('click', { detail: 1, bubbles: true, composed: true }));
+      await vi.waitFor(() => expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#0A84FF' })));
+      await tick();
+      // Focus returns into the still-open picker (its value field), never to <body>.
+      const picker = document.body.querySelector<HTMLElement>('.color-picker')!;
+      expect(picker.contains(document.activeElement)).toBe(true);
+
+      // Keys go wherever focus really is, as in the app; the editor's global Escape must not see this one.
+      document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(global).not.toHaveBeenCalled();
+      expect(Edit.cancel).toHaveBeenCalledOnce();
+      expect(Edit.commit).not.toHaveBeenCalled();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(document.body.querySelector('.color-picker')).toBeNull();
+    } finally {
+      window.removeEventListener('keydown', global);
+      dispose();
+    }
+  });
+
+  it('ColorField returns focus to the open picker when the eyedropper drops it while sampling', async () => {
+    (window as Window & { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper = class {
+      open() {
+        // Chromium moves focus off a focused control once it becomes disabled.
+        (document.activeElement as HTMLElement | null)?.blur();
+        return Promise.resolve({ sRGBHex: '#0a84ff' });
+      }
+    };
+    const { api, Edit } = fakeAPI();
+    const target = render(ColorField, { api, get: () => '#ff6b1a', edit: commandEdit('Color'), label: 'Color' });
+    target.querySelector<HTMLButtonElement>('button.color-field')!.click();
+    await tick();
+
+    const eyedropper = document.body.querySelector<HTMLButtonElement>('[aria-label="Sample screen color"]')!;
+    eyedropper.focus();
+    eyedropper.click();
+    await vi.waitFor(() => expect(document.body.querySelector('.color-picker')!.contains(document.activeElement)).toBe(true));
+    expect(Edit.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ value: '#0A84FF' }));
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    expect(Edit.cancel).toHaveBeenCalledOnce();
+  });
+
+  it('ColorField does not take focus back after the picker closed during sampling', async () => {
+    let finish!: (value: { sRGBHex: string }) => void;
+    (window as Window & { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper = class {
+      open() {
+        (document.activeElement as HTMLElement | null)?.blur();
+        return new Promise<{ sRGBHex: string }>((resolve) => { finish = resolve; });
+      }
+    };
+    const { api, Edit } = fakeAPI();
+    const target = render(ColorField, { api, get: () => '#ff6b1a', edit: commandEdit('Color'), label: 'Color' });
+    const trigger = target.querySelector<HTMLButtonElement>('button.color-field')!;
+    trigger.click();
+    await tick();
+    document.body.querySelector<HTMLButtonElement>('[aria-label="Sample screen color"]')!.click();
+    // Close while the eyedropper is still out; the picker plays its exit and is still connected.
+    document.body.querySelector<HTMLElement>('.color-picker-layer')!.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    flushSync();
+    const picker = document.body.querySelector<HTMLElement>('.color-picker')!;
+    expect(picker.isConnected).toBe(true);
+    expect(document.activeElement).toBe(document.body);
+
+    finish({ sRGBHex: '#0a84ff' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
+    expect(document.activeElement).not.toBe(picker);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(document.body.querySelector('.color-picker')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(Edit.begin).not.toHaveBeenCalled();
   });
 
   it('mounts color and fill picker overlays above clipped panel contents', async () => {

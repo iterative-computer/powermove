@@ -237,46 +237,73 @@ impl MediaCache {
     /// frame ready instead of decoding them one layer at a time.
     pub(crate) fn open_cold(&mut self, videos: &[PlannedVideoDraw], export: bool) {
         self.drain_prepared();
+        // One draw cannot benefit from parallel opening, but completions
+        // above still need to be adopted before the normal draw path.
+        if videos.len() < 2 {
+            return;
+        }
         let purpose = if export {
             DecodePurpose::Export
         } else {
             DecodePurpose::Display
         };
-        let mut jobs: Vec<Job> = Vec::new();
-        for v in videos {
-            let Some(current) = stamp(&v.path) else {
-                continue;
-            };
-            // One job per file: layers of a file share its decoded frames.
-            if jobs.iter().any(|j| j.key.path == v.path) {
-                continue;
-            }
-            let existing = self
-                .sources
-                .get(&v.path)
-                .filter(|(seen, _)| *seen == current)
-                .map(|(_, src)| src.clone());
-            if let Some(src) = &existing
-                && (self.frames.keys().any(|k| k.path == v.path)
-                    || self.selected_frame_decoded(src, v, purpose))
-            {
-                continue;
-            }
-            jobs.push(Job {
-                key: Key {
-                    path: v.path.clone(),
-                    instance: v.instance,
-                    export,
+        let jobs: Vec<Job> = {
+            // Borrow paths only for this frame. Small frames keep the direct
+            // checks; building hash tables costs more than those checks.
+            let many_jobs = videos.len() > 8;
+            let mut queued_paths: HashSet<&Path> = HashSet::new();
+            let cached_paths: Option<HashSet<&Path>> = (videos.len() > 4 && self.frames.len() > 4)
+                .then(|| self.frames.keys().map(|key| key.path.as_path()).collect());
+            let mut jobs: Vec<Job> = Vec::new();
+            for v in videos {
+                let Some(current) = stamp(&v.path) else {
+                    continue;
+                };
+                // One job per file: layers of a file share its decoded frames.
+                let queued = if many_jobs {
+                    queued_paths.contains(v.path.as_path())
+                } else {
+                    jobs.iter().any(|j| j.key.path == v.path)
+                };
+                if queued {
+                    continue;
+                }
+                let existing = self
+                    .sources
+                    .get(&v.path)
+                    .filter(|(seen, _)| *seen == current)
+                    .map(|(_, src)| src.clone());
+                if let Some(src) = &existing {
+                    let has_frame = match &cached_paths {
+                        Some(paths) => paths.contains(v.path.as_path()),
+                        None => self.frames.keys().any(|key| key.path == v.path),
+                    };
+                    if has_frame || self.selected_frame_decoded(src, v, purpose) {
+                        continue;
+                    }
+                }
+                jobs.push(Job {
+                    key: Key {
+                        path: v.path.clone(),
+                        instance: v.instance,
+                        export,
+                        stamp: current,
+                        settings: String::new(),
+                    },
                     stamp: current,
-                    settings: String::new(),
-                },
-                stamp: current,
-                existing,
-                seconds: v.seconds,
-                interpret: v.interpret.clone(),
-                composition: v.composition,
-            });
-        }
+                    existing,
+                    seconds: v.seconds,
+                    interpret: v.interpret.clone(),
+                    composition: v.composition,
+                });
+                // A cached first draw must not hide an uncached later draw
+                // of the same file at another selected frame.
+                if many_jobs {
+                    queued_paths.insert(v.path.as_path());
+                }
+            }
+            jobs
+        };
         if jobs.len() < 2 {
             return;
         }

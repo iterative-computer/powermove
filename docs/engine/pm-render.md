@@ -249,10 +249,9 @@ render exactly, and colour overrides against the native float reading (max
 the native reading is now checked through a colour override restating the
 file's primaries.
 
-The general corpus request uses `VideoEnd::Final`, matching the capture's
-`prepareFrame` before `renderToPixels`. The viewer default (`0.04` s padding)
-selected frame 118 instead of 119 in the final `retime/speed` sample; final
-output uses `1 / composition fps`. The renderer's two policies are unchanged.
+The general corpus request uses `OutputKind::Final` for canvas policy. Source
+timing is identical in preview and export: native PTS selection holds the last
+frame without browser seek padding. The corpus asserts their equality.
 
 **Recorded deviations in the corpus comparison** (`tests/corpus.rs`):
 `hevc-alpha.mov` is encoded with straight alpha but its probe reports Apple's

@@ -311,6 +311,7 @@ mod child {
                         pixels,
                         class: SnapshotClass::Sync,
                         view_seq: None,
+                        viewer: None,
                         wait_ms: 20_000,
                         blender_wait_ms: 0,
                         captions_hidden: false,
@@ -469,7 +470,7 @@ mod child {
             view: None,
             motion_blur: pm_render::motion::MotionBlur::Off,
             sampling: pm_render::sampling::Sampling::Final,
-            video_end: pm_render::VideoEnd::of(pm_protocol::frame::FramePurpose::Export),
+            output_kind: pm_render::OutputKind::of(pm_protocol::frame::FramePurpose::Export),
             origin: None,
         };
         let frame_out = direct

@@ -32,7 +32,7 @@ use pm_protocol::color::{
 use pm_protocol::common::{Size, Ticks};
 use pm_render::footage::Timing;
 use pm_render::sampling::Sampling;
-use pm_render::{MapResolver, RenderRequest, Renderer, VideoEnd};
+use pm_render::{MapResolver, OutputKind, RenderRequest, Renderer};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -448,7 +448,11 @@ fn render(
     let request = RenderRequest {
         export,
         sampling,
-        video_end: VideoEnd::Final,
+        output_kind: if export {
+            OutputKind::Final
+        } else {
+            OutputKind::Preview
+        },
         ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
     };
     let tick = Ticks::new((case.time * pm_time::TICKS_PER_SECOND as f64).round() as i64).unwrap();
@@ -600,6 +604,7 @@ fn superwhites_reach_effects_the_same_way_for_every_reading() {
     );
     let bands = [8.0f64, 16.0, 128.0, 235.0, 250.0];
     let mut seen = Vec::new();
+    let mut errors = Vec::new();
     for (clip, (w, h)) in [
         ("superwhite-sd.mp4", (256u32, 144u32)),
         ("superwhite-hd.mp4", (1280, 720)),
@@ -625,7 +630,7 @@ fn superwhites_reach_effects_the_same_way_for_every_reading() {
             assets.paths.insert("clip".into(), fixtures().join(clip));
             let request = RenderRequest {
                 export: true,
-                video_end: VideoEnd::Final,
+                output_kind: OutputKind::Final,
                 ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
             };
             let frame = renderer
@@ -646,11 +651,13 @@ fn superwhites_reach_effects_the_same_way_for_every_reading() {
                 if exposure != 0.0 {
                     want = want.max(0.0);
                 }
+                errors.push((v - want).abs() * 255.0);
                 assert!(
                     (v - want).abs() < 1e-4,
                     "{clip} exposure {exposure} band {code}: {v} != {want}"
                 );
             }
+            renderer.recycle(frame);
             seen.push(values);
         }
     }
@@ -667,5 +674,13 @@ fn superwhites_reach_effects_the_same_way_for_every_reading() {
     assert!(
         seen[1][4] > seen[1][3] + 0.03,
         "the superwhite band is recovered"
+    );
+    errors.sort_by(f64::total_cmp);
+    println!(
+        "SUPERWHITE-REFERENCE max={:.6}, p99.9={:.6}, mean={:.6} CV over {} band centers",
+        errors.last().unwrap(),
+        errors.last().unwrap(),
+        errors.iter().sum::<f64>() / errors.len() as f64,
+        errors.len(),
     );
 }

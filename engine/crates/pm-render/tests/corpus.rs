@@ -81,15 +81,6 @@ const STILL_CLASSES: &[(&str, bool)] = &[
     ("render/still-photo-progressive-jpg", true),
 ];
 
-/// Frames whose paused-viewer render differs from the export's for a
-/// known, owned reason. Each must still differ: an entry that starts
-/// passing fails until it is removed, and a full run fails for an entry it
-/// never measured.
-///
-/// M-R1 (lane L4): the viewer keeps video 0.04 s before a clip's end
-/// (`VideoEnd::Viewer`), exports 1 / fps (`VideoEnd::Final`).
-const PREVIEW_EXPORT_PENDING: &[(&str, f64)] = &[("retime/speed", 2.9)];
-
 /// Video-class projects drawing video minified under a projection, where
 /// patch interiors of today's frame average source pixels across chroma
 /// edges. The class restates today's reading (`support::restate_today`)
@@ -126,8 +117,6 @@ fn corpus_render_parity() {
         return;
     }
     let only = std::env::var("PM_RENDER_ONLY").ok();
-    let narrowed = only.is_some() || std::env::var_os("PM_ENGINE_CORPUS").is_some();
-    let mut pending_seen = Vec::new();
     let diffs = std::env::var("PM_RENDER_DIFFS")
         .ok()
         .map(std::path::PathBuf::from);
@@ -309,10 +298,9 @@ fn corpus_render_parity() {
             // The capture's motion blur: 16 samples opaque, 20 transparent.
             let mut request =
                 RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
-            // capture.ts runs prepareFrame before renderToPixels: final
-            // output keeps the last source frame with 1 / composition fps
-            // padding, unlike the viewer's default 0.04 seconds.
-            request.video_end = pm_render::VideoEnd::Final;
+            // Use the export's canvas policy; source timing is shared with
+            // the viewer and holds the last source frame without padding.
+            request.output_kind = pm_render::OutputKind::Final;
             request.motion_blur = pm_render::motion::MotionBlur::Samples(16);
             let frame = match renderer.render(
                 &p.document,
@@ -345,10 +333,6 @@ fn corpus_render_parity() {
                 // The gated frame's media (a minified video's rendition).
                 &resolver,
             );
-            let pending = PREVIEW_EXPORT_PENDING.contains(&(p.name.as_str(), s.time));
-            if pending {
-                pending_seen.push((p.name.clone(), s.time));
-            }
             // The gated frame is the export's.
             if let Err(e) = identical(&export, &rgba) {
                 failed.push(format!(
@@ -356,14 +340,8 @@ fn corpus_render_parity() {
                     p.name, s.time
                 ));
             }
-            match (identical(&preview, &export), pending) {
-                (Err(e), false) => failed.push(format!("{} t={}: {e}", p.name, s.time)),
-                (Err(e), true) => eprintln!("{} t={}: pending M-R1: {e}", p.name, s.time),
-                (Ok(()), true) => failed.push(format!(
-                    "{} t={}: preview equals export; remove it from PREVIEW_EXPORT_PENDING",
-                    p.name, s.time
-                )),
-                (Ok(()), false) => {}
+            if let Err(e) = identical(&preview, &export) {
+                failed.push(format!("{} t={}: {e}", p.name, s.time));
             }
             let ours = opaque8(&rgba);
             let (w, h, reference) =
@@ -600,15 +578,6 @@ fn corpus_render_parity() {
             "\n{} Chromium SVG rasters were not captured ({listed} listed in needs.json; run engine/crates/pm-render/tools/svg-rasters/run.ts --needs <dir>)",
             dir.missing().len()
         );
-    }
-    if !narrowed {
-        for (name, time) in PREVIEW_EXPORT_PENDING {
-            if !pending_seen.iter().any(|(n, t)| n == name && t == time) {
-                failed.push(format!(
-                    "{name} t={time}: PREVIEW_EXPORT_PENDING entry not measured"
-                ));
-            }
-        }
     }
     eprintln!("\nskipped (unsupported by this renderer):");
     for (name, why) in &skipped {

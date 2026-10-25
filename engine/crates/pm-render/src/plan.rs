@@ -30,7 +30,6 @@ use crate::capability::{self, Feature, Unsupported};
 use crate::composite::{self, EffectHost};
 use crate::error::LayerFailure;
 use crate::js;
-use crate::request::VideoEnd;
 use crate::scene3d::Object3dPlan;
 
 /// One composition (or one group's members) rendered into a target.
@@ -266,8 +265,6 @@ pub struct Build<'r> {
     pub(crate) video_center: Option<f64>,
     /// The resampler of level 2 raster content.
     pub(crate) sampling: crate::sampling::Sampling,
-    /// `videoPlaybackTime`'s `endPadding` for this output ([`VideoEnd`]).
-    video_padding: f64,
     /// The output origin of the level being built (the request's at the
     /// top level, in its groups, mattes, and motion-blur samples; `(0, 0)`
     /// inside a precomp, which renders its own target).
@@ -314,8 +311,6 @@ pub struct BuildOptions {
     /// cannot translate (`crate::shader_layers::fallback`); without one
     /// they route.
     pub shader_fallback: bool,
-    /// The end-of-clip padding of video sources ([`VideoEnd`]).
-    pub video_end: VideoEnd,
     /// The viewer's visible window when this is a viewer frame of the open
     /// root composition (today's preview source clipping, which a `raster`
     /// override sees as its `crop` argument: `crate::compat_crop`).
@@ -329,8 +324,7 @@ pub struct BuildOptions {
 pub const PRECOMP_MAX_DEPTH: u32 = 6;
 
 /// Builds the plan of `composition` at `time` (seconds) into a target of
-/// `width` × `height` at `scale` output pixels per composition pixel, with
-/// the video end padding of the output kind (`video_end`).
+/// `width` × `height` at `scale` output pixels per composition pixel.
 #[allow(clippy::too_many_arguments)]
 pub fn build<'r>(
     ev: &mut Evaluator,
@@ -340,7 +334,6 @@ pub fn build<'r>(
     width: u32,
     height: u32,
     scale: (f64, f64),
-    video_end: VideoEnd,
     assets: &'r dyn AssetResolver,
 ) -> (CompPlan, Build<'r>) {
     build_with(
@@ -355,10 +348,7 @@ pub fn build<'r>(
         None,
         crate::scene3d::Options3d::default(),
         None,
-        BuildOptions {
-            video_end,
-            ..BuildOptions::default()
-        },
+        BuildOptions::default(),
         None,
     )
 }
@@ -438,7 +428,6 @@ pub(crate) fn build_reusing<'r>(
     compat: Option<&'r dyn crate::compat::CompatRasters>,
     reuse: Option<&'r mut crate::reuse::DrawReuse>,
 ) -> (CompPlan, Build<'r>) {
-    let video_padding = video_padding(options.video_end, root_comp);
     let mut reuse = reuse;
     if let Some(r) = reuse.as_deref_mut() {
         r.begin(
@@ -448,7 +437,6 @@ pub(crate) fn build_reusing<'r>(
             crate::reuse::BuildKey {
                 sampling: options.sampling,
                 blur: options.blur,
-                video_padding: video_padding.to_bits(),
                 view_override: options3d.view.is_some(),
                 origin: options.origin.map(|(x, y)| (x.to_bits(), y.to_bits())),
             },
@@ -470,7 +458,6 @@ pub(crate) fn build_reusing<'r>(
         blur: options.blur,
         video_center: None,
         sampling: options.sampling,
-        video_padding,
         origin: options.origin.unwrap_or((0.0, 0.0)),
         passes: Vec::new(),
         compat,
@@ -1455,18 +1442,13 @@ fn native_content_quad<'d>(
                 let at = b.video_center.unwrap_or(time);
                 let st = scope.source_time(layer, at, Some(&mut b.retime))?;
                 let rate = interpret.as_ref().and_then(|i| i.frame_rate);
-                let time = match (
-                    (sequence && rate.is_none())
-                        .then(|| crate::media::sequence_playback_time(record, st))
-                        .flatten(),
-                    rate,
-                ) {
-                    (Some(t), _) => t,
-                    // The file's frames on the overridden grid; the last
-                    // frame clamps when the media is opened.
-                    (None, Some(_)) => js::max(0.0, st),
-                    (None, None) => playback_time(st, rec("dur").to_number(), b.video_padding),
-                };
+                // Native selection uses the source's PTS (or conformed
+                // grid) and holds its last frame. Browser seek padding
+                // hid valid frames and made preview differ from export.
+                let time = (sequence && rate.is_none())
+                    .then(|| crate::media::sequence_playback_time(record, st))
+                    .flatten()
+                    .unwrap_or_else(|| js::max(0.0, st));
                 Source::Video {
                     level2: crate::sampling::is_level2(layer),
                     sequence,
@@ -2201,25 +2183,6 @@ pub fn fit_uv(fit: &str, sw: f64, sh: f64, bw: f64, bh: f64) -> [f64; 4] {
             }
         }
         _ => [0.0, 0.0, 1.0, 1.0],
-    }
-}
-
-/// `videoPlaybackTime(asset, time, endPadding)` for container sources:
-/// clamped to `[0, dur − endPadding]`. The engine then selects the frame by section 5 rule 7
-/// (today's microsecond rounding only steers Chromium's seek to the same
-/// frame).
-pub use crate::retime::playback_time;
-
-/// Today's `endPadding` for an output kind. The viewer's compositor seeks
-/// with the default 0.04 s; `prepareFrame`, which every export and agent
-/// still runs first, passes `1 / PM.proj.fps`, the exported composition's
-/// rate (`fps` of the composition rendered, as expressions see it; at the
-/// open composition that is `PM.proj.fps`). Precomps inside it keep that
-/// padding, as `prepareFrame` does.
-pub fn video_padding(video_end: VideoEnd, root_comp: &Comp<'_>) -> f64 {
-    match video_end {
-        VideoEnd::Preview => 0.04,
-        VideoEnd::Final => 1.0 / root_comp.expression_fps().to_number(),
     }
 }
 

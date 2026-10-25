@@ -13,8 +13,13 @@ function copyAppearance(source: Document, target: Document): void {
   for (const node of source.head.querySelectorAll('link[rel="stylesheet"], style')) {
     target.head.appendChild(node.cloneNode(true));
   }
-  target.documentElement.dataset.density = source.documentElement.dataset.density;
-  target.documentElement.dataset.theme = source.documentElement.dataset.theme;
+  // Light theme and default density are the absence of the attribute: copy
+  // absence as absence (assigning `undefined` would write "undefined").
+  for (const key of ['density', 'theme'] as const) {
+    const value = source.documentElement.dataset[key];
+    if (value === undefined) delete target.documentElement.dataset[key];
+    else target.documentElement.dataset[key] = value;
+  }
   target.documentElement.style.cssText = source.documentElement.style.cssText;
 }
 

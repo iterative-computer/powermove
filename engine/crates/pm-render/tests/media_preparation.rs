@@ -2,7 +2,7 @@
 mod doc;
 
 use pm_protocol::{color::Precision, common::Size};
-use pm_render::{MapResolver, RenderRequest, Renderer, VideoEnd};
+use pm_render::{MapResolver, OutputKind, RenderRequest, Renderer};
 use serde_json::json;
 use std::sync::{Mutex, OnceLock};
 
@@ -37,7 +37,7 @@ fn planned_video_preparation_reuses_exact_source_and_decoder_on_first_render() {
     assets.paths.insert("clip".into(), path);
     let request = RenderRequest {
         export: true,
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
     };
     let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
@@ -105,7 +105,7 @@ fn display_preparation_caches_selected_frame_for_first_render() {
     assets.paths.insert("clip".into(), path);
     let request = RenderRequest {
         export: false,
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
     };
     let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
@@ -178,7 +178,7 @@ fn preparation_finds_video_inside_a_nested_composition() {
     assets.paths.insert("clip".into(), path);
     let request = RenderRequest {
         export: true,
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
     };
     let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
@@ -215,7 +215,7 @@ fn display_preparation_is_bounded_across_many_layers() {
     assets.paths.insert("clip".into(), path);
     let request = RenderRequest {
         export: false,
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
     };
     let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
@@ -266,7 +266,7 @@ fn a_frame_opens_its_new_video_sources_together() {
     let document = doc::load(&project);
     let request = RenderRequest {
         export: false,
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
     };
     let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();
@@ -321,7 +321,7 @@ fn sources_past_the_preparation_cap_still_open_together() {
     let document = doc::load(&project);
     let request = RenderRequest {
         export: false,
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::at_scale(Size::new(w, h), 1.0, Precision::Float32)
     };
     let time = pm_protocol::common::Ticks::new(pm_time::TICKS_PER_SECOND / 2).unwrap();

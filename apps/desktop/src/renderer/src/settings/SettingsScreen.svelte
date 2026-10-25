@@ -11,7 +11,7 @@
   import { applyAccount, cloudBridge, openSignIn, signOut, subscribeAccount, type CloudUser } from '../cloud/account';
   import TranscriptionSettings from '../transcription/TranscriptionSettings.svelte';
 
-  export type SettingsPage = 'general' | 'accounts' | 'transcription' | 'extensions' | 'project';
+  import type { SettingsPage } from './pages';
 
   let { PM, projectBridge }: {
     PM: Record<string, any>;
