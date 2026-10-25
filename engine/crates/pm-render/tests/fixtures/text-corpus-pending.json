@@ -6,26 +6,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "02bf0a98b0b871db302ec5c8847f2cd091b42e5b933996fcf0365f272a5d9279",
-    "owner": "L4",
-    "reason": "groups and precomps",
-    "checks": [
-      "unreferenced: max 83.00 p99.9 21.00 mean 0.052 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "5618053895ed98f973d03cd1cf558f23e16a0adc0dffcd03388ef897eb9bee5f"
-  },
-  {
-    "frame": "0bf48b4a0577edb1203f1eecf2b17fef5fa4aabe597b73606cb67039ce23ca40",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 3 pixels over 2 CV; max 4; outside independent mask band 3",
-      "paired isolated text passes 2 CV; measurement 84a3be5eb2a42675c136f814526f445f85057af7bef032e367c63af74c06a629"
-    ],
-    "measurement_sha256": "485ec76b30abcc218302bef8b5e7d84c023bed52d7db9c902b786faf0b7b1bb0"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "115ce0fff9ad5ffd9df8038ec0d9402313d94cad6517ffd264cac6190d2f2f4f",
@@ -34,7 +15,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "12563d527447319844f5460ff545a791cfcee3ae2c0e372b3c477152bab5b3b0",
@@ -43,35 +24,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "15bb7fa9f64f16e351b9fc970e7d66387844f31b74119ee00b5c6c25ef372242",
-    "owner": "L4",
-    "reason": "transitions",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.637 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "aab87b28be5bb4371a13f431fb5c0c4939d1dff0e39d49824eb3147ac5d96da2"
-  },
-  {
-    "frame": "1a79248cf368168881ce0c51d91869156754bc4cf9e42e357fe77b997bb6100e",
-    "owner": "L4",
-    "reason": "transitions",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 118.00 mean 0.376 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "b4489406225470e5af848289e67d52af4d79b170feb65b18337ea820cb76b55b"
-  },
-  {
-    "frame": "1b389b9afb914318805e75c5612c84eaa00c02f0a97aa95af4a60d88d359c79e",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 62 pixels over 2 CV; max 16; outside independent mask band 62",
-      "paired isolated text passes 2 CV; measurement 325140dec12e28932cd12f500f8d19446d8c57396b99af5f6501ae10f8a51ba7"
-    ],
-    "measurement_sha256": "158408b96f0dafe50ee99ae474816bd1c2f02f54645fe40a055dd713379ab624"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "1c751024e910742b261844a53f6900fc43d51c55ff1d7df9c9426b3f65335390",
@@ -80,7 +33,17 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
+  },
+  {
+    "frame": "1c9ce1881340cc19ae4b4cf6389ab53e802c402ccc0a895518fe9e323103827a",
+    "owner": "L4",
+    "reason": "projected or resampled text with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 16775 pixels over 2 CV, max 163, outside independent mask band 16775",
+      "paired isolated text passes; engine 3c2d31472d510d357bf02d206ee60660d35a14fdb25d3f4c7337632cac241770"
+    ],
+    "measurement_sha256": "b5914d771b3bcea08218883ba7840e1cb943b327e7c3b31402539c2cc855472d"
   },
   {
     "frame": "1d57ccaedc36425c8e1ecb9ff71270d943857ac277b3a3cccce28b92e524f7ab",
@@ -89,55 +52,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "1ff8be110e98237ee0fd1541bc78b66ff791f31f192abd519eb216292592a300",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 9 pixels over 2 CV; max 6; outside independent mask band 9",
-      "paired isolated text passes 2 CV; measurement e43c78ce0edf857721c28edb359f925308ea7b01ba1ff77538092b487d98a345"
-    ],
-    "measurement_sha256": "765ff508ca01384ef1af4524c4f75c1f6874b9d5d66fbe30c3793566be688c44"
-  },
-  {
-    "frame": "21681b45fb810b68588cee20c604cb336c1a9dc721652e23a32b46dc60468f57",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; mattes",
-    "checks": [
-      "text: 683 pixels over 2 CV; max 62; outside independent mask band 683",
-      "paired isolated text passes 2 CV; measurement 43687c9e7fe09a132a11cc6fc9f12783fbe9a3464ad772c68460785860ae8d3b"
-    ],
-    "measurement_sha256": "ee36cfbf7b63047b0a1d8d5b9ddc90aed1e40ea9df92d461e46ab67d5876e5fa"
-  },
-  {
-    "frame": "219641faaafcb0a8973a48a8c2bf143a3bb5a74dfecd60695be55ce5443820ba",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 28 pixels over 2 CV; max 5; outside independent mask band 28",
-      "paired isolated text passes 2 CV; measurement e2e9f8ce0912f2770f38b6d5a3fafafa24e0dd6d740b618321d2be2e9ce1dd28"
-    ],
-    "measurement_sha256": "3a7355367eda6e9237a64ddef284e7fe54ad8a5a8d951ce2505f7a29b2812f3a"
-  },
-  {
-    "frame": "224dccf3610bb75701fd36927ccd2088f25533be894543641eaa2804f0873a55",
-    "owner": "L4",
-    "reason": "mattes",
-    "checks": [
-      "unreferenced: max 132.00 p99.9 39.00 mean 0.365 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "53836e0f73ab713428cf2b0e4e45bc798c92f128eed25af15c9646e1d69479a7"
-  },
-  {
-    "frame": "28b9736a8cf59efdc8099de56f7fd1d0ca6edaf2cd33dd2408fe0cb807c22bb9",
-    "owner": "L4",
-    "reason": "groups and precomps",
-    "checks": [
-      "unreferenced: max 54.00 p99.9 16.00 mean 0.047 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "df29a690747b6a8cd957c6832e877f8992130f6b49ec7cd5d70774599cb27b8b"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "2b5b14939b3a542c22afda6ef8d6f1b5e45532ad58695c3adb0963bb37fda1ef",
@@ -146,34 +61,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "2ef05e5dc6a8fee5d9d72515c7fcec8e593f8fe06abcb361b22c13540e73eefd",
-    "owner": "L4",
-    "reason": "groups and precomps",
-    "checks": [
-      "unreferenced: max 189.00 p99.9 0.00 mean 0.027 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "9a946b26d6aea459cfefe77f81ceca7ca14b152d08a1b57d1d97373cb131c88e"
-  },
-  {
-    "frame": "306737551ea496cf24cb0cfe0e033d00566a302bb9a5529db27b67f7ca2baaf7",
-    "owner": "L4",
-    "reason": "2.5D planes",
-    "checks": [
-      "unreferenced: max 69.00 p99.9 19.00 mean 0.108 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "7154f4792ad1333697ee2ecb79e21a7c416ed8b689a78deb7aceb83d13dbde89"
-  },
-  {
-    "frame": "33863765cc7002b812b0d0390ce34c105f8a690ccc0d29001f2fc87912cd9b94",
-    "owner": "L4",
-    "reason": "groups and precomps",
-    "checks": [
-      "unreferenced: max 86.00 p99.9 21.00 mean 0.051 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "e402f2c375a5a69fc18135516aa5b47d6d4b5d0b936e9da794341b45bb07bb2e"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "364630ec7f0455529971b41e81c06e05eaafad3e2ec1b4e002f74db60aca6719",
@@ -182,54 +70,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "3c9795748e607f4b615f923e0ae9f73258612dd85a863fc58a7b166cb6754a64",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 50 pixels over 2 CV; max 23; outside independent mask band 50",
-      "paired isolated text passes 2 CV; measurement d9e73abc8d7a95244c78ba4f658d1155e59d94ad065a0121200df1b4985b7979"
-    ],
-    "measurement_sha256": "3d5c11fbccc3cdfc246202b0b9d7e33d2a0d7b0f4ffdb39a2b9dde59225abce0"
-  },
-  {
-    "frame": "411b7b79f08f7dd7ab65a2386e015807f3167782cbcd03d7772ae67c2d30ca26",
-    "owner": "L4",
-    "reason": "mattes",
-    "checks": [
-      "unreferenced: max 132.00 p99.9 38.00 mean 0.352 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "09a63dc77144bea75dbc6c0ea8da6a99494b82101ab17b873ca8fae0f3d13576"
-  },
-  {
-    "frame": "4289d3f3bb92b275fd4fc95c2c8c5ee026caef5dcb017243e27975279d64716e",
-    "owner": "L4",
-    "reason": "groups and precomps",
-    "checks": [
-      "unreferenced: max 198.00 p99.9 25.00 mean 0.180 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "8ea499762b56b387b7d9d45eddea2c5e0431bc1b7f0e217625839c80ee6837ca"
-  },
-  {
-    "frame": "428cb894c778af8a678b4f20edece666b108a3eaab6390d8e0820ccfe6441863",
-    "owner": "L4",
-    "reason": "groups and precomps",
-    "checks": [
-      "unreferenced: max 79.00 p99.9 5.00 mean 0.035 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "204b98558126fe1334e0ccddf6788877d9a3bb105e5c074e2437483a9770c19e"
-  },
-  {
-    "frame": "448037d513557c971b4ff18a22f04e3678686e0852cfd730ecbd2886c87921bb",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 29 pixels over 2 CV; max 25; outside independent mask band 29",
-      "paired isolated text passes 2 CV; measurement 97683310730e46cecbea583250340f9b29489e7e022cf1519f311fd8dfadf547"
-    ],
-    "measurement_sha256": "1b0093729d31e2397ac5fb95183d172dd1d17c9c8417aabffc3e511e5e4a2cc3"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "456bf434e8fc9fe2a3a22db307fcb789a88393c5ce8dcf7ba416d0f3466f1493",
@@ -238,17 +79,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "48db88212293c91755570922fef3851702a673c391f2e9c1181b0147a8868dc5",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; transitions",
-    "checks": [
-      "text: 3240 pixels over 2 CV; max 211; outside independent mask band 3240",
-      "paired isolated text passes 2 CV; measurement b05c4ddfb950612cc3fbc7fcb3e56b0a553961eb22a8c3c1e6e46f74ccf7c0b3"
-    ],
-    "measurement_sha256": "ca4e970d864676278f344e57181b11be446024ea2fd2d77eb41a25743dd28fe0"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "4c38e721a3bdb4069559b940bc9715c4cdfe5f6eaedf34dad60d661084254d35",
@@ -257,75 +88,47 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
-    "frame": "501810a622df16c0ad405ba97a5c643c5f5fdfba85681aeeba26faa8645b0170",
+    "frame": "4fc45d719fc60b62d6630790c62099c2d7f5a0a9546c4d8be8a64e4a1b913b78",
     "owner": "L4",
-    "reason": "transitions",
+    "reason": "nontext content intersects text at pixel 53545: background delta 81.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.657 from today (bound p99.9 1, max 4)"
+      "text reference gap; original bar: 8429 pixels over 2 CV, max 226, outside independent mask band 6490",
+      "paired isolated text passes; engine 7f4d22b648b533fcbc7f088ed1359c7422ee44ddf3bb4f0a348cfffe429886ba"
     ],
-    "measurement_sha256": "c485e37c1c36d4f8933b63e22c72bf41d90ef6b088cc8bec09be7468db6c85b0"
+    "measurement_sha256": "6ffafc0ab9a0a4750a822fe22240b57b7661a768d13dc9c2b99745a24c5b2459"
   },
   {
-    "frame": "5031e8e41740995213665b7adb53aa5a0f7cedc39355cd6aae0e9cf6d995c0a3",
+    "frame": "515c13e29cac8e5fd4ff698f877486752fcb0bc1356d618dc9e05cfb720b616c",
     "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
+    "reason": "nontext content intersects text at pixel 519692: background delta 16.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "text: 12 pixels over 2 CV; max 4; outside independent mask band 12",
-      "paired isolated text passes 2 CV; measurement 4718a2cc0f6047f10034b4ea02bee1a66f15e86597bb54b50ca1a4a4ee0d387e"
+      "text reference gap; original bar: 19586 pixels over 2 CV, max 176, outside independent mask band 19586",
+      "paired isolated text passes; engine e8ce06c2bca51c66aea175631c36688e4e8bc143227335528f72c369408e429b"
     ],
-    "measurement_sha256": "5ae10670a06db0222e368a52a65f8b5e25b75df4539b44353427696d64738514"
+    "measurement_sha256": "f4e759be6993a2cf04ca518e90b7a685125e9b66b644821013d29aaf67318d16"
   },
   {
-    "frame": "51b17a8ec551192411c12e0c04c1183ca27d45480fbb67eaf54436bbe1cf2e55",
+    "frame": "584f54c2b46cc4daa31e6c68308dff3f9adfb7ebe96f01ddcd04af2240794e85",
     "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
+    "reason": "no active text with passing authored-isolation outline reference",
     "checks": [
-      "text: 237 pixels over 2 CV; max 46; outside independent mask band 237",
-      "paired isolated text passes 2 CV; measurement 596961c6d68652a329d83b7a8528bd9f039c3a5694805738db1e937de71b2550"
+      "text reference gap; original bar: 8308 pixels over 2 CV, max 224, outside independent mask band 8308",
+      "paired isolated text passes; engine d9bbf90d32ae153c1d5ddb0c3a426f173680f0305cd404bb5edb86f1a4e69fdd"
     ],
-    "measurement_sha256": "76985c86d43338cdf014bab217dce69ea9dbf3c74fc5886b96a8c5a03ae047d2"
+    "measurement_sha256": "e4642a9b84723d466bedb6e127e9ccab1513a31fe8aab5e76f24b77d169c7a35"
   },
   {
-    "frame": "56cd3dcc5a44f466b28d6e5c9168804b81bb3d54bc8c396e5cae335bf76d42fa",
+    "frame": "596169d5ccbfba56ea545ec35a66e8c5f75fc1240a7e5c9ef1948776a7a41f2e",
     "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; mattes",
+    "reason": "nontext content intersects text at pixel 53545: background delta 64.73 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "text: 729 pixels over 2 CV; max 60; outside independent mask band 729",
-      "paired isolated text passes 2 CV; measurement 637706382a17c9e73cf2f70c09fec9e56aef6bd8afdc6e2890a10afbbd8a039a"
+      "text reference gap; original bar: 3893 pixels over 2 CV, max 226, outside independent mask band 3893",
+      "paired isolated text passes; engine 7f4d22b648b533fcbc7f088ed1359c7422ee44ddf3bb4f0a348cfffe429886ba"
     ],
-    "measurement_sha256": "38217e9cdf478ed091931c2e261292af78dc41e3c07a687b2a6dad9e628a9f4b"
-  },
-  {
-    "frame": "574a7d5533eb02c6480aec97bb88772fc9eb3204914841d9d1e4e866f832dc46",
-    "owner": "L4",
-    "reason": "path mask/text edge composition; every differing text pixel is in the independent mask band",
-    "checks": [
-      "text: 30 pixels over 2 CV; max 3; outside independent mask band 0"
-    ],
-    "measurement_sha256": "b5147ea3375e714f70b63e152e2255cc86a5f98f3840a9719d748e349acbcc04"
-  },
-  {
-    "frame": "586def7e5e8c07b7ecbd4b04eb7e427992388f7f37bbdbb8328ffcb4f2c8c5c0",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; transitions",
-    "checks": [
-      "text: 1562 pixels over 2 CV; max 225; outside independent mask band 1562",
-      "paired isolated text passes 2 CV; measurement b3f59c12341743ad0fd65ce6affcd9c4f9cd63a3d9496924542e6b91903a53be"
-    ],
-    "measurement_sha256": "fd5aad954e506b63d2937e5afcc9d9c078e1bb345470a4ca980f02155c07c58c"
-  },
-  {
-    "frame": "599c62e9cde684207a3592c8a770715304c84cb8d57d98fa2ae4abfe8230886d",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 8 pixels over 2 CV; max 27; outside independent mask band 8",
-      "paired isolated text passes 2 CV; measurement 692be84f858738e6b70b1d020bf2a45f4b1c6a565e5d8aba842f5cc577c86457"
-    ],
-    "measurement_sha256": "5782d8288bcfb000fb7938f251aa43531728d2370c89c2226188f3a7f793deb4"
+    "measurement_sha256": "106abfe4136be77d0f3a99f38ec16b63bae024ef9016161ade4ea36d2f8539f5"
   },
   {
     "frame": "5db10fbc1aa1a0d60be5664d733b6648f45bc9e71c50c7beab2072e99bffe61a",
@@ -334,27 +137,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "6257dff1cee55ba1bcf30138c70c6f4f056b744ce8de1038d4782dd01084289d",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 19 pixels over 2 CV; max 3; outside independent mask band 19",
-      "paired isolated text passes 2 CV; measurement 25f17a95eb73eee8dc37bf0e58cb1dc7d18b9ee248b72fefc29e65ca008e4975"
-    ],
-    "measurement_sha256": "af6a0c0cd1cca7df05b99495bf2bc95520800af58a72e2cf0c8a97d519d50d10"
-  },
-  {
-    "frame": "639370fd1e958887069f1e994690c913b85423fec66090fd3c289839004fa5d9",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; other layer types",
-    "checks": [
-      "text: 146 pixels over 2 CV; max 51; outside independent mask band 111",
-      "paired isolated text passes 2 CV; measurement 2946a07ed03c382a026ff5265370407ca32a4ea56dfb086ed2508d68146858e4"
-    ],
-    "measurement_sha256": "3cf0d4597e0d981db9f609fd35a50d74fbc6f0e69d929e0425cebb898101c9d6"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "63b97c1cd2c3c9aeead67d233347f4737a346404de3fbc12cc16906dfa4174c1",
@@ -363,7 +146,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "64218a9c731438ec8ebf2f61f750c8cfd2085be3c3f870fee9fe3e5dcf506146",
@@ -372,25 +155,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "66090f7b9c1b693b02f0602639530d0b2ba4e8342c98a35e08adf6089aa062fe",
-    "owner": "L4",
-    "reason": "2.5D planes",
-    "checks": [
-      "unreferenced: max 69.00 p99.9 21.00 mean 0.103 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "5fd2270d3d904928b89e78f1ec4e7b285ab5f16322e01b94bc03ab38c6d57f66"
-  },
-  {
-    "frame": "66aec1af12e9cc395525769f3155ffb360f98c712fc3acc1b00a5af8b75e1b3a",
-    "owner": "L4",
-    "reason": "groups and precomps",
-    "checks": [
-      "unreferenced: max 54.00 p99.9 19.00 mean 0.052 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "1720be7460a5fe994e2741ae2a08fc60162d87cab9e9b6e8553798453f6f2248"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "681dfa2713c0ec3d63e3708012ba2bbefacfdd50872a8449877ff111d0afb563",
@@ -399,53 +164,27 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
-    "frame": "68848c0d029e1bbe0e96f2daf60dfbeedebb134e16503d8e0c506b9a9dc11929",
+    "frame": "697acd71dbec45d09d5fe611bcd3ab94dd76f69b43b24cafe0b6627d6bf636dd",
     "owner": "L4",
-    "reason": "transitions",
+    "reason": "nontext content intersects text at pixel 928105: background delta 13.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.458 from today (bound p99.9 1, max 4)"
+      "text reference gap; original bar: 15958 pixels over 2 CV, max 188, outside independent mask band 15958",
+      "paired isolated text passes; engine f40a6c7c2045af0cdef6979a7b8dcd24f84c9cf2142fe8b0d90002c318ebd84c"
     ],
-    "measurement_sha256": "43f53ee9191ca2b343977c8dd1e892d5985dc4254c8331513a2d8d2e04344b1c"
+    "measurement_sha256": "5a32bb61144903d89caaf840d4f1aca20d1ab7926ee1f4e4b382774bbd004117"
   },
   {
-    "frame": "6d4ae6a3a4ca3ddd1931face33115fbf884dd0d08d267a89d00013cf8f6f516f",
+    "frame": "6c18195fbb9c649c4675d8b9343837e3f33af61d3a7937052ac39551206592a3",
     "owner": "L4",
-    "reason": "transitions",
+    "reason": "nontext content intersects text at pixel 53545: background delta 91.27 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "unreferenced: max 188.00 p99.9 85.00 mean 0.500 from today (bound p99.9 1, max 4)"
+      "text reference gap; original bar: 8048 pixels over 2 CV, max 226, outside independent mask band 6306",
+      "paired isolated text passes; engine 7f4d22b648b533fcbc7f088ed1359c7422ee44ddf3bb4f0a348cfffe429886ba"
     ],
-    "measurement_sha256": "f525feb66028831e30c1e8ff6f17da3ff8a066261d738d33a4bdb043f9941d72"
-  },
-  {
-    "frame": "6d54b8b70f981d96129a2c125b9c081473ca269fb1aa123bbbff5985af3fde27",
-    "owner": "L4",
-    "reason": "other layer types",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 121.00 mean 0.596 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "6d150521a895d8fbb016e2e23ac58e57adf34a33e5361bd601a22df1404c3901"
-  },
-  {
-    "frame": "6d8052707ce32a88f1e8cb325617f85af38e7f0e13bc02de834b40b70cc35dad",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; transitions",
-    "checks": [
-      "text: 5789 pixels over 2 CV; max 140; outside independent mask band 5789",
-      "paired isolated text passes 2 CV; measurement d6cc115b2fbcdb556a7c0daab91c78d41a2a0e9508c11cb1475acedd89e62484"
-    ],
-    "measurement_sha256": "2aedea55714f02eab7d5cb414f2564aec8b8e9c29fd04b8d48fa0f92a93bc548"
-  },
-  {
-    "frame": "6fcb23d1ac0b2d4d67bc22cf0ff9b8f0df06b56847862b1a5a12a3418bb703f8",
-    "owner": "L4",
-    "reason": "transitions",
-    "checks": [
-      "unreferenced: max 224.00 p99.9 119.00 mean 0.515 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "74406b5f83592e1fc71d08a5b5b19cd760ed7accbb268c52119df990fb2914a1"
+    "measurement_sha256": "9418c261b893e9bf5d2251d84b1f4754906e9df6995f97ad241ad88b00a2a07c"
   },
   {
     "frame": "70e0d8807abbb29640a46a6f417caff6c62db428518507b27f105279272cc314",
@@ -454,7 +193,17 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
+  },
+  {
+    "frame": "72afba6fe8659092fdfbb9a3c2dce121c0633e6b20d3cf2060fff33b68555ac4",
+    "owner": "L4",
+    "reason": "projected or resampled text with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 1980 pixels over 2 CV, max 166, outside independent mask band 1980",
+      "paired isolated text passes; engine 77c5553f44eceaccc0b29503a468f55c74ed1af138cc73c8110d0820c10c1320"
+    ],
+    "measurement_sha256": "0ec31069b131142215022cbfc2c0ab8b1d00bc82318a3f96a684c705b43691dd"
   },
   {
     "frame": "72e0f5bac4ea345726e5faebfa4189044a585634827e281caf70784d728e6b37",
@@ -463,36 +212,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "75eda954f2e0ec90b3aa60f4855df15aef70c1649bdc55345842f78161137e46",
-    "owner": "L4",
-    "reason": "groups and precomps",
-    "checks": [
-      "unreferenced: max 51.00 p99.9 19.00 mean 0.052 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "ee567b1409102c62d3d500086192ad7f2cff71df3d69cad3e49206347975a1fd"
-  },
-  {
-    "frame": "760f05059a3f8a0b44f482c6d61d12e7af215cc8a1e05ae4236b67b527bea75a",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 32 pixels over 2 CV; max 30; outside independent mask band 32",
-      "paired isolated text passes 2 CV; measurement 5987a19e751032fdddecae883a9adceae1e9b519226a512cea10ba7b70bc9972"
-    ],
-    "measurement_sha256": "9e0c7adf3cc54c9419130a3eba55811552fe42bd91c3a70bed7d206009f6b87b"
-  },
-  {
-    "frame": "77365e5fad1b21d5f258a7c761fdfcfec133b5ec171c969ae9dece81c6fd74e7",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 32 pixels over 2 CV; max 29; outside independent mask band 32",
-      "paired isolated text passes 2 CV; measurement 6f966bcc9e43c7c450b895b7b2742352cdd15759ecff34493aff7006485455a7"
-    ],
-    "measurement_sha256": "38f1fdf0c794fa92737b437ea07fd4b1e16fd5afa1f7213e783fadff59d38a4e"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "7907f346f6ab2f8a2c3f52112b2d47a7233ceafb86a318b0af551edb47b147b2",
@@ -501,7 +221,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "793e56069dbeb45bb56f10ba1d2b6031d957d105519b7bc79d38c56dd99e3022",
@@ -510,17 +230,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "79c1c8f594e381b11d5e7abdab08d7f1082c6257e30f0e70e414993cf586940a",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 22 pixels over 2 CV; max 29; outside independent mask band 22",
-      "paired isolated text passes 2 CV; measurement 0f77d3182675cdab33c7ee873bf9fd836c66b94c3bb72e91a5d8d352d27da67d"
-    ],
-    "measurement_sha256": "8001e8db6552cd460f10ccc6851164aaaa6bfaeb09d194655cf1b0e33e4d01ae"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "7f2e59b8e4aaa0079156d61c0569b2efdb71bfbcc5de54fcfce92307f32599d2",
@@ -529,83 +239,27 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
-    "frame": "7f2f519ebb4ee85c144126b497733e0f1be09d11b1a712b0bcc944a6bd1b2a4d",
+    "frame": "83025241d00d073def7adad5fa8898edadeea7fc09aafac0f099cfe04a299d07",
     "owner": "L4",
-    "reason": "transitions",
+    "reason": "nontext content intersects text at pixel 873974: background delta 13.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.581 from today (bound p99.9 1, max 4)"
+      "text reference gap; original bar: 25301 pixels over 2 CV, max 245, outside independent mask band 25301",
+      "paired isolated text passes; engine d24a9597d504983f863982663b58a809b3e65bbe977871d61c8135b2f8aa38bc"
     ],
-    "measurement_sha256": "ad5d0d57e418b714cb2b540c836595bfb4bd925e88439c5ea743a0b5604be10a"
+    "measurement_sha256": "ccd89d6d91445b6eaa907437a73ca418685001e9b205fd392c3d5b3eab939620"
   },
   {
-    "frame": "7f3f6c94d551ea3014cb494b8b6e4b898b99c59492d53cfc2db6962a94493d21",
+    "frame": "86e5a17e6828916e7263b6679330fc8106b015d300bd8c7fef6420e584c5e2ca",
     "owner": "L4",
-    "reason": "2.5D planes",
+    "reason": "projected or resampled text with passing authored-isolation outline reference",
     "checks": [
-      "unreferenced: max 69.00 p99.9 20.00 mean 0.103 from today (bound p99.9 1, max 4)"
+      "text reference gap; original bar: 2905 pixels over 2 CV, max 187, outside independent mask band 2905",
+      "paired isolated text passes; engine d888b2dfdf95b7abe5f7bb31e96fcc11bcaacf3022d331a887188c943291e7c3"
     ],
-    "measurement_sha256": "81774b694d418efa23956981a5d7e6ef3fe0ddea01586beabc9e4a7cff273a14"
-  },
-  {
-    "frame": "82526c92e7912ddadfff004f5e045baa59729e55fc671f444dac68ed5f0af0c3",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 8 pixels over 2 CV; max 85; outside independent mask band 8",
-      "paired isolated text passes 2 CV; measurement 325140dec12e28932cd12f500f8d19446d8c57396b99af5f6501ae10f8a51ba7"
-    ],
-    "measurement_sha256": "ad98254728c7a13f484aac638942b2061cff43847b2eef63fa8b31b89e249413"
-  },
-  {
-    "frame": "880b09085b38dff1ac5e8246fc5f16fc5909ff74de1fc1418f5c3f9e2dc5236f",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 5 pixels over 2 CV; max 12; outside independent mask band 5",
-      "paired isolated text passes 2 CV; measurement bbad9082ed1a5e13626e29ff1ff7f4268785dc668d3bde3c1292f7ae7835ec63"
-    ],
-    "measurement_sha256": "b9b76c70d466593304471a7945af48405d77cea0bc8cd1b299d5be1858d53a47"
-  },
-  {
-    "frame": "892b56df7888e4f0c351bfc327f157d89018bd6ee34f70acb4f3407a336e9956",
-    "owner": "L4",
-    "reason": "transitions",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.387 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "c96e463895a19a7e8849149793a6552af91517e3e02de9e3b97e85a93f282860"
-  },
-  {
-    "frame": "8ab2a8717218995d3f0dc13353a16b0037082aceea3054ff54f8a658d7f4d76a",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 136 pixels over 2 CV; max 51; outside independent mask band 136",
-      "paired isolated text passes 2 CV; measurement 2946a07ed03c382a026ff5265370407ca32a4ea56dfb086ed2508d68146858e4"
-    ],
-    "measurement_sha256": "6645ebb04de9a74962bb0dae31b259b31620e456017af2bbd8029a242d9963de"
-  },
-  {
-    "frame": "8abe9ac7d683eb26d6b788bed4abb3510a5ba40a10e04f5ef9517437f9a0c1a5",
-    "owner": "L4",
-    "reason": "transitions",
-    "checks": [
-      "unreferenced: max 225.00 p99.9 119.00 mean 0.686 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "9418d258c43e37375550d5f42d687ae4c9dcdc8fdbf244b5cb9cf7af62167cdf"
-  },
-  {
-    "frame": "8b0e6b6495b7e2696fc24b6d476354baf41bec1d7688c31ca4d1ea2eb839d4bf",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; groups and precomps",
-    "checks": [
-      "text: 430 pixels over 2 CV; max 57; outside independent mask band 430",
-      "paired isolated text passes 2 CV; measurement be13c954b72ecda044984dae82b09d68b2d5c69173eb3e23f957cf38b2c38c58"
-    ],
-    "measurement_sha256": "b86ca0fbec026ab3c1e279861f364565916f75c5146ec8176f5e7f1b41450f50"
+    "measurement_sha256": "fb76deccf92d2457fe96a518a8ab2ba67b5536e46a87457cf3b84dd7951afcc2"
   },
   {
     "frame": "945f8c01f904e2b42c13a4e3b7ea400f2a2eb5bdc697965b86b8fcaacd95433d",
@@ -614,27 +268,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "96cc394378e4c9d6e6b4f7b3e752e685c75c0c42a73764a48e1dc785eeaa9148",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 13 pixels over 2 CV; max 3; outside independent mask band 13",
-      "paired isolated text passes 2 CV; measurement 84a3be5eb2a42675c136f814526f445f85057af7bef032e367c63af74c06a629"
-    ],
-    "measurement_sha256": "36e4df63f12557381c5e6fc34c74329e97de6974fc40546d2911411554ecb87e"
-  },
-  {
-    "frame": "98dec082aa0d0d9a74f763395593b8cb4060e79099fcb20f3bb2b409a94f4d00",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; transitions",
-    "checks": [
-      "text: 4691 pixels over 2 CV; max 97; outside independent mask band 4691",
-      "paired isolated text passes 2 CV; measurement fdc3122248333cae2634f589c3057dd8da49cb40a989425eab8929fc52248807"
-    ],
-    "measurement_sha256": "82654db5175d05b7cd2b046d9b5b71f67704508d3e65d8219ea4720eaf481703"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "992dad4d512bcf5865511cfc2031440da2cbe24124f81d7fb45fd20eedda6a1a",
@@ -643,7 +277,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "9e437c939142b88621274891559773822c1b074fe0daef6fdd2adbe534ff92cf",
@@ -652,7 +286,17 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
+  },
+  {
+    "frame": "a3249d8625e6e084bbb87bf1132c563e1e18e02ad2f9c5b0fabb10e8eb3a455e",
+    "owner": "L4",
+    "reason": "projected or resampled text with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 16674 pixels over 2 CV, max 148, outside independent mask band 16674",
+      "paired isolated text passes; engine 53b8926293636c6e47dfc01796e8840e1ebc6075f0474bd0c420d5b02be91300"
+    ],
+    "measurement_sha256": "93aafaa5da8b1e7dc2da15a76d85a6cdcc7bbccbe61aa065840663fe3e49972d"
   },
   {
     "frame": "a42b3d5c0926020ea0fb0a421c14f7b93c95857830e3c29b62fcdfca66b6da9c",
@@ -661,55 +305,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "a438caf4b35fc91117f84681e1c6508b0711db92d175f49035a444fc8d1d38a2",
-    "owner": "L4",
-    "reason": "groups and precomps",
-    "checks": [
-      "unreferenced: max 34.00 p99.9 9.00 mean 0.053 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "4b6669ea19309676caaa5fd6a908b2c21168342798bd484ad9e31913489c2bc2"
-  },
-  {
-    "frame": "a44b03ba07d5f5b577d940927f1b7dc803bd6db8aceb5155e91762ba18b18e50",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; 2.5D planes",
-    "checks": [
-      "text: 14 pixels over 2 CV; max 23; outside independent mask band 14",
-      "paired isolated text passes 2 CV; measurement b3da95d97780ae3e9632c40b21c9ed568487b77c8d6ed0794562aa63c92139e3"
-    ],
-    "measurement_sha256": "7d26eca31511be622eebab69de541621de843e6533f4e9863d267934912fe37c"
-  },
-  {
-    "frame": "a7cb6310198de2ce6ea38e1e0d662db6eb50e3d981ccba3790c485b6c956ed07",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; transitions",
-    "checks": [
-      "text: 2419 pixels over 2 CV; max 217; outside independent mask band 2419",
-      "paired isolated text passes 2 CV; measurement d0f79deba79a99efb72f8033c5bbeedbf884ff459a14717965f05aa14d38a016"
-    ],
-    "measurement_sha256": "99e80e96030e9113cee3e6801c0445bbc4d3b753a58b673babf0475a44fd65a0"
-  },
-  {
-    "frame": "a8ac07844dfaaa3e779449965d579bb22303e415c8f49a82da8cb7c5bf3a46d5",
-    "owner": "L4",
-    "reason": "transitions",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.444 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "e18bbd2dfd2b26465a53c202b370a157551385d260d04597a2bcea15d90ecfb8"
-  },
-  {
-    "frame": "aa10e779a07e90ce3fa4d80a18eafbdca83be65cbd368491141eac902ab77eec",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; transitions",
-    "checks": [
-      "text: 3423 pixels over 2 CV; max 140; outside independent mask band 3423",
-      "paired isolated text passes 2 CV; measurement 261556e85c413ce1c01a711d0def4356e2a27af3933ec918f35b9339e6b38b44"
-    ],
-    "measurement_sha256": "439626314d95e58d3a30b3916ddf56b5471ca15a852e1988dff07e31a76663ee"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "aa4557f0a2028a1696107aaf23074ce56f7b605aab9b94ea9326f140b37d9b89",
@@ -718,7 +314,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "af334ed7f6b6882b76709f0b601ee3a09c6fb025836855c505c4857c50bc804e",
@@ -727,7 +323,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "b4fca968507c9d85237ba8e88241c33c7b0c56599297a62b9745520a1d4797dd",
@@ -736,16 +332,17 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
-    "frame": "b57154da30608f4fb5af1bc4bc3c51bb7081b5029cb872c62da65da43306c307",
+    "frame": "b7bb16b1959a22d07e6425d33686dfff9ff6e86cc1da1daeabbe6fa4152977f3",
     "owner": "L4",
-    "reason": "groups and precomps",
+    "reason": "projected or resampled text with passing authored-isolation outline reference",
     "checks": [
-      "unreferenced: max 51.00 p99.9 1.00 mean 0.006 from today (bound p99.9 1, max 4)"
+      "text reference gap; original bar: 1953 pixels over 2 CV, max 202, outside independent mask band 1953",
+      "paired isolated text passes; engine 77c5553f44eceaccc0b29503a468f55c74ed1af138cc73c8110d0820c10c1320"
     ],
-    "measurement_sha256": "b60973f64204651da4bb3c852551ddf7bac52953676ec46a768353a70e9c0d8f"
+    "measurement_sha256": "5887e83f8a117e90b12ef7cd6e50a0a69556bdaf5d07656d0807158c3899c65b"
   },
   {
     "frame": "bac225d5ebc62d1237c94422cd9b1fd31bde65fd9e7ae79bf6ef1de53ffff9c1",
@@ -754,17 +351,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "bc675dca83e0d4ec64a53e7872affaeac83bc72325f62ecb66b1e1df00f7e677",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 32 pixels over 2 CV; max 29; outside independent mask band 32",
-      "paired isolated text passes 2 CV; measurement e0463dfebf3bf297a9ea9046bf25ff6b12e3b2669729d680d18b149f0ba55cf9"
-    ],
-    "measurement_sha256": "7f2736d7c4916fa7f69bd953b24dbca521eb352085483958e46c6769992341e6"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "be866f9d8870d695bc3717e6584aaea0942e0265a2da513d64b1201583e5a2d0",
@@ -773,64 +360,57 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
-    "frame": "c180b8c8f1fd1c3aef2819d80b8a601aa92fc16fffcce95ac9c104367af9a623",
+    "frame": "be95b4aeb733e920c290a22e8fc9b9bbf8e77ffe15f3f8e02d5533de1e943712",
     "owner": "L4",
-    "reason": "transitions",
+    "reason": "no active text with passing authored-isolation outline reference",
     "checks": [
-      "unreferenced: max 212.00 p99.9 107.00 mean 0.367 from today (bound p99.9 1, max 4)"
+      "text reference gap; original bar: 10077 pixels over 2 CV, max 79, outside independent mask band 10077",
+      "paired isolated text passes; engine 598ddbfa658eaf70a2e0c50fa12f914c28a4496bbb150a21d6d77d73b0d8c55d"
     ],
-    "measurement_sha256": "47ee2704242d4846daf34ae17d5a363f2a8229cbb9f7fdd86ae022bf35df8252"
+    "measurement_sha256": "204b98558126fe1334e0ccddf6788877d9a3bb105e5c074e2437483a9770c19e"
   },
   {
-    "frame": "c38978c78ff80442cf76166438969019743c2699d71196568e7b2ca13028e36a",
+    "frame": "c415b014aa5767677551cb7f269ea5157fabec4664425b3babac0206e5d96e30",
     "owner": "L4",
-    "reason": "groups and precomps",
+    "reason": "no active text with passing authored-isolation outline reference",
     "checks": [
-      "unreferenced: max 86.00 p99.9 6.00 mean 0.037 from today (bound p99.9 1, max 4)"
+      "text reference gap; original bar: 9796 pixels over 2 CV, max 228, outside independent mask band 9796",
+      "paired isolated text passes; engine 8be60ef111206ab19ce4aabb93324ffc3bf1f0d422778faabf114f1598fd5c46"
+    ],
+    "measurement_sha256": "35dfbb204796b0442cebbf3016bf203cf912daa3367bb0f138c6fd2ed671b970"
+  },
+  {
+    "frame": "c605d8050f055875c49d4d36b2d675fb71f3adb42a65c14abb38fcdca9d4e370",
+    "owner": "L4",
+    "reason": "projected or resampled text with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 3287 pixels over 2 CV, max 181, outside independent mask band 3287",
+      "paired isolated text passes; engine d888b2dfdf95b7abe5f7bb31e96fcc11bcaacf3022d331a887188c943291e7c3"
+    ],
+    "measurement_sha256": "10b35dca46977f1a85ab3bb0f87c29d7a1be34378cac49ec48f8447391d38209"
+  },
+  {
+    "frame": "c8e5809012747f9cc7c491eff4cd74c522a08eebd00fbbb3a296e0c5552703ec",
+    "owner": "L4",
+    "reason": "no active text with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 11488 pixels over 2 CV, max 86, outside independent mask band 11488",
+      "paired isolated text passes; engine 598ddbfa658eaf70a2e0c50fa12f914c28a4496bbb150a21d6d77d73b0d8c55d"
     ],
     "measurement_sha256": "02f5eba0a7eb697bc2f8e083525c036d774efa955d179c7e005160f53086eb24"
   },
   {
-    "frame": "c78dbc31967adf7ee909bdbc57144d9f046383346ae3472ae2bbbbfaaae15832",
+    "frame": "cd6d5a4acf49ab0d94e10887721380e4d1665202ddd3a4b329a6abd03a16c709",
     "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
+    "reason": "no active text with passing authored-isolation outline reference",
     "checks": [
-      "text: 31 pixels over 2 CV; max 30; outside independent mask band 31",
-      "paired isolated text passes 2 CV; measurement 5987a19e751032fdddecae883a9adceae1e9b519226a512cea10ba7b70bc9972"
+      "text reference gap; original bar: 10085 pixels over 2 CV, max 215, outside independent mask band 10085",
+      "paired isolated text passes; engine 5091eafc4d883c5d8808d51879c0ebe1602ab07b0a09216ed8de18ddbfea2791"
     ],
-    "measurement_sha256": "c957ea189b27bd4883b3bdecb8f12d9a4daef09611b9a9cde8021671a0af3a5c"
-  },
-  {
-    "frame": "c8927962e07aabeac60dd3ec5b1968477c66b268368039c1cbf961a771d9a5cc",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 3 pixels over 2 CV; max 3; outside independent mask band 3",
-      "paired isolated text passes 2 CV; measurement 9c6562f1bdc2a0e8ee0a5af39c332cfe698d578264e67d899d022c2ac7a8fc95"
-    ],
-    "measurement_sha256": "7431b8a473b44c007129eeec3d5345e9d392a6e5b1c11e94410f82c2776df3bc"
-  },
-  {
-    "frame": "cb619cd2e94d252ea5b084ade72a3e59e8122befd8462e95a9b5a5f1ffc099ab",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; ",
-    "checks": [
-      "text: 22 pixels over 2 CV; max 30; outside independent mask band 22",
-      "paired isolated text passes 2 CV; measurement 5987a19e751032fdddecae883a9adceae1e9b519226a512cea10ba7b70bc9972"
-    ],
-    "measurement_sha256": "94f159d36bd4a0dab16f4a454b68d030b5fc424531cc441684f330f951ca8c4e"
-  },
-  {
-    "frame": "d11beed62eba776775754a8c195a17d4e6842dba039c0373a7ea940e62950064",
-    "owner": "L4",
-    "reason": "other layer types",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 121.00 mean 0.578 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "96c84652fb2206903ab63a2fbec4842b80d045194bcad838db5286a8f7af95b6"
+    "measurement_sha256": "577ca3b1daad9a210abdb5d8dd976e49241ee26896bd30a2c4214f9920622fac"
   },
   {
     "frame": "d22baed355244d28a64c768859585538c802cfdb8ae88274b534e6b003f9ba52",
@@ -839,55 +419,37 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
-    "frame": "d414f44975d3882191f25a3f358bdba07bd32cf030b5badd71d213a47211f6a7",
+    "frame": "e199e8b479b22eb7484468ee3ea9454b3fe1510b18f7289473694abace81dec8",
     "owner": "L4",
-    "reason": "path mask/text edge composition; every differing text pixel is in the independent mask band",
+    "reason": "projected or resampled text with passing authored-isolation outline reference",
     "checks": [
-      "text: 16 pixels over 2 CV; max 4; outside independent mask band 0"
+      "text reference gap; original bar: 4680 pixels over 2 CV, max 195, outside independent mask band 4680",
+      "paired isolated text passes; engine d888b2dfdf95b7abe5f7bb31e96fcc11bcaacf3022d331a887188c943291e7c3"
     ],
-    "measurement_sha256": "2be25d95d76f50f44c9d0b5e98bca94ca3245be6222a80607b04a43860f8bdf6"
+    "measurement_sha256": "4429180ffcc731abd270be2c8f2d1cc9a4534736827aff398190f7b0e26ad5e9"
   },
   {
-    "frame": "d69823b03827d04c6af290051e9dee619ad0c6765d272db98acd3d19052998ec",
+    "frame": "e5308e653cf4018fb06d59e48489e36943096c5b5f0b7efd2d256687026461c0",
     "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; mattes",
+    "reason": "nontext content intersects text at pixel 90: background delta 3.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "text: 579 pixels over 2 CV; max 96; outside independent mask band 579",
-      "paired isolated text passes 2 CV; measurement 42b125c75c475885fe6a23e1b2d97db898e6b98f38f2553aa5eee1c524b7fd69"
+      "text reference gap; original bar: 24240 pixels over 2 CV, max 255, outside independent mask band 24240",
+      "paired isolated text passes; engine 9dbadc166a83a5be3ef4f5ba58cea840847b5f379446364bc4be37bbea67c26a"
     ],
-    "measurement_sha256": "b3583fddf260a2fc8fe0eb5fb6dce146893d7a2c372c291ffd30cb6d9a48fdb4"
+    "measurement_sha256": "dd590cbbf3e4a90ee3d5826b3f2e3e28dfbed0390b1c61ffcc3999d7541534aa"
   },
   {
-    "frame": "d829fdb969da091d797ee65c08c7489263fb675d366d56f0ef708d01f7b49767",
+    "frame": "eae15eabb767a0fe142fe02f16151796280e7821a2ea329a81ce6ca98399b8bb",
     "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; 2.5D planes",
+    "reason": "nontext content intersects text at pixel 500469: background delta 16.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "text: 3 pixels over 2 CV; max 7; outside independent mask band 3",
-      "paired isolated text passes 2 CV; measurement b3da95d97780ae3e9632c40b21c9ed568487b77c8d6ed0794562aa63c92139e3"
+      "text reference gap; original bar: 21213 pixels over 2 CV, max 171, outside independent mask band 21213",
+      "paired isolated text passes; engine 306aae61affa73c22559171406006d35e844e07310691739dcf9c5ef30e682c0"
     ],
-    "measurement_sha256": "c9a3f1e763e33e061693ef819c363410b0448466ae3591d46ef3c97e39680a4b"
-  },
-  {
-    "frame": "e869f16049a4994ea9d4e2574c91fe63010cc15ba9918221afb97afbe8475880",
-    "owner": "L4",
-    "reason": "transitions",
-    "checks": [
-      "unreferenced: max 226.00 p99.9 120.00 mean 0.704 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "95865c8ddb8c9a2f047ef7fe14049c3f0ddbb41a8010ec141edcbd348b13eff8"
-  },
-  {
-    "frame": "ec132c448b7a065cb8f002eeffabb40e20d552943e5ba2a68853d0b28ba0f344",
-    "owner": "L4",
-    "reason": "text composition with passing authored-isolation projection; other layer types",
-    "checks": [
-      "text: 145 pixels over 2 CV; max 51; outside independent mask band 111",
-      "paired isolated text passes 2 CV; measurement 2946a07ed03c382a026ff5265370407ca32a4ea56dfb086ed2508d68146858e4"
-    ],
-    "measurement_sha256": "7fae8255811c6d14c416f5ab283a107e124c89f57ce23d23f028682b2089ceae"
+    "measurement_sha256": "8d729de1373cacc3d8c482da1e7f6d441ee5d9edc69c684dbb6552a885a6e5c8"
   },
   {
     "frame": "ec21e3261b95211c16d97e6767644cefcef2633ff1c596c3d76c5e600318bae7",
@@ -896,7 +458,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "ed606b52d800d6b731f74b6bf452ef590fc584879be475cf2ca48019b4f56e43",
@@ -905,25 +467,17 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
-    "frame": "efadb2c557b65f63d14711b90b38295126aeab59adb23cac6bcf7fefc4074739",
+    "frame": "edf964f0da5dc99997e4ed70e493d3a98872992d232463596888856d61670182",
     "owner": "L4",
-    "reason": "transitions",
+    "reason": "nontext content intersects text at pixel 148247: background delta 3.00 CV; nontext drawn above text with passing authored-isolation outline reference",
     "checks": [
-      "unreferenced: max 226.00 p99.9 119.00 mean 0.681 from today (bound p99.9 1, max 4)"
+      "text reference gap; original bar: 61572 pixels over 2 CV, max 198, outside independent mask band 61572",
+      "paired isolated text passes; engine 2c84f30af75a1c7febee5b34549e03aa50bca64784eccb4878e5ede3456bd9a8"
     ],
-    "measurement_sha256": "b579bc28cb89c705cd847fb3110f1eab9e23a2f0c2146f2b145d3070c62cec89"
-  },
-  {
-    "frame": "efc8d172e9b4fe6d8ac0b3b72c76fe0cb1a734af89453216586ed86c0496e68f",
-    "owner": "L4",
-    "reason": "mattes",
-    "checks": [
-      "unreferenced: max 132.00 p99.9 39.00 mean 0.357 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "822937c202116fb8b01fe45c5661bb9533266811cc663d5bb245694b3b3a212e"
+    "measurement_sha256": "80027fe636cab7f733b56a30625b1c51293682019bf8e657763cd95db4de5422"
   },
   {
     "frame": "f390def9b59108cb0d00c19199ec392a0a56dd188a68c367e758b7ef6df9ae79",
@@ -932,16 +486,7 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
-  },
-  {
-    "frame": "f3f3ca99fcb1b0683f573b29fd520486e4da4d9499e9bf59a8a844960784a41b",
-    "owner": "L4",
-    "reason": "other layer types",
-    "checks": [
-      "unreferenced: max 75.00 p99.9 34.00 mean 0.342 from today (bound p99.9 1, max 4)"
-    ],
-    "measurement_sha256": "39ab237e087745d556d00e27f693bcdcb1bf273c85ba5cd800f12f06f27cb751"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
     "frame": "f60784642d1d9ea476e29d6b5ec9367dde3a8c33e5400926b29906dca54814e3",
@@ -950,15 +495,56 @@
     "checks": [
       "unreferenced: max 192.00 p99.9 0.00 mean 0.021 from today (bound p99.9 1, max 4)"
     ],
-    "measurement_sha256": "73f066bd773913e79c7436edb8cd5868587c295ef3b76bc6ed2df9f8a3a00f14"
+    "measurement_sha256": "9417c224154db8dc9c953bd908f0c5b64bcbb7a2e7917d79b3d5a0110367fef5"
   },
   {
-    "frame": "fe40f09044773cfeb40ec4dca183a46325e04095cbf811c7da183446f14acc5d",
+    "frame": "ff84e4211ecd70e103761f1c9710d0838b0fec2e79ab57cc99a4a82f5e93c945",
     "owner": "L4",
-    "reason": "transitions",
+    "reason": "projected or resampled text with passing authored-isolation outline reference",
     "checks": [
-      "unreferenced: max 226.00 p99.9 118.00 mean 0.583 from today (bound p99.9 1, max 4)"
+      "text reference gap; original bar: 2291 pixels over 2 CV, max 167, outside independent mask band 2291",
+      "paired isolated text passes; engine 77c5553f44eceaccc0b29503a468f55c74ed1af138cc73c8110d0820c10c1320"
     ],
-    "measurement_sha256": "12872b7f811811b21283b7366e09934d5d7d63109147997bb7b58b3e1894d060"
+    "measurement_sha256": "7b49b0b15367187e1f9cff9b2cd85d28769b1eec1df9111849746a87227893d6"
+  },
+  {
+    "frame": "ff946b4415214cf7c4baf92306094f9163aa291450e6da733a8a29e4ea5ae3c1",
+    "owner": "L4",
+    "reason": "nontext content intersects text at pixel 53545: background delta 148.27 CV; nontext drawn above text with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 5221 pixels over 2 CV, max 226, outside independent mask band 5221",
+      "paired isolated text passes; engine 7f4d22b648b533fcbc7f088ed1359c7422ee44ddf3bb4f0a348cfffe429886ba"
+    ],
+    "measurement_sha256": "76a5108b6fdecbedfbf985c12890e9b37e29ba76f22c4e4561224168ba53cf6a"
+  },
+  {
+    "frame": "70ccae997450d6006a2fc33e4685704aa3b21400e5f6f71bc0f28a07871713c1",
+    "owner": "L4",
+    "reason": "nontext content intersects text at pixel 41440: background delta 1.24 CV with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 13925 pixels over 2 CV, max 226, outside independent mask band 13925",
+      "paired isolated text passes; engine 246c9ce988cfc5d6d1007d4ec3877ec04d1206701143370792a18e909290ad4d"
+    ],
+    "measurement_sha256": "61d3f0d5e974cf2c025c9673bc357630453ab2446f4db70e7b2144a1c2f35fb7"
+  },
+  {
+    "frame": "fd8aa5815ac158c609974a42ee8023266001cd1618bd3b66c94eee01c9004b20",
+    "owner": "L4",
+    "reason": "nontext content intersects text at pixel 31184: background delta 1.18 CV with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 19713 pixels over 2 CV, max 226, outside independent mask band 19713",
+      "paired isolated text passes; engine 07a9abe0819145ef83cedf65c608e5b5d22fbdefd260c0935781cfabe3512b29"
+    ],
+    "measurement_sha256": "1b73dede47ca724012f5830c57f9ffcfa86e3c74be95bb769bac720272b48b09"
+  },
+  {
+    "frame": "0d99a9710049222679f4aaa27f88457e612a15698aa9ca64d0fae0395f85765b",
+    "owner": "L4",
+    "reason": "nontext content intersects text at pixel 31184: background delta 1.15 CV with passing authored-isolation outline reference",
+    "checks": [
+      "text reference gap; original bar: 21581 pixels over 2 CV, max 226, outside independent mask band 21581",
+      "paired isolated text passes; engine d1bb4e8a65f4a9b71164321ff7e2822d36a63f87e91f0288be2ac69e33399c40"
+    ],
+    "measurement_sha256": "b80e263b4cad6fa59880382bcef4f1b02a8665f2f78a3bed1ba0926dbca7d92d"
   }
 ]

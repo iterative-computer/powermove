@@ -11,13 +11,12 @@ publish.workspace = true
 # Deterministic geometry digest over generated cases, used to check that
 # native and wasm32 builds produce bit-identical output (see tests/wasm/).
 conformance = []
-# The rendering side (docs/engine/vector.md): coverage scenes, glyph paths,
+# The rendering side (docs/engine/vector.md): coverage scenes
 # and SVG through usvg with filters through resvg. Off for pm-eval and
 # pm-wasm, which need geometry only.
-render = ["dep:pm-text", "dep:i_overlay", "usvg/text", "usvg/system-fonts", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
+render = ["dep:i_overlay", "usvg/text", "usvg/system-fonts", "dep:usvg", "dep:resvg", "dep:tiny-skia"]
 
 [dependencies]
-pm-text = { path = "../pm-text", default-features = false, features = ["render"], optional = true }
 kurbo = "0.13.1"
 libm.workspace = true
 ryu-js.workspace = true
@@ -29,7 +28,6 @@ tiny-skia = { version = "0.12", optional = true }
 i_overlay = { version = "9.1", optional = true }
 
 [dev-dependencies]
-pm-text = { path = "../pm-text", default-features = false, features = ["render", "system"] }
 png = "0.18"
 # Exact float parsing for the bit-for-bit vector comparisons.
 serde_json = { workspace = true, features = ["float_roundtrip"] }

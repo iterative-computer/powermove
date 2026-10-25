@@ -1,41 +1,16 @@
-//! Glyph rendering (plan section 12, amendment 10; design notes in
-//! `docs/engine/text-render.md`).
-//!
-//! - [`profile`]: the engine-owned stem-darkening and positioning profiles
-//!   (Canvas2D for `compat` level 1, CoreText for level 2).
-//! - [`outline`], [`bitmap`]: glyph outlines (Skrifa, synthetic bold and
-//!   italic, the profile's expansion) and color bitmap glyphs placed as
-//!   Canvas2D places them, both cached across frames.
-//! - [`scene`]: a text raster as ordered canvas draws (coverage items and
-//!   image items) in device pixels; [`text_raster`] builds the scene of a text
-//!   layer's `rasterText` canvas.
-//! - [`atlas`]: coverage cells 1:1 with device pixels.
-//! - [`cpu`], [`paint`]: the `vello_cpu` coverage fallback and ordered N32
-//!   or float CPU paint reference for the GPU pass in `pm-render`.
-//! - [`color`]: canvas color strings.
+//! Exact outline text coverage, ordered float paint, and color glyphs.
 
 pub mod atlas;
 pub mod bitmap;
-#[cfg(all(target_os = "macos", feature = "cg-masks"))]
-pub mod cgmask;
 pub mod color;
 pub mod color4;
-#[cfg(feature = "cg-masks")]
 pub mod colr;
-#[cfg(all(target_os = "macos", feature = "cg-masks"))]
+#[cfg(all(target_os = "macos", feature = "coretext-reference"))]
 pub mod coretext;
 pub mod cpu;
-pub mod graphite;
-pub mod mask_tables;
 pub mod outline;
 pub mod paint;
-pub mod profile;
 pub mod scene;
-pub mod sdf;
-#[cfg(feature = "cg-masks")]
-pub mod skaaa;
-#[cfg(feature = "cg-masks")]
-pub mod skpath;
 
 use kurbo::Affine;
 
@@ -92,6 +67,5 @@ pub fn text_raster<R: FontResolver>(
         );
         painter.fill_text(&mut scene.items, &runs, origin, m, color, 1.0, 0.0);
     }
-    painter.resolve_canvas_pass(&mut scene.items, false);
     scene
 }

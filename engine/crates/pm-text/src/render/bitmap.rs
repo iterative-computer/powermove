@@ -10,15 +10,15 @@
 //! 6 px higher, so Canvas2D placement is the rule for both levels
 //! (amendment 10).
 //!
-//! The strike image is resampled once to the device scale with an area
-//! filter (premultiplied), so the paint pass samples it close to 1:1.
+//! The original strike pixels and authored placement are retained. The
+//! renderer converts to its working color space before area minification.
 
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
 
 use kurbo::{Affine, Rect, Vec2};
-use skrifa::bitmap::{BitmapData, BitmapFormat, Origin};
+use skrifa::bitmap::{BitmapData, BitmapFormat, BitmapGlyph as StrikeGlyph, Origin};
 use skrifa::instance::Size;
 use skrifa::raw::TableProvider;
 use skrifa::{GlyphId, MetadataProvider};
@@ -57,12 +57,6 @@ pub fn has_bitmaps(face: FaceRef<'_>) -> bool {
     face.font().is_some_and(|f| !f.bitmap_strikes().is_empty())
 }
 
-/// Whether a face has color vector glyphs (`COLR` with `CPAL`).
-pub fn has_colr(face: FaceRef<'_>) -> bool {
-    face.font()
-        .is_some_and(|f| f.colr().is_ok() && f.cpal().is_ok())
-}
-
 /// Whether `glyph` is a color vector glyph (`COLR`) of the face.
 pub fn is_colr_glyph(face: FaceRef<'_>, glyph: u32) -> bool {
     face.font()
@@ -73,7 +67,6 @@ pub fn is_colr_glyph(face: FaceRef<'_>, glyph: u32) -> bool {
 #[derive(Default)]
 pub struct Bitmaps {
     map: HashMap<Key, Option<Arc<BitmapGlyph>>>,
-    #[cfg(feature = "cg-masks")]
     pub(crate) colr: super::colr::Cache,
 }
 
@@ -84,7 +77,6 @@ impl Bitmaps {
 
     pub fn clear(&mut self) {
         self.map.clear();
-        #[cfg(feature = "cg-masks")]
         self.colr.clear();
     }
 
@@ -135,6 +127,9 @@ fn decode(data: &BitmapData<'_>, width: u32, height: u32) -> Option<Rgba8> {
                 }
                 let mut buf = vec![0; reader.output_buffer_size()?];
                 let info = reader.next_frame(&mut buf).ok()?;
+                if info.width != width || info.height != height {
+                    return None;
+                }
                 let px = info.width as usize * info.height as usize;
                 return Some(premultiply(Rgba8 {
                     width: info.width,
@@ -194,126 +189,6 @@ fn premultiply(mut img: Rgba8) -> Rgba8 {
     img
 }
 
-/// Lanczos-2 resampling of a premultiplied image by `scale` < 1 (the
-/// kernel widened by 1 / scale); output pixel `o` is centered on source
-/// position `(o + 0.5) / scale`. Larger scales return the image as it is.
-pub fn lanczos2(img: &Rgba8, scale: f64) -> Rgba8 {
-    if scale.is_nan() || scale >= 1.0 || img.width == 0 || img.height == 0 {
-        return img.clone();
-    }
-    const SUPPORT: f64 = 2.0;
-    let k = |x: f64| -> f64 {
-        let x = x.abs();
-        if x < 1e-9 {
-            1.0
-        } else if x >= SUPPORT {
-            0.0
-        } else {
-            let p = std::f64::consts::PI * x;
-            SUPPORT * p.sin() * (p / SUPPORT).sin() / (p * p)
-        }
-    };
-    let w = ((f64::from(img.width) * scale).ceil() as u32).max(1);
-    let h = ((f64::from(img.height) * scale).ceil() as u32).max(1);
-    let weights = |o: u32, n: u32| -> Vec<(usize, f64)> {
-        let center = (f64::from(o) + 0.5) / scale - 0.5;
-        let r = SUPPORT / scale;
-        let lo = (center - r).floor() as i64;
-        let hi = (center + r).ceil() as i64;
-        // Normalized over the whole kernel: taps outside the image are
-        // transparent, so edges fade.
-        let sum: f64 = (lo..=hi).map(|i| k((i as f64 - center) * scale)).sum();
-        (lo..=hi)
-            .filter(|i| *i >= 0 && *i < i64::from(n))
-            .map(|i| (i as usize, k((i as f64 - center) * scale) / sum))
-            .collect()
-    };
-    let wx: Vec<_> = (0..w).map(|x| weights(x, img.width)).collect();
-    let wy: Vec<_> = (0..h).map(|y| weights(y, img.height)).collect();
-    let sw = img.width as usize;
-    let mut out = vec![0u8; w as usize * h as usize * 4];
-    for (y, ry) in wy.iter().enumerate() {
-        for (x, rx) in wx.iter().enumerate() {
-            let mut acc = [0.0f64; 4];
-            for &(sy, fy) in ry {
-                for &(sx, fx) in rx {
-                    let p = &img.data[(sy * sw + sx) * 4..(sy * sw + sx) * 4 + 4];
-                    for c in 0..4 {
-                        acc[c] += f64::from(p[c]) * fx * fy;
-                    }
-                }
-            }
-            let o = (y * w as usize + x) * 4;
-            // Premultiplied: color never exceeds alpha (the kernel rings).
-            let a = acc[3].round().clamp(0.0, 255.0);
-            out[o + 3] = a as u8;
-            for c in 0..3 {
-                out[o + c] = acc[c].round().clamp(0.0, a) as u8;
-            }
-        }
-    }
-    Rgba8 {
-        width: w,
-        height: h,
-        data: out,
-    }
-}
-
-/// Area-filter resampling of a premultiplied image by `scale` < 1 (larger
-/// scales are left to the paint pass's bilinear filter and return the image
-/// as it is). Output pixel `o` covers source pixels `[o, o + 1) / scale`;
-/// the part of the last row and column beyond the source is transparent.
-pub fn resample(img: &Rgba8, scale: f64) -> Rgba8 {
-    if scale.is_nan() || scale >= 1.0 || img.width == 0 || img.height == 0 {
-        return img.clone();
-    }
-    let w = ((f64::from(img.width) * scale).ceil() as u32).max(1);
-    let h = ((f64::from(img.height) * scale).ceil() as u32).max(1);
-    let (sw, sh) = (img.width as usize, img.height as usize);
-    let inv = 1.0 / scale;
-    let mut out = vec![0u8; w as usize * h as usize * 4];
-    let weights = |o: usize, n: usize| -> Vec<(usize, f64)> {
-        let x0 = o as f64 * inv;
-        let x1 = (x0 + inv).min(n as f64);
-        let mut v = Vec::new();
-        let mut i = x0.floor() as usize;
-        while (i as f64) < x1 && i < n {
-            let a = (i as f64).max(x0);
-            let b = ((i + 1) as f64).min(x1);
-            if b > a {
-                v.push((i, b - a));
-            }
-            i += 1;
-        }
-        v
-    };
-    let wx: Vec<_> = (0..w as usize).map(|x| weights(x, sw)).collect();
-    let wy: Vec<_> = (0..h as usize).map(|y| weights(y, sh)).collect();
-    for (y, ry) in wy.iter().enumerate() {
-        for (x, rx) in wx.iter().enumerate() {
-            let mut acc = [0.0f64; 4];
-            for &(sy, fy) in ry {
-                for &(sx, fx) in rx {
-                    let p = &img.data[(sy * sw + sx) * 4..(sy * sw + sx) * 4 + 4];
-                    for c in 0..4 {
-                        acc[c] += f64::from(p[c]) * fx * fy;
-                    }
-                }
-            }
-            let area = inv * inv;
-            let o = (y * w as usize + x) * 4;
-            for c in 0..4 {
-                out[o + c] = (acc[c] / area).round().clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    Rgba8 {
-        width: w,
-        height: h,
-        data: out,
-    }
-}
-
 /// Apple Color Emoji's downward shift in whole device pixels for a run at
 /// `requested` px drawn at `size` px. From 20 px up it is `size / 8`
 /// rounded, halves down; below, Canvas2D shifts the (enlarged) glyph
@@ -357,21 +232,63 @@ pub fn apple_emoji_shift(requested: f32, size: f32) -> f64 {
     (f64::from(size) / 8.0 - 0.5).ceil()
 }
 
-fn build(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<BitmapGlyph> {
+/// The drawn area of a bitmap glyph relative to its origin, at device
+/// scale 1: its nonzero-alpha texels through the authored placement (the
+/// draw path's strike and sizes), grown by the reconstruction's reach. A
+/// device pixel is nonzero exactly when its square meets this rectangle.
+/// Enlargement samples bilinearly, so texel `k` weighs on samples within
+/// `(k - 0.5, k + 1.5)` texels; as an area rectangle that is `scale / 2 -
+/// 1 / 2` px past the texel edge. Minification integrates texel area, so
+/// it reaches no further. `None` when the glyph has no color strike (the
+/// painter falls back to its outline); `Some(None)` when it draws nothing.
+pub fn ink_bounds(
+    face: FaceRef<'_>,
+    glyph: u32,
+    requested: f32,
+    size: f32,
+) -> Option<Option<Rect>> {
     let font = face.font()?;
-    let strikes = font.bitmap_strikes();
-    if strikes.is_empty() {
-        return None;
-    }
-    let bitmap = strikes.glyph_for_size(Size::new(size), GlyphId::new(glyph))?;
+    let bitmap = font
+        .bitmap_strikes()
+        .glyph_for_size(Size::new(size), GlyphId::new(glyph))?;
     let image = decode(&bitmap.data, bitmap.width, bitmap.height)?;
     let upem = f32::from(font.head().ok()?.units_per_em());
-    let is_apple_color_emoji = strikes.format() == Some(BitmapFormat::Sbix)
-        && font
-            .localized_strings(skrifa::string::StringId::POSTSCRIPT_NAME)
-            .any(|name| name.chars().eq("AppleColorEmoji".chars()));
-    let scale = f64::from(size / bitmap.ppem_y);
-    let units = f64::from(size / upem);
+    let (transform, _) =
+        authored_placement(&bitmap, upem, is_apple_color_emoji(face), requested, size);
+    let Some(content) = alpha_bounds(&image) else {
+        return Some(None);
+    };
+    let reach = (f64::from(size) / f64::from(bitmap.ppem_y) / 2.0 - 0.5).max(0.0);
+    Some(Some(
+        transform.transform_rect_bbox(content).inflate(reach, reach),
+    ))
+}
+
+/// The texel rectangle of an image's nonzero alpha.
+fn alpha_bounds(image: &Rgba8) -> Option<Rect> {
+    let w = image.width as usize;
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for (i, px) in image.data.chunks_exact(4).enumerate() {
+        if px[3] != 0 {
+            let (x, y) = (i % w, i / w);
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x + 1);
+            y1 = y1.max(y + 1);
+        }
+    }
+    (x1 > 0).then(|| Rect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64))
+}
+
+fn authored_placement(
+    bitmap: &StrikeGlyph<'_>,
+    upem: f32,
+    is_apple_color_emoji: bool,
+    requested: f32,
+    size: f32,
+) -> (Affine, Rect) {
+    let scale = f64::from(size) / f64::from(bitmap.ppem_y);
+    let units = f64::from(size) / f64::from(upem);
     let outer = if is_apple_color_emoji {
         Vec2::new(0.0, apple_emoji_shift(requested, size))
     } else {
@@ -387,28 +304,31 @@ fn build(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<Bit
             -f64::from(bitmap.inner_bearing_y),
         ));
     if bitmap.placement_origin == Origin::BottomLeft {
-        transform *= Affine::translate((0.0, -f64::from(image.height)));
+        transform *= Affine::translate((0.0, -f64::from(bitmap.height)));
     }
-    // Downscale to the device scale with a Lanczos-2 filter (closest to
-    // Canvas2D among area, linear, Mitchell, Lanczos-2 and -3 on
-    // `fit-emoji`); a resampled pixel spans 1 / scale source pixels, and
-    // the paint pass samples it bilinearly at the glyph's phase.
-    let transform = if scale < 1.0 {
-        transform * Affine::scale(1.0 / scale)
-    } else {
-        transform
-    };
-    let image = if scale < 1.0 {
-        lanczos2(&image, scale)
-    } else {
-        image
-    };
+    // Keep the source strike at native resolution. `transform` carries the
+    // complete strike-to-device scale; the GPU integrates its footprint
+    // after converting the pixels into the project's working color space.
     let bounds = transform.transform_rect_bbox(Rect::new(
         0.0,
         0.0,
-        f64::from(image.width),
-        f64::from(image.height),
+        f64::from(bitmap.width),
+        f64::from(bitmap.height),
     ));
+    (transform, bounds)
+}
+
+fn build(face: FaceRef<'_>, glyph: u32, requested: f32, size: f32) -> Option<BitmapGlyph> {
+    let font = face.font()?;
+    let strikes = font.bitmap_strikes();
+    if strikes.is_empty() {
+        return None;
+    }
+    let bitmap = strikes.glyph_for_size(Size::new(size), GlyphId::new(glyph))?;
+    let image = decode(&bitmap.data, bitmap.width, bitmap.height)?;
+    let upem = f32::from(font.head().ok()?.units_per_em());
+    let (transform, bounds) =
+        authored_placement(&bitmap, upem, is_apple_color_emoji(face), requested, size);
     Some(BitmapGlyph {
         image: Arc::new(image),
         transform,
@@ -431,36 +351,165 @@ mod tests {
     }
 
     #[test]
-    fn area_resampling_preserves_mean_and_extent() {
-        let img = Rgba8 {
-            width: 4,
-            height: 2,
-            data: (0..8).flat_map(|i| [i * 30, 0, 0, 255]).collect(),
+    fn emoji_ink_bounds_follow_the_authored_strike_placement_at_several_sizes() {
+        let strike = StrikeGlyph {
+            data: BitmapData::Png(&[]),
+            bearing_x: 0.0,
+            bearing_y: 0.0,
+            inner_bearing_x: 2.0,
+            inner_bearing_y: 30.0,
+            ppem_x: 40.0,
+            ppem_y: 40.0,
+            advance: None,
+            width: 40,
+            height: 40,
+            placement_origin: Origin::TopLeft,
         };
-        let out = resample(&img, 0.5);
-        assert_eq!((out.width, out.height), (2, 1));
-        // (0 + 30 + 120 + 150) / 4 = 75
-        assert_eq!(out.data[0], 75);
-        assert_eq!(out.data[3], 255);
-        let same = resample(&img, 1.5);
-        assert_eq!(same, img);
+        for (size, expected) in [
+            (40.0, Rect::new(2.0, -25.0, 42.0, 15.0)),
+            (80.0, Rect::new(4.0, -50.0, 84.0, 30.0)),
+            (200.0, Rect::new(10.0, -125.0, 210.0, 75.0)),
+        ] {
+            let (transform, ink) = authored_placement(&strike, 1000.0, true, size, size);
+            assert_eq!(ink, expected);
+            assert_eq!(
+                transform.transform_rect_bbox(Rect::new(0.0, 0.0, 40.0, 40.0)),
+                ink
+            );
+        }
     }
 
-    #[test]
-    fn lanczos_keeps_flat_interiors_and_premultiplication() {
-        let img = Rgba8 {
-            width: 20,
-            height: 20,
-            data: (0..400).flat_map(|_| [100, 50, 0, 200]).collect(),
+    /// The pixels the painter makes nonzero for one glyph drawn at `origin`.
+    #[cfg(target_os = "macos")]
+    fn painted_box(
+        face: FaceRef<'_>,
+        glyph: u32,
+        size: f32,
+        bitmap_size: f32,
+        origin: (f64, f64),
+    ) -> [i64; 4] {
+        use crate::render::scene::{Painter, Run, TextScene};
+        let mut outlines = crate::render::outline::Outlines::new();
+        let mut bitmaps = Bitmaps::new();
+        let mut painter = Painter {
+            outlines: &mut outlines,
+            bitmaps: &mut bitmaps,
+            unsupported: Vec::new(),
         };
-        let out = lanczos2(&img, 0.4);
-        assert_eq!((out.width, out.height), (8, 8));
-        let mid = &out.data[(4 * 8 + 4) * 4..(4 * 8 + 4) * 4 + 4];
-        assert_eq!(mid, &[100, 50, 0, 200]);
-        assert!(
-            out.data
-                .chunks_exact(4)
-                .all(|p| p[0] <= p[3] && p[1] <= p[3])
+        let glyphs = [crate::compat::PlacedGlyph {
+            id: glyph,
+            x: 0.0,
+            y: 0.0,
+        }];
+        let run = Run {
+            face,
+            size,
+            coords: crate::render::outline::Coords::Normalized(&[]),
+            synthetic_bold: false,
+            synthetic_italic: false,
+            oblique: 0.0,
+            glyphs: &glyphs,
+            bitmap_size: Some(bitmap_size),
+        };
+        let mut scene = TextScene {
+            width: 320,
+            height: 320,
+            items: Vec::new(),
+        };
+        painter.fill_text(
+            &mut scene.items,
+            &[run],
+            origin,
+            Affine::IDENTITY,
+            [1.0; 4],
+            1.0,
+            0.0,
         );
+        let image = crate::render::paint::render_cpu(&scene);
+        let mut b = [i64::MAX, i64::MAX, i64::MIN, i64::MIN];
+        // Nonzero as stored: an alpha code of at least one in RGBA8.
+        for (i, px) in image.data.chunks_exact(4).enumerate() {
+            if (px[3] * 255.0).round() >= 1.0 {
+                let (x, y) = ((i % 320) as i64, (i / 320) as i64);
+                b = [b[0].min(x), b[1].min(y), b[2].max(x + 1), b[3].max(y + 1)];
+            }
+        }
+        b
+    }
+
+    /// Ink is what the painter draws: at every size (minified below the
+    /// strike, enlarged above it, enlarged full-em draws below 24 px) and
+    /// sub-pixel phase, the nonzero pixels are exactly the pixels whose
+    /// squares meet the ink rectangle. Covers a shaped skin-tone sequence.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn installed_apple_emoji_ink_is_the_painted_pixels() {
+        let file = std::fs::File::open("/System/Library/Fonts/Apple Color Emoji.ttc")
+            .expect("Apple Color Emoji system font");
+        // The mapping borrows a stable, read-only system file for this test.
+        let bytes = std::sync::Arc::new(unsafe { memmap2::MmapOptions::new().map(&file) }.unwrap());
+        let face = FaceRef {
+            data: &bytes[..],
+            index: 0,
+            id: 0,
+        };
+        let shared: std::sync::Arc<dyn AsRef<[u8]> + Send + Sync> = bytes.clone();
+        let font = read_fonts::model::Font::new(read_fonts::model::Blob::from(shared), 0).unwrap();
+        let shape = |text: &str, size: f32| {
+            let shaper = harfrust::ShaperFont::new(&font).with_scale((size * 65536.0) as i32);
+            let mut buffer = harfrust::Buffer::new();
+            for (cluster, ch) in text.char_indices() {
+                buffer.push(ch as u32, cluster as u32);
+            }
+            buffer.set_direction(harfrust::Direction::LeftToRight);
+            harfrust::shape(&shaper, &mut buffer, harfrust::ShapeOptions::new()).unwrap();
+            let [glyph] = buffer.glyph_infos() else {
+                panic!("{text} must shape to one color glyph at size {size}");
+            };
+            glyph.glyph_id
+        };
+        let wave = face.font().unwrap().charmap().map('👋').unwrap().to_u32();
+        // (requested, drawn): small emoji draw at an enlarged full-em size.
+        for (requested, drawn) in [
+            (12.0, 15.0),
+            (23.0, 24.0),
+            (40.0, 40.0),
+            (96.0, 96.0),
+            (200.0, 200.0),
+        ] {
+            let tone = shape("👋🏽", requested);
+            assert_ne!(tone, wave, "skin-tone modifier was not shaped");
+            for glyph in [wave, tone] {
+                let ink = crate::render::scene::drawn_color_glyph_ink(
+                    face,
+                    crate::render::outline::Coords::Normalized(&[]),
+                    glyph,
+                    requested,
+                    0.0,
+                    Some(drawn),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(Some(Some(ink)), ink_bounds(face, glyph, requested, drawn));
+                for origin in [
+                    (40.0, 250.0),
+                    (40.3, 250.7),
+                    (40.5, 250.25),
+                    (40.875, 250.5),
+                ] {
+                    let expected = [
+                        (ink.x0 + origin.0).floor() as i64,
+                        (ink.y0 + origin.1).floor() as i64,
+                        (ink.x1 + origin.0).ceil() as i64,
+                        (ink.y1 + origin.1).ceil() as i64,
+                    ];
+                    assert_eq!(
+                        painted_box(face, glyph, requested, drawn, origin),
+                        expected,
+                        "glyph {glyph} at {requested} px (drawn {drawn}), origin {origin:?}: ink {ink:?}"
+                    );
+                }
+            }
+        }
     }
 }

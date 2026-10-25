@@ -503,6 +503,101 @@ pub fn run(
     })
 }
 
+/// The built-in transitions the reference models: all four.
+pub fn models_transition(id: &str) -> bool {
+    matches!(id, "crossfade" | "wipe" | "slide" | "zoom")
+}
+
+/// A built-in transition from its GLSL: `from` and `to` are the two
+/// frame-sized stacks the compositor hands it (`u_from`, `u_to`), `progress`
+/// `u_prog`. Slide's `step()` edges are open where a sample position lies
+/// within f32 rounding of the frame's border (either side may hold).
+pub fn transition(
+    id: &str,
+    params: &[Param],
+    from: &Image,
+    to: &Image,
+    progress: f64,
+) -> Option<Output> {
+    let p = |i: usize| params.get(i).copied().unwrap_or(Param::Float(0.0)).float();
+    let (w, h) = (from.width, from.height);
+    let prog = progress.clamp(0.0, 1.0);
+    let mix = |a: Rgba, b: Rgba, t: f64| -> Rgba { std::array::from_fn(|k| a[k] + (b[k] - a[k]) * t) };
+    let mut open = vec![None; w * h];
+    let mut resampled = false;
+    let image = match id {
+        "crossfade" => per_pixel(from, |x, y, _| mix(from.at(x, y), to.at(x, y), prog)),
+        "wipe" => {
+            let a = p(0).to_radians();
+            let dir = [a.cos(), a.sin()];
+            let span = (dir[0].abs() + dir[1].abs()).max(0.0001);
+            let feather = (p(1) / 200.0).max(0.0001);
+            let edge = -feather + (1.0 + 2.0 * feather) * prog;
+            per_pixel(from, |x, y, st| {
+                let pos = ((st[0] - 0.5) * dir[0] + (st[1] - 0.5) * dir[1]) / span + 0.5;
+                let reveal = 1.0 - smoothstep(edge - feather, edge + feather, pos);
+                mix(from.at(x, y), to.at(x, y), reveal)
+            })
+        }
+        "slide" => {
+            resampled = true;
+            let a = p(0).to_radians();
+            let dir = [a.cos(), -a.sin()];
+            // `step(0, u) · step(u, 1)` on both axes; within `TIE` of a
+            // border the f32 program may land on either side.
+            const TIE: f64 = 1e-6;
+            let inside = |uv: [f64; 2]| -> (bool, bool) {
+                let strict = uv.iter().all(|v| (0.0..=1.0).contains(v));
+                let near = uv.iter().any(|v| v.abs() < TIE || (v - 1.0).abs() < TIE);
+                (strict, near)
+            };
+            let mut out = Image::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    let st = [(x as f64 + 0.5) / w as f64, 1.0 - (y as f64 + 0.5) / h as f64];
+                    let from_uv = [st[0] - dir[0] * prog, st[1] - dir[1] * prog];
+                    let to_uv = [st[0] + dir[0] * (1.0 - prog), st[1] + dir[1] * (1.0 - prog)];
+                    let clamp = |uv: [f64; 2]| uv.map(|v| v.clamp(0.0, 1.0));
+                    let (fi, fnear) = inside(from_uv);
+                    let (ti, tnear) = inside(to_uv);
+                    let value = |fi: bool, ti: bool| -> Rgba {
+                        let f = if fi { from.sample(clamp(from_uv)) } else { [0.0; 4] };
+                        let t = if ti { to.sample(clamp(to_uv)) } else { [0.0; 4] };
+                        std::array::from_fn(|k| t[k] + f[k] * (1.0 - t[3]))
+                    };
+                    out.put(x, y, value(fi, ti));
+                    if fnear || tnear {
+                        let fs = if fnear { vec![true, false] } else { vec![fi] };
+                        let ts = if tnear { vec![true, false] } else { vec![ti] };
+                        let points = fs
+                            .iter()
+                            .flat_map(|f| ts.iter().map(move |t| (*f, *t)))
+                            .map(|(f, t)| value(f, t))
+                            .collect();
+                        open[y * w + x] = Some(Open::Points(points));
+                    }
+                }
+            }
+            out
+        }
+        "zoom" => {
+            resampled = true;
+            let amount = p(0) / 100.0;
+            per_pixel(from, |_, _, st| {
+                let f = from.sample(st.map(|v| 0.5 + (v - 0.5) * (1.0 - prog * amount)));
+                let t = to.sample(st.map(|v| 0.5 + (v - 0.5) * (1.0 + (1.0 - prog) * amount)));
+                mix(f, t, prog)
+            })
+        }
+        _ => return None,
+    };
+    Some(Output {
+        image,
+        open,
+        resampled,
+    })
+}
+
 /// The per-channel minimum or maximum (`f`) of the texels from `left`
 /// columns left to `right` right and `up` rows above to `down` below each
 /// pixel, clamped to the image (clamp-to-edge sampling).
@@ -826,6 +921,29 @@ mod tests {
             (px[0] - 0.9 * 2.5).abs() < 1e-9 && (px[3] - 2.5).abs() < 1e-9,
             "{px:?}"
         );
+    }
+
+    #[test]
+    fn transitions_run_from_the_first_stack_to_the_second() {
+        let from = flat(8, 6, [1.0, 0.0, 0.0, 1.0]);
+        let to = flat(8, 6, [0.0, 0.0, 1.0, 1.0]);
+        let at = |id: &str, params: &[Param], p: f64| transition(id, params, &from, &to, p).unwrap();
+        // Crossfade halfway is the even mix.
+        assert_eq!(at("crossfade", &[], 0.5).image.at(3, 3), [0.5, 0.0, 0.5, 1.0]);
+        // A wipe at 0° (left to right, no softness) reveals `to` on the left.
+        let wipe = at("wipe", &[Param::Float(0.0), Param::Float(0.0)], 0.5).image;
+        assert_eq!(wipe.at(0, 3), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(wipe.at(7, 3), [1.0, 0.0, 0.0, 1.0]);
+        // Slide and zoom begin at `from` and end at `to`.
+        for (id, params) in [("slide", vec![Param::Float(0.0)]), ("zoom", vec![Param::Float(25.0)])] {
+            assert_eq!(at(id, &params, 0.0).image.at(4, 3), from.at(4, 3), "{id}");
+            assert_eq!(at(id, &params, 1.0).image.at(4, 3), to.at(4, 3), "{id}");
+        }
+        // Halfway through a slide at 0°, `to` has entered from the left.
+        let slide = at("slide", &[Param::Float(0.0)], 0.5).image;
+        assert_eq!(slide.at(1, 3), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(slide.at(6, 3), [1.0, 0.0, 0.0, 1.0]);
+        assert!(transition("unknown", &[], &from, &to, 0.5).is_none());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! Glyph outlines at device size, with synthetic bold and italic and the
-//! profile's stem-darkening expansion, cached across frames.
+//! cached across frames.
 //!
 //! Outlines come from Skrifa (unhinted, at the variation location of the
 //! run), so every host renders the same coverage (S4, "Determinism and
@@ -34,7 +34,6 @@ pub fn synthetic_bold_width(size: f64) -> f64 {
 /// fonts such as Marker Felt). The miter limit only matters for synthetic
 /// bold, which keeps miters like Skia's fake bold.
 pub const EXPAND_MITER_LIMIT: f64 = 4.0;
-pub const EXPAND_TOLERANCE: f64 = 0.1;
 
 /// The outline of one glyph as drawn.
 #[derive(Clone, Debug)]
@@ -42,11 +41,6 @@ pub struct Outline {
     pub path: Arc<BezPath>,
     /// Control-point bounds of `path` (a superset of the ink).
     pub bounds: Rect,
-    /// When set, `path` is the outline before expansion and the expansion
-    /// is drawn as a stroke of this width (round joins) over the fill: the
-    /// exact dilation, used where `kurbo::expand_path` fails on a glyph
-    /// (cusps in Marker Felt grow points tens of pixels away).
-    pub dilate: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -58,8 +52,7 @@ struct Key {
     coords: Vec<(u32, u32)>,
     bold: (u64, u64),
     skew: u64,
-    ex: u64,
-    ey: u64,
+    expand_tolerance: u64,
 }
 
 /// One face's font bytes and index (the registry's full font, not a subset).
@@ -123,8 +116,9 @@ pub struct GlyphStyle {
     pub synthetic_bold: (f64, f64),
     /// Synthesized oblique: `x' = x + skew × y` (y down; 0 for none).
     pub skew: f64,
-    /// Outline expansion per side in device px.
-    pub expand: (f64, f64),
+    /// Kurbo fake-bold expansion tolerance in local pixels, chosen from
+    /// the final device transform so its error stays below 1e-4 device px.
+    pub expand_tolerance: f64,
 }
 
 struct Pen(BezPath);
@@ -230,8 +224,7 @@ impl Outlines {
                 style.synthetic_bold.1.to_bits(),
             ),
             skew: style.skew.to_bits(),
-            ex: style.expand.0.to_bits(),
-            ey: style.expand.1.to_bits(),
+            expand_tolerance: style.expand_tolerance.to_bits(),
         };
         if let Some(hit) = self.map.get(&key) {
             return hit.clone();
@@ -271,71 +264,17 @@ fn build(
             Diagonal2::new(bx, by),
             Join::Miter,
             EXPAND_MITER_LIMIT,
-            EXPAND_TOLERANCE,
+            style.expand_tolerance,
         );
     }
     if style.skew != 0.0 {
         path.apply_affine(Affine::new([1.0, 0.0, style.skew, 1.0, 0.0, 0.0]));
     }
-    let (ex, ey) = style.expand;
-    let mut dilate = None;
-    if ex != 0.0 || ey != 0.0 {
-        // Contours without area (a hairline drawn as two coincident edges)
-        // cover nothing, also under font smoothing; expanded they would
-        // become visible slivers.
-        path = without_degenerate_contours(&path);
-        let before = path.bounding_box();
-        let expanded = kurbo::expand_path(
-            &path,
-            Diagonal2::new(ex, ey),
-            Join::Round,
-            EXPAND_MITER_LIMIT,
-            EXPAND_TOLERANCE,
-        );
-        // A dilation stays within the outline's bounds grown by the
-        // expansion (plus the tolerance).
-        let limit = before.inflate(ex + 0.25, ey + 0.25);
-        let after = expanded.bounding_box();
-        let sane = after.x0 >= limit.x0
-            && after.y0 >= limit.y0
-            && after.x1 <= limit.x1
-            && after.y1 <= limit.y1
-            && after.is_finite();
-        if sane {
-            path = expanded;
-        } else {
-            dilate = Some(ex + ey);
-        }
-    }
-    let bounds = match dilate {
-        Some(w) => path.bounding_box().inflate(w / 2.0, w / 2.0),
-        None => path.bounding_box(),
-    };
+    let bounds = path.bounding_box();
     Some(Outline {
         path: Arc::new(path),
         bounds,
-        dilate,
     })
-}
-
-/// `path` without its subpaths whose area is below 0.01 square pixels.
-fn without_degenerate_contours(path: &BezPath) -> BezPath {
-    let mut out = BezPath::new();
-    let mut current = BezPath::new();
-    let flush = |current: &mut BezPath, out: &mut BezPath| {
-        if !current.elements().is_empty() && current.area().abs() >= 0.01 {
-            out.extend(current.elements().iter().copied());
-        }
-        *current = BezPath::new();
-    };
-    for el in path.elements() {
-        if matches!(el, kurbo::PathEl::MoveTo(_)) {
-            flush(&mut current, &mut out);
-        }
-        current.push(*el);
-    }
-    flush(&mut current, &mut out);
-    out
 }
 
 /// Units per em of a face (1000 when the `head` table is unreadable).
@@ -348,24 +287,6 @@ pub fn units_per_em(face: FaceRef<'_>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn degenerate_contours_are_dropped_before_expansion() {
-        let mut p = BezPath::new();
-        p.move_to((0.0, 0.0));
-        p.line_to((10.0, 0.0));
-        p.line_to((10.0, 10.0));
-        p.line_to((0.0, 10.0));
-        p.close_path();
-        // A hairline: out and back along the same segment.
-        p.move_to((20.0, 0.0));
-        p.line_to((20.0, 10.0));
-        p.line_to((20.0, 0.0));
-        p.close_path();
-        let q = without_degenerate_contours(&p);
-        assert_eq!(q.elements().len(), 5);
-        assert!((q.area().abs() - 100.0).abs() < 1e-9);
-    }
 
     #[test]
     fn fake_bold_follows_skias_interpolation() {

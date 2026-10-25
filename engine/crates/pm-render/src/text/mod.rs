@@ -1,24 +1,18 @@
 //! Text and captions (plan sections 10 and 12, amendments 10 and 19).
 //! Design notes: `docs/engine/text-render.md`.
 //!
-//! A text or captions layer draws as today's compositor draws it: its
-//! canvas raster (`rasterText`, `rasterAnimatedText`, or the captions
-//! rasterizer's `draw`) at the density `continuousRasterScale` asks for,
-//! sampled through the layer's quad. The raster is a [`TextScene`] painted
-//! by platform masks, native Graphite primitives and Vello coverage through
-//! the ordered paint pass ([`gpu`]): N32 for level 1, float for level 2.
-//! Cached rasters retain only the ink crop, drawn through the part of the
-//! layer's quad it covers; native primitives keep the full canvas viewport
-//! while drawing so AA stays unchanged.
+//! Production text and captions paint exact glyph outlines in device space.
+//! Level 1 keeps its Blink-compatible layout; level 2 keeps its Parley
+//! layout. Both use exact float area coverage, float paint, and working-domain image
+//! filtering. The ordered scene retains only its ink crop. A 2.5D layer
+//! instead paints at its plane density and projects through that plane.
+//! The explicit raster API still paints into its requested canvas.
 //!
 //! Layout is `pm-text`'s level 1 (`compat`) through the host's
 //! [`TextFonts`]; word states, animator poses, raster boxes, and font
 //! anchors are `pm-eval`'s.
 
-mod canvas;
 pub mod gpu;
-mod graphite;
-mod legacy_blur;
 pub mod served;
 
 use std::hash::{Hash, Hasher};
@@ -35,8 +29,9 @@ use pm_text::font::{FaceId, FaceInfo, FontResolver};
 use pm_text::render::bitmap::Bitmaps;
 use pm_text::render::color::{self, Rgba};
 use pm_text::render::outline::Outlines;
-use pm_text::render::profile::Profile;
-use pm_text::render::scene::{ItemContent, Painter, PathStyle, TextScene, fill_path, rounded_rect};
+use pm_text::render::scene::{
+    ImagePixels, ItemContent, Painter, PathStyle, TextScene, fill_path, rounded_rect,
+};
 
 /// The fonts a renderer lays text out with: `pm-text`'s level 1 layout
 /// over the host's font registry (full font files, so outlines are
@@ -141,30 +136,11 @@ impl<R: FontResolver + Send> TextFonts for pm_eval::text_measure::CompatMeasure<
     }
 }
 
-/// Level 1 glyph masks as Canvas2D gets them on this platform: CoreGraphics
-/// on macOS (`pm_text::render::cgmask`); elsewhere none (outlines with the
-/// Canvas2D profile).
-fn platform_masks() -> Option<Box<dyn pm_text::render::scene::MaskSource + Send>> {
-    #[cfg(target_os = "macos")]
-    {
-        Some(Box::new(pm_text::render::cgmask::CgMasks::new()))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
 /// Everything text rendering keeps across frames.
 pub struct TextContext {
     pub(crate) fonts: Option<Box<dyn TextFonts>>,
     outlines: Outlines,
     bitmaps: Bitmaps,
-    /// Level 1 glyph masks from the platform rasterizer (CoreGraphics on
-    /// macOS), as Canvas2D draws them.
-    masks: Option<Box<dyn pm_text::render::scene::MaskSource + Send>>,
-    /// The level 1 profile (Canvas2D).
-    profile: Profile,
     generation: u64,
     /// The fonts' own generation when last synced.
     fonts_generation: u64,
@@ -178,8 +154,6 @@ impl Default for TextContext {
             fonts: None,
             outlines: Outlines::new(),
             bitmaps: Bitmaps::new(),
-            masks: platform_masks(),
-            profile: Profile::CANVAS2D,
             generation: 0,
             fonts_generation: 0,
             captions_hidden: false,
@@ -211,36 +185,17 @@ impl TextContext {
         }
     }
 
-    /// Drops every glyph drawn from the previous fonts: outlines, color
-    /// bitmaps, platform masks and their CTFonts. Glyph caches key on
+    /// Drops every glyph drawn from the previous fonts: outlines and color
+    /// bitmaps. Glyph caches key on
     /// `FontBytes::id`, which is never reused, so a replaced font can never
     /// hit an old entry; this releases the old entries.
     fn forget_glyphs(&mut self) {
         self.outlines.clear();
         self.bitmaps.clear();
-        if let Some(masks) = self.masks.as_deref_mut() {
-            masks.reset();
-        }
     }
 
     pub fn has_fonts(&self) -> bool {
         self.fonts.is_some()
-    }
-
-    /// Where level 1 glyph masks come from (`None`: outlines with the
-    /// profile's stem darkening).
-    pub fn set_masks(&mut self, masks: Option<Box<dyn pm_text::render::scene::MaskSource + Send>>) {
-        self.masks = masks;
-        self.generation += 1;
-    }
-
-    /// The level 1 profile (tests and the fitting tool).
-    pub fn set_profile(&mut self, profile: Profile) {
-        self.profile = profile;
-    }
-
-    pub fn profile(&self) -> &Profile {
-        &self.profile
     }
 
     /// `PM.captionsHidden`: an export without burned-in captions draws no
@@ -267,9 +222,6 @@ impl TextContext {
 #[derive(Debug, Clone)]
 pub struct TextPlan {
     pub scene: Arc<TextScene>,
-    /// Compat level 1 is an N32 Canvas2D backing store, even when the
-    /// composition that samples it has a floating-point working format.
-    pub canvas_n32: bool,
     pub crop: [u32; 4],
     /// Content key of the painted pixels (scene, crop, and the font
     /// generation): equal keys paint equal rasters.
@@ -289,7 +241,6 @@ impl TextPlan {
         let key = scene_key(&scene, crop, u64::MAX);
         TextPlan {
             scene: Arc::new(scene),
-            canvas_n32: false,
             crop,
             key,
         }
@@ -334,6 +285,14 @@ fn js_max(a: f64, b: f64) -> f64 {
 
 fn js_min(a: f64, b: f64) -> f64 {
     crate::js::min(a, b)
+}
+
+fn affine_max_scale(m: Affine) -> f64 {
+    let [a, b, c, d, _, _] = m.as_coeffs();
+    let xx = a * a + b * b;
+    let xy = a * c + b * d;
+    let yy = c * c + d * d;
+    ((xx + yy + ((xx - yy).powi(2) + 4.0 * xy * xy).sqrt()) * 0.5).sqrt()
 }
 
 fn get<'c>(d: &'c Content, key: &str) -> &'c JsValue {
@@ -413,32 +372,14 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (i as u64, generation, scene.width, scene.height, crop).hash(&mut h);
         for item in &scene.items {
-            if matches!(item.content, ItemContent::GlyphMask { .. }) {
-                // Hash the paint uploaded to the shader. CSS Color 4 system
-                // colors already arrive as f32; equivalent legacy syntax
-                // must have the same key after conversion to SkColor4f.
-                let alpha = (item.color[3] * item.opacity) as f32;
-                for c in [
-                    item.color[0] as f32 * alpha,
-                    item.color[1] as f32 * alpha,
-                    item.color[2] as f32 * alpha,
-                    alpha,
-                ] {
-                    c.to_bits().hash(&mut h);
-                }
-            } else {
-                for c in item.color {
-                    c.to_bits().hash(&mut h);
-                }
-                item.opacity.to_bits().hash(&mut h);
+            for c in item.color {
+                c.to_bits().hash(&mut h);
             }
+            item.opacity.to_bits().hash(&mut h);
             item.blur.to_bits().hash(&mut h);
             match &item.content {
-                ItemContent::Coverage { paths, curve } => {
+                ItemContent::Coverage { paths } => {
                     0u8.hash(&mut h);
-                    for v in curve {
-                        v.to_bits().hash(&mut h);
-                    }
                     for p in paths {
                         for c in p.transform.as_coeffs() {
                             c.to_bits().hash(&mut h);
@@ -489,26 +430,26 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
                         }
                     }
                 }
-                ItemContent::Image { image, transform }
-                | ItemContent::GlyphMask {
-                    image, transform, ..
-                }
-                | ItemContent::Graphite {
-                    image, transform, ..
-                } => {
-                    (if matches!(item.content, ItemContent::GlyphMask { .. }) {
-                        2u8
-                    } else {
-                        1u8
-                    })
-                    .hash(&mut h);
-                    if let ItemContent::Graphite { raster, .. } = &item.content {
-                        3u8.hash(&mut h);
-                        raster.hash_content(&mut h);
+                ItemContent::Image { image, transform } => {
+                    1u8.hash(&mut h);
+                    match image {
+                        ImagePixels::Rgba8(i) => {
+                            0u8.hash(&mut h);
+                            (i.width, i.height).hash(&mut h);
+                            i.data.hash(&mut h);
+                        }
+                        ImagePixels::WorkingF32(i) => {
+                            1u8.hash(&mut h);
+                            (i.width, i.height).hash(&mut h);
+                            for v in &i.data {
+                                v.to_bits().hash(&mut h);
+                            }
+                        }
+                        ImagePixels::Colr(program) => {
+                            2u8.hash(&mut h);
+                            program.content_key().hash(&mut h);
+                        }
                     }
-                    image.width.hash(&mut h);
-                    image.height.hash(&mut h);
-                    image.data.hash(&mut h);
                     for c in transform.as_coeffs() {
                         c.to_bits().hash(&mut h);
                     }
@@ -521,27 +462,12 @@ fn scene_key(scene: &TextScene, crop: [u32; 4], generation: u64) -> [u64; 2] {
 }
 
 impl TextContext {
-    fn painter(
-        &mut self,
-        viewport: (u32, u32),
-    ) -> (Painter<'_>, &mut dyn TextFonts, &mut Vec<String>) {
+    fn painter(&mut self) -> (Painter<'_>, &mut dyn TextFonts, &mut Vec<String>) {
         let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
         (
             Painter {
                 outlines: &mut self.outlines,
                 bitmaps: &mut self.bitmaps,
-                // Platform masks are Canvas2D's look: level 1 only (level 2
-                // captions swap in the CoreText profile and draw outlines).
-                masks: if self.profile == Profile::CANVAS2D {
-                    self.masks
-                        .as_deref_mut()
-                        .map(|m| m as &mut dyn pm_text::render::scene::MaskSource)
-                } else {
-                    None
-                },
-                viewport: Some(viewport),
-                path_rasterizer: Some(&pm_vector::canvas2d::text::RASTERIZER),
-                profile: self.profile.clone(),
                 unsupported: Vec::new(),
             },
             fonts,
@@ -550,13 +476,11 @@ impl TextContext {
     }
 
     /// The scene's retained canvas and content key, or `None` without ink.
-    fn finish(&self, scene: TextScene, canvas_n32: bool) -> Option<TextPlan> {
+    fn finish(&self, scene: TextScene) -> Option<TextPlan> {
         let crop = scene.ink()?;
-        let mut key = scene_key(&scene, crop, self.generation);
-        key[0] ^= u64::from(canvas_n32);
+        let key = scene_key(&scene, crop, self.generation);
         Some(TextPlan {
             scene: Arc::new(scene),
-            canvas_n32,
             crop,
             key,
         })
@@ -596,7 +520,7 @@ impl TextContext {
             };
             // The compatibility raster API still works for new text. Its
             // pixels come from the same output-resolution painter, with
-            // transparent room for the smoothing profile around the ink.
+            // the existing transparent ink margin.
             let (w, h) = (raster.w + 8.0, raster.h + 8.0);
             let (ax, ay) = (raster.anchor_x + 4.0, raster.anchor_y + 4.0);
             let density = js_min(js_min(scale, 8192.0 / w), 8192.0 / h);
@@ -606,16 +530,52 @@ impl TextContext {
                 .text_layer_level2(scope, layer, time, m, target)
                 .map(|p| p.map(|p| Self::quad(p, w, h, ax, ay)));
         }
+        let raster = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            scope.text_raster(layer, time, fonts.measure())?
+        };
+        let density = js_min(js_min(scale, 8192.0 / raster.w), 8192.0 / raster.h);
+        let target = (canvas_px(raster.w, density), canvas_px(raster.h, density));
+        let scene = self.text_scene_level1(scope, layer, time, Affine::scale(density), target)?;
+        Ok(self
+            .finish(scene)
+            .map(|p| Self::quad(p, raster.w, raster.h, raster.anchor_x, raster.anchor_y)))
+    }
+
+    /// Level 1 layout at its unchanged Canvas coordinates, painted through
+    /// the exact world matrix into output pixels.
+    pub(crate) fn text_layer_level1_device<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        world: Affine,
+        target: (u32, u32),
+    ) -> JsResult<Option<TextPlan>> {
+        self.sync_fonts();
+        let raster = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            scope.text_raster(layer, time, fonts.measure())?
+        };
+        let m = world * Affine::translate((-raster.anchor_x, -raster.anchor_y));
+        let scene = self.text_scene_level1(scope, layer, time, m, target)?;
+        Ok(self.finish(scene))
+    }
+
+    fn text_scene_level1<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        m: Affine,
+        target: (u32, u32),
+    ) -> JsResult<TextScene> {
         let d = scope.resolved_text_content(layer, time)?;
         let stored = pm_eval::node::member(Some(layer), "d");
         let has = |key: &str| {
             pm_eval::node::member(stored, key)
                 .map(|n| pm_eval::node::get(n, b"length").truthy())
                 .unwrap_or(false)
-        };
-        let raster = {
-            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
-            scope.text_raster(layer, time, fonts.measure())?
         };
         if has("animators") || has("styles") {
             let tc = text_content(&d);
@@ -624,35 +584,20 @@ impl TextContext {
             let state = scope.text_animation_state(layer, time, &layout)?;
             let animated = scope.animated_raster_glyphs(&d, &layout, &state, fonts.measure());
             if let Some(a) = animated {
-                let w = js_max(1.0, a.x1 - a.x0);
-                let h = js_max(1.0, a.y1 - a.y0);
-                let density = js_min(js_min(scale, 8192.0 / w), 8192.0 / h);
-                let (cw, ch) = (canvas_px(w, density), canvas_px(h, density));
                 let mut scene = TextScene {
-                    width: cw,
-                    height: ch,
+                    width: target.0,
+                    height: target.1,
                     items: Vec::new(),
                 };
-                let (mut painter, fonts, unsupported) = self.painter((cw, ch));
+                let (mut painter, fonts, unsupported) = self.painter();
                 for (g, baseline) in a.glyphs.iter().zip(&a.baselines) {
                     if g.opacity.is_nan() || g.opacity <= 0.0 {
                         continue;
                     }
-                    let m = canvas::transform(
-                        canvas::translate(
-                            canvas::narrow(Affine::new([
-                                density,
-                                0.0,
-                                0.0,
-                                density,
-                                -a.x0 * density,
-                                -a.y0 * density,
-                            ])),
-                            g.unit.x,
-                            *baseline,
-                        ),
-                        g.matrix,
-                    );
+                    let glyph_m = m
+                        * Affine::translate((-a.x0, -a.y0))
+                        * Affine::translate((g.unit.x, *baseline))
+                        * Affine::new(g.matrix);
                     let fill = match &g.color {
                         Some(c) => JsValue::String(c.clone()),
                         None => get(&g.style, "color").clone(),
@@ -660,33 +605,31 @@ impl TextContext {
                     // Each glyph draws between `save()` and `restore()`: a
                     // rejected color leaves the canvas default, black.
                     let style_color = fill_style(&fill, color::BLACK, &mut painter.unsupported);
-                    let blur = if g.blur > 0.01 { g.blur * density } else { 0.0 };
+                    let blur = if g.blur > 0.01 {
+                        g.blur * affine_max_scale(m)
+                    } else {
+                        0.0
+                    };
                     let style = text_content(&g.style);
                     let runs = fonts.text_runs(&style, &g.unit.text, 0.0);
-                    let faces = run_faces(fonts, &runs, m);
+                    let faces = run_faces(fonts, &runs, glyph_m);
                     let refs = run_refs(&runs, &faces);
                     painter.fill_text(
                         &mut scene.items,
                         &refs,
                         (0.0, 0.0),
-                        m,
+                        glyph_m,
                         style_color,
                         g.opacity,
                         blur,
                     );
                 }
-                painter.resolve_canvas_pass(&mut scene.items, false);
                 unsupported.append(&mut painter.unsupported);
-                let anchor = (raster.anchor_x, raster.anchor_y);
-                return Ok(self
-                    .finish(scene, true)
-                    .map(|p| Self::quad(p, raster.w, raster.h, anchor.0, anchor.1)));
+                return Ok(scene);
             }
         }
         let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
         let g = text_geometry(&d, fonts.measure());
-        let density = g.density(scale);
-        let (cw, ch) = (canvas_px(g.w, density), canvas_px(g.h, density));
         let tc = text_content(&d);
         let fill = {
             let c = get(&d, "color");
@@ -698,18 +641,15 @@ impl TextContext {
         };
         let fill = fill_style(&fill, color::BLACK, &mut self.unsupported);
         let mut scene = TextScene {
-            width: cw,
-            height: ch,
+            width: target.0,
+            height: target.1,
             items: Vec::new(),
         };
-        let (mut painter, fonts, unsupported) = self.painter((cw, ch));
+        let (mut painter, fonts, unsupported) = self.painter();
         let lines = fonts.line_runs(&tc);
-        let m = Affine::scale(density);
         for (row, line) in lines.iter().enumerate() {
-            // Blink's DrawTextInternal converts the canvas point to float,
-            // then subtracts the double alignment width. The blob's glyphs
-            // remain relative to (0,0): baking this origin into each glyph
-            // changes SDF creation-space and path-matrix rounding.
+            // These f32 casts belong to Blink's layout-origin contract;
+            // glyph paths and the world transform stay in f64.
             let runs = fonts.text_runs(&tc, &line.text, tc.tracking.unwrap_or(0.0));
             let origin = (
                 f64::from((f64::from(g.x as f32) + line.x) as f32),
@@ -719,15 +659,12 @@ impl TextContext {
             let refs = run_refs(&runs, &faces);
             painter.fill_text(&mut scene.items, &refs, origin, m, fill, 1.0, 0.0);
         }
-        painter.resolve_canvas_pass(&mut scene.items, false);
         unsupported.append(&mut painter.unsupported);
-        Ok(self
-            .finish(scene, true)
-            .map(|p| Self::quad(p, raster.w, raster.h, raster.anchor_x, raster.anchor_y)))
+        Ok(scene)
     }
 
     /// A `compat` level 2 text layer at output resolution: level 2 layout
-    /// (Parley) drawn with the CoreText profile at exact positions through
+    /// (Parley) drawn with exact outlines at its positions through
     /// `m` (layer pixels to target pixels, size anchor included) into a
     /// `target`-sized scene, cropped to its ink.
     pub(crate) fn text_layer_level2<'d>(
@@ -757,10 +694,6 @@ impl TextContext {
         let mut painter = Painter {
             outlines: &mut self.outlines,
             bitmaps: &mut self.bitmaps,
-            masks: None,
-            viewport: None,
-            path_rasterizer: None,
-            profile: Profile::CORETEXT,
             unsupported: Vec::new(),
         };
         for draw in &frame.draws {
@@ -795,11 +728,11 @@ impl TextContext {
             );
         }
         self.unsupported.append(&mut painter.unsupported);
-        Ok(self.finish(scene, false))
+        Ok(self.finish(scene))
     }
 
     /// A `compat` level 2 captions layer at output resolution: the same
-    /// frame (layout, word states, box) drawn with the CoreText profile at
+    /// frame (layout, word states, box) drawn with exact outlines at
     /// exact positions through `m` (layer pixels to target pixels).
     pub(crate) fn captions_layer_level2<'d>(
         &mut self,
@@ -818,15 +751,42 @@ impl TextContext {
             return Ok(None);
         };
         let base = m * Affine::translate((frame.block.x0, frame.block.y0));
-        let saved = std::mem::replace(&mut self.profile, Profile::CORETEXT);
         let mut scene = TextScene {
             width: target.0,
             height: target.1,
             items: Vec::new(),
         };
         self.caption_items(&frame, base, &mut scene);
-        self.profile = saved;
-        Ok(self.finish(scene, false))
+        Ok(self.finish(scene))
+    }
+
+    pub(crate) fn captions_layer_level1_device<'d>(
+        &mut self,
+        scope: &mut Scope<'_, 'd>,
+        layer: &'d Node,
+        time: f64,
+        world: Affine,
+        target: (u32, u32),
+    ) -> JsResult<Option<TextPlan>> {
+        self.sync_fonts();
+        let frame = {
+            let fonts = self.fonts.as_deref_mut().expect("checked by the caller");
+            scope.caption_frame(layer, time, fonts.measure())?
+        };
+        let Some(frame) = frame else {
+            return Ok(None);
+        };
+        let mut scene = TextScene {
+            width: target.0,
+            height: target.1,
+            items: Vec::new(),
+        };
+        self.caption_items(
+            &frame,
+            world * Affine::translate((frame.block.x0, frame.block.y0)),
+            &mut scene,
+        );
+        Ok(self.finish(scene))
     }
 
     /// A captions layer at `time` drawn at raster scale `scale`.
@@ -846,9 +806,7 @@ impl TextContext {
             return Ok(None);
         };
         let (scene, w, h, ax, ay) = self.caption_scene(&frame, scale);
-        Ok(self
-            .finish(scene, true)
-            .map(|p| Self::quad(p, w, h, ax, ay)))
+        Ok(self.finish(scene).map(|p| Self::quad(p, w, h, ax, ay)))
     }
 
     /// The captions rasterizer's `draw(frame, scale)` as a scene, with the
@@ -868,11 +826,7 @@ impl TextContext {
             height: canvas_px(h, density),
             items: Vec::new(),
         };
-        let m0 = canvas::translate(
-            canvas::scale(Affine::IDENTITY, density, density),
-            margin,
-            margin,
-        );
+        let m0 = Affine::scale(density) * Affine::translate((margin, margin));
         self.caption_items(f, m0, &mut scene);
         (scene, w, h, margin - block.x0, margin - block.y0)
     }
@@ -887,8 +841,6 @@ impl TextContext {
         // The style each word's `save()` restores: the box fill once the box
         // is drawn, else the canvas default, black.
         let mut restored = color::BLACK;
-        // The box's tessellated fill makes the canvas pass multisampled.
-        let mut box_msaa = false;
         if style.boxed && style.box_opacity > 0.0 {
             // A rejected box color fills with the canvas default, black.
             let fill = hex_to_rgba(
@@ -904,25 +856,7 @@ impl TextContext {
                 block.y1 - block.y0,
                 style.box_radius,
             );
-            // With platform masks (Canvas2D's look), the box is filled as
-            // the GPU canvas fills paths: 4× multisampled.
-            let item = if self.masks.is_some() && self.profile == Profile::CANVAS2D {
-                box_msaa = true;
-                pm_text::render::scene::fill_rounded_rect_msaa(
-                    (
-                        0.0,
-                        0.0,
-                        block.x1 - block.x0,
-                        block.y1 - block.y0,
-                        style.box_radius,
-                    ),
-                    m0,
-                    fill,
-                    1.0,
-                )
-            } else {
-                fill_path(path, m0, fill, 1.0)
-            };
+            let item = fill_path(path, m0, fill, 1.0);
             if let Some(item) = item {
                 scene.items.push(item);
             }
@@ -939,8 +873,7 @@ impl TextContext {
         // keeps the canvas default, black.
         let stroke_color =
             hex_to_rgba(&style.stroke_color.to_string_lossy(), 1.0).unwrap_or(color::BLACK);
-        let canvas_level1 = self.profile == Profile::CANVAS2D;
-        let (mut painter, fonts, unsupported) = self.painter((scene.width, scene.height));
+        let (mut painter, fonts, unsupported) = self.painter();
         for line in &layout.lines {
             for word in &line.words {
                 let state =
@@ -961,17 +894,10 @@ impl TextContext {
                 if state.scale != 1.0 {
                     let cx = x + word.width / 2.0;
                     let cy = pad + line.y + layout.line_height / 2.0;
-                    m = if canvas_level1 {
-                        canvas::translate(
-                            canvas::scale(canvas::translate(m, cx, cy), state.scale, state.scale),
-                            -cx,
-                            -cy,
-                        )
-                    } else {
-                        m * Affine::translate((cx, cy))
-                            * Affine::scale(state.scale)
-                            * Affine::translate((-cx, -cy))
-                    };
+                    m = m
+                        * Affine::translate((cx, cy))
+                        * Affine::scale(state.scale)
+                        * Affine::translate((-cx, -cy));
                 }
                 let text = word.text.to_string_lossy();
                 let runs = fonts.text_runs(&content, &text, tracking);
@@ -997,7 +923,6 @@ impl TextContext {
                 painter.fill_text(&mut scene.items, &refs, (x, y), m, fill, state.alpha, 0.0);
             }
         }
-        painter.resolve_canvas_pass(&mut scene.items, box_msaa);
         unsupported.append(&mut painter.unsupported);
     }
 }
@@ -1064,8 +989,8 @@ mod tests {
             ],
         };
         let cx = TextContext::default();
-        for canvas_n32 in [true, false] {
-            let plan = cx.finish(scene.clone(), canvas_n32).unwrap();
+        {
+            let plan = cx.finish(scene.clone()).unwrap();
             let [x0, y0, x1, y1] = plan.crop;
             assert_eq!(Some(plan.crop), scene.ink());
             assert!(x1 - x0 < scene.width && y1 - y0 < scene.height);
@@ -1087,7 +1012,7 @@ mod tests {
             height: 128,
             items: Vec::new(),
         };
-        assert!(cx.finish(empty, true).is_none());
+        assert!(cx.finish(empty).is_none());
     }
 
     #[test]
@@ -1141,11 +1066,10 @@ mod tests {
     }
 
     /// A font change (a new generation from the registry, or new fonts)
-    /// drops every glyph cache, platform masks and their CTFonts included,
-    /// and makes later raster keys new.
+    /// drops glyph caches and makes later raster keys new.
     #[test]
     fn font_changes_drop_glyph_caches() {
-        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicU64, Ordering};
         struct Fonts(Arc<AtomicU64>);
         impl TextFonts for Fonts {
             fn measure(&mut self) -> &mut dyn TextMeasure {
@@ -1164,48 +1088,17 @@ mod tests {
                 self.0.load(Ordering::SeqCst)
             }
         }
-        struct Masks(Arc<AtomicUsize>);
-        impl pm_text::render::scene::MaskSource for Masks {
-            fn mask(
-                &mut self,
-                _: pm_text::render::outline::FaceRef<'_>,
-                _: &[(u32, f32)],
-                _: u16,
-                _: f32,
-                _: pm_text::render::scene::MaskStyle,
-                _: kurbo::Rect,
-            ) -> Option<Arc<pm_text::render::scene::GlyphMask>> {
-                None
-            }
-            fn preblend(&self, _: [f64; 3]) -> [u8; 256] {
-                [0; 256]
-            }
-            fn reset(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
         let generation = Arc::new(AtomicU64::new(1));
-        let resets = Arc::new(AtomicUsize::new(0));
         let mut cx = TextContext::default();
-        cx.set_masks(Some(Box::new(Masks(resets.clone()))));
         cx.set_fonts(Some(Box::new(Fonts(generation.clone()))));
-        assert_eq!(
-            resets.load(Ordering::SeqCst),
-            1,
-            "new fonts reset the masks"
-        );
         let key = cx.generation;
         cx.sync_fonts();
-        assert_eq!((resets.load(Ordering::SeqCst), cx.generation), (1, key));
+        assert_eq!(cx.generation, key);
         generation.store(2, Ordering::SeqCst);
         cx.sync_fonts();
-        assert_eq!(
-            resets.load(Ordering::SeqCst),
-            2,
-            "a new generation resets the masks"
-        );
         assert_ne!(cx.generation, key, "and re-keys rasters");
+        let key = cx.generation;
         cx.sync_fonts();
-        assert_eq!(resets.load(Ordering::SeqCst), 2);
+        assert_eq!(cx.generation, key);
     }
 }

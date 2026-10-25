@@ -57,7 +57,10 @@ impl Coverage {
 pub fn fill(path: &BezPath, rule: FillRule, n: usize, width: usize, height: usize) -> Coverage {
     assert!(n > 0);
     let segments = segments(path, n as f64);
-    let (mut lo, mut hi) = (Point::new(f64::MAX, f64::MAX), Point::new(f64::MIN, f64::MIN));
+    let (mut lo, mut hi) = (
+        Point::new(f64::MAX, f64::MAX),
+        Point::new(f64::MIN, f64::MIN),
+    );
     for (a, b) in &segments {
         lo = Point::new(lo.x.min(a.x).min(b.x), lo.y.min(a.y).min(b.y));
         hi = Point::new(hi.x.max(a.x).max(b.x), hi.y.max(a.y).max(b.y));
@@ -83,6 +86,7 @@ pub fn fill(path: &BezPath, rule: FillRule, n: usize, width: usize, height: usiz
     let cells = out.width * n;
     let left = (x0 * n) as f64;
     let mut acc = vec![0.0f64; cells + 2];
+    let mut touched = Vec::new();
     let mut row = vec![0.0f64; out.width];
     for py in y0..y1 {
         let (top, bottom) = ((py * n) as f64, ((py + 1) * n) as f64);
@@ -93,7 +97,6 @@ pub fn fill(path: &BezPath, rule: FillRule, n: usize, width: usize, height: usiz
         row.iter_mut().for_each(|v| *v = 0.0);
         for k in 0..n {
             let strip = top + k as f64;
-            acc.iter_mut().for_each(|v| *v = 0.0);
             for (a, b) in &active {
                 let (ylo, yhi) = (a.y.min(b.y).max(strip), a.y.max(b.y).min(strip + 1.0));
                 if ylo >= yhi {
@@ -101,20 +104,25 @@ pub fn fill(path: &BezPath, rule: FillRule, n: usize, width: usize, height: usiz
                 }
                 let x_at = |y: f64| a.x + (b.x - a.x) * ((y - a.y) / (b.y - a.y)) - left;
                 let dy = if b.y > a.y { yhi - ylo } else { ylo - yhi };
-                accumulate(&mut acc, x_at(ylo), x_at(yhi), dy, cells);
+                accumulate(&mut acc, &mut touched, x_at(ylo), x_at(yhi), dy, cells);
             }
+            touched.sort_unstable();
+            touched.dedup();
             let mut winding = 0.0;
-            for (c, delta) in acc[..cells].iter().enumerate() {
-                winding += delta;
-                let w = winding.abs();
-                row[c / n] += match rule {
-                    FillRule::NonZero => w.min(1.0),
-                    FillRule::EvenOdd => {
-                        let m = w % 2.0;
-                        if m > 1.0 { 2.0 - m } else { m }
-                    }
-                };
+            let mut cursor = 0;
+            for &event in &touched {
+                if event >= cells {
+                    break;
+                }
+                add_run(&mut row, cursor, event, n, filled(winding, rule));
+                winding += acc[event];
+                cursor = event;
             }
+            add_run(&mut row, cursor, cells, n, filled(winding, rule));
+            for &event in &touched {
+                acc[event] = 0.0;
+            }
+            touched.clear();
         }
         let base = (py - y0) * out.width;
         let cell_area = 1.0 / (nf * nf);
@@ -123,6 +131,31 @@ pub fn fill(path: &BezPath, rule: FillRule, n: usize, width: usize, height: usiz
         }
     }
     out
+}
+
+/// Add a constant-winding run by whole pixel spans instead of visiting each
+/// microcell. The signed-area events and their f64 accumulation are unchanged.
+fn add_run(row: &mut [f64], mut start: usize, end: usize, n: usize, covered: f64) {
+    if covered == 0.0 {
+        return;
+    }
+    while start < end {
+        let pixel = start / n;
+        let next = ((pixel + 1) * n).min(end);
+        row[pixel] += covered * (next - start) as f64;
+        start = next;
+    }
+}
+
+fn filled(winding: f64, rule: FillRule) -> f64 {
+    let w = winding.abs();
+    match rule {
+        FillRule::NonZero => w.min(1.0),
+        FillRule::EvenOdd => {
+            let m = w % 2.0;
+            if m > 1.0 { 2.0 - m } else { m }
+        }
+    }
 }
 
 /// The flattened outline as line segments in cell units, every subpath
@@ -162,7 +195,7 @@ fn segments(path: &BezPath, n: f64) -> Vec<(Point, Point)> {
 /// `xa` to `xb` (window cell units) with signed height `dy`: to each cell it
 /// crosses the area to its right, and to every later cell (through the
 /// running sum) the full `dy`.
-fn accumulate(acc: &mut [f64], xa: f64, xb: f64, dy: f64, cells: usize) {
+fn accumulate(acc: &mut [f64], touched: &mut Vec<usize>, xa: f64, xb: f64, dy: f64, cells: usize) {
     let (lo, hi) = (xa.min(xb), xa.max(xb));
     let span = hi - lo;
     let share = |u: f64, v: f64| if span > 0.0 { dy * (v - u) / span } else { dy };
@@ -171,6 +204,7 @@ fn accumulate(acc: &mut [f64], xa: f64, xb: f64, dy: f64, cells: usize) {
     if u < 0.0 {
         let v = hi.min(0.0);
         acc[0] += share(u, v);
+        touched.push(0);
         u = v;
         if span == 0.0 || u >= hi {
             return;
@@ -188,6 +222,8 @@ fn accumulate(acc: &mut [f64], xa: f64, xb: f64, dy: f64, cells: usize) {
         let d = share(u, v);
         acc[c] += d * (1.0 - f);
         acc[c + 1] += d * f;
+        touched.push(c);
+        touched.push(c + 1);
         if v >= end {
             break;
         }
@@ -202,6 +238,90 @@ mod tests {
 
     fn total(c: &Coverage) -> f64 {
         c.alpha.iter().sum()
+    }
+
+    // The original dense prefix scan, kept only as a numerical guard for
+    // event-run aggregation. Both paths use the same signed-area deposits.
+    fn dense_fill(
+        path: &BezPath,
+        rule: FillRule,
+        n: usize,
+        width: usize,
+        height: usize,
+    ) -> Coverage {
+        let mut out = fill(path, rule, n, width, height);
+        out.alpha.fill(0.0);
+        if out.width == 0 || out.height == 0 {
+            return out;
+        }
+        let segments = segments(path, n as f64);
+        let cells = out.width * n;
+        let left = (out.x0 * n) as f64;
+        let mut acc = vec![0.0f64; cells + 2];
+        let mut touched = Vec::new();
+        let mut row = vec![0.0f64; out.width];
+        for py in out.y0..out.y0 + out.height {
+            let (top, bottom) = ((py * n) as f64, ((py + 1) * n) as f64);
+            let active: Vec<&(Point, Point)> = segments
+                .iter()
+                .filter(|(a, b)| a.y.min(b.y) < bottom && a.y.max(b.y) > top)
+                .collect();
+            row.fill(0.0);
+            for k in 0..n {
+                let strip = top + k as f64;
+                acc.fill(0.0);
+                touched.clear();
+                for (a, b) in &active {
+                    let (ylo, yhi) = (a.y.min(b.y).max(strip), a.y.max(b.y).min(strip + 1.0));
+                    if ylo >= yhi {
+                        continue;
+                    }
+                    let x_at = |y: f64| a.x + (b.x - a.x) * ((y - a.y) / (b.y - a.y)) - left;
+                    let dy = if b.y > a.y { yhi - ylo } else { ylo - yhi };
+                    accumulate(&mut acc, &mut touched, x_at(ylo), x_at(yhi), dy, cells);
+                }
+                let mut winding = 0.0;
+                for (c, delta) in acc[..cells].iter().enumerate() {
+                    winding += delta;
+                    row[c / n] += filled(winding, rule);
+                }
+            }
+            let base = (py - out.y0) * out.width;
+            let area = 1.0 / (n * n) as f64;
+            for (x, value) in row.iter().enumerate() {
+                out.alpha[base + x] = value * area;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn event_runs_match_dense_scan() {
+        let curve = Circle::new((5.1, 5.3), 3.75).to_path(1e-9);
+        let mut overlap = Rect::new(0.75, 1.125, 10.25, 9.875).to_path(1e-9);
+        overlap.extend(Circle::new((6.4, 5.2), 3.1).to_path(1e-9).iter());
+        let clipped = Affine::translate((-2.3, 1.7))
+            * Affine::rotate(0.31)
+            * Rect::new(0.0, 0.0, 9.0, 8.0).to_path(1e-9);
+        for (case, path) in [curve, overlap, clipped].iter().enumerate() {
+            for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                for n in [1, 4, 32, 128] {
+                    let fast = fill(path, rule, n, 12, 12);
+                    let dense = dense_fill(path, rule, n, 12, 12);
+                    assert_eq!(
+                        (fast.x0, fast.y0, fast.width, fast.height),
+                        (dense.x0, dense.y0, dense.width, dense.height),
+                    );
+                    let max = fast
+                        .alpha
+                        .iter()
+                        .zip(&dense.alpha)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0f64, f64::max);
+                    assert!(max < 1e-10, "case {case}, {rule:?}, n={n}: {max:.3e}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -275,7 +395,10 @@ mod tests {
             let worst = (exact.alpha.iter().zip(&doubled.alpha)).map(|(a, b)| (a - b).abs());
             // Corner pixels hold two axis-aligned boundaries.
             let worst = worst.fold(0.0, f64::max);
-            assert!(worst > 0.0 && worst <= 1.0 / n as f64 + 1e-12, "{n}: {worst}");
+            assert!(
+                worst > 0.0 && worst <= 1.0 / n as f64 + 1e-12,
+                "{n}: {worst}"
+            );
         }
     }
 

@@ -521,6 +521,9 @@ fn draw(
         } else {
             Some(Vec::new())
         };
+        // A transition reads the whole stack below the layer and the stack
+        // with it, so it is applied to the frame after the composite.
+        let transition = layer_transition(&mut scope, effects, layer, seconds)?;
         let unmodelled = if group || ty == "precomp" {
             Some("groups and precomps")
         } else if !matches!(ty.as_str(), "solid" | "image" | "shape") {
@@ -529,11 +532,7 @@ fn draw(
             Some("mattes")
         } else if scope.is_3d_layer(layer).map_err(fail)? {
             Some("2.5D planes")
-        } else if scope
-            .active_transition(layer, seconds, &|_| true)
-            .map_err(fail)?
-            .is_some()
-        {
+        } else if matches!(transition, Some(Err(_))) {
             Some("transitions")
         } else if chain.is_none() {
             Some("effects")
@@ -541,6 +540,18 @@ fn draw(
             None
         };
         let chain = chain.unwrap_or_default();
+        // A layer this reference does not draw under a transition leaves
+        // the whole moved stack unreferenced.
+        let transition = transition.map(|t| t.expect("unmodelled transitions are refused above"));
+        macro_rules! skip_layer {
+            () => {{
+                if transition.is_some() {
+                    out.rgba.fill(f64::NAN);
+                    out.whole_frame = true;
+                }
+                continue;
+            }};
+        }
         let world = scope.world_matrix(layer, seconds).map_err(fail)?;
         let offset = scope.size_anchor_offset(layer, seconds).map_err(fail)?;
         let scaled = kurbo::Affine::new([
@@ -570,7 +581,7 @@ fn draw(
                 (sx, sy),
                 out,
             )?;
-            continue;
+            skip_layer!();
         }
         let d = scope
             .ev
@@ -603,13 +614,13 @@ fn draw(
                     (sx, sy),
                     out,
                 )?;
-                continue;
+                skip_layer!();
             }
             let sw = pm_render::js::or_number(pm_render::js::get(&d, "w"), w as f64);
             let sh = pm_render::js::or_number(pm_render::js::get(&d, "h"), h as f64);
             let rect = kurbo::Rect::new(-sw / 2.0, -sh / 2.0, sw / 2.0, sh / 2.0);
             unreference(out, &(device * kurbo::Shape::to_path(&rect, 1e-9)), 1);
-            continue;
+            skip_layer!();
         }
         let mode = reference_blend(
             pm_render::composite::build::blend_mode(&mut scope, layer, seconds).map_err(fail)?,
@@ -679,7 +690,7 @@ fn draw(
                     (sx, sy),
                     out,
                 )?;
-                continue;
+                skip_layer!();
             };
             for (i, p) in layer_px.iter_mut().enumerate() {
                 let was = p.0;
@@ -690,6 +701,7 @@ fn draw(
             }
             layer_open = open;
         }
+        let before = transition.as_ref().map(|_| out.rgba.clone());
         for (i, (px, edge)) in layer_px.iter().enumerate() {
             if px[3] <= 0.0 && !edge && layer_open[i].is_none() && px.iter().all(|v| *v == 0.0) {
                 continue;
@@ -716,54 +728,153 @@ fn draw(
                     blend(mode, src, dst)
                 })
             };
-            // An open pixel below stays open; this layer's open values
-            // composite over every value open below.
-            // A range's extremes after compositing lie at its corners:
-            // color and alpha each at either end (source-over is bilinear
-            // in them; the blend modes are monotone per channel).
-            let corners = |lo: &Rgba, hi: &Rgba| -> Vec<Rgba> {
-                [lo, hi]
-                    .iter()
-                    .flat_map(|c| [lo[3], hi[3]].map(|a| [c[0], c[1], c[2], a]))
-                    .collect()
-            };
-            let below: Vec<Rgba> = match &out.open[i] {
-                Some(Open::Points(points)) => points.clone(),
-                Some(Open::Range(lo, hi)) => corners(lo, hi),
-                None => vec![dst],
-            };
-            let mine: Vec<Rgba> = match &layer_open[i] {
-                Some(Open::Points(points)) => points.clone(),
-                Some(Open::Range(lo, hi)) => corners(lo, hi),
-                None => vec![*px],
-            };
-            let ranged = matches!(out.open[i], Some(Open::Range(..)))
-                || matches!(layer_open[i], Some(Open::Range(..)));
-            let values: Vec<Rgba> = mine
-                .iter()
-                .flat_map(|m| below.iter().map(move |b| (*m, *b)))
-                .map(|(m, b)| over(m, b))
-                .collect();
             out.rgba[i * 4..][..4].copy_from_slice(&over(*px, dst));
-            if values.len() > 1 {
-                out.open[i] = Some(if ranged {
-                    let lo = std::array::from_fn(|k| {
-                        values.iter().map(|v| v[k]).fold(f64::INFINITY, f64::min)
-                    });
-                    let hi = std::array::from_fn(|k| {
-                        values
-                            .iter()
-                            .map(|v| v[k])
-                            .fold(f64::NEG_INFINITY, f64::max)
-                    });
-                    Open::Range(lo, hi)
-                } else {
-                    Open::Points(values)
-                });
-            }
+            out.open[i] = composite_open(*px, layer_open[i].as_ref(), dst, out.open[i].as_ref(), over);
+        }
+        if let (Some((id, params, edge_in, progress)), Some(before)) = (transition, before) {
+            apply_transition(out, before, &id, &params, edge_in, progress);
         }
     }
     Ok(())
+}
+
+/// What stays open after compositing `src` (open at `mine`) over `dst`
+/// (open at `below`): every allowed source over every allowed destination.
+/// A range's extremes after compositing lie at its corners, colour and
+/// alpha each at either end (source-over is bilinear in them; the blend
+/// modes are monotone per channel).
+pub fn composite_open(
+    src: Rgba,
+    mine: Option<&Open>,
+    dst: Rgba,
+    below: Option<&Open>,
+    over: impl Fn(Rgba, Rgba) -> Rgba,
+) -> Option<Open> {
+    let corners = |lo: &Rgba, hi: &Rgba| -> Vec<Rgba> {
+        [lo, hi]
+            .iter()
+            .flat_map(|c| [lo[3], hi[3]].map(|a| [c[0], c[1], c[2], a]))
+            .collect()
+    };
+    let values_of = |open: Option<&Open>, value: Rgba| match open {
+        Some(Open::Points(points)) => points.clone(),
+        Some(Open::Range(lo, hi)) => corners(lo, hi),
+        None => vec![value],
+    };
+    let ranged = matches!(mine, Some(Open::Range(..))) || matches!(below, Some(Open::Range(..)));
+    let (mine, below) = (values_of(mine, src), values_of(below, dst));
+    let values: Vec<Rgba> = mine
+        .iter()
+        .flat_map(|m| below.iter().map(|b| over(*m, *b)))
+        .collect();
+    if values.len() < 2 {
+        return None;
+    }
+    Some(if ranged {
+        let fold = |f: fn(f64, f64) -> f64, from: f64| -> Rgba {
+            std::array::from_fn(|k| values.iter().map(|v| v[k]).fold(from, f))
+        };
+        Open::Range(fold(f64::min, f64::INFINITY), fold(f64::max, f64::NEG_INFINITY))
+    } else {
+        Open::Points(values)
+    })
+}
+
+/// A built-in transition step: definition, parameters, `edge === 'in'`,
+/// progress.
+pub type Transition = (String, Vec<pm_reference::effects::Param>, bool, f64);
+
+/// The layer's active transition (`runTransition`): `None` when none runs,
+/// `Some(Err)` when it is not a built-in the reference models.
+pub fn layer_transition<'d>(
+    scope: &mut Scope<'_, 'd>,
+    effects: &pm_render::effects::Effects,
+    layer: &'d Node,
+    seconds: f64,
+) -> Result<Option<Result<Transition, String>>, String> {
+    use pm_protocol::definitions::DefinitionKind;
+    use pm_reference::effects::Param;
+    use pm_render::effects::plan::{Binding, transition_at};
+    let step = transition_at(scope, effects, layer, seconds)
+        .map_err(|e| format!("evaluation: {e:?}"))?;
+    let step = match step {
+        Ok(Some(step)) => step,
+        Ok(None) => return Ok(None),
+        Err(feature) => return Ok(Some(Err(format!("transition: {feature}")))),
+    };
+    // A fork or an override by id is a user program, not the built-in.
+    let builtin = pm_render::builtin_definitions().definitions.iter().any(|d| {
+        d.id.as_str() == step.definition
+            && d.kind == DefinitionKind::Transition
+            && effects
+                .get(DefinitionKind::Transition, &step.definition)
+                .and_then(|drawn| drawn.glsl.as_ref().map(|g| &g.source))
+                == d.glsl.as_ref().map(|g| &g.source)
+    });
+    if !builtin || !pm_reference::effects::models_transition(&step.definition) {
+        return Ok(Some(Err(format!("transition {}", step.definition))));
+    }
+    let params = step
+        .params
+        .iter()
+        .map(|p| match p.value {
+            Binding::Float(v) => Param::Float(v),
+            Binding::Color(c) => Param::Color(c),
+        })
+        .collect();
+    Ok(Some(Ok((step.definition, params, step.edge_in, step.progress))))
+}
+
+/// Runs a transition on the frame: `before` the stack below the layer,
+/// `out` the stack with it. Moved pixels are resampled where the
+/// transition samples away from the pixel; an open value below makes the
+/// frame unreferenced where it is moved (the transition would mix it).
+/// Returns the pixels the transition moved.
+pub fn apply_transition(
+    out: &mut Reference,
+    before: Vec<f64>,
+    id: &str,
+    params: &[pm_reference::effects::Param],
+    edge_in: bool,
+    progress: f64,
+) -> Vec<bool> {
+    use pm_reference::effects::Image;
+    let (w, h) = (out.width, out.height);
+    let with_layer = out.rgba.clone();
+    let (from, to) = if edge_in { (before, with_layer) } else { (with_layer, before) };
+    let image = |rgba: Vec<f64>| Image { width: w, height: h, rgba };
+    let (from, to) = (image(from), image(to));
+    let result = pm_reference::effects::transition(id, params, &from, &to, progress)
+        .expect("a modelled transition");
+    let open_below = out.open.iter().any(Option::is_some);
+    let mut moved_pixels = vec![false; w * h];
+    for i in 0..w * h {
+        fn px(img: &Image, i: usize) -> &[f64] {
+            &img.rgba[i * 4..][..4]
+        }
+        let moved = px(&from, i) != px(&to, i) || px(&result.image, i) != px(&to, i);
+        if !moved {
+            continue;
+        }
+        moved_pixels[i] = true;
+        if open_below {
+            result_nan(out, i);
+            continue;
+        }
+        out.rgba[i * 4..][..4].copy_from_slice(px(&result.image, i));
+        if result.resampled {
+            out.resampled[i] = true;
+        }
+        if let Some(open) = &result.open[i] {
+            out.open[i] = Some(open.clone());
+        }
+    }
+    moved_pixels
+}
+
+fn result_nan(out: &mut Reference, i: usize) {
+    out.rgba[i * 4..][..4].fill(f64::NAN);
+    out.open[i] = None;
 }
 
 /// A built-in effect chain: each step's definition and parameters.

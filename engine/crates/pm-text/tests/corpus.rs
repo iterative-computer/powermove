@@ -142,6 +142,31 @@ fn main() {
         subset_bytes as f64 / 1e6
     );
     assert!(percent < 5.0, "subsets are {percent:.2}% of their fonts");
+
+    // Whole-corpus before/after fingerprint. This includes every captured
+    // break and caret advance plus the actual line-run faces, variation
+    // coordinates and glyph ids/positions passed to the rasterizer. Run this
+    // same test at the pre-raster commit and compare the printed digests.
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    let mut layout = pm_text::compat::Compat::new(run.registry);
+    for (case, output) in corpus.cases.iter().zip(&run.outputs) {
+        digest.update(serde_json::to_vec(output).expect("case layout serialization"));
+        digest.update(
+            serde_json::to_vec(&layout.line_runs(&case.d)).expect("glyph-run serialization"),
+        );
+    }
+    let digest = format!("{:x}", digest.finalize());
+    println!(
+        "whole text corpus layout: {} cases, sha256 {digest}",
+        corpus.cases.len()
+    );
+    if let Ok(baseline) = std::env::var("PM_LAYOUT_BASELINE_DIGEST") {
+        assert_eq!(
+            digest, baseline,
+            "breaks, advances, faces or glyph positions changed"
+        );
+    }
     println!("ok");
 }
 

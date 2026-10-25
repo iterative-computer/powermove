@@ -78,8 +78,7 @@ pub struct Routed {
     pub project: String,
     pub reasons: Vec<String>,
     /// What would still route once the hosts give their renderers fonts
-    /// (docs/engine/text-render.md, "Engine hosts do not give their
-    /// renderers fonts yet"): the static check with fonts, effect features
+    /// (docs/engine/text-render.md, "Routing"): the static check with fonts, effect features
     /// taken from the check with definitions.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub with_fonts: Vec<String>,

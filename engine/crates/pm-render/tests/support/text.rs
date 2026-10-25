@@ -2,6 +2,22 @@
 
 #![allow(dead_code)]
 
+/// Select a coverage implementation for whole-corpus comparisons. This is
+/// test configuration; production always uses the renderer's default.
+pub fn configure_coverage(renderer: &mut pm_render::Renderer) {
+    use pm_render::text::gpu::Coverage;
+    if let Ok(mode) = std::env::var("PM_TEXT_COVERAGE") {
+        let coverage = match mode.as_str() {
+            "auto" => Coverage::Auto,
+            "area" => Coverage::Area,
+            "direct" => Coverage::Direct,
+            "cpu" => Coverage::Cpu,
+            _ => panic!("PM_TEXT_COVERAGE must be auto, area, direct, or cpu"),
+        };
+        renderer.text_gpu().set_coverage(coverage);
+    }
+}
+
 /// `(ink SSIM, full SSIM, ink ratio)`: `pm_render::parity::text_ssim`.
 pub fn ink_ssim(reference: &[u8], test: &[u8], w: usize, h: usize) -> (f64, f64, f64) {
     pm_render::parity::text_ssim(reference, test, w, h)
@@ -257,6 +273,17 @@ pub fn without_text(doc: &pm_model::Document) -> pm_model::Document {
             ch.insert("expr", pm_model::Value::Null);
             p.insert("opacity", pm_model::Value::Object(ch));
         }
+    }
+    pm_model::Document::new(Some(root), doc.revision() + 1)
+}
+
+/// The composition's authored background without any layer (every layer
+/// list emptied, precompositions included). Used to verify that a nontext
+/// layer cannot influence modeled text pixels.
+pub fn background_only(doc: &pm_model::Document) -> pm_model::Document {
+    let mut root = doc.to_value().expect("a document");
+    for list in layer_lists(&mut root) {
+        list.clear();
     }
     pm_model::Document::new(Some(root), doc.revision() + 1)
 }
