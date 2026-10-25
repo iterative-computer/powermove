@@ -15,13 +15,18 @@
 //! `data:` URLs resolve.
 
 use kurbo::{Affine, BezPath};
+use std::collections::HashMap;
 
 use super::svg_depth::{MAX_ELEMENT_DEPTH, element_depth, with_stack};
 use crate::render::scene::PixelRect;
 
 #[path = "svg_float.rs"]
 mod svg_float;
-pub use svg_float::{FloatDraw, FloatGradient, FloatGroup, FloatNode, FloatPaint, FloatStop};
+pub use svg_float::{
+    FloatDraw, FloatFilter, FloatGradient, FloatGroup, FloatNode, FloatPaint, FloatStop,
+};
+pub use usvg::NonZeroRect as SvgRect;
+pub use usvg::filter as usvg_filter;
 pub use usvg::{BlendMode, SpreadMethod};
 
 /// Why an SVG could not be read.
@@ -52,6 +57,7 @@ pub struct SvgDocument {
     /// work over the tree runs on a stack sized to it.
     pub(crate) depth: usize,
     gpu: bool,
+    pub(crate) filter_res: HashMap<String, Option<[u32; 2]>>,
 }
 
 impl Drop for SvgDocument {
@@ -129,23 +135,30 @@ impl SvgDocument {
             return Err(SvgError("SVGZ (gzip) is not read".into()));
         }
         let text = std::str::from_utf8(data).map_err(|_| SvgError("not UTF-8".into()))?;
-        let (tree, gpu) = with_stack(depth, || {
+        let (tree, gpu, filter_res) = with_stack(depth, || {
             let xml =
                 |e: usvg::roxmltree::Error| SvgError(format!("SVG data parsing failed cause {e}"));
             let text = super::svg_xml::libxml2_text(text).map_err(xml)?;
             let doc = super::svg_xml::parse(&text).map_err(xml)?;
+            let filter_res = filter_resolutions(&doc)?;
+            let unsupported_edge_mode = doc.descendants().any(|n| {
+                n.is_element()
+                    && n.tag_name().name() == "feGaussianBlur"
+                    && n.attribute("edgeMode").is_some_and(|v| v != "none")
+            });
             let text_nodes = doc
                 .descendants()
                 .any(|n| n.is_element() && n.tag_name().name() == "text");
             let tree = usvg::Tree::from_xmltree(&doc, &options(text_nodes))
                 .map_err(|e| SvgError(e.to_string()))?;
-            let gpu = paintable_group(tree.root());
-            Ok::<_, SvgError>((tree, gpu))
+            let gpu = paintable_group(tree.root()) && !unsupported_edge_mode;
+            Ok::<_, SvgError>((tree, gpu, filter_res))
         })?;
         Ok(Self {
             tree: core::mem::ManuallyDrop::new(tree),
             depth,
             gpu,
+            filter_res,
         })
     }
 
@@ -286,8 +299,14 @@ impl SvgDocument {
 }
 
 fn paintable_group(g: &usvg::Group) -> bool {
-    g.filters().is_empty()
-        && g.clip_path().is_none_or(paintable_clip)
+    g.filters().iter().all(|f| {
+        f.primitives().iter().all(|p| {
+            matches!(
+                p.kind(),
+                usvg::filter::Kind::GaussianBlur(_) | usvg::filter::Kind::Offset(_)
+            )
+        })
+    }) && g.clip_path().is_none_or(paintable_clip)
         && g.mask().is_none_or(paintable_mask)
         && g.children().iter().all(|node| match node {
             usvg::Node::Group(g) => paintable_group(g),
@@ -301,6 +320,64 @@ fn paintable_group(g: &usvg::Group) -> bool {
             usvg::Node::Image(_) => false,
             usvg::Node::Text(t) => paintable_group(t.flattened()),
         })
+}
+
+/// `usvg` discards SVG 1.1 filterRes. Retain it after XML normalization,
+/// including href inheritance, so the renderer can use the authored grid.
+fn filter_resolutions(
+    doc: &usvg::roxmltree::Document<'_>,
+) -> Result<HashMap<String, Option<[u32; 2]>>, SvgError> {
+    let filters: HashMap<_, _> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "filter")
+        .filter_map(|n| n.attribute("id").map(|id| (id.to_owned(), n)))
+        .collect();
+    let mut result = HashMap::new();
+    for (id, node) in &filters {
+        let mut seen = std::collections::HashSet::new();
+        let mut current = Some(*node);
+        while let Some(n) = current {
+            let Some(key) = n.attribute("id") else { break };
+            if !seen.insert(key) {
+                break;
+            }
+            if let Some(raw) = n.attribute("filterRes") {
+                let values: Vec<_> = raw
+                    .split(|c: char| c.is_ascii_whitespace() || c == ',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::parse::<f64>)
+                    .collect();
+                if values
+                    .iter()
+                    .any(|value| value.as_ref().is_ok_and(|v| *v < 0.0))
+                {
+                    return Err(SvgError(format!("negative SVG filterRes on filter {id}")));
+                }
+                let parsed = match values.as_slice() {
+                    [Ok(x)] => Some((*x, *x)),
+                    [Ok(x), Ok(y)] => Some((*x, *y)),
+                    _ => None,
+                }
+                .and_then(|(x, y)| {
+                    (x.is_finite()
+                        && y.is_finite()
+                        && x > 0.0
+                        && y > 0.0
+                        && x < u32::MAX as f64
+                        && y < u32::MAX as f64)
+                        .then_some([x as u32, y as u32])
+                });
+                result.insert(id.clone(), parsed.filter(|v| v[0] > 0 && v[1] > 0));
+                break;
+            }
+            current = n
+                .attributes()
+                .find(|a| a.name() == "href")
+                .and_then(|a| a.value().strip_prefix('#'))
+                .and_then(|target| filters.get(target).copied());
+        }
+    }
+    Ok(result)
 }
 
 fn paintable_clip(c: &usvg::ClipPath) -> bool {

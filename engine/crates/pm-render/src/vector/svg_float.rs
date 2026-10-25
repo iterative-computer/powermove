@@ -5,7 +5,10 @@
 use pm_protocol::color::Precision;
 use pm_vector::kurbo::{Affine, BezPath, Point};
 use pm_vector::render::scene::PixelRect;
-use pm_vector::render::svg::{FloatDraw, FloatGradient, FloatNode, FloatPaint, SvgDocument};
+use pm_vector::render::svg::usvg_filter as filter;
+use pm_vector::render::svg::{
+    FloatDraw, FloatFilter, FloatGradient, FloatNode, FloatPaint, SvgDocument,
+};
 use wgpu::util::DeviceExt;
 
 use crate::coverage::{self, AreaCoverage, Batch, Item};
@@ -191,7 +194,8 @@ struct Params { v: array<vec4<f32>, 2> };
     return vec4<f32>(f32(i & 1u)*2.0-1.0, 1.0-f32(i >> 1u)*2.0,0.0,1.0);
 }
 @fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let xy = vec2<i32>(floor(pos.xy)) - vec2<i32>(p.v[0].xy);
+    let out_xy = vec2<i32>(floor(pos.xy));
+    let xy = select(out_xy - vec2<i32>(p.v[0].xy), out_xy, p.v[1].y > 0.5);
     let size = vec2<i32>(p.v[0].zw);
     let rate = i32(p.v[1].x);
     if (xy.x < 0 || xy.y < 0 || xy.x >= size.x || xy.y >= size.y) {
@@ -200,7 +204,8 @@ struct Params { v: array<vec4<f32>, 2> };
     var sum = vec4<f32>(0.0);
     for (var y = 0; y < rate; y++) {
         for (var x = 0; x < rate; x++) {
-            sum += textureLoad(fine, xy * rate + vec2<i32>(x, y), 0);
+            let source_xy = xy + select(vec2<i32>(0), vec2<i32>(p.v[0].xy), p.v[1].y > 0.5);
+            sum += textureLoad(fine, source_xy * rate + vec2<i32>(x, y), 0);
         }
     }
     return sum / f32(rate * rate);
@@ -218,6 +223,69 @@ struct DrawEntry {
     offset: u64,
 }
 
+/// Reuses the same GPU allocations across ordered tile commands in one
+/// encoder. Each checkout within a tile is distinct; reset occurs only after
+/// its resolve and copy have been recorded.
+#[derive(Default)]
+struct ScratchPool {
+    textures: std::collections::HashMap<(u32, u32), Vec<wgpu::Texture>>,
+    used: std::collections::HashMap<(u32, u32), usize>,
+    coverage: Option<wgpu::Buffer>,
+    coverage_bytes: u64,
+}
+
+impl ScratchPool {
+    fn reset(&mut self) {
+        self.used.clear();
+    }
+
+    fn target(&mut self, device: &wgpu::Device, w: u32, h: u32) -> wgpu::Texture {
+        // A larger cleared scratch target can serve a smaller edge tile.
+        // This keeps the number of retained allocations independent of the
+        // number of tiles and their varying edge dimensions.
+        let key = self
+            .textures
+            .iter()
+            .filter(|((tw, th), list)| {
+                *tw >= w
+                    && *th >= h
+                    && self.used.get(&(*tw, *th)).copied().unwrap_or(0) < list.len()
+            })
+            .map(|(key, _)| *key)
+            .min_by_key(|(tw, th)| u64::from(*tw) * u64::from(*th))
+            .unwrap_or((w, h));
+        let index = self.used.entry(key).or_default();
+        let list = self.textures.entry(key).or_default();
+        if *index == list.len() {
+            list.push(float_target(device, key.0, key.1));
+        }
+        let out = list[*index].clone();
+        *index += 1;
+        out
+    }
+
+    fn coverage(&mut self, device: &wgpu::Device, bytes: u64) -> wgpu::Buffer {
+        if self.coverage_bytes < bytes {
+            self.coverage = Some(coverage::buffer(device, bytes));
+            self.coverage_bytes = bytes;
+        }
+        self.coverage.as_ref().unwrap().clone()
+    }
+
+    fn allocated_bytes(&self) -> u64 {
+        self.textures
+            .iter()
+            .fold(self.coverage_bytes, |sum, ((w, h), list)| {
+                sum.saturating_add(
+                    u64::from(*w)
+                        .saturating_mul(u64::from(*h))
+                        .saturating_mul(16)
+                        .saturating_mul(list.len() as u64),
+                )
+            })
+    }
+}
+
 pub struct SvgPainter {
     coverage: AreaCoverage,
     draw: wgpu::RenderPipeline,
@@ -228,6 +296,10 @@ pub struct SvgPainter {
     copy_layout: wgpu::BindGroupLayout,
     resolve: wgpu::RenderPipeline,
     resolve_layout: wgpu::BindGroupLayout,
+    filter: wgpu::RenderPipeline,
+    filter_layout: wgpu::BindGroupLayout,
+    filter_resample: wgpu::RenderPipeline,
+    filter_resample_layout: wgpu::BindGroupLayout,
 }
 
 fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -313,7 +385,8 @@ fn float_target(device: &wgpu::Device, w: u32, h: u32) -> wgpu::Texture {
         format: wgpu::TextureFormat::Rgba32Float,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
 }
@@ -372,11 +445,34 @@ fn render_pass(
     pass.draw(0..4, 0..1);
 }
 
+fn clear_target(encoder: &mut wgpu::CommandEncoder, target: &wgpu::Texture) {
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("pm svg clear"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+}
+
 impl SvgPainter {
     /// Float blending is optional on engine devices. Reject it before
     /// constructing pipelines so the caller can use the native fallback.
     pub fn new(device: &wgpu::Device) -> Option<Self> {
-        if !device.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
+        if !device
+            .features()
+            .contains(wgpu::Features::FLOAT32_BLENDABLE)
+        {
             return None;
         }
         let dm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -394,6 +490,14 @@ impl SvgPainter {
         let rm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm svg float resolve"),
             source: wgpu::ShaderSource::Wgsl(RESOLVE.into()),
+        });
+        let fm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pm svg float filter"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("svg_filters.wgsl").into()),
+        });
+        let sm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pm svg filterRes resample"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("svg_filter_resample.wgsl").into()),
         });
         let dl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm svg float draw"),
@@ -421,6 +525,14 @@ impl SvgPainter {
             label: Some("pm svg float resolve"),
             entries: &[tex_entry(0), buffer_entry(1, false)],
         });
+        let fl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pm svg float filter"),
+            entries: &[tex_entry(0), buffer_entry(1, false), buffer_entry(2, true)],
+        });
+        let sl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pm svg filterRes resample"),
+            entries: &[tex_entry(0), buffer_entry(1, false)],
+        });
         Some(Self {
             coverage: AreaCoverage::new(device),
             draw: pipeline(
@@ -442,6 +554,10 @@ impl SvgPainter {
             copy_layout: xl,
             resolve: pipeline(device, &rm, &rl, wgpu::TextureFormat::Rgba32Float, None),
             resolve_layout: rl,
+            filter: pipeline(device, &fm, &fl, wgpu::TextureFormat::Rgba32Float, None),
+            filter_layout: fl,
+            filter_resample: pipeline(device, &sm, &sl, wgpu::TextureFormat::Rgba32Float, None),
+            filter_resample_layout: sl,
         })
     }
 
@@ -459,9 +575,16 @@ impl SvgPainter {
         clip: &[Point],
         precision: Precision,
     ) -> Result<Option<(wgpu::Texture, u64)>, String> {
+        let _ = queue;
         let Some(mut scene) = doc.float_scene(transform, clip) else {
             return Ok(None);
         };
+        if has_filters(&scene) {
+            let target = self.render_filtered_tiled(device, encoder, doc, transform, rect, clip)?;
+            return self
+                .finish_output(device, encoder, target, rect, precision)
+                .map(Some);
+        }
         let (w, h) = (rect.width.max(1), rect.height.max(1));
         let mut paint_rect = rect;
         let mut resolve = None;
@@ -553,6 +676,7 @@ impl SvgPainter {
         });
         let mut cursor = 0;
         let mut stop_cursor = 0;
+        let mut scratch = ScratchPool::default();
         let target = self.paint_nodes(
             device,
             encoder,
@@ -564,6 +688,8 @@ impl SvgPainter {
             &ranges,
             &mut cursor,
             &mut stop_cursor,
+            &mut scratch,
+            false,
         )?;
         let target = if let Some(bounds) = resolve {
             let output = float_target(device, w, h);
@@ -600,6 +726,283 @@ impl SvgPainter {
         } else {
             target
         };
+        self.finish_output(device, encoder, target, rect, precision)
+            .map(Some)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_filtered_tiled(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        doc: &SvgDocument,
+        transform: Affine,
+        rect: PixelRect,
+        clip: &[Point],
+    ) -> Result<wgpu::Texture, String> {
+        if rect.width.max(1) > device.limits().max_texture_dimension_2d
+            || rect.height.max(1) > device.limits().max_texture_dimension_2d
+        {
+            return Err("SVG output exceeds device texture dimensions".into());
+        }
+        let output = float_target(device, rect.width.max(1), rect.height.max(1));
+        let scene = doc
+            .float_scene(transform, clip)
+            .ok_or_else(|| "SVG filter scene changed during tile render".to_owned())?;
+        let halo = filter_halo(&scene)?;
+        let smooth_resolve = smooth_filter_resolve(&scene);
+        let mut scratch = ScratchPool::default();
+        const TILE: u32 = 64;
+        for y in (0..rect.height.max(1)).step_by(TILE as usize) {
+            for x in (0..rect.width.max(1)).step_by(TILE as usize) {
+                let tile = PixelRect::new(
+                    rect.x
+                        .checked_add(i32::try_from(x).map_err(|_| "SVG tile x overflow")?)
+                        .ok_or("SVG tile x overflow")?,
+                    rect.y
+                        .checked_add(i32::try_from(y).map_err(|_| "SVG tile y overflow")?)
+                        .ok_or("SVG tile y overflow")?,
+                    TILE.min(rect.width.max(1) - x),
+                    TILE.min(rect.height.max(1) - y),
+                );
+                self.render_filter_tile(
+                    device,
+                    encoder,
+                    doc,
+                    transform,
+                    rect,
+                    clip,
+                    tile,
+                    halo,
+                    smooth_resolve,
+                    &output,
+                    &mut scratch,
+                )?;
+            }
+        }
+        Ok(output)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_filter_tile(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        doc: &SvgDocument,
+        transform: Affine,
+        rect: PixelRect,
+        clip: &[Point],
+        tile: PixelRect,
+        halo: [u32; 2],
+        smooth_resolve: bool,
+        output: &wgpu::Texture,
+        scratch: &mut ScratchPool,
+    ) -> Result<(), String> {
+        let hx = i32::try_from(halo[0]).map_err(|_| "SVG halo x overflow")?;
+        let hy = i32::try_from(halo[1]).map_err(|_| "SVG halo y overflow")?;
+        let expanded = PixelRect::new(
+            tile.x.checked_sub(hx).ok_or("SVG tile x overflow")?,
+            tile.y.checked_sub(hy).ok_or("SVG tile y overflow")?,
+            tile.width
+                .checked_add(halo[0].checked_mul(2).ok_or("SVG halo width overflow")?)
+                .ok_or("SVG tile width overflow")?,
+            tile.height
+                .checked_add(halo[1].checked_mul(2).ok_or("SVG halo height overflow")?)
+                .ok_or("SVG tile height overflow")?,
+        );
+        let rate = GROUP_RATE;
+        let fine_rect = PixelRect::new(
+            expanded
+                .x
+                .checked_mul(rate as i32)
+                .ok_or("SVG fine x overflow")?,
+            expanded
+                .y
+                .checked_mul(rate as i32)
+                .ok_or("SVG fine y overflow")?,
+            expanded
+                .width
+                .checked_mul(rate)
+                .ok_or("SVG fine width overflow")?,
+            expanded
+                .height
+                .checked_mul(rate)
+                .ok_or("SVG fine height overflow")?,
+        );
+        let fine_clip: Vec<_> = clip
+            .iter()
+            .map(|p| Point::new(p.x * f64::from(rate), p.y * f64::from(rate)))
+            .collect();
+        let scene = doc
+            .float_scene(Affine::scale(f64::from(rate)) * transform, &fine_clip)
+            .ok_or_else(|| "SVG filter scene changed during fine render".to_owned())?;
+        let mut paths = Vec::new();
+        collect(&scene, fine_rect, &mut paths)
+            .ok_or_else(|| "SVG fine coverage coordinates overflow".to_owned())?;
+        let target_bytes = u64::from(fine_rect.width)
+            .saturating_mul(u64::from(fine_rect.height))
+            .saturating_mul(16)
+            .saturating_mul(target_count(&scene));
+        let coverage_bytes = coverage_pixels(&paths).saturating_mul(4);
+        let limit = u64::from(device.limits().max_storage_buffer_binding_size);
+        let oversize = fine_rect.width > device.limits().max_texture_dimension_2d
+            || fine_rect.height > device.limits().max_texture_dimension_2d
+            || target_bytes.saturating_add(coverage_bytes) > MAX_FINE_BYTES
+            || coverage_bytes > limit;
+        if oversize {
+            if tile.width <= 1 && tile.height <= 1 {
+                return Err("SVG filtered tile exceeds device or 128 MiB fine-grid budget".into());
+            }
+            let (a, b) = if tile.width >= tile.height && tile.width > 1 {
+                let half = tile.width / 2;
+                (
+                    PixelRect::new(tile.x, tile.y, half, tile.height),
+                    PixelRect::new(tile.x + half as i32, tile.y, tile.width - half, tile.height),
+                )
+            } else {
+                let half = tile.height / 2;
+                (
+                    PixelRect::new(tile.x, tile.y, tile.width, half),
+                    PixelRect::new(tile.x, tile.y + half as i32, tile.width, tile.height - half),
+                )
+            };
+            self.render_filter_tile(
+                device,
+                encoder,
+                doc,
+                transform,
+                rect,
+                clip,
+                a,
+                halo,
+                smooth_resolve,
+                output,
+                scratch,
+            )?;
+            self.render_filter_tile(
+                device,
+                encoder,
+                doc,
+                transform,
+                rect,
+                clip,
+                b,
+                halo,
+                smooth_resolve,
+                output,
+                scratch,
+            )?;
+            return Ok(());
+        }
+        scratch.reset();
+        let tile_target = if paths.is_empty() {
+            let blank = scratch.target(device, fine_rect.width, fine_rect.height);
+            clear_target(encoder, &blank);
+            blank
+        } else {
+            let items: Vec<_> = paths
+                .iter()
+                .map(|e| Item {
+                    path: &e.path,
+                    bounds: e.coverage_bounds,
+                    at: [0, 0],
+                })
+                .collect();
+            let batch = Batch::new(&items);
+            let values = scratch.coverage(device, batch.bytes());
+            self.coverage.encode(device, encoder, &batch, &values, None);
+            for (i, e) in paths.iter_mut().enumerate() {
+                e.offset = batch.offset(i);
+            }
+            let (stops, ranges) = collect_stops(&scene);
+            let stop_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("pm svg tile stops"),
+                contents: bytes(stops.as_flattened()),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+            self.paint_nodes(
+                device,
+                encoder,
+                &scene,
+                fine_rect,
+                &paths,
+                &values,
+                &stop_buffer,
+                &ranges,
+                &mut 0,
+                &mut 0,
+                scratch,
+                smooth_resolve,
+            )?
+        };
+        let resolved = scratch.target(device, tile.width, tile.height);
+        let view = tile_target.create_view(&wgpu::TextureViewDescriptor::default());
+        let ub = uniform(
+            device,
+            &[
+                (tile.x - expanded.x) as f32,
+                (tile.y - expanded.y) as f32,
+                tile.width as f32,
+                tile.height as f32,
+                rate as f32,
+                1.0,
+                0.0,
+                0.0,
+            ],
+        );
+        let bg = bind(
+            device,
+            &self.resolve_layout,
+            &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: ub.as_entire_binding(),
+                },
+            ],
+        );
+        render_pass(encoder, &resolved, true, &self.resolve, &bg);
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &resolved,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: output,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: (tile.x - rect.x) as u32,
+                    y: (tile.y - rect.y) as u32,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: tile.width,
+                height: tile.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        if scratch.allocated_bytes() > MAX_FINE_BYTES {
+            return Err("SVG scratch allocations exceed 128 MiB fine-grid budget".into());
+        }
+        Ok(())
+    }
+
+    fn finish_output(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        target: wgpu::Texture,
+        rect: PixelRect,
+        precision: Precision,
+    ) -> Result<(wgpu::Texture, u64), String> {
+        let (w, h) = (rect.width.max(1), rect.height.max(1));
         let format = pm_gpu::working_format(precision);
         let (output, bpp) = match format {
             wgpu::TextureFormat::Rgba8Unorm => (0, 4),
@@ -608,7 +1011,7 @@ impl SvgPainter {
             _ => return Err("unsupported SVG working format".into()),
         };
         if output == 2 {
-            return Ok(Some((target, u64::from(w) * u64::from(h) * bpp)));
+            return Ok((target, u64::from(w) * u64::from(h) * bpp));
         }
         let result = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pm svg float output"),
@@ -636,8 +1039,7 @@ impl SvgPainter {
             }],
         );
         render_pass(encoder, &result, true, &self.copy[output], &bg);
-        let _ = queue;
-        Ok(Some((result, u64::from(w) * u64::from(h) * bpp)))
+        Ok((result, u64::from(w) * u64::from(h) * bpp))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -653,9 +1055,11 @@ impl SvgPainter {
         ranges: &[(u32, u32)],
         cursor: &mut usize,
         stop_cursor: &mut usize,
+        scratch: &mut ScratchPool,
+        smooth_resolve: bool,
     ) -> Result<wgpu::Texture, String> {
         let (w, h) = (rect.width.max(1), rect.height.max(1));
-        let mut target = float_target(device, w, h);
+        let mut target = scratch.target(device, w, h);
         // Explicit clear also covers empty groups.
         {
             let view = target.create_view(&wgpu::TextureViewDescriptor::default());
@@ -709,7 +1113,7 @@ impl SvgPainter {
                     render_pass(encoder, &target, false, &self.draw, &bg);
                 }
                 FloatNode::Group(group) => {
-                    let front = self.paint_nodes(
+                    let mut front = self.paint_nodes(
                         device,
                         encoder,
                         &group.children,
@@ -720,7 +1124,20 @@ impl SvgPainter {
                         ranges,
                         cursor,
                         stop_cursor,
+                        scratch,
+                        smooth_resolve,
                     )?;
+                    for filter in &group.filters {
+                        front = self.paint_filter(
+                            device,
+                            encoder,
+                            filter,
+                            &front,
+                            rect,
+                            scratch,
+                            smooth_resolve,
+                        )?;
+                    }
                     let clip = if let Some(nodes) = &group.clip {
                         Some(self.paint_nodes(
                             device,
@@ -733,6 +1150,8 @@ impl SvgPainter {
                             ranges,
                             cursor,
                             stop_cursor,
+                            scratch,
+                            smooth_resolve,
                         )?)
                     } else {
                         None
@@ -749,11 +1168,13 @@ impl SvgPainter {
                             ranges,
                             cursor,
                             stop_cursor,
+                            scratch,
+                            smooth_resolve,
                         )?)
                     } else {
                         None
                     };
-                    let result = float_target(device, w, h);
+                    let result = scratch.target(device, w, h);
                     let back_view = target.create_view(&wgpu::TextureViewDescriptor::default());
                     let front_view = front.create_view(&wgpu::TextureViewDescriptor::default());
                     let clip_view = clip
@@ -812,13 +1233,376 @@ impl SvgPainter {
         }
         Ok(target)
     }
+
+    fn paint_filter(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        filter: &FloatFilter,
+        graphic: &wgpu::Texture,
+        rect: PixelRect,
+        scratch: &mut ScratchPool,
+        smooth_resolve: bool,
+    ) -> Result<wgpu::Texture, String> {
+        if let Some(Some([w, h])) = filter.resolution {
+            let r = filter.filter.rect();
+            let region = [r.left(), r.top(), r.width(), r.height()];
+            if w > device.limits().max_texture_dimension_2d
+                || h > device.limits().max_texture_dimension_2d
+                || u64::from(w) * u64::from(h) * 16 * 4 > MAX_FINE_BYTES
+            {
+                return Err("SVG filterRes grid exceeds device or 128 MiB budget".into());
+            }
+            let source = self.filter_resample_pass(
+                device,
+                encoder,
+                graphic,
+                [w, h],
+                [w, h],
+                region,
+                filter.transform,
+                [rect.x, rect.y],
+                false,
+                scratch,
+            )?;
+            let mut grid_filter = filter.clone();
+            grid_filter.transform =
+                Affine::scale_non_uniform(
+                    f64::from(w) / f64::from(r.width()),
+                    f64::from(h) / f64::from(r.height()),
+                ) * Affine::translate((-f64::from(r.left()), -f64::from(r.top())));
+            grid_filter.resolution = None;
+            let grid_rect = PixelRect::new(0, 0, w, h);
+            let filtered = self.paint_filter(
+                device,
+                encoder,
+                &grid_filter,
+                &source,
+                grid_rect,
+                scratch,
+                false,
+            )?;
+            return self.filter_resample_pass(
+                device,
+                encoder,
+                &filtered,
+                [rect.width.max(1), rect.height.max(1)],
+                [w, h],
+                region,
+                filter.transform.inverse(),
+                [rect.x, rect.y],
+                true,
+                scratch,
+            );
+        }
+        let mut results = std::collections::HashMap::<String, wgpu::Texture>::new();
+        let mut previous: Option<wgpu::Texture> = None;
+        let region = rect4(filter.filter.rect());
+        let t = filter.transform;
+        let inv = t.inverse().as_coeffs();
+        if !inv.iter().all(|v| v.is_finite()) {
+            return Err("singular SVG filter transform".into());
+        }
+        if matches!(filter.resolution, Some(None)) {
+            let blank = scratch.target(device, rect.width.max(1), rect.height.max(1));
+            clear_target(encoder, &blank);
+            return Ok(blank);
+        }
+        let input = |source: &filter::Input,
+                     results: &std::collections::HashMap<String, wgpu::Texture>|
+         -> Result<(wgpu::Texture, bool), String> {
+            match source {
+                filter::Input::SourceGraphic => Ok((graphic.clone(), false)),
+                filter::Input::SourceAlpha => Ok((graphic.clone(), true)),
+                filter::Input::Reference(name) => results
+                    .get(name)
+                    .cloned()
+                    .map(|v| (v, false))
+                    .ok_or_else(|| format!("SVG filter input {name} is missing")),
+            }
+        };
+        for primitive in filter.filter.primitives() {
+            let bounds = rect4(primitive.rect());
+            let linear = primitive.color_interpolation() == filter::ColorInterpolation::LinearRGB;
+            let result = match primitive.kind() {
+                filter::Kind::GaussianBlur(blur) => {
+                    let (source, alpha) = input(blur.input(), &results)?;
+                    let c = t.as_coeffs();
+                    let axes = [
+                        ([c[0], c[1]], f64::from(blur.std_dev_x().get())),
+                        ([c[2], c[3]], f64::from(blur.std_dev_y().get())),
+                    ];
+                    let mut current = source;
+                    for (stage, (v, sigma)) in axes.iter().enumerate() {
+                        let length = v[0].hypot(v[1]);
+                        let mut sigma = sigma * length;
+                        if smooth_resolve && filter.resolution.is_none() && sigma > 0.0 {
+                            // The final 4× resolve averages subpixel centers.
+                            // Remove its variance so the reconstructed output
+                            // has the authored Gaussian variance at pixel centers.
+                            let subcell_variance = f64::from(GROUP_RATE * GROUP_RATE - 1) / 12.0;
+                            if sigma * sigma > subcell_variance {
+                                sigma = (sigma * sigma - subcell_variance).sqrt();
+                            }
+                        }
+                        let axis = if length > 0.0 {
+                            [v[0] / length, v[1] / length]
+                        } else {
+                            [1.0, 0.0]
+                        };
+                        let weights = gaussian_weights(sigma)?;
+                        current = self.filter_pass(
+                            device,
+                            encoder,
+                            &current,
+                            rect,
+                            region,
+                            bounds,
+                            inv,
+                            axis,
+                            &weights,
+                            stage as u32,
+                            [0.0, 0.0],
+                            alpha && stage == 0,
+                            linear && stage == 0,
+                            linear && stage == 1,
+                            scratch,
+                        );
+                    }
+                    current
+                }
+                filter::Kind::Offset(offset) => {
+                    let (source, alpha) = input(offset.input(), &results)?;
+                    let d = t.as_coeffs();
+                    let shift = [
+                        d[0] * f64::from(offset.dx()) + d[2] * f64::from(offset.dy()),
+                        d[1] * f64::from(offset.dx()) + d[3] * f64::from(offset.dy()),
+                    ];
+                    self.filter_pass(
+                        device,
+                        encoder,
+                        &source,
+                        rect,
+                        region,
+                        bounds,
+                        inv,
+                        [1.0, 0.0],
+                        &[1.0],
+                        2,
+                        shift,
+                        alpha,
+                        false,
+                        false,
+                        scratch,
+                    )
+                }
+                kind => {
+                    return Err(format!(
+                        "unsupported SVG float filter primitive: {}",
+                        filter_kind(kind)
+                    ));
+                }
+            };
+            results.insert(primitive.result().to_owned(), result.clone());
+            previous = Some(result);
+        }
+        Ok(previous.unwrap_or_else(|| graphic.clone()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn filter_resample_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::Texture,
+        size: [u32; 2],
+        grid: [u32; 2],
+        region: [f32; 4],
+        transform: Affine,
+        origin: [i32; 2],
+        project: bool,
+        scratch: &mut ScratchPool,
+    ) -> Result<wgpu::Texture, String> {
+        let c = transform.as_coeffs();
+        if !c.iter().all(|v| v.is_finite()) {
+            return Err("singular SVG filterRes transform".into());
+        }
+        let p = [
+            region[0],
+            region[1],
+            region[2],
+            region[3],
+            c[0] as f32,
+            c[2] as f32,
+            c[4] as f32,
+            0.0,
+            c[1] as f32,
+            c[3] as f32,
+            c[5] as f32,
+            0.0,
+            origin[0] as f32,
+            origin[1] as f32,
+            0.0,
+            0.0,
+            grid[0] as f32,
+            grid[1] as f32,
+            0.0,
+            0.0,
+            f32::from(project),
+            GROUP_RATE as f32,
+            0.0,
+            0.0,
+        ];
+        let ub = uniform(device, &p);
+        let view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let bg = bind(
+            device,
+            &self.filter_resample_layout,
+            &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: ub.as_entire_binding(),
+                },
+            ],
+        );
+        let out = scratch.target(device, size[0], size[1]);
+        render_pass(encoder, &out, true, &self.filter_resample, &bg);
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn filter_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::Texture,
+        rect: PixelRect,
+        region: [f32; 4],
+        bounds: [f32; 4],
+        inverse: [f64; 6],
+        axis: [f64; 2],
+        weights: &[f32],
+        stage: u32,
+        shift: [f64; 2],
+        alpha: bool,
+        to_linear: bool,
+        to_srgb: bool,
+        scratch: &mut ScratchPool,
+    ) -> wgpu::Texture {
+        let mut p = [0.0f32; 32];
+        p[0..4].copy_from_slice(&[
+            axis[0] as f32,
+            axis[1] as f32,
+            (weights.len() / 2) as f32,
+            stage as f32,
+        ]);
+        p[4..8].copy_from_slice(&region);
+        p[8..12].copy_from_slice(&bounds);
+        p[12..16].copy_from_slice(&[
+            inverse[0] as f32,
+            inverse[2] as f32,
+            inverse[1] as f32,
+            inverse[3] as f32,
+        ]);
+        p[16..20].copy_from_slice(&[
+            inverse[4] as f32,
+            inverse[5] as f32,
+            rect.x as f32,
+            rect.y as f32,
+        ]);
+        p[20..24].copy_from_slice(&[
+            shift[0] as f32,
+            shift[1] as f32,
+            f32::from(alpha),
+            f32::from(to_linear),
+        ]);
+        p[24] = f32::from(to_srgb);
+        let ub = uniform(device, &p);
+        let wb = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("pm svg gaussian weights"),
+            contents: bytes(weights),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
+        let view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        let bg = bind(
+            device,
+            &self.filter_layout,
+            &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: ub.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wb.as_entire_binding(),
+                },
+            ],
+        );
+        let out = scratch.target(device, rect.width.max(1), rect.height.max(1));
+        render_pass(encoder, &out, true, &self.filter, &bg);
+        out
+    }
+}
+
+fn rect4(r: pm_vector::render::svg::SvgRect) -> [f32; 4] {
+    [r.left(), r.top(), r.right(), r.bottom()]
+}
+
+fn gaussian_weights(sigma: f64) -> Result<Vec<f32>, String> {
+    if !sigma.is_finite() || sigma < 0.0 || sigma > 4096.0 {
+        return Err(format!("invalid SVG Gaussian standard deviation {sigma}"));
+    }
+    if sigma == 0.0 {
+        return Ok(vec![1.0]);
+    }
+    let radius = (8.0 * sigma).ceil() as i32;
+    let phi = |x: f64| 0.5 * libm::erfc(-x / std::f64::consts::SQRT_2);
+    Ok((-radius..=radius)
+        .map(|k| {
+            let k = f64::from(k);
+            (phi((k + 0.5) / sigma) - phi((k - 0.5) / sigma)) as f32
+        })
+        .collect())
+}
+
+fn filter_kind(kind: &filter::Kind) -> &'static str {
+    match kind {
+        filter::Kind::Blend(_) => "feBlend",
+        filter::Kind::ColorMatrix(_) => "feColorMatrix",
+        filter::Kind::ComponentTransfer(_) => "feComponentTransfer",
+        filter::Kind::Composite(_) => "feComposite",
+        filter::Kind::ConvolveMatrix(_) => "feConvolveMatrix",
+        filter::Kind::DiffuseLighting(_) => "feDiffuseLighting",
+        filter::Kind::DisplacementMap(_) => "feDisplacementMap",
+        filter::Kind::DropShadow(_) => "feDropShadow",
+        filter::Kind::Flood(_) => "feFlood",
+        filter::Kind::GaussianBlur(_) => "feGaussianBlur",
+        filter::Kind::Image(_) => "feImage",
+        filter::Kind::Merge(_) => "feMerge",
+        filter::Kind::Morphology(_) => "feMorphology",
+        filter::Kind::Offset(_) => "feOffset",
+        filter::Kind::SpecularLighting(_) => "feSpecularLighting",
+        filter::Kind::Tile(_) => "feTile",
+        filter::Kind::Turbulence(_) => "feTurbulence",
+    }
 }
 
 fn needs_joint_samples(nodes: &[FloatNode]) -> bool {
     nodes.iter().any(|node| match node {
         FloatNode::Draw(_) => false,
         FloatNode::Group(group) => {
-            group.clip.is_some() || group.mask.is_some() || needs_joint_samples(&group.children)
+            group.clip.is_some()
+                || group.mask.is_some()
+                || !group.filters.is_empty()
+                || needs_joint_samples(&group.children)
         }
     })
 }
@@ -829,12 +1613,123 @@ fn target_count(nodes: &[FloatNode]) -> u64 {
         .filter_map(|node| match node {
             FloatNode::Draw(_) => None,
             FloatNode::Group(g) => Some(
-                1 + target_count(&g.children)
+                1 + 2 * g
+                    .filters
+                    .iter()
+                    .map(|f| f.filter.primitives().len() as u64)
+                    .sum::<u64>()
+                    + target_count(&g.children)
                     + g.clip.as_deref().map(target_count).unwrap_or(0)
                     + g.mask.as_deref().map(target_count).unwrap_or(0),
             ),
         })
         .sum::<u64>()
+}
+
+fn has_filters(nodes: &[FloatNode]) -> bool {
+    nodes.iter().any(|node| match node {
+        FloatNode::Draw(_) => false,
+        FloatNode::Group(g) => {
+            !g.filters.is_empty()
+                || has_filters(&g.children)
+                || g.clip.as_deref().is_some_and(has_filters)
+                || g.mask.as_deref().is_some_and(has_filters)
+        }
+    })
+}
+
+/// Allow the Gaussian variance correction for the final 4× box resolve only
+/// when every hard group/filter boundary falls on whole output pixels.
+fn smooth_filter_resolve(nodes: &[FloatNode]) -> bool {
+    fn aligned(r: pm_vector::render::svg::SvgRect, t: Affine) -> bool {
+        let c = t.as_coeffs();
+        let edge = |v: f64| v.is_finite() && (v - v.round()).abs() < 1e-6;
+        c[1].abs() < 1e-9
+            && c[2].abs() < 1e-9
+            && edge(c[0] * f64::from(r.left()) + c[4])
+            && edge(c[0] * f64::from(r.right()) + c[4])
+            && edge(c[3] * f64::from(r.top()) + c[5])
+            && edge(c[3] * f64::from(r.bottom()) + c[5])
+    }
+    nodes.iter().all(|node| match node {
+        FloatNode::Draw(_) => true,
+        FloatNode::Group(g) => {
+            g.clip.is_none()
+                && g.mask.is_none()
+                && g.filters.iter().all(|f| {
+                    aligned(f.filter.rect(), f.transform)
+                        && f.filter
+                            .primitives()
+                            .iter()
+                            .all(|p| aligned(p.rect(), f.transform))
+                })
+                && smooth_filter_resolve(&g.children)
+        }
+    })
+}
+
+/// A conservative device-pixel support radius of every supported primitive
+/// along every path through the scene. The 8σ tails are below f32 precision.
+fn filter_halo(nodes: &[FloatNode]) -> Result<[u32; 2], String> {
+    let mut halo = [2.0f64; 2];
+    fn walk(nodes: &[FloatNode], halo: &mut [f64; 2]) -> Result<(), String> {
+        for node in nodes {
+            if let FloatNode::Group(g) = node {
+                for f in &g.filters {
+                    let c = f.transform.as_coeffs();
+                    if let Some(Some([rw, rh])) = f.resolution {
+                        let r = f.filter.rect();
+                        let cell_x = f64::from(r.width()) / f64::from(rw);
+                        let cell_y = f64::from(r.height()) / f64::from(rh);
+                        for axis in 0..2 {
+                            halo[axis] +=
+                                2.0 * (c[axis].abs() * cell_x + c[axis + 2].abs() * cell_y);
+                        }
+                    }
+                    for p in f.filter.primitives() {
+                        match p.kind() {
+                            filter::Kind::GaussianBlur(b) => {
+                                for axis in 0..2 {
+                                    halo[axis] += 8.0
+                                        * (f64::from(b.std_dev_x().get()) * c[axis].abs()
+                                            + f64::from(b.std_dev_y().get()) * c[axis + 2].abs());
+                                }
+                            }
+                            filter::Kind::Offset(o) => {
+                                for axis in 0..2 {
+                                    halo[axis] += (f64::from(o.dx()) * c[axis]
+                                        + f64::from(o.dy()) * c[axis + 2])
+                                        .abs();
+                                }
+                            }
+                            other => {
+                                return Err(format!(
+                                    "unsupported SVG float filter primitive: {}",
+                                    filter_kind(other)
+                                ));
+                            }
+                        }
+                    }
+                }
+                walk(&g.children, halo)?;
+                if let Some(c) = &g.clip {
+                    walk(c, halo)?;
+                }
+                if let Some(m) = &g.mask {
+                    walk(m, halo)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(nodes, &mut halo)?;
+    if !halo
+        .iter()
+        .all(|v| v.is_finite() && *v < i32::MAX as f64 / 4.0)
+    {
+        return Err("SVG filter halo exceeds device coordinates".into());
+    }
+    Ok(halo.map(|v| v.ceil() as u32))
 }
 
 fn coverage_pixels(paths: &[DrawEntry]) -> u64 {

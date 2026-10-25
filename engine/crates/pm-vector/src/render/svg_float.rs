@@ -2,6 +2,7 @@
 //! resolved here, while coverage and colour stay in GPU float storage.
 
 use kurbo::{Affine, BezPath, Cap, Join, Point, Rect, Shape, Stroke};
+use std::sync::Arc;
 
 use super::{SvgDocument, affine, bez};
 use crate::render::scene::FLATTEN_TOLERANCE;
@@ -57,6 +58,38 @@ pub struct FloatGroup {
     pub clip: Option<Vec<FloatNode>>,
     pub mask: Option<Vec<FloatNode>>,
     pub mask_luminance: bool,
+    /// Filters run on the group's source graphic before its clip, mask and opacity.
+    pub filters: Vec<FloatFilter>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FloatFilter {
+    /// Resolved filter and primitive regions, input graph and color spaces.
+    pub filter: Arc<usvg::filter::Filter>,
+    /// Filter user coordinates to device pixels.
+    pub transform: Affine,
+    /// SVG 1.1 filterRes; `Some(None)` means an invalid or zero grid.
+    pub resolution: Option<Option<[u32; 2]>>,
+}
+
+fn attach_resolutions(
+    nodes: &mut [FloatNode],
+    resolutions: &std::collections::HashMap<String, Option<[u32; 2]>>,
+) {
+    for node in nodes {
+        if let FloatNode::Group(group) = node {
+            for filter in &mut group.filters {
+                filter.resolution = resolutions.get(filter.filter.id()).copied();
+            }
+            attach_resolutions(&mut group.children, resolutions);
+            if let Some(clip) = &mut group.clip {
+                attach_resolutions(clip, resolutions);
+            }
+            if let Some(mask) = &mut group.mask {
+                attach_resolutions(mask, resolutions);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +108,7 @@ impl SvgDocument {
         let tree: &usvg::Tree = &self.tree;
         with_stack(self.depth, || {
             let mut nodes = children(tree.root(), transform)?;
+            attach_resolutions(&mut nodes, &self.filter_res);
             if !clip.is_empty() {
                 let mut outline = BezPath::new();
                 for (i, p) in clip.iter().enumerate() {
@@ -95,6 +129,7 @@ impl SvgDocument {
                     })]),
                     mask: None,
                     mask_luminance: false,
+                    filters: Vec::new(),
                 })];
             }
             Some(nodes)
@@ -138,6 +173,15 @@ fn group_node(g: &usvg::Group, parent: Affine) -> Option<Vec<FloatNode>> {
         clip,
         mask,
         mask_luminance,
+        filters: g
+            .filters()
+            .iter()
+            .map(|f| FloatFilter {
+                filter: f.clone(),
+                transform: t,
+                resolution: None,
+            })
+            .collect(),
     })])
 }
 
@@ -155,6 +199,7 @@ fn clip_path(c: &usvg::ClipPath, t: Affine) -> Option<Vec<FloatNode>> {
             clip: Some(clip_path(outer, parent)?),
             mask: None,
             mask_luminance: false,
+            filters: Vec::new(),
         })])
     } else {
         Some(children)
@@ -186,6 +231,7 @@ fn clip_children(group: &usvg::Group, t: Affine) -> Option<Vec<FloatNode>> {
                         clip: Some(clip_path(c, gt)?),
                         mask: None,
                         mask_luminance: false,
+                        filters: Vec::new(),
                     })];
                 }
                 out.extend(nested);
@@ -220,6 +266,7 @@ fn mask(m: &usvg::Mask, t: Affine) -> Option<Vec<FloatNode>> {
         })]),
         mask: None,
         mask_luminance: false,
+        filters: Vec::new(),
     })];
     if let Some(inner) = m.mask() {
         nodes = vec![FloatNode::Group(FloatGroup {
@@ -229,6 +276,7 @@ fn mask(m: &usvg::Mask, t: Affine) -> Option<Vec<FloatNode>> {
             clip: None,
             mask: Some(mask(inner, t)?),
             mask_luminance: inner.kind() == usvg::MaskType::Luminance,
+            filters: Vec::new(),
         })];
     }
     Some(nodes)
