@@ -51,16 +51,24 @@ Rewrite a row when its numbers change. Keep no round history here.
 
 ## 3D output and Library cards
 
-The scene pass now resolves RGBA16F samples in linear light and defers the
-preserved r180 ACES curve to the composite boundary, after transparent blending.
-This is decision `3D-TONEMAP-1`; masks and effects keep their layer boundaries.
-The reference is independent Three.js r180 shading into RGBA32F at eight samples
-per axis, averaged in linear light and output-converted with f64 arithmetic.
+The scene pass writes linear RGBA16F samples (4× MSAA, memoryless on Apple GPUs),
+resolves them in hardware and applies the preserved r180 ACES curve once at the
+composite boundary, after transparent blending (decision `3D-TONEMAP-1`); masks and
+effects keep their layer boundaries. Metal truncates f32 to half at a render-target
+store, so every 3D color program and the encoded scene output store the IEEE
+nearest-even half computed in the shader.
 
-`tests/scene3d.rs`, `tests/scene3d_gltf.rs` and the Editor Library-card gate remain
-red during reference qualification. No 3D correction is accepted by this ledger
-until native output is at least as close as today's under the reference rule. The old
-native RGBA8, gamma-averaged self-reference has been removed.
+- **Reference:** independent Three.js r180 shading into RGBA32F at eight samples per
+  axis, averaged in linear light and output-converted with f64 arithmetic.
+- **Gate:** `tests/scene3d.rs` and `tests/scene3d_gltf.rs` (displayed pixels and
+  geometry), and the Editor-view Library cards (`e2e/library-card-parity.spec.ts`).
+- **Units:** CV; card statistics over the cube's pixels, signed mean per channel.
+
+No 3D correction is accepted yet: the per-pixel edge rule and the cards' per-pixel
+rule remain red. The cards are unbiased (signed mean +0.0005/0.0000/−0.0003 CV,
+today +0.0008/+0.0008/+0.0006; truncating stores gave −0.0178/−0.0064/−0.0021); their
+remaining one-code differences match the rate of a half-float working frame rounded
+again to 8 bits.
 
 ## Raster sampling and masks
 

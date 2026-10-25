@@ -234,12 +234,10 @@ plane and out through the flat layer's world matrix, onto the flat layer's ink
 
 ## Level 2 sampling
 
-Level 1 content is still sampled as today (bilinear, no mipmaps, hard UV edges,
-pixel-center coverage); no gate pins that, and the sampler's bars are meant to
-apply to all content (gate-policy.md). Level 1 stills are sampled from today's 8-bit texture
-(composite.md, "Today's composite drift"). Level 2 raster content (`compat` ≥ 2
-image, video, precomp, shader, and extension layers; SVG images, shapes, text, and
-solids belong to their own renderers) is drawn by `sampling::gpu`. Level 2 shader
+Raster content at every compatibility level (image, video, precomp, shader, and
+extension layers; SVG images, shapes, text, and solids belong to their own
+renderers) is drawn by `sampling::gpu`, so the sampler's bars apply to all of it
+(gate-policy.md). Level 2 shader
 and extension fragment layers render at the density they are drawn at, without
 today's 4,096 px cap (level 1 keeps it), up to 16,384 px. Every layer type is
 drawn at level 2; level 2 text that `pm-text` does not lay out yet (animators,
@@ -263,9 +261,10 @@ range styles, typography anchoring) is a named text reason, not a level 2 route.
   premultiplied space).
 - **Playback** (frames while playing, scrub frames): trilinear over the pyramid with
   the exact gradients.
-- **Pyramids** are box-filtered (2×2 mean, edge texels repeated for odd sizes),
-  built per frame for video and precomps and kept for the last 16 stills (counted
-  in `Renderer::pooled_bytes`, dropped by `trim`).
+- **Pyramids** are box-filtered (2×2 mean, edge texels repeated for odd sizes).
+  The source is level 0; one compute pass writes the float tail below it, half
+  floats rounded to nearest. Tails are pooled: kept for known source revisions
+  (stills), rebuilt in place for changed ones (video, precomps), released at rest.
 - **Continuous rasterization for precomps.** A level 2 precomp renders its child at
   the density it is drawn at (the world matrix's column lengths, or the densest
   corner of a 2.5D plane), never below its own size (inner level 1 content keeps

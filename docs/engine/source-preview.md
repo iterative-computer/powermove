@@ -28,9 +28,9 @@ the timestamp Chromium consumes from its underlying frame.
 When a coded source exceeds four times the monitor's device pixels, or its
 colour/geometry requires conversion, the engine resamples it before delivery.
 It uses composition's declared sampler: Lanczos-3 for paused frames and
-trilinear filtering for playback. A minified frame rebuilds one kept mip
-pyramid on the GPU (released at rest); unminified frames reuse the source
-texture directly. Pausing requests a Final-quality repaint. A rearmed
+trilinear filtering for playback. A minified frame rebuilds its mip tail on
+the GPU in the renderer's pooled storage (released at rest); unminified frames
+reuse the source texture directly. Pausing requests a Final-quality repaint. A rearmed
 resolution media query repaints a paused monitor when DPR alone changes,
 independently of CSS resizing. Source snapshots wait for the host's answer
 for the file they read, so a pending binding is never reported offline.
