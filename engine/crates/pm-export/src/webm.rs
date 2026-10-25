@@ -1,7 +1,6 @@
 //! WebM through FFmpeg (plan section 17, "Muxers" and "Formats at cutover"): VP9
 //! or VP8 from libvpx, alpha as libvpx's second stream (Matroska `AlphaMode` and
-//! `BlockAdditional`), Opus from libopus at 48 kHz. Opaque exports remux the
-//! encoded packets into the current exporter's EBML layout.
+//! `BlockAdditional`), Opus from libopus at 48 kHz.
 //!
 //! Frame-exact: every frame of the range is encoded, frame n at presentation
 //! time n / rate (Matroska stores milliseconds; the stream also declares its

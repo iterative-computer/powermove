@@ -17,7 +17,7 @@ export type ParityReport = { checks: Check[]; metrics: Record<string, unknown> }
  *  container framing and colour tags may change with the engine's encoders
  *  (WebM now carries the export's colour description). */
 const VIDEO_FIELDS = ['codec_name', 'pix_fmt', 'width', 'height', 'r_frame_rate', 'nb_read_frames'] as const;
-const AUDIO_FIELDS = ['sample_rate', 'channels'] as const;
+const AUDIO_FIELDS = ['sample_rate', 'channels', 'channel_layout'] as const;
 
 function json<T>(binary: string, args: string[]): T {
   return JSON.parse(execFileSync(binary, args, { encoding: 'utf8', maxBuffer: MAX_BUFFER })) as T;
@@ -39,6 +39,12 @@ function one(probeResult: Probe, kind: 'video' | 'audio'): Stream | null {
 function frames16(input: string): Buffer {
   return execFileSync(ffmpegBinary, ['-v', 'error', '-i', input, '-map', '0:v:0', '-fps_mode', 'passthrough',
     '-f', 'rawvideo', '-pix_fmt', 'rgba64le', 'pipe:1'], { maxBuffer: MAX_BUFFER });
+}
+
+/** Decoded audio length in sample frames (after priming, pre-skip and edits). */
+function decodedAudioFrames(input: string): number {
+  return execFileSync(ffmpegBinary, ['-v', 'error', '-i', input, '-map', '0:a:0', '-ac', '1', '-f', 'f32le', '-acodec', 'pcm_f32le',
+    'pipe:1'], { maxBuffer: MAX_BUFFER }).length / 4;
 }
 
 /** A PNG sequence folder's frames, in name order, as one input. */
@@ -87,8 +93,7 @@ export function compareExports(today: string, engine: string, reference: string 
   // Audio: the same family (PCM, AAC, Opus) and the same length.
   const family = (s: Stream | null) => String(s?.codec_name ?? '').replace(/^pcm_.*/, 'pcm');
   add(checks, 'audio.codec_family', family(one(old, 'audio')), family(one(current, 'audio')));
-  const samples = (s: Stream | null) => Math.round(Number(s?.duration ?? 0) * Number(s?.sample_rate ?? 0));
-  const lengths = [samples(one(old, 'audio')), samples(one(current, 'audio'))];
+  const lengths = ([[today, old], [engine, current]] as const).map(([file, p]) => (one(p, 'audio') ? decodedAudioFrames(file) : 0));
   metrics.audioSamples = lengths;
   add(checks, 'audio.length_within_one_opus_frame', true, Math.abs(lengths[0]! - lengths[1]!) <= 960);
   const video = one(current, 'video');
