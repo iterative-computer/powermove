@@ -65,6 +65,7 @@ export class EngineSourceMedia {
   private readonly prepared = new Map<string, Promise<void>>();
   private warming = 0;
   private monitorValue: SourceMonitor | null = null;
+  private monitorIdentity: string | null = null;
   private disposed = false;
   private generation = 0;
   private lifetime = 0;
@@ -319,7 +320,20 @@ export class EngineSourceMedia {
     const meta = this.host.project().assets?.[asset];
     const size = meta && ['image', 'video'].includes(meta.kind) ? sourcePosterSize(meta) : null;
     if (size) this.prepare(asset, 0, size.width, size.height);
+    this.monitorIdentity = this.identity(asset);
     return this.monitorValue = new SourceMonitor(this, asset, this.host);
+  }
+
+  /** The existing asset event also covers Interpret Footage and undo/redo. */
+  assetsChanged(): void {
+    const monitor = this.monitorValue;
+    if (!monitor) return;
+    let identity: string;
+    try { identity = this.identity(monitor.asset); }
+    catch { return; }
+    if (identity === this.monitorIdentity) return;
+    this.monitorIdentity = identity;
+    monitor.invalidate();
   }
 
   receive(message: AudioMessage): void {
@@ -329,6 +343,7 @@ export class EngineSourceMedia {
   reset(): void {
     this.lifetime++;
     this.monitorValue?.dispose(); this.monitorValue = null;
+    this.monitorIdentity = null;
     for (const poster of this.posters.values()) URL.revokeObjectURL(poster.url);
     this.posters.clear(); this.pendingPosters.clear();
     for (const capture of this.pendingCaptures.values()) capture.controller.abort();
@@ -351,7 +366,7 @@ export class SourceMonitor extends EventTarget {
   paintedSize: { width: number; height: number } | null = null;
   readonly surface: HTMLCanvasElement | HTMLImageElement | HTMLVideoElement;
   private readonly videoPresenter: SourceVideoPresenter | null;
-  readonly duration: number;
+  duration: number;
   private at = 0;
   private arrived = performance.now();
   private advancing = false;
@@ -420,7 +435,7 @@ export class SourceMonitor extends EventTarget {
       await this.source.bindSource(this.asset); await this.host.wake();
       if (this.disposed || request !== this.requested) return;
       this.host.session()?.audio({ audio: 'sourceMonitor', generation, asset: this.asset, time, playing });
-    } catch (error) { this.fail(error); }
+    } catch (error) { if (!this.disposed && request === this.requested) this.fail(error); }
   }
 
   async play(): Promise<void> {
@@ -437,6 +452,19 @@ export class SourceMonitor extends EventTarget {
     this.advancing = false; void this.command(false);
     if (this.frame) cancelAnimationFrame(this.frame); this.frame = 0;
     this.dispatchEvent(new Event('pause'));
+  }
+
+  invalidate(): void {
+    if (this.disposed) return;
+    const time = this.currentTime;
+    this.duration = Number(this.host.project().assets?.[this.asset]?.dur) || 0;
+    this.at = Math.min(this.duration || Infinity, time);
+    this.arrived = performance.now();
+    this.frameAbort?.abort();
+    // Retire both a pending paint and an in-flight source-status reply while
+    // preserving the transport's current time and play state.
+    void this.command(this.advancing);
+    void this.paint();
   }
 
   receive(message: Extract<AudioMessage, { audio: 'sourceStatus' }>): void {
@@ -498,12 +526,12 @@ export class SourceMonitor extends EventTarget {
         canvas.getContext('2d', { colorSpace: 'srgb' })?.putImageData(new ImageData(pixels, width, height), 0, 0);
       }
       if (this.surface instanceof HTMLImageElement) {
-        const blob = await new Promise<Blob | null>(resolve => this.canvas!.toBlob(resolve, 'image/png'));
+        const blob = await cancellable(new Promise<Blob | null>(resolve => this.canvas!.toBlob(resolve, 'image/png')), signal);
         if (!blob) throw new Error('The source image could not be presented.');
         if (this.disposed || this.requested !== generation) return;
         const previous = this.imageUrl;
         this.surface.src = this.imageUrl = URL.createObjectURL(blob);
-        try { await this.surface.decode(); }
+        try { await cancellable(this.surface.decode(), signal); }
         finally { if (previous) URL.revokeObjectURL(previous); }
         if (this.disposed || this.requested !== generation) return;
       }

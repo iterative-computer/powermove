@@ -5,6 +5,8 @@ import type { EngineSnapshot, EngineRenderTransport } from './render-transport';
 import type { EngineBridge } from '../../../shared/engine-ipc';
 import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { DocumentSession } from './session';
+import { ticks } from './transport';
+import { SourceVideoPresenter } from './source-video-presenter';
 
 function fixture(frameBridge?: FrameBridgeApi) {
   const project = { id: 'project', assets: { clip: { id: 'clip', kind: 'video', w: 1920, h: 1080, dur: 20, contentHash: 'original', rendition: false } } };
@@ -325,11 +327,130 @@ describe('engine source consumers', () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     const f = fixture();
     Object.assign(f.project.assets.clip, { kind: 'image', format, interpret });
+    let surface: HTMLElement | null = null;
     try {
       const monitor = f.source.monitor('clip');
+      surface = monitor.surface;
       document.body.append(monitor.surface);
       await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledWith(
         expect.objectContaining({ source: expect.objectContaining({ color }) }), 'async'));
+    } finally { f.source.dispose(); surface?.remove(); vi.unstubAllGlobals(); }
+  });
+
+  it('repaints an open paused still after interpretation changes and drops its old paint', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ putImageData: vi.fn() } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(callback => callback(new Blob(['frame'], { type: 'image/png' })));
+    vi.spyOn(HTMLImageElement.prototype, 'decode').mockResolvedValue();
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:frame');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const f = fixture();
+    Object.assign(f.project.assets.clip, { kind: 'image', format: 'png', w: 4, h: 2 });
+    let finishOld!: (value: EngineSnapshot) => void;
+    f.snapshot.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; }));
+    let surface: HTMLElement | null = null;
+    try {
+      const monitor = f.source.monitor('clip');
+      surface = monitor.surface;
+      const loaded = vi.fn();
+      monitor.addEventListener('loadeddata', loaded);
+      document.body.append(monitor.surface);
+      await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledOnce());
+      (f.project.assets.clip as any).interpret = { alpha: 'premultiplied' };
+      f.source.assetsChanged();
+      finishOld({ width: 4, height: 2, data: new Uint8ClampedArray(32) } as EngineSnapshot);
+      await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledTimes(2));
+      expect(f.snapshot).toHaveBeenNthCalledWith(2, expect.objectContaining({ source: {
+        asset: 'clip', fit: 'contain', color: 'interpreted'
+      } }), 'async');
+      await vi.waitFor(() => expect(loaded).toHaveBeenCalledOnce());
+      expect(monitor.paused).toBe(true);
+      f.source.assetsChanged();
+      await Promise.resolve();
+      expect(f.snapshot).toHaveBeenCalledTimes(2);
+      expect(f.error).not.toHaveBeenCalled();
+    } finally { f.source.dispose(); surface?.remove(); vi.unstubAllGlobals(); }
+  });
+
+  it('does not wait for a cancelled image encode before painting the new reading', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ putImageData: vi.fn() } as unknown as CanvasRenderingContext2D);
+    const encodes: Array<(blob: Blob | null) => void> = [];
+    vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(callback => { encodes.push(callback); });
+    vi.spyOn(HTMLImageElement.prototype, 'decode').mockResolvedValue();
+    const url = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:frame');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const f = fixture();
+    Object.assign(f.project.assets.clip, { kind: 'image', format: 'png', w: 4, h: 2 });
+    let surface: HTMLElement | null = null;
+    try {
+      const monitor = f.source.monitor('clip');
+      surface = monitor.surface;
+      const loaded = vi.fn();
+      monitor.addEventListener('loadeddata', loaded);
+      document.body.append(monitor.surface);
+      await vi.waitFor(() => expect(encodes).toHaveLength(1));
+      (f.project.assets.clip as any).interpret = { alpha: 'premultiplied' };
+      f.source.assetsChanged();
+      await vi.waitFor(() => expect(encodes).toHaveLength(2));
+      encodes[1]!(new Blob(['fresh'], { type: 'image/png' }));
+      await vi.waitFor(() => expect(loaded).toHaveBeenCalledOnce());
+      encodes[0]!(new Blob(['stale'], { type: 'image/png' }));
+      await Promise.resolve();
+      expect(url).toHaveBeenCalledOnce();
+      expect(f.error).not.toHaveBeenCalled();
+    } finally { f.source.dispose(); surface?.remove(); vi.unstubAllGlobals(); }
+  });
+
+  it('replaces a pending video surface after an interpretation edit', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const discardSource = vi.fn();
+    const f = fixture({ discardSource } as unknown as FrameBridgeApi);
+    const present = vi.spyOn(SourceVideoPresenter.prototype, 'paint').mockResolvedValue();
+    let finishOld!: (value: EngineSnapshot) => void;
+    f.snapshot.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; }));
+    f.snapshot.mockResolvedValue({ width: 4, height: 2, data: new Uint8ClampedArray(),
+      videoSurface: { token: 'fresh', width: 4, height: 2 } } as EngineSnapshot);
+    let surface: HTMLElement | null = null;
+    try {
+      const monitor = f.source.monitor('clip');
+      surface = monitor.surface;
+      document.body.append(monitor.surface);
+      await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledOnce());
+      (f.project.assets.clip as any).interpret = { primaries: 'bt2020' };
+      f.source.assetsChanged();
+      finishOld({ width: 4, height: 2, data: new Uint8ClampedArray(),
+        videoSurface: { token: 'stale', width: 4, height: 2 } } as EngineSnapshot);
+      await vi.waitFor(() => expect(present).toHaveBeenCalledOnce());
+      expect(discardSource).toHaveBeenCalledWith('stale');
+      expect(present).toHaveBeenCalledWith({ token: 'fresh', width: 4, height: 2 }, expect.any(AbortSignal));
+      expect(f.snapshot).toHaveBeenNthCalledWith(2, expect.objectContaining({ source: {
+        asset: 'clip', fit: 'contain', color: 'compositor'
+      } }), 'async');
+    } finally { f.source.dispose(); surface?.remove(); vi.unstubAllGlobals(); }
+  });
+
+  it('keeps source transport time and playback while retiring status from the old reading', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    const f = fixture();
+    f.project.assets.clip.kind = 'audio';
+    try {
+      const monitor = f.source.monitor('clip');
+      monitor.currentTime = 3;
+      await vi.waitFor(() => expect(f.audio.mock.calls.at(-1)![0]).toMatchObject({ time: ticks(3), playing: false }));
+      await monitor.play();
+      const old = f.audio.mock.calls.at(-1)![0];
+      Object.assign(f.project.assets.clip, { interpret: { frameRate: 30 }, dur: 10 });
+      f.source.assetsChanged();
+      await vi.waitFor(() => expect(f.audio.mock.calls.at(-1)![0].generation).toBeGreaterThan(old.generation));
+      const fresh = f.audio.mock.calls.at(-1)![0];
+      expect(fresh).toMatchObject({ asset: 'clip', playing: true });
+      expect(fresh.time).toBeGreaterThanOrEqual(ticks(3));
+      expect(monitor.duration).toBe(10);
+      f.source.receive({ audio: 'sourceStatus', asset: 'clip', time: 0, playing: false,
+        generation: old.generation, levels: { peak: [], rms: [] } });
+      expect(monitor.paused).toBe(false);
+      expect(monitor.currentTime).toBeGreaterThanOrEqual(3);
     } finally { f.source.dispose(); vi.unstubAllGlobals(); }
   });
 

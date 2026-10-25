@@ -264,6 +264,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   const offAssets = PM.bus?.on?.('assets', () => {
     audio.sync();
     svgRasters.prime();
+    sourceMedia?.assetsChanged();
   }) ?? (() => {});
 
   // Edits reach the engine as soon as the write that made them returns: a
