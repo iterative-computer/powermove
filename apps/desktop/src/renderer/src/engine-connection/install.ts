@@ -513,7 +513,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   });
   (PM as any).EngineRender = renderTransport;
   sourceMedia = new EngineSourceMedia({
-    render: renderTransport, native, frameBridge: source,
+    render: renderTransport, native,
     project: () => PM.proj,
     revision: () => renderTransport.currentRevision() ?? 0,
     session: snapshotSession,

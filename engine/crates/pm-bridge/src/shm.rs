@@ -144,9 +144,9 @@ pub fn take(name: &str, length: usize) -> io::Result<Vec<u8>> {
     take_with(name, length, |bytes| Ok(bytes.to_vec()))
 }
 
-/// [`take`] without the copy: `read` sees the mapped segment's first
-/// `length` bytes, already unlinked, and the mapping ends when it returns.
-pub fn take_with<T>(
+/// `read` sees the mapped segment's first `length` bytes, already unlinked;
+/// the mapping ends when it returns.
+fn take_with<T>(
     name: &str,
     length: usize,
     read: impl FnOnce(&[u8]) -> io::Result<T>,

@@ -3,12 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EngineSourceMedia, sourcePosterSize } from './source-media';
 import type { EngineSnapshot, EngineRenderTransport } from './render-transport';
 import type { EngineBridge } from '../../../shared/engine-ipc';
-import type { FrameBridgeApi } from '../../../shared/frame-bridge';
 import type { DocumentSession } from './session';
 import { ticks } from './transport';
 import { SourceVideoPresenter } from './source-video-presenter';
 
-function fixture(frameBridge?: FrameBridgeApi) {
+function fixture() {
   const project = { id: 'project', assets: { clip: { id: 'clip', kind: 'video', w: 1920, h: 1080, dur: 20, contentHash: 'original', rendition: false } } };
   const pixels = { width: 4, height: 2, data: new Uint8ClampedArray(32), revision: 1, pixels: 'straight' } as EngineSnapshot;
   const snapshot = vi.fn(async () => pixels);
@@ -21,7 +20,6 @@ function fixture(frameBridge?: FrameBridgeApi) {
   const bind = vi.fn(async () => {});
   const changed = vi.fn(), error = vi.fn();
   const source = new EngineSourceMedia({ project: () => project, revision: () => 7,
-    frameBridge,
     render: { snapshot, toCanvas } as unknown as EngineRenderTransport,
     native: { browserRendition: rendition, sourceFilmstrip: strip, prepareSource: prepare, releasePreparedSources: release, cancelMediaJob: cancel } as unknown as EngineBridge,
     session: () => ({ audio } as unknown as DocumentSession), wake: async () => {}, bind,
@@ -290,9 +288,8 @@ describe('engine source consumers', () => {
     f.source.dispose();
   });
 
-  it('releases a native surface delivered after its frame caller has aborted', async () => {
-    const discardSource = vi.fn();
-    const f = fixture({ discardSource } as unknown as FrameBridgeApi);
+  it('drops native planes delivered after their frame caller has aborted', async () => {
+    const f = fixture();
     let finish!: (value: EngineSnapshot) => void;
     f.snapshot.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     const controller = new AbortController();
@@ -300,10 +297,9 @@ describe('engine source consumers', () => {
     await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledOnce());
     controller.abort();
     await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
-    finish({ width: 4, height: 2, data: new Uint8ClampedArray(),
-      videoSurface: { token: 'late-surface', width: 4, height: 2 } } as EngineSnapshot);
-    await vi.waitFor(() => expect(discardSource).toHaveBeenCalledOnce());
-    expect(discardSource).toHaveBeenCalledWith('late-surface');
+    finish({ width: 4, height: 2, data: new Uint8ClampedArray(12),
+      videoPlanes: { format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited', timestamp: 1 } } as EngineSnapshot);
+    await Promise.resolve();
     expect(f.source.stats.frames).toBe(0);
     expect(f.source.stats.hits).toBe(0);
     await f.source.frame('clip', 1, 4, 2, { color: 'compositor' });
@@ -499,15 +495,15 @@ describe('engine source consumers', () => {
     } finally { f.source.dispose(); surface?.remove(); vi.unstubAllGlobals(); }
   });
 
-  it('replaces a pending video surface after an interpretation edit', async () => {
+  it('replaces pending video planes after an interpretation edit', async () => {
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
-    const discardSource = vi.fn();
-    const f = fixture({ discardSource } as unknown as FrameBridgeApi);
+    const f = fixture();
     const present = vi.spyOn(SourceVideoPresenter.prototype, 'paint').mockResolvedValue();
     let finishOld!: (value: EngineSnapshot) => void;
     f.snapshot.mockImplementationOnce(() => new Promise(resolve => { finishOld = resolve; }));
-    f.snapshot.mockResolvedValue({ width: 4, height: 2, data: new Uint8ClampedArray(),
-      videoSurface: { token: 'fresh', width: 4, height: 2 } } as EngineSnapshot);
+    const video = (timestamp: number) => ({ format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited', timestamp });
+    const fresh = { width: 4, height: 2, data: new Uint8ClampedArray(12), videoPlanes: video(2) } as EngineSnapshot;
+    f.snapshot.mockResolvedValue(fresh);
     let surface: HTMLElement | null = null;
     try {
       const monitor = f.source.monitor('clip');
@@ -516,11 +512,9 @@ describe('engine source consumers', () => {
       await vi.waitFor(() => expect(f.snapshot).toHaveBeenCalledOnce());
       (f.project.assets.clip as any).interpret = { primaries: 'bt2020' };
       f.source.assetsChanged();
-      finishOld({ width: 4, height: 2, data: new Uint8ClampedArray(),
-        videoSurface: { token: 'stale', width: 4, height: 2 } } as EngineSnapshot);
+      finishOld({ width: 4, height: 2, data: new Uint8ClampedArray(12), videoPlanes: video(1) } as EngineSnapshot);
       await vi.waitFor(() => expect(present).toHaveBeenCalledOnce());
-      expect(discardSource).toHaveBeenCalledWith('stale');
-      expect(present).toHaveBeenCalledWith({ token: 'fresh', width: 4, height: 2 }, expect.any(AbortSignal));
+      expect(present).toHaveBeenCalledWith({ video: fresh.videoPlanes, data: fresh.data, width: 4, height: 2 }, expect.any(AbortSignal));
       expect(f.snapshot).toHaveBeenNthCalledWith(2, expect.objectContaining({ source: {
         asset: 'clip', fit: 'contain', color: 'compositor'
       } }), 'async');

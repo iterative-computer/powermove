@@ -108,7 +108,7 @@ export type EngineSnapshot = {
   width: number;
   height: number;
   data: Uint8ClampedArray;
-  videoSurface?: { token: string; width: number; height: number };
+  /** Source monitor video: `data` holds these decoded planes, not RGBA. */
   videoPlanes?: import('../../../shared/engine-protocol').SourceVideoFrame & { timestamp: number };
   pixels: SnapshotPixels;
   revision: number;
@@ -984,7 +984,7 @@ export class EngineRenderTransport {
 
   private result(reply: Extract<EngineSnapshotReply, { status: 'rendered' }>): EngineSnapshot {
     const data = new Uint8ClampedArray(reply.data.buffer, reply.data.byteOffset, reply.data.byteLength);
-    return { width: reply.width, height: reply.height, data, ...(reply.videoSurface ? { videoSurface: reply.videoSurface } : {}), ...(reply.videoPlanes ? { videoPlanes: reply.videoPlanes } : {}), pixels: reply.pixels, revision: reply.revision, viewSeq: reply.viewSeq, origin: reply.origin, layerBox: reply.layerBox ?? null, raster: reply.raster ?? null, quality: reply.quality, waitedUs: reply.waitedUs, renderUs: reply.renderUs, mainMs: reply.mainMs };
+    return { width: reply.width, height: reply.height, data, ...(reply.videoPlanes ? { videoPlanes: reply.videoPlanes } : {}), pixels: reply.pixels, revision: reply.revision, viewSeq: reply.viewSeq, origin: reply.origin, layerBox: reply.layerBox ?? null, raster: reply.raster ?? null, quality: reply.quality, waitedUs: reply.waitedUs, renderUs: reply.renderUs, mainMs: reply.mainMs };
   }
 
   private fail(error: unknown, where: string): EngineSnapshotError {
@@ -1386,7 +1386,7 @@ export class EngineRenderTransport {
   }
 
   private canvas(snapshot: EngineSnapshot): HTMLCanvasElement {
-    if (snapshot.videoSurface || snapshot.videoPlanes) throw new EngineSnapshotError('invalidMessage', 'A native source video surface is presented through its video track.');
+    if (snapshot.videoPlanes) throw new EngineSnapshotError('invalidMessage', 'Native source video planes are presented through their video track.');
     const out = this.options.createCanvas?.(snapshot.width, snapshot.height) ?? document.createElement('canvas');
     out.width = snapshot.width;
     out.height = snapshot.height;

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { EngineSnapshotRequest } from '../../shared/engine-ipc';
 import type { Request, Response, SnapshotViewer } from '../../shared/engine-protocol';
 import { RemoteError } from './protocol';
-import { MAX_BLENDER_WAIT_MS, MAX_FALLBACK_BYTES, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, fallbackBudgetBytes, validSnapshotRequest, type SnapshotEngine } from './snapshots';
+import { MAX_BLENDER_WAIT_MS, MAX_FALLBACK_BYTES, MAX_PER_WINDOW, RENDER_ALLOWANCE_MS, SnapshotService, answerBoundMs, sourceVideoByteLength, fallbackBudgetBytes, validSnapshotRequest, type SnapshotEngine } from './snapshots';
 import { FallbackInputs } from './fallback-inputs';
 import { decode, encode } from './msgpack';
 
@@ -179,78 +179,39 @@ describe('SnapshotService', () => {
     expect(e.sent[0]).toMatchObject({ body: { type: 'snapshot', renderer: 33, session: 5 }, revision: 41 });
   });
 
-  it('transfers native 4:2:2 source planes as a video surface without cloning them into renderer IPC', async () => {
-    const video = { format: 'nv16', primaries: 'smpte170m', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' };
-    const planes = new Uint8Array(8).fill(128);
-    const response = { ...rendered({ kind: 'inline', bytes: planes }, 2, 2), pixels: 'straight', video } as Response;
-    const present = vi.fn(async () => ({ token: 'native-surface', width: 2, height: 2 }));
-    const service = new SnapshotService({ engine: engine(async () => response), takePixels: null, sourceSurface: present, log: () => {} });
-    const reply = await service.snapshot(9, request({ target: { kind: 'source', asset: 'clip', fit: 'contain', color: 'compositor' }, pixels: 'straight', class: 'async' }));
-    expect(present).toHaveBeenCalledWith(9, 2, 2, video, planes, expect.any(Number));
-    expect(reply).toMatchObject({ status: 'rendered', videoSurface: { token: 'native-surface', width: 2, height: 2 }, data: new Uint8Array() });
-    const ordinary = await service.snapshot(9, request());
-    expect(ordinary).toMatchObject({ status: 'failed', code: 'invalidMessage' });
-    expect(present).toHaveBeenCalledOnce();
-  });
-
-  it('hands a shared coded frame to its surface without taking it into a main Buffer, and releases an unused one', async () => {
-    const video = { format: 'p010le', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' };
-    const name = '/pm.0123456789abcdef01234567';
-    const response = { ...rendered({ kind: 'sharedMemory', name, length: 24 }, 4, 2), pixels: 'straight', video } as Response;
-    const take = vi.fn((_: string, length: number) => new Uint8Array(length));
-    const present = vi.fn(async () => ({ token: 'segment-surface', width: 4, height: 2 }));
-    const service = new SnapshotService({ engine: engine(async () => response), takePixels: take, sourceSurface: present, log: () => {} });
-    const source = request({ target: { kind: 'source', asset: 'clip', fit: 'contain', color: 'compositor' }, pixels: 'straight', class: 'async' });
-    expect(await service.snapshot(9, source)).toMatchObject({ status: 'rendered', videoSurface: { token: 'segment-surface' }, data: new Uint8Array() });
-    expect(present).toHaveBeenCalledWith(9, 4, 2, video, { segment: name, length: 24 }, expect.any(Number));
-    expect(take).not.toHaveBeenCalled();
-    present.mockRejectedValueOnce(new Error('Source surface memory budget exceeded'));
-    expect(await service.snapshot(9, source)).toMatchObject({ status: 'failed', code: 'internal' });
-    expect(take).toHaveBeenCalledWith(name, 24);
-  });
-
-  it('uses distinct delivery stamps across raw and shared frames even at one clock tick', async () => {
+  it('uses distinct delivery stamps for consecutive coded frames even at one clock tick', async () => {
     const clock = vi.spyOn(performance, 'now').mockReturnValue(42);
     try {
-      let format = 'nv12';
-      const present = vi.fn(async () => ({ token: 'surface', width: 2, height: 2 }));
-      const e = engine(async () => ({ ...rendered({ kind: 'inline', bytes: new Uint8Array(format === 'nv12' ? 6 : 8) }, 2, 2),
-        pixels: 'straight', video: { format, primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } }) as Response);
-      const service = new SnapshotService({ engine: e, takePixels: null, sourceSurface: present, log: () => {} });
+      const e = engine(async () => ({ ...rendered({ kind: 'inline', bytes: new Uint8Array(6) }, 2, 2),
+        pixels: 'straight', video: { format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } }) as Response);
+      const service = new SnapshotService({ engine: e, takePixels: null, log: () => {} });
       const capture = () => service.snapshot(9, request({ target: { kind: 'source', asset: 'clip', fit: 'contain', color: 'compositor' }, pixels: 'straight', class: 'async' }));
-      const first = await capture();
-      format = 'nv16';
-      await capture();
-      format = 'nv12';
-      const third = await capture();
-      expect(first).toMatchObject({ status: 'rendered', videoPlanes: { timestamp: 42000 } });
-      expect(present).toHaveBeenCalledWith(9, 2, 2, expect.anything(), expect.anything(), 42001);
-      expect(third).toMatchObject({ status: 'rendered', videoPlanes: { timestamp: 42002 } });
+      expect(await capture()).toMatchObject({ status: 'rendered', videoPlanes: { timestamp: 42000 } });
+      expect(await capture()).toMatchObject({ status: 'rendered', videoPlanes: { timestamp: 42001 } });
     } finally { clock.mockRestore(); }
-  });
-
-  it('preserves native I420A planes for an alpha video frame without an RGB surface', async () => {
-    const video = { format: 'i420a', primaries: 'smpte170m', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' };
-    const planes = new Uint8Array(10);
-    const response = { ...rendered({ kind: 'inline', bytes: planes }, 2, 2), pixels: 'straight', video } as Response;
-    const present = vi.fn(async () => { throw new Error('Alpha must not enter the opaque IOSurface path'); });
-    const service = new SnapshotService({ engine: engine(async () => response), takePixels: null, sourceSurface: present, log: () => {} });
-    const reply = await service.snapshot(9, request({ target: { kind: 'source', asset: 'alpha', fit: 'contain', color: 'compositor' }, pixels: 'straight', class: 'async' }));
-    expect(reply).toMatchObject({ status: 'rendered', videoPlanes: { ...video, timestamp: expect.any(Number) }, data: planes });
-    expect(present).not.toHaveBeenCalled();
   });
 
   it.each([
     [{ format: 'nv12', primaries: 'bt470bg', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' }, 6],
+    [{ format: 'i420a', primaries: 'smpte170m', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' }, 10],
+    [{ format: 'i422', primaries: 'smpte170m', transfer: 'bt709', matrix: 'smpte170m', range: 'limited' }, 8],
+    [{ format: 'i420p10', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' }, 12],
     [{ format: 'rgba', primaries: 'bt709', transfer: 'srgb', matrix: 'rgb', range: 'full' }, 16]
-  ])('sends %o frames without a GPU import', async (video, bytes) => {
+  ])('returns %o frames as WebCodecs planes for the window', async (video, bytes) => {
     const planes = new Uint8Array(bytes);
     const response = { ...rendered({ kind: 'inline', bytes: planes }, 2, 2), pixels: 'straight', video } as Response;
-    const present = vi.fn();
-    const service = new SnapshotService({ engine: engine(async () => response), takePixels: null, sourceSurface: present, log: () => {} });
+    const service = new SnapshotService({ engine: engine(async () => response), takePixels: null, log: () => {} });
     const reply = await service.snapshot(9, request({ target: { kind: 'source', asset: 'clip', fit: 'contain', color: 'compositor' }, pixels: 'straight', class: 'async' }));
     expect(reply).toMatchObject({ status: 'rendered', videoPlanes: { ...video, timestamp: expect.any(Number) }, data: planes });
-    expect(present).not.toHaveBeenCalled();
+    const ordinary = await service.snapshot(9, request());
+    expect(ordinary).toMatchObject({ status: 'failed', code: 'invalidMessage' });
+  });
+
+  it('refuses retired IOSurface layouts and unknown colour tags', () => {
+    for (const format of ['nv16', 'p010le']) expect(() => sourceVideoByteLength(2, 2, { format, primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' })).toThrow('format');
+    expect(() => sourceVideoByteLength(2, 2, { format: 'nv12', primaries: 'bt709', transfer: 'private', matrix: 'bt709', range: 'limited' })).toThrow('colour tags');
+    expect(sourceVideoByteLength(3, 3, { format: 'i422', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' })).toBe(21);
+    expect(sourceVideoByteLength(3, 3, { format: 'i420p10', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' })).toBe(34);
   });
 
   it('maps shared-memory results once through the bridge', async () => {

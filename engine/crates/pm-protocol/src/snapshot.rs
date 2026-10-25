@@ -590,7 +590,7 @@ impl Validate for SnapshotOutcome {
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SourceVideoFrame {
-    // Native plane format: nv12, nv16, p010le, or planar i420a.
+    // WebCodecs buffer layout: nv12, planar i420a, i422 or i420p10, or rgba.
     pub format: String,
     // gfx::ColorSpace / WebCodecs identifiers describing the decoded frame.
     pub primaries: String,
@@ -617,7 +617,8 @@ impl SourceVideoFrame {
         }
     }
 
-    /// Packed Y plus interleaved UV, planar Y,U,V,A for i420a, or RGBA8; no padding.
+    /// Y then interleaved (nv12) or planar chroma, then i420a's alpha, or
+    /// RGBA8; no padding. i420p10 samples are 16-bit little-endian.
     pub fn byte_len(&self, width: u32, height: u32) -> Option<u64> {
         if self.visible_width.is_some_and(|w| w == 0 || w > width) {
             return None;
@@ -627,12 +628,12 @@ impl SourceVideoFrame {
         if self.format == "rgba" {
             return (w * h).checked_mul(4);
         }
-        let chroma_h = if self.format == "nv16" {
+        let chroma_h = if self.format == "i422" {
             h
         } else {
             h.div_ceil(2)
         };
-        let bytes = if self.format == "p010le" { 2 } else { 1 };
+        let bytes = if self.format == "i420p10" { 2 } else { 1 };
         let alpha = if self.format == "i420a" { w * h } else { 0 };
         (w * h + w.div_ceil(2) * 2 * chroma_h)
             .checked_mul(bytes)?
@@ -651,7 +652,7 @@ impl Validate for SourceVideoFrame {
             && if rgba {
                 *self == Self::srgb_rgba()
             } else {
-                matches!(self.format.as_str(), "nv12" | "nv16" | "p010le" | "i420a")
+                matches!(self.format.as_str(), "nv12" | "i420a" | "i422" | "i420p10")
                     && matches!(self.primaries.as_str(), "bt709" | "smpte170m" | "bt470bg")
                     && matches!(self.transfer.as_str(), "bt709" | "linear")
                     && matches!(self.matrix.as_str(), "bt709" | "smpte170m" | "bt2020-ncl")
@@ -1536,9 +1537,9 @@ mod tests {
         video.format = "i420a".into();
         assert_eq!(video.byte_len(160, 90), Some(36000));
         assert_eq!(video.byte_len(3, 3), Some(26));
-        video.format = "p010le".into();
+        video.format = "i420p10".into();
         assert_eq!(video.byte_len(160, 90), Some(43200));
-        video.format = "nv16".into();
+        video.format = "i422".into();
         assert_eq!(video.byte_len(160, 90), Some(28800));
         video.transfer = "guessed-profile".into();
         assert!(video.validate().is_err());
