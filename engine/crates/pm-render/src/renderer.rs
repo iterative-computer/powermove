@@ -2192,7 +2192,13 @@ impl Renderer {
         let [draw] = plan.draws.as_slice() else {
             return Ok(None);
         };
-        let plan::Content::Texture { source, uv, alpha } = &draw.content else {
+        // Raster content reaches the sampler as a placed draw; only a flat
+        // (non-2.5D) placement can be a 1:1 copy.
+        let content = match &draw.content {
+            plan::Content::Placed(p) if p.plane.is_none() => &p.content,
+            other => other,
+        };
+        let plan::Content::Texture { source, uv, alpha } = content else {
             return Ok(None);
         };
         // An interpreted source is read differently from its file (color,
