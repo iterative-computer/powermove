@@ -609,6 +609,24 @@
         "relative": 0.001
       }
     },
+    "pyramid_playback_30": {
+      "all_threads/cpu.heap_alloc_bytes": {
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
+      },
+      "all_threads/cpu.heap_allocs": {
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here, or add only threads with fixed work): measured spread over 3 identical runs within the bench thread's.",
+        "relative": 0.001
+      },
+      "cpu.heap_alloc_bytes": {
+        "reason": "As cpu.heap_allocs: measured spread up to 0.03% (inspector_edit_500: 71,631,848 to 71,654,048 bytes; playback_500: 341,465,520 to 341,476,800).",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: measured spread over 5 to 9 identical runs is up to 0.011% (inspector_edit_500: 845,076 to 845,166).",
+        "relative": 0.001
+      }
+    },
     "scrub_24": {
       "all_threads/cpu.heap_alloc_bytes": {
         "reason": "Every thread: the video decode thread's demuxer and decoder allocate according to how far decoding ahead got when each seek arrived. Measured spread: 3 full runs 15,046 to 15,056 allocations and 1,616,662 to 1,618,582 bytes; a 4th full run 15,198 allocations; 12 runs of scrub_24 alone 15,046 to 15,339 allocations (1.9%) and 1,521,120 to 1,538,422 bytes (1.1%), at load 29. The bench thread's own counts stay within 0.1%.",
