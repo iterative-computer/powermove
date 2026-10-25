@@ -1771,7 +1771,7 @@ P5) now belong to the perf3 lane.
 ## Pacing at 120 Hz
 
 Playback at the display's rate presents every frame the engine renders, from
-the first refresh after Play. Five rules keep it so; the 120 Hz rig's
+the first refresh after Play. Seven rules keep it so; the 120 Hz rig's
 `playing` row checks them
 (`docs/engine/perfbench.md`, with `PM_PERFBENCH_RIG_TRACE` for the per-frame
 trace).
@@ -1783,15 +1783,18 @@ trace).
    costs a refresh: its frame is dropped as late. The 0.75-refresh commit
    timer (perf3) did that at 120 Hz under load and was removed. The display
    prediction is 1.5 refreshes and 3.2 ms (A/V sync above).
-2. **Render-ahead covers twice the delivery time** (`Schedule::lead_frames`):
-   at least `DEFAULT_LEAD` (4) frames and 2 × delivery (3 refreshes, at least
-   12.5 ms). The viewer picks a frame about two refreshes before it shows;
-   the other delivery covers the wait for the render's phase slot, the render
-   and its jitter. Four frames at 120 fps (33 ms) arrived after the worker had
-   decided their refresh. It is 6 frames at 120 fps on a 120 Hz display and
-   unchanged at 60 fps and below. The playing pool stays ring + 4 + 2: a frame
-   leaves it when the viewer has drawn it, about two refreshes before it
-   shows, so six frames ahead hold about five surfaces (`poolWaits` stays 0).
+2. **Render-ahead covers twice the delivery time and a phase slot**
+   (`Schedule::lead_frames`): at least `DEFAULT_LEAD` (4) frames, and
+   2 × delivery + one refresh. Delivery is the viewer's display latency
+   (the hint's `latencyUs`), half a refresh and the arrival; without it,
+   3 refreshes. One delivery is the viewer's horizon, the other covers the
+   render and a stall on the way to the viewer (the window's main thread
+   busy for a dozen milliseconds); the refresh is the longest wait for the
+   render's phase slot. Four frames at 120 fps (33 ms) arrived after the
+   worker had decided their refresh. It is 7 frames at 120 fps on a 120 Hz
+   display and unchanged at 60 fps and below. The playing pool stays
+   ring + 4 + 2: a frame leaves it when the viewer has drawn it, about two
+   refreshes before it shows (`poolWaits` stays 0).
 3. **Frame events follow the refresh that drew the frame**
    (`PresentedEvents`). The worker's report arrives about a millisecond into
    the refresh, the moment the page's own animation frame runs: taken in
@@ -1828,6 +1831,28 @@ trace).
    Play first), and the viewer keeps drawing frames of a pool whose
    surfaces match the new one's (`presenter.ts` `onPool`). Sessions with
    compatibility producers start through the native preroll instead.
+
+6. **One vsync timeline, corrected continuously** (`VsyncEstimator`).
+   The worker's estimator locks once on the median of its BeginFrame
+   samples, then each sample within a quarter refresh nudges the phase by
+   1/16 of its error (at most 1/16 of a refresh); twelve agreeing samples
+   outside that band relock it. The hint goes to the engine when the phase
+   moved 100 µs or every 250 ms. Within a run (same clock, period and
+   resize state) the worker's decision offset moves with the timeline in
+   steps of under half a refresh instead of being recomputed: a refit that
+   moved the frame boundary across a decision drew one frame twice and
+   dropped the next.
+7. **Playback frames leave from the completion thread.** The render thread
+   encodes the next timed frame while the GPU finishes the last one;
+   `present/complete.rs` sends each, in order, when its GPU work is done.
+   A frame costs the render thread its compose only, so render-ahead holds
+   on a busy machine. The schedule's cost estimate is render start to GPU
+   done. The C′ prototype still presents on the render thread.
+
+`POWERMOVE_ENGINE_SIM_AUDIO=1` replaces the audio device with a simulated
+one (48 kHz, 512-frame buffers, 10 ms latency, called back a buffer ahead)
+so a machine without working output still runs audio-clocked playback
+(rig `PM_PERFBENCH_RIG_AUDIO=1`).
 
 Open, outside the bridge:
 

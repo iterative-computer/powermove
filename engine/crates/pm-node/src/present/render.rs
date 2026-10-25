@@ -5074,11 +5074,28 @@ impl Thread {
                         self.stats().rerendered += 1;
                     }
                     let started = now();
-                    // Timed frames are sent in order after any frame still
-                    // finishing on the GPU.
-                    self.drain_frames();
-                    let rendered =
-                        self.render(key, media, k, Some((shown_from, shown_for)), false, false);
+                    // The next frame is encoded while the GPU finishes this
+                    // one: the completion thread sends it, in order, when
+                    // the GPU is done (`super::complete`), so a frame costs
+                    // the render thread its compose, not compose plus GPU.
+                    // The C′ prototype presents on this thread.
+                    let remote = self
+                        .views
+                        .get(&key)
+                        .and_then(|v| v.pool.as_ref())
+                        .is_some_and(|l| l.remote.is_some());
+                    let deferred = self.completer.is_some() && !remote;
+                    if !deferred {
+                        self.drain_frames();
+                    }
+                    let rendered = self.render(
+                        key,
+                        media,
+                        k,
+                        Some((shown_from, shown_for)),
+                        deferred,
+                        false,
+                    );
                     self.trace_event(
                         if rendered.is_some() {
                             "timed frame"
@@ -5107,15 +5124,10 @@ impl Thread {
                     }
                     view.compat_blocked = None;
                     view.schedule.rendered(&view.clock, k);
-                    if rendered.is_some() {
-                        // What the next frames will cost (deadline-aware skips).
-                        view.schedule.observe((now() - started) as f64);
-                    }
-                    let remote = view.pool.as_ref().is_some_and(|l| l.remote.is_some());
                     if let Some(descriptor) = rendered {
                         if remote {
                             self.present_remote(key, &descriptor, shown_from);
-                        } else {
+                        } else if !deferred {
                             let revision = descriptor.revision;
                             self.event(key, Event::Frame(descriptor), Some(revision));
                         }
@@ -5938,6 +5950,11 @@ impl Thread {
         let trace = self.config.trace;
         let elapsed = gpu_done - meta.start;
         if let Some(view) = self.views.get_mut(&key) {
+            // What the next playback frames will cost, render start to GPU
+            // done (the schedule's deadline-aware skips and a Play's start).
+            if meta.timing.is_some() {
+                view.schedule.observe(elapsed as f64);
+            }
             view.costs.frame(
                 meta.timing.is_some(),
                 meta.cpu_us,

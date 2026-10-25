@@ -180,20 +180,19 @@ impl Schedule {
     }
 
     /// Render-ahead in frames: at least `lead`, and at least twice the
-    /// delivery time. One delivery is the viewer's horizon (it picks a frame
-    /// about two refreshes before the frame shows); the other covers the
-    /// wait for the render's phase slot, the render itself, and its jitter.
-    /// At 120 fps, 4 frames (33 ms) delivered frames after the viewer had
+    /// delivery time plus a phase slot (`slot_us`, a refresh: the longest
+    /// wait for a render's slot). One delivery is the viewer's horizon (it
+    /// picks a frame its display latency and half a refresh before it
+    /// shows); the other covers the render and a stall on the way to the
+    /// viewer (the window's main thread busy for a dozen milliseconds). At
+    /// 120 fps, 4 frames (33 ms) delivered frames after the viewer had
     /// decided for their refresh (docs/engine/bridge.md, "Pacing at 120 Hz").
-    pub fn lead_frames(lead: u32, delivery_us: f64, frame_us: f64) -> u32 {
+    pub fn lead_frames(lead: u32, delivery_us: f64, slot_us: f64, frame_us: f64) -> u32 {
         if frame_us.is_nan() || frame_us <= 0.0 {
             return lead;
         }
-        lead.max(
-            (2.0 * delivery_us / frame_us)
-                .ceil()
-                .min(f64::from(MAX_LEAD)) as u32,
-        )
+        let ahead = (2.0 * delivery_us + slot_us) / frame_us;
+        lead.max((ahead - 1e-6).ceil().min(f64::from(MAX_LEAD)) as u32)
     }
 
     /// What to do at host µs `now` with `lead` frames of render-ahead (a
@@ -246,7 +245,8 @@ impl Schedule {
             Some(latency) => latency + p.hint.period_us / 2.0 + ARRIVAL_US,
             None => (3.0 * p.hint.period_us).max(DELIVERY_US / 2.0),
         });
-        let lead = Self::lead_frames(lead, delivery, Self::frame_us(clock));
+        let slot = phase.map_or(0.0, |p| p.hint.period_us);
+        let lead = Self::lead_frames(lead, delivery, slot, Self::frame_us(clock));
         let ready = now as f64 + self.cost_us.map_or(0.0, |c| c + delivery);
         if let Some(next) = self.next_redo(clock, now, k, until, ready, phase) {
             return next;
@@ -560,32 +560,32 @@ mod tests {
         let clock = playing(0, PlaybackRate::NORMAL);
         let mut schedule = Schedule::default();
         let p = phase(0.5);
-        // An 8 ms refresh delivers in 24 ms: a lead of 1 renders 3 frames
-        // (50 ms) ahead. Frame 600 shows from 50 ms, so it is due at once.
+        // Frames due at once render at once; the first one due later waits
+        // for the first phase slot (7 + 8n ms: refreshes at 3 + 8n ms, half
+        // a refresh in) at or after its due time.
+        let mut k = 0;
+        let at = loop {
+            match schedule.next_in_phase(&clock, 0, 1, Some(p)) {
+                Next::Render { k: rendered, .. } => {
+                    k = rendered;
+                    schedule.rendered(&clock, rendered);
+                }
+                Next::WaitUntil(at) => break at,
+                other => panic!("{other:?}"),
+            }
+        };
+        let lead = Schedule::lead_frames(1, 24_000.0, 8_000.0, Schedule::frame_us(&clock));
+        let due =
+            clock.host_at((k + 1) * FRAME).unwrap() - f64::from(lead) * Schedule::frame_us(&clock);
+        assert!(at >= due && at < due + 8_000.0, "{at} for due {due}");
+        assert_eq!((at - 7_000.0).rem_euclid(8_000.0), 0.0, "{at}");
         assert!(matches!(
-            schedule.next_in_phase(&clock, 0, 1, Some(p)),
-            Next::Render { k: 600, .. }
+            schedule.next_in_phase(&clock, at as i64, 1, Some(p)),
+            Next::Render { .. }
         ));
-        schedule.rendered(&clock, 600);
-        // 601 shows from 66.7 ms and is due at 16.7 ms. Refreshes fall at
-        // 3 + 8n ms, the phase at 7 + 8n ms: 23 ms.
-        assert_eq!(
-            schedule.next_in_phase(&clock, 100, 1, Some(p)),
-            Next::WaitUntil(23_000.0)
-        );
-        assert!(matches!(
-            schedule.next_in_phase(&clock, 23_000, 1, Some(p)),
-            Next::Render { k: 601, .. }
-        ));
-        schedule.rendered(&clock, 601);
-        // 602 is due at 33.3 ms: the next phase slot is 39 ms.
-        assert_eq!(
-            schedule.next_in_phase(&clock, 23_100, 1, Some(p)),
-            Next::WaitUntil(39_000.0)
-        );
         // Without a hint it would start at its due time.
-        match schedule.next(&clock, 23_100, 1) {
-            Next::WaitUntil(at) => assert!((at - 33_333.3).abs() < 1.0, "{at}"),
+        match Schedule::default().next(&clock, 0, 1) {
+            Next::Render { .. } => {}
             other => panic!("{other:?}"),
         }
     }
@@ -593,16 +593,23 @@ mod tests {
     #[test]
     fn render_ahead_covers_twice_the_delivery_at_any_frame_rate() {
         let refresh = |hz: f64| 1e6 / hz;
-        let delivery = |hz: f64| (3.0 * refresh(hz)).max(DELIVERY_US / 2.0);
-        // 120 fps on a 120 Hz display: 6 frames (50 ms), not 4 (33 ms).
-        assert_eq!(Schedule::lead_frames(4, delivery(120.0), refresh(120.0)), 6);
+        // The worker's display latency (1.5 refreshes and 3.2 ms), half a
+        // refresh, and the arrival.
+        let delivery = |hz: f64| 2.0 * refresh(hz) + 3_200.0 + ARRIVAL_US;
+        let at =
+            |fps: f64, hz: f64| Schedule::lead_frames(4, delivery(hz), refresh(hz), refresh(fps));
+        // 120 fps on a 120 Hz display: 7 frames (58 ms), not 4 (33 ms).
+        assert_eq!(at(120.0, 120.0), 7);
         // Lower rates keep the 4-frame floor, which is already longer.
-        assert_eq!(Schedule::lead_frames(4, delivery(120.0), refresh(60.0)), 4);
-        assert_eq!(Schedule::lead_frames(4, delivery(120.0), 1e6 / 23.976), 4);
-        // 60 fps on a 60 Hz display delivers in 50 ms: 6 frames.
-        assert_eq!(Schedule::lead_frames(4, delivery(60.0), refresh(60.0)), 6);
+        assert_eq!(at(60.0, 120.0), 4);
+        assert_eq!(at(23.976, 120.0), 4);
+        // 60 fps on a 60 Hz display: 6 frames (100 ms).
+        assert_eq!(at(60.0, 60.0), 6);
         // Bounded however fast the frames.
-        assert_eq!(Schedule::lead_frames(4, delivery(120.0), 100.0), MAX_LEAD);
+        assert_eq!(
+            Schedule::lead_frames(4, delivery(120.0), refresh(120.0), 100.0),
+            MAX_LEAD
+        );
     }
 
     #[test]
