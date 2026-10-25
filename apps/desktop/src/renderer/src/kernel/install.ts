@@ -1036,10 +1036,10 @@ export function installKernel(PM: LegacyPM): InstalledKernel {
     },
     rasterKey: (layer, scale, time, crop) => rasterContentKey(PM, layer, scale, time, crop),
     documentRevision: () => PM.EngineDoc?.barrier?.revision ?? null,
-    engineRasterAsync: async (layer, scale, time, crop) => {
+    engineRasterAsync: async (layer, scale, time, crop, urgent) => {
       const engine = engineRender(PM);
       if (!engine) return null;
-      return await engineRasterPrepared(engine, rasterHost(PM), layer, scale, time, crop as RasterCrop);
+      return await engineRasterPrepared(engine, rasterHost(PM), layer, scale, time, crop as RasterCrop, urgent);
     }
   });
   const rasterBase: RenderAPI['raster'] = (...args) => {

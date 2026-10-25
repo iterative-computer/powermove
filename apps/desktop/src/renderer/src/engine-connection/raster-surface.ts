@@ -110,12 +110,12 @@ export async function engineRaster(transport: EngineRenderTransport, host: Raste
   return snapshot ? toRasterSurface(withoutInk(snapshot, layer, scale), layer, window, (s) => transport.toCanvas(s), host, time) : null;
 }
 
-/** Playback's base pixels, asynchronously prepared at dependency priority. */
+/** A compatibility base, asynchronously prepared at current-frame or paused-future priority. */
 /** The engine's raster and the document revision it was drawn at. */
-export async function engineRasterPrepared(transport: EngineRenderTransport, host: RasterHost, layer: any, scale: number, time: number, crop: RasterCrop): Promise<{ surface: EngineRasterSurface | null; revision: number } | null> {
+export async function engineRasterPrepared(transport: EngineRenderTransport, host: RasterHost, layer: any, scale: number, time: number, crop: RasterCrop, urgent = true): Promise<{ surface: EngineRasterSurface | null; revision: number } | null> {
   const window = engineCrop(crop);
   const where = host.locate(layer);
-  const snapshot = await transport.rasterForCompat(String(layer?.id ?? ''), scale, time, window, rasterOptions(layer, where));
+  const snapshot = await transport.rasterForCompat(String(layer?.id ?? ''), scale, time, window, rasterOptions(layer, where), urgent ? 'sync' : 'idle');
   return snapshot ? { surface: toRasterSurface(withoutInk(snapshot, layer, scale), layer, window, s => transport.toCanvas(s), host, time), revision: snapshot.revision } : null;
 }
 

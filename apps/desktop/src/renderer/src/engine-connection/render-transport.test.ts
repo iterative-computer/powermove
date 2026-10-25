@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { EngineCompatAsk, EngineSnapshotReply, EngineSnapshotRequest } from '../../../shared/engine-ipc';
 import type { ShaderFallbackRequest, SnapshotViewer } from '../../../shared/engine-protocol';
-import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, intoLoop, runAhead, COMPAT_WARM_MS, COMPAT_PREFETCH, COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
+import { BLENDER_WAIT_MS, COMPAT_LOOKAHEAD, intoLoop, runAhead, COMPAT_WARM_DELAY_MS, COMPAT_WARM_MS, COMPAT_PREFETCH, COMPAT_PREFETCH_IN_FLIGHT, COMPAT_PREPARE_IN_FLIGHT, EngineRenderTransport, EngineSnapshotError, VANISHING_RASTER_SCALE, type TransportSession, type TransportSvgRasters, layerRasterScale, svgUploadKey, unpremultiply } from './render-transport';
 
 const quality = { resolution: 'full', representation: 'original', draft3d: false, cached: false, standIn: false } as const;
 
@@ -123,14 +123,17 @@ describe('EngineRenderTransport', () => {
   });
 
   it('prepares playback base pixels over async IPC at dependency priority, without changing ordinary async snapshots', async () => {
-    const { transport, asked } = setup([rendered(2, 2), rendered(2, 2)]);
+    const { transport, asked } = setup([rendered(2, 2), rendered(2, 2), rendered(2, 2)]);
     const sync = vi.spyOn(transport, 'snapshotSync');
     await transport.rasterForCompat('shape', 2, .5);
     expect(sync).not.toHaveBeenCalled();
     expect(asked[0]!.snapshot.class).toBe('sync');
     await transport.raster('shape', 2, .6);
     expect(asked[1]!.snapshot.class).toBe('async');
+    await transport.rasterForCompat('shape', 2, .7, null, {}, 'idle');
+    expect(asked[2]!.snapshot.class).toBe('idle');
     expect(transport.stats.async).toBe(2);
+    expect(transport.stats.idle).toBe(1);
   });
 
   it('draws what the engine needs on this thread and asks again, never waiting on a task', () => {
@@ -678,13 +681,16 @@ describe('compatibility answers during playback', () => {
     } finally { t.dispose(); vi.useRealTimers(); }
   });
 
-  it('warms a bounded horizon from paused needs before Play without a continuing paused timer', async () => {
+  it('warms a bounded horizon after paused presentation before Play without a continuing paused timer', async () => {
     vi.useFakeTimers();
     const { t, session, asked, state } = rig(false);
     t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, async () => {});
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([0]);
+      t.pausedFramePresented(0);
+      await vi.advanceTimersByTimeAsync(COMPAT_WARM_DELAY_MS);
       expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => i * frame));
       expect(t.lookaheadStats.maxInFlight).toBeLessThanOrEqual(COMPAT_PREPARE_IN_FLIGHT);
       expect(vi.getTimerCount()).toBe(0);
@@ -703,7 +709,61 @@ describe('compatibility answers during playback', () => {
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(20 * frame)] }, session);
       await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([20 * frame]);
+      t.pausedFramePresented(100 * frame);
+      await vi.advanceTimersByTimeAsync(COMPAT_WARM_DELAY_MS);
       expect(asked).toEqual(Array.from({ length: COMPAT_LOOKAHEAD + 1 }, (_, i) => (20 - i) * frame));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('gives a paused seek both visible layer answers before warming future frames', async () => {
+    vi.useFakeTimers();
+    const { t, session, state, asked } = rig(false);
+    const pending: Array<{ layer: string; time: number; done: () => void }> = [];
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, n => new Promise(resolve => pending.push({ layer: n.layer, time: n.time, done: resolve })));
+    try {
+      state.time = 18 * frame;
+      t.receiveCompat({ compat: 'needs', needs: [need(state.time, 'plain')] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending.map(p => p.time)).toEqual([18 * frame]);
+      state.time = 6 * frame;
+      t.pausedTimeChanged();
+      t.receiveCompat({ compat: 'needs', needs: [need(state.time, 'plain')] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending.map(p => p.time)).toEqual([18 * frame, 6 * frame]);
+      pending[0]!.done();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([]); // The obsolete .6 answer cannot satisfy the .2 view.
+      pending[1]!.done();
+      await vi.advanceTimersByTimeAsync(0);
+      t.receiveCompat({ compat: 'needs', needs: [need(6 * frame, 'typed')] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending.map(p => p.time)).toEqual([18 * frame, 6 * frame, 6 * frame]);
+      pending[2]!.done();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked).toEqual([6 * frame, 6 * frame]);
+      t.pausedFramePresented(6 * frame);
+      await vi.advanceTimersByTimeAsync(COMPAT_WARM_DELAY_MS);
+      expect(pending.some(p => p.time > 6 * frame)).toBe(true);
+    } finally { t.dispose(); vi.useRealTimers(); }
+  });
+
+  it('cancels the previous frame’s deferred paused warmup when seeking', async () => {
+    vi.useFakeTimers();
+    const { t, session, state, asked } = rig(false);
+    t.answerCompat('rasterOverride', n => { asked.push(n.time); return { kind: 'native' }; }, async () => {});
+    try {
+      state.time = 18 * frame;
+      t.receiveCompat({ compat: 'needs', needs: [need(state.time)] }, session);
+      await vi.advanceTimersByTimeAsync(0);
+      t.pausedFramePresented(state.time);
+      await vi.advanceTimersByTimeAsync(COMPAT_WARM_DELAY_MS - 1);
+      state.time = 6 * frame;
+      t.pausedTimeChanged();
+      t.receiveCompat({ compat: 'needs', needs: [need(state.time)] }, session);
+      await vi.advanceTimersByTimeAsync(COMPAT_WARM_DELAY_MS + 1);
+      expect(asked).toEqual([18 * frame, 6 * frame]);
       expect(vi.getTimerCount()).toBe(0);
     } finally { t.dispose(); vi.useRealTimers(); }
   });
@@ -716,12 +776,17 @@ describe('compatibility answers during playback', () => {
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(0);
-      expect(pending).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
+      expect(pending).toHaveLength(1);
+      pending.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+      t.pausedFramePresented(0);
+      await vi.advanceTimersByTimeAsync(COMPAT_WARM_DELAY_MS);
+      expect(pending).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(COMPAT_WARM_MS + 1);
       pending.forEach(resolve => resolve());
       await vi.advanceTimersByTimeAsync(0);
       expect(asked).toEqual([0]);
-      expect(pending).toHaveLength(COMPAT_PREPARE_IN_FLIGHT);
+      expect(pending).toHaveLength(1);
       expect(t.lookaheadStats.inFlight).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
     } finally { t.dispose(); vi.useRealTimers(); }
@@ -994,7 +1059,7 @@ describe('compatibility answers during playback', () => {
     } finally { t.dispose(); }
   });
 
-  it('prepares nothing speculatively while paused', async () => {
+  it('waits for the paused frame before preparing its future horizon, and never prefetches beyond it', async () => {
     vi.useFakeTimers();
     const { t, session } = rig(false);
     const prepared: number[] = [];
@@ -1002,6 +1067,9 @@ describe('compatibility answers during playback', () => {
     try {
       t.receiveCompat({ compat: 'needs', needs: [need(0)] }, session);
       await vi.advanceTimersByTimeAsync(100);
+      expect(prepared).toEqual([0]);
+      t.pausedFramePresented(0);
+      await vi.advanceTimersByTimeAsync(COMPAT_WARM_DELAY_MS);
       expect(Math.max(...prepared)).toBe(COMPAT_LOOKAHEAD * frame);
       expect(t.lookaheadStats.prefetched).toBe(0);
     } finally { t.dispose(); vi.useRealTimers(); }

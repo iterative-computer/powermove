@@ -530,7 +530,11 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   // And the compatibility context draws over WebM export frames (kernel/compat-context.ts).
   const detachContextExports = (PM as any).CompatContextExports?.attach?.(renderTransport) ?? (() => {});
   // Playback: keep compatibility answers ahead of the clock (render-transport.ts).
-  const offPresented = PM.bus?.on?.('preview:presented', () => renderTransport.presentedWhilePlaying());
+  const offPresented = PM.bus?.on?.('preview:presented', (event: { time?: number }) => {
+    if (Number.isFinite(event?.time)) renderTransport.pausedFramePresented(ticks(event.time!));
+    else renderTransport.presentedWhilePlaying();
+  });
+  const offTime = PM.bus?.on?.('time', () => { if (!PM.playing) renderTransport.pausedTimeChanged(); });
   let wasPlaying = !!PM.playing;
   const offTransport = PM.bus?.on?.('transport', () => {
     const playing = !!PM.playing;
@@ -824,6 +828,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       detachRasterCompat();
       detachContextExports();
       if (typeof offPresented === 'function') offPresented();
+      if (typeof offTime === 'function') offTime();
       if (typeof offTransport === 'function') offTransport();
       renderTransport.dispose();
       if ((PM as any).EngineRender === renderTransport) (PM as any).EngineRender = null;

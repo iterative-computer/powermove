@@ -286,7 +286,7 @@ describe('the raster override producer', () => {
     expect(engineRasterAsync).not.toHaveBeenCalled();
     await compat.prepare(need('box', 1), 4);
     expect(engineRasterAsync).toHaveBeenCalledTimes(1);
-    expect(engineRasterAsync).toHaveBeenCalledWith(shape, 2, 1, undefined);
+    expect(engineRasterAsync).toHaveBeenCalledWith(shape, 2, 1, undefined, true);
   });
 
   it('propagates a preparation failure instead of drawing a blank or blocking in a sync retry', async () => {
@@ -304,9 +304,17 @@ describe('the raster override producer', () => {
     services.register('raster', (layer: any, ...rest: any[]) => ({ ...original(layer, ...rest), key: 'prepared' }));
     const request = need('title', 0.5, 2);
     await compat.prepare(request, 4);
-    expect(engineRasterAsync).toHaveBeenCalledWith(text, 2, 0.5, undefined);
+    expect(engineRasterAsync).toHaveBeenCalledWith(text, 2, 0.5, undefined, true);
     expect(compat.answer(request, 4, { prepared: true })).toMatchObject({ kind: 'raster', key: 'prepared' });
     expect(engineRaster).not.toHaveBeenCalled();
+  });
+
+  it('passes paused future preparation to the background raster queue', async () => {
+    const { services, compat, engineRasterAsync, need } = setup(true);
+    const original = services.get<any>('raster');
+    services.register('raster', (layer: any, ...rest: any[]) => ({ ...original(layer, ...rest), key: 'future' }));
+    await compat.prepare(need('title', 0.6, 2), 4, { urgent: false });
+    expect(engineRasterAsync).toHaveBeenCalledWith(text, 2, 0.6, undefined, false);
   });
 
   it('freezes geometry while a shared wrapper surface waits for asynchronous readback', async () => {

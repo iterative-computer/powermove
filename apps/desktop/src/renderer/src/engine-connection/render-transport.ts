@@ -224,6 +224,9 @@ export const COMPAT_LOOKAHEAD = 18;
 /** A bounded paused prefill; never an ongoing paused timer. A changing
  *  base needs enough turns to fill the pipeline, including worker startup. */
 export const COMPAT_WARM_MS = 500;
+/** Give a newly presented paused frame a brief interaction turn before
+ * preparing future rasters. A seek during that turn needs the slots now. */
+export const COMPAT_WARM_DELAY_MS = 250;
 /** Main-thread time one lookahead call may take (ms); the rest waits for the next frame. */
 const LOOKAHEAD_BUDGET_MS = 6;
 const LOOKAHEAD_MAX_ANSWERS = 16;
@@ -406,6 +409,12 @@ export class EngineRenderTransport {
    * layer's exact need (including scale/crop) and document revision. */
   private readonly ahead = new Map<string, AheadEntry>();
   private pausedEditRevision: number | null = null;
+  /** Paused lookahead starts only after the exact frame has reached the viewer.
+   * A renderer may discover the next wrapped layer only after the previous
+   * answer; preparing future frames before then occupies both raster slots. */
+  private pausedPresented: { time: number; revision: number | null; viewSeq: number | null } | null = null;
+  private pausedWarmTimer: ReturnType<typeof setTimeout> | null = null;
+  private pausedGeneration = 0;
   private aheadTimer: ReturnType<typeof setTimeout> | null = null;
   private aheadTurn = 0;
   private pumpingAhead = false;
@@ -428,6 +437,9 @@ export class EngineRenderTransport {
     this.aheadTimer = null;
     this.ahead.clear();
     this.pausedEditRevision = null;
+    this.pausedPresented = null;
+    if (this.pausedWarmTimer !== null) clearTimeout(this.pausedWarmTimer);
+    this.pausedWarmTimer = null;
     this.producers.clear();
     this.answerers.clear();
     this.preparers.clear();
@@ -532,6 +544,10 @@ export class EngineRenderTransport {
       const playhead = this.options.playhead?.();
       const clock = this.options.playing?.() ? playhead : null;
       const revision = this.options.revision();
+      const shown = this.pausedPresented;
+      const pausedCurrent = !clock && !!shown && !!playhead
+        && shown.revision === revision && shown.viewSeq === this.options.viewSeq()
+        && Math.abs(shown.time - playhead.time) < Math.max(1, (this.options.frameTicks?.() ?? 0) / 2);
       const span = this.options.span?.() ?? null;
       const loop = this.playbackLoop(span);
       const entries = [...this.ahead.values()].filter(entry => {
@@ -590,7 +606,7 @@ export class EngineRenderTransport {
       // An edit needs its current pixels first. Preparing an entire paused
       // playback horizon at every revision competes with the next pointer
       // move, and those future answers are invalidated by that move anyway.
-      const horizon = !this.options.playing?.() && revision === this.pausedEditRevision ? 0 : COMPAT_LOOKAHEAD;
+      const horizon = !clock && (!pausedCurrent || revision === this.pausedEditRevision) ? 0 : COMPAT_LOOKAHEAD;
       for (let offset = 0; offset <= horizon; offset++) {
         for (let i = 0; i < entries.length; i++) {
           const entry = entries[(i + this.aheadTurn) % entries.length]!;
@@ -602,7 +618,7 @@ export class EngineRenderTransport {
           pending++;
           if (done >= LOOKAHEAD_MAX_ANSWERS || (done > 0 && performance.now() >= deadline)) continue;
           const prepare = this.preparers.get(entry.need.source);
-          if (prepare && this.aheadInFlight >= COMPAT_PREPARE_IN_FLIGHT) continue;
+          if (prepare && (this.aheadInFlight >= COMPAT_PREPARE_IN_FLIGHT || (!clock && offset > 0 && this.aheadInFlight > 0))) continue;
           done++;
           if (prepare) {
             this.prepareAhead(entry, time, revision ?? 0, prepare, warm, warmUntil);
@@ -639,7 +655,37 @@ export class EngineRenderTransport {
   }
 
   playbackStarted(): void {
+    if (this.pausedWarmTimer !== null) clearTimeout(this.pausedWarmTimer);
+    this.pausedWarmTimer = null;
     this.presentedWhilePlaying();
+  }
+
+  /** A paused frame really reached the viewer. Future preparation may now
+   * use otherwise idle slots; a seek, zoom, or edit invalidates this marker. */
+  pausedFramePresented(time: number): void {
+    if (this.options.playing?.()) { this.presentedWhilePlaying(); return; }
+    const revision = this.options.revision(), viewSeq = this.options.viewSeq();
+    if (this.pausedPresented?.time === time && this.pausedPresented.revision === revision && this.pausedPresented.viewSeq === viewSeq) return;
+    this.pausedPresented = { time, revision, viewSeq };
+    if (this.pausedWarmTimer !== null) clearTimeout(this.pausedWarmTimer);
+    this.pausedWarmTimer = setTimeout(() => {
+      this.pausedWarmTimer = null;
+      this.presentedWhilePlaying(true);
+    }, COMPAT_WARM_DELAY_MS);
+  }
+
+  /** A requested paused seek supersedes the last presented frame immediately,
+   * before the native clock reply or its new compatibility asks arrive. */
+  pausedTimeChanged(): void {
+    this.pausedGeneration++;
+    this.pausedPresented = null;
+    if (this.pausedWarmTimer !== null) clearTimeout(this.pausedWarmTimer);
+    this.pausedWarmTimer = null;
+    for (const entry of this.ahead.values()) {
+      entry.required.clear();
+      entry.sent.clear();
+      entry.prefetched.clear();
+    }
   }
 
   /** Prepares one frame's compatibility work ahead; the answer horizon reaching
@@ -657,13 +703,14 @@ export class EngineRenderTransport {
 
   private prepareAhead(entry: AheadEntry, time: number, revision: number, prepare: CompatPreparer, warm = false, warmUntil = performance.now() + COMPAT_WARM_MS): void {
     const need = { ...entry.need, time };
+    const pausedGeneration = this.pausedGeneration;
     entry.pending.add(time);
     this.aheadInFlight++;
     this.lookaheadStats.inFlight = this.aheadInFlight;
     this.lookaheadStats.maxInFlight = Math.max(this.lookaheadStats.maxInFlight, this.aheadInFlight);
     const began = performance.now();
     this.trace.record('prepare dispatched', revision, time);
-    void Promise.resolve().then(() => prepare(need, revision, { urgent: !this.options.playing?.() && (time === entry.cursor || entry.required.has(time)) })).then(() => {
+    void Promise.resolve().then(() => prepare(need, revision, { urgent: !!this.options.playing?.() || time === entry.cursor || entry.required.has(time) })).then(() => {
       this.trace.record('prepare ready', revision, time, began);
       const ms = performance.now() - began;
       this.prepareMs = this.prepareMs === null ? ms : this.prepareMs * 0.75 + ms * 0.25;
@@ -672,7 +719,7 @@ export class EngineRenderTransport {
       const cursor = clock && need.composition === this.options.composition()
         ? Math.floor(clock.time / Math.abs(entry.step)) * Math.abs(entry.step) : entry.cursor;
       const distance = runAhead(cursor, time, entry.step, entry.loop ?? null);
-      if ((!this.options.playing?.() && !entry.required.has(time) && (!warm || performance.now() >= warmUntil)) || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
+      if ((!this.options.playing?.() && (pausedGeneration !== this.pausedGeneration || !entry.required.has(time) && (!warm || performance.now() >= warmUntil))) || entry.session.closed || this.ahead.get(this.aheadTag(need)) !== entry
         || this.preparers.get(need.source) !== prepare || revision !== this.options.revision() || distance < -Math.abs(entry.step) || distance > COMPAT_LOOKAHEAD * Math.abs(entry.step)) {
         this.lookaheadStats.obsolete++;
         return;
@@ -1340,12 +1387,12 @@ export class EngineRenderTransport {
     }
   }
 
-  /** Playback depends on these pixels. Await over async IPC, but admit at
-   * sync priority: ordinary async snapshots yield to a due viewer frame,
-   * which itself cannot render until this compatibility answer arrives. */
-  async rasterForCompat(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, options: RasterOptions = {}): Promise<EngineSnapshot | null> {
+  /** Current and playback frames depend on these pixels, so their async IPC
+   * snapshot uses sync priority. Paused future frames use idle priority and
+   * yield to the viewer frame that a seek has made due. */
+  async rasterForCompat(layer: string, scale: number, time: number, crop: { x: number; y: number; width: number; height: number } | null = null, options: RasterOptions = {}, cls: 'sync' | 'idle' = 'sync'): Promise<EngineSnapshot | null> {
     try {
-      return await this.snapshotAsyncAt(this.rasterOptions(layer, scale, time, crop, options), 'sync');
+      return await this.snapshotAsyncAt(this.rasterOptions(layer, scale, time, crop, options), cls);
     } catch (error) {
       if (error instanceof EngineSnapshotError && error.code === 'empty') return null;
       throw error;

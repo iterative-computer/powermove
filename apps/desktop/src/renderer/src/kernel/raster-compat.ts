@@ -72,7 +72,7 @@ export interface RasterCompatOptions {
    *  today's crop window applied: `sourceWindow` for text, `uv` for shapes), or null. */
   engineRaster: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => any;
   /** Prepare the same base surface without blocking the renderer's event loop. */
-  engineRasterAsync?: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike) => Promise<{ surface: any; revision: number } | null>;
+  engineRasterAsync?: (layer: unknown, scale: number, time: number, crop?: RasterWindowLike, urgent?: boolean) => Promise<{ surface: any; revision: number } | null>;
   /** Native-evaluated content identity for a base whose pixels are time independent. */
   /** The content identity of a layer's base raster, and whether it holds
    *  across document revisions; null when the base is not cached. */
@@ -566,7 +566,7 @@ export function createRasterCompat(PM: LegacyPM, options: RasterCompatOptions): 
             }
             stats.asyncLoads++;
             const began = performance.now();
-            const loaded = await options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop);
+            const loaded = await options.engineRasterAsync!(missing.layer, missing.scale, missing.time, missing.crop, prepareOptions?.urgent !== false);
             transport?.trace?.record('base dependency', revision, need.time, began);
             const ms = performance.now() - began;
             stats.asyncMs += ms; stats.asyncMsMax = Math.max(stats.asyncMsMax, ms);
