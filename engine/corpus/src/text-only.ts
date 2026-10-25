@@ -50,5 +50,5 @@ export function textOnly(doc: Record<string, any>): Record<string, any> {
 export function textOnlyProjects(projects: CorpusProject[]): CorpusProject[] {
   return projects
     .filter(p => hasText(p.doc))
-    .map(p => ({ ...p, doc: textOnly(p.doc), extensions: [], blender: undefined, covers: [...(p.covers ?? []), 'text in isolation'] }));
+    .map(p => ({ ...p, doc: textOnly(p.doc), extensions: [], covers: [...(p.covers ?? []), 'text in isolation'] }));
 }

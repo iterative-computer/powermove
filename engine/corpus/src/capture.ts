@@ -15,8 +15,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSyn
 import os from 'node:os';
 import path from 'node:path';
 import { launchLegacyApp, type LegacyApp } from './app';
-import { installBlenderRecorder, pairSnapshots, takeBlenderJobs, BLENDER_FORMAT, type SnapshotPass } from './blender';
-import { desktopRoot, EXTENSION_EFFECTS, parseRender3D, repoRoot, scene3d, shaderPresets } from './catalog';
+import { desktopRoot, EXTENSION_EFFECTS, repoRoot, shaderPresets } from './catalog';
 import { generateCorpus, stableJson, type GeneratedProject } from './generate';
 import { legacyCaptureProjects } from './legacy-capture';
 import { MISSING_MEDIA, resolveMedia, type MediaSource } from './media';
@@ -43,7 +42,6 @@ interface SampleRecord {
   png?: FileRecord; alphaPng?: FileRecord; float?: { data: FileRecord; header: FileRecord }; eval?: FileRecord;
   /** Transparent float renders at other motion-blur sample counts (`blurSamples`). */
   blur?: Array<{ samples: number; float: { data: FileRecord; header: FileRecord } }>;
-  blender?: FileRecord; blenderSnapshots?: { final: number; preview: number; export?: number; exportAlpha?: number }; blenderError?: string;
   glErrors: string[]; warnings: string[]; prepareError?: string; error?: string; ms: number;
 }
 
@@ -51,7 +49,6 @@ interface ProjectRecord {
   id: string; group?: string; title?: string; covers?: string[]; source: 'synthetic' | 'real';
   document?: FileRecord; loaded?: FileRecord; media: Record<string, { assetId: string; kind: string; source?: MediaSource; error?: string }>;
   hydrateIssues: Issue[]; keyIdRewrites: string[]; extensionChecks: Array<{ extension: string; effect: string; registered: boolean; paramsMatch: boolean }>; extensions?: string[]; missingDefinitions: string[]; mediaPending: string[]; settle?: { stable: boolean; renders: number; prepareError?: string };
-  blender?: { settings: Record<string, unknown>; compositions: string[]; assets: FileRecord[]; problems: string[] };
   samples: SampleRecord[]; pageErrors: string[]; error?: string; ms: number;
 }
 
@@ -114,7 +111,6 @@ class Session {
   async start(extensions: string[] = []): Promise<void> {
     this.extensions = [...extensions].sort();
     this.legacy = await launchLegacyApp({ extensions: this.extensions });
-    await installBlenderRecorder(this.legacy);
     await this.legacy.evaluate(installCorpusPage);
     if (await this.legacy.evaluateScript<boolean>(this.legacyHelpers) !== true) throw new Error('The legacy helper bundle did not install in the renderer');
     this.opened = 0;
@@ -169,58 +165,6 @@ async function captureSamples(session: Session, out: string, dir: string, sample
     record.samples.push(sample);
   }
 }
-
-/**
- * Blender snapshots for every captured sample of a project with 3D objects: final
- * output (every nested composition and shutter sample) and the paused rendered
- * preview. Runs after the frames, since it turns Blender output on in memory.
- */
-async function captureBlender(session: Session, out: string, dir: string, project: CorpusProject, record: ProjectRecord, alpha: boolean): Promise<void> {
-  const settings = parseRender3D({ ...(project.blender ?? {}), enabled: true });
-  const objectDefinition = scene3d.definitions.object;
-  const problems: string[] = [];
-  const compositions: string[] = await session.legacy.evaluate(args => (window as any).__corpus.enableBlenderOutput(args), { settings, objectDefinition });
-  const written = new Map<string, FileRecord>();
-  for (const sample of record.samples) {
-    if (sample.error) continue;
-    try {
-      const stray = await takeBlenderJobs(session.legacy);
-      if (stray.length) problems.push(`${stray.length} Blender jobs before the ${sample.time}s pass`);
-      const final = await session.legacy.evaluate(t => (window as any).__corpus.blenderFinal(t), sample.time);
-      const finalJobs = await takeBlenderJobs(session.legacy);
-      const exportPasses: Record<string, SnapshotPass & { options: unknown }> = {};
-      for (const [kind, mbSamples] of [['export', 16], ...(alpha ? [['exportAlpha', 20]] : [])] as Array<[string, number]>) {
-        const pass = await session.legacy.evaluate(args => (window as any).__corpus.blenderExport(args),
-          { time: sample.time, width: sample.width, height: sample.height, mbSamples });
-        const jobs = await takeBlenderJobs(session.legacy);
-        exportPasses[kind] = { options: pass.options, ...pairSnapshots(out, dir, pass.requests, jobs, written, pass.error ? { error: pass.error } : {}) };
-      }
-      const preview = await session.legacy.evaluate(args => (window as any).__corpus.blenderPreview(args), { time: sample.time, objectDefinition });
-      const previewJobs = await takeBlenderJobs(session.legacy);
-      const document = {
-        format: BLENDER_FORMAT, version: 1, project: project.id, time: sample.time, settings, compositions,
-        final: pairSnapshots(out, dir, final.requests, finalJobs, written, final.error ? { error: final.error } : {}),
-        preview: pairSnapshots(out, dir, preview.requests, previewJobs, written, { view: preview.view, ...(preview.error ? { error: preview.error } : {}) }),
-        ...exportPasses,
-      };
-      for (const [kind, pass] of [['final', document.final], ['preview', document.preview], ...Object.entries(exportPasses)] as Array<[string, SnapshotPass]>) {
-        if (pass.mismatch) problems.push(`${kind} @ ${sample.time}s: ${pass.mismatch}`);
-        if (pass.error) problems.push(`${kind} @ ${sample.time}s: ${pass.error}`);
-      }
-      sample.blender = writeFile(out, `${dir}/blender/${timeLabel(sample.time)}.json`, JSON.stringify(document) + '\n');
-      sample.blenderSnapshots = {
-        final: document.final.snapshots.length, preview: document.preview.snapshots.length,
-        ...Object.fromEntries(Object.entries(exportPasses).map(([kind, pass]) => [kind, pass.snapshots.length])),
-      };
-    } catch (error) {
-      sample.blenderError = (error as Error).message.split('\n')[0]!;
-      problems.push(`@ ${sample.time}s: ${sample.blenderError}`);
-    }
-  }
-  record.blender = { settings, compositions, assets: [...written.values()], problems };
-}
-
-const hasObjects = (described: GeneratedProject) => described.layerTypes.includes(`extension:${scene3d.definitions.object}`);
 
 function missingDefinitions(doc: any, hydrated: any): string[] {
   const out: string[] = [];
@@ -283,9 +227,6 @@ async function captureSynthetic(session: Session, out: string, project: CorpusPr
     record.loaded = writeFile(out, `${dir}/loaded.json`, loaded + '\n');
     record.settle = await session.legacy.evaluate(t => (window as any).__corpus.settle(t), project.samples[0]!);
     await captureSamples(session, out, dir, project.samples, described.size, described.alpha, evaluate, record, project.id, project.blurSamples);
-    const stray = await takeBlenderJobs(session.legacy);
-    if (stray.length) record.hydrateIssues.push({ path: 'blender', message: `${stray.length} Blender jobs while capturing frames` });
-    if (hasObjects(described)) await captureBlender(session, out, dir, project, record, described.alpha);
   } catch (error) {
     record.error = (error as Error).message.split('\n')[0]!;
   }
@@ -404,16 +345,16 @@ export async function capture(options: Options): Promise<string> {
   if (nativeOnly.length) log(`Left to the native semantic gate (level 2 text, no legacy reference): ${nativeOnly.length} projects`);
   const build = buildFingerprint();
   const session = new Session(options, await legacyScript());
-  await session.start();
-  const environment = await session.legacy.evaluate(() => (window as any).__corpus.environment());
-  const appVersions = await session.legacy.evaluateMain(({ app }) => ({ app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node }));
-  const extracted = shaderPresets();
-  const live = await session.legacy.evaluate(() => (window as any).__corpus.shaderPresets());
-  const shaderPresetCheck = Object.keys(extracted).every(name => live[name] === extracted[name]) && Object.keys(live).length === Object.keys(extracted).length;
-  log(`App ${appVersions.app}, Electron ${appVersions.electron}, GPU ${environment.renderer}; shader presets ${shaderPresetCheck ? 'match' : 'DIFFER'}`);
-
-  const records: ProjectRecord[] = [];
   try {
+    await session.start();
+    const environment = await session.legacy.evaluate(() => (window as any).__corpus.environment());
+    const appVersions = await session.legacy.evaluateMain(({ app }) => ({ app: app.getVersion(), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node }));
+    const extracted = shaderPresets();
+    const live = await session.legacy.evaluate(() => (window as any).__corpus.shaderPresets());
+    const shaderPresetCheck = Object.keys(extracted).every(name => live[name] === extracted[name]) && Object.keys(live).length === Object.keys(extracted).length;
+    log(`App ${appVersions.app}, Electron ${appVersions.electron}, GPU ${environment.renderer}; shader presets ${shaderPresetCheck ? 'match' : 'DIFFER'}`);
+
+    const records: ProjectRecord[] = [];
     if (options.synthetic) {
       for (const [index, project] of projects.entries()) {
         await session.prepareFor(project.extensions);
@@ -439,10 +380,8 @@ export async function capture(options: Options): Promise<string> {
       }
     }
     const all = [...records, ...(real ? [real] : [])];
-    const files = all.flatMap(record => [
-      ...record.samples.flatMap(sample => [sample.png, sample.alphaPng, sample.float?.data, sample.float?.header, ...(sample.blur ?? []).flatMap(b => [b.float.data, b.float.header]), sample.eval, sample.blender].filter(Boolean) as FileRecord[]),
-      ...(record.blender?.assets ?? []),
-    ]);
+    const files = all.flatMap(record => record.samples.flatMap(sample =>
+      [sample.png, sample.alphaPng, sample.float?.data, sample.float?.header, ...(sample.blur ?? []).flatMap(b => [b.float.data, b.float.header]), sample.eval].filter(Boolean) as FileRecord[]));
     const manifest = {
       format: 'powermove-engine-corpus', version: 1, id, label: options.label,
       createdAt: startedAt, finishedAt: new Date().toISOString(), durationMs: Math.round(performance.now() - started),
@@ -452,7 +391,6 @@ export async function capture(options: Options): Promise<string> {
         opaque: 'PM.GL.renderToPixels(t, w, h, {mblur: true, mbSamples: 16, shutter, opaque: true, topDownOpaque: true}) after PM.prepareFrame(t), PM.quality = 1',
         transparent: 'PM.GL.renderToPixels(t, w, h, {transparent: true, mblur: true, mbSamples: 20, shutter}); float readback captured, plus the exporter alphaFrame straight-alpha conversion',
         evaluation: 'every channel from PM.allProps through PM.ev / PM.evP, resolved content, local and world matrices, world opacity, planeMatrix for 3D layers, GL.bounds, text layout, caption bounds, path values, precomp source times (recursive), scene3d.describe()',
-        blender: `after the frames, render3d {enabled: true, ...project settings} on every composition with 3D objects; final snapshots from PM.prepareFrame(t) (default options: composition size, 10 shutter samples when motion blur is on) labelled by blenderFrameRequests; export snapshots from PM.prepareFrame(t, {width, height, mblur: true, mbSamples: 16}) and, for transparent projects, exportAlpha with mbSamples 20, labelled the same way; preview snapshots from scene3d.renderFrame() at t; ${'the main-process blender:run handler records jobs and returns an empty render, so Blender never runs'}`,
       },
       shaderPresetCheck,
       generated: { dir: 'generated', projects: corpus.projects.length, media: corpus.media },
@@ -462,10 +400,6 @@ export async function capture(options: Options): Promise<string> {
         frames: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.png).length, 0),
         floatFrames: all.reduce((sum, record) => sum + record.samples.reduce((n, sample) => n + (sample.float ? 1 : 0) + (sample.blur?.length ?? 0), 0), 0),
         evalDumps: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.eval).length, 0),
-        blenderDumps: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.blender).length, 0),
-        blenderSnapshots: all.reduce((sum, record) => sum + record.samples.reduce((n, sample) => n + (sample.blenderSnapshots ? sample.blenderSnapshots.final + sample.blenderSnapshots.preview : 0), 0), 0),
-        blenderExportSnapshots: all.reduce((sum, record) => sum + record.samples.reduce((n, sample) => n + (sample.blenderSnapshots?.export ?? 0) + (sample.blenderSnapshots?.exportAlpha ?? 0), 0), 0),
-        projectsWithBlenderProblems: all.filter(record => record.blender?.problems.length).map(record => record.id),
         failedSamples: all.reduce((sum, record) => sum + record.samples.filter(sample => sample.error).length, 0),
         failedProjects: all.filter(record => record.error).map(record => ({ id: record.id, error: record.error })),
         projectsWithGlErrors: all.filter(record => record.samples.some(sample => sample.glErrors.length)).map(record => record.id),
@@ -480,8 +414,7 @@ export async function capture(options: Options): Promise<string> {
         dir: record.source === 'real' ? `real/${record.id.slice(5)}` : `projects/${record.id}`,
         document: record.document, loaded: record.loaded, media: record.media, error: record.error,
         extensions: record.extensions, extensionChecks: record.extensionChecks, hydrateIssues: record.hydrateIssues, keyIdRewrites: record.keyIdRewrites.length, missingDefinitions: record.missingDefinitions, mediaPending: record.mediaPending, settle: record.settle,
-        blender: record.blender,
-        samples: record.samples.map(sample => ({ time: sample.time, width: sample.width, height: sample.height, png: sample.png, alphaPng: sample.alphaPng, float: sample.float, blur: sample.blur, eval: sample.eval, blender: sample.blender, blenderSnapshots: sample.blenderSnapshots, blenderError: sample.blenderError, glErrors: sample.glErrors, warnings: sample.warnings, prepareError: sample.prepareError, error: sample.error, ms: sample.ms })),
+        samples: record.samples.map(sample => ({ time: sample.time, width: sample.width, height: sample.height, png: sample.png, alphaPng: sample.alphaPng, float: sample.float, blur: sample.blur, eval: sample.eval, glErrors: sample.glErrors, warnings: sample.warnings, prepareError: sample.prepareError, error: sample.error, ms: sample.ms })),
         pageErrors: record.pageErrors.length,
       })),
       scenarios,
@@ -493,7 +426,7 @@ export async function capture(options: Options): Promise<string> {
     log(`Verified ${verified.checked} files: ${verified.problems.length} problems, ${verified.unlisted.length} unlisted`);
     log(`Done: ${manifest.totals.frames} frames, ${manifest.totals.floatFrames} float frames, ${manifest.totals.evalDumps} evaluation dumps, ${(manifest.totals.bytes / 1e6).toFixed(1)} MB, ${manifest.totals.failedSamples} failed samples`);
   } finally {
-    await session.legacy.close();
+    if (session.legacy) await session.legacy.close();
   }
   return out;
 }
