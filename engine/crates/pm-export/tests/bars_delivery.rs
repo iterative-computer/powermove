@@ -13,8 +13,10 @@
 //!   analytic codes at 8 bits (H.264) and 10 bits (HEVC Main10, ProRes 422 HQ);
 //!   ΔE2000 maximum 1.0 and mean 0.5 at 8 bits, maximum 0.5 at 10 bits, decoded
 //!   by FFmpeg with zimg and by AVFoundation.
-//! - **Audio**: a click at frame N lands at sample floor(N × sr × den / num) ± 1;
-//!   total samples equal round(duration × sr).
+//! - **Audio**: a click at frame N, start t = N × sr × den / num samples, lands
+//!   at sample ⌈t⌉ with weight 1 − (⌈t⌉ − t): today's source node plays a start
+//!   between samples by linear interpolation from its fraction (pm-audio.md,
+//!   AUDIO-5/6). Total samples equal round(duration × sr).
 //!
 //! Each prints its measurements (`MEASURE …`) for docs/engine/export.md.
 
@@ -179,6 +181,9 @@ fn video_job(path: &Path, settings: ExportSettings, destination: PathBuf) -> Exp
         )],
     );
     doc["fps"] = json!(24);
+    // The project's depth sets the intermediates (DEPTH-1, color-depth.md);
+    // these bars measure 16-bit delivery, so the project is 32-bit float.
+    doc["colorDepth"] = json!(32);
     asset(&mut doc, "clip", "video", "mov", w, h, dur);
     let mut media = MediaPaths::default();
     media.insert("clip", path.to_path_buf());
@@ -1112,6 +1117,8 @@ fn audio_bar_clicks_land_on_their_samples_and_totals_match() {
     let click = dir.join("click.wav");
     click_wav(&click, 0.5);
     for (num, den) in [(24000u32, 1001u32), (25, 1), (30000, 1001), (60000, 1001)] {
+        // The click's level at a whole-sample start (frame 0).
+        let mut unit = None;
         for n in [0u64, 1, 7, 37] {
             let fps = num as f64 / den as f64;
             let dur = 2.0;
@@ -1138,18 +1145,26 @@ fn audio_bar_clicks_land_on_their_samples_and_totals_match() {
             let out = dir.join(format!("click-{num}-{den}-{n}.mov"));
             let delivered = export(&job_of(&doc, media, s, out.clone()));
             let samples = decoded_audio(&out);
-            let at = samples.iter().position(|&v| v > 0.5).unwrap_or_else(|| {
+            let at = samples.iter().position(|&v| v != 0.0).unwrap_or_else(|| {
                 panic!(
-                    "{num}/{den} frame {n}: no click in {} samples, peak {}",
-                    samples.len(),
-                    samples.iter().fold(0f32, |m, &v| m.max(v.abs()))
+                    "{num}/{den} frame {n}: no click in {} samples",
+                    samples.len()
                 )
             });
-            let want = (n as u128 * 48_000 * den as u128 / num as u128) as usize;
+            let (start, q) = (u128::from(n) * 48_000 * u128::from(den), u128::from(num));
+            let want = start.div_ceil(q) as usize;
+            let weight = 1.0 - (want as f64 - start as f64 / q as f64);
             let total = (frames as f64 * den as f64 / num as f64 * 48_000.0).round() as usize;
+            assert_eq!(at, want, "{num}/{den} frame {n}: the click's first sample");
             assert!(
-                at.abs_diff(want) <= 1,
-                "{num}/{den} frame {n}: click at {at}, expected {want}"
+                samples[at + 1..].iter().all(|&v| v == 0.0),
+                "{num}/{den} frame {n}: one click sample"
+            );
+            let unit = *unit.get_or_insert(f64::from(samples[at]));
+            assert!(
+                (f64::from(samples[at]) - unit * weight).abs() <= 1e-6,
+                "{num}/{den} frame {n}: click {} at weight {weight}, unit {unit}",
+                samples[at]
             );
             assert_eq!(samples.len(), total, "{num}/{den}: total samples");
             assert_eq!(
