@@ -57,6 +57,8 @@ use super::document::{Route, ViewDocument};
 use super::schedule::{Next, Phase, Schedule};
 use super::view;
 
+mod media_prepare;
+
 /// Stand-in for the C′ prototype's layer in builds without it (feature
 /// `remote-layer`): uninhabited, so a pool never has a remote layer.
 #[cfg(not(feature = "remote-layer"))]
@@ -2529,6 +2531,7 @@ impl Thread {
                 if let Some(view) = self.views.get_mut(&key) {
                     view.dirty = true;
                 }
+                self.prepare_video_media(key);
             }
             Command::ShaderFallback { key, message } => self.shader_fallback(key, message),
             Command::AudioMemoryPressure => {
@@ -2826,6 +2829,7 @@ impl Thread {
     /// A document update: the mirror, the audio thread's mirror, the frame
     /// grid, and a redraw.
     fn document(&mut self, key: Key, update: DocumentUpdate, posted: i64, audio_forwarded: bool) {
+        let preparing = media_prepare::changes_video_sources(&update);
         let traced = i64::try_from(update.revision().get()).unwrap_or(i64::MAX);
         let doc = self.docs.entry(key).or_default();
         let copies = doc.copies();
@@ -2870,6 +2874,9 @@ impl Thread {
         }
         self.refresh_timing(key);
         self.refresh_audio_ingress(key);
+        if preparing {
+            self.prepare_video_media(key);
+        }
         if let Some(view) = self.views.get_mut(&key) {
             view.dirty = true;
             // A paused headless session has no frame to announce this
@@ -3552,6 +3559,7 @@ impl Thread {
     ) {
         // A new state or pool comes after the frames of the old one.
         self.drain_frames();
+        let first_view = !self.views.contains_key(&key);
         let frame_ticks = self.frame_ticks;
         let view = self.views.entry(key).or_insert_with(|| View {
             key,
@@ -3634,6 +3642,9 @@ impl Thread {
             self.refresh_timing(key);
         }
         self.warm_audio(key);
+        if first_view || composition_changed || attached {
+            self.prepare_video_media(key);
+        }
         if self.views[&key].state.headless == Some(true) {
             self.rest = Rest::default();
             if let Some(old) = self.views.get_mut(&key).and_then(|v| v.pool.take()) {
@@ -6106,10 +6117,10 @@ impl Thread {
                 pm_render::motion::MotionBlur::Samples(motion_blur)
             },
             sampling: pm_render::sampling::Sampling::Final,
-            video_end: if job.request.viewer.is_some() {
-                pm_render::VideoEnd::Preview
+            output_kind: if job.request.viewer.is_some() {
+                pm_render::OutputKind::Preview
             } else {
-                pm_render::VideoEnd::of(purpose)
+                pm_render::OutputKind::of(purpose)
             },
             origin: viewer_grid.and_then(|grid| grid.1),
         };

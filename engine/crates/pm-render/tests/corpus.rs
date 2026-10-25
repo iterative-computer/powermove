@@ -81,14 +81,33 @@ const STILL_CLASSES: &[(&str, bool)] = &[
     ("render/still-photo-progressive-jpg", true),
 ];
 
-/// Frames whose paused-viewer render differs from the export's for a
-/// known, owned reason. Each must still differ: an entry that starts
-/// passing fails until it is removed, and a full run fails for an entry it
-/// never measured.
-///
-/// M-R1 (lane L4): the viewer keeps video 0.04 s before a clip's end
-/// (`VideoEnd::Viewer`), exports 1 / fps (`VideoEnd::Final`).
-const PREVIEW_EXPORT_PENDING: &[(&str, f64)] = &[("retime/speed", 2.9)];
+/// Video-class projects drawing video minified under a projection, where
+/// patch interiors of today's frame average source pixels across chroma
+/// edges. The class restates today's reading (`support::restate_today`)
+/// except its chroma filter; these projects draw a rendition carrying
+/// today's filter (`support::todays_chroma_rendition`), so the rest is held
+/// to the class. The engine's own filter is proven against 4:4:4 truth by
+/// tests/chroma_truth.rs.
+const MINIFIED_VIDEO: &[&str] = &["space25d/precomps"];
+
+/// A scratch directory removed when dropped.
+struct TempDir(std::path::PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn tempdir_guard(name: &str) -> TempDir {
+    let dir = std::env::temp_dir().join(format!(
+        "pm-render-corpus-{}-{}",
+        std::process::id(),
+        name.replace('/', "_")
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    TempDir(dir)
+}
 
 #[test]
 fn corpus_render_parity() {
@@ -98,8 +117,6 @@ fn corpus_render_parity() {
         return;
     }
     let only = std::env::var("PM_RENDER_ONLY").ok();
-    let narrowed = only.is_some() || std::env::var_os("PM_ENGINE_CORPUS").is_some();
-    let mut pending_seen = Vec::new();
     let diffs = std::env::var("PM_RENDER_DIFFS")
         .ok()
         .map(std::path::PathBuf::from);
@@ -201,7 +218,8 @@ fn corpus_render_parity() {
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or_default();
-                    let mut c = renderer.video_color(path).expect("video color");
+                    let read = renderer.video_color(path).expect("video color");
+                    let mut c = read;
                     match name {
                         // Encoded with straight alpha (its color is red where
                         // alpha is 0); the probe applies Apple's premultiplied
@@ -218,9 +236,15 @@ fn corpus_render_parity() {
                         "av1.mp4" | "vp9-opus.webm" => {
                             c.matrix = pm_protocol::color::MatrixCoefficients::Bt709;
                         }
-                        _ => continue,
+                        _ => {}
                     }
-                    renderer.interpret(path, Some(c));
+                    // Today's readings the engine corrects (SD primaries,
+                    // partly tagged SD H.264), restated so this gate keeps
+                    // judging everything else.
+                    support::restate_today(path, &mut c);
+                    if c != read {
+                        renderer.interpret(path, Some(c));
+                    }
                 }
             }
         }
@@ -231,21 +255,40 @@ fn corpus_render_parity() {
             ));
             continue;
         }
+        let renditions = tempdir_guard(&p.name);
+        let mut resolver = pm_render::MapResolver {
+            paths: p.resolver.paths.clone(),
+        };
+        if video {
+            // Media reached without an asset record (generated corpus clips).
+            support::restate_today_for_videos(&mut renderer, &p.resolver);
+            if MINIFIED_VIDEO.contains(&p.name.as_str()) {
+                for path in resolver.paths.values_mut() {
+                    let Ok(read) = renderer.video_color(path) else {
+                        continue;
+                    };
+                    let rendition = support::todays_chroma_rendition(path, &renditions.0);
+                    let mut c = renderer.video_color(&rendition).unwrap();
+                    (c.primaries, c.matrix, c.range) = (read.primaries, read.matrix, read.range);
+                    renderer.interpret(&rendition, Some(c));
+                    *path = rendition;
+                }
+            }
+        }
         for s in &p.samples {
             // The capture's motion blur: 16 samples opaque, 20 transparent.
             let mut request =
                 RenderRequest::sized(Size::new(s.width, s.height), Precision::Float16);
-            // capture.ts runs prepareFrame before renderToPixels: final
-            // output keeps the last source frame with 1 / composition fps
-            // padding, unlike the viewer's default 0.04 seconds.
-            request.video_end = pm_render::VideoEnd::Final;
+            // Use the export's canvas policy; source timing is shared with
+            // the viewer and holds the last source frame without padding.
+            request.output_kind = pm_render::OutputKind::Final;
             request.motion_blur = pm_render::motion::MotionBlur::Samples(16);
             let frame = match renderer.render(
                 &p.document,
                 &p.composition,
                 ticks(s.time),
                 &request,
-                &p.resolver,
+                &resolver,
             ) {
                 Ok(f) => f,
                 Err(e) => {
@@ -268,24 +311,18 @@ fn corpus_render_parity() {
                 ticks(s.time),
                 request.output_size,
                 request.motion_blur,
-                &p.resolver,
+                // The gated frame's media (a minified video's rendition).
+                &resolver,
             );
-            let pending = PREVIEW_EXPORT_PENDING.contains(&(p.name.as_str(), s.time));
-            if pending {
-                pending_seen.push((p.name.clone(), s.time));
-            }
             // The gated frame is the export's.
             if let Err(e) = identical(&export, &rgba) {
-                failed.push(format!("{} t={}: gated frame vs export: {e}", p.name, s.time));
-            }
-            match (identical(&preview, &export), pending) {
-                (Err(e), false) => failed.push(format!("{} t={}: {e}", p.name, s.time)),
-                (Err(e), true) => eprintln!("{} t={}: pending M-R1: {e}", p.name, s.time),
-                (Ok(()), true) => failed.push(format!(
-                    "{} t={}: preview equals export; remove it from PREVIEW_EXPORT_PENDING",
+                failed.push(format!(
+                    "{} t={}: gated frame vs export: {e}",
                     p.name, s.time
-                )),
-                (Ok(()), false) => {}
+                ));
+            }
+            if let Err(e) = identical(&preview, &export) {
+                failed.push(format!("{} t={}: {e}", p.name, s.time));
             }
             let ours = opaque8(&rgba);
             let (w, h, reference) =
@@ -417,7 +454,8 @@ fn corpus_render_parity() {
                         let mut problems = report.failures(&Bounds::HALF_FLOAT);
                         let mut shape = String::new();
                         if r.modelled() == 1.0 {
-                            let alpha = |f: &[f64]| f.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+                            let alpha =
+                                |f: &[f64]| f.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
                             let wanted = geometry(&r.alpha(), r.width);
                             // Geometry is the renderer's, not the storage's:
                             // judged on an f32 frame (half-float storage
@@ -524,15 +562,6 @@ fn corpus_render_parity() {
                         .collect();
                     write_png(&dir.join(format!("{stem}-diff.png")), w, h, &marked);
                 }
-            }
-        }
-    }
-    if !narrowed {
-        for (name, time) in PREVIEW_EXPORT_PENDING {
-            if !pending_seen.iter().any(|(n, t)| n == name && t == time) {
-                failed.push(format!(
-                    "{name} t={time}: PREVIEW_EXPORT_PENDING entry not measured"
-                ));
             }
         }
     }

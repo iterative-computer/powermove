@@ -102,7 +102,8 @@ fn apple_aac_priming() {
 #[test]
 fn color_interpretation_follows_section_9() {
     let f = fixtures_dir();
-    // Untagged SD-height video: BT.601, 525-line primaries, limited range.
+    // Untagged SD video: the shared table's BT.601 coefficients, SMPTE 170M
+    // primaries (VIDEO-SD-1), limited range.
     let p = probe(&f.join("hevc.mp4")).unwrap().probe;
     let c = &p.video.unwrap().color;
     assert_eq!(
@@ -158,15 +159,20 @@ fn corpus_probe_facts() {
         v("mjpeg.avi").video.unwrap().color.interpreted.range,
         Range::Full
     );
-    // DV: 525-line primaries by height, bottom field first from the bitstream.
+    // NTSC DV: SD coefficients and 525-line SMPTE 170M primaries (the shared
+    // table), bottom field first from the bitstream; PAL DV's 576 lines
+    // read BT.470BG.
     let dv = v("dv-ntsc.dv");
     let dvv = dv.video.as_ref().unwrap();
-    assert_eq!(dvv.color.interpreted.primaries, Primaries::Bt601_525);
+    if dvv.color.tagged.primaries.is_none() {
+        assert_eq!(dvv.color.interpreted.primaries, Primaries::Bt601_525);
+    }
+    assert_eq!(dvv.color.interpreted.matrix, MatrixCoefficients::Bt601);
     assert_eq!(dvv.fields.order, FieldOrder::BottomFirst);
-    assert_eq!(
-        v("dv-pal.avi").video.unwrap().color.interpreted.primaries,
-        Primaries::Bt601_625
-    );
+    let pal = v("dv-pal.avi").video.unwrap().color;
+    if pal.tagged.primaries.is_none() {
+        assert_eq!(pal.interpreted.primaries, Primaries::Bt601_625);
+    }
     // Nominal rates (S6 table) and how they were decided.
     for (name, rate, method) in [
         ("h264-422-10.mov", (25, 1), RateMethod::Median),

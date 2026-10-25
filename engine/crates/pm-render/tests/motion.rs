@@ -131,6 +131,8 @@ fn motion_corpus_parity() {
         if !video {
             continue;
         }
+        // Preserve the video lane's corrected source interpretation.
+        support::restate_today_for_videos(&mut renderer, &p.resolver);
         let blur_video = p.name == "motion/blur-video";
         let fps = pm_eval::node::to_number(p.document.root().unwrap().get("fps"));
         for s in &p.samples {

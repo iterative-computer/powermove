@@ -90,6 +90,8 @@ fn transfers_agree() {
 fn primaries_and_matrices_agree() {
     for (engine, reference) in [
         (pm_protocol::color::Primaries::Bt709, Primaries::BT709),
+        (pm_protocol::color::Primaries::Bt601_525, Primaries::BT601_525),
+        (pm_protocol::color::Primaries::Bt601_625, Primaries::BT601_625),
         (pm_protocol::color::Primaries::DisplayP3, Primaries::P3_D65),
         (pm_protocol::color::Primaries::Bt2020, Primaries::BT2020),
     ] {
@@ -119,6 +121,90 @@ fn primaries_and_matrices_agree() {
             let c = f64::from(code);
             assert!((q.luma_value(code) - color::dequantize_luma(c, u32::from(bits), full)).abs() < 1e-12);
             assert!((q.chroma_value(code) - color::dequantize_chroma(c, u32::from(bits), full)).abs() < 1e-12);
+        }
+    }
+}
+
+/// BT.2087's published BT.2020 → BT.709 matrix, the engine's conversions
+/// to Rec.709 for every primaries it reads, and its BT.2390 EETF.
+#[test]
+fn gamut_conversions_and_the_eetf_agree() {
+    let to_709 = |p: Primaries| color::mul(&color::invert(&Primaries::BT709.to_xyz()), &p.to_xyz());
+    let bt2087 = [
+        [1.6605, -0.5876, -0.0728],
+        [-0.1246, 1.1329, -0.0083],
+        [-0.0182, -0.1006, 1.1187],
+    ];
+    let derived = to_709(Primaries::BT2020);
+    for i in 0..3 {
+        for j in 0..3 {
+            assert!(
+                (derived[i][j] - bt2087[i][j]).abs() < 1e-4,
+                "BT.2087 [{i}][{j}]"
+            );
+        }
+    }
+    for (engine, reference) in [
+        (
+            pm_protocol::color::Primaries::Bt601_525,
+            Primaries::BT601_525,
+        ),
+        (
+            pm_protocol::color::Primaries::Bt601_625,
+            Primaries::BT601_625,
+        ),
+        (pm_protocol::color::Primaries::DisplayP3, Primaries::P3_D65),
+        (pm_protocol::color::Primaries::Bt2020, Primaries::BT2020),
+    ] {
+        let ours =
+            pm_color::primaries::conversion(engine, pm_protocol::color::Primaries::Bt709).unwrap();
+        let want = to_709(reference);
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (ours[i][j] - want[i][j]).abs() < 1e-9,
+                    "{engine:?} [{i}][{j}]"
+                );
+            }
+        }
+    }
+    // Identity below the knee; the source peak onto the target peak.
+    let pq = |nits: f64| Transfer::Pq.from_linear(nits / 10_000.0);
+    assert!((color::eetf_bt2390(pq(1000.0), 1000.0, 203.0) - pq(203.0)).abs() < 1e-12);
+    assert_eq!(color::eetf_bt2390(0.3, 1000.0, 203.0), 0.3);
+    for i in 0..=1000 {
+        let e = f64::from(i) / 1000.0;
+        let (x, y) = (
+            pm_color::tonemap::eetf(e, 1000.0),
+            color::eetf_bt2390(e, 1000.0, 203.0),
+        );
+        assert!((x - y).abs() < 1e-12, "EETF at {e}: {x} vs {y}");
+    }
+}
+
+/// The engine's range normalization at the decoder depths video reaches,
+/// including VideoToolbox's 16-bit ProRes layouts.
+#[test]
+fn range_normalization_agrees_at_12_and_16_bits() {
+    use pm_protocol::color::{SampleAlignment, normalization};
+    for (bits, alignment) in [(12u8, SampleAlignment::Lsb), (16, SampleAlignment::Full16)] {
+        for range in [Range::Limited, Range::Full] {
+            let n = normalization(bits, alignment, range);
+            let full = range == Range::Full;
+            for code in [0.0, 16.0, 64.0, 128.0, 235.0, 240.0, 255.0]
+                .map(|c| c * f64::from(1u32 << (bits - 8)))
+            {
+                let y = (code - n.luma_offset) / n.luma_scale;
+                let c = (code - n.chroma_offset) / n.chroma_scale;
+                assert!(
+                    (y - color::dequantize_luma(code, u32::from(bits), full)).abs() < 1e-12,
+                    "{bits} {range:?} Y′ {code}"
+                );
+                assert!(
+                    (c - color::dequantize_chroma(code, u32::from(bits), full)).abs() < 1e-12,
+                    "{bits} {range:?} C {code}"
+                );
+            }
         }
     }
 }

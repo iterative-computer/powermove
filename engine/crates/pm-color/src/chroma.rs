@@ -1,9 +1,13 @@
 //! Chroma siting, upsampling, decimation, and pass-through (section 9,
 //! "Chroma").
 //!
-//! Upsampling is siting-aware and keeps co-sited samples exact: horizontal
-//! linear for 4:2:2 (and 4:1:1); for 4:2:0, Catmull-Rom horizontally and
-//! linear between rows vertically. A luma pixel that lies exactly on a
+//! Upsampling is siting-aware and keeps co-sited samples exact: Catmull-Rom
+//! across for every horizontal subsampling (4:2:0, 4:2:2, 4:1:1), linear
+//! between rows for 4:2:0. Catmull-Rom across is measured closer to 4:4:4
+//! ground truth than linear for both 4:2:0 and 4:2:2, in natural and graphic
+//! content and at edges (`pm-render/tests/chroma_truth.rs`). Rows stay linear:
+//! [`VERTICAL_420`] decimation is its exact inverse, so 4:2:0 sources export
+//! to 4:2:0 unchanged (section 2, invariant (1)). A luma pixel that lies exactly on a
 //! chroma sample position gets that sample unchanged (every filter's weight
 //! vector is a unit vector there). The encoder-input side decimates by point
 //! sampling at co-sited positions and averages two samples where the output
@@ -84,10 +88,10 @@ pub fn filters(factors: Factors) -> (Filter, Filter) {
     } else {
         Filter::None
     };
-    let horizontal = match (factors.x > 1, factors.y > 1) {
-        (false, _) => Filter::None,
-        (true, true) => Filter::CatmullRom,
-        (true, false) => Filter::Linear,
+    let horizontal = if factors.x > 1 {
+        Filter::CatmullRom
+    } else {
+        Filter::None
     };
     (horizontal, vertical)
 }
@@ -316,12 +320,14 @@ mod tests {
                     samples[(y * cw + i) as usize]
                 );
             }
-            // Between samples: the average (linear).
-            for i in 0..cw - 1 {
-                let a = f64::from(samples[(y * cw + i) as usize]);
-                let b = f64::from(samples[(y * cw + i + 1) as usize]);
-                let v = f64::from(up[(y * 2 * cw + 2 * i + 1) as usize]);
-                assert!((v - (a + b) / 2.0).abs() < 1e-6);
+            // Between samples: Catmull-Rom's midpoint (−1, 9, 9, −1) / 16,
+            // edge samples repeated.
+            let at =
+                |i: i64| f64::from(samples[(y * cw) as usize + i.clamp(0, cw as i64 - 1) as usize]);
+            for i in 0..cw as i64 - 1 {
+                let want = (9.0 * (at(i) + at(i + 1)) - at(i - 1) - at(i + 2)) / 16.0;
+                let v = f64::from(up[(y * 2 * cw) as usize + 2 * i as usize + 1]);
+                assert!((v - want).abs() < 1e-6);
             }
         }
         // Point decimation at the co-sited columns recovers the plane.

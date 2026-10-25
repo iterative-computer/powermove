@@ -323,12 +323,9 @@ it to NCL, `pm-media` `probe/color.rs`), full range at 4:2:2 and 4:4:4, and
 HDR transfers (refused before drawing). The flat fixtures alone would have
 shown none of this.
 
-One observation while measuring, not part of the class: the source time is
-clamped to the asset's duration less the end padding (today's
-`videoPlaybackTime`, 0.04 s in the viewer; `pm_render::retime::playback_time`),
-so at 30 fps the last frame of a file is never drawn (it starts 0.033 s
-before the end); the measurement declares assets slightly longer for that
-reason. It matches today's viewer by design.
+Video source selection uses native timestamps and holds the final frame.
+The class uses the actual asset duration; no browser seek padding or
+measurement-only duration inflation applies (`video_end.rs`).
 
 The lanes' own corpus runs at this tip agree with the runner where they
 overlap and pin the same differences: `tests/corpus.rs` 256 frames, 0 failed

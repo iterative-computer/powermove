@@ -167,9 +167,10 @@ through; clipping happens only at output.
 - `pm_color::linear`: linear-light helpers for linear blending (Phase 3a): E
   conversions of premultiplied values, the nine blend modes in both domains,
   HDR-safe screen, overlay, and soft light.
-- `pm_color::chroma`: siting origins, the section 9 upsamplers (horizontal
-  linear for 4:2:2; Catmull-Rom horizontally and linear vertically for 4:2:0;
-  co-sited samples exact), decimation, and pass-through.
+- `pm_color::chroma`: siting origins, the section 9 upsamplers (Catmull-Rom
+  horizontally for every subsampling, linear vertically for 4:2:0, chosen
+  against 4:4:4 ground truth by `tests/chroma_truth.rs`; co-sited samples
+  exact), decimation, and pass-through.
   **Declared 4:2:0 filter.** Section 9 leaves the 4:2:0 encoder-input filter
   to a declaration. A two-row average blurred chroma by `[1, 6, 1] / 8`
   against the linear upsampler (35 CV on an H.264 round trip, failing
@@ -248,10 +249,9 @@ render exactly, and colour overrides against the native float reading (max
 the native reading is now checked through a colour override restating the
 file's primaries.
 
-The general corpus request uses `VideoEnd::Final`, matching the capture's
-`prepareFrame` before `renderToPixels`. The viewer default (`0.04` s padding)
-selected frame 118 instead of 119 in the final `retime/speed` sample; final
-output uses `1 / composition fps`. The renderer's two policies are unchanged.
+The general corpus request uses `OutputKind::Final` for canvas policy. Source
+timing is identical in preview and export: native PTS selection holds the last
+frame without browser seek padding. The corpus asserts their equality.
 
 **Recorded deviations in the corpus comparison** (`tests/corpus.rs`):
 `hevc-alpha.mov` is encoded with straight alpha but its probe reports Apple's

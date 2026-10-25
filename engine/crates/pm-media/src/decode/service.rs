@@ -34,6 +34,8 @@ pub struct MediaSource {
     pub index: Arc<FrameIndex>,
     pub info: CodecInfo,
     pub extradata: Vec<u8>,
+    /// The probe's already-open FFmpeg context serves the first decoder.
+    startup_input: Arc<Mutex<Option<Input>>>,
     pub nominal: NominalRate,
     pub color: ColorDescription,
     /// Presented PTS in presentation order.
@@ -41,28 +43,56 @@ pub struct MediaSource {
 }
 
 impl MediaSource {
+    /// Prepare a stable file's content-hash-keyed probe and frame index at
+    /// import time. The first [`open`](Self::open) can reuse that work; no
+    /// decoded or converted frame is retained by this cache.
+    pub fn prewarm(path: &Path) -> Result<()> {
+        crate::probe::cache::prewarm(path)
+    }
+
+    /// Interruptible import preparation for a renderer background worker.
+    pub fn prewarm_cancelled(path: &Path, cancel: &std::sync::atomic::AtomicBool) -> Result<()> {
+        crate::probe::cache::prewarm_cancelled(path, cancel)
+    }
+
     /// Probes and indexes a file's best video stream.
     pub fn open(path: &Path) -> Result<Arc<MediaSource>> {
-        let Probed { probe, index } = crate::probe::probe(path)?;
+        let prepared = crate::probe::cache::lookup(path)?;
+        let (probe, index, extradata, startup_input) = match prepared {
+            Some(prepared) => (
+                prepared.probe,
+                prepared.index,
+                prepared.extradata,
+                prepared.input,
+            ),
+            None => {
+                let (Probed { probe, index }, input) = crate::probe::probe_with_input(path)?;
+                let index = Arc::new(index.ok_or_else(|| MediaError::invalid("no video index"))?);
+                let stream = probe
+                    .video_stream
+                    .ok_or_else(|| MediaError::invalid("no video stream"))?;
+                let extradata = input.extradata(stream);
+                (probe, index, extradata, Arc::new(Mutex::new(Some(input))))
+            }
+        };
         let stream = probe
             .video_stream
             .ok_or_else(|| MediaError::invalid("no video stream"))?;
-        let index = index.ok_or_else(|| MediaError::invalid("no video index"))?;
         let video = probe.video.as_ref().unwrap();
         let nominal = video.nominal_rate.clone().ok_or_else(|| {
             MediaError::invalid("the stream has no nominal rate (fewer than two frames)")
         })?;
-        let input = Input::open(path)?;
         let pts = index.presented_pts();
         Ok(Arc::new(MediaSource {
             id: NEXT_SOURCE.fetch_add(1, Ordering::Relaxed),
             stream,
             info: video.codec.clone(),
-            extradata: input.extradata(stream),
+            extradata,
+            startup_input,
             nominal,
             color: video.color.interpreted,
             pts,
-            index: Arc::new(index),
+            index,
             probe,
         }))
     }
@@ -444,7 +474,11 @@ impl DecodeService {
         let session = match reused {
             Some(s) => s,
             None => {
-                let input = Input::open(source.path())?;
+                // The probe's demuxer serves the first session.
+                let input = match source.startup_input.lock().unwrap().take() {
+                    Some(input) => input,
+                    None => Input::open(source.path())?,
+                };
                 let spec = StreamSpec {
                     input: &input,
                     stream: source.stream,

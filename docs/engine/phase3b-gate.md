@@ -108,7 +108,7 @@ and the seek corpus (`media-corpus`: 62 files), our LGPL FFmpeg build:
 light (1.18e-6), BT.601 readings, bwdif against FFmpeg's at field rate (4 files, 2.47e-7
 to 2.50e-7), rotation and clean aperture exact, Interpret Footage (alpha, primaries,
 transfer, ColorSync profiles, CMYK) within 0.372 CV, conformed rates by section 5
-rule 7, video end padding per output kind.
+rule 7, and shared preview/export video endpoint selection.
 
 ## Export conformance
 

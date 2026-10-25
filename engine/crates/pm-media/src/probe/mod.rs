@@ -4,6 +4,7 @@
 //! nominal rate; decode cost, poster, and filmstrip seed. Waveform peaks are
 //! in [`peaks`]; the content hash in [`crate::hash`].
 
+pub mod cache;
 pub mod color;
 pub mod peaks;
 pub mod timing;
@@ -227,7 +228,36 @@ fn kind(t: ff::AVMediaType) -> StreamKind {
 
 /// Probes a file.
 pub fn probe(path: &Path) -> Result<Probed> {
+    probe_with_input(path).map(|(probed, _)| probed)
+}
+
+/// Probe while retaining its opened demuxer for the first decoder session.
+/// This avoids reopening the same source after indexing on first use.
+pub(crate) fn probe_with_input(path: &Path) -> Result<(Probed, Input)> {
     let size = std::fs::metadata(path)?.len();
+    // The sampled identity is independent of FFmpeg's stream probe and the
+    // container index: for larger files its reads overlap them. Tiny clips
+    // stay inline, where a thread would cost more than it saves.
+    if size >= 128 << 10 {
+        return std::thread::scope(|scope| {
+            let fingerprint = scope.spawn(|| crate::hash::sampled_fingerprint(path));
+            let probed = probe_with_input_fingerprint(path, size, || Ok(String::new()));
+            let value = fingerprint
+                .join()
+                .map_err(|_| MediaError::invalid("fingerprint worker panicked"))?;
+            let (mut probed, input) = probed?;
+            probed.probe.sampled_fingerprint = value?;
+            Ok((probed, input))
+        });
+    }
+    probe_with_input_fingerprint(path, size, || crate::hash::sampled_fingerprint(path))
+}
+
+fn probe_with_input_fingerprint(
+    path: &Path,
+    size: u64,
+    fingerprint: impl FnOnce() -> Result<String>,
+) -> Result<(Probed, Input)> {
     let input = Input::open(path)?;
     let container = input.format_name();
     let mut streams = Vec::new();
@@ -319,11 +349,11 @@ pub fn probe(path: &Path) -> Result<Probed> {
             k.contains("content.identifier") || k == "content_identifier"
         }),
         creation_time: find(&|k| k == "creation_time"),
-        sampled_fingerprint: crate::hash::sampled_fingerprint(path)?,
+        sampled_fingerprint: fingerprint()?,
         streams,
         video,
     };
-    Ok(Probed { probe, index })
+    Ok((Probed { probe, index }, input))
 }
 
 fn audio_probe(path: &Path, input: &Input, i: usize, container: &str) -> AudioProbe {
@@ -660,6 +690,22 @@ impl MediaProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_fingerprint_keeps_probe_and_index_identical() {
+        // Large enough to take the parallel route.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../apps/desktop/e2e/fixtures/tone.wav");
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(size >= 128 << 10);
+        let (parallel, _) = probe_with_input(&path).unwrap();
+        let (serial, _) =
+            probe_with_input_fingerprint(&path, size, || crate::hash::sampled_fingerprint(&path))
+                .unwrap();
+        assert!(!parallel.probe.sampled_fingerprint.is_empty());
+        assert_eq!(parallel.probe, serial.probe);
+        assert_eq!(parallel.index, serial.index);
+    }
 
     #[test]
     fn clean_aperture_rectangle() {

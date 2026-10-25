@@ -36,7 +36,7 @@ use pm_protocol::priority::{
     AlphaOutput as WireAlpha, AudioCoding, Container as WireContainer, ExportFormat,
     ExportSettings, ProResProfile as WireProRes, WebmCodec,
 };
-use pm_render::{RenderError, RenderRequest, Renderer, VideoEnd};
+use pm_render::{OutputKind, RenderError, RenderRequest, Renderer};
 use pm_time::Rate;
 
 use crate::Error;
@@ -1117,8 +1117,7 @@ fn plan_export_checked(
             pm_render::motion::MotionBlur::Off
         },
         sampling: pm_render::sampling::Sampling::Final,
-        // `prepareFrame`'s end padding: the last frame of a clip is kept.
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         origin: None,
     };
     Ok(ExportPlan {
@@ -1273,7 +1272,6 @@ where
     let sampled = crate::verify::sampled_frames(frames);
     let pass = pass_key(job.seed, request.output_size);
     let mut pipeline = Pipeline::new(spec, sink)?;
-    pipeline.set_legacy_png(crate::png_compat::has_level1_content(&document));
     let mut mixer = audio.map(|a| {
         let first = pm_audio::offline::sample_of_ticks(timeline.tick(0).get(), a.sample_rate);
         let mut mixer = pm_audio::Mixer::new_legacy_export(
@@ -1714,9 +1712,8 @@ pub fn render_still(
     routing.check(renderer, document, composition, media)?;
     let (cw, ch) = composition_size(document, composition)?;
     let size = still_size(cw, ch, max_dimension);
-    // Today's agent stills run `prepareFrame` first (`snapshotAsync`).
     let request = RenderRequest {
-        video_end: VideoEnd::Final,
+        output_kind: OutputKind::Final,
         ..RenderRequest::sized(size, Precision::Float16)
     };
     let frame = render_frame(

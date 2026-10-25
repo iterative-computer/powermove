@@ -99,6 +99,9 @@ fn full_frame_job_sized(
         )],
     );
     doc["fps"] = json!(23.976);
+    // The project's depth owns the working format: 32-bit carries 16-bit
+    // codes exactly.
+    doc["colorDepth"] = json!(32);
     asset(&mut doc, "clip", "video", "mov", w, h, dur);
     let mut media = MediaPaths::default();
     media.insert("clip", path.to_path_buf());
@@ -154,6 +157,7 @@ fn renderer_for(path: &Path) -> Renderer {
     let mut r = Renderer::headless().unwrap();
     let mut c = r.video_color(path).unwrap();
     c.matrix = MatrixCoefficients::Bt709;
+    c.primaries = pm_protocol::color::Primaries::Bt709;
     r.interpret(path, Some(c));
     r
 }
