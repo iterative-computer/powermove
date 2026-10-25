@@ -1302,10 +1302,12 @@ fn native_content_quad<'d>(
                 let bh = js::or_number(js::get(&d, "h"), hf);
                 let uv = fit_uv(&js::string(js::get(&d, "fit")), sw, sh, bw, bh);
                 let target = pm_vector::render::scene::PixelRect::new(0, 0, width, height);
+                // Frames while playing reproject a cached source raster.
+                let playback = b.sampling == crate::sampling::Sampling::Playback;
                 // The document parsed above; a planning error is one there.
                 let mut plan = |_: &mut Scope<'_, 'd>, world: &Mat2d, target| {
                     Ok(
-                        crate::vector::svg::plan_svg(&path, bw, bh, uv, world, target)
+                        crate::vector::svg::plan_svg(&path, bw, bh, uv, world, target, playback)
                             .ok()
                             .flatten()
                             .map(|q| *q),
@@ -1315,7 +1317,9 @@ fn native_content_quad<'d>(
                     return local_level2(scope, layer, time, scale, b.origin, target, &mut plan);
                 }
                 let world = vector_world(scope, layer, time, scale, b.origin)?;
-                return match crate::vector::svg::plan_svg(&path, bw, bh, uv, &world, target) {
+                return match crate::vector::svg::plan_svg(
+                    &path, bw, bh, uv, &world, target, playback,
+                ) {
                     Ok(quad) => Ok(quad.map(|q| device_quad(*q))),
                     Err(message) => {
                         b.failures.push(LayerFailure {

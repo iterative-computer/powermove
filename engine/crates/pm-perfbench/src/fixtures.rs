@@ -473,32 +473,16 @@ pub fn synthetic(o: Synthetic) -> Fixture {
     }
 }
 
-/// One moving SVG image. The source stays byte-identical while its image
-/// box translates, so every frame must draw actual transformed SVG pixels.
+/// One moving, rotating SVG image whose source stays byte-identical: a
+/// gradient card, a clip path, a blurred shape and 60 small motifs.
 pub fn animated_svg() -> Fixture {
-    svg_fixture(60)
-}
-
-/// The same moving SVG box with only its three base elements, for a tiny
-/// source diagnostic alongside the illustrated workload.
-pub fn animated_svg_trivial() -> Fixture {
-    svg_fixture(0)
-}
-
-fn svg_fixture(motifs: usize) -> Fixture {
     use std::fmt::Write;
     let mut art = String::from(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180"><defs><linearGradient id="g"><stop stop-color="#3FCF8E"/><stop offset="1" stop-color="#4C8DFF"/></linearGradient></defs><rect x="8" y="8" width="304" height="164" rx="24" fill="url(#g)"/><path d="M20 145 L86 32 L154 132 L218 26 L300 145 Z" fill="#F2A541" fill-opacity=".8"/><circle cx="162" cy="88" r="39" fill="#EE6352" fill-opacity=".7"/>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180"><defs><linearGradient id="g"><stop stop-color="#3FCF8E"/><stop offset="1" stop-color="#4C8DFF"/></linearGradient><clipPath id="c"><circle cx="250" cy="90" r="60"/></clipPath><filter id="b"><feGaussianBlur stdDeviation="3"/></filter></defs><rect x="8" y="8" width="304" height="164" rx="24" fill="url(#g)"/><path d="M20 145 L86 32 L154 132 L218 26 L300 145 Z" fill="#F2A541" fill-opacity=".8"/><g clip-path="url(#c)"><rect x="190" width="130" height="180" fill="#FFD23F"/></g><circle cx="162" cy="88" r="39" fill="#EE6352" fill-opacity=".7" filter="url(#b)"/>"##,
     );
-    // A small illustrated badge has many independently painted motifs. The
-    // source is fixed across frames; only the authored image box moves.
     for row in 0..6 {
         for col in 0..10 {
-            if row * 10 + col >= motifs {
-                continue;
-            }
-            let x = 20 + col * 30;
-            let y = 24 + row * 26;
+            let (x, y) = (20 + col * 30, 24 + row * 26);
             let color = ["#FCE6A7", "#F5A4AE", "#A9E9F0"][(row + col) % 3];
             write!(
                 art,
@@ -519,14 +503,17 @@ fn svg_fixture(motifs: usize) -> Fixture {
         180.0,
         10.0,
     );
+    set(&mut image, "scale.x", json!(125));
+    set(&mut image, "scale.y", json!(125));
     set(
         &mut image,
         "position.x",
-        keys(
-            json!(320),
-            &[(0.0, json!(260)), (2.0, json!(380))],
-            EASES[0],
-        ),
+        keys(json!(320), &[(0.0, json!(260)), (3.0, json!(380))], EASES[0]),
+    );
+    set(
+        &mut image,
+        "rotation",
+        keys(json!(0), &[(0.0, json!(-12)), (3.0, json!(18))], EASES[0]),
     );
     let mut doc = project(640, 360, 30.0, 10.0, solid_fill("#141821"), vec![image]);
     doc["assets"]["art"] = json!({
@@ -536,7 +523,7 @@ fn svg_fixture(motifs: usize) -> Fixture {
     Fixture {
         doc,
         media: std::collections::BTreeMap::from([("art".into(), path)]),
-        summary: json!({ "source": "animated SVG", "size": [320, 180], "box": [180, 101.25], "motifs": motifs }),
+        summary: json!({ "source": "animated SVG", "size": [320, 180], "box": [180, 101.25], "motion": "translate and rotate" }),
         dir: Some(dir),
     }
 }

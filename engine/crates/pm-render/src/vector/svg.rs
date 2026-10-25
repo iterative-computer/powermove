@@ -80,6 +80,7 @@ pub fn plan_svg(
     uv: [f64; 4],
     world: &Mat2d,
     target: PixelRect,
+    playback: bool,
 ) -> Result<Option<Box<VectorQuad>>, String> {
     let (doc, stamp) = document(path)?;
     let (w, h) = doc.size();
@@ -124,6 +125,7 @@ pub fn plan_svg(
             transform: m.as_coeffs(),
             rect,
             clip: corners.map(|p| [p.x, p.y]),
+            playback,
         },
         rect,
     })))
@@ -164,7 +166,7 @@ mod tests {
         world: &Mat2d,
     ) -> (PixelRect, [f64; 6], [[f64; 2]; 4]) {
         let target = PixelRect::new(0, 0, 400, 200);
-        let quad = plan_svg(p, bw, bh, uv, world, target)
+        let quad = plan_svg(p, bw, bh, uv, world, target, false)
             .unwrap()
             .expect("drawn");
         let VectorQuad::Device {

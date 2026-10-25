@@ -44,14 +44,17 @@ fn sample(q: vec2<f32>) -> vec4<f32> {
     }
     var result = vec4<f32>(0.0);
     if (mode == 2u) {
-        result = sample(pos.xy - p.v[5].xy);
+        // A source scale below 1 reconstructs a device-grid image at the
+        // fine grid's pixel centers.
+        let scale = select(1.0, p.v[6].y, p.v[6].y > 0.0);
+        result = sample((pos.xy - p.v[5].xy) * scale);
     } else {
         let radius = i32(p.v[0].z);
         for (var k = -radius; k <= radius; k++) {
             result += sample(pos.xy + f32(k) * p.v[0].xy) * weights[u32(k + radius)];
         }
     }
-    if (mode == 1u && p.v[6].x > 0.5 && result.a > 0.0) {
+    if (mode != 0u && p.v[6].x > 0.5 && result.a > 0.0) {
         result = vec4<f32>(linear_to_srgb(result.rgb / result.a) * result.a, result.a);
     }
     return result;

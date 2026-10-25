@@ -5,7 +5,8 @@
 //! - Coverage scenes use exact area coverage in `r32float` atlas pages,
 //!   then composite their paint in float at working precision.
 //! - SVG images draw at output resolution through the float GPU painter,
-//!   or resvg for documents it cannot draw. No editor window is involved.
+//!   or resvg for documents it cannot draw. Playback frames reproject a
+//!   persistent source raster instead. No editor window is involved.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -21,7 +22,7 @@ use crate::coverage::{AreaCoverage, Batch, InputScratch, TransformedItem};
 use super::VectorSource;
 
 struct Entry {
-    _texture: wgpu::Texture,
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     bytes: u64,
     /// The resolve tick of the last use (least recently used order).
@@ -365,7 +366,7 @@ pub struct VectorCache {
     svg_sample: Option<super::svg_sample::SvgSample>,
     svg_fallback_reason: Option<String>,
     svg_fallback_reasons: HashMap<([u8; 32], u8), String>,
-    svg_uncacheable_sources: HashSet<[u8; 32]>,
+    svg_unpaintable_rasters: HashSet<[u8; 32]>,
     svg_raster_hits: u64,
     svg_raster_misses: u64,
 }
@@ -398,7 +399,7 @@ impl VectorCache {
             svg_sample: None,
             svg_fallback_reason: None,
             svg_fallback_reasons: HashMap::new(),
-            svg_uncacheable_sources: HashSet::new(),
+            svg_unpaintable_rasters: HashSet::new(),
             svg_raster_hits: 0,
             svg_raster_misses: 0,
         }
@@ -415,7 +416,8 @@ impl VectorCache {
         self.svg_fallback_reason.as_deref()
     }
 
-    /// Persistent source raster reuse, independent of output transform.
+    /// Playback source raster hits and misses (reuse across translation and
+    /// rotation).
     pub fn svg_raster_cache_counts(&self) -> (u64, u64) {
         (self.svg_raster_hits, self.svg_raster_misses)
     }
@@ -546,110 +548,48 @@ impl VectorCache {
                 transform,
                 rect,
                 clip,
+                playback,
             } => {
-                self.svg_fallback_reason = None;
                 self.svg_fallback_reasons
                     .retain(|entry_key, _| self.entries.contains_key(entry_key));
                 let (doc, _) = super::svg::document(path)?;
-                let transform = pm_vector::kurbo::Affine::new(*transform);
+                let transform = Affine::new(*transform);
                 let clip = clip.map(|[x, y]| pm_vector::kurbo::Point::new(x, y));
-                if doc.gpu_paintable()
-                    && device
-                        .features()
-                        .contains(wgpu::Features::FLOAT32_BLENDABLE)
-                {
-                    // Integrate the canonical high density source into every
-                    // output precision, including float exports.
-                        if let Some(plan) = super::svg_sample::plan_with_clip(
-                            &doc, path, *stamp, transform, &clip, &device.limits(),
-                        )
-                        {
-                            let raster_key = (plan.key, u8::MAX);
-                            let source = if let Some(entry) = self.entries.get_mut(&raster_key) {
-                                entry.used = self.tick;
-                                entry.frame = self.frame;
-                                self.svg_raster_hits += 1;
-                                pm_perf::bump(pm_perf::Counter::SvgRasterHits);
-                                pm_perf::bump(pm_perf::Counter::VectorCacheHits);
-                                Some(entry._texture.clone())
-                            } else if self.svg_uncacheable_sources.contains(&plan.key) {
-                                None
-                            } else {
-                                self.svg_raster_misses += 1;
-                                pm_perf::bump(pm_perf::Counter::SvgRasterMisses);
-                                let mut encoder = device.create_command_encoder(&Default::default());
-                                let raster = self
-                                    .svg
-                                    .get_or_insert_with(|| {
-                                        super::svg_float::SvgPainter::new(device).unwrap()
-                                    })
-                                    .render(
-                                        device,
-                                        queue,
-                                        &mut encoder,
-                                        &doc,
-                                        pm_vector::kurbo::Affine::scale(plan.scale),
-                                        plan.rect,
-                                        &plan.source_clip,
-                                        plan.source_precision,
-                                    )?;
-                                if let Some((texture, bytes)) = raster {
-                                    queue.submit([encoder.finish()]);
-                                    let source = texture.clone();
-                                    self.insert(raster_key, texture, bytes);
-                                    Some(source)
-                                } else {
-                                    // A canonical fill that exceeds its work/device budget
-                                    // cannot become cheaper on the next moving frame.
-                                    if self.svg_uncacheable_sources.len() >= self.max_entries {
-                                        self.svg_uncacheable_sources.clear();
-                                    }
-                                    self.svg_uncacheable_sources.insert(plan.key);
-                                    None
-                                }
-                            };
-                            if let Some(source) = source {
-                                let sampler = self
-                                    .svg_sample
-                                    .get_or_insert_with(|| super::svg_sample::SvgSample::new(device));
-                                if let Some((texture, bytes)) = sampler.render(
-                                    device, queue, &source, &plan, transform, *rect, &clip, precision,
-                                ) {
-                                    return Ok(self.insert(key, texture, bytes));
-                                }
-                            }
-                        }
+                let reason = if !doc.gpu_paintable() {
+                    "SVG feature requires resvg".to_owned()
+                } else if !device.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
+                    "GPU lacks FLOAT32_BLENDABLE".to_owned()
+                } else {
+                    if *playback
+                        && let Some((texture, bytes)) = self.svg_playback(
+                            device, queue, &doc, path, *stamp, transform, *rect, &clip, precision,
+                        )?
+                    {
+                        self.svg_fallback_reason = None;
+                        return Ok(self.insert(key, texture, bytes));
+                    }
                     let mut encoder =
                         device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("pm svg float"),
                         });
-                    let painter = self
-                        .svg
-                        .get_or_insert_with(|| super::svg_float::SvgPainter::new(device).unwrap());
-                    if let Some(drawn) = painter.render(
-                        device,
-                        queue,
-                        &mut encoder,
-                        &doc,
-                        transform,
-                        *rect,
-                        &clip,
-                        precision,
+                    let painter = self.svg.get_or_insert_with(|| {
+                        super::svg_float::SvgPainter::new(device)
+                            .expect("FLOAT32_BLENDABLE was checked")
+                    });
+                    if let Some((texture, bytes)) = painter.render(
+                        device, queue, &mut encoder, &doc, transform, *rect, &clip, precision,
                     )? {
                         queue.submit([encoder.finish()]);
-                        return Ok(self.insert(key, drawn.0, drawn.1));
+                        self.svg_fallback_reason = None;
+                        return Ok(self.insert(key, texture, bytes));
                     }
-                    self.svg_fallback_reason = painter.fallback_reason().map(str::to_owned);
-                } else {
-                    self.svg_fallback_reason = Some(if !doc.gpu_paintable() {
-                        "SVG feature requires resvg".into()
-                    } else {
-                        "GPU lacks FLOAT32_BLENDABLE".into()
-                    });
-                }
-                let reason = self.svg_fallback_reason.clone().unwrap_or_else(|| {
-                    "float SVG painter declined; resvg fallback".to_owned()
-                });
+                    painter
+                        .fallback_reason()
+                        .unwrap_or("float SVG painter declined")
+                        .to_owned()
+                };
+                // The declared fallback: resvg at output resolution, with the
+                // reason observable at runtime and restored on a cache hit.
                 self.svg_fallback_reason = Some(reason.clone());
                 self.svg_fallback_reasons.insert(key, reason);
                 let b = doc.raster_device(transform, *rect, Some(&clip));
@@ -663,6 +603,74 @@ impl VectorCache {
         // the bound holds within a frame too (a work item can be a whole
         // export).
         Ok(self.insert(key, texture, bytes))
+    }
+
+    /// A playback frame from the persistent source raster: the raster is
+    /// looked up (or painted once) by content, scale bucket and crop, then
+    /// reprojected at `transform`. `None` paints the frame directly.
+    #[allow(clippy::too_many_arguments)]
+    fn svg_playback(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        doc: &pm_vector::render::svg::SvgDocument,
+        path: &std::path::Path,
+        stamp: super::svg::Stamp,
+        transform: Affine,
+        rect: PixelRect,
+        clip: &[pm_vector::kurbo::Point; 4],
+        precision: Precision,
+    ) -> Result<Option<(wgpu::Texture, u64)>, String> {
+        let Some(plan) =
+            super::svg_sample::plan_with_clip(doc, path, stamp, transform, clip, &device.limits())
+        else {
+            return Ok(None);
+        };
+        let raster_key = (plan.key, u8::MAX);
+        let source = if let Some(entry) = self.entries.get_mut(&raster_key) {
+            entry.used = self.tick;
+            entry.frame = self.frame;
+            self.svg_raster_hits += 1;
+            pm_perf::bump(pm_perf::Counter::SvgRasterHits);
+            entry.texture.clone()
+        } else if self.svg_unpaintable_rasters.contains(&plan.key) {
+            return Ok(None);
+        } else {
+            self.svg_raster_misses += 1;
+            pm_perf::bump(pm_perf::Counter::SvgRasterMisses);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("pm svg source raster"),
+            });
+            let painter = self.svg.get_or_insert_with(|| {
+                super::svg_float::SvgPainter::new(device).expect("FLOAT32_BLENDABLE was checked")
+            });
+            let Some((texture, bytes)) = painter.render(
+                device,
+                queue,
+                &mut encoder,
+                doc,
+                Affine::scale(plan.scale),
+                plan.rect,
+                &plan.source_clip,
+                super::svg_sample::SOURCE_PRECISION,
+            )?
+            else {
+                // A raster beyond the painter's budget stays beyond it on
+                // the next moving frame; remember it (bounded).
+                if self.svg_unpaintable_rasters.len() >= self.max_entries {
+                    self.svg_unpaintable_rasters.clear();
+                }
+                self.svg_unpaintable_rasters.insert(plan.key);
+                return Ok(None);
+            };
+            queue.submit([encoder.finish()]);
+            self.insert(raster_key, texture.clone(), bytes);
+            texture
+        };
+        let sampler = self
+            .svg_sample
+            .get_or_insert_with(|| super::svg_sample::SvgSample::new(device));
+        Ok(sampler.render(device, queue, &source, &plan, transform, rect, clip, precision))
     }
 
     /// Caches a new texture under `key`, making room first.
@@ -684,7 +692,7 @@ impl VectorCache {
         self.entries.insert(
             key,
             Entry {
-                _texture: texture,
+                texture,
                 view: view.clone(),
                 bytes,
                 used: self.tick,

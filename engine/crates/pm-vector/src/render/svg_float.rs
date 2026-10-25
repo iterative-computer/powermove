@@ -152,8 +152,23 @@ fn children(group: &usvg::Group, transform: Affine) -> Option<Vec<FloatNode>> {
 
 fn group_node(g: &usvg::Group, parent: Affine) -> Option<Vec<FloatNode>> {
     let t = parent * affine(g.transform());
-    let children = children(g, t)?;
+    let mut children = children(g, t)?;
     if !g.should_isolate() {
+        return Some(children);
+    }
+    // One draw composited normally needs no isolated layer: its group
+    // opacity is the draw's own (`<path opacity>` becomes such a group).
+    if g.clip_path().is_none()
+        && g.mask().is_none()
+        && g.filters().is_empty()
+        && g.blend_mode() == usvg::BlendMode::Normal
+        && let [FloatNode::Draw(draw)] = children.as_mut_slice()
+    {
+        let o = g.opacity().get();
+        match &mut draw.paint {
+            FloatPaint::Solid(rgba) => rgba[3] *= o,
+            FloatPaint::Gradient { opacity, .. } => *opacity *= o,
+        }
         return Some(children);
     }
     let clip = if let Some(c) = g.clip_path() {

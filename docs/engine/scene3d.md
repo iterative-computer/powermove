@@ -347,7 +347,7 @@ Engine presenter and transport:
   pixels).
 - `pm-protocol/src/frame.rs` (`ChromeSelection`, `DepthIdSurface`
   encoding, `Scene3dMeta`, round 11 `ViewerState.surface_epoch`),
-  `preview.rs` (new), `blender.rs`, `snapshot.rs`, `svg_raster.rs`,
+  `preview.rs` (new), `blender.rs`, `snapshot.rs`,
   `envelope.rs`, `interop.rs`, `lib.rs`, `samples.rs`; wire fixtures
   `event-frame`, `event-previewControl`, `event-previewStatus`,
   `request-blenderRender`, `response-frame`; the generated
@@ -1596,8 +1596,8 @@ production pixel.
 Transient render failures: `render_failed` (round 10) still makes a
 deterministic failure (an invalid request such as the scene budget
 refusal, a missing composition, a stopped job watchdog) wait for the next
-change. Device, readback, GPU, media, fallback-runner and SVG-raster
-errors now redraw the paused frame after 100 ms, 500 ms and 2 s first
+change. Device, readback, GPU, media and fallback-runner errors now
+redraw the paused frame after 100 ms, 500 ms and 2 s first
 (`RENDER_RETRY_US`), counted per frame (revision and view sequence).
 
 Merge with feat/native-engine (svgbucket V1 canvas, level 2 text): the

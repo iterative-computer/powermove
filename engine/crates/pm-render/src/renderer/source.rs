@@ -29,6 +29,7 @@ const MAX_SOURCE_BATCH: usize = 16;
 struct SourceDecode {
     exact_worker: bool,
     sequence: bool,
+    sampling: Sampling,
 }
 
 #[derive(Default)]
@@ -66,14 +67,6 @@ impl SourceReuse {
 }
 
 impl Renderer {
-    pub fn source_is_svg(path: &Path) -> Result<bool, String> {
-        let mut head = [0u8; 512];
-        let n = std::fs::File::open(path)
-            .and_then(|mut file| file.read(&mut head))
-            .map_err(|e| e.to_string())?;
-        Ok(pm_media::image::sniff(&head[..n]) == pm_media::image::ImageFormat::Svg)
-    }
-
     /// A source frame in top-down premultiplied RGBA8 display pixels.
     /// The output is independent of a composition's color settings.
     #[allow(clippy::too_many_arguments)]
@@ -95,8 +88,8 @@ impl Renderer {
             SourceDecode {
                 exact_worker: true,
                 sequence,
+                sampling: Sampling::Final,
             },
-            Sampling::Final,
         )
     }
 
@@ -105,6 +98,7 @@ impl Renderer {
     /// per-file override and the image-sequence rule, from the exact worker.
     /// The source monitor draws footage this way whenever Chromium cannot
     /// present the coded planes with the same reading.
+    #[allow(clippy::too_many_arguments)]
     pub fn source_rgba8_composed(
         &mut self,
         path: &Path,
@@ -124,8 +118,8 @@ impl Renderer {
             SourceDecode {
                 exact_worker: true,
                 sequence,
+                sampling,
             },
-            sampling,
         )
     }
 
@@ -148,8 +142,8 @@ impl Renderer {
             SourceDecode {
                 exact_worker: false,
                 sequence,
+                sampling: Sampling::Final,
             },
-            Sampling::Final,
         )
     }
 
@@ -161,7 +155,6 @@ impl Renderer {
         fit: SourceFit,
         interpretation: Option<&Interpretation>,
         decode: SourceDecode,
-        sampling: Sampling,
     ) -> Result<Vec<u8>, String> {
         let mut head = [0u8; 512];
         let n = std::fs::File::open(path)
@@ -177,7 +170,7 @@ impl Renderer {
                 label: Some("pm source snapshot"),
             });
         let source = self.source_texture(path, time, interpretation, kind, &mut encoder, decode)?;
-        self.draw_source_target(source, output, fit, sampling, encoder)
+        self.draw_source_target(source, output, fit, decode.sampling, encoder)
     }
 
     fn source_texture(
@@ -321,6 +314,7 @@ impl Renderer {
                 SourceDecode {
                     exact_worker: false,
                     sequence,
+                    sampling: Sampling::Final,
                 },
             )?;
             self.record_source_draw(&source, output, fit, Sampling::Final, &target, &mut encoder);
@@ -414,6 +408,7 @@ impl Renderer {
             transform: transform.as_coeffs(),
             rect: PixelRect::new(0, 0, output.width, output.height),
             clip: [[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]],
+            playback: false,
         };
         self.vector.begin_frame();
         let view = self

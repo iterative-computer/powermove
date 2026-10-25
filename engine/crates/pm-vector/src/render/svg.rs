@@ -59,8 +59,6 @@ pub struct SvgDocument {
     /// work over the tree runs on a stack sized to it.
     pub(crate) depth: usize,
     gpu: bool,
-    has_text: bool,
-    has_mask_or_filter: bool,
     pub(crate) filter_res: HashMap<String, Option<[u32; 2]>>,
 }
 
@@ -139,7 +137,7 @@ impl SvgDocument {
             return Err(SvgError("SVGZ (gzip) is not read".into()));
         }
         let text = std::str::from_utf8(data).map_err(|_| SvgError("not UTF-8".into()))?;
-        let (tree, gpu, has_text, has_mask_or_filter, filter_res) = with_stack(depth, || {
+        let (tree, gpu, filter_res) = with_stack(depth, || {
             let xml =
                 |e: usvg::roxmltree::Error| SvgError(format!("SVG data parsing failed cause {e}"));
             let text = super::svg_xml::libxml2_text(text).map_err(xml)?;
@@ -153,20 +151,15 @@ impl SvgDocument {
             let text_nodes = doc
                 .descendants()
                 .any(|n| n.is_element() && n.tag_name().name() == "text");
-            let has_mask_or_filter = doc.descendants().any(|n| {
-                n.is_element() && matches!(n.tag_name().name(), "mask" | "filter")
-            });
             let tree = usvg::Tree::from_xmltree(&doc, &options(text_nodes))
                 .map_err(|e| SvgError(e.to_string()))?;
             let gpu = paintable_group(tree.root()) && !unsupported_edge_mode;
-            Ok::<_, SvgError>((tree, gpu, text_nodes, has_mask_or_filter, filter_res))
+            Ok::<_, SvgError>((tree, gpu, filter_res))
         })?;
         Ok(Self {
             tree: core::mem::ManuallyDrop::new(tree),
             depth,
             gpu,
-            has_text,
-            has_mask_or_filter,
             filter_res,
         })
     }
@@ -221,18 +214,6 @@ impl SvgDocument {
     /// unsupported filters and `crispEdges` shapes are not.
     pub fn gpu_paintable(&self) -> bool {
         self.gpu
-    }
-
-    /// Whether the parsed SVG has text glyphs. Small glyph edges need a
-    /// denser canonical source when a float raster is reused under motion.
-    pub fn has_text(&self) -> bool {
-        self.has_text
-    }
-
-    /// Whether the SVG declares a mask or filter, whose high-density source
-    /// can require joint fine-grid work during a cache fill.
-    pub fn has_mask_or_filter(&self) -> bool {
-        self.has_mask_or_filter
     }
 
     /// The SVG's user space stretched over `width` × `height` (an `<img>`

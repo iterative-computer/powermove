@@ -95,6 +95,41 @@ fn anisotropic_gaussian_has_independent_f64_axis_weights() {
     }
 }
 
+/// Blurs of at least 3 device pixels run on the device grid with matched
+/// variance. They stay within 0.05 CV of the f64 Gaussian everywhere in the
+/// frame, in both colour spaces, and conserve area and centroid.
+#[test]
+fn device_grid_gaussians_match_f64_weights() {
+    for (sigma, srgb) in [((3.0, 6.0), false), ((5.0, 3.5), true), ((12.0, 9.0), false)] {
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="96" height="96"{}><feGaussianBlur stdDeviation="{} {}"/></filter></defs><rect x="40" y="36" width="13" height="21" fill="#fff" filter="url(#f)"/></svg>"##,
+            if srgb { r#" color-interpolation-filters="sRGB""# } else { "" },
+            sigma.0,
+            sigma.1
+        );
+        let frame = render(&svg, 96, 96, Affine::IDENTITY);
+        let (mut max_cv, mut area, mut expected_area, mut mx, mut emx) =
+            (0.0f64, 0.0, 0.0, 0.0, 0.0);
+        for y in 0..96 {
+            for x in 0..96 {
+                let expected = box_blur(x, y, (40, 36, 53, 57), sigma);
+                let p = pixel(&frame, 96, x as usize, y as usize);
+                for actual in p {
+                    max_cv = max_cv.max((actual - expected).abs() * 255.0);
+                }
+                area += p[3];
+                expected_area += expected;
+                mx += p[3] * f64::from(x);
+                emx += expected * f64::from(x);
+            }
+        }
+        eprintln!("device-grid Gaussian {sigma:?} sRGB={srgb}: max {max_cv:.3} CV");
+        assert!(max_cv <= 0.05, "σ {sigma:?}: {max_cv:.3} CV");
+        assert!((area - expected_area).abs() / expected_area < 1e-3);
+        assert!((mx / area - emx / expected_area).abs() < 1e-3);
+    }
+}
+
 #[test]
 fn rotated_nonuniform_and_skewed_gaussian_follow_f64_covariance() {
     // A one-unit square blurred in SVG user space has covariance

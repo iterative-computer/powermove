@@ -2095,9 +2095,9 @@ qualified; those viewports remain an open gap, unchanged by this round.
   compiled).
 - `pm-cli/src/{render,scope}.rs`, `pm-node/src/jobs/mod.rs`,
   `apps/desktop/src/renderer/src/engine-connection/{install,render-transport.test}.ts`:
-  merge resolutions keeping both the font installation/seed scope and the
-  SVG rasterizer/source; `scope.rs` sets the resvg rasterizer on the one
-  renderer that has fonts. Protocol TypeScript regenerated.
+  merge resolutions keeping the font installation/seed scope. SVG images
+  now paint natively in the renderer (vector.md). Protocol TypeScript
+  regenerated.
 - `pm-render/tests/support/mod.rs`: `corpus_root()`.
 
 2026-10-19 (lane ne-fonts, round 7):

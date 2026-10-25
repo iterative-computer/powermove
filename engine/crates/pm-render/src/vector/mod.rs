@@ -32,12 +32,15 @@ pub enum VectorSource {
     },
     /// An SVG image under `transform` (user units to target pixels) drawn
     /// into `rect`, clipped to the polygon `clip` (float GPU paint, or resvg).
+    /// `playback` frames reproject a cached source raster (the SVG playback
+    /// resampler); paused frames and exports paint at output resolution.
     SvgRaster {
         path: std::path::PathBuf,
         stamp: svg::Stamp,
         transform: [f64; 6],
         rect: PixelRect,
         clip: [[f64; 2]; 4],
+        playback: bool,
     },
 }
 
@@ -58,8 +61,10 @@ impl VectorSource {
                 transform,
                 rect,
                 clip,
+                playback,
             } => {
                 h.update(b"svg");
+                h.update([u8::from(*playback)]);
                 hash_bytes(&mut h, path.as_os_str().as_encoded_bytes());
                 h.update(stamp.0.to_le_bytes());
                 h.update(stamp.1.to_le_bytes());

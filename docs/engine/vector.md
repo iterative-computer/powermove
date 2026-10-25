@@ -98,37 +98,48 @@ See [composite.md](composite.md#path-masks) and `tests/path_masks.rs` (G-V2).
 
 ## SVG images
 
-All SVG image layers use one native route at output resolution. The layer's box,
-fit window, anchor and world transform determine the device-space drawing. There
-is no editor-window raster request. An SVG project can render
-and export headlessly, including through `pm-cli`.
+Paused frames, exports and captures paint every SVG image at output resolution.
+The layer's box, fit window, anchor and world transform determine the
+device-space drawing. There is no editor-window raster request. An SVG project
+can render and export headlessly, including through `pm-cli`.
 
 usvg parses the document and lays out SVG text. System fonts load lazily, once per
 process. Paths use exact area coverage. Gradients integrate premultiplied paint
 with subcell coverage at an adaptive 1–16 samples per axis. Clips and masks share
 a 4× grid with child paint, group opacity and W3C blending, then resolve once.
-Intermediates stay RGBA32F until the project's working-precision store.
+A group that only carries opacity over one draw folds the opacity into its paint.
+Intermediates stay RGBA32F until the project's working-precision store. An
+axis-aligned image-box clip is an exact rectangle bound applied at the output,
+not a group clip.
 
-A persistent float source raster is keyed by the parsed file's path/stamp,
-effective-scale bucket and local image crop. Translation and rotation reuse it;
-scale crossing a bucket repaints it. Reprojection integrates source-cell overlap
-with each output pixel instead of bilinear point sampling. The image crop is
-painted jointly into the cached source. An axis-aligned output image-box clip
-uses rectangle bounds rather than allocating a full-frame group grid.
+**Playback** (the SVG counterpart of the level 2 playback resampler, frames
+while playing or scrubbing) reprojects a persistent RGBA16F source raster. It is
+keyed by the file's path and stamp, an upward √2 bucket of the transform's
+largest scale (2–2.8 source pixels per output pixel) and the image crop in SVG
+user space, which is painted into the raster. Translation and rotation reuse it;
+a scale beyond the bucket repaints it. Each output pixel integrates its source
+footprint (4 × 4 quadrature of the bilinear raster), conserving area and
+centroid within 1e-3 and staying several times closer to f64 coverage than
+today's bilinear RGBA8 draw. Sources above 32 MiB, or footprints beyond 4.5
+texels per axis, paint directly.
 
 Gaussian blur and offset run in float before the group's clip, mask and opacity.
 Filter and primitive regions clip output while retaining the source halo. Each
 primitive uses its declared `color-interpolation-filters`, defaulting to linearRGB.
 SVG 1.1 `filterRes` uses its authored raster grid; zero disables the filtered element.
+A Gaussian of at least 3 device pixels runs on the device grid (area average,
+variance-matched kernel, bilinear reconstruction on the 4× grid, regions applied
+there); kernels and halos extend 6σ.
 
-Large supported groups use ordered tiles with a shared 4× grid and Gaussian halos.
-Scratch textures return to a pool after their last encoded read. Texture scratch
-and coverage are preflighted against 128 MiB and a filter work budget; output and
-command metadata are separate. Buffer sizes, binding sizes, dispatches and
-texture dimensions are checked against the actual device limits before creation.
-Work exceeding those bounds uses the declared resvg fallback rather than failing
-an export. `Renderer::svg_fallback_reason` exposes the runtime reason, including
-on a cached fallback result.
+Filtered and large groups use ordered tiles with a shared 4× grid and Gaussian
+halos, the fine scene resolved once and culled per tile. Tiles are as large as
+the live scratch targets allow within 128 MiB, and at most two short batches are
+in flight. Scratch textures return to a pool after their last encoded read.
+Texture scratch, coverage and filter work are preflighted; buffer sizes, binding
+sizes, dispatches and texture dimensions are checked against the device limits
+before creation. Work beyond those bounds uses the declared resvg fallback rather
+than failing an export. `Renderer::svg_fallback_reason` exposes the runtime reason,
+including on a cached fallback result.
 
 Unsupported filter primitives, Gaussian duplicate/wrap edge modes, patterns,
 embedded images and crisp-edge paint use resvg at output resolution with an RGBA8
