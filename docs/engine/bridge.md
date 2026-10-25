@@ -1770,100 +1770,84 @@ P5) now belong to the perf3 lane.
 
 ## Pacing at 120 Hz
 
-Playback at the display's rate presents every frame the engine renders, from
-the first refresh after Play. Seven rules keep it so; the 120 Hz rig's
-`playing` row checks them
-(`docs/engine/perfbench.md`, with `PM_PERFBENCH_RIG_TRACE` for the per-frame
-trace).
+Playback at the display's rate shows every frame the engine renders, from
+the first refresh the first new frame can make. The 120 Hz rig's `playing`
+row checks it (`docs/engine/perfbench.md`; `PM_PERFBENCH_RIG_TRACE` writes
+the per-frame trace).
 
-1. **The worker draws timed frames in its animation frame.** A worker
-   canvas sends what an animation frame drew to viz as the callback returns.
-   A frame drawn later in the refresh waits for the next BeginFrame, so a
-   commit timer gains nothing, and a timer that fires after that BeginFrame
-   costs a refresh: its frame is dropped as late. The 0.75-refresh commit
-   timer (perf3) did that at 120 Hz under load and was removed. The display
+1. **One vsync timeline** (`VsyncEstimator`, `display-timing.ts`). The
+   presentation worker locks once on the median of its BeginFrame samples,
+   then tracks the phase like a PLL: each sample within a quarter refresh
+   moves it by 1/16 of its error (at most 1/16 of a refresh); twelve
+   agreeing samples outside that band relock it. The engine's vsync hint
+   is this timeline, re-sent when the phase moved 100 µs (at most every
+   250 ms), so the engine's plan and the viewer's decisions agree. Within a
+   run the decision offset follows the timeline instead of being re-centred
+   (re-centred only past five eighths of a refresh): a decision that jumps
+   across a frame boundary draws one frame twice and drops the next.
+2. **The worker draws timed frames in its animation frame.** A worker canvas
+   hands viz what an animation frame drew when the callback returns; a frame
+   drawn later in the refresh waits for the next BeginFrame. The display
    prediction is 1.5 refreshes and 3.2 ms (A/V sync above).
-2. **Render-ahead covers twice the delivery time and a phase slot**
+3. **Render-ahead covers twice the delivery time and a phase slot**
    (`Schedule::lead_frames`): at least `DEFAULT_LEAD` (4) frames, and
    2 × delivery + one refresh. Delivery is the viewer's display latency
-   (the hint's `latencyUs`), half a refresh and the arrival; without it,
+   (the hint's `latencyUs`), half a refresh and the arrival; without a hint,
    3 refreshes. One delivery is the viewer's horizon, the other covers the
-   render and a stall on the way to the viewer (the window's main thread
-   busy for a dozen milliseconds); the refresh is the longest wait for the
-   render's phase slot. Four frames at 120 fps (33 ms) arrived after the
-   worker had decided their refresh. It is 7 frames at 120 fps on a 120 Hz
-   display and unchanged at 60 fps and below. The playing pool stays
-   ring + 4 + 2: a frame leaves it when the viewer has drawn it, about two
-   refreshes before it shows (`poolWaits` stays 0).
-3. **Frame events follow the refresh that drew the frame**
-   (`PresentedEvents`). The worker's report arrives about a millisecond into
-   the refresh, the moment the page's own animation frame runs: taken in
-   arrival order, one page animation frame had none and the next had two, and
-   the older was never announced. A timed frame is emitted at the first page
+   render and a stall on the way (the window's main thread busy for a dozen
+   milliseconds); the refresh is the longest wait for the render's phase
+   slot: 7 frames at 120 fps on a 120 Hz display, 6 at 60 fps on a 60 Hz
+   one, the floor of 4 for slower frame rates on 120 Hz. A frame leaves the pool when the viewer has drawn it, about two refreshes
+   before it shows, so `poolWaits` stays 0.
+4. **Playback frames leave from the completion thread**
+   (`present/complete.rs`). The render thread encodes the next timed frame
+   while the GPU finishes the last; each is sent, in order, when its GPU
+   work is done, so a frame costs the render thread its compose only. The
+   schedule's cost estimate is render start to GPU done. The C′ prototype
+   presents on the render thread.
+5. **Frame events follow the refresh that drew the frame**
+   (`PresentedEvents`). A timed frame is announced at the first page
    animation frame of a later refresh than its draw (the page's and the
-   worker's BeginFrame times agree within 0.1 ms). It is still at most one
-   emission per page animation frame, inside it (decision EXT-TIMING-1 keeps
-   that timing).
-
-4. **Play starts the picture and the sound on one line**
-   (`Thread::start_time`, pm-audio `Playback::command_at`). The line's
-   first media shows at the earliest instant both can make: for the
-   picture, the first refresh the first new frame can be ready for (what
-   is left of its render, then the viewer's display latency, which the
-   vsync hint carries as `latencyUs`); for the sound, the device's latency
-   and one of its buffers. pm-audio presents the run's first sample at that
-   host time, partway into a device buffer (silence before it), or, when
-   its audio was not queued in time, passes over what should already have
-   played: what is heard is on the line either way, and its first clock
-   sample only confirms the line (`TransportClock::follow` adopts it). A
-   device that never confirms leaves the line on the host clock. Without
-   the viewer's timing the line starts after `PREROLL_US`. When the
-   playhead's frame is on screen and current, the run renders from the
-   next frame, and the engine connection announces the frame on screen
-   again at the next animation frame (`PresentedEvents.replay`), as
-   today's Play draws it first; after a seek or an undrawn edit the run
-   renders it first and the start is planned for it.
-5. **The first new frames are rendered while paused** (`Thread::arm`).
-   Once the paused frame has stayed 50 ms, the next frames of a forward
-   1× run go into the paused pool's free slots (one slot stays free); any
-   change gives them back. A Play sends them at once, before the playing
-   pool replaces the paused one (`BridgePresenter::transport` sends the
-   Play first), and the viewer keeps drawing frames of a pool whose
-   surfaces match the new one's (`presenter.ts` `onPool`). Sessions with
+   worker's BeginFrame times agree within 0.1 ms), at most one emission per
+   page animation frame, inside it (decision EXT-TIMING-1).
+6. **Play starts the picture and the sound on one line**
+   (`Thread::start_time`). The line's first media shows at the earliest
+   instant both can make: for the picture, the first refresh the first new
+   frame can be ready for (what is left of its render, its delivery to the
+   worker, then the viewer's display latency); for the sound, the device's
+   latency and one of its buffers. pm-audio presents the run's first sample
+   at that host time (`Start::At`), partway into a device buffer, or passes
+   over what should already have played when its audio was late; its first
+   clock sample confirms the line (`TransportClock::follow`). A Play the
+   presenter forwarded to the audio at ingress (PLAY-1) is prepared there
+   and held (`Start::Held`, 150 ms at most) until the render thread times
+   it (`AudioCtl::StartAt`); a forwarded Play the render thread defers or
+   ignores starts at once. A device that never confirms leaves the line on
+   the host clock; without the viewer's timing the line starts after
+   `PREROLL_US`. When the playhead's frame is on screen and current, the
+   run renders from the next frame and the engine connection announces the
+   frame on screen again at the next animation frame
+   (`PresentedEvents.replay`), as today's Play does.
+7. **The first new frames are rendered while paused** (`Thread::arm`).
+   Once the paused frame has stayed 50 ms, the next frames of a forward 1×
+   run go into the paused pool's free slots (one stays free); any change
+   gives them back. A Play sends them at once, before the playing pool
+   replaces the paused one (`BridgePresenter::transport` sends the Play
+   first), and the viewer keeps drawing frames of a pool whose surfaces
+   match the new one's (`presenter.ts` `onPool`). Sessions with
    compatibility producers start through the native preroll instead.
-
-6. **One vsync timeline, corrected continuously** (`VsyncEstimator`).
-   The worker's estimator locks once on the median of its BeginFrame
-   samples, then each sample within a quarter refresh nudges the phase by
-   1/16 of its error (at most 1/16 of a refresh); twelve agreeing samples
-   outside that band relock it. The hint goes to the engine when the phase
-   moved 100 µs or every 250 ms. Within a run (same clock, period and
-   resize state) the worker's decision offset moves with the timeline in
-   steps of under half a refresh instead of being recomputed: a refit that
-   moved the frame boundary across a decision drew one frame twice and
-   dropped the next.
-7. **Playback frames leave from the completion thread.** The render thread
-   encodes the next timed frame while the GPU finishes the last one;
-   `present/complete.rs` sends each, in order, when its GPU work is done.
-   A frame costs the render thread its compose only, so render-ahead holds
-   on a busy machine. The schedule's cost estimate is render start to GPU
-   done. The C′ prototype still presents on the render thread.
 
 `POWERMOVE_ENGINE_SIM_AUDIO=1` replaces the audio device with a simulated
 one (48 kHz, 512-frame buffers, 10 ms latency, called back a buffer ahead)
-so a machine without working output still runs audio-clocked playback
-(rig `PM_PERFBENCH_RIG_AUDIO=1`).
+for a machine whose output does not run (rig `PM_PERFBENCH_RIG_AUDIO=1`).
 
-Open, outside the bridge:
-
-- **viz's latch.** viz draws a refresh as soon as every client has submitted;
-  with the page and the worker canvas that is about 1.4 ms after BeginFrame.
-  Under load BeginFrames come up to 2 ms early (on both paths) and a draw
-  that early is presented with the previous one, which is never seen
-  (`Graphics.Pipeline.DrawAndSwap` feedback). Today's viewer escapes it on
-  heavy projects only because its page frame takes about 3 ms; on a light
-  project it shows the same collisions. Measured in hidden test windows; an
-  awake visible display may differ. C′ presents outside viz.
+Open, outside the bridge: **viz's latch.** viz draws a refresh as soon as
+every client has submitted, about 1.4 ms after BeginFrame with the page and
+the worker canvas. BeginFrames can come up to 2 ms early under load, and a
+draw that early is presented with the previous one, which is never seen
+(`Graphics.Pipeline.DrawAndSwap` feedback). Today's viewer escapes it on
+heavy projects only because its page frame takes about 3 ms. C′ presents
+outside viz.
 
 #### perf3: prepare the viewer drawing before mount
 
