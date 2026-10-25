@@ -47,6 +47,7 @@ pub struct SvgDocument {
     /// work over the tree runs on a stack sized to it.
     pub(crate) depth: usize,
     gpu: bool,
+    natural_size: (f64, f64),
 }
 
 impl Drop for SvgDocument {
@@ -72,7 +73,8 @@ impl core::fmt::Debug for SvgDocument {
 /// Fonts 4 §2 leaves them to the user agent). Text is laid out by usvg
 /// (fontdb matching, rustybuzz shaping) and drawn as its outlines.
 fn fonts() -> std::sync::Arc<usvg::fontdb::Database> {
-    static FONTS: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> = std::sync::OnceLock::new();
+    static FONTS: std::sync::OnceLock<std::sync::Arc<usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
     FONTS
         .get_or_init(|| {
             let mut db = usvg::fontdb::Database::new();
@@ -95,10 +97,11 @@ fn options(text: bool) -> usvg::Options<'static> {
         },
         ..usvg::Options::default()
     };
+    // The initial CSS font size affects `em`/`ex` lengths even in a document
+    // without a text element. Loading font faces remains lazy.
+    options.font_family = "Times".into();
+    options.font_size = 16.0;
     if text {
-        // Chrome's initial font: Times at `medium` (16 px).
-        options.font_family = "Times".into();
-        options.font_size = 16.0;
         options.fontdb = fonts();
     }
     options
@@ -122,21 +125,25 @@ impl SvgDocument {
             return Err(SvgError("SVGZ (gzip) is not read".into()));
         }
         let text = std::str::from_utf8(data).map_err(|_| SvgError("not UTF-8".into()))?;
-        let (tree, gpu) = with_stack(depth, || {
-            let xml = |e: usvg::roxmltree::Error| SvgError(format!("SVG data parsing failed cause {e}"));
+        let (tree, gpu, natural_size) = with_stack(depth, || {
+            let xml =
+                |e: usvg::roxmltree::Error| SvgError(format!("SVG data parsing failed cause {e}"));
             let text = super::svg_xml::libxml2_text(text).map_err(xml)?;
             let doc = super::svg_xml::parse(&text).map_err(xml)?;
             let text_nodes = doc
                 .descendants()
                 .any(|n| n.is_element() && n.tag_name().name() == "text");
-            let tree = usvg::Tree::from_xmltree(&doc, &options(text_nodes)).map_err(|e| SvgError(e.to_string()))?;
+            let tree = usvg::Tree::from_xmltree(&doc, &options(text_nodes))
+                .map_err(|e| SvgError(e.to_string()))?;
+            let natural_size = super::svg_xml::natural_size(&doc, &tree);
             let gpu = paintable_group(tree.root());
-            Ok::<_, SvgError>((tree, gpu))
+            Ok::<_, SvgError>((tree, gpu, natural_size))
         })?;
         Ok(Self {
             tree: core::mem::ManuallyDrop::new(tree),
             depth,
             gpu,
+            natural_size,
         })
     }
 
@@ -149,6 +156,13 @@ impl SvgDocument {
     pub fn size(&self) -> (f64, f64) {
         let s = self.tree.size();
         (f64::from(s.width()), f64::from(s.height()))
+    }
+
+    /// The natural size of this SVG when used as an HTML image. This can
+    /// differ from the usvg viewport for a viewBox without absolute root
+    /// dimensions; the viewport is still what rasterization transforms.
+    pub fn natural_size(&self) -> (f64, f64) {
+        self.natural_size
     }
 
     /// Whether Vello can draw every part of the document (no filters,
@@ -168,7 +182,12 @@ impl SvgDocument {
     /// The SVG under `transform` (user units to device pixels), drawn by
     /// resvg into the device rectangle `rect`. `clip` (a closed polygon in
     /// device pixels) limits it, antialiased.
-    pub fn raster_device(&self, transform: Affine, rect: PixelRect, clip: Option<&[kurbo::Point]>) -> SvgRaster {
+    pub fn raster_device(
+        &self,
+        transform: Affine,
+        rect: PixelRect,
+        clip: Option<&[kurbo::Point]>,
+    ) -> SvgRaster {
         let (w, h) = (rect.width.max(1), rect.height.max(1));
         let empty = || SvgRaster {
             width: w,
@@ -245,8 +264,10 @@ fn paintable_group(g: &usvg::Group) -> bool {
             usvg::Node::Group(g) => paintable_group(g),
             usvg::Node::Path(p) => {
                 p.rendering_mode().use_shape_antialiasing()
-                    && p.fill().is_none_or(|f| !matches!(f.paint(), usvg::Paint::Pattern(_)))
-                    && p.stroke().is_none_or(|s| !matches!(s.paint(), usvg::Paint::Pattern(_)))
+                    && p.fill()
+                        .is_none_or(|f| !matches!(f.paint(), usvg::Paint::Pattern(_)))
+                    && p.stroke()
+                        .is_none_or(|s| !matches!(s.paint(), usvg::Paint::Pattern(_)))
             }
             usvg::Node::Image(_) => false,
             usvg::Node::Text(t) => paintable_group(t.flattened()),
@@ -325,6 +346,30 @@ mod tests {
         // The left half is covered: the 10 × 10 user space spans 40 × 10.
         assert_eq!(b.rgba[(5 * 40 + 10) * 4 + 3], 255);
         assert_eq!(b.rgba[(5 * 40 + 30) * 4 + 3], 0);
+    }
+
+    #[test]
+    fn natural_size_follows_svg_image_sizing() {
+        let parse = |attributes: &str| {
+            SvgDocument::parse(format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" {attributes}><rect width="100" height="60"/></svg>"#
+            ).as_bytes()).unwrap().natural_size()
+        };
+        assert_eq!(parse(""), (300.0, 150.0));
+        assert_eq!(parse(r#"width="100""#), (100.0, 150.0));
+        assert_eq!(parse(r#"viewBox="0 0 100 60""#), (250.0, 150.0));
+        assert_eq!(parse(r#"width="100" viewBox="0 0 100 60""#), (100.0, 60.0));
+        assert_eq!(
+            parse(r#"viewBox="0 0 160 60" preserveAspectRatio="none""#),
+            (300.0, 150.0)
+        );
+        assert_eq!(parse(r#"height="1in" viewBox="0 0 100 60""#), (160.0, 96.0));
+        let lengths = SvgDocument::parse(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1ex"><rect width="16" height="8"/></svg>"#,
+        )
+        .unwrap();
+        assert_eq!(lengths.size(), (16.0, 8.0));
+        assert_eq!(lengths.natural_size(), (16.0, 8.0));
     }
 
     fn nested(levels: usize) -> String {
