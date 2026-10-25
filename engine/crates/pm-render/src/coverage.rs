@@ -254,6 +254,8 @@ pub struct AreaCoverage {
     scan_page: LazyComputePipeline,
     slots: Vec<GpuSlot>,
     cursor: usize,
+    /// One retained CPU staging allocation for the five read-only inputs.
+    upload: Vec<u8>,
 }
 
 /// Buffers referenced by one page's commands. Distinct pages recorded in
@@ -261,11 +263,7 @@ pub struct AreaCoverage {
 /// slots because queue writes follow the preceding submission in order.
 #[derive(Default)]
 struct GpuSlot {
-    counts: SlotBuffer,
-    items: SlotBuffer,
-    edges: SlotBuffer,
-    edge_items: SlotBuffer,
-    rows: SlotBuffer,
+    inputs: SlotBuffer,
     values: SlotBuffer,
 }
 
@@ -298,12 +296,44 @@ impl SlotBuffer {
 
 impl GpuSlot {
     fn bytes(&self) -> u64 {
-        self.counts.bytes
-            + self.items.bytes
-            + self.edges.bytes
-            + self.edge_items.bytes
-            + self.rows.bytes
-            + self.values.bytes
+        self.inputs.bytes + self.values.bytes
+    }
+}
+
+/// Five shader bindings in one buffer. The separate ranges retain their
+/// original layouts and bind sizes; only their allocation and upload change.
+struct InputLayout {
+    offsets: [u64; 5],
+    sizes: [u64; 5],
+    bytes: u64,
+}
+
+impl InputLayout {
+    fn new(lengths: [usize; 5], alignment: u64) -> Self {
+        let mut offsets = [0; 5];
+        let mut sizes = [0; 5];
+        let mut end = 0u64;
+        for i in 0..5 {
+            offsets[i] = end.div_ceil(alignment) * alignment;
+            // Empty storage arrays still need a valid, nonzero binding.
+            sizes[i] = (lengths[i] as u64).max(16);
+            end = offsets[i] + sizes[i];
+        }
+        Self {
+            offsets,
+            sizes,
+            bytes: end,
+        }
+    }
+
+    fn bindings<'a>(&self, buffer: &'a wgpu::Buffer) -> [wgpu::BindingResource<'a>; 5] {
+        std::array::from_fn(|i| {
+            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer,
+                offset: self.offsets[i],
+                size: wgpu::BufferSize::new(self.sizes[i]),
+            })
+        })
     }
 }
 
@@ -352,6 +382,7 @@ impl AreaCoverage {
             scan_page: compute(device, &module, "scan_page"),
             slots: Vec::new(),
             cursor: 0,
+            upload: Vec::new(),
         }
     }
 
@@ -371,6 +402,9 @@ impl AreaCoverage {
                 true
             }
         });
+        if self.upload.capacity() > KEEP as usize {
+            self.upload = Vec::new();
+        }
     }
 
     /// Records the coverage of every item of `batch` into `encoder` (no
@@ -406,11 +440,13 @@ impl AreaCoverage {
             device,
             encoder,
             batch,
-            &counts,
-            &items,
-            &edges,
-            &edge_items,
-            &rows,
+            [
+                counts.as_entire_binding(),
+                items.as_entire_binding(),
+                edges.as_entire_binding(),
+                edge_items.as_entire_binding(),
+                rows.as_entire_binding(),
+            ],
             values,
             page,
             &self.raster,
@@ -438,22 +474,33 @@ impl AreaCoverage {
             self.slots.push(GpuSlot::default());
         }
         let slot = &mut self.slots[index];
-        let counts = slot.counts.get(device, 16, wgpu::BufferUsages::UNIFORM);
-        queue.write_buffer(
-            counts,
-            0,
-            words(&[[batch.edges.len() as u32, batch.rows.len() as u32, 0, 0]]),
+        let counts = [batch.edges.len() as u32, batch.rows.len() as u32, 0, 0];
+        let sources = [
+            words(std::slice::from_ref(&counts)),
+            words(&batch.items),
+            words(&batch.edges),
+            words(&batch.edge_items),
+            words(&batch.rows),
+        ];
+        let limits = device.limits();
+        let alignment = u64::from(
+            limits
+                .min_uniform_buffer_offset_alignment
+                .max(limits.min_storage_buffer_offset_alignment)
+                .max(4),
         );
-        let upload = |storage: &mut SlotBuffer, data: &[u8]| {
-            let buffer = storage.get(device, data.len() as u64, wgpu::BufferUsages::STORAGE);
-            if !data.is_empty() {
-                queue.write_buffer(buffer, 0, data);
-            }
-        };
-        upload(&mut slot.items, words(&batch.items));
-        upload(&mut slot.edges, words(&batch.edges));
-        upload(&mut slot.edge_items, words(&batch.edge_items));
-        upload(&mut slot.rows, words(&batch.rows));
+        let layout = InputLayout::new(sources.map(|source| source.len()), alignment);
+        self.upload.resize(layout.bytes as usize, 0);
+        for (i, source) in sources.iter().enumerate() {
+            let offset = layout.offsets[i] as usize;
+            self.upload[offset..offset + source.len()].copy_from_slice(source);
+        }
+        let inputs = slot.inputs.get(
+            device,
+            layout.bytes,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::STORAGE,
+        );
+        queue.write_buffer(inputs, 0, &self.upload[..layout.bytes as usize]);
         let values = slot.values.get(
             device,
             batch.bytes(),
@@ -464,11 +511,7 @@ impl AreaCoverage {
             device,
             encoder,
             batch,
-            counts,
-            slot.items.buffer.as_ref().unwrap(),
-            slot.edges.buffer.as_ref().unwrap(),
-            slot.edge_items.buffer.as_ref().unwrap(),
-            slot.rows.buffer.as_ref().unwrap(),
+            layout.bindings(inputs),
             values,
             page,
             &self.raster,
@@ -483,11 +526,7 @@ fn record(
     device: &wgpu::Device,
     encoder: &mut wgpu::CommandEncoder,
     batch: &Batch,
-    counts: &wgpu::Buffer,
-    items: &wgpu::Buffer,
-    edges: &wgpu::Buffer,
-    edge_items: &wgpu::Buffer,
-    rows: &wgpu::Buffer,
+    inputs: [wgpu::BindingResource<'_>; 5],
     values: &wgpu::Buffer,
     page: Option<&wgpu::TextureView>,
     raster: &LazyComputePipeline,
@@ -503,10 +542,10 @@ fn record(
         device,
         &raster.get_bind_group_layout(0),
         &[
-            (0, counts.as_entire_binding()),
-            (1, items.as_entire_binding()),
-            (2, edges.as_entire_binding()),
-            (3, edge_items.as_entire_binding()),
+            (0, inputs[0].clone()),
+            (1, inputs[1].clone()),
+            (2, inputs[2].clone()),
+            (3, inputs[3].clone()),
             (5, values.as_entire_binding()),
         ],
     );
@@ -514,9 +553,9 @@ fn record(
     pass.set_bind_group(0, &group, &[]);
     pass.dispatch_workgroups((batch.edges.len() as u32).div_ceil(64), 1, 1);
     let mut entries = vec![
-        (0, counts.as_entire_binding()),
-        (1, items.as_entire_binding()),
-        (4, rows.as_entire_binding()),
+        (0, inputs[0].clone()),
+        (1, inputs[1].clone()),
+        (4, inputs[4].clone()),
         (6, values.as_entire_binding()),
     ];
     let scan = match page {
@@ -591,6 +630,25 @@ mod tests {
     use super::*;
     use kurbo::{Affine, Circle, Rect, Shape};
     use pm_reference::coverage::{FillRule, fill};
+
+    #[test]
+    fn packed_inputs_have_distinct_aligned_bindings() {
+        // Includes a short storage array and an empty one. The latter still
+        // needs a valid binding, while all following offsets must obey the
+        // device's uniform/storage alignment.
+        let lengths = [16, 32, 48, 4, 0];
+        let layout = InputLayout::new(lengths, 256);
+        assert_eq!(layout.offsets, [0, 256, 512, 768, 1024]);
+        assert_eq!(layout.sizes, [16, 32, 48, 16, 16]);
+        assert_eq!(layout.bytes, 1040);
+        for i in 0..5 {
+            assert_eq!(layout.offsets[i] % 256, 0);
+            assert!(layout.sizes[i] >= lengths[i] as u64);
+            if i > 0 {
+                assert!(layout.offsets[i] >= layout.offsets[i - 1] + layout.sizes[i - 1]);
+            }
+        }
+    }
 
     fn read(gpu: &pm_gpu::Gpu, texture: &wgpu::Texture) -> Vec<f32> {
         pm_gpu::readback::read_f32(&gpu.device, &gpu.queue, texture).unwrap()
