@@ -619,7 +619,7 @@ impl Effects {
                     format!(
                         "{}\n{}\nfn store(c: vec4<f32>) -> vec4<f32> {{ return {}; }}\n{SIMPLE_WGSL}",
                         pm_color::wgsl::COLOR,
-                        crate::scene3d::NEAREST_HALF_WGSL,
+                        crate::nearest_half::NEAREST_HALF_WGSL,
                         if format == wgpu::TextureFormat::Rgba16Float {
                             "pm_scene_half_color(c)"
                         } else {

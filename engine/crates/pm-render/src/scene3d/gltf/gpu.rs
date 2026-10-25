@@ -181,7 +181,7 @@ impl GltfGpu {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("3d transmission mips"),
             source: wgpu::ShaderSource::Wgsl(
-                format!("{}\n{}", super::super::NEAREST_HALF_WGSL, r#"
+                format!("{}\n{}", crate::nearest_half::NEAREST_HALF_WGSL, r#"
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
 struct Out { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };

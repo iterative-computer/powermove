@@ -123,32 +123,64 @@ centroid within 1e-3 and staying several times closer to f64 coverage than
 today's bilinear RGBA8 draw. Sources above 32 MiB, or footprints beyond 4.5
 texels per axis, paint directly.
 
-Gaussian blur and offset run in float before the group's clip, mask and opacity.
-Filter and primitive regions clip output while retaining the source halo. Each
-primitive uses its declared `color-interpolation-filters`, defaulting to linearRGB.
-SVG 1.1 `filterRes` uses its authored raster grid; zero disables the filtered element.
-A Gaussian of at least 3 device pixels runs on the device grid (area average,
-variance-matched kernel, bilinear reconstruction on the 4× grid, regions applied
-there); kernels and halos extend 6σ.
+Large unfiltered groups use ordered tiles of the shared 4× grid, the fine
+scene resolved once and culled per tile. Tiles are as large as the live
+scratch targets allow within 128 MiB, and at most two short batches are in
+flight. Scratch textures return to a pool after their last encoded read.
+Coverage and texture scratch are preflighted; buffer sizes, binding sizes,
+dispatches and texture dimensions are checked against the device limits
+before creation.
 
-Filtered and large groups use ordered tiles with a shared 4× grid and Gaussian
-halos, the fine scene resolved once and culled per tile. Tiles are as large as
-the live scratch targets allow within 128 MiB, and at most two short batches are
-in flight. Scratch textures return to a pool after their last encoded read.
-Texture scratch, coverage and filter work are preflighted; buffer sizes, binding
-sizes, dispatches and texture dimensions are checked against the device limits
-before creation. Work beyond those bounds uses the declared resvg fallback rather
-than failing an export. `Renderer::svg_fallback_reason` exposes the runtime reason,
-including on a cached fallback result.
+### SVG filters
 
-Unsupported filter primitives, Gaussian duplicate/wrap edge modes, patterns,
-embedded images and crisp-edge paint use resvg at output resolution with an RGBA8
-store. External resources never load; data URLs may resolve.
+A filtered group draws first, at device resolution (`vector/svg_filter.rs`),
+and the scene then paints its result as a raster (`FloatPaint::Image`) under
+the group's clip, mask, opacity and blend. On the joint 4× grid the raster is
+reconstructed linearly within each pixel (monotonized-central slopes, so the
+pixel's average and its range are kept), giving clips and masks its slope.
+
+- **Primitives.** feGaussianBlur, feOffset, feDropShadow, feFlood,
+  feComposite (every operator, arithmetic clamped to a premultiplied
+  colour), feMerge, feBlend, feColorMatrix (matrix, saturate, hueRotate,
+  luminanceToAlpha) and feComponentTransfer (table, discrete, linear,
+  gamma), as Filter Effects Level 1 defines them. Each converts its inputs
+  into its `color-interpolation-filters` space (linearRGB by default);
+  results are stored premultiplied, sRGB-encoded, RGBA32F.
+- **Regions.** The filter region and each primitive subregion clip by exact
+  pixel area (4 × 4 quadrature under rotation or skew). Every image carries
+  its region; per-pixel primitives split a pixel by their inputs' and
+  output's regions and evaluate each part on unclipped values, so no pixel
+  is clipped twice. Sources outside the region still feed a Gaussian.
+- **Rectangles.** Each image covers where its content can be (forward from
+  the source's bounds through each primitive's reach and subregion) and
+  where the output reads it (backward from the output rectangle), so memory
+  follows content rather than blur reach. A group whose images exceed
+  256 MiB, or the device's texture size, splits its output into tiles;
+  one that no tile fits takes the declared fallback.
+- **Gaussians.** A Gaussian whose covariance is diagonal on the device grid
+  (any axis-aligned placement, isotropic blurs under rotation) uses the
+  exact separable Gaussian shared with path masks (`composite::gaussian`,
+  per-axis kernels): the box-reconstruction Gaussian within 2⁻¹² at any σ,
+  O(1) taps per pixel. Other rotated or skewed blurs use direct passes along
+  the transformed axes, on a 4× grid below 3 px.
+- **filterRes.** SVG 1.1 `filterRes` runs on its authored grid; zero
+  disables the element.
+
+Other filter primitives (feTurbulence, lighting, feDisplacementMap,
+feImage, feTile, feMorphology, feConvolveMatrix), Gaussian duplicate/wrap
+edge modes, patterns, embedded images and crisp-edge paint use resvg at
+output resolution with an RGBA8 store; `SvgDocument::unsupported_feature`
+names the feature. Every fallback is visible: pm-perf counts it
+(`engine.svg_fallback.feature`, `.limit`, `.device`), the frame names it
+(`Frame::svg_fallbacks`), the layer gets a scene diagnostic (its warnings;
+an empty report clears it once the layer draws in float), and the presenter
+logs each file and reason once. External resources never load; data URLs
+may resolve.
 The image reader retains the existing corrupt-document and encoding decisions,
 and deeply nested documents use a bounded, sized stack.
 
-Eligible arcs and geometric shapes are normalized to cubics within 1e-6 user units
-before parsing; context-dependent CSS geometry retains usvg's conversion.
+Eligible arcs and geometric shapes (`<rect …/>` and `<rect …></rect>` alike)
+are normalized to cubics within 1e-6 user units before parsing; context-dependent CSS geometry retains usvg's conversion.
 
 SVG semantics follow the SVG specification and the resvg conformance cases. Where
 those leave user-agent choices open, parsing preserves Chromium's authored sizing
@@ -161,7 +193,10 @@ and preview/export equality against an independent f64 paint reference. It requi
 captured legacy-app frames for all placements and all Chromium semantic probes.
 `tests/svg_filters.rs` includes public synthetic actual legacy filter witnesses and checks
 Gaussian color, regions, transformed covariance and filter grids against independent
-f64 math. The desktop gate uses live authored placements, checks geometry at RGBA32F
+f64 math. `tests/svg_filter_graphs.rs` renders public synthetic design-tool exports
+(Figma, Illustrator, Sketch, CSS drop shadows, glows, every per-pixel primitive) and
+Gaussians of 8 to 400 px against `pm_reference::filter`, within 0.125 CV and closer
+than the resvg fallback. The desktop gate uses live authored placements, checks geometry at RGBA32F
 against f64, and proves the window's RGBA8 endpoint is the same frame after rounding.
 Each SVG image resolves before layer compositing; paint, filter, clip and mask within
 one image share their subpixel grid. CLI and job-engine tests require an SVG project

@@ -528,6 +528,62 @@ pub fn animated_svg() -> Fixture {
     }
 }
 
+/// One SVG image layer (`art`, `w` × `h` user units) centered in a
+/// 960 × 540 composition, its box `bw` × `bh`, its scale rising from 100%
+/// to 110% over the first second (so every frame repaints it).
+fn svg_layer_fixture(name: &str, svg: &str, (w, h): (f64, f64), (bw, bh): (f64, f64)) -> Fixture {
+    let dir = TempDir::new(name);
+    let path = dir.path().join("art.svg");
+    std::fs::write(&path, svg).expect("write SVG bench source");
+    let mut image = layer(
+        name,
+        "image",
+        json!({ "asset": "art", "fit": "contain", "w": bw, "h": bh }),
+        480.0,
+        270.0,
+        10.0,
+    );
+    for axis in ["scale.x", "scale.y"] {
+        set(
+            &mut image,
+            axis,
+            keys(json!(100), &[(0.0, json!(100)), (1.0, json!(110))], EASES[0]),
+        );
+    }
+    let mut doc = project(960, 540, 30.0, 10.0, solid_fill("#141821"), vec![image]);
+    doc["assets"]["art"] = json!({
+        "id": "art", "name": "art.svg", "kind": "image", "format": "svg",
+        "w": w, "h": h, "dur": 0, "fps": 30, "persisted": true
+    });
+    Fixture {
+        doc,
+        media: std::collections::BTreeMap::from([("art".into(), path)]),
+        summary: json!({ "source": name, "size": [w, h], "box": [bw, bh], "motion": "scale 100% to 110%" }),
+        dir: Some(dir),
+    }
+}
+
+/// Figma's drop-shadow export of a card (blur 6, offset 4, 25% black,
+/// shape knocked out), 4× its user size.
+pub fn figma_drop_shadow() -> Fixture {
+    svg_layer_fixture(
+        "svg-drop-shadow",
+        r##"<svg width="120" height="100" viewBox="0 0 120 100" fill="none" xmlns="http://www.w3.org/2000/svg"><g filter="url(#f)"><rect x="20" y="16" width="80" height="64" rx="8" fill="#4C8DFF"/></g><defs><filter id="f" x="8" y="8" width="104" height="88" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/><feOffset dy="4"/><feGaussianBlur stdDeviation="6"/><feComposite in2="hardAlpha" operator="out"/><feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.25 0"/><feBlend mode="normal" in2="BackgroundImageFix" result="shadow"/><feBlend mode="normal" in="SourceGraphic" in2="shadow" result="shape"/></filter></defs></svg>"##,
+        (120.0, 100.0),
+        (480.0, 400.0),
+    )
+}
+
+/// A full-frame Figma layer blur (stdDeviation 40) of gradient blobs.
+pub fn layer_blur() -> Fixture {
+    svg_layer_fixture(
+        "svg-layer-blur",
+        r##"<svg width="960" height="540" viewBox="0 0 960 540" fill="none" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3FCF8E"/><stop offset="1" stop-color="#4C8DFF"/></linearGradient><filter id="f" x="-120" y="-120" width="1200" height="780" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"><feFlood flood-opacity="0" result="BackgroundImageFix"/><feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/><feGaussianBlur stdDeviation="40" result="effect1_foregroundBlur"/></filter></defs><g filter="url(#f)"><rect x="40" y="40" width="880" height="460" rx="48" fill="url(#g)"/><circle cx="260" cy="200" r="150" fill="#EE6352"/><circle cx="700" cy="340" r="180" fill="#FFD23F" fill-opacity=".8"/></g></svg>"##,
+        (960.0, 540.0),
+        (960.0, 540.0),
+    )
+}
+
 /// A text layer document for typing (`text`, 96 px title, over a backdrop).
 pub fn text_doc(text: &str) -> Value {
     let mut l = layer(

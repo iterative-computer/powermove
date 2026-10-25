@@ -238,9 +238,13 @@ fn resample(
     Ok(out)
 }
 
+/// An inner source image at its own size, with its size, UV window and
+/// opacity.
+type SourceImage = (TextReference, (u32, u32), [f64; 4], f64);
+
 /// A draw's inner source image at its own size: a text scene or a
 /// precomp. `None` when it holds no text.
-fn source_image(content: &Content) -> Result<Option<(TextReference, (u32, u32), [f64; 4], f64)>, String> {
+fn source_image(content: &Content) -> Result<Option<SourceImage>, String> {
     let Content::Texture { source, uv, alpha } = content else {
         return Ok(None);
     };

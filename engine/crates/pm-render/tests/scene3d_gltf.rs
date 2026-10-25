@@ -900,8 +900,8 @@ fn gltf_programs_and_uniforms_equal_three_js() {
                             .expect("program dump directory");
                         std::fs::create_dir_all(&p).unwrap();
                         let (vs, fs) = &program_forms[0];
-                        std::fs::write(p.join(format!("{}-{k}-{n}.vs", c.id)), &vs).unwrap();
-                        std::fs::write(p.join(format!("{}-{k}-{n}.fs", c.id)), &fs).unwrap();
+                        std::fs::write(p.join(format!("{}-{k}-{n}.vs", c.id)), vs).unwrap();
+                        std::fs::write(p.join(format!("{}-{k}-{n}.fs", c.id)), fs).unwrap();
                         for (id, (rv, rf)) in &programs {
                             std::fs::write(p.join(format!("{}-{k}-rec{id}.vs", c.id)), rv).unwrap();
                             std::fs::write(p.join(format!("{}-{k}-rec{id}.fs", c.id)), rf).unwrap();

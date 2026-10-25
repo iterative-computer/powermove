@@ -114,7 +114,7 @@ mod tests {
         let b = Bitmap {
             width: 2,
             height: 2,
-            rgba: vec![0.31, 0.2, 0.1, 0.5].repeat(4),
+            rgba: [0.31, 0.2, 0.1, 0.5].repeat(4),
         };
         for (at, dx, dy) in [
             ((-4.0, 8.0), (1.0, 0.0), (0.0, 1.0)),

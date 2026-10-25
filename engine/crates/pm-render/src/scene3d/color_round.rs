@@ -42,45 +42,6 @@ highp vec4 pm_scene_half_color(highp vec4 color) {
 }
 "#;
 
-/// The same integer conversion for WGSL scene-output fragments. Metal's
-/// `quantizeToF16` and native half conversion may lower to round-toward-zero,
-/// so the float32 bit pattern is rounded explicitly before an RGBA16F store.
-/// Include this only in pipelines whose physical color target is RGBA16F.
-pub const NEAREST_HALF_WGSL: &str = r#"
-fn pm_scene_nearest_half(value: f32) -> f32 {
-    let bits = bitcast<u32>(value);
-    let sign_bit = bits & 0x80000000u;
-    let magnitude = bits & 0x7fffffffu;
-    let exponent = magnitude >> 23u;
-    if (exponent == 255u) { return value; }
-    if (exponent > 142u) { return bitcast<f32>(sign_bit | 0x7f800000u); }
-    if (exponent < 102u) { return bitcast<f32>(sign_bit); }
-    if (exponent < 113u) {
-        let significand = (magnitude & 0x007fffffu) | 0x00800000u;
-        let shift = 126u - exponent;
-        var kept = significand >> shift;
-        let lost = significand & ((1u << shift) - 1u);
-        let halfway = 1u << (shift - 1u);
-        if (lost > halfway || (lost == halfway && (kept & 1u) != 0u)) { kept += 1u; }
-        let rounded = f32(kept) * 5.9604644775390625e-8;
-        return bitcast<f32>(bitcast<u32>(rounded) | sign_bit);
-    }
-    var kept = magnitude >> 13u;
-    let lost = magnitude & 0x1fffu;
-    if (lost > 0x1000u || (lost == 0x1000u && (kept & 1u) != 0u)) { kept += 1u; }
-    var rounded = kept << 13u;
-    if (rounded >= 0x47800000u) { rounded = 0x7f800000u; }
-    return bitcast<f32>(sign_bit | rounded);
-}
-
-fn pm_scene_half_color(color: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(pm_scene_nearest_half(color.r),
-                     pm_scene_nearest_half(color.g),
-                     pm_scene_nearest_half(color.b),
-                     pm_scene_nearest_half(color.a));
-}
-"#;
-
 /// The authored three.js source stays unchanged. Only the native 3D color
 /// program receives a conversion at the last fragment output assignment.
 pub(super) fn at_fragment_output(source: &str) -> Result<String, String> {
@@ -295,7 +256,8 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
         let module = wgsl(
             &gpu,
             format!(
-                "{NEAREST_HALF_WGSL}\n{FULLSCREEN_WGSL}\n@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {{\n    var v = array<f32, 4>(0.1, 0.3, 0.6, 1.00146484375)[u32(p.x)];\n    return pm_scene_half_color(vec4<f32>(v, v, v, 1.0));\n}}"
+                "{}\n{FULLSCREEN_WGSL}\n@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {{\n    var v = array<f32, 4>(0.1, 0.3, 0.6, 1.00146484375)[u32(p.x)];\n    return pm_scene_half_color(vec4<f32>(v, v, v, 1.0));\n}}",
+                crate::nearest_half::NEAREST_HALF_WGSL
             ),
         );
         let red = draw(&gpu, (&module, Some("vs")), (&module, Some("fs")), 1, None);
@@ -316,7 +278,8 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
         let module = wgsl(
             &gpu,
             format!(
-                "{NEAREST_HALF_WGSL}\n{FULLSCREEN_WGSL}\n@fragment fn fs(@builtin(sample_index) sample: u32) -> @location(0) vec4<f32> {{\n    let v = pm_scene_nearest_half(select(0.10003662109375, 0.0999755859375, sample == 0u));\n    return vec4<f32>(v, v, v, 1.0);\n}}"
+                "{}\n{FULLSCREEN_WGSL}\n@fragment fn fs(@builtin(sample_index) sample: u32) -> @location(0) vec4<f32> {{\n    let v = pm_scene_nearest_half(select(0.10003662109375, 0.0999755859375, sample == 0u));\n    return vec4<f32>(v, v, v, 1.0);\n}}",
+                crate::nearest_half::NEAREST_HALF_WGSL
             ),
         );
         let red = draw(&gpu, (&module, Some("vs")), (&module, Some("fs")), 4, None);

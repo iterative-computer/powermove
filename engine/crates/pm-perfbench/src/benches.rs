@@ -106,6 +106,8 @@ pub fn all() -> Vec<Bench> {
         ("text_cold", text_cold),
         ("playback_shapes_200", playback_shapes_200),
         ("playback_svg_animated", playback_svg_animated),
+        ("paused_svg_drop_shadow", paused_svg_drop_shadow),
+        ("paused_svg_large_blur", paused_svg_large_blur),
     ]
 }
 
@@ -413,6 +415,59 @@ pub fn playback_svg_animated(ctx: &Ctx) -> BenchReport {
     notes["resvg_p50_ms"] = json!(resvg[resvg.len() / 2]);
     notes["resvg_size"] = json!([rw, rh]);
     report("playback_svg_animated", "frames", m, wall, notes)
+}
+
+/// An SVG image with a filter, paused, its scale changing every frame: 30
+/// frames, each repainting the filtered SVG at output resolution (no cache
+/// hit) in float. The notes carry resvg's CPU time for the same document
+/// at the image's last device size, outside the counter scope.
+fn paused_svg_filter(
+    ctx: &Ctx,
+    name: &str,
+    f: fixtures::Fixture,
+    device: (u32, u32),
+) -> BenchReport {
+    let mut v = Viewer::new(ctx, &f.doc, &f.media);
+    let fps = 30.0;
+    for k in 0..2 {
+        v.frame(ticks(f64::from(k) / fps));
+    }
+    let scope = Scope::begin();
+    let wall: Vec<_> = (2..32)
+        .map(|k| v.frame(ticks(f64::from(k) / fps)))
+        .collect();
+    let m = measured(scope);
+    for counter in [
+        pm_perf::Counter::SvgFallbackFeature,
+        pm_perf::Counter::SvgFallbackLimit,
+        pm_perf::Counter::SvgFallbackDevice,
+    ] {
+        assert_eq!(m.0.get(counter), 0, "{name}: the filtered SVG fell back");
+    }
+    let (svg, _) = pm_render::vector::svg::document(&f.media["art"]).expect("SVG parses");
+    let mut resvg: Vec<f64> = (0..wall.len())
+        .map(|_| {
+            let start = Instant::now();
+            std::hint::black_box(svg.raster(device.0, device.1));
+            start.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    resvg.sort_by(f64::total_cmp);
+    let mut notes = f.summary.clone();
+    notes["resvg_p50_ms"] = json!(resvg[resvg.len() / 2]);
+    notes["resvg_size"] = json!([device.0, device.1]);
+    report(name, "frames", m, wall, notes)
+}
+
+/// The Figma drop-shadow card export (`fixtures::figma_drop_shadow`).
+pub fn paused_svg_drop_shadow(ctx: &Ctx) -> BenchReport {
+    let f = fixtures::figma_drop_shadow();
+    paused_svg_filter(ctx, "paused_svg_drop_shadow", f, (1029, 857))
+}
+
+/// A full-frame Figma layer blur of 40 user units (`fixtures::layer_blur`).
+pub fn paused_svg_large_blur(ctx: &Ctx) -> BenchReport {
+    paused_svg_filter(ctx, "paused_svg_large_blur", fixtures::layer_blur(), (1496, 842))
 }
 
 /// A layer drag, paused: 60 moves of one solid, each a new revision drawn

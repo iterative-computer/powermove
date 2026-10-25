@@ -557,6 +557,15 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
                 frame.failures
             )));
         }
+        for f in &frame.svg_fallbacks {
+            eprintln!(
+                "note: layer {} in {}: {} is drawn by the 8-bit resvg fallback: {}",
+                f.layer,
+                f.composition,
+                f.path.display(),
+                f.reason
+            );
+        }
         let rgba = renderer
             .read_rgba(&frame)
             .map_err(|e| Failure::Failed(e.to_string()))?;

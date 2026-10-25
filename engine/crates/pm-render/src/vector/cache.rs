@@ -260,17 +260,23 @@ struct Out {
     return o;
 }
 
-@fragment fn fs(i: Out) -> @location(0) vec4<f32> {
+fn paint(i: Out) -> vec4<f32> {
     let cov = textureLoad(coverage, vec2<i32>(floor(i.cell)), 0).r;
     return i.color * cov;
 }
+@fragment fn fs(i: Out) -> @location(0) vec4<f32> { return paint(i); }
+// RGBA16F targets store the nearest half of the painted value
+// (`crate::nearest_half`); overlapping items round their blend in hardware.
+@fragment fn fs_half(i: Out) -> @location(0) vec4<f32> { return pm_scene_half_color(paint(i)); }
 "#;
 
 impl Paint {
     fn new(device: &wgpu::Device) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm vector paint"),
-            source: wgpu::ShaderSource::Wgsl(PAINT_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{PAINT_WGSL}", crate::nearest_half::NEAREST_HALF_WGSL).into(),
+            ),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pm vector paint"),
@@ -324,7 +330,11 @@ impl Paint {
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
-                    entry_point: Some("fs"),
+                    entry_point: Some(if format == wgpu::TextureFormat::Rgba16Float {
+                        "fs_half"
+                    } else {
+                        "fs"
+                    }),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
@@ -366,9 +376,21 @@ pub struct VectorCache {
     svg_sample: Option<super::svg_sample::SvgSample>,
     svg_fallback_reason: Option<String>,
     svg_fallback_reasons: HashMap<([u8; 32], u8), String>,
+    /// The SVG images of the frame drawn by the declared fallback.
+    svg_fallbacks: Vec<(std::path::PathBuf, String)>,
     svg_unpaintable_rasters: HashSet<[u8; 32]>,
     svg_raster_hits: u64,
     svg_raster_misses: u64,
+}
+
+fn record_fallback(
+    list: &mut Vec<(std::path::PathBuf, String)>,
+    path: &std::path::Path,
+    reason: &str,
+) {
+    if !list.iter().any(|(p, r)| p == path && r == reason) {
+        list.push((path.to_owned(), reason.to_owned()));
+    }
 }
 
 impl Default for VectorCache {
@@ -399,6 +421,7 @@ impl VectorCache {
             svg_sample: None,
             svg_fallback_reason: None,
             svg_fallback_reasons: HashMap::new(),
+            svg_fallbacks: Vec::new(),
             svg_unpaintable_rasters: HashSet::new(),
             svg_raster_hits: 0,
             svg_raster_misses: 0,
@@ -414,6 +437,12 @@ impl VectorCache {
     /// without changing the texture resolve contract.
     pub fn svg_fallback_reason(&self) -> Option<&str> {
         self.svg_fallback_reason.as_deref()
+    }
+
+    /// The SVG images (file and reason) drawn by the declared resvg
+    /// fallback since the frame began, each once.
+    pub fn take_svg_fallbacks(&mut self) -> Vec<(std::path::PathBuf, String)> {
+        std::mem::take(&mut self.svg_fallbacks)
     }
 
     /// Playback source raster hits and misses (reuse across translation and
@@ -460,6 +489,7 @@ impl VectorCache {
     /// bounded).
     pub fn begin_frame(&mut self) {
         self.frame += 1;
+        self.svg_fallbacks.clear();
         self.evict(
             self.max_bytes.saturating_sub(self.scene_scratch_bytes()),
             self.max_entries,
@@ -531,8 +561,11 @@ impl VectorCache {
         if let Some(e) = self.entries.get_mut(&key) {
             e.used = self.tick;
             e.frame = self.frame;
-            if matches!(source, VectorSource::SvgRaster { .. }) {
+            if let VectorSource::SvgRaster { path, .. } = source {
                 self.svg_fallback_reason = self.svg_fallback_reasons.get(&key).cloned();
+                if let Some(reason) = &self.svg_fallback_reason {
+                    record_fallback(&mut self.svg_fallbacks, path, reason);
+                }
             }
             pm_perf::bump(pm_perf::Counter::VectorCacheHits);
             return Ok(e.view.clone());
@@ -555,10 +588,16 @@ impl VectorCache {
                 let (doc, _) = super::svg::document(path)?;
                 let transform = Affine::new(*transform);
                 let clip = clip.map(|[x, y]| pm_vector::kurbo::Point::new(x, y));
-                let reason = if !doc.gpu_paintable() {
-                    "SVG feature requires resvg".to_owned()
+                let (reason, counter) = if let Some(feature) = doc.unsupported_feature() {
+                    (
+                        format!("SVG {feature} is drawn by resvg"),
+                        pm_perf::Counter::SvgFallbackFeature,
+                    )
                 } else if !device.features().contains(wgpu::Features::FLOAT32_BLENDABLE) {
-                    "GPU lacks FLOAT32_BLENDABLE".to_owned()
+                    (
+                        "GPU lacks FLOAT32_BLENDABLE".to_owned(),
+                        pm_perf::Counter::SvgFallbackDevice,
+                    )
                 } else {
                     if *playback
                         && let Some((texture, bytes)) = self.svg_playback(
@@ -583,11 +622,16 @@ impl VectorCache {
                         self.svg_fallback_reason = None;
                         return Ok(self.insert(key, texture, bytes));
                     }
-                    painter
-                        .fallback_reason()
-                        .unwrap_or("float SVG painter declined")
-                        .to_owned()
+                    (
+                        painter
+                            .fallback_reason()
+                            .unwrap_or("float SVG painter declined")
+                            .to_owned(),
+                        pm_perf::Counter::SvgFallbackLimit,
+                    )
                 };
+                pm_perf::bump(counter);
+                record_fallback(&mut self.svg_fallbacks, path, &reason);
                 // The declared fallback: resvg at output resolution, with the
                 // reason observable at runtime and restored on a cache hit.
                 self.svg_fallback_reason = Some(reason.clone());

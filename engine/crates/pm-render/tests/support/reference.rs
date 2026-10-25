@@ -211,9 +211,6 @@ impl Reference {
 
 /// `#RRGGBB` or `#RRGGBBAA` as straight E values; `None` for anything the
 /// reference does not read.
-
-/// `#RRGGBB` or `#RRGGBBAA` as straight E values; `None` for anything the
-/// reference does not read.
 fn hex(s: &str) -> Option<[f64; 4]> {
     let d = s.strip_prefix('#')?;
     if !(d.len() == 6 || d.len() == 8) || !d.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -387,7 +384,7 @@ fn surface(w: usize, h: usize) -> Reference {
 
 fn note(out: &mut Reference, why: impl Into<String>) {
     let why = why.into();
-    if !out.unmodelled.iter().any(|u| *u == why) {
+    if !out.unmodelled.contains(&why) {
         out.unmodelled.push(why);
     }
 }

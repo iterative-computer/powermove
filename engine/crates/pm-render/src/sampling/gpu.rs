@@ -407,7 +407,7 @@ impl Resampler {
             source: wgpu::ShaderSource::Wgsl(
                 format!(
                     "{}\n{}",
-                    crate::scene3d::NEAREST_HALF_WGSL,
+                    crate::nearest_half::NEAREST_HALF_WGSL,
                     include_str!("../shaders/resample.wgsl")
                 )
                 .into(),
@@ -560,7 +560,7 @@ impl Resampler {
             crate::pipelines::LazyPipeline::new(move || {
                 let source = format!(
                     "{}\n{store}\n{}",
-                    crate::scene3d::NEAREST_HALF_WGSL,
+                    crate::nearest_half::NEAREST_HALF_WGSL,
                     include_str!("../shaders/mips.wgsl").replace("STORE", storage)
                 );
                 let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {

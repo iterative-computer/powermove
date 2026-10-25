@@ -336,7 +336,7 @@ impl Pipelines {
                                 format!(
                                     "{}\n{}\n{}\n{}\n{}",
                                     pm_color::wgsl::COLOR,
-                                    crate::scene3d::NEAREST_HALF_WGSL,
+                                    crate::nearest_half::NEAREST_HALF_WGSL,
                                     include_str!("shaders/scene_output.wgsl"),
                                     include_str!("shaders/composite.wgsl"),
                                     include_str!("shaders/scene_quad.wgsl")
@@ -740,7 +740,7 @@ impl HalfModules {
                 let mut wgsl = format!(
                     "{}\n{}\n{}",
                     pm_color::wgsl::COLOR,
-                    crate::scene3d::NEAREST_HALF_WGSL,
+                    crate::nearest_half::NEAREST_HALF_WGSL,
                     source
                 );
                 for name in ["fs_draw", "fs_background", "fs_solid", "fs_rect"] {

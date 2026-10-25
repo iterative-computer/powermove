@@ -81,6 +81,70 @@ fn host_progress(
     Ok(())
 }
 
+/// The frame's SVG images drawn by the declared resvg fallback, attributed
+/// to the layers whose documents name an unsupported feature (a device or
+/// work limit names only its file), and their layer diagnostics: warnings
+/// for each, and an empty one for a layer warned on the previous frame.
+fn svg_diagnostics(
+    layers: &[crate::plan::SvgLayer],
+    fallbacks: &[(std::path::PathBuf, String)],
+    warned: &mut Vec<(String, String)>,
+    meta: &mut Vec<pm_protocol::frame::Scene3dMeta>,
+) -> Vec<crate::SvgFallback> {
+    let mut out = Vec::new();
+    let mut now: Vec<(String, String)> = Vec::new();
+    for (path, reason) in fallbacks {
+        let mut attributed = false;
+        for l in layers.iter().filter(|l| l.path == *path) {
+            attributed = true;
+            out.push(crate::SvgFallback {
+                composition: l.composition.clone(),
+                layer: l.layer.clone(),
+                path: path.clone(),
+                reason: reason.clone(),
+            });
+        }
+        if !attributed {
+            out.push(crate::SvgFallback {
+                composition: String::new(),
+                layer: String::new(),
+                path: path.clone(),
+                reason: reason.clone(),
+            });
+        }
+    }
+    let mut report = |composition: &str, layer: &str, warnings: Vec<String>| {
+        let composition = pm_protocol::common::CompositionId::new(composition);
+        let layer = pm_protocol::common::LayerId::new(layer);
+        if composition.is_valid() && layer.is_valid() {
+            meta.push(pm_protocol::frame::Scene3dMeta {
+                composition,
+                layers: vec![layer],
+                warnings,
+                error: None,
+            });
+        }
+    };
+    for f in &out {
+        let key = (f.composition.clone(), f.layer.clone());
+        if f.layer.is_empty() || now.contains(&key) {
+            continue;
+        }
+        let warnings = out
+            .iter()
+            .filter(|g| g.composition == f.composition && g.layer == f.layer)
+            .map(|g| format!("Drawn by the 8-bit resvg fallback: {}", g.reason))
+            .collect();
+        report(&f.composition, &f.layer, warnings);
+        now.push(key);
+    }
+    for (composition, layer) in warned.iter().filter(|k| !now.contains(k)) {
+        report(composition, layer, Vec::new());
+    }
+    *warned = now;
+    out
+}
+
 /// A rendered frame.
 pub struct Frame {
     /// Scene diagnostics of these pixels, grouped by composition and layer.
@@ -94,6 +158,8 @@ pub struct Frame {
     pub legend: Vec<String>,
     /// Layers that failed and drew nothing.
     pub failures: Vec<LayerFailure>,
+    /// SVG layers drawn by the declared resvg fallback, with the reason.
+    pub svg_fallbacks: Vec<crate::SvgFallback>,
     /// The composition time rendered, in seconds.
     pub seconds: f64,
 }
@@ -121,9 +187,14 @@ pub struct PassThrough {
 
 /// What a render into a caller's target reports.
 pub struct Rendered {
+    /// Scene diagnostics by composition and layer: 3D scenes, and SVG image
+    /// layers drawn by the declared resvg fallback (warnings name the
+    /// reason; an empty report clears one when the layer draws in float).
     pub scene3d_meta: Vec<pm_protocol::frame::Scene3dMeta>,
     pub legend: Vec<String>,
     pub failures: Vec<LayerFailure>,
+    /// SVG layers drawn by the declared resvg fallback, with the reason.
+    pub svg_fallbacks: Vec<crate::SvgFallback>,
     pub seconds: f64,
     /// Where each top-level layer was drawn: its content quad in output
     /// pixels, top-down, corners in the order (0,0), (1,0), (1,1), (0,1)
@@ -261,6 +332,10 @@ fn preview_window(
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// SVG layers (composition, layer) the last frame of each rendered
+    /// composition warned about: views of other compositions sharing the
+    /// renderer neither clear nor repeat them.
+    svg_warned: std::collections::HashMap<String, Vec<(String, String)>>,
     pipelines: Pipelines,
     media: MediaCache,
     pool: TargetPool,
@@ -403,6 +478,7 @@ impl Renderer {
             compat: None,
             reuse: crate::reuse::DrawReuse::new(),
             reuse_enabled: false,
+            svg_warned: Default::default(),
             channel_memo: true,
             prefix: Default::default(),
             frame_reuse: FrameReuse::default(),
@@ -1316,6 +1392,7 @@ impl Renderer {
             depth_id,
             legend: r.legend,
             failures: r.failures,
+            svg_fallbacks: r.svg_fallbacks,
             seconds: r.seconds,
         })
     }
@@ -1618,6 +1695,7 @@ impl Renderer {
             && !request.export
             && !crate::composite::has_nodes(&plan);
         let mut failures = build.failures;
+        let svg_layers = build.svg_layers;
         if !build.unsupported.is_empty() {
             return Err(RenderError::Unsupported(build.unsupported));
         }
@@ -1815,6 +1893,17 @@ impl Renderer {
         self.media.scrub = scrub;
         failures.extend(exec_failures);
         crate::scene3d::metadata::failures(document, &failures, &mut scene3d_meta);
+        let fallbacks = self.vector.take_svg_fallbacks();
+        let svg_fallbacks = if fallbacks.is_empty() && !self.svg_warned.contains_key(composition) {
+            Vec::new()
+        } else {
+            let warned = self.svg_warned.entry(composition.to_owned()).or_default();
+            let out = svg_diagnostics(&svg_layers, &fallbacks, warned, &mut scene3d_meta);
+            if warned.is_empty() {
+                self.svg_warned.remove(composition);
+            }
+            out
+        };
         if !unsupported.is_empty() {
             return Err(RenderError::Unsupported(unsupported));
         }
@@ -1845,6 +1934,7 @@ impl Renderer {
             quads,
             legend,
             failures,
+            svg_fallbacks,
             seconds,
             stand_ins: std::mem::take(&mut self.media.stand_ins),
         })

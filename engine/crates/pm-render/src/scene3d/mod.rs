@@ -21,7 +21,6 @@
 //! Legacy OBJ mesh layers retain their own encoded output contract.
 
 mod color_round;
-pub(crate) use color_round::NEAREST_HALF_WGSL;
 pub mod describe;
 pub mod gltf;
 pub mod gpu;

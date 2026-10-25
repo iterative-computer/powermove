@@ -72,7 +72,7 @@ impl OpPipelines {
             pm_color::wgsl::COLOR,
             pm_color::wgsl::BLEND,
             pm_color::wgsl::CSS_GAMUT,
-            crate::scene3d::NEAREST_HALF_WGSL,
+            crate::nearest_half::NEAREST_HALF_WGSL,
             include_str!("../shaders/scene_output.wgsl"),
             include_str!("ops.wgsl")
         );
