@@ -109,7 +109,7 @@ export type EngineSnapshot = {
   height: number;
   data: Uint8ClampedArray;
   videoSurface?: { token: string; width: number; height: number };
-  videoPlanes?: import('../../../shared/engine-protocol').SourceVideoFrame;
+  videoPlanes?: import('../../../shared/engine-protocol').SourceVideoFrame & { timestamp: number };
   pixels: SnapshotPixels;
   revision: number;
   viewSeq: number | null;

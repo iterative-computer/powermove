@@ -19,7 +19,11 @@ function harness(send: SourceSharedTexture['sendSharedTexture'] = async () => {}
     readonly allocBytes = allocBytes;
     release = vi.fn();
     constructor(readonly width: number, readonly height: number, readonly format: string,
-      readonly bytes: Uint8Array, readonly fullRange: boolean) { surfaces.push(this); }
+      readonly bytes: Uint8Array | string, readonly fullRange: boolean) { surfaces.push(this); }
+    static fromSegment(width: number, height: number, format: string, name: string, length: number, fullRange: boolean) {
+      if (length !== sourceVideoByteLength(width, height, { ...video, format: format as SourceVideoFrame['format'] })) throw new Error('segment length');
+      return new Surface(width, height, format, name, fullRange);
+    }
   }
   const sharedTexture: SourceSharedTexture = {
     importSharedTexture(options) {
@@ -43,16 +47,26 @@ describe('source video IOSurface presentation', () => {
     expect(sourceVideoByteLength(4, 2, { ...video, format: 'nv16' })).toBe(16);
     expect(sourceVideoByteLength(4, 2, { ...video, format: 'p010le' })).toBe(24);
     const h = harness();
-    await expect(h.service.present(7, 4, 2, video, new Uint8Array(11))).rejects.toThrow('plane length');
-    await expect(h.service.present(7, 4, 2, { ...video, transfer: 'private-curve' }, h.data())).rejects.toThrow('colour tags');
-    await expect(h.service.present(99, 4, 2, video, h.data())).rejects.toThrow('window is gone');
+    await expect(h.service.present(7, 4, 2, video, new Uint8Array(11), 123456)).rejects.toThrow('plane length');
+    await expect(h.service.present(7, 4, 2, { ...video, transfer: 'private-curve' }, h.data(), 123456)).rejects.toThrow('colour tags');
+    await expect(h.service.present(99, 4, 2, video, h.data(), 123456)).rejects.toThrow('window is gone');
     expect(h.surfaces).toHaveLength(0);
+  });
+
+  it('fills a surface straight from the engine segment, checking its length first', async () => {
+    const h = harness();
+    const p010 = { ...video, format: 'p010le' as const };
+    await expect(h.service.present(7, 4, 2, p010, { segment: '/pm.0123456789abcdef01234567', length: 23 }, 1)).rejects.toThrow('plane length');
+    expect(h.surfaces).toHaveLength(0);
+    await h.service.present(7, 4, 2, p010, { segment: '/pm.0123456789abcdef01234567', length: 24 }, 1);
+    expect(h.surfaces[0]).toMatchObject({ bytes: '/pm.0123456789abcdef01234567', format: 'p010le' });
+    h.service.dispose();
   });
 
   it('preserves a padded GPU frame visible rectangle and public display size', async () => {
     const h = harness();
     const padded = { ...video, format: 'p010le', visibleWidth: 4 };
-    const descriptor = await h.service.present(7, 8, 2, padded, new Uint8Array(sourceVideoByteLength(8, 2, padded)));
+    const descriptor = await h.service.present(7, 8, 2, padded, new Uint8Array(sourceVideoByteLength(8, 2, padded)), 123456);
     expect(descriptor).toMatchObject({ width: 4, height: 2 });
     expect(h.imports[0]!.options.textureInfo).toMatchObject({ codedSize: { width: 8, height: 2 },
       visibleRect: { x: 0, y: 0, width: 4, height: 2 } });
@@ -61,11 +75,11 @@ describe('source video IOSurface presentation', () => {
 
   it('sends one descriptor with the decoded video tags and releases native only after all references', async () => {
     const h = harness();
-    const descriptor = await h.service.present(7, 4, 2, video, h.data());
+    const descriptor = await h.service.present(7, 4, 2, video, h.data(), 123456);
     expect(descriptor).toMatchObject({ kind: 'powermove-source-surface', width: 4, height: 2 });
     expect(descriptor.token).toMatch(/^[0-9a-f-]{36}$/);
     expect(h.imports).toHaveLength(1);
-    expect(h.imports[0]!.options.textureInfo).toMatchObject({ pixelFormat: 'nv12', colorSpace: {
+    expect(h.imports[0]!.options.textureInfo).toMatchObject({ timestamp: 123456, pixelFormat: 'nv12', colorSpace: {
       primaries: video.primaries, transfer: video.transfer, matrix: video.matrix, range: video.range } });
     expect(h.imports[0]!.release).toHaveBeenCalledOnce();
     expect(h.surfaces[0]!.release).not.toHaveBeenCalled();
@@ -79,7 +93,7 @@ describe('source video IOSurface presentation', () => {
 
   it('releases main on send failure, preserving native until Chromium releases its references', async () => {
     const h = harness(async () => { throw new Error('transfer timed out'); });
-    await expect(h.service.present(7, 4, 2, video, h.data())).rejects.toThrow('transfer timed out');
+    await expect(h.service.present(7, 4, 2, video, h.data(), 123456)).rejects.toThrow('transfer timed out');
     expect(h.imports[0]!.release).toHaveBeenCalledOnce();
     expect(h.surfaces[0]!.release).not.toHaveBeenCalled();
     h.imports[0]!.allReleased();
@@ -88,7 +102,7 @@ describe('source video IOSurface presentation', () => {
 
   it('rejects an IOSurface whose padded allocation exceeds the global budget before import', async () => {
     const h = harness(async () => {}, SOURCE_SURFACE_BYTES_LIMIT + 1);
-    await expect(h.service.present(7, 4, 2, video, h.data())).rejects.toThrow('memory budget');
+    await expect(h.service.present(7, 4, 2, video, h.data(), 123456)).rejects.toThrow('memory budget');
     expect(h.surfaces[0]!.release).toHaveBeenCalledOnce();
     expect(h.imports).toHaveLength(0);
     expect(h.service.bytes).toBe(0);
@@ -97,7 +111,7 @@ describe('source video IOSurface presentation', () => {
   it('rejects a frame whose target disappears while the transfer is in flight', async () => {
     let finishSend: (() => void) | undefined;
     const h = harness(() => new Promise<void>(resolve => { finishSend = resolve; }));
-    const presenting = h.service.present(7, 4, 2, video, h.data());
+    const presenting = h.service.present(7, 4, 2, video, h.data(), 123456);
     h.service.windowGone(7);
     finishSend!();
     await expect(presenting).rejects.toThrow('went away during transfer');
@@ -110,8 +124,8 @@ describe('source video IOSurface presentation', () => {
 
   it('bounds in-flight surfaces and reclaims a renderer-gone import after the GPU grace', async () => {
     const h = harness();
-    for (let n = 0; n < SOURCE_SURFACES_PER_WINDOW; n++) await h.service.present(7, 4, 2, video, h.data());
-    await expect(h.service.present(7, 4, 2, video, h.data())).rejects.toThrow('window budget');
+    for (let n = 0; n < SOURCE_SURFACES_PER_WINDOW; n++) await h.service.present(7, 4, 2, video, h.data(), 123456);
+    await expect(h.service.present(7, 4, 2, video, h.data(), 123456)).rejects.toThrow('window budget');
     h.service.windowGone(7);
     expect(h.callbacks.size).toBe(SOURCE_SURFACES_PER_WINDOW);
     for (const callback of [...h.callbacks.values()]) callback();

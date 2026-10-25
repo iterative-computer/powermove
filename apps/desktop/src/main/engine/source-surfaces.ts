@@ -8,15 +8,20 @@ export const SOURCE_SURFACES_PER_WINDOW = 8;
 export const SOURCE_SURFACE_RECLAIM_MS = 2_000;
 
 export type NativeSourceSurface = { readonly ioSurface: Buffer; readonly allocBytes: number; release(): void };
-export type SourceVideoSurfaceConstructor = new (
-  width: number, height: number, format: SourceVideoFrame['format'], bytes: Uint8Array, fullRange: boolean
-) => NativeSourceSurface;
+export type SourceVideoSurfaceConstructor = {
+  new (width: number, height: number, format: SourceVideoFrame['format'], bytes: Uint8Array, fullRange: boolean): NativeSourceSurface;
+  /** Fills the surface from the engine's shared-memory segment and unlinks it. */
+  fromSegment(width: number, height: number, format: SourceVideoFrame['format'], name: string, length: number, fullRange: boolean): NativeSourceSurface;
+};
+/** Packed planes: inline bytes, or the engine's segment holding them. */
+export type SourceVideoBytes = Uint8Array | { readonly segment: string; readonly length: number };
 export type ImportedSourceTexture = { release(): void };
 export type SourceFrameTarget = { readonly detached?: boolean; isDestroyed?(): boolean };
 export type SourceSharedTexture = {
   importSharedTexture(options: {
     textureInfo: {
       pixelFormat: SourceVideoFrame['format'];
+      timestamp: number;
       codedSize: { width: number; height: number };
       visibleRect: { x: number; y: number; width: number; height: number };
       colorSpace: { primaries: string; transfer: string; matrix: string; range: string };
@@ -93,12 +98,13 @@ export class SourceSurfaceService {
   get bytes(): number { return this.reservedBytes; }
 
   /** Import one native YUV IOSurface and send it to the target preload once. */
-  async present(windowId: number, width: number, height: number, video: SourceVideoFrame, data: Uint8Array): Promise<SourceSurfaceArgs> {
+  async present(windowId: number, width: number, height: number, video: SourceVideoFrame, data: SourceVideoBytes, timestamp: number): Promise<SourceSurfaceArgs> {
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) throw new Error('Invalid source delivery timestamp');
     if (this.disposed) throw new Error('Source surfaces are disposed');
     if (video.format === 'i420a') throw new Error('Alpha source planes require their I420A video frame.');
     if (!Number.isSafeInteger(windowId) || windowId < 1) throw new Error('Invalid source window');
     const byteLength = sourceVideoByteLength(width, height, video);
-    if (!(data instanceof Uint8Array) || data.byteLength !== byteLength) throw new Error('Incorrect source video plane length');
+    if (data instanceof Uint8Array ? data.byteLength !== byteLength : data?.length !== byteLength) throw new Error('Incorrect source video plane length');
     if (byteLength > SOURCE_SURFACE_BYTES_LIMIT || this.reservedBytes + byteLength > SOURCE_SURFACE_BYTES_LIMIT)
       throw new Error('Source surface memory budget exceeded');
     if ([...this.entries.values()].filter(entry => entry.windowId === windowId).length >= SOURCE_SURFACES_PER_WINDOW)
@@ -106,7 +112,9 @@ export class SourceSurfaceService {
     const frame = this.options.resolveFrame(windowId);
     if (!frame || frame.detached || frame.isDestroyed?.()) throw new Error('Source window is gone');
 
-    const native = new this.options.addon.SourceVideoSurface(width, height, video.format, data, video.range === 'full');
+    const Surface = this.options.addon.SourceVideoSurface, fullRange = video.range === 'full';
+    const native = data instanceof Uint8Array ? new Surface(width, height, video.format, data, fullRange)
+      : Surface.fromSegment(width, height, video.format, data.segment, data.length, fullRange);
     if (!Buffer.isBuffer(native.ioSurface) || native.ioSurface.length === 0) {
       native.release();
       throw new Error('Source surface did not expose an IOSurface handle');
@@ -130,7 +138,7 @@ export class SourceSurfaceService {
     this.reservedBytes += allocBytes;
     try {
       entry.imported = this.options.sharedTexture.importSharedTexture({
-        textureInfo: { pixelFormat: video.format, codedSize: { width, height },
+        textureInfo: { pixelFormat: video.format, timestamp, codedSize: { width, height },
           visibleRect: { x: 0, y: 0, width: video.visibleWidth ?? width, height },
           colorSpace: { primaries: video.primaries, transfer: video.transfer, matrix: video.matrix, range: video.range },
           handle: { ioSurface: native.ioSurface } },

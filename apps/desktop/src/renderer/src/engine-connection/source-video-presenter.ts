@@ -21,7 +21,7 @@ const releaseWriter = (writer: WritableStreamDefaultWriter<VideoFrame>): void =>
 };
 
 export type SourceVideoDescriptor = { token: string; width: number; height: number }
-  | { video: SourceVideoFrame; data: Uint8ClampedArray; width: number; height: number };
+  | { video: SourceVideoFrame & { timestamp: number }; data: Uint8ClampedArray; width: number; height: number };
 
 /** The engine only sends tags WebCodecs names (pm-protocol validates them). */
 function rawColorSpace(video: SourceVideoFrame): VideoColorSpaceInit {
@@ -35,10 +35,9 @@ export class SourceVideoPresenter {
   private track: GeneratorTrack | null = null;
   private writer: WritableStreamDefaultWriter<VideoFrame> | null = null;
   private started: Promise<void> | null = null;
-  private lastTimestamp = -1;
   private disposed = false;
   private readonly disposal = new AbortController();
-  private presentedTime = -1;
+  private presentedTimestamp = -1;
   private readonly presentation = new Set<() => void>();
   /** Presentation of the last written frame while pending; the next write waits for it. */
   private previous: Promise<void> | null = null;
@@ -51,7 +50,7 @@ export class SourceVideoPresenter {
     if (typeof this.surface.requestVideoFrameCallback === 'function') {
       const presented: VideoFrameRequestCallback = (_now, metadata) => {
         if (this.disposed) return;
-        this.presentedTime = metadata.mediaTime;
+        this.presentedTimestamp = Math.round(metadata.mediaTime * 1e6);
         for (const wake of this.presentation) wake();
         this.surface.requestVideoFrameCallback(presented);
       };
@@ -60,13 +59,13 @@ export class SourceVideoPresenter {
   }
 
   /** Resolves once the element presents the frame stamped `timestamp` (µs)
-   * or a later one. The next paint writes only after this, so two frames
+   * exactly. The next paint writes only after this, so two frames
    * never reach the generated track's sink within one vsync, where it can
    * keep the older. A detached or hidden element presents nothing and does
    * not wait (null). */
   private presentedAt(timestamp: number): Promise<void> | null {
     if (typeof this.surface.requestVideoFrameCallback !== 'function') return null;
-    const shown = () => this.disposed || this.presentedTime * 1e6 >= timestamp - 0.5 || !this.surface.isConnected || document.hidden;
+    const shown = () => this.disposed || this.presentedTimestamp === timestamp || !this.surface.isConnected || document.hidden;
     if (shown()) return null;
     const presented = new Promise<void>(resolve => {
       const done = () => {
@@ -116,7 +115,7 @@ export class SourceVideoPresenter {
 
     let sourceFrame: VideoFrame | null = null;
     let held: Promise<void> | null = null;
-    let stampedFrame: VideoFrame | null = null;
+    let writtenFrame: VideoFrame | null = null;
     let startupTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelResolve!: () => void;
     let cancelReject!: (error: Error) => void;
@@ -129,6 +128,7 @@ export class SourceVideoPresenter {
       if (this.previous) await Promise.race([this.previous, cancelled]);
       if (signal?.aborted || this.disposed) throw new DOMException('Source video presentation was cancelled.', 'AbortError');
       if ('video' in descriptor) {
+        if (!Number.isSafeInteger(descriptor.video.timestamp) || descriptor.video.timestamp < 0) throw new Error('Invalid source delivery timestamp');
         const layout = FORMATS[descriptor.video.format];
         if (!layout) throw new Error('Invalid raw source frame format.');
         if (descriptor.video.visibleWidth !== undefined && (!Number.isInteger(descriptor.video.visibleWidth) || descriptor.video.visibleWidth < 1 || descriptor.video.visibleWidth > descriptor.width)) throw new Error('Invalid source visible width.');
@@ -136,13 +136,15 @@ export class SourceVideoPresenter {
         const data = descriptor.data.buffer instanceof ArrayBuffer ? descriptor.data as Uint8ClampedArray<ArrayBuffer> : new Uint8ClampedArray(descriptor.data);
         // This request owns its uncached planes; transfer their buffer once.
         const init: VideoFrameBufferInit & { transfer: ArrayBuffer[] } = { format: layout.format, codedWidth: descriptor.width, codedHeight: descriptor.height,
-          timestamp: Math.round(performance.now() * 1000), colorSpace: rawColorSpace(descriptor.video), transfer: [data.buffer],
+          timestamp: descriptor.video.timestamp, colorSpace: rawColorSpace(descriptor.video), transfer: [data.buffer],
           ...(descriptor.video.visibleWidth !== undefined ? { visibleRect: { x: 0, y: 0, width: descriptor.video.visibleWidth, height: descriptor.height }, displayWidth: descriptor.video.visibleWidth, displayHeight: descriptor.height } : {}) };
         sourceFrame = new VideoFrame(data, init);
       } else {
         sourceFrame = this.bridge!.sourceFrame(descriptor.token);
         if (!sourceFrame) throw new Error('Native source video surface was not delivered.');
       }
+      const timestamp = sourceFrame.timestamp;
+      if (!Number.isSafeInteger(timestamp) || timestamp < 0) throw new Error('Invalid source delivery timestamp');
       const writer = this.ensureWriter();
       const visibleWidth = 'video' in descriptor ? descriptor.video.visibleWidth ?? descriptor.width : descriptor.width;
       if (this.surface.width !== visibleWidth) this.surface.width = visibleWidth;
@@ -163,15 +165,16 @@ export class SourceVideoPresenter {
           if (this.disposed || signal?.aborted) throw new DOMException('Source video presentation was cancelled.', 'AbortError');
           // Keep the source alive: Chromium can close a VideoFrame passed to
           // the writer, and a dropped startup write must be replayable.
-          const timestamp = this.lastTimestamp = Math.max(this.lastTimestamp + 1, Math.round(performance.now() * 1000));
-          stampedFrame = new VideoFrame(sourceFrame, { timestamp });
+          // Replay the same underlying frame and stamp. Chromium consumes
+          // its native timestamp, not a clone's JS-only timestamp override.
+          writtenFrame = new VideoFrame(sourceFrame);
           try {
-            const writing = writer.write(stampedFrame);
+            const writing = writer.write(writtenFrame);
             void writing.catch(() => {});
             await Promise.race([writing, playing.then(() => writing), cancelled, timeout]);
           } finally {
-            stampedFrame.close();
-            stampedFrame = null;
+            writtenFrame.close();
+            writtenFrame = null;
           }
           if (played) break;
           let tickTimer: ReturnType<typeof setTimeout> | null = null;
@@ -180,7 +183,7 @@ export class SourceVideoPresenter {
           finally { if (tickTimer !== null) clearTimeout(tickTimer); }
         }
         await Promise.race([playing, cancelled, timeout]);
-        this.previous = this.presentedAt(this.lastTimestamp);
+        this.previous = this.presentedAt(timestamp);
         // A shared-texture frame can reach the compositor after its write is
         // accepted; releasing the import first could leave the previous frame
         // on screen. Buffer-backed frames own their planes.

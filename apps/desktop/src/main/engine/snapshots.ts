@@ -30,7 +30,7 @@ import type { Request, Response, SnapshotOutcome, SnapshotRequest, SourceVideoFr
 import type { Log } from './connection';
 import { RemoteError } from './protocol';
 import type { WindowSnapshotSessions } from './window-sessions';
-import { sourceVideoByteLength } from './source-surfaces';
+import { sourceVideoByteLength, type SourceVideoBytes } from './source-surfaces';
 
 /** What the service needs of the engine (NativeEngine). */
 export interface SnapshotEngine {
@@ -257,7 +257,7 @@ export type SnapshotServiceOptions = {
   /** Absent when the pm-bridge addon did not load (then shared-memory results fail). */
   takePixels: TakePixels | null;
   /** Native source planes are imported and transferred without an RGBA readback. */
-  sourceSurface?: (windowId: number, width: number, height: number, video: SourceVideoFrame, data: Uint8Array) => Promise<{ token: string; width: number; height: number }>;
+  sourceSurface?: (windowId: number, width: number, height: number, video: SourceVideoFrame, data: SourceVideoBytes, timestamp: number) => Promise<{ token: string; width: number; height: number }>;
   log: Log;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -269,6 +269,7 @@ export class SnapshotService {
   private readonly cancellations = new Map<number, Map<string, AbortController>>();
   private readonly perWindow = new Map<number, number>();
   private outstandingBytes = 0;
+  private sourceTimestamp = 0;
   private readonly stats: SnapshotStats = { served: 0, failed: 0, needsRenderer: 0, shared: 0, refused: 0, outstanding: 0, outstandingBytes: 0, windowSessions: 0, needsDocument: 0 };
 
   constructor(private readonly options: SnapshotServiceOptions) {}
@@ -447,20 +448,36 @@ export class SnapshotService {
       this.discard(response);
       return failed('invalidMessage', 'The engine source presentation format did not match its request.');
     }
-    let data: Uint8Array;
+    // A coded source frame for an IOSurface is read straight from the
+    // engine's segment into that surface: no intermediate main Buffer.
+    const surface = !!video && !['nv12', 'i420a', 'rgba'].includes(video.format);
+    let data: Uint8Array = new Uint8Array(0), segment: SourceVideoBytes | null = null;
     try {
       const expected = video ? sourceVideoByteLength(outcome.width, outcome.height, video) : outcome.width * outcome.height * 4;
-      data = this.pixels(outcome.payload, expected);
+      if (surface && outcome.payload.kind === 'sharedMemory') {
+        if (outcome.payload.length !== expected) {
+          this.discard(response);
+          throw new Error(`the engine shared ${outcome.payload.length} of ${expected} pixel bytes`);
+        }
+        this.stats.shared++;
+        segment = { segment: outcome.payload.name, length: outcome.payload.length };
+      } else data = this.pixels(outcome.payload, expected);
     } catch (error) {
       this.stats.failed++;
       return failed('internal', error instanceof Error ? error.message : String(error));
     }
+    // Stamp the underlying frame at creation, before either IPC path. A
+    // VideoFrame clone timestamp does not retime Chromium's MediaStream sink.
+    const videoTimestamp = video ? this.sourceTimestamp = Math.max(this.sourceTimestamp + 1, Math.round(performance.now() * 1000)) : 0;
     let videoSurface: { token: string; width: number; height: number } | undefined;
-    if (video && !['nv12', 'i420a', 'rgba'].includes(video.format)) {
-      if (!this.options.sourceSurface) return failed('unavailable', 'Native source video presentation is unavailable.');
-      if (signal.aborted) return failed('cancelled', 'The source request was cancelled.');
-      try { videoSurface = await this.options.sourceSurface(windowId, outcome.width, outcome.height, video, data); }
-      catch (error) { return failed('internal', error instanceof Error ? error.message : String(error)); }
+    if (surface) {
+      const unused = () => { if (segment) this.discard(response); };
+      if (!this.options.sourceSurface) { unused(); return failed('unavailable', 'Native source video presentation is unavailable.'); }
+      if (signal.aborted) { unused(); return failed('cancelled', 'The source request was cancelled.'); }
+      // present() takes the segment as its first step, or a failure before
+      // that leaves it to discard; taking an already-taken segment is refused.
+      try { videoSurface = await this.options.sourceSurface(windowId, outcome.width, outcome.height, video!, segment ?? data, videoTimestamp); }
+      catch (error) { unused(); return failed('internal', error instanceof Error ? error.message : String(error)); }
       data = new Uint8Array(0);
     }
     this.stats.served++;
@@ -473,7 +490,7 @@ export class SnapshotService {
       pixels: outcome.pixels,
       data,
       ...(videoSurface ? { videoSurface } : {}),
-      ...(video && !videoSurface ? { videoPlanes: video } : {}),
+      ...(video && !videoSurface ? { videoPlanes: { ...video, timestamp: videoTimestamp } } : {}),
       origin: [outcome.origin[0], outcome.origin[1]],
       layerBox: outcome.layerBox ? [outcome.layerBox[0], outcome.layerBox[1]] : null,
       raster: outcome.raster ?? null,

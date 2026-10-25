@@ -10,7 +10,8 @@ function fixture() {
   const tracks: Array<{ stop: ReturnType<typeof vi.fn> }> = [];
   const write = vi.fn(async (_frame: VideoFrame) => {});
   const abort = vi.fn(async (_reason: unknown) => {});
-  const sourceFrame = vi.fn((_token: string): VideoFrame | null => ({ close: vi.fn() }) as unknown as VideoFrame);
+  let nextTimestamp = 1_000_000;
+  const sourceFrame = vi.fn((_token: string): VideoFrame | null => ({ close: vi.fn(), timestamp: ++nextTimestamp }) as unknown as VideoFrame);
   const discardSource = vi.fn((_token: string) => {});
   const bridge: Bridge = { sourceFrame, discardSource };
   const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue();
@@ -25,9 +26,10 @@ function fixture() {
   });
   vi.stubGlobal('VideoFrame', class {
     close = vi.fn();
+    readonly timestamp: number;
     constructor(readonly source: VideoFrame, readonly options?: { timestamp: number }) {
-      // The presenter's held copy of its latest frame takes no options.
-      if (options) created.push({ source, timestamp: options.timestamp, close: this.close });
+      this.timestamp = options?.timestamp ?? source.timestamp;
+      created.push({ source, timestamp: this.timestamp, close: this.close });
     }
   });
   return { bridge, sourceFrame, discardSource, created, tracks, write, abort, play, pause };
@@ -45,7 +47,7 @@ describe('SourceVideoPresenter', () => {
     const presenter = new SourceVideoPresenter(undefined);
     const data = new Uint8ClampedArray(format === 'i420a' ? 20 : 12);
     await presenter.paint({ width: 4, height: 2, data,
-      video: { format, primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', range: 'limited' } });
+      video: { format, timestamp: 1000, primaries: 'smpte170m', transfer: 'smpte170m', matrix: 'smpte170m', range: 'limited' } });
     expect(f.created[0]!.source).toBe(data);
     expect(f.created[0]!.timestamp).toBeGreaterThanOrEqual(0);
     expect(f.sourceFrame).not.toHaveBeenCalled();
@@ -55,7 +57,7 @@ describe('SourceVideoPresenter', () => {
     presenter.dispose();
   });
 
-  it('starts playback before writing, closes both frames after acceptance, and stamps nonchronological seeks monotonically', async () => {
+  it('starts playback before writing, closes both frames, and preserves source delivery stamps', async () => {
     const f = fixture();
     let accept!: () => void;
     f.write.mockImplementationOnce(() => new Promise<void>(resolve => { accept = resolve; }));
@@ -79,7 +81,7 @@ describe('SourceVideoPresenter', () => {
     expect(f.discardSource).toHaveBeenCalledWith('first');
 
     await presenter.paint({ token: 'earlier-seek', width: 4, height: 2 });
-    expect(f.created.map(frame => frame.timestamp)).toEqual([1_000_000, 1_000_001]);
+    expect(f.created.map(frame => frame.timestamp)).toEqual([1_000_001, 1_000_002]);
     expect(f.play).toHaveBeenCalledOnce();
     expect(f.tracks).toHaveLength(1);
     expect(f.discardSource).toHaveBeenCalledTimes(2);
@@ -100,7 +102,7 @@ describe('SourceVideoPresenter', () => {
     await vi.advanceTimersByTimeAsync(16);
     expect(f.write).toHaveBeenCalledTimes(2);
     expect(f.created[1]!.source).toBe(f.sourceFrame.mock.results[0]!.value);
-    expect(f.created[1]!.timestamp).toBeGreaterThan(f.created[0]!.timestamp);
+    expect(f.created[1]!.timestamp).toBe(f.created[0]!.timestamp);
     start();
     await painting;
     expect(f.created[1]!.close).toHaveBeenCalledOnce();
@@ -137,7 +139,7 @@ describe('SourceVideoPresenter', () => {
     const presenter = new SourceVideoPresenter(undefined);
     document.body.append(presenter.surface);
     const planes = (fill: number) => ({ width: 4, height: 2, data: new Uint8ClampedArray(12).fill(fill),
-      video: { format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } as const });
+      video: { format: 'nv12', timestamp: fill * 1000, primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } as const });
     await presenter.paint(planes(1));
     const written = f.created.at(-1)!.timestamp;
     let second = false;
@@ -160,6 +162,39 @@ describe('SourceVideoPresenter', () => {
     await vi.advanceTimersByTimeAsync(1);
     await third;
     expect(f.write).toHaveBeenCalledTimes(3);
+    presenter.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('matches adjacent microseconds across raw/shared frames and rejects old callbacks', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    vi.spyOn(performance, 'now').mockReturnValue(1000);
+    let presented!: VideoFrameRequestCallback;
+    Object.defineProperty(HTMLVideoElement.prototype, 'requestVideoFrameCallback', { configurable: true,
+      value: (callback: VideoFrameRequestCallback) => { presented = callback; return 1; } });
+    onTestFinished(() => { delete (HTMLVideoElement.prototype as Partial<HTMLVideoElement>).requestVideoFrameCallback; });
+    const presenter = new SourceVideoPresenter(f.bridge);
+    document.body.append(presenter.surface);
+    const planes = (timestamp: number) => ({ width: 4, height: 2, data: new Uint8ClampedArray(12),
+      video: { timestamp, format: 'nv12', primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', range: 'limited' } as const });
+    await presenter.paint(planes(1_000_000));
+    const first = f.created.at(-1)!.timestamp;
+    const second = presenter.paint({ token: 'second', width: 4, height: 2 });
+    presented(0, { mediaTime: first / 1e6 } as VideoFrameCallbackMetadata);
+    await second;
+    expect(f.write).toHaveBeenCalledTimes(2);
+    const latest = f.created.at(-1)!.timestamp;
+    expect(latest - first).toBe(1);
+    const third = presenter.paint(planes(1_000_002));
+    // A repeated callback for the old frame must still wait for the new one.
+    presented(0, { mediaTime: first / 1e6 } as VideoFrameCallbackMetadata);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.write).toHaveBeenCalledTimes(2);
+    presented(0, { mediaTime: latest / 1e6 } as VideoFrameCallbackMetadata);
+    await third;
+    expect(f.write).toHaveBeenCalledTimes(3);
+    expect(f.discardSource).toHaveBeenCalledWith('second');
     presenter.dispose();
     expect(vi.getTimerCount()).toBe(0);
   });
