@@ -653,6 +653,42 @@
         "relative": 0.001
       }
     },
+    "playback_shapes_200": {
+      "all_threads/cpu.heap_alloc_bytes": {
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here): measured spread over 10 identical full runs within the bench thread's.",
+        "relative": 0.015
+      },
+      "all_threads/cpu.heap_allocs": {
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here): measured spread over 10 identical full runs within the bench thread's.",
+        "relative": 0.001
+      },
+      "cpu.heap_alloc_bytes": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls; each of the 5,280 vector cache misses records its own submission, so the bytes vary more than the counts: 10 full debug runs at load 6 gave 949,834,352 to 962,128,116 bytes (1.3% spread, 0.14% above the seeded maximum).",
+        "relative": 0.015
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls: 10 full debug runs at load 6 gave 1,788,368 to 1,788,497 allocations (0.007%).",
+        "relative": 0.001
+      }
+    },
+    "playback_svg_animated": {
+      "all_threads/cpu.heap_alloc_bytes": {
+        "reason": "As this bench thread's cpu.heap_alloc_bytes (every thread's counts equal the bench thread's here).",
+        "relative": 0.001
+      },
+      "all_threads/cpu.heap_allocs": {
+        "reason": "As this bench thread's cpu.heap_allocs (every thread's counts equal the bench thread's here).",
+        "relative": 0.001
+      },
+      "cpu.heap_alloc_bytes": {
+        "reason": "The fixture's SVG path holds the process id, so every frame's path copies vary with its digit count (+120 bytes over 60 frames from a 2-digit-longer id: 30,524,264 to 30,524,384), plus the render thread's wgpu-core submission bookkeeping as in the other GPU benches.",
+        "relative": 0.001
+      },
+      "cpu.heap_allocs": {
+        "reason": "The render thread also runs wgpu-core's bookkeeping of submissions in flight, which allocates according to how far the GPU has got when a frame polls, as in the other GPU benches.",
+        "relative": 0.001
+      }
+    },
     "scrub_24": {
       "all_threads/cpu.heap_alloc_bytes": {
         "reason": "Every thread: the video decode thread's demuxer and decoder allocate according to how far decoding ahead got when each seek arrived. Measured spread: 3 full runs 15,046 to 15,056 allocations and 1,616,662 to 1,618,582 bytes; a 4th full run 15,198 allocations; 12 runs of scrub_24 alone 15,046 to 15,339 allocations (1.9%) and 1,521,120 to 1,538,422 bytes (1.1%), at load 29. The bench thread's own counts stay within 0.1%.",
