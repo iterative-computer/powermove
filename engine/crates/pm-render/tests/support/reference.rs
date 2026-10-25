@@ -183,8 +183,9 @@ impl Reference {
         classify(&self.edge, &self.resampled, self.width, self.height, 2)
     }
 
-    /// The capture's opaque sRGB byte boundary: over black, independently
-    /// gamut-mapped in f64. Unknown source pixels stay explicitly unknown.
+    /// The capture's opaque view (`opaque8`, today's `FRAG_CAPTURE_OPAQUE`
+    /// into RGBA8): color over black clamped to 0…1, alpha 1. Unknown source
+    /// pixels stay explicitly unknown.
     pub fn opaque(&self) -> Vec<f64> {
         self.rgba
             .chunks_exact(4)
@@ -192,8 +193,12 @@ impl Reference {
                 if p.iter().any(|v| v.is_nan()) {
                     return [f64::NAN; 4];
                 }
-                let rgb = pm_reference::color::css_gamut_map_srgb([p[0], p[1], p[2]]);
-                [rgb[0], rgb[1], rgb[2], 1.0]
+                [
+                    p[0].clamp(0.0, 1.0),
+                    p[1].clamp(0.0, 1.0),
+                    p[2].clamp(0.0, 1.0),
+                    1.0,
+                ]
             })
             .collect()
     }
@@ -355,19 +360,7 @@ struct Ctx<'a, 'd> {
     effects: &'a pm_render::effects::Effects,
     /// Motion-blur samples per blurred layer (1: none).
     samples: u32,
-    /// 8-bit project storage holds 0…1 only.
-    unorm8: bool,
     bitmaps: HashMap<PathBuf, Option<Bitmap>>,
-}
-
-impl Ctx<'_, '_> {
-    fn clamp(&self, c: Rgba) -> Rgba {
-        if self.unorm8 {
-            c.map(|v| v.clamp(0.0, 1.0))
-        } else {
-            c
-        }
-    }
 }
 
 fn surface(w: usize, h: usize) -> Reference {
@@ -492,6 +485,9 @@ fn draw(
     if color.working() != WorkingEncoding::Standard {
         return Err("linear-light compositing".into());
     }
+    // Every project composites in float, 8-bit delivery included
+    // (docs/engine/composite.md): extended values survive between blends
+    // and only the comparison boundary maps them.
     let comp = Comp::resolve(document, composition).map_err(|e| format!("{e:?}"))?;
     let seconds = comp.seconds_at(time.get());
     let mut ctx = Ctx {
@@ -499,7 +495,6 @@ fn draw(
         assets,
         effects,
         samples,
-        unorm8: color.precision == Precision::Unorm8,
         bitmaps: HashMap::new(),
     };
     draw_comp(
@@ -542,7 +537,7 @@ fn draw_comp<'d>(
                         [c[0], c[1], c[2], 1.0]
                     }
                 };
-                out.rgba[(y * w + x) * 4..][..4].copy_from_slice(&ctx.clamp(c));
+                out.rgba[(y * w + x) * 4..][..4].copy_from_slice(&c);
             }
         }
     }
@@ -583,7 +578,6 @@ fn device_of<'d>(
 /// its partial-coverage marks) through opacity, mask and matte.
 #[allow(clippy::too_many_arguments)]
 fn composite_layer(
-    ctx: &Ctx<'_, '_>,
     out: &mut Reference,
     px: &[(Rgba, bool)],
     resampled: Option<&[bool]>,
@@ -611,7 +605,7 @@ fn composite_layer(
         }
         let at = &mut out.rgba[i * 4..][..4];
         let dst = [at[0], at[1], at[2], at[3]];
-        at.copy_from_slice(&ctx.clamp(blend(mode, source, dst)));
+        at.copy_from_slice(&blend(mode, source, dst));
     }
 }
 
@@ -828,7 +822,6 @@ fn draw_pass<'d>(
                 })
                 .collect();
             composite_layer(
-                ctx,
                 out,
                 &px,
                 Some(&child.resampled),
@@ -851,7 +844,7 @@ fn draw_pass<'d>(
             let px = layer_pixels(&times, |t| {
                 content_pixels(scope, layer, &ty, t, scale_xy, w, h)
             })?;
-            composite_layer(ctx, out, &px, None, opacity, mode, &mask, &matte);
+            composite_layer(out, &px, None, opacity, mode, &mask, &matte);
             continue;
         }
         if ty == "image"
@@ -860,7 +853,7 @@ fn draw_pass<'d>(
             let px = layer_pixels(&times, |t| {
                 svg_pixels(scope, layer, t, scale_xy, w, h, &svg)
             })?;
-            composite_layer(ctx, out, &px, None, opacity, mode, &mask, &matte);
+            composite_layer(out, &px, None, opacity, mode, &mask, &matte);
             continue;
         }
         // Image and precomp sources: decoded (or independently painted) f64
@@ -932,13 +925,6 @@ fn draw_pass<'d>(
         } else {
             None
         };
-        let coverage = fill(
-            &(device * kurbo::Shape::to_path(&rect, 1e-9)),
-            FillRule::NonZero,
-            PATH_SAMPLES,
-            w,
-            h,
-        );
         let asset_id = pm_render::js::string(pm_render::js::get(&d, "asset"));
         let record = ctx.root.get("assets").and_then(|v| v.get(&asset_id));
         if precomp.is_none()
@@ -989,6 +975,24 @@ fn draw_pass<'d>(
             unreference(out, &(device * kurbo::Shape::to_path(&rect, 1e-9)), 1);
             continue;
         };
+        // Only the fitted content draws: a contain fit's letterbox is empty
+        // (the window's part of the box where source coordinates are 0…1).
+        let span = |origin: f64, size: f64| ((-origin / size).max(0.0), ((1.0 - origin) / size).min(1.0));
+        let (s0, s1) = span(uv[0], uv[2]);
+        let (t0, t1) = span(uv[1], uv[3]);
+        let content = kurbo::Rect::new(
+            rect.x0 + s0 * sw,
+            rect.y0 + t0 * sh,
+            rect.x0 + s1 * sw,
+            rect.y0 + t1 * sh,
+        );
+        let coverage = fill(
+            &(device * kurbo::Shape::to_path(&content, 1e-9)),
+            FillRule::NonZero,
+            PATH_SAMPLES,
+            w,
+            h,
+        );
         let centered = if ty == "precomp" { 0.0 } else { 0.5 };
         let mut px = vec![([0.0; 4], false); w * h];
         let mut resampled = vec![false; w * h];
@@ -1013,7 +1017,7 @@ fn draw_pass<'d>(
                 resampled[index] = true;
             }
         }
-        composite_layer(ctx, out, &px, Some(&resampled), opacity, mode, &mask, &matte);
+        composite_layer(out, &px, Some(&resampled), opacity, mode, &mask, &matte);
     }
     Ok(())
 }
