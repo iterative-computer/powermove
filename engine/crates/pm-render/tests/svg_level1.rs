@@ -744,12 +744,9 @@ fn planned_buckets(plan: &pm_render::plan::CompPlan, out: &mut Vec<(u32, u32)>) 
     }
 }
 
-/// The engine's viewer request for a view. On today's canvas (decisions V1
-/// and V1b, `pm_node::present::compose::canvas_placement`): the canvas
-/// itself at today's output scale (the canvas over the composition part it
-/// holds), starting at the crop's unrounded origin. Without it, the
-/// composition at zoom × DPR (capped at 2 by the presentation) × the
-/// preview resolution, as the engine drew before V1.
+/// Reconstruct a captured SVG view's canvas or full-composition coordinates.
+/// Canvas captures retain their recorded output scale and unrounded crop origin;
+/// full-composition captures use their recorded zoom, device ratio and resolution.
 fn viewer_request(cw: u32, ch: u32, row: &Value, todays_canvas: bool) -> RenderRequest {
     let f = |k: &str| row[k].as_f64().unwrap();
     if todays_canvas {

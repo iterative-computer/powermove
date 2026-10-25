@@ -39,6 +39,14 @@ today's worst error elsewhere. A gate with other storage states its own. Geometr
 exact: alpha area (relative) and centroid (px) within 1e-3 (`same_geometry`). Preview ==
 export: the paused viewer's frame and the export's are identical (`identical`).
 
+For a fully modelled transparent Float16 corpus frame, G-C2 measures that same 1e-3
+geometry bound on a Float32 render of the **same authored document**, changing only
+`colorDepth` to 32. Float16 stores round soft alpha weights and can move an
+alpha-weighted centroid without moving the geometry. G-C2 always logs the original
+Float16 area and centroid deviation and keeps its pixel-class bounds and
+preview/export identity on the original Float16 frame. The Float32 geometry probe
+runs for every such frame, regardless of whether its Float16 centroid passes.
+
 A case where today is closer to the reference than the engine fails. Report it; never
 widen a bound to pass it.
 
@@ -51,8 +59,9 @@ Gaussian (`gaussian`), sRGB, BT.709 and BT.1886, PQ, HLG, H.273 matrices, ranges
 primaries, and ICC matrix/TRC profiles with optional unclipped conversion (`color`).
 `tests/engine_formulas.rs` cross-checks it against pm-color.
 `pm-render/tests/support/reference.rs` builds a document's reference frame: authored
-values from pm-eval, all math from pm-reference. It models backgrounds and 2D solids
-today, leaves image boxes unreferenced, and anything else the whole frame.
+values from pm-eval; independent f64 coverage, compositing, and declared mip-zero
+still sampling. It models backgrounds, 2D solids, supported level-1 stills, and
+parametric masks; unsupported content remains explicitly unreferenced.
 
 `tests/corpus.rs` (G-C2) is the model conversion; its gated frame must equal the export
 frame, and the paused preview must equal that export. Video selects from source timestamps
@@ -67,7 +76,7 @@ deletes the today-equality test it replaces.
 |---|---|---|
 | L2 text | G-T1, G-T2, G-T5 | `coverage::fill(outline, _, 32, …)` on glyph outlines at the exact layout positions; `composite::blend`; `gaussian::blur` (σ = blur × world scale); `compare`, `same_geometry` |
 | L3 vectors, masks, SVG | G-V1, G-V2, G-V3 | `coverage::fill(_, _, 16, …)` for shapes, paths, SVG; `gaussian::blur` with `Edge::Transparent` at σ = max(0, feather)·\|world x\|/2; `compare`, `same_geometry` |
-| L4 compositing, sampling, viewer, 3D | G-C3, G-C4, G-C5 bars, G-D1, G-D2, G-M1 | `composite::{blend, porter_duff, luma709}`; `Class::Resampled` with a declared-kernel reference (move the one in `tests/sampling.rs` here); `support::reference::preview_and_export`, `identical`; groups, precomps, mattes |
+| L4 compositing, sampling, viewer, 3D | G-C2, G-C3, G-C4, G-C5 bars, G-D1, G-D2, G-M1 | `composite::{blend, porter_duff, luma709}`; `Class::Resampled` with the declared-kernel model in `support::sampling_reference`; `support::reference::preview_and_export`, `identical`; groups, precomps, mattes |
 | L5 stills | G-I1 | `color::{Transfer, Primaries, MatrixTrc, convert, bradford}`; images as `Resampled` |
 | L6 effects, export | G-E1, G-X1 | `compare` with stated f32 bounds; `color::{rgb_to_ycbcr, dequantize_luma, dequantize_chroma}`; `identical` |
 

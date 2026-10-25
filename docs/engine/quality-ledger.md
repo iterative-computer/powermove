@@ -33,47 +33,62 @@ Then one row per correction:
 
 Rewrite a row when its numbers change. Keep no round history here.
 
-## 3D Library cards (C3)
+## 3D output and Library cards
 
-- **Reference:** the engine's render of the same pinned view at 4× per axis (each
-  sample 4× MSAA), box-averaged to card pixels in the card's encoding. It is the
-  engine's own 8-bit render averaged in gamma space; the 3D lane's linear-light
-  resolve should replace it with an independent f32 reference.
-- **Gate:** `e2e/library-card-parity.spec.ts`, 3D cases. Pixels away from edges are
-  exact. A differing edge pixel (3×3 span above 8 CV in today's card) must be, per
-  channel, no further from the reference than today's.
-- **Units:** CV, max channel difference, over the pixels where today and the engine
-  differ.
+The scene pass now resolves RGBA16F samples in linear light and defers the
+preserved r180 ACES curve to the composite boundary, after transparent blending.
+This is decision `3D-TONEMAP-1`; masks and effects keep their layer boundaries.
+The reference is independent Three.js r180 shading into RGBA32F at eight samples
+per axis, averaged in linear light and output-converted with f64 arithmetic.
 
-| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+`tests/scene3d.rs`, `tests/scene3d_gltf.rs` and the Editor Library-card gate remain
+red during reference qualification. No 3D correction is accepted by this ledger
+until native output is at least as close as today's under the reference rule. The old
+native RGBA8, gamma-averaged self-reference has been removed.
+
+## Raster sampling and masks
+
+- **Reference:** decoded level-1 source texels, independent f64 affine Lanczos-3
+  with the declared anti-ringing clamp and exact outline coverage; parametric
+  mask distance, feather and compositing formulas evaluated in f64.
+- **Gate:** `pm-render/tests/corpus.rs`, still and parametric-mask cases. Pixel
+  classes and precision bounds follow [gate-policy.md](gate-policy.md). Original
+  working pixels also have to equal the same-size paused preview/export. Geometry
+  is measured separately at Float32 to avoid treating half-float alpha rounding
+  as shifted positions.
+- **Units:** CV; each entry gives max, p99.9, mean. Other corpus cases remain
+  subject to the unchanged bounds, including cases without a complete reference.
+
+| Correction (declared kernel / authored mask formula) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
-| MSAA edge resolve: Metal hardware resolve instead of WebGL's (box filter over samples) | 1, 1, 1.00 | 0, 0, 0.00 | Camera view, 4 viewers × 2 themes (35 edge pixels) |
+| Float sampling and analytic quad coverage | 10.10, 10.10, 0.063 | 0.02, 0.02, <0.001 | Transparent alpha still |
+| Same sampling through opaque output quantization | 9.08, 9.08, 0.057 | 0.27, 0.27, 0.002 | Same alpha still, opaque view |
+| Parametric mask coverage with float sampling | 144.06, 110.89, 10.156–10.621 | 0.25, 0.22–0.23, 0.068 | Three transparent rectangle/ellipse-mask frames |
 
-Open, gate failing: in the Editor view, today is 20, 20, 5.02 and the engine is
-19, 19, 4.65 (132 edge pixels, 16 cards), but 4–5 pixels per card are one CV
-further from the reference than today's. Owner: 3D lane (linear-light resolve).
-The raw camera frame's one interior pixel, `(799, 448)`, is a rounding-midpoint tie:
-a surface fit over 2,805 face pixels gives 150.50 ± 0.02, and today (151) and the
-engine (150) are both 0.50 away.
+The still subset passes all six frames and the mask subset all three. Broader
+blend cases expose the existing hard pixel-centre edges of level-1 solids; they
+remain red against exact coverage, including at Float32. This is independent of
+mask alpha quantization and is not waived.
 
 ## Text raster
 
 - **Reference:** the byte-exact uploaded Canvas raster, sampled bilinearly in f64
   at output pixel centres through the authored quad, with its opacity over the
-  captured background. The quad and full-canvas placement remain exact.
+  independently evaluated f64 document background. The quad and full-canvas
+  placement remain exact.
 - **Gate:** `pm-render` example `color_depth_parity`, using the synthetic
   `color-depth.ts` captures. Resampled text uses `pm_reference::compare` with
   `EIGHT_BIT` at depth 8 and `HALF_FLOAT` at depths 16 and 32; other pixels stay
   byte-exact. The depth-8 PNG export equals the preview. `pm-node`'s
   `render_fonts` also requires exact full-canvas pixels after placing the ink crop.
-- **Units:** CV. The maximum can differ within the stated precision bound;
-  p99.9 and mean are no worse than today's full-quad sampling.
+- **Units:** CV. Maximum, p99.9 and mean differences from today's error must each
+  stay within the stated precision bound, with the original per-pixel bar.
 
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
-| Retain only ink without reproducing full-quad f32 interpolation (bilinear pixel-centre reference) | 0.775, 0.748, 0.236 | 0.789, 0.707, 0.235 | Rotated text, depth 8 |
-| Same ink-only quad at half-float depth | 0.487, 0.400, 0.063 | 0.479, 0.366, 0.060 | Rotated text, depth 16 |
-| Same ink-only quad at float depth | 0.405, 0.366, 0.036 | 0.455, 0.304, 0.033 | Rotated text, depth 32 |
+| Retain only ink without reproducing full-quad f32 interpolation (bilinear pixel-centre reference) | 1.06, 0.98, 0.421 | 1.04, 1.00, 0.421 | Rotated text, depth 8 |
+| Same ink-only quad at half-float depth | 0.50, 0.40, 0.078 | 0.52, 0.40, 0.075 | Rotated text, depth 16 |
+| Same ink-only quad at float depth | 0.40, 0.37, 0.036 | 0.45, 0.30, 0.033 | Rotated text, depth 32 |
 
 ## Video
 
@@ -86,17 +101,10 @@ engine (150) are both 0.50 away.
 - **Gate:** `pm-render/tests/video_reading.rs` (engine within 0.59 / 0.063 / 0.004 CV of
   the reference at 8 / 16 / 32-bit on pixels whose chroma is flat over the
   reconstruction footprint, and at least as close as today everywhere), and
-  `pm-render/tests/chroma_truth.rs` for the filter. `e2e/engine-viewer-canvas.spec.ts`
-  checks the untagged SD fixture's native viewer colour against the same
-  independent f64 H.273 / SMPTE 170M reference. It compares every pixel in
-  the video box, including its scaled border, using today's original-video
-  coverage with only the source colour corrected. Whole-stage geometry and
-  nonvideo pixel parity retain their original bounds; the native snapshot's
-  video interior is checked against the reference and the displayed frame.
-  The viewer gate uses the largest RGB-channel error per pixel for aggregate
-  max, p99.9 and mean, and checks the native-minus-today error at every pixel
-  (99.9% at most 1 CV, none beyond 4 CV).
-  `video_reading.rs` proves the same video reading in paused preview and export.
+  `pm-render/tests/chroma_truth.rs` for the filter. `video_reading.rs` proves
+  the same video reading in paused preview and export. The G-C4 presentation
+  gate separately checks exact equal-size viewer/export pixels and snapped
+  device geometry; it no longer reproduces the legacy viewer's canvas scaling.
 - **Units:** CV. Engine columns are 16-bit projects; their max and p99.9 sit at chroma
   edges, where the engine's Catmull-Rom and the reference's Lanczos-3 legitimately
   differ.
