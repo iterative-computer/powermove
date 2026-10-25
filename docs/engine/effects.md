@@ -32,7 +32,7 @@ and validation, about 0.03 ms). `translate` does both.
 |---|---|---|
 | 0 | Source limits: size, a budgeted GLSL ES preprocessor (macro expansion, statements), WebGL's identifier and struct-nesting rules, `#extension` placement | `limits::check_source` |
 | 1 | WebGL's compile and link: glslang's ES 3.00 front end on the unmodified program with `PM.VERT` | `compile::validate_es` |
-| 2 | `#version 450`, precision removed, GLSL 4.50 and Vulkan keywords renamed, polyfills (`inverse`, `outerProduct`, `modf`, scalar `normalize`/`faceforward`/`reflect`/`refract`, `round`, `radians`, `degrees`), line counts unchanged | `normalize` |
+| 2 | `#version 450`, precision removed, GLSL 4.50 and Vulkan keywords renamed, polyfills (`inverse`, `outerProduct`, `modf`, scalar `normalize`/`faceforward`/`reflect`/`refract`, `round`), line counts unchanged | `normalize` |
 | 3 | glslang, relaxed Vulkan rules, automatic bindings and locations | `compile::compile` |
 | 4 | Sampler arrays, distinct bindings, varyings by name, the fragment interface (narrow, array, and depth outputs; unused inputs), signed `%` as `OpSRem`, `uint` negation, `texelFetchOffset`, 2-row matrix strides, non-finite constants, the combined-sampler split; SPIR-V limits (call depth, recursion, private variables, uniform vectors); the bind check | `rewrite`, `limits::check_spirv`, `reflect::unbound_resources` |
 | 5 | naga SPIR-V front end with `adjust_coordinate_space` (GL row order), derivative uniformity off, validation | `pipeline::Prepared::finish` |
@@ -62,7 +62,7 @@ comparison are kept outside the repository with the review evidence).
 | `normalize` (vectors) | `metal::normalize` | `metal::fast::normalize` | `fast::normalize` |
 | `tanh` | `metal::tanh` | `metal::precise::tanh` | `precise::tanh` |
 | `round` | `metal::rint` (glslang and naga fold it into `roundEven`) | `metal::round` (ties away from zero) | `pm_glsl`'s `pm_round` polyfill (exact ties away from zero on every back end), whose Metal body is `return metal::round(x);` (`ANGLE_POLYFILLS`) |
-| `radians`, `degrees` | `(x) * c` | `ANGLE_radians`: `c * x` | `pm_glsl` polyfill, `c * x` |
+| `radians`, `degrees` | `(x) * c` | `ANGLE_radians`: `c * x` | naga's `x * c` (the same IEEE product; the polyfill went with E-A1) |
 
 `round` is a correctness fix as well: `round(0.5)` was 0 in the engine and is
 1 in WebGL (`tests/effects.rs` `round_ties_away_from_zero_as_in_webgl`, which
@@ -94,6 +94,15 @@ pixels of probes (`radians`/`degrees`, `halftone-fragcoord`,
 undefined behaviour). The app corpus is unchanged (one 3D studio frame
 closer).
 
+**The nearest half at every store.** Metal's render-target conversion
+truncates f32 to half, so a program drawing into an RGBA16F target would lose up
+to a half step per pass. For RGBA16F pipelines `GpuProgram::pipeline` compiles
+the fragment MSL with its color outputs converted to `half` in the shader
+(`glsl::half_store`), where MSL rounds to the nearest even; the store is then
+exact (`tests/effects.rs` `rgba16f_stores_the_nearest_half_of_a_programs_output`:
+0.3 stores 0x34CD, not truncation's 0x34CC). The engine's own WGSL passes do the
+same (composite.md).
+
 **Isolation.** Translation runs on its own thread with a 1 GiB stack (a 100,000-deep
 swizzle chain overflows 8 MiB) and a 20 s deadline (`cache::prepare_isolated`). A
 program past the deadline fails with stage `deadline`; its thread is left to finish
@@ -114,192 +123,6 @@ engine-only: WebGL draws the program, so it runs in the decision 19 fallback run
 its textures (`Status::NeedsFallback`, reported as `NotHeadlessRenderable`; "The fallback
 runner" below). A renderer without a runner (`pm-cli`) names it as not
 headless-renderable. Nothing is drawn wrong, and nothing is routed.
-
-**ANGLE-only programs** (`effects::ANGLE_ONLY`, orchestrator decision DEFS-2,
-2026-10-19). One Store program still differs natively with ANGLE's calls:
-`mrsigma/private-extension-19` 2.0.8 (`private-extension-19.glass`). Its rim
-search bisects the bilinear alpha of `u_orig` at coordinates built from
-screen-space derivatives, a 2×2 inverse, and `cos`/`sin`, and branches on
-`alpha < 0.5`; the hardware filter weighs texels with 8-bit fractions, so a
-coordinate one ulp apart can move the rim a bisection step. Intermediate
-probes of the program against WebGL (a private copy of the gate case whose
-output is replaced by each stage's values) localise it: the Jacobian and
-`lgP2S` match at 8 bits, the ray-seeded `best` distance already differs at
-44 pixels, and everything after it inherits that. MSL `fp contract` pragmas
-(`off`, `on`, `fast`) change nothing. So the program is listed, by the
-SHA-256 of its user body with every number written as `0` (the extension
-bakes the composition size into the body), and where a fallback runner is
-attached (the app's viewer and its exports) it draws through it, the same
-ANGLE that draws it today; a renderer without one (`pm-cli`) draws the
-native translation. Its GPU program is still built, so `validate_effect`
-compiles it. Built-ins (all bit-exact natively) and layers are never
-listed; the Store's other `private-extension-19` (zellzoi 2.0.1) matches
-natively and has another fingerprint. (A private user setup contains manifest 2.0.1, byte-identical to
-zellzoi 2.0.1, rather than the separately listed 2.0.8 release.) Through the runner the program is
-bit-exact against WebGL in all four variants (`effects_webgl`
-`fallback_effects_match_webgl` on a private mini corpus of the gate case,
-`PM_SHADER_STATS=1`: 36,864 of 36,864 pixels each); the shader gate draws
-it with a runner host (`<corpus>/fallback-effects`) and counts it as via the
-runner. Tests: `effects_fallback.rs`
-`an_angle_only_program_draws_through_the_runner_where_one_is_attached`
-(viewer request with stage `angle-parity`, the runner's pixels drawn, a job
-through its host, native without a runner, the built-in it copies stays
-native); `glsl::tests::fingerprints_ignore_numbers_and_spacing_only`. The
-cost is the runner's (see the throughput gap).
-
-## First-use native/ANGLE parity (DEFS-4)
-
-`effects::parity::Parity` judges the first frame of a user effect,
-transition, shader layer, or extension fragment layer with the window's
-runner attached. Built-ins retain their measured native path; forks and
-id overrides are user programs. `ANGLE_ONLY` remains a seed for known
-programs, rather than the only way a program reaches ANGLE.
-
-An unknown program holds presentation, draws through both pipelines with
-identical parameters and input texels, and presents the runner's result.
-Verdicts include working depth in their identity. Depth 8 compares exact byte
-codes, depth 32 compares exact binary32 bits, and every binary16 channel keeps
-the existing absolute bound of 1/255, including HDR values. A failed comparison
-pins the program to ANGLE.
-Matching programs become native-verified. No pixel-count allowance or
-perturbation exemption participates in this decision. Effects compare
-before `clamp`, and every ping-pong pass is included. A failed comparison
-readback never verifies the program. A probe whose reference fails never
-presents the unverified native frame:
-
-- A lasting failure (`FallbackFailure::is_final`: WebGL refuses the
-  program (`compile`), its draw passes the runner's deadline (`watchdog`),
-  or its target is past the GPU's WebGL size limit (`tooLarge`)) pins the
-  program to the runner (`Parity::failed`, and `Parity::pin` when the
-  failure was learned from another request of the program). From then on
-  the runner's own failure handling decides, as for any runner program and
-  as today's compositor does: an effect or transition is skipped and
-  reported once, a shader layer draws nothing and is reported once, a
-  runaway is turned off by the watchdog, and a job stops by name for every
-  failure but `compile`. A `tooLarge` pin applies at every size (the
-  runner draws the program at smaller sizes, as WebGL does today); it
-  costs runner throughput only. Pins are never cleared.
-- A transient failure (`contextLost`, the compile `deadline`,
-  `unavailable`, `size`) leaves the program unknown and goes through the
-  runner's retry and backoff (`Retries`): asked for again at once, then
-  drawn without it and reported once until the backoff passes, then
-  probed again. Effects and transitions get this from `runner_step`;
-  shader layers route through the fallback branch of `shader_source`
-  while the program has a retry streak, so no request is sent during a
-  backoff. A job retries in place and then stops naming the program.
-
-Before 2026-10-19 both cases left the program unknown: effects and
-transitions failed every frame with "first-use shader parity is waiting
-for its WebGL reference" (the viewer never presented, a job stopped), and
-shader layers re-probed every frame without backoff.
-
-Decisions persist as small, content-addressed markers in
-`Engine Cache/Shader Cache/angle-parity`, without source, parameters or
-pixels. Separate atomic native and runner markers ensure that a
-simultaneous native verification cannot overwrite a pin. The fingerprint
-covers the exact wrapped vertex/fragment source (constants included), the
-engine build identity, pipeline revision, adapter/backend and driver
-identity, OS build, Electron and Chromium versions. Corrupt markers cause
-a re-probe. Two limits of the key, open: the GPU and driver are wgpu's
-adapter, not the GPU Chromium's ANGLE runs on (they can differ on a
-dual-GPU Mac); and the engine build is identified by the addon's mtime and
-size, not a content hash or build id (every install or rebuild changes
-the mtime, so this only matters for a byte-different addon with an equal
-mtime and size). The desktop sets `POWERMOVE_ENGINE_PARITY_ENV` for both engine
-processes; standalone `pm-cli` has no browser reference and does not probe.
-
-The cost is bounded to first contact per program/environment. The existing
-runner queue, request limits, deadlines and content cache apply. Verified
-frames do no readback or runner round trip; pins pay the existing runner
-cost. Up to 32 native first-frame results stay paired with their request
-keys in memory (the transport's request bound). The reply is judged when
-it arrives, even if playback has moved on; repeated frames do not redraw
-the native probe while it is in flight. A paused redraw presents ANGLE's
-probed frame after verification. Cached native verifications look for a
-pin written by another renderer process at most every 500 ms
-(`PIN_CHECK`; at once after a decision), not with a file read on every
-draw. If a probe's reply never arrives (its request is dropped past the
-transport's bound, or its session parks or closes), the program stays
-pending in that definition set and draws through the runner for the
-session's lifetime: exact, at the runner's cost. This verifies
-the actual first frame; future parameter/input combinations need their
-own corpus coverage.
-
-`tools/shaders/user-setups.ts` captures private user setups through the
-real app extension builder and loader in isolated, hidden profiles, once
-with each setting. `collect.ts` discovers the private `user-setups/`
-corpus automatically, refuses differences in loader health, registrations
-or evaluated parameters, and includes all registered GLSL plus project
-parameter samples at keys and interval midpoints. A missing private
-corpus emits a named skip. `--user-loader <capture.json>` reuses a capture;
-all captures and per-program gate reports stay outside Git. Real-loader
-health includes extensions with no GLSL, so a failed activation cannot
-silently remove a shader from the inventory. Identical missing bundled
-dependencies remain visible in the private health report.
-
-The gate uses the production runtime probe for user programs and writes
-per-program outcomes with `PM_SHADER_GATE_REPORT`. Since 2026-10-19 it
-also asserts the outcome: every user-setups program must end
-`NativeVerified`, pinned to the runner, on the static `ANGLE_ONLY` seed,
-or refused by both; one the probe never judged (`Unknown`) fails the gate
-(`settle_user_verdict`, tested by
-`a_user_program_the_probe_never_judged_fails_the_gate`). For user effects
-and transitions the "Match WebGL" rows compare the runner's output with
-the WebGL capture; the native evidence is this verdict. Its older undefined-
-behavior exemption now names only the three generated probes exactly;
-a user's id containing `sub-` or `hub-` cannot bypass comparison. Effects
-whose WebGL draw raises a GL error are judged by the cleared target,
-just as layers already were.
-
-Tests: `effects::parity` (strict channel bound, HDR, version/source
-invalidation, persistent decisions, pin precedence, lasting versus
-transient reference failures, the bounded concurrent-pin check),
-`effects_fallback` (first-frame hold and presentation, verification and
-pinning across a fresh renderer, transitions and fragment layers; an
-effect, a shader layer and a transition whose reference fails for good
-are pinned and skipped or draw nothing as today, also in a job; an effect
-and a shader layer whose reference fails transiently follow the runner's
-backoff and are judged once the runner draws them; a job stops naming
-the effect), and
-`e2e/engine-shader-parity.spec.ts` (actual native/ANGLE draws and app
-restart and asynchronous snapshots).
-
-The DEFS-4 qualification captured 41 private user programs through both
-settings with identical registrations, health and 49 evaluated project
-parameter samples. Of their 219 variants, 216 matched; three variants of
-one invalid program were refused identically by native and WebGL.
-The 40 drawable programs finished native-verified, with no runtime pins
-needed for these inputs. Across the selected shader corpus, 752 variants
-produced 730 matches and 22 identical refusals, with no pending references
-or pixel failures. Full original project-frame parity belongs to the
-integration gate; these results cover shader inputs and evaluated effect
-channels, rather than the composition's fonts, panels or raster assets.
-
-On the qualification machine, 239×137 debug-build snapshots measured
-822 ms on first use for the stable program and 556 ms for the unseeded
-ill-conditioned program. Both presented pixels exactly equal to the
-legacy compositor. Five subsequent snapshots averaged 202 ms and 423 ms,
-respectively, with zero and five runner rounds. The stable program's
-202 ms is not its steady state: the review (2026-10-19) measured the same
-program at about 193 ms per snapshot right after its probe and 5 ms per
-snapshot after waiting 3 s, and a second program probed later showed the
-same window. After the reference-failure fix (same date), one rerun of
-`e2e/engine-shader-parity.spec.ts` measured the stable program at 864 ms
-first use and 5.7 to 6.5 ms for the five snapshots right after it (zero
-runner rounds), and the pinned program at 631 ms then 436 to 462 ms (five
-rounds). After merging the integration branch (with PERF3's runner
-work), a second rerun measured 874 ms then 6.3 to 7.1 ms for the stable
-program and 312 ms then 23.9 to 24.8 ms for the pinned one (debug engine,
-239x137, shared machine load). The window did not appear in either run; its cause is
-not established (a candidate is the viewer session's own asynchronous
-probe failing transiently while the window's thread is blocked in
-synchronous snapshots, which before the fix left the program re-probing),
-so it stays recorded for PERF3. After app restart, the
-stable program needed no probe (five steady snapshots averaged 5.2 ms);
-the persisted pin averaged 409 ms and continued to use ANGLE. These are
-end-to-end snapshot times under shared machine load, not GPU timings or a
-viewer frame-rate claim. Each snapshot stayed within the transport's 5 s
-bound; the first probe and runner draw deadlines remain unchanged.
 
 ## Where effects run
 
@@ -821,9 +644,8 @@ the first launch translates the built-ins on the render thread. Measured
 (`tests/effects.rs`, release, M4 Max): the 20 built-ins in 120 ms cold, 1.4 ms from the
 folder. The folder outlives the engine build that wrote it, so every change to what
 `pm_glsl` emits bumps `pm_glsl::PIPELINE_REVISION`, which is part of every key and every
-entry: revision 2 (2026-10-19) is the `round`, `radians`, and `degrees` polyfills, so a
-machine that ran an earlier build translates programs calling them again rather than
-loading revision 1's SPIR-V (where `round` was ties to even). `cache::tests`
+entry: revision 2 added the `round` polyfill (ties away from zero; revision 1's SPIR-V
+rounded ties to even), revision 3 removed the `radians`/`degrees` polyfills. `cache::tests`
 `an_entry_written_under_an_earlier_revision_is_not_reused` plants revision 1 entries
 under both keys; `emitted_programs_match_the_pipeline_revision` hashes what a set of
 programs over every polyfill prepares to and fails when it changes without a bump.
@@ -938,312 +760,36 @@ it draws without a report (`shaderKey`, the registered `definition`,
 (`udefs`) stays the Inspector's, as today. Tests:
 `definition-snapshots.test.ts` (5 new).
 
-## Parity
+## Gates
 
-**Shader level** (`tools/effects/collect.ts`, `webgl.ts`; `tests/effects_webgl.rs`).
-The corpus: the 16 built-in effects at defaults, 70% of range, minimum, maximum, two
-seeded random sets, coerced values (numbers as strings, toggles as numbers, short and
-odd colors), two crops of a 2× composition, and E-encoded inputs above 1.0 (values up to
-3.0 in the layer and the backdrop); the 4 transitions at four progress values with three
-parameter sets and above-1.0 inputs; spike S3's 43 generated agent-style effects and
-transitions (every section 11 contract row; up to 8 passes); the 394 coverage probes.
-WebGL2 on ANGLE Metal (Chromium 151.0.7922.34 headless via Playwright) replays the compositor's
-exact calls; the engine runs the production path (`effect_step`/`transition_step`,
-`Renderer::run_effects`/`run_transition`). Judged by section 25's Standard class on 8-bit
-values plus the same rule on float values scaled by max(1, |reference|).
+**Built-in formulas against f64** (gate-policy.md, "Effects"). `pm_reference::effects`
+evaluates all sixteen built-in effects from their GLSL in f64: GL's `texture()`
+(bilinear between texel centres, clamp to edge), the ping-pong passes, `u_orig`.
+Where the formula leaves a value open the reference says so: a Posterize level at a
+storage boundary of its input is either neighbouring level (E-R3, judged by the nearest
+level), Gradient's dither, Grain's noise and Displace's field are hash noise (GLSL ES
+leaves `sin` of large arguments open), so they are the range their formula allows.
 
-Measured 2026-10-16 (M4 Max, macOS 27, wgpu 30.0.1 Metal):
+- **The effect proof** (`tests/effect_proof.rs`): every corpus layer with a built-in chain,
+  drawn without and with its effects at float depth; the f64 chain applied to the
+  engine's own input must equal the engine's output within 1 CV (the GPU's 8-bit
+  bilinear fractions). 299 chains on solids, shapes, images, SVG and text: max 0.69 CV
+  (Chroma), most below 0.04.
+- **G-C2 and the text corpus** model effects on solids, shapes and SVG images in the
+  frame reference (`support::reference`), including motion-blurred layers (effects on
+  the accumulated samples at the centre time) and the light an effect writes at zero
+  alpha (source-over). Effects on raster images stay unreferenced with the image (L4).
 
-| Group | Variants | Match WebGL | Both refuse | Known open |
-|---|---|---|---|---|
-| Built-in effects | 176 | 176 | 0 | 0 |
-| Built-in transitions | 52 | 52 | 0 | 0 |
-| Generated (S3) | 219 | 211 | 8 (2 `linkError` cases) | 0 |
-| Coverage probes | 394 | 260 of 270 drawn | 122 | 12 |
-
-Rerun 2026-10-18 on `glsl-20261018-193347` (the same cases plus the three fallback
-cases), with programs only the fallback runner draws in a column of their own (compared
-with WebGL by `fallback_effects_match_webgl`, above) instead of known open:
-
-| Group | Variants | Match WebGL | Fallback runner | Both refuse | Known open | Failures |
-|---|---|---|---|---|---|---|
-| Built-in effects | 176 | 176 | 0 | 0 | 0 | 0 |
-| Built-in transitions | 52 | 52 | 0 | 0 | 0 | 0 |
-| Fallback | 23 | 0 | 23 | 0 | 0 | 0 |
-| Generated (S3) | 219 | 211 | 0 | 8 | 0 | 0 |
-| Coverage probes | 394 | 260 | 8 | 122 | 4 | 0 |
-
-Known open (each also in S3.md): until the fallback runner drew them, 8 probes whose only
-sampler is not a float `sampler2D` (WebGL samples (0, 0, 0, 1); now drawn by the runner and
-matched), ternary on a
-struct or an array (WebGL refuses; the engine accepts: needs expression types), `out
-vec3` (GL leaves alpha undefined; 320 values at 2 CV), integer division by zero
-(undefined). `output-ivec4` links in WebGL and its draw fails; the engine refuses it at
-pipeline creation.
-
-**App level** (`engine/corpus/src/projects/render-effects.ts`, captured through the app;
-`tests/corpus.rs` with the built-in definitions): every built-in effect at two parameter
-sets on a photo, an alpha image at 85% opacity, and a rotated solid; every transition in
-and out on a photo and a solid; a stack with Glow, an animated enable, Drop Shadow, a
-disabled effect, and a missing one; effects on a group, inside a precomp, on a precomp
-layer, and a transition on a group; effects with the compositor's other steps
-(`render/fx-compositing`: a masked blur, Glow with screen, Drop Shadow before a track
-matte, a transition after a multiply composite, an adjustment with animated opacity, a
-masked adjustment with multiply); adjustment layers (`render/fx-adjustment`: a blur over
-a time range, Glow and Duotone feathered with screen at 80%, Drop Shadow at 60%, alpha
-content over transparency, an adjustment inside a precomp). Capture
-`effects-20261017-060101-ca4d364f` (87 samples, each opaque and as a transparent float
-frame), measured 2026-10-17: 84 samples within 1 CV everywhere (max 1 CV; their float
-frames within 0.63 CV), the 3 Posterize samples in the WebGL-unstable class (below), 0
-failures. With the newest v1, render, and composite captures, `corpus.rs` compares 202
-frames: 0 failed, 6 (the 3 Posterize samples, opaque and float) listed apart. Again
-after the wave 4 merges (text, motion, 3D), 2026-10-17: 228 frames compared, 0 failed,
-the same 6 listed apart.
-
-**Linear blending** (`tests/effects_linear.rs`, no WebGL reference exists): each of the
-16 built-in effects (the corpus's non-trivial parameters for Color, Levels, and
-Gradient), on an opaque picture larger than the frame over black and on a solid over
-transparency; the 4 transitions at progress 0.2, 0.5, and 0.8 over a full-frame
-picture; a raw effect mixing the layer with `u_backdrop`; adjustment layers with
-Invert, Blur, and Duotone at 100%. Each, with linear blending on, against the same
-project in Standard: every case within 1 CV for 100% of channel values (max 1 CV).
-Also: a blur across a hard black and white edge averages E values (midpoint 0.5, not
-0.735) and a 50% white-over-black composite in the same renderer is 188 with linear
-blending on and 128 off (the control that linear light is in force).
-
-**The WebGL-unstable class** (amendment 9). `webgl.ts --perturb-input` moves every
-input texel one binary16 step away from zero; WebGL's own output then moves past the
-tolerance for Posterize (7 of 11 variants, up to 43 CV), Levels (6 of 11, up to 138 CV),
-and Color (1 of 11, 2 CV): step functions at some parameters (`floor(x * n + .5)`,
-`clamp` then a steep `pow`). The engine's layer buffer equals today's within 1 CV but not
-bit for bit (pm-render's drawing class), so `render/fx-posterize` differs at 0.02% to 0.1%
-of pixels by exactly one posterize level (16, 27, and 85 CV at 16, 9.5, and 3 levels).
-Those 3 samples pass the 99.9% rule and fail the maximum (and their float frames the
-1 CV rule); `tests/corpus.rs` lists them
-apart for review (`pm_render::effects::WEBGL_UNSTABLE`). Not decided here: the plan's
-gate wording needs the class reviewed by Jude.
-
-How the instability arises (2026-10-18). Posterize computes `floor(x * n +
-.5) / n` per channel: a value within rounding of a level boundary lands on
-either level, a full step apart (255 / (n − 1) CV: 16, 27, and 85 CV at the
-corpus's 16, 9.5, and 3 levels). Levels clamps, then raises to a steep
-`pow`, so a rounding-level input change near the clamp is amplified past a
-code value; Color's hue rotation is unstable at saturated extremes. Today's
-WebGL output itself moves by that much when its input moves one binary16
-step. In the app the engine's input to these effects (the layer buffer:
-pm-render's sampling and compositing) equals today's within 1 CV everywhere
-but not bit for bit, so isolated pixels whose input sits on a boundary land
-on the other level. They are not drawn "as today" bit for bit. Under the
-earlier amendment 22 (any visible difference a blocker) they were escalated
-with side-by-sides; the current one judges them against an f64 reference
-instead (gate-policy.md, lane L6) (`PM_RENDER_DIFFS` now also writes review frames:
-engine, legacy, and a map of the differing pixels). Measured 2026-10-18 on
-`effects-20261017-060101-ca4d364f`: `render/fx-posterize` t = 0, 1, 2 differ
-at 0.10%, 0.05%, 0.02% of pixels, max 16, 27, 85 CV (float 15.9, 26.9,
-85.0 CV). Matching them requires a layer buffer bit-identical to WebGL's
-for every input that reaches these effects; not attempted here (Gaps).
-
-Rerun 2026-10-18 after the review (same capture, `PM_RENDER_ONLY`, debug
-build: the release corpus build then failed its thin-LTO link with "failed
-to get bitcode from object file for LTO", caused by pm-media bundling
-CrabbyAvif's Rust staticlib into its rlib, not by kache; fixed since, see
-[release-build.md](release-build.md)): `render/fx-color` t = 0, 1, 2 at
-98.12%, 97.80%, 97.50% exact, 100% within 1 CV, max 1 CV (float 0.50,
-0.75, 0.75 CV); `render/fx-levels` at 98.35%, 97.24%, 98.49% exact, 100%
-within 1 CV, max 1 CV (float 0.25, 0.25, 0.37 CV); `render/fx-posterize`
-unchanged (99.90%, 99.95%, 99.98% exact, max 16, 27, 85 CV). Color and
-Levels render as today within the drawing class's 1 CV at the corpus's
-parameters; at parameters where they are step functions they have
-Posterize's exposure. Side-by-sides of Posterize: `PM_RENDER_DIFFS`
-(review copies outside the repository).
-
-**Resolved 2026-10-19: Posterize, Color, and Levels render as today, bit
-for bit.** Two causes, both now removed:
-- *Input.* The layer buffer feeding them was within 1 CV of WebGL's but not
-  bit-identical: today's image layers sample Blink's 8-bit premultiplied
-  bitmap as an `RGBA8` texture, and the GPU's bilinear filter weighs 8-bit
-  texels differently from half-float ones. The compositing lane now uploads
-  and samples Level 1 stills as `Rgba8Unorm` (`docs/engine/composite.md`,
-  merged into this branch). The differing Posterize pixels were all inside
-  the rotated, resampled photo.
-- *Arithmetic.* naga writes GLSL's `pow` as `metal::pow`, ANGLE as
-  `metal::powr`; under Metal's fast math they round differently, so Levels'
-  continuous path (`pow(x, 1/gamma)`, at gamma 1 too) differed by one
-  binary16 step in about 10% of pixels. Legacy programs now compile from
-  MSL the engine writes with ANGLE's calls (`pm_render::glsl`, below).
-
-Measured 2026-10-19 (M4 Max, debug build):
-- App level, capture `effects-20261017-060101-ca4d364f` (`tests/corpus.rs`,
-  `PM_RENDER_ONLY=render/fx-`): `render/fx-posterize`, `render/fx-color`,
-  and `render/fx-levels` at t = 0, 1, 2: the transparent float frames
-  equal today's exactly (max 0.0000 CV; before: Posterize 15.9, 26.9,
-  85.0 CV), the opaque 8-bit frames 100.00% exact (rounded) with max 1 CV,
-  as every effect project's opaque frame. 63 frames compared, 0 failed, 0
-  listed apart; `CORPUS_UNSTABLE` is now empty, so a departing frame fails.
-- Shader level with bit-identical inputs (`effects_webgl`,
-  `PM_SHADER_STATS=1`, `glsl-20261018-193347`), every variant including the
-  step-function parameters that move WebGL itself under a one-step input
-  perturbation (Color `max`; Levels `alt`, `max`, `random2`, `coerced`,
-  `viewport-alt`, `hdr-alt`; Posterize `alt`, `max`, `random2`, `coerced`,
-  `hdr`, `hdr-alt`): Color 11 of 11, Levels 11 of 11 (8 of 11 before
-  `powr`), Posterize 11 of 11 bit-exact. Every built-in effect and
-  transition variant is now bit-exact (Gradient's `defaults` and `hdr` were
-  2 px off by one binary16 step before).
-- App level at the step parameters themselves: `render/fx-steps-color`,
-  `-levels`, `-posterize` (`render-effects.ts`: the variants above on
-  rotated, stretched photos and the alpha image, plus Levels at gamma 1 and
-  a steep 45/55/0.2, Posterize at 2 and 3 levels), captured through the app
-  with every other effect and transition project as
-  `effects-20261019-055047-8d8a4ce4` (93 samples): `tests/corpus.rs`
-  compares 348 frames with the newest captures; all 93 effect and
-  transition float frames equal today's (max 0.0000 CV), the opaque frames
-  100.00% exact (rounded) with max 1 CV. The 5 failures of that run are
-  video-class frames outside this lane (`motion/blur-video`,
-  `retime/speed`, `space25d/precomps`), identical with this lane's changes
-  removed.
-
-The Store `mrsigma/private-extension-19` 2.0.8 glass effect is the shader
-gate's WebGL-unstable item (`docs/engine/shaders.md`): there both renderers
-get bit-identical inputs, so the difference is the arithmetic. ANGLE and
-naga each translate the GLSL to their own MSL, and Metal compiles both
-(wgpu with Metal's default fast math, which permits reassociation and
-contraction that depend on the exact MSL text). Two translations of the same
-program then round differently, and where the program is discontinuous (a
-threshold or branch on a computed value in its highlight) a rounding
-difference flips the side; WebGL itself moves by up to 67 CV there when its
-input moves one binary16 step.
-
-Fast math is not the cause (checked 2026-10-19): with wgpu-hal patched to
-compile every Metal library with fast math off (a temporary
-`[patch.crates-io]` copy outside the repository, separate target folder,
-reverted after), the shader gate on `shaders-20261018-022611` got further
-from WebGL, not closer: defaults 48 px over 1 CV (max 99 CV), coerced 49
-(max 72), hdr 53 (max 45), and the alt variant, which matches with fast
-math, failed at 2 px (max 10 CV); with fast math on (production) the
-counts are 43, 45, and 49 px and alt matches. So ANGLE's MSL behaves like
-fast-math MSL for this program, and the residual is the two translations'
-different MSL text. Matching it bit for bit would need the
-engine to emit ANGLE's MSL for that program; running it in the fallback
-runner would match the arithmetic but not in-app inputs (the layer buffer is
-within 1 CV, not bit-identical) and would read the frame back every frame.
+**Translations against WebGL** (G-E1, `tests/shader_gate.rs`; shaders.md): every user,
+Store, sample and generated program, and `tests/effects_webgl.rs` for the built-ins,
+transitions and probes, within an f32-justified bound except where WebGL moves against
+itself. This offline gate replaced the app's first-use probe (DEFS-4, deleted with
+E-R1): a user program draws natively in its first frame, with no runner round trip.
 
 **Store GLSL.** Fuzz (`pm-glsl-fuzz`, worker process, per-input deadline), 2026-10-16:
-
-| Run | Inputs | Outcomes | Crashes, hangs, panics | Slowest |
-|---|---|---|---|---|
-| seed 1, mutants of the 63 non-probe corpus programs | 3,000 | 189 ok, 2,810 `es-validate`, 1 `limits` | 0 | 66 ms |
-| seed 3, mutants of the 394 probes | 3,000 | 103 ok, 11 `bind`, 2,850 `es-validate`, 36 `limits` | 0 | 68 ms |
-| resource bombs | 17 | 5 ok, 6 `limits`, 5 `es-validate`, 1 `rewrite` | 0 | 538 ms |
-
-The `rewrite` bomb is a 100,000-element constant array: glslang emits an instruction
-longer than SPIR-V's 65,535-word limit and the SPIR-V loader refuses it; WebGL refuses
-the program for its 64 KiB private-variable rule, the engine routes it. Compile parity
-of the mutants with WebGL (S3's `webgl-compile.ts`) was not rerun here. `cargo test -p
-pm-glsl` runs 300 mutants in process and the probes' verdicts on every build
-(`tests/probes.rs`; the fixture is rewritten by `tools/effects/expectations.ts`).
-
-## Shared files this lane changed
-
-For the owners of these files (derouter, device, bridge, dochost, jobs):
-
-- **pm-render outside `effects/`, `glsl/`, `shader_layers/`**: `renderer.rs`
-  (the fallback host loop in `render` and `render_into`, `set_fallback_host`,
-  `put_fallback_pixels`, `put_fallback_failure` returning the retry delay,
-  `fallback_retry_at`, `fallback_textures`, `watchdog_watch`,
-  `watchdog_holding`, `wait_idle`, `watchdog_reports`), `capability.rs`
-  (`unsupported_for`), `error.rs` (three `RenderError` variants:
-  `WatchdogPending`, `Fallback(String)`, `Watchdog(String)`; outside
-  pm-render they reach generic error arms, and pm-node's presenter handles
-  `WatchdogPending` itself), `exec.rs`, `lib.rs` (`pub mod glsl`), and
-  `tests/corpus.rs` (the review side-by-side dump under `PM_RENDER_DIFFS`,
-  now for every failing frame; the `CORPUS_UNSTABLE` machinery is removed).
-  2026-10-19: `renderer.rs` also pins a job frame's runner results and
-  replaces the 16-round limit with the progress rule (`host_progress`); in
-  the second review it waits for a program still compiling
-  (`HOST_COMPILE_WAITS`, exported from `lib.rs`). Merging the bridge and
-  perf2 lanes: `renderer.rs` keeps the job watchdog stop ahead of
-  `plan::build_blender`, `lib.rs` lists `frame_prefix` and `glsl`. Merging the
-  svgcompat lane: `render_into` keeps the fallback host loop; a frame is
-  complete only without fallback or watchdog waits; a job renderer gets
-  its definitions and the fallback host. (SVG images later moved to the
-  native vector painter.)
-- **pm-engine**: `engine.rs`, `jobs.rs` (`job_definitions`;
-  `JobService::definitions_pushed` defers the push's acknowledgement until
-  the job engine holds the set).
-- **pm-protocol**: `envelope.rs` (`Request::ShaderFallback`,
-  `Event::ShaderFallback` with `Input`), `samples.rs`, `shader_fallback.rs`
-  (second review: `MAX_EDGE` 16,384), wire fixtures; the generated
-  `shared/engine-protocol/` types. Merging the bridge lane, `ShaderFallback`
-  became the last request variant (index 28, sample id 29), after the
-  bridge's `Snapshot` and `CompatFrame`, which keep their indices.
-- **pm-glsl**: `pipeline.rs` (`PIPELINE_REVISION` 2), `cache.rs`
-  (`Key::at_revision` and the revision tests), `normalize.rs` (`pm_round`).
-- **RFCs**: `rfcs/07-errors-and-isolation.md` and
-  `rfcs/10-definition-snapshots.md`: a definitions failure report's
-  `FailureReport.revision` carries the definitions generation it answers
-  (the field is overloaded: for document failures it is the document
-  revision).
-- **Kernel**: `kernel/definition-snapshots.ts` (`changedAt` and the latest
-  generation per entry, so a push is acknowledged against the generation it
-  carried).
-- **pm-node**: `present/render.rs` (texture bands, failures without
-  routing, transient retry wake-ups; second review: a snapshot's texture
-  bands to main ahead of `needsRenderer`, `fallback_inputs`; DEFS-4:
-  fallback pixels and failures select the replying session's owning
-  definitions before delivery, even when another viewer parked its set),
-  `jobs/{fallback,definitions,compile,mod}.rs`, `tests/document.rs`,
-  `tests/snapshot.rs` (bridge's: one child test).
-- **pm-export** `render.rs`, **pm-cli** `main.rs`, `render.rs`,
-  `render_parity.rs` (second review: the WebGL-unstable review class and
-  its fx stripping are removed; a departing frame fails).
-- **Corpus**: `engine/corpus/src/projects/render-effects.ts` (2026-10-19:
-  `render/fx-steps-{color,levels,posterize}`, the effects at their step
-  parameters).
-- **Desktop**: `preload/index.ts` (bridge's: the `onShaderFallback`
-  listener and its acknowledgement), `shared/engine-ipc.ts`,
-  `main/engine/{index,native-engine,protocol,definitions,agent-jobs,render-queue}.ts`,
-  `main/agent-tools/{bridge,spec}.ts`, `engine-connection/{install,session}.ts`,
-  `legacy/assistant/harness.ts` and `legacy/core/exporter.ts` (a
-  `PM.EngineDefinitions.settle()` call before a render or export),
-  `main/engine/shader-fallback-relay.ts` (2026-10-19: `tooLarge` as
-  `budgetExceeded`). Second review, with the bridge lane's render
-  transport merged: `main/engine/fallback-inputs.ts` (new),
-  `native-engine.ts` (the interactive engine's texture bands kept, ahead of
-  the session-event filter; `fallbackTextures`), `snapshots.ts` (bridge's:
-  `fallbackTextures` on `needsRenderer`), `shared/engine-ipc.ts` (the
-  reply's `fallbackTextures`), `engine-connection/render-transport.ts`
-  (bridge's: textures to `render`/`renderSync`), `install.ts` (the job
-  runner hook and `setRoute` re-applied to the bridge's `openSession`),
-  `session.ts` (the bridge's `uploadFallback` for runner results), and
-  `pm-render/tools/shaders/collect.ts` (a local extension that does not
-  load is noted, not fatal).
-  DEFS-4 also sets the parity environment on utility processes in
-  `main/engine/index.ts`; the fallback runner's synchronous path uses
-  `gl.finish()` before readback.
-  `kernel/api.ts`, `main/index.ts`, `legacy/core/editing.ts`, and
-  `legacy/gl/raster.ts` are untouched.
-
-## Commands
-
-```sh
-bun engine/crates/pm-render/tools/effects/builtins.ts            # rewrite builtins.json
-bun engine/crates/pm-render/tools/effects/collect.ts             # shader corpus → engine corpus folder
-~/Library/Caches/powermove-engine/bin/pm-electron-lock \
-  bun engine/crates/pm-render/tools/effects/webgl.ts [--perturb-input]
-bun engine/crates/pm-render/tools/effects/expectations.ts        # probe verdict fixture
-cargo test -p pm-render --test effects_webgl -- --nocapture      # shader parity
-PM_SHADER_STATS=1 cargo test -p pm-render --test effects_webgl -- --nocapture  # bit-exact counts per variant
-cargo test -p pm-render --release --test effects_linear -- --nocapture  # linear blending
-bun engine/corpus/src/capture.ts --only render/fx-,render/tr- --label effects --skip-real --skip-scenarios
-cargo test -p pm-render --release --test corpus -- --nocapture   # app-level parity
-cargo run --release -p pm-glsl --bin pm-glsl-fuzz -- --seeds <seeds.json> --iterations 3000
-cargo test -p pm-render --release --test effects builtin_costs -- --ignored --nocapture
-cargo test -p pm-render --test watchdog --test effects                    # watchdog (test hook)
-cargo test -p pm-node --test definitions --test jobs                      # views, jobs, compile
-cargo test -p pm-cli --test definitions                                   # pm-cli and snapshots
-PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
-  cargo test -p pm-render --test corpus -- --nocapture                    # review side-by-sides
-```
+3,000 mutants of the corpus programs and 3,000 of the probes, and 17 resource bombs, with
+no crash, hang or panic (slowest 538 ms, a bomb). `cargo test -p pm-glsl` runs 300
+mutants and the probes' verdicts on every build (`tests/probes.rs`).
 
 ## Gaps
 
@@ -1269,8 +815,7 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
   `parseUniforms` (`shader_layers::uniforms`, `parse_uniforms_matches_the_app`).
   `sceneWarnings` and `sceneError` for 3D scene layers are the 3D lane's.
 - **Fallback runner throughput is below today's** (measured 2026-10-19, M4
-  Max, needs Jude's call; the ANGLE-only listing adds the Store
-  private-extension-19 2.0.8 effect to the programs that pay it). Each fallback step reads its textures back and
+  Max; only programs the engine cannot translate pay it). Each fallback step reads its textures back and
   sends them to the renderer and the pixels back (binary16, about 16 MB per
   full-HD texture each way); results are cached by content key (512 MB), so
   a still frame costs one round trip, but an animated fallback effect does
@@ -1311,33 +856,9 @@ PM_RENDER_ONLY=render/fx-posterize PM_RENDER_DIFFS=<dir outside the repo> \
 - **Linear blending with an alpha above 1:** in Standard such a pixel darkens the stack
   beneath by the excess (WebGL's arithmetic, kept); with linear blending on the
   composite is in linear light and there is no reference for it.
-- **WebGL-unstable class: no longer an allowance anywhere** (2026-10-19,
-  second review). The shader gate fails a variant that differs from WebGL
-  whether or not WebGL moves against its own perturbed runs (the
-  perturbation result stays in the failure as the explanation, with the
-  side-by-side under `PM_SHADER_GATE_DIFFS`; `shader_gate`
-  `a_difference_webgl_is_unstable_under_fails_the_gate`); before, such a
-  variant was counted apart and passed, the mechanism that hid
-  liquid-glass 2.0.8. `tests/corpus.rs` and `pm-cli parity` lost their
-  (empty) listing machinery: a departing frame fails. The three built-ins
-  exposed to rounding drift moved from `pm_render::effects::WEBGL_UNSTABLE`
-  to a fixture in `effects_webgl` (`EXPOSED_BUILTINS`): the perturbation
-  test fails when a built-in outside it turns out ill-conditioned.
-- **WebGL-unstable user programs:** the first-use probe now detects
-  unlisted programs on the actual machine; known fingerprints remain
-  seeded. The private corpus uses the real extension loader and actual
-  project parameter samples. Complete project-frame parity remains the
-  integration gate's responsibility. `pm-cli` still has no ANGLE reference
-  or runner and draws native translations of otherwise translatable
-  programs; it cannot claim equivalence to a desktop program pinned on
-  this machine.
-- **ANGLE parity residue** (shader level, within 1 CV): `radians`/`degrees`
-  probes (6 of 36,864 pixels at 1 CV even with ANGLE's operand order),
-  `halftone-fragcoord`, `outer-product-twist`, `mix-bool`,
-  `matrixCompMult`, `outerProduct`, `modf-infinity`; none of them in a
-  built-in or a Store or corpus program that differs at app level.
-- **Not run**: the full pm-render suite (targeted tests only; clippy is
-  clean on pm-render, pm-glsl, pm-cli, and pm-node).
+- **Ill-conditioned user programs** (E-R2): a program whose output WebGL itself moves
+  under a one-step change (the Store liquid-glass bisection) draws natively; native and
+  WebGL differ there as WebGL differs from itself. Its authors could make it stable.
 - The generated corpus was written by an agent from the docs, not produced through the
   in-app agent harness (S3 provenance gap); the Store's 4 public releases (figuate
   chrome 1.0.0, zellzoi private-extension-03 1.0.0 and private-extension-19 2.0.1, mrsigma
