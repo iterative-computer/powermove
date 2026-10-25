@@ -21,7 +21,7 @@
 //! (`Report::failures` with `Bounds::EIGHT_BIT`: today's captures are 8-bit);
 //! geometry exact where nothing is feathered (alpha area and centroid
 //! within 1e-3); and the same canvas from repeated renders (the preview and
-//! the export share it). Without a capture the today half is not measured.
+//! the export share it). Every case requires its captured legacy witness.
 //!
 //! `PM_MASK_REF` picks a capture, `PM_MASK_ONLY` a case-id prefix,
 //! `PM_MASK_EVIDENCE=<dir>` writes the per-case statistics as JSON there.
@@ -33,7 +33,9 @@ use std::path::{Path, PathBuf};
 #[allow(dead_code)]
 mod mask_reference;
 
-use pm_reference::compare::{Bounds, Class, Stats, classify, compare, geometry, identical, same_geometry};
+use pm_reference::compare::{
+    Bounds, Class, Stats, classify, compare, geometry, identical, same_geometry,
+};
 use pm_render::composite::path_masks::{PathCoverage, coverage_values};
 use pm_vector::{LayerMasks, MaskMode, MaskShape, MaskValues, PathValues, Vertex};
 
@@ -58,7 +60,8 @@ struct Case {
 }
 
 fn cases() -> Vec<Case> {
-    let v: serde_json::Value = serde_json::from_str(include_str!("fixtures/mask-cases.json")).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/mask-cases.json")).unwrap();
     let num = |v: &serde_json::Value| v.as_f64().unwrap_or(f64::NAN);
     v["cases"]
         .as_array()
@@ -125,7 +128,9 @@ fn capture_dir(ids: &[String]) -> Option<PathBuf> {
         .ok()?
         .filter_map(|e| Some(e.ok()?.path()))
         .filter(|p| {
-            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("masks-"))
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("masks-"))
                 && ids.iter().all(|id| p.join(format!("{id}.png")).is_file())
         })
         .collect();
@@ -140,7 +145,9 @@ fn read_coverage(path: &Path) -> Vec<f64> {
     let mut buf = vec![0; reader.output_buffer_size().unwrap()];
     let info = reader.next_frame(&mut buf).unwrap();
     buf.truncate(info.buffer_size());
-    buf.chunks_exact(4).map(|p| f64::from(p[3]) / 255.0).collect()
+    buf.chunks_exact(4)
+        .map(|p| f64::from(p[3]) / 255.0)
+        .collect()
 }
 
 /// Coverage as premultiplied white RGBA.
@@ -157,16 +164,16 @@ fn path_mask_coverage_gate() {
     let gpu = pm_gpu::Gpu::new("path mask gate").expect("a Metal device");
     let cases = cases();
     let ids: Vec<String> = cases.iter().map(|c| c.id.clone()).collect();
-    let capture = capture_dir(&ids);
-    match &capture {
-        Some(dir) => eprintln!("today: {}", dir.display()),
-        None => eprintln!("note: no masks-* capture; the comparison with today is not measured"),
-    }
+    let capture = capture_dir(&ids).expect("today's complete masks-* witness is required");
+    eprintln!("today: {}", capture.display());
     let only = std::env::var("PM_MASK_ONLY").ok();
     let evidence = std::env::var("PM_MASK_EVIDENCE").ok().map(PathBuf::from);
     let mut failures = Vec::new();
     let mut rows = Vec::new();
-    for c in cases.iter().filter(|c| only.as_deref().is_none_or(|o| c.id.starts_with(o))) {
+    for c in cases
+        .iter()
+        .filter(|c| only.as_deref().is_none_or(|o| c.id.starts_with(o)))
+    {
         let LayerMasks::Path(masks) = LayerMasks::new(&c.masks) else {
             panic!("{}: not a path route", c.id)
         };
@@ -186,15 +193,8 @@ fn path_mask_coverage_gate() {
         let exact = mask_reference::path_coverage(&masks, c.world, w, h);
         let edge: Vec<bool> = exact.iter().map(|v| *v > 1e-9 && *v < 1.0 - 1e-9).collect();
         let classes = classify(&edge, &vec![false; w * h], w, h, 2);
-        let today = capture
-            .as_ref()
-            .map(|d| read_coverage(&d.join(format!("{}.png", c.id))));
-        let report = compare(
-            &rgba(&engine),
-            &rgba(today.as_deref().unwrap_or(&exact)),
-            &rgba(&exact),
-            &classes,
-        );
+        let today = read_coverage(&capture.join(format!("{}.png", c.id)));
+        let report = compare(&rgba(&engine), &rgba(&today), &rgba(&exact), &classes);
         let bound = engine_bound(masks.masks.len());
         let worst = [Class::Interior, Class::Edge]
             .map(|k| report.class(k).engine_vs_reference.max)
@@ -206,10 +206,8 @@ fn path_mask_coverage_gate() {
                 c.id
             ));
         }
-        if today.is_some() {
-            for f in report.failures(&Bounds::EIGHT_BIT) {
-                failures.push(format!("{}: {f}", c.id));
-            }
+        for f in report.failures(&Bounds::EIGHT_BIT) {
+            failures.push(format!("{}: {f}", c.id));
         }
         if masks.masks.iter().all(|m| m.feather == 0.0) {
             let (g, r) = (geometry(&engine, w), geometry(&exact, w));
@@ -223,11 +221,7 @@ fn path_mask_coverage_gate() {
             / 2.0;
         eprintln!(
             "{:<26} σ {:>6.2}  edge {:>8} px  engine {}  today {}",
-            c.id,
-            sigma,
-            e.engine_vs_reference.pixels,
-            e.engine_vs_reference,
-            if today.is_some() { e.today_vs_reference.to_string() } else { "-".into() },
+            c.id, sigma, e.engine_vs_reference.pixels, e.engine_vs_reference, e.today_vs_reference,
         );
         rows.push(serde_json::json!({
             "id": c.id,
@@ -236,16 +230,43 @@ fn path_mask_coverage_gate() {
             "bound_cv": bound,
             "edge": {
                 "engine_vs_reference": stats_json(&e.engine_vs_reference),
-                "today_vs_reference": today.as_ref().map(|_| stats_json(&e.today_vs_reference)),
-                "excess": today.as_ref().map(|_| stats_json(&e.excess)),
+                "today_vs_reference": stats_json(&e.today_vs_reference),
+                "excess": stats_json(&e.excess),
             },
-            "interior_vs_today": today.as_ref().map(|_| stats_json(&report.class(Class::Interior).engine_vs_today)),
+            "interior_vs_today": stats_json(&report.class(Class::Interior).engine_vs_today),
         }));
+        if let Some(dir) = &evidence {
+            std::fs::create_dir_all(dir).unwrap();
+            let file = std::fs::File::create(dir.join(format!("{}.png", c.id))).unwrap();
+            let mut encoder =
+                png::Encoder::new(std::io::BufWriter::new(file), c.width * 3, c.height);
+            encoder.set_color(png::ColorType::Grayscale);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut row = Vec::with_capacity(w * h * 3);
+            for y in 0..h {
+                for pixels in [&engine, &today, &exact] {
+                    row.extend(
+                        pixels[y * w..(y + 1) * w]
+                            .iter()
+                            .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8),
+                    );
+                }
+            }
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&row)
+                .unwrap();
+        }
     }
     if let Some(dir) = evidence {
         std::fs::create_dir_all(&dir).unwrap();
-        let doc = serde_json::json!({"capture": capture.map(|d| d.display().to_string()), "cases": rows});
-        std::fs::write(dir.join("g-v2.json"), serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let doc = serde_json::json!({"capture": capture.display().to_string(), "cases": rows});
+        std::fs::write(
+            dir.join("g-v2.json"),
+            serde_json::to_string_pretty(&doc).unwrap(),
+        )
+        .unwrap();
     }
     assert!(failures.is_empty(), "G-V2:\n{}", failures.join("\n"));
 }

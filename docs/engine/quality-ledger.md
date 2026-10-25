@@ -121,3 +121,33 @@ the unclipped reference over the same band centers.
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
 | Straight colour is the working float divided by alpha (today: rounded to 8 bits, truncated on unpremultiply, premultiplied and unpremultiplied again by Canvas2D) | 167, 78, 1.7 | 0.50, 0.50, 0.25 | 400,000 random premultiplied pixels |
+
+## Vector coverage
+
+- **Reference:** authored fills and f64 stroke regions with their caps, joins, miter
+  limits and dashes, covered at 16 × 16 cells per pixel (`pm-reference`); folded
+  stroke regions use 64 × 64 cells. Strokes expand in local space before the world
+  transform, as Canvas2D specifies.
+- **Gate:** `pm-render/tests/vector_gate.rs` (G-V1), all 474 captured canvases.
+  Geometry is checked separately at 1e-3. The corpus also checks paused
+  preview/export identity; its remaining reference failures block G-C2.
+- **Units:** CV, pooled edge pixels.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Exact area coverage replaces density-bucket rasterization (Canvas2D fill and stroke geometry) | 123.65, 59.01, 0.661 | 3.16, 0.02, <0.001 | 474 shape and path canvases |
+| Authored stroke styles covered without raster seams (Canvas2D caps, joins, miter limits and dashes) | 123.21, 58.94, 0.658 | 3.16, 0.03, <0.001 | 209 stroked canvases from the same witness |
+
+## Path mask coverage and feather
+
+- **Reference:** f64 area coverage and the normalized separable Gaussian with
+  transparent canvas edges, at `σ = max(0, feather) × |world x| / 2`, followed by
+  authored add/subtract formulas.
+- **Gate:** `pm-render/tests/path_masks.rs` (G-V2), with the captured legacy mask
+  witness. All cases pass the per-pixel reference-closeness bar; sharp masks
+  also preserve area and centroid at 1e-3. The corpus checks preview/export identity.
+- **Units:** CV, worst per-case max, p99.9 and mean over edge pixels.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Exact path coverage and Gaussian feather replace canvas rasterization and the approximate blur | 95.25, 82.62, 3.876 | 0.080, 0.077, 0.016 | 54 masks and stacks, including transformed, subtract-only, HD and UHD cases |
