@@ -1617,3 +1617,47 @@ fn monitor_4k_checker_is_closer_to_f64_than_unmipped_bilinear() {
         assert!(report.class(Class::Resampled).engine_vs_reference.mean < 1.0);
     }
 }
+
+/// Fractional contain edges have exact pixel-area coverage, as composition
+/// does. The prior source draw snapped these edges to pixel centres.
+#[test]
+fn fractional_source_contain_is_closer_to_exact_coverage() {
+    use pm_reference::compare::{Bounds, Class, compare, geometry, same_geometry};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("red.png");
+    let mut image = png::Encoder::new(std::fs::File::create(&path).unwrap(), 160, 90);
+    image.set_color(png::ColorType::Rgb);
+    image.set_depth(png::BitDepth::Eight);
+    image
+        .write_header()
+        .unwrap()
+        .write_image_data(&[255, 0, 0].repeat(160 * 90))
+        .unwrap();
+    let size = Size::new(1464, 824);
+    let mut renderer = Renderer::headless().unwrap();
+    let pixels = renderer
+        .source_rgba8(&path, Ticks::ZERO, size, SourceFit::Contain, None, false)
+        .unwrap();
+    let engine: Vec<f64> = pixels.iter().map(|&v| f64::from(v) / 255.0).collect();
+    let mut reference = Vec::with_capacity(engine.len());
+    let mut today = Vec::with_capacity(engine.len());
+    for y in 0..size.height {
+        // 1464 * 90/160 = 823.5, centred in the 824-pixel target.
+        let area = ((f64::from(y) + 1.0).min(823.75) - f64::from(y).max(0.25)).max(0.0);
+        for _ in 0..size.width {
+            reference.extend_from_slice(&[area, 0.0, 0.0, area]);
+            today.extend_from_slice(&[1.0, 0.0, 0.0, 1.0]);
+        }
+    }
+    let classes = vec![Class::Resampled; (size.width * size.height) as usize];
+    let report = compare(&engine, &today, &reference, &classes);
+    eprintln!("fractional source contain: {report}");
+    assert!(report.failures(&Bounds::EIGHT_BIT).is_empty(), "{report}");
+    let alpha = |rgba: &[f64]| rgba.chunks_exact(4).map(|p| p[3]).collect::<Vec<_>>();
+    same_geometry(
+        &geometry(&alpha(&engine), size.width as usize),
+        &geometry(&alpha(&reference), size.width as usize),
+        1e-3,
+    )
+    .unwrap();
+}

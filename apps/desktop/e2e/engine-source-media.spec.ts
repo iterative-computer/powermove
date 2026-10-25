@@ -311,12 +311,20 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         await page.evaluate(({ theme, id }) => {
           const PM = (window as any).PM; PM.theme.apply(theme);
           PM.Kernel.services.get('viewer').preview.show(id);
+          // Capture both modes on the same integer device grid. Fractional
+          // source-fit coverage is judged by the f64 source snapshot gate.
+          Object.assign(document.querySelector<HTMLElement>('#source-preview')!.style, { width: '720px', height: '405px' });
         }, { theme, id: ids['still-red.png'] });
         await expect(page.locator('#source-preview[data-open="true"]')).toBeVisible();
         if (enabled) await page.waitForFunction(() => {
           const monitor = (window as any).PM.EngineSourceMedia.monitorValue;
-          return monitor?.paintedSize && monitor.surface instanceof HTMLImageElement && monitor.surface.complete && monitor.surface.naturalWidth > 0;
+          const image = monitor?.surface;
+          return !monitor?.rendering && image instanceof HTMLImageElement && image.complete &&
+            monitor.paintedSize?.width === Math.round(image.clientWidth * devicePixelRatio) &&
+            monitor.paintedSize?.height === Math.round(image.clientHeight * devicePixelRatio) &&
+            image.naturalWidth === monitor.paintedSize.width && image.naturalHeight === monitor.paintedSize.height;
         });
+        await page.locator('#source-preview .sp-media img').evaluate((image: HTMLImageElement) => image.decode());
         await page.locator('#source-preview').screenshot({ path: path.join(directory, `source-${theme}.png`), animations: 'disabled' });
         const composition = await page.evaluate(() => {
           const properties = ['z-index', 'transform', 'opacity', 'filter', 'backdrop-filter', 'will-change', 'isolation', 'contain', 'box-shadow', 'object-fit'];
@@ -330,61 +338,131 @@ for (const enabled of [false, true]) test.describe(`source media, engine ${enabl
         });
         await writeFile(path.join(directory, `source-${theme}-composition.json`), JSON.stringify(composition, null, 2));
         await page.keyboard.press('Escape');
-        await page.locator('.asset-list').screenshot({ path: path.join(directory, `assets-${theme}.png`), animations: 'disabled' });
-        const videoLayout: Record<string, unknown> = {};
+        await page.evaluate(() => { const root = document.querySelector<HTMLElement>('#source-preview')!; root.style.removeProperty('width'); root.style.removeProperty('height'); });
+        const thumbnailLayout: Record<string, unknown> = {};
         for (const name of Object.keys(measured)) {
           const preview = page.locator(`.asset-card[data-asset-id="${ids[name]}"] .asset-preview`);
           const file = path.join(directory, `${name}-inline-${theme}.png`);
-          await preview.screenshot({ path: file, animations: 'disabled' });
-          if (VIDEO_SOURCES.includes(name)) {
-            const layout = await preview.evaluate(element => {
+          if (VIDEO_SOURCES.includes(name)) await preview.screenshot({ path: file, animations: 'disabled' });
+          const layout = await preview.evaluate(element => {
+            const image = element.querySelector<HTMLImageElement>('.asset-poster')!;
+            const rect = element.getBoundingClientRect(), imageRect = image.getBoundingClientRect();
+            const style = getComputedStyle(image), previewStyle = getComputedStyle(element);
+            const badge = element.querySelector<HTMLElement>('.asset-badge');
+            const badgeRect = badge?.getBoundingClientRect(), badgeStyle = badge && getComputedStyle(badge);
+            return { width: rect.width, height: rect.height, imageX: imageRect.x - rect.x, imageY: imageRect.y - rect.y,
+              imageWidth: imageRect.width, imageHeight: imageRect.height, bitmap: [image.naturalWidth, image.naturalHeight],
+              objectFit: style.objectFit, opacity: style.opacity, filter: style.filter, radius: previewStyle.borderRadius,
+              background: previewStyle.backgroundColor, overflow: previewStyle.overflow,
+              badge: badge && badgeRect && badgeStyle ? { text: badge.textContent, x: badgeRect.x - rect.x, y: badgeRect.y - rect.y,
+                width: badgeRect.width, height: badgeRect.height, color: badgeStyle.color,
+                background: badgeStyle.backgroundColor, radius: badgeStyle.borderRadius, opacity: badgeStyle.opacity } : null };
+          });
+          thumbnailLayout[name] = layout;
+          expect.soft(layout.imageX).toBe(0); expect.soft(layout.imageY).toBe(0);
+          expect.soft(layout.imageWidth).toBe(layout.width); expect.soft(layout.imageHeight).toBe(layout.height);
+          expect.soft(layout.objectFit).toBe('cover'); expect.soft(layout.opacity).toBe('1'); expect.soft(layout.filter).toBe('none');
+          const posterSize = inline.find(result => result.name === name)!;
+          expect.soft(layout.bitmap).toEqual([posterSize.width, posterSize.height]);
+          if (!VIDEO_SOURCES.includes(name)) {
+            // Compare the decoded bitmap at its native size. Chromium can
+            // rasterize that bitmap into the rounded card in two variants.
+            const decoded = await preview.evaluate(async element => {
               const image = element.querySelector<HTMLImageElement>('.asset-poster')!;
-              const rect = element.getBoundingClientRect(), imageRect = image.getBoundingClientRect();
-              const style = getComputedStyle(image);
-              const badge = element.querySelector<HTMLElement>('.asset-badge')!;
-              const badgeRect = badge.getBoundingClientRect(), badgeStyle = getComputedStyle(badge);
-              return { width: rect.width, height: rect.height, imageX: imageRect.x - rect.x, imageY: imageRect.y - rect.y,
-                imageWidth: imageRect.width, imageHeight: imageRect.height, bitmap: [image.naturalWidth, image.naturalHeight],
-                objectFit: style.objectFit, opacity: style.opacity, filter: style.filter, radius: getComputedStyle(element).borderRadius,
-                badge: { text: badge.textContent, x: badgeRect.x - rect.x, y: badgeRect.y - rect.y, width: badgeRect.width, height: badgeRect.height,
-                  color: badgeStyle.color, background: badgeStyle.backgroundColor, radius: badgeStyle.borderRadius, opacity: badgeStyle.opacity } };
+              await image.decode();
+              const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+              canvas.getContext('2d')!.drawImage(image, 0, 0);
+              return canvas.toDataURL('image/png');
             });
-            videoLayout[name] = layout;
-            expect.soft(layout.imageX).toBe(0); expect.soft(layout.imageY).toBe(0);
-            expect.soft(layout.imageWidth).toBe(layout.width); expect.soft(layout.imageHeight).toBe(layout.height);
-            expect.soft(layout.objectFit).toBe('cover'); expect.soft(layout.opacity).toBe('1'); expect.soft(layout.filter).toBe('none');
-            expect.soft(layout.bitmap).toEqual([320, 180]);
-            if (enabled) {
-              // Stored screenshot codes belong to its actual display profile,
-              // whereas the independent lossy-poster reference is sRGB.
-              const profile = readPngMatrixTrcProfile(await readFile(file));
-              const expected = referenceSrgbToDisplay(profile, measured[name].independentPosterCodes as ColourTriple);
-              const colour = await solidCaptureError(file, expected, true);
-              videoThemeColours.push({ name, theme, ...colour });
-              expect.soft(colour.max, `${name} ${theme} screenshot versus independent poster/display ICC: ${JSON.stringify(colour)}`).toBeLessThanOrEqual(1);
-              expect.soft(colour.alphaMax).toBe(0);
-              expect.soft(colour.pixels).toBeGreaterThan(colour.size[0]! * colour.size[1]! * .2);
-            }
+            const decodedFile = path.join(directory, `${name}-inline-decoded-${theme}.png`);
+            await writeFile(decodedFile, Buffer.from(decoded.split(',')[1]!, 'base64'));
+            const poster = await capturedPixelDelta(path.join(directory, `${name}-poster${enabled ? 'Native' : 'Reference'}.png`), decodedFile);
+            expect.soft(poster.sameSize, `${name} ${theme} decoded poster dimensions`).toBe(true);
+            expect.soft(poster.max, `${name} ${theme} decoded poster`).toBe(0);
+          } else if (enabled) {
+            // Stored screenshot codes belong to its actual display profile,
+            // whereas the independent lossy-poster reference is sRGB.
+            const profile = readPngMatrixTrcProfile(await readFile(file));
+            const expected = referenceSrgbToDisplay(profile, measured[name].independentPosterCodes as ColourTriple);
+            const colour = await solidCaptureError(file, expected, true);
+            videoThemeColours.push({ name, theme, ...colour });
+            expect.soft(colour.max, `${name} ${theme} screenshot versus independent poster/display ICC: ${JSON.stringify(colour)}`).toBeLessThanOrEqual(1);
+            expect.soft(colour.alphaMax).toBe(0);
+            expect.soft(colour.pixels).toBeGreaterThan(colour.size[0]! * colour.size[1]! * .2);
           }
         }
-        await writeFile(path.join(directory, `inline-${theme}-layout.json`), JSON.stringify(videoLayout, null, 2));
-        if (enabled && evidence) expect.soft(videoLayout, `${theme} video thumbnail layout`).toEqual(JSON.parse(await readFile(path.join(evidence, 'legacy', `inline-${theme}-layout.json`), 'utf8')));
+        await writeFile(path.join(directory, `inline-${theme}-layout.json`), JSON.stringify(thumbnailLayout, null, 2));
+        if (enabled && evidence) expect.soft(thumbnailLayout, `${theme} thumbnail layout`).toEqual(JSON.parse(await readFile(path.join(evidence, 'legacy', `inline-${theme}-layout.json`), 'utf8')));
       }
       if (enabled) await writeFile(path.join(directory, 'video-theme-colours.json'), JSON.stringify(videoThemeColours, null, 2));
       if (enabled && evidence) {
         const captures = [];
-        for (const theme of ['light', 'dark']) for (const surface of ['source', ...Object.keys(measured).map(name => `${name}-inline`)]) {
+        for (const theme of ['light', 'dark']) for (const surface of ['source', ...VIDEO_SOURCES.map(name => `${name}-inline`)]) {
           const file = `${surface}-${theme}.png`;
           captures.push({ file, ...await capturedPixelDelta(path.join(evidence, 'legacy', file), path.join(directory, file)) });
         }
         await writeFile(path.join(evidence, 'theme-capture-comparison.json'), JSON.stringify(captures, null, 2));
         for (const result of captures) {
           expect.soft(result.sameSize, JSON.stringify(result)).toBe(true);
-          // Video colours now have independent poster + display ICC gates
-          // above; preserve exact legacy pixels for still/SVG/theme chrome.
-          if (!VIDEO_SOURCES.some(name => result.file.startsWith(`${name}-inline-`))) expect.soft(result.max, JSON.stringify(result)).toBe(0);
+          // The source preview remains exact. Inline video has independent
+          // poster and display ICC gates; still/SVG cards are never captured
+          // through Chromium's timing-dependent rounded-card compositor.
+          if (result.file.startsWith('source-')) expect.soft(result.max, JSON.stringify(result)).toBe(0);
+        }
+        for (const name of Object.keys(measured).filter(name => !VIDEO_SOURCES.includes(name))) for (const theme of ['light', 'dark']) {
+          const file = `${name}-inline-decoded-${theme}.png`;
+          const poster = await capturedPixelDelta(path.join(evidence, 'legacy', file), path.join(directory, file));
+          expect.soft(poster.sameSize, `${name} ${theme} cross-session decoded poster size`).toBe(true);
+          expect.soft(poster.max, `${name} ${theme} cross-session decoded poster`).toBe(0);
         }
       }
+      if (enabled) {
+        const window = await session.app.browserWindow(page);
+        const zoom = await window.evaluate(window => window.webContents.getZoomFactor());
+        const density = await page.evaluate(() => devicePixelRatio);
+        try {
+          // Electron zoom changes DPR and emits real resolution notifications;
+          // CDP's metrics override changes the value without emitting them here.
+          // Fix the monitor CSS box so only its device size changes.
+          await page.evaluate(id => {
+            (window as any).PM.Kernel.services.get('viewer').preview.show(id);
+            Object.assign(document.querySelector<HTMLElement>('#source-preview')!.style, { width: '720px', height: '405px' });
+          }, ids['still-red.png']);
+          const setDpr = (dpr: number) => window.evaluate((window, factor) => window.webContents.setZoomFactor(factor), zoom * dpr / density);
+          await setDpr(1);
+          const baseline = await page.waitForFunction(() => {
+            const monitor = (window as any).PM.EngineSourceMedia.monitorValue;
+            const surface = monitor?.surface as HTMLImageElement | undefined;
+            if (devicePixelRatio !== 1 || !monitor?.paused || !surface?.clientWidth || !surface.clientHeight ||
+                monitor.paintedSize?.width !== surface.clientWidth || monitor.paintedSize?.height !== surface.clientHeight) return null;
+            return { width: surface.clientWidth, height: surface.clientHeight };
+          }).then(handle => handle.jsonValue());
+          if (!baseline) throw new Error('The paused monitor did not reach its baseline device size.');
+          for (const dpr of [2, 1.5]) {
+            await setDpr(dpr);
+            await expect.poll(() => page.evaluate(() => {
+              const monitor = (window as any).PM.EngineSourceMedia.monitorValue;
+              const surface = monitor?.surface as HTMLImageElement | undefined;
+              return { dpr: devicePixelRatio, paused: monitor?.paused, css: surface && [surface.clientWidth, surface.clientHeight],
+                painted: monitor?.paintedSize, bitmap: surface && [surface.naturalWidth, surface.naturalHeight],
+                error: monitor?.error?.message ?? null };
+            }), { timeout: 10_000 }).toEqual({ dpr, paused: true, css: [baseline.width, baseline.height],
+              painted: { width: Math.round(baseline.width * dpr), height: Math.round(baseline.height * dpr) },
+              bitmap: [Math.round(baseline.width * dpr), Math.round(baseline.height * dpr)], error: null });
+          }
+        } finally {
+          try { await page.evaluate(() => {
+            (window as any).PM.Kernel.services.get('viewer').preview.clear();
+            const root = document.querySelector<HTMLElement>('#source-preview')!;
+            root.style.removeProperty('width'); root.style.removeProperty('height');
+          }); }
+          finally {
+            try { await window.evaluate((window, factor) => window.webContents.setZoomFactor(factor), zoom); }
+            finally { await window.dispose(); }
+          }
+        }
+      }
+
       const monitor = await page.evaluate(async ({ enabled, id }) => {
         const PM = (window as any).PM; PM.Kernel.services.get('viewer').preview.show(id);
         const root = document.querySelector<HTMLElement>('#source-preview')!;

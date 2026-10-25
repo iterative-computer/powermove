@@ -219,21 +219,26 @@ are source frames.
 |---|---|---|---|
 | A seek to a leading picture of a CRA shows that picture (today: the CRA, the next keyframe) | 1 frame (frame 30, the CRA, for frame 29) | 0 | 4K HEVC Main10, keyint 30, open GOP |
 
-### Source minification
+### Source sampling
 
 - **Reference:** independent f64, normalized Lanczos-3 over binary source
   texels with clamp-to-edge support. The previous source draw's unmipped
   bilinear result is exact at these pixel centres. This follows the declared
   composition sampling kernel (`pm-render::sampling`), with no monitor filter.
+  Fractional fit edges use the exact area of each output pixel inside the
+  centred source rectangle, independently calculated in f64.
 - **Gate:** `source_snapshot::monitor_4k_checker_is_closer_to_f64_than_unmipped_bilinear`,
   all 921,600 pixels classified Resampled under unchanged `EIGHT_BIT` bounds,
   including per-pixel excess. The paused monitor equals the source export.
+  `fractional_source_contain_is_closer_to_exact_coverage` also checks alpha area
+  and centroid with `same_geometry` at the policy's unchanged 1e-3 bound.
 - **Units:** CV, maximum channel difference.
 
 | Correction / case | Previous monitor vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean |
 |---|---|---|
 | Lanczos-3 when paused, 3840×2160 one-texel checker → 1280×720 | 127.50, 127.50, 127.500 | 0.50, 0.50, 0.500 |
 | GPU mip pyramid and trilinear playback, same checker | 127.50, 127.50, 127.500 | 4.01, 0.51, 0.500 |
+| Exact fractional fit coverage, 160×90 opaque red → 1464×824 contain | 63.75, 63.75, 0.155 | 0.25, 0.25, 0.001 |
 
 Playback's maximum is at the clamped outer support; every output pixel is
 closer than the previous draw. No colour or geometry tolerance is widened.
