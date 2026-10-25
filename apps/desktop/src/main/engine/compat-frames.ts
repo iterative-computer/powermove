@@ -91,11 +91,7 @@ export class CompatFrames {
   async serve(request: CompatFrameRequest, layer: string | null = null): Promise<Response> {
     if (this.pending.size >= MAX_ASKS) throw new ProtocolError('budgetExceeded', 'Too many compatibility frames are being drawn.');
     const windows = this.options.windows();
-    // Level 1 SVG images are Chromium's rasters, drawn by the window that
-    // has the project open (decision S1).
-    const closed = request.source === 'svgImage'
-      ? 'SVG images are drawn by the editor window that has this project open; open the project in a window to export it.'
-      : 'This layer is drawn by an extension in the editor; open the project in a window to export it.';
+    const closed = 'This layer is drawn by an extension in the editor; open the project in a window to export it.';
     if (!windows.length) throw new ProtocolError('notHeadlessRenderable', closed);
     // A compatibility context's export frame goes to the windows inline.
     const frame = request.frame;

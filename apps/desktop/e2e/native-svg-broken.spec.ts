@@ -1,8 +1,8 @@
 /* Broken persisted SVG assets have the same empty paint as today's <img>.
    Documents roxmltree rejects but Chromium's libxml2 paints (DTD external
    subsets, parameter and external entities) must not be mistaken for broken
-   ones: Chromium draws level 1 SVG images for the engine (decision S1,
-   docs/engine/vector.md), so they paint as today, through the engine. */
+   ones: the engine draws SVG images natively (docs/engine/vector.md) and
+   must paint them as today. */
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -67,12 +67,15 @@ test('corrupt persisted level 1 SVGs paint an empty image through the engine', a
             w.__brokenOff = w.__powermoveTestBridge.nativeEngine.onExportStatus((s: any) => w.__brokenJobs.push(s));
           });
           const output = path.join(out, `${native ? 'native' : 'legacy'}-${name}.png`);
-          await app.app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, output);
+          await app.app.evaluate(({ dialog }, { filePath, valid }) => {
+            dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+            dialog.showMessageBox = async () => ({ response: valid ? 2 : 1, checkboxChecked: false });
+          }, { filePath: output, valid });
           const result = await app.page.evaluate(async () => (window as any).PM.Export.run({ format: 'still', w: 64, h: 64, alpha: true, mblur: false }));
           const jobs = await app.page.evaluate(() => { const w = window as any; w.__brokenOff(); return w.__brokenJobs; });
           await writeFile(path.join(out, `${native ? 'native' : 'legacy'}-${name}.json`), JSON.stringify({ facts, result, jobs, diagnostics: app.diagnostics }, null, 2));
-          // The job engine exports it (valid ones with the window's
-          // rasters), never today's exporter; the export shows today's paint.
+          // The job engine exports it, never today's exporter; the export
+          // shows today's paint.
           if (native) {
             expect(jobs.some((j: any) => j.state === 'done' && !j.routed), name).toBe(true);
             expect(jobs.some((j: any) => j.routed), name).toBe(false);

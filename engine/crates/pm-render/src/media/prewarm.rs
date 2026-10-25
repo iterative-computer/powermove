@@ -381,6 +381,7 @@ impl MediaCache {
             {
                 if let Some((_, old)) = self.sources.remove(&result.key.path) {
                     self.viewer.release(Some(old.id));
+                    self.source_viewer.release(Some(old.id));
                     self.service.release(None, Some(old.id));
                     self.frames.retain(|key, _| key.path != result.key.path);
                     self.recount();

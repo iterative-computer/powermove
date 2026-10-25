@@ -25,7 +25,7 @@ mod mac {
     }
 
     pub fn run() {
-        assert!(pm_perf::ENABLED, "work counters must be enabled");
+        const { assert!(pm_perf::ENABLED, "work counters must be enabled") };
         pm_perf::count_globally(true);
         let dir = PathBuf::from(
             std::env::args_os()
@@ -171,7 +171,6 @@ mod mac {
                 timings.push(start.elapsed().as_secs_f64() * 1000.);
             }
             let warm_counts = pm_perf::snapshot_global().since(&before);
-            drop(draw);
             // Readback and byte verification are outside both counter spans.
             // The snapshot returns GL rows; reverse them exactly as the mapped
             // production encoder does before comparing today's top-down pixels.

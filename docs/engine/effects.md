@@ -1163,10 +1163,10 @@ For the owners of these files (derouter, device, bridge, dochost, jobs):
   (`HOST_COMPILE_WAITS`, exported from `lib.rs`). Merging the bridge and
   perf2 lanes: `renderer.rs` keeps the job watchdog stop ahead of
   `plan::build_blender`, `lib.rs` lists `frame_prefix` and `glsl`. Merging the
-  svgcompat lane: `render_into` keeps the fallback host loop and runs the
-  SVG raster rounds inside each of its rounds (`render_into_svg`); a frame
-  is complete only without fallback, watchdog, or SVG waits; a job
-  renderer gets its definitions, the fallback host, and the SVG source.
+  svgcompat lane: `render_into` keeps the fallback host loop; a frame is
+  complete only without fallback or watchdog waits; a job renderer gets
+  its definitions and the fallback host. (SVG images later moved to the
+  native vector painter.)
 - **pm-engine**: `engine.rs`, `jobs.rs` (`job_definitions`;
   `JobService::definitions_pushed` defers the push's acknowledgement until
   the job engine holds the set).

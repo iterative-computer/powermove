@@ -8,8 +8,12 @@
 //! outlines independently. Text pixels use the independently modeled
 //! composition background and, when paint order permits, modeled solids.
 //! Other nontext content must not overlap them.
-//! Unsupported text composition remains an explicit failing reference gap,
-//! while pixels outside text retain the original Standard bound.
+//! Text composition the reference does not model is a reference gap: it
+//! fails unless it is a measured, owned pending entry. Pixels outside text
+//! use G-C2's independent authored f64 reference and per-pixel closeness
+//! proof; unreferenced non-text content keeps the Standard class (≤ 1 CV for
+//! 99.9%, ≤ 4 for any) or is a measured owned pending entry
+//! (`fixtures/text-corpus-pending.json`).
 //!
 //! The capture's renderer laid `system-ui` DOM text out at 12 and 13 px on a
 //! 2x display, which fixes `opsz` for 24 and 26 px `system-ui` canvas fonts
@@ -46,6 +50,10 @@
 //!
 //! Runs without the harness (the CoreText registry needs the main thread).
 
+#[path = "support/pending.rs"]
+mod pending;
+#[path = "support/quality.rs"]
+mod quality;
 mod support;
 
 #[cfg(target_os = "macos")]
@@ -97,20 +105,24 @@ fn outlined_frame(
         }
         text_draws.push(ideal);
     }
-    let full_hidden = (seen_text && !nontext_above_text).then(|| {
-        support::reference::render(hidden, comp_id, support::ticks(time), size.0, size.1, true)
-    });
-    let background = support::text::background_only(hidden);
-    let mut base = match full_hidden {
-        Some(full) if full.unmodelled.is_empty() && full.modelled() == 1.0 => full,
-        _ => support::reference::render(
-            &background,
+    let reference = |doc: &pm_model::Document| {
+        support::reference::render(
+            doc,
             comp_id,
             support::ticks(time),
             size.0,
             size.1,
             true,
-        ),
+            16,
+            renderer.effects(),
+            resolver,
+        )
+    };
+    let full_hidden = (seen_text && !nontext_above_text).then(|| reference(hidden));
+    let background = support::text::background_only(hidden);
+    let mut base = match full_hidden {
+        Some(full) if full.unmodelled.is_empty() && full.modelled() == 1.0 => full,
+        _ => reference(&background),
     };
     if !base.unmodelled.is_empty() {
         return Err(base.unmodelled.join("; "));
@@ -197,6 +209,18 @@ fn outlined_frame(
     Ok((base.opaque(), classes, reach))
 }
 
+/// A text reference gap, judged after the isolation captures are read.
+#[cfg(target_os = "macos")]
+struct GapObservation {
+    pair: String,
+    in_isolation: bool,
+    over2: usize,
+    outside_mask_band: usize,
+    /// Its row in the `PM_TEXT_REPORT` verdicts.
+    row: usize,
+    entry: pending::Entry,
+}
+
 #[cfg(target_os = "macos")]
 fn main() {
     use pm_protocol::color::Precision;
@@ -206,8 +230,9 @@ fn main() {
     use sha2::{Digest, Sha256};
     use support::*;
 
-    let narrowed = std::env::var_os("PM_ENGINE_CORPUS").is_some()
-        || std::env::var_os("PM_TEXT_ONLY").is_some();
+    // Selecting a capture directory never waives completeness. Only the
+    // explicit per-project developer filter makes this a narrowed run.
+    let narrowed = std::env::var_os("PM_TEXT_ONLY").is_some();
 
     let mut captures = corpus_dirs();
     if std::env::var("PM_ENGINE_CORPUS").is_err()
@@ -236,25 +261,6 @@ fn main() {
         .map(std::path::PathBuf::from);
     let mut renderer = Renderer::headless().expect("a Metal device");
     support::text::configure_coverage(&mut renderer);
-    // Level 1 SVG images (decision S1) draw Chromium's rasters, as
-    // tests/corpus.rs draws them: PM_SVG_RASTERS, else the newest
-    // `svg-rasters-*` directory; without one resvg approximates them.
-    renderer.set_svg_wait(true);
-    match std::env::var("PM_SVG_RASTERS")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| newest_capture("svg-rasters-"))
-    {
-        Some(dir) => renderer.set_svg_source(Some(std::sync::Arc::new(
-            pm_render::vector::svg_rasters::RasterDir::new(dir),
-        ))),
-        None => {
-            eprintln!(
-                "no Chromium SVG rasters (PM_SVG_RASTERS): resvg approximates level 1 SVG images"
-            );
-            renderer.set_svg_rasterizer(pm_render::vector::svg_rasters::SvgRasterizer::Resvg);
-        }
-    }
     // The built-in effects, transitions, and extension layers as the kernel
     // snapshots them (as tests/corpus.rs sets them).
     renderer
@@ -263,6 +269,9 @@ fn main() {
     let mut compared = 0;
     let mut failed = Vec::new();
     let mut gate_rows = Vec::new();
+    let mut isolated_proofs = std::collections::BTreeMap::new();
+    let mut gap_observations = Vec::new();
+    let mut pending = pending::Audit::read(include_str!("fixtures/text-corpus-pending.json"));
     let mut skipped = Vec::new();
     for capture in &captures {
         let in_isolation = isolated.as_ref() == Some(capture);
@@ -357,6 +366,8 @@ fn main() {
                 continue;
             }
             let hidden = text::without_text(&p.document);
+            let authored_text =
+                text::authored_isolation_fingerprint(&p.document).expect("authored text");
             for (sample_index, s) in p.samples.iter().enumerate() {
                 // The capture's motion blur: 16 samples (opaque export).
                 let mut request =
@@ -427,17 +438,25 @@ fn main() {
                         let e: Vec<f64> = ours.iter().map(|x| f64::from(*x) / 255.0).collect();
                         let t: Vec<f64> = reference.iter().map(|x| f64::from(*x) / 255.0).collect();
                         let report = compare(&e, &t, &rgba, &classes);
-                        // Modeled text is held to one CV at each pixel. The
-                        // original Standard rule still judges unmodeled
-                        // nontext through `rest_ok` below.
+                        // Modeled text is held to one CV at each pixel. An
+                        // interior pixel keeps today's 1 CV bar or proves its
+                        // corrected paint against the reference directly
+                        // (`quality::reference_problems`, as G-C2). Nontext
+                        // is judged through `rest_ok` below.
                         why.extend(
-                            report
-                                .failures(&Bounds {
+                            quality::reference_problems(
+                                &report,
+                                &Bounds {
                                     per_pixel_cv: (1.0, 1.0),
                                     ..Bounds::EIGHT_BIT
-                                })
-                                .into_iter()
-                                .filter(|s| !s.starts_with("unreferenced:")),
+                                },
+                                &e,
+                                &t,
+                                &rgba,
+                                &classes,
+                            )
+                            .into_iter()
+                            .filter(|s| !s.starts_with("unreferenced:")),
                         );
                         unreferenced_text = classes
                             .iter()
@@ -507,23 +526,144 @@ fn main() {
                 // differences from the hidden engine frame—defines text.
                 // Thus unrelated nontext differences cannot disappear into
                 // the text region of the old comparison.
+                // Path mask edges of 2D masked layers are corrected (exact
+                // coverage and Gaussian): G-V2 (`tests/path_masks.rs`)
+                // judges them against the reference, not this comparison.
+                let bands = support::mask_reference::mask_bands(
+                    &p.document,
+                    &p.composition,
+                    ticks(s.time),
+                    wu,
+                    hu,
+                )
+                .expect("mask reference");
                 let rest: Vec<bool> = modeled_reach
                     .as_ref()
                     .unwrap_or(&mask)
                     .iter()
-                    .map(|m| !m)
+                    .zip(&bands)
+                    .map(|(m, b)| !m && !b)
                     .collect();
                 let d = Diff::of_masked(&ours, &reference, &rest);
-                // A frame whose every pixel is text has no other pixels to
-                // judge (the Standard class holds trivially).
-                let rest_ok = !rest.contains(&true) || d.passes();
+                // Non-text pixels use the same authored f64 proof as G-C2:
+                // corrected vector coverage is judged against its outline,
+                // not against the old density-bucket raster in the capture.
+                let r = support::reference::render(
+                    &hidden,
+                    &p.composition,
+                    ticks(s.time),
+                    w,
+                    h,
+                    true,
+                    16,
+                    renderer.effects(),
+                    &p.resolver,
+                );
+                let opaque = support::reference::Reference {
+                    rgba: r.opaque(),
+                    ..r.clone()
+                };
+                let selected = |values: &[f64]| {
+                    values
+                        .chunks_exact(4)
+                        .zip(&rest)
+                        .filter(|(_, keep)| **keep)
+                        .flat_map(|(px, _)| px.iter().copied())
+                        .collect::<Vec<_>>()
+                };
+                let unit = |px: &[u8]| px.iter().map(|v| f64::from(*v) / 255.0).collect::<Vec<_>>();
+                let (engine_full, today_full) = (unit(&ours), unit(&reference));
+                let (engine, today) = (selected(&engine_full), selected(&today_full));
+                let wanted = selected(&opaque.rgba);
+                let classes: Vec<_> = opaque
+                    .classes()
+                    .into_iter()
+                    .zip(&rest)
+                    .filter_map(|(c, keep)| keep.then_some(c))
+                    .collect();
+                let proof = pm_reference::compare::compare(&engine, &today, &wanted, &classes);
+                let problems = quality::reference_problems(
+                    &proof,
+                    &pm_reference::compare::Bounds::EIGHT_BIT,
+                    &engine,
+                    &today,
+                    &wanted,
+                    &classes,
+                );
+                let owner = |reasons: &[String]| {
+                    if reasons.iter().any(|r| r.contains("effect") || r.contains("transition")
+                        || r.contains("motion-blurred") || r.contains("matte"))
+                    {
+                        "L6"
+                    } else {
+                        "L4"
+                    }
+                };
+                let label = format!("{}{tag}", p.name);
+                let rest_owned = pending.check(
+                    pending::Entry {
+                        frame: pending::frame_id(&label, s.time, w, h, "non-text"),
+                        owner: owner(&r.unmodelled).into(),
+                        reason: r.unmodelled.join(", "),
+                        checks: problems.clone(),
+                        measurement_sha256: pending::measurement(&engine, &today, &wanted, &classes),
+                    },
+                    !r.unmodelled.is_empty() && problems.iter().all(|p| p.starts_with("unreferenced:")),
+                );
+                let rest_ok = problems.is_empty() || rest_owned;
+                // Text the reference cannot model yet (effects, projection,
+                // shared groups) may become an owned gap only with
+                // independent evidence that its glyph raster is right: the
+                // same authored text, time and size passes the outline
+                // reference in isolation, or every pixel over the original
+                // 2 CV bar lies in an independently judged mask band.
+                // Isolation is measured last, so admission is deferred.
+                let pair = pending::frame_id(
+                    &format!("{}:{authored_text}", p.name),
+                    s.time,
+                    w,
+                    h,
+                    "text-pair",
+                );
+                let outside_mask_band = (0..wu * hu)
+                    .filter(|&i| mask[i] && !bands[i])
+                    .filter(|&i| (0..4).any(|c| ours[i * 4 + c].abs_diff(reference[i * 4 + c]) > 2))
+                    .count();
+                if in_isolation && gap.is_none() && why.is_empty() {
+                    isolated_proofs.insert(pair.clone(), format!("{:x}", Sha256::digest(&ours)));
+                }
                 compared += 1;
+                if let Some(reason) = gap.as_ref().filter(|_| why.is_empty() && rest_ok) {
+                    gap_observations.push(GapObservation {
+                        pair,
+                        in_isolation,
+                        over2,
+                        outside_mask_band,
+                        row: gate_rows.len(),
+                        entry: pending::Entry {
+                            frame: pending::frame_id(&label, s.time, w, h, "text"),
+                            owner: owner(std::slice::from_ref(reason)).into(),
+                            reason: reason.clone(),
+                            checks: vec![format!(
+                                "text reference gap; original bar: {over2} pixels over 2 CV, max {tmax}, outside independent mask band {outside_mask_band}"
+                            )],
+                            measurement_sha256: pending::measurement(
+                                &engine_full,
+                                &today_full,
+                                &opaque.rgba,
+                                &opaque.classes(),
+                            ),
+                        },
+                    });
+                }
+                let deferred = gap.is_some() && why.is_empty() && rest_ok;
                 let fails = gap.is_some() || !why.is_empty() || !rest_ok;
                 exact += usize::from(!fails && gap.is_none());
                 let frame_index = compared - 1;
                 let engine_sha256 = format!("{:x}", Sha256::digest(&ours));
                 gate_rows.push(serde_json::json!({
                     "case": frame_index, "pass": !fails && gap.is_none(),
+                    "ownedPending": rest_ok && !problems.is_empty(),
                     "width": w, "height": h,
                     "captureDir": capture.display().to_string(),
                     "projectDir": dir.strip_prefix(capture).unwrap().display().to_string(),
@@ -559,14 +699,17 @@ fn main() {
                     100.0 * d.fraction_within_one(),
                     d.max,
                     gap.as_deref()
-                        .map_or("exact outline reference", |_| "original-bound gap")
+                        .map_or("exact outline reference", |_| "reference gap")
                 );
-                println!("{line}");
-                if fails {
+                println!("{line}\n    non-text f64 reference{proof}");
+                for problem in &problems {
+                    println!("    {problem}");
+                }
+                if fails && !deferred {
                     if !why.is_empty() {
                         println!("  frame {} why: {}", compared - 1, why.join("; "));
                     }
-                    failed.push(format!("{line}: {}", why.join("; ")));
+                    failed.push(format!("{line}: {}", why.iter().chain(&problems).cloned().collect::<Vec<_>>().join("; ")));
                 }
                 if !fails && gap.is_none() && !inactive_text {
                     covered.insert(p.name.clone());
@@ -603,6 +746,32 @@ fn main() {
             }
         }
     }
+    let mut text_pending = 0;
+    for gap in gap_observations {
+        let paired = isolated_proofs.get(&gap.pair);
+        let mut entry = gap.entry;
+        if let Some(proof) = paired {
+            entry.reason = format!("{} with passing authored-isolation outline reference", entry.reason);
+            entry.checks.push(format!("paired isolated text passes; engine {proof}"));
+        } else if gap.over2 > 0 && gap.outside_mask_band == 0 {
+            entry.owner = "L4".into();
+            entry.reason = format!("{}; every text pixel over 2 CV is in the independent mask band", entry.reason);
+        }
+        let eligible = quality::text_context_is_owned_gap(
+            gap.in_isolation,
+            paired.is_some(),
+            gap.over2,
+            gap.outside_mask_band,
+        );
+        let owned = pending.check(entry, eligible);
+        gate_rows[gap.row]["ownedPending"] = owned.into();
+        if owned {
+            text_pending += 1;
+        } else {
+            failed.push(format!("frame {}: unowned text reference gap", gate_rows[gap.row]["case"]));
+        }
+    }
+    println!("owned text reference gaps: {text_pending}");
     if let Ok(path) = std::env::var("PM_TEXT_REPORT") {
         let path = std::path::Path::new(&path);
         assert!(
@@ -626,6 +795,7 @@ fn main() {
             ));
         }
     }
+    failed.extend(pending.finish(!narrowed));
     level2.report();
     failed.extend(level2.failures());
     println!(

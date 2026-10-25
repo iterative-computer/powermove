@@ -74,6 +74,11 @@ pub struct Ring {
     tail: AtomicUsize,
     /// Chunks of older epochs are skipped by the consumer.
     epoch: AtomicU32,
+    /// Host µs at which the current epoch's first frame is to be presented
+    /// (0: as soon as it is queued). Published before `epoch`.
+    start_at: AtomicU64,
+    /// `start_at` is a bound until [`Ring::time_held_start`] times it.
+    start_held: std::sync::atomic::AtomicBool,
     underruns: AtomicU64,
     /// Whether the transport runs, so an empty ring is a miss
     /// ([`Ring::set_expecting`]).
@@ -128,6 +133,8 @@ impl Ring {
             head: AtomicUsize::new(0),
             tail: AtomicUsize::new(0),
             epoch: AtomicU32::new(0),
+            start_at: AtomicU64::new(0),
+            start_held: std::sync::atomic::AtomicBool::new(false),
             underruns: AtomicU64::new(0),
             expecting: std::sync::atomic::AtomicBool::new(true),
             played: AtomicU64::new(0),
@@ -190,9 +197,36 @@ impl Ring {
 
     /// Moves to a new epoch: queued chunks of older epochs will not play.
     pub fn set_epoch(&self, epoch: u32) {
+        self.set_epoch_at(epoch, Start::Ready);
+    }
+
+    /// [`Self::set_epoch`] for an epoch whose first frame is presented at
+    /// `start` ([`Consumer::fill_from`]).
+    pub fn set_epoch_at(&self, epoch: u32, start: Start) {
         self.epoch_base
             .store(self.written.load(Ordering::Relaxed), Ordering::Relaxed);
+        let (at, held) = match start {
+            Start::Ready => (0, false),
+            Start::At(at) => (at, false),
+            Start::Held(until) => (until, true),
+        };
+        self.start_held.store(held, Ordering::Relaxed);
+        self.start_at.store(at, Ordering::Relaxed);
         self.epoch.store(epoch, Ordering::Release);
+    }
+
+    /// Times the held start of the current epoch ([`Start::Held`]): its
+    /// first frame is presented at host µs `at` (0: as soon as queued).
+    /// Nothing held (already timed, or a later epoch): no effect.
+    pub fn time_held_start(&self, at: u64) {
+        if self.start_held.swap(false, Ordering::AcqRel) {
+            self.start_at.store(at, Ordering::Release);
+        }
+    }
+
+    /// The largest device buffer seen so far (frames).
+    pub fn callback_frames(&self) -> usize {
+        self.callback_frames.load(Ordering::Relaxed)
     }
 
     /// Whether the producer is running a playback: a callback that finds
@@ -261,10 +295,29 @@ impl Ring {
     }
 }
 
+/// When a Play presents its first sample (host µs on the device's clock).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Start {
+    /// As soon as its audio is queued.
+    #[default]
+    Ready,
+    /// At this host µs: before it the device plays silence, and audio that
+    /// was not queued in time is passed over, so what is heard stays on the
+    /// line that starts there.
+    At(u64),
+    /// Prepared and held until [`Ring::time_held_start`] times it, at
+    /// this host µs at the latest.
+    Held(u64),
+}
+
 /// The device callback's side: a read position inside the current chunk.
 pub struct Consumer {
     ring: Arc<Ring>,
     offset: usize,
+    /// The epoch whose scheduled start was resolved ([`Self::fill_from`]).
+    started: u32,
+    /// Frames of the current epoch still to pass over: it started late.
+    skip: usize,
     /// The epoch whose media this consumer has played: an empty ring is an
     /// underrun only once the run's first chunk was heard (before it, the
     /// start is still being prepared and nothing audible is missing; the
@@ -272,12 +325,14 @@ pub struct Consumer {
     heard_epoch: Option<u32>,
 }
 
-/// What the start of a device buffer plays.
+/// What a device buffer plays first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Heard {
     pub tag: Tag,
     /// Frames into the tag's chunk.
     pub offset: usize,
+    /// Frames into the device buffer (silence before a scheduled start).
+    pub at_frame: usize,
 }
 
 /// Two upper bounds on a chunk's publication on the monotonic host clock.
@@ -296,6 +351,8 @@ impl Consumer {
         Consumer {
             ring,
             offset: 0,
+            started: 0,
+            skip: 0,
             heard_epoch: None,
         }
     }
@@ -361,6 +418,60 @@ impl Consumer {
     /// Device channels beyond the ring's are silent. Returns what the first
     /// frame plays, when it plays media.
     pub fn fill(&mut self, out: &mut [f32], device_channels: usize) -> Option<Heard> {
+        self.fill_after(out, device_channels, 0)
+    }
+
+    /// [`Self::fill`] for a buffer whose first frame is presented at host
+    /// µs `presented_us` on a device at `rate` Hz. An epoch scheduled to
+    /// start at a host time ([`Ring::set_epoch_at`]) is silent until then,
+    /// and when its audio was not queued in time it passes over what should
+    /// already have played: what is heard stays on the line that starts at
+    /// the scheduled time, whatever the device's buffer phase.
+    pub fn fill_from(
+        &mut self,
+        out: &mut [f32],
+        device_channels: usize,
+        presented_us: u64,
+        rate: u32,
+    ) -> Option<Heard> {
+        let ring = &*self.ring;
+        let current = ring.epoch.load(Ordering::Acquire);
+        if self.started == current {
+            return self.fill_after(out, device_channels, 0);
+        }
+        let at = ring.start_at.load(Ordering::Acquire);
+        if at == 0 {
+            self.started = current;
+            self.skip = 0;
+            return self.fill_after(out, device_channels, 0);
+        }
+        let frames = out.len() / device_channels.max(1);
+        let lead = (at as f64 - presented_us as f64) * f64::from(rate) / 1e6;
+        // Nothing of the run queued yet, or its start is past this buffer:
+        // silence, and the start is decided again at the next buffer.
+        if self.queued_frames() == 0 || lead.round() >= frames as f64 {
+            ring.callback_frames.fetch_max(frames, Ordering::Relaxed);
+            out.fill(0.0);
+            ring.played.fetch_add(frames as u64, Ordering::Relaxed);
+            return None;
+        }
+        self.started = current;
+        self.skip = 0;
+        if lead >= 0.0 {
+            self.fill_after(out, device_channels, lead.round() as usize)
+        } else {
+            self.skip = (-lead).round() as usize;
+            self.fill_after(out, device_channels, 0)
+        }
+    }
+
+    /// Fills `out` from its frame `start` on (the frames before are silent).
+    fn fill_after(
+        &mut self,
+        out: &mut [f32],
+        device_channels: usize,
+        start: usize,
+    ) -> Option<Heard> {
         let ring = &*self.ring;
         let rc = ring.channels;
         let frames = out.len() / device_channels.max(1);
@@ -368,7 +479,7 @@ impl Consumer {
         out.fill(0.0);
         let current = ring.epoch.load(Ordering::Acquire);
         let mut first: Option<Heard> = None;
-        let mut done = 0;
+        let mut done = start.min(frames);
         while done < frames {
             let tail = ring.tail.load(Ordering::Relaxed);
             let head = ring.head.load(Ordering::Acquire);
@@ -394,10 +505,25 @@ impl Consumer {
                 ring.tail.store(tail + 1, Ordering::Release);
                 continue;
             }
+            if self.skip > 0 {
+                // A late start: this audio should already have been heard.
+                let pass = (tag.frames as usize - self.offset).min(self.skip);
+                ring.retired.fetch_add(pass as u64, Ordering::Release);
+                self.skip -= pass;
+                self.offset += pass;
+                if self.offset >= tag.frames as usize {
+                    self.offset = 0;
+                    ring.consumer
+                        .store(slot.next.load(Ordering::Acquire), Ordering::Relaxed);
+                    ring.tail.store(tail + 1, Ordering::Release);
+                }
+                continue;
+            }
             if first.is_none() {
                 first = Some(Heard {
                     tag,
                     offset: self.offset,
+                    at_frame: done,
                 });
             }
             self.heard_epoch = Some(tag.epoch);
@@ -460,6 +586,89 @@ mod tests {
         assert_eq!(h.tag.media_ticks, 5000);
         assert_eq!(out[0], 0.0);
         assert_eq!(out[3], 3.0);
+    }
+
+    #[test]
+    fn a_scheduled_start_is_heard_at_its_time_whatever_the_buffer_phase() {
+        // 48 kHz: a frame every 20.833 µs; buffers of 480 frames (10 ms).
+        const RATE: u32 = 48_000;
+        let ramp: Vec<f32> = (0..CHUNK).map(|i| i as f32 + 1.0).collect();
+        let start = |at: u64| {
+            let ring = Ring::new(16, 1);
+            ring.set_epoch_at(1, Start::At(at));
+            for n in 0..8 {
+                assert!(ring.push(tag(n * 1000, 1, CHUNK as u32), &ramp));
+            }
+            (ring.clone(), Consumer::new(ring))
+        };
+        let mut out = vec![0f32; 480];
+        // Due 15 ms after this buffer's first frame: the whole buffer is
+        // silent, and the next one starts 5 ms (240 frames) in.
+        let (_, mut c) = start(1_015_000);
+        assert_eq!(c.fill_from(&mut out, 1, 1_000_000, RATE), None);
+        assert!(out.iter().all(|v| *v == 0.0));
+        let h = c.fill_from(&mut out, 1, 1_010_000, RATE).unwrap();
+        assert_eq!((h.at_frame, h.offset, h.tag.media_ticks), (240, 0, 0));
+        assert!(out[..240].iter().all(|v| *v == 0.0));
+        assert_eq!(out[240], 1.0);
+        // Already 2 ms late (96 frames): what should have been heard is passed over.
+        let (_, mut c) = start(998_000);
+        let h = c.fill_from(&mut out, 1, 1_000_000, RATE).unwrap();
+        assert_eq!((h.at_frame, h.offset), (0, 96));
+        assert_eq!(out[0], 97.0);
+        // Nothing queued yet: silence, and the start is decided at the next buffer.
+        let ring = Ring::new(16, 1);
+        ring.set_epoch_at(1, Start::At(1_005_000));
+        let mut c = Consumer::new(ring.clone());
+        assert_eq!(c.fill_from(&mut out, 1, 1_000_000, RATE), None);
+        assert!(ring.push(tag(0, 1, CHUNK as u32), &ramp));
+        assert!(ring.push(tag(0, 1, CHUNK as u32), &ramp));
+        let h = c.fill_from(&mut out, 1, 1_010_000, RATE).unwrap();
+        assert_eq!((h.at_frame, h.offset), (0, 240));
+        // An epoch without a start time plays at once, as `fill` does.
+        let (ring, mut c) = start(0);
+        ring.set_epoch(2);
+        assert!(ring.push(tag(0, 2, CHUNK as u32), &ramp));
+        let h = c.fill_from(&mut out, 1, 1_000_000, RATE).unwrap();
+        assert_eq!((h.at_frame, h.offset, h.tag.epoch), (0, 0, 2));
+    }
+
+    #[test]
+    fn a_held_start_waits_for_its_time_or_its_bound() {
+        const RATE: u32 = 48_000;
+        let ramp: Vec<f32> = (0..CHUNK).map(|i| i as f32 + 1.0).collect();
+        let held = |until: u64| {
+            let ring = Ring::new(16, 1);
+            ring.set_epoch_at(1, Start::Held(until));
+            for n in 0..8 {
+                assert!(ring.push(tag(n * 1000, 1, CHUNK as u32), &ramp));
+            }
+            (ring.clone(), Consumer::new(ring))
+        };
+        let mut out = vec![0f32; 480];
+        // Queued and held: silent until timed, then heard at that time.
+        let (ring, mut c) = held(2_000_000);
+        assert_eq!(c.fill_from(&mut out, 1, 1_000_000, RATE), None);
+        ring.time_held_start(1_015_000);
+        assert_eq!(
+            c.fill_from(&mut out, 1, 1_010_000, RATE).unwrap().at_frame,
+            240
+        );
+        // Timing it again, or a later epoch's ready start, changes nothing.
+        ring.time_held_start(5_000_000);
+        ring.set_epoch(2);
+        ring.time_held_start(5_000_000);
+        assert!(ring.push(tag(0, 2, CHUNK as u32), &ramp));
+        assert_eq!(
+            c.fill_from(&mut out, 1, 1_020_000, RATE).unwrap().tag.epoch,
+            2
+        );
+        // Never timed: it starts at its bound.
+        let (_, mut c) = held(1_005_000);
+        assert_eq!(
+            c.fill_from(&mut out, 1, 1_000_000, RATE).unwrap().at_frame,
+            240
+        );
     }
 
     #[test]

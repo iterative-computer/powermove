@@ -91,13 +91,7 @@ namespace and pins. A missing browser is named `chromium-unavailable` when a
 program needs it. The profile's latest published definition snapshot is used
 unless `--definitions` supplies another set. Existing outputs require `--force`. Native process exit codes reach the caller.
 
-Level 1 SVG images also start Chromium on demand. Both `powermove render` and
-bundled `pm-cli` draw the app's SVG raster buckets through the hidden host's
-`decodeSvg` and `SvgRasterCanvas` module. A bare `pm-cli` without the helper
-fails with `svg-chromium-unavailable` when a frame draws an SVG. Passing
-`--approximate-svg` permits resvg only when no helper is available; this prints
-an approximate SVG notice and counts those draws in the summary's
-`approximateSvg`. It does not provide the app's Chromium pixels.
+SVG images need no Chromium: the native renderer draws them.
 
 A source checkout can set `POWERMOVE_PM_CLI` to its built binary. A packaged build
 looks under `dist/native/<platform>-<arch>/pm-cli` and names a missing runtime as
@@ -123,8 +117,8 @@ for workspace/panel tools and pinned or unverified user shaders. Missing
 Chromium returns `chromium-unavailable` when first needed. The native runtime
 must match the bundled protocol; missing addons are `native-runtime-unavailable`.
 `render` and direct bundled `pm-cli` (`render` and `scope`) use the desktop
-profile’s shader pins and the same on-demand Chromium service for ANGLE and
-level 1 SVG images. `pm-cli scope` measures the same pixels `render` writes: it
+profile’s shader pins and the same on-demand Chromium service for ANGLE.
+`pm-cli scope` measures the same pixels `render` writes: it
 takes `--definitions`, and without a helper a pinned or unverified user program
 fails as not headless-renderable (exit 4) instead of drawing natively. Set `POWERMOVE_USER_DATA` to select another
 profile. See [native hidden-host integration](../../docs/engine/hidden-host.md)

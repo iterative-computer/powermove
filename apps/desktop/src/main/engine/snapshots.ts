@@ -26,16 +26,41 @@
  * goes straight back to the (possibly blocked) caller.
  */
 import type { EngineSnapshotReply, EngineSnapshotRequest } from '../../shared/engine-ipc';
-import type { Request, Response, SnapshotOutcome, SnapshotRequest } from '../../shared/engine-protocol';
+import type { Request, Response, SnapshotOutcome, SnapshotRequest, SourceVideoFrame } from '../../shared/engine-protocol';
 import type { Log } from './connection';
 import { RemoteError } from './protocol';
 import type { WindowSnapshotSessions } from './window-sessions';
+
+// pm-protocol's SourceVideoFrame tags: those WebCodecs and Chromium apply
+// exactly as the engine reads them. Other readings arrive as sRGB RGBA.
+const PRIMARIES = new Set(['bt709', 'bt470bg', 'smpte170m']);
+const TRANSFER = new Set(['bt709', 'linear']);
+const MATRIX = new Set(['bt709', 'smpte170m', 'bt2020-ncl']);
+
+/** Bytes of a tightly packed source video frame in its WebCodecs layout
+ * (pm-protocol's `SourceVideoFrame::byte_len`), including odd sizes; throws
+ * on unknown formats or tags. */
+export function sourceVideoByteLength(width: number, height: number, video: SourceVideoFrame): number {
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width > 16384 || height > 16384)
+    throw new Error('Invalid source video dimensions');
+  if (video?.format === 'rgba' && video.primaries === 'bt709' && video.transfer === 'srgb' && video.matrix === 'rgb'
+      && video.range === 'full' && video.visibleWidth === undefined) return width * height * 4;
+  if (!video || typeof video !== 'object' || !['nv12', 'i420a', 'i422', 'i420p10'].includes(video.format)
+      || !PRIMARIES.has(video.primaries) || !TRANSFER.has(video.transfer)
+      || !MATRIX.has(video.matrix) || !['limited', 'full'].includes(video.range))
+    throw new Error('Invalid source video format or colour tags');
+  if (video.visibleWidth !== undefined && (!Number.isSafeInteger(video.visibleWidth) || video.visibleWidth < 1 || video.visibleWidth > width))
+    throw new Error('Invalid source visible width');
+  const chromaHeight = video.format === 'i422' ? height : Math.ceil(height / 2);
+  const bytesPerSample = video.format === 'i420p10' ? 2 : 1;
+  return (width * height + Math.ceil(width / 2) * 2 * chromaHeight) * bytesPerSample + (video.format === 'i420a' ? width * height : 0);
+}
 
 /** What the service needs of the engine (NativeEngine). */
 export interface SnapshotEngine {
   isReady(process: 'interactive'): boolean;
   clientPort(id: number, process: 'interactive'): { port: number; generation: number } | null;
-  request(process: 'interactive', body: Request, session?: number | null, revision?: number | null): Promise<Response>;
+  request(process: 'interactive', body: Request, session?: number | null, revision?: number | null, signal?: AbortSignal): Promise<Response>;
   /** The textures the engine sent ahead of a `needsRenderer` answer for
    *  one of its fallback requests (fallback-inputs.ts). */
   fallbackTextures?(key: string, count: number, width: number, height: number): Uint8Array[] | null;
@@ -99,6 +124,7 @@ function validViewer(value: unknown, width: number, height: number): boolean {
 export function validSnapshotRequest(value: unknown): value is EngineSnapshotRequest {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
+  if (v['requestId'] !== undefined && !id(v['requestId'])) return false;
   if (!safeUint(v['generation'])) return false;
   const document = v['document'];
   if (document !== undefined && !validDocument(document)) return false;
@@ -107,8 +133,6 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (fallback !== undefined && (document === undefined || !validFallback(fallback))) return false;
   const compat = v['compatEvents'];
   if (compat !== undefined && (document === undefined || !validCompatEvents(compat))) return false;
-  const svg = v['svgPixels'];
-  if (svg !== undefined && (document === undefined || !validSvgPixels(svg))) return false;
   if (v['revision'] !== null && !safeUint(v['revision'])) return false;
   const s = v['snapshot'] as Record<string, unknown> | null;
   if (!s || typeof s !== 'object') return false;
@@ -119,6 +143,7 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (w < 1 || h < 1 || w > MAX_EDGE || h > MAX_EDGE || w * h * 4 > 512 * 1024 ** 2) return false;
   if (!['opaque', 'premultiplied', 'straight'].includes(s['pixels'] as string)) return false;
   if (!['sync', 'async', 'idle'].includes(s['class'] as string)) return false;
+  if ((s['target'] as Record<string, unknown> | null)?.['color'] === 'compositor' && (s['class'] === 'sync' || s['pixels'] !== 'straight')) return false;
   if (s['viewSeq'] !== null && !safeUint(s['viewSeq'])) return false;
   if (s['viewer'] != null && !validViewer(s['viewer'], w, h)) return false;
   if (s['viewer'] != null && s['viewSeq'] !== null
@@ -143,6 +168,11 @@ export function validSnapshotRequest(value: unknown): value is EngineSnapshotReq
   if (target['kind'] === 'frame') {
     return safeUint(target['motionBlurSamples']) && (target['motionBlurSamples'] as number) <= 256 &&
       typeof target['background'] === 'boolean' && typeof target['draft3d'] === 'boolean';
+  }
+  if (target['kind'] === 'source') {
+    return id(target['asset']) && (s['time'] as number) >= 0
+      && ['stretch', 'contain', 'cover'].includes(target['fit'] as string)
+      && ['display', 'interpreted', 'compositor'].includes(target['color'] as string);
   }
   if (target['kind'] === 'layer') {
     if (s['viewer'] != null) return false;
@@ -170,12 +200,6 @@ export const MAX_COMPAT_EVENTS = 4096;
 export function fallbackBudgetBytes(byteLength: number, colorDepth: 16 | 32): number {
   return byteLength / (colorDepth === 32 ? 2 : 1);
 }
-/** Most SVG rasters one request carries, and their bytes (a material
- *  map may be three.js's largest texture, 16384 × 16384). */
-export const MAX_SVG_PIXELS = 64;
-export const MAX_SVG_BYTES = 1024 * 1024 * 1024;
-/** Largest SVG raster edge (`svgRasterDimensions`' limit). */
-const MAX_SVG_EDGE = 8192;
 
 function validDocument(value: unknown): boolean {
   if (!value || typeof value !== 'object') return false;
@@ -186,23 +210,6 @@ function validDocument(value: unknown): boolean {
   if (json === undefined || json === null) return d['hash'] === undefined || d['hash'] === null || (typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']));
   // A document's body comes with its canonical hash.
   return typeof d['hash'] === 'string' && /^[0-9a-f]{64}$/.test(d['hash']) && json instanceof Uint8Array && json.byteLength > 0 && json.byteLength <= MAX_DOCUMENT_BYTES;
-}
-
-function validSvgPixels(value: unknown): boolean {
-  if (!Array.isArray(value) || value.length > MAX_SVG_PIXELS) return false;
-  let bytes = 0;
-  for (const p of value as Record<string, unknown>[]) {
-    const key = p?.['key'] as Record<string, unknown> | undefined;
-    if (!key || typeof key !== 'object' || typeof key['content'] !== 'string' || !/^[0-9a-f]{64}$/.test(key['content'])) return false;
-    if (key['texture'] !== undefined && key['texture'] !== true) return false;
-    const max = key['texture'] === true ? 16384 : MAX_SVG_EDGE;
-    const w = key['width'], h = key['height'];
-    if (!Number.isInteger(w) || !Number.isInteger(h) || (w as number) < 1 || (h as number) < 1 || (w as number) > max || (h as number) > max) return false;
-    const data = p['data'];
-    if (!(data instanceof Uint8Array) || data.byteLength !== (w as number) * (h as number) * 4) return false;
-    bytes += data.byteLength;
-  }
-  return bytes <= MAX_SVG_BYTES;
 }
 
 function validFallback(value: unknown): boolean {
@@ -256,11 +263,19 @@ export type SnapshotServiceOptions = {
 export type SnapshotStats = { served: number; failed: number; needsRenderer: number; shared: number; refused: number; outstanding: number; outstandingBytes: number; windowSessions: number; needsDocument: number };
 
 export class SnapshotService {
+  private readonly cancellations = new Map<number, Map<string, AbortController>>();
   private readonly perWindow = new Map<number, number>();
   private outstandingBytes = 0;
+  private sourceTimestamp = 0;
   private readonly stats: SnapshotStats = { served: 0, failed: 0, needsRenderer: 0, shared: 0, refused: 0, outstanding: 0, outstandingBytes: 0, windowSessions: 0, needsDocument: 0 };
 
   constructor(private readonly options: SnapshotServiceOptions) {}
+
+  cancel(windowId: number, requestId: string): void { this.cancellations.get(windowId)?.get(requestId)?.abort(); }
+  forget(windowId: number): void {
+    for (const controller of this.cancellations.get(windowId)?.values() ?? []) controller.abort();
+    this.cancellations.delete(windowId);
+  }
 
   status(): SnapshotStats {
     return { ...this.stats, outstanding: [...this.perWindow.values()].reduce((a, b) => a + b, 0), outstandingBytes: this.outstandingBytes };
@@ -273,25 +288,38 @@ export class SnapshotService {
       return failed('invalidMessage', 'A snapshot names its session, composition, time, size, and limits.');
     }
     const request = value;
+    const controller = new AbortController();
+    if (request.requestId) {
+      let requests = this.cancellations.get(windowId);
+      if (!requests) this.cancellations.set(windowId, requests = new Map());
+      if (requests.has(request.requestId)) return failed('invalidMessage', 'A snapshot with this request id is already running.');
+      requests.set(request.requestId, controller);
+    }
     const bytes = request.snapshot.outputSize.width * request.snapshot.outputSize.height * 4;
     const inFlight = this.perWindow.get(windowId) ?? 0;
     if (inFlight >= MAX_PER_WINDOW || this.outstandingBytes + bytes > MAX_OUTSTANDING_BYTES) {
+      if (request.requestId) this.cancellations.get(windowId)?.delete(request.requestId);
       this.stats.refused++;
       return failed('refused', 'Too many snapshots are in flight; try again when they finish.');
     }
     this.perWindow.set(windowId, inFlight + 1);
     this.outstandingBytes += bytes;
     try {
-      return await this.run(windowId, request);
+      return await this.run(windowId, request, controller.signal);
     } finally {
+      controller.abort();
       const left = (this.perWindow.get(windowId) ?? 1) - 1;
       if (left > 0) this.perWindow.set(windowId, left);
       else this.perWindow.delete(windowId);
       this.outstandingBytes -= bytes;
+      if (request.requestId) {
+        const requests = this.cancellations.get(windowId); requests?.delete(request.requestId);
+        if (!requests?.size) this.cancellations.delete(windowId);
+      }
     }
   }
 
-  private async run(windowId: number, request: EngineSnapshotRequest): Promise<EngineSnapshotReply> {
+  private async run(windowId: number, request: EngineSnapshotRequest, signal: AbortSignal): Promise<EngineSnapshotReply> {
     const now = this.options.now ?? (() => performance.now());
     const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const started = now();
@@ -301,6 +329,7 @@ export class SnapshotService {
     // A cold start or a restart: wait (within the request's own wait) for
     // the interactive engine rather than fail at once.
     while (!this.options.engine.isReady('interactive')) {
+      if (signal.aborted) return failed('cancelled', 'The source request was cancelled.');
       if (now() - started >= snapshot.waitMs) {
         this.stats.failed++;
         return failed('unavailable', 'The new engine is not running.');
@@ -325,7 +354,6 @@ export class SnapshotService {
             windowId,
             request.document,
             (request.fallbackPixels ?? []).map((p) => ({ ...p })),
-            (request.svgPixels ?? []).map((p) => ({ key: { ...p.key }, data: p.data })),
             request.compatEvents ?? []
           ),
           new Promise<'timeout'>((resolve) => {
@@ -357,11 +385,13 @@ export class SnapshotService {
       }
       owner = { port: client.port, session: request.session };
     }
+    if (signal.aborted) return failed('cancelled', 'The source request was cancelled.');
     const answer = this.options.engine.request(
       'interactive',
       { type: 'snapshot', renderer: owner.port, session: owner.session, snapshot } as Request,
       null,
-      request.revision
+      request.revision,
+      signal
     );
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<'timeout'>((resolve) => {
@@ -404,18 +434,26 @@ export class SnapshotService {
         if (textures) fallbackTextures.push({ key: r.key, textures });
       }
       return {
-        status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat, svg: outcome.svg ?? [],
+        status: 'needsRenderer', revision: outcome.revision, fallback: outcome.fallback, compat: outcome.compat,
         ...(fallbackTextures.length ? { fallbackTextures } : {})
       };
     }
-    const expected = outcome.width * outcome.height * 4;
+    const video = outcome.video;
+    const compositor = snapshot.target.kind === 'source' && snapshot.target.color === 'compositor';
+    if (Boolean(video) !== compositor) {
+      this.discard(response);
+      return failed('invalidMessage', 'The engine source presentation format did not match its request.');
+    }
     let data: Uint8Array;
     try {
-      data = this.pixels(outcome.payload, expected);
+      data = this.pixels(outcome.payload, video ? sourceVideoByteLength(outcome.width, outcome.height, video) : outcome.width * outcome.height * 4);
     } catch (error) {
       this.stats.failed++;
       return failed('internal', error instanceof Error ? error.message : String(error));
     }
+    // Stamp the underlying frame once, here. A VideoFrame clone's timestamp
+    // does not retime Chromium's MediaStream sink.
+    const videoTimestamp = video ? this.sourceTimestamp = Math.max(this.sourceTimestamp + 1, Math.round(performance.now() * 1000)) : 0;
     this.stats.served++;
     return {
       status: 'rendered',
@@ -425,6 +463,7 @@ export class SnapshotService {
       height: outcome.height,
       pixels: outcome.pixels,
       data,
+      ...(video ? { videoPlanes: { ...video, timestamp: videoTimestamp } } : {}),
       origin: [outcome.origin[0], outcome.origin[1]],
       layerBox: outcome.layerBox ? [outcome.layerBox[0], outcome.layerBox[1]] : null,
       raster: outcome.raster ?? null,

@@ -461,160 +461,153 @@ fn svg_project(name: &str) -> SvgProject {
     fixture
 }
 
-fn without_chromium(args: &[&str], dir: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_pm-cli"))
-        .arg("render")
-        .args(args)
-        .env_remove("POWERMOVE_ANGLE_ENDPOINT")
-        .env_remove("POWERMOVE_ANGLE_TOKEN")
-        .env("POWERMOVE_ANGLE_HELPER", dir.join("missing-helper.cjs"))
-        .output()
-        .unwrap()
-}
-
-/// resvg is an explicit approximation (decision S1), named on stderr and
-/// in the summary. A project without SVG prints no notice.
+/// SVG images are drawn natively: a bare pm-cli with no Chromium helper
+/// (none configured, none beside it) renders an SVG project, and `scope`
+/// reads it too. The SVG (a 64 × 32 orange rounded rect with a white
+/// circle) is `contain`ed in a 160 × 90 box at the top left: 2.5×.
 #[test]
-fn level_1_svg_images_render_with_a_named_approximate_svg_notice() {
-    let fixture = svg_project("svg-approximate");
-    let dir = &fixture.0;
-    let project_file = dir.join("p.json");
-    let out = without_chromium(
-        &[
-            project_file.to_str().unwrap(),
-            "-o",
-            dir.join("svg.mp4").to_str().unwrap(),
-            "--preset",
-            "web",
-            "--approximate-svg",
-        ],
-        dir,
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    let s = summary(&out);
-    let draws = s["approximateSvg"].as_u64().unwrap_or(0);
-    assert!(draws >= 25, "every frame drew the SVG with resvg: {s}");
-    assert!(
-        stderr.contains(&format!(
-            "pm-cli: notice (approximate SVG): {draws} level 1 SVG image draw(s) were rasterized by resvg, not Chromium"
-        )),
-        "{stderr}"
-    );
-    // The PNG project: no SVG drawn, no notice.
-    let png_file = dir.join("png.json");
-    std::fs::write(&png_file, project(true, false).to_string()).unwrap();
-    let out = cli(&[
-        png_file.to_str().unwrap(),
-        "-o",
-        dir.join("png.mp4").to_str().unwrap(),
-        "--preset",
-        "web",
-    ]);
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert_eq!(summary(&out)["approximateSvg"], 0);
-    assert!(!stderr.contains("approximate SVG"), "{stderr}");
-}
-
-#[test]
-fn level_1_svg_images_without_chromium_fail_with_a_named_error() {
-    let fixture = svg_project("svg-unavailable");
-    let dir = &fixture.0;
-    let output = dir.join("svg.png");
-    let out = without_chromium(
-        &[
-            dir.join("p.json").to_str().unwrap(),
-            "-o",
-            output.to_str().unwrap(),
-            "--format",
-            "still",
-        ],
-        dir,
-    );
-    assert_eq!(out.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("svg-chromium-unavailable"), "{stderr}");
-    assert!(stderr.contains("--approximate-svg"), "{stderr}");
-    assert!(!stderr.contains("notice (approximate SVG)"), "{stderr}");
-    assert!(!output.exists(), "a failed export must not publish a still");
-    let mut remaining: Vec<_> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
-        .collect();
-    remaining.sort();
-    assert_eq!(
-        remaining,
-        ["art.svg", "p.json"],
-        "a failed export must remove temporary outputs"
-    );
-}
-
-/// The production helper is configured but its Chromium is missing: an
-/// SVG-only project fails by name on `render` and `scope` and writes
-/// nothing (no resvg fallback when a helper is configured). Skipped with a
-/// printed reason without `POWERMOVE_ANGLE_HELPER` (a built CLI
-/// dist/native-angle-child.cjs); `POWERMOVE_REQUIRE_ANGLE_HELPER=1` makes
-/// that a failure.
-#[test]
-fn level_1_svg_images_with_the_helper_but_no_browser_fail_by_name() {
-    let helper = match std::env::var("POWERMOVE_ANGLE_HELPER") {
-        Ok(helper) if !helper.is_empty() => helper,
-        _ if std::env::var_os("POWERMOVE_REQUIRE_ANGLE_HELPER").is_some() => {
-            panic!("POWERMOVE_REQUIRE_ANGLE_HELPER is set: set POWERMOVE_ANGLE_HELPER")
-        }
-        _ => {
-            eprintln!(
-                "skipped: this gate needs the production ANGLE helper (set POWERMOVE_ANGLE_HELPER to a built CLI dist/native-angle-child.cjs)"
-            );
-            return;
-        }
-    };
-    let fixture = svg_project("svg-no-browser");
+fn svg_images_render_without_chromium() {
+    let fixture = svg_project("svg-native");
     let dir = &fixture.0;
     let project_file = dir.join("p.json");
     let still = dir.join("svg.png");
-    let scopes = dir.join("scopes");
-    for (command, args) in [
-        (
-            "render",
-            vec![
-                project_file.to_str().unwrap(),
-                "-o",
-                still.to_str().unwrap(),
-                "--format",
-                "still",
-                "--approximate-svg",
-            ],
-        ),
-        (
-            "scope",
-            vec![
-                project_file.to_str().unwrap(),
-                "-o",
-                scopes.to_str().unwrap(),
-                "--approximate-svg",
-            ],
-        ),
-    ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_pm-cli"))
+    let bare = |command: &str, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_pm-cli"))
             .arg(command)
-            .args(&args)
+            .args(args)
             .env_remove("POWERMOVE_ANGLE_ENDPOINT")
             .env_remove("POWERMOVE_ANGLE_TOKEN")
-            .env("POWERMOVE_ANGLE_HELPER", &helper)
-            .env("POWERMOVE_CHROMIUM", dir.join("missing-chromium"))
+            .env("POWERMOVE_ANGLE_HELPER", dir.join("missing-helper.cjs"))
+            .output()
+            .unwrap()
+    };
+    let out = bare(
+        "render",
+        &[
+            project_file.to_str().unwrap(),
+            "-o",
+            still.to_str().unwrap(),
+            "--format",
+            "still",
+        ],
+    );
+    let s = summary(&out);
+    assert!(s.get("approximateSvg").is_none(), "{s}");
+    let decoder = png::Decoder::new(std::io::BufReader::new(
+        std::fs::File::open(&still).unwrap(),
+    ));
+    let mut reader = decoder.read_info().unwrap();
+    let mut bytes = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut bytes).unwrap();
+    assert_eq!((info.width, info.height), (320, 180));
+    let channels = info.color_type.samples();
+    let at = |x: usize, y: usize| {
+        let i = (y * 320 + x) * channels;
+        [bytes[i], bytes[i + 1], bytes[i + 2]]
+    };
+    // Within 1 code value: an 8-bit export is dithered.
+    let near = |x: usize, y: usize, rgb: [u8; 3]| {
+        let p = at(x, y);
+        assert!(
+            p.iter().zip(rgb).all(|(a, b)| a.abs_diff(b) <= 1),
+            "({x}, {y}): {p:?}, expected {rgb:?}"
+        );
+    };
+    let (orange, white, solid) = ([0xff, 0x5a, 0x1f], [0xff; 3], [0x3f, 0xcf, 0x8e]);
+    // The rect's interior, the circle's center (48, 16) → (120, 45), and the
+    // solid beside the box.
+    near(40, 45, orange);
+    near(120, 45, white);
+    near(240, 45, solid);
+    // The rect spans y 5..85 (32 × 2.5, centered in 90), its corners
+    // rounded (rx 8 → 20 px): the box's corner pixel is the solid's.
+    near(0, 5, solid);
+    near(80, 4, solid);
+    near(80, 5, orange);
+    let scopes = dir.join("scopes");
+    let out = bare(
+        "scope",
+        &[
+            project_file.to_str().unwrap(),
+            "-o",
+            scopes.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(scopes.join("scope.json").exists());
+}
+
+/// The review's plain box clip used to invalidate the Metal device at
+/// 1440×810. A subprocess also exercises subsequent quads/readback/export,
+/// which caught the original invalid `pm quads` buffer panic.
+#[test]
+fn svg_large_boxes_and_drop_shadow_sizes_export_without_a_window() {
+    for (case, width, height, box_width, box_height, sigma) in [
+        ("plain-1440", 1920, 1080, 1440, 810, None),
+        ("plain-1080p", 1920, 1080, 1920, 1080, None),
+        ("plain-4k", 3840, 2160, 3840, 2160, None),
+        ("small-blur-1080p", 1920, 1080, 1920, 1080, Some(0.5)),
+        ("shadow-1080p", 1920, 1080, 1920, 1080, Some(20.0)),
+    ] {
+        let dir = SvgProject(scratch(case));
+        let svg = dir.0.join("source.svg");
+        let source = sigma.map_or_else(
+            || r##"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#5A93F2"/></svg>"##.to_owned(),
+            |sigma| format!(r##"<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><defs><filter id="b" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="{sigma}"/></filter></defs><circle cx="480" cy="270" r="150" fill="#5A93F2" filter="url(#b)"/></svg>"##),
+        );
+        std::fs::write(&svg, source).unwrap();
+        let mut p = project(false, false);
+        p["w"] = json!(width);
+        p["h"] = json!(height);
+        p["layers"] = json!([layer(
+            "svg",
+            "image",
+            json!({"asset":"still", "fit":"contain", "w":box_width,"h":box_height}),
+            width as f64 / 2.0,
+            height as f64 / 2.0
+        )]);
+        p["assets"] = json!({"still":{"id":"still","name":"source.svg","kind":"image","format":"svg","sourcePath":svg}});
+        let input = dir.0.join("project.json");
+        let output = dir.0.join("frame.png");
+        std::fs::write(&input, p.to_string()).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_pm-cli"))
+            .arg("render")
+            .arg(&input)
+            .arg("-o")
+            .arg(&output)
+            .args(["--format", "still", "--range", "0:0.04"])
+            .env_remove("POWERMOVE_ANGLE_ENDPOINT")
+            .env_remove("POWERMOVE_ANGLE_TOKEN")
+            .env("POWERMOVE_ANGLE_HELPER", dir.0.join("absent.cjs"))
             .output()
             .unwrap();
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(out.status.code(), Some(1), "{command}: {stderr}");
         assert!(
-            stderr.contains("chromium-unavailable"),
-            "{command}: {stderr}"
+            result.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let decoder = png::Decoder::new(std::io::BufReader::new(
+            std::fs::File::open(output).unwrap(),
+        ));
+        let mut reader = decoder.read_info().unwrap();
+        let mut bytes = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut bytes).unwrap();
+        assert_eq!((info.width, info.height), (width, height), "{case}");
+        let channels = info.color_type.samples();
+        let center = ((height as usize / 2) * width as usize + width as usize / 2) * channels;
+        assert!(
+            (bytes[center] as i32 - 0x5a).abs() <= 1,
+            "{case}: red {}",
+            bytes[center]
         );
         assert!(
-            !stderr.contains("notice (approximate SVG)"),
-            "{command}: a configured helper never falls back to resvg: {stderr}"
+            (bytes[center + 2] as i32 - 0xf2).abs() <= 1,
+            "{case}: blue {}",
+            bytes[center + 2]
         );
     }
-    assert!(!still.exists(), "render published a still");
-    assert!(!scopes.join("scope.json").exists(), "scope wrote scopes");
 }

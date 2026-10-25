@@ -63,13 +63,6 @@ export function todaysCanvas(
   return finite && canvas.width >= 1 && canvas.height >= 1 && crop.width > 0 && crop.height > 0 && canvas.css.width > 0 && canvas.css.height > 0 ? canvas : null;
 }
 
-/** Today's compositor's output scale on a canvas (`outputScale(W, H)` in
- *  legacy/gl/compositor.ts): canvas pixels per composition pixel, per axis.
- *  Every layer, level 1 SVG buckets included, renders at it. */
-export function canvasOutputScale(canvas: ViewerCanvas): [number, number] {
-  return [canvas.width / canvas.crop.width, canvas.height / canvas.crop.height];
-}
-
 /** The preview resolution menu (Auto, Full, Half, Quarter) as contract 2's enum. */
 export function previewResolution(value: string | number | null | undefined): PreviewResolution {
   const scale = typeof value === 'number' ? value : value == null || value === 'auto' ? NaN : Number(value);

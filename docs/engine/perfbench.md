@@ -37,9 +37,9 @@ The counters are always on, in release builds too. A `Scope` diffs a thread's
 | `gpu.copies`, `gpu.texture_to_buffer_bytes` | every recorded copy; the bytes of texture-to-buffer copies |
 | `cpu.heap_allocs` / `cpu.heap_alloc_bytes` | `pm_perf::CountingAlloc`, installed by bench and test binaries (growing `realloc`s count their new size) |
 | `engine.glsl_compiles` | GLSL programs through glslang (`pm-gpu` `glsl.rs`) |
-| `engine.raster_requests` / `engine.raster_answers` | level 1 SVG rasters asked of the window and put back; fallback runner jobs and their pixels |
+| `engine.raster_requests` / `engine.raster_answers` | fallback runner jobs and their pixels |
 | `engine.layers_planned`, `engine.comp_passes` | layers planned from scratch; composition passes built (`pm-render` `plan.rs`) |
-| `cache.{pipeline,program,media,vector,text,svg,draw_reuse,frame_prefix,bind_group,target_pool}.{hits,misses}` | effect pipelines per format, effect programs, media textures (stills and decoded frames), vector rasters, text rasters, SVG rasters, layer draw reuse, the kept frame bottom, kept bind groups, pooled targets |
+| `cache.{pipeline,program,media,vector,text,draw_reuse,frame_prefix,bind_group,target_pool}.{hits,misses}` | effect pipelines per format, effect programs, media textures (stills and decoded frames), vector textures (shapes, masks, paths, SVG images), text rasters, layer draw reuse, the kept frame bottom, kept bind groups, pooled targets |
 
 **GPU calls without call-site edits.** `engine/third_party/wgpu` is wgpu
 30.0.1's front crate, vendored unchanged except one marked counter line in each
@@ -114,6 +114,21 @@ the cold work is the point.
 | `typing_60` | key | 60 keystrokes into a 96 px SF Pro title, each a revision drawn paused |
 | `open_large_2000` | open | the 2,000-layer project's text parsed, given to a new view, routed, and drawn by a new composer |
 | `import_3d_600k` | frame | the first frame of a lit, shadowed scene placing the 600k-vertex model, then 10 frames turning it |
+| `playback_shapes_200` | frame | 60 playing frames of the synthetic project with 200 animated shape layers (rectangles, ellipses, polygons and stars, some stroked) |
+| `playback_svg_animated` | frame | 60 playing frames of one translating, rotating SVG image (gradient, clip path, blur, 120 motifs); every frame reuses its playback source raster. Notes carry resvg's CPU time for the same document at its device size |
+
+`examples/source_media.rs` is a diagnostic, not a ratcheted bench: it reports
+these counters and GPU-complete wall times for 24 scattered source-monitor
+seeks at 320×180 and a 24-frame 160×90 filmstrip of the public H.264 fixture
+(`PM_SOURCE_BENCH_MEDIA` selects another clip). The app's source workloads are
+gated end to end by `e2e/engine-source-performance.spec.ts`, which records
+this output beside its wall clocks.
+
+```sh
+source engine/env.sh
+CARGO_BUILD_JOBS=2 nice -n 15 cargo build --manifest-path engine/Cargo.toml --release -p pm-perfbench --example source_media
+~/Library/Caches/powermove-engine/bin/pm-electron-lock engine/target/release/examples/source_media
+```
 
 Each bench reports the bench thread's counters (the ratchet's numbers), every
 thread's (informational), and wall-clock per unit including the GPU
@@ -257,8 +272,9 @@ then the next page animation frame**. This is a compositor opportunity, not a
 measurement of physical display scanout. The old `preview:presented` endpoints
 were unequal: today emits synchronously at the end of `GL.render`, after issuing
 WebGL commands but before GPU completion; the engine reports its presentation
-draw, then `PresentedEvents` merges those reports to one bus emission per rAF
-(newest wins). The direct presentation callback can precede the page's WebGPU
+draw, then `PresentedEvents` emits at most one bus event per rAF (a timed
+frame at the first page rAF of a later refresh than the one that drew it).
+The direct presentation callback can precede the page's WebGPU
 completion too. The rig now uses:
 
 - today: `gl.fenceSync` after the final `GL.render` commands, `gl.flush`,
@@ -319,15 +335,30 @@ edit, 13.0 ms before the reuse fix) were wrong and are withdrawn.
 
 Rows that are not frame steps:
 
-- **playing**: `PM.play()` for 3 s on the 500-layer project at 120 fps: frames
-  presented against the 360 a 120 Hz display would show, the gaps between
-  presentations, the page's animation-frame rate (the hidden test window's
+- **playing**: `PM.play()` for 3 s on the 500-layer project at 120 fps
+  (`PM_PERFBENCH_RIG_PLAY_FPS` for another rate): frames presented against the
+  360 a 120 Hz display would show, distinct frame times on the bus, frames
+  missing between the first and last shown (`droppedFrames`), the gaps between
+  presentations (longest, and their standard deviation as judder), the time
+  from `PM.play()` to the bus event of the first frame after the playhead's
+  position at Play (`firstAdvanceMs`; with the trace, also when the display
+  showed it, `display.firstAdvanceShownMs`), the page's animation-frame rate (the hidden test window's
   display link), and per presented frame the page's main thread and the
   engine's compose CPU, GPU-only and span. It retains bus-event counts/gaps and
-  counts engine direct callbacks, GPU draw completions, bus emissions, actual
-  replacements of pending emissions, and pending state at the measurement's
-  boundaries; continuous playback counts completed draws reaching a following
-  rAF, not distinct physical scanouts;
+  counts engine direct callbacks, GPU draw completions, bus emissions,
+  emissions passed over for a newer one, and pending reports at the
+  measurement's boundaries. Presented counts completed draws reaching a
+  following rAF, not physical scanouts. With `PM_PERFBENCH_RIG_TRACE=<file>`
+  the row also writes a per-frame trace there (outside the repository): the
+  page's animation frames, reports and emissions; the viewer presenter's
+  arrivals, draws and drops; the engine's per-frame record (render start, GPU
+  done, sent, the time it shows from; `POWERMOVE_BRIDGE_TRACE`); and viz's
+  presentation feedback for each submitted canvas frame
+  (`e2e/helpers/compositor-timing.ts`: which display frame showed it, and
+  submissions another one superseded). `PM_PERFBENCH_RIG_AUDIO=1` puts the
+  public tone under the project, so the engine's audio device drives the
+  line. `PM_PERFBENCH_RIG_ORDER=engine` runs
+  the engine first, for paired runs that alternate;
 - **open**: the 2,000-layer project saved to a `.pmv` by today's app, then
   opened three times on each path through `PM.openProject`, each in a fresh app
   on a small project: time to its first GPU-complete frame plus next rAF, the

@@ -184,6 +184,9 @@ pub struct Synthetic {
     pub h: u32,
     pub dur: f64,
     pub seed: u32,
+    /// Leaf layers are shape layers (rect, ellipse, polygon, star; some
+    /// stroked) instead of solids.
+    pub shapes: bool,
 }
 
 impl Synthetic {
@@ -196,12 +199,14 @@ impl Synthetic {
             h: 1080,
             dur: 10.0,
             seed: 1,
+            shapes: false,
         }
     }
 }
 
 struct Gen {
     rng: Random,
+    shapes: bool,
     fps: f64,
     dur: f64,
     by_type: std::collections::BTreeMap<String, usize>,
@@ -252,6 +257,25 @@ impl Gen {
                 dur,
             );
             l["name"] = json!(format!("Image {index}"));
+            l
+        } else if self.shapes {
+            let color = *self.rng.pick(&PALETTE);
+            let shape = *self.rng.pick(&["rect", "ellipse", "polygon", "star"]);
+            let stroke = if self.rng.next() < 0.4 {
+                2 + (self.rng.next() * 6.0) as u32
+            } else {
+                0
+            };
+            let mut l = layer(
+                &id,
+                "shape",
+                json!({ "shape": shape, "w": size, "h": size, "color": color, "radius": size / 8,
+                        "stroke": stroke, "strokeColor": "#F2F2F2", "points": 5 }),
+                0.0,
+                0.0,
+                dur,
+            );
+            l["name"] = json!(format!("Shape {index}"));
             l
         } else {
             let color = *self.rng.pick(&PALETTE);
@@ -324,6 +348,7 @@ pub fn synthetic(o: Synthetic) -> Fixture {
     }
     let mut g = Gen {
         rng: Random(o.seed),
+        shapes: o.shapes,
         fps,
         dur,
         by_type: Default::default(),
@@ -445,6 +470,61 @@ pub fn synthetic(o: Synthetic) -> Fixture {
         doc,
         media,
         dir,
+    }
+}
+
+/// One moving, rotating SVG image whose source stays byte-identical: a
+/// gradient card, a clip path, a blurred shape and 60 small motifs.
+pub fn animated_svg() -> Fixture {
+    use std::fmt::Write;
+    let mut art = String::from(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180"><defs><linearGradient id="g"><stop stop-color="#3FCF8E"/><stop offset="1" stop-color="#4C8DFF"/></linearGradient><clipPath id="c"><circle cx="250" cy="90" r="60"/></clipPath><filter id="b"><feGaussianBlur stdDeviation="3"/></filter></defs><rect x="8" y="8" width="304" height="164" rx="24" fill="url(#g)"/><path d="M20 145 L86 32 L154 132 L218 26 L300 145 Z" fill="#F2A541" fill-opacity=".8"/><g clip-path="url(#c)"><rect x="190" width="130" height="180" fill="#FFD23F"/></g><circle cx="162" cy="88" r="39" fill="#EE6352" fill-opacity=".7" filter="url(#b)"/>"##,
+    );
+    for row in 0..6 {
+        for col in 0..10 {
+            let (x, y) = (20 + col * 30, 24 + row * 26);
+            let color = ["#FCE6A7", "#F5A4AE", "#A9E9F0"][(row + col) % 3];
+            write!(
+                art,
+                "<path d=\"M{x} {y} l7 -8 l7 8 l-7 8 Z\" fill=\"{color}\" opacity=\".72\"/><circle cx=\"{x}\" cy=\"{y}\" r=\"3\" fill=\"#243146\"/>"
+            )
+            .expect("append SVG motif");
+        }
+    }
+    art.push_str("</svg>");
+    let dir = TempDir::new("animated-svg");
+    let path = dir.path().join("art.svg");
+    std::fs::write(&path, art).expect("write SVG bench source");
+    let mut image = layer(
+        "animated-svg",
+        "image",
+        json!({ "asset": "art", "fit": "contain", "w": 180, "h": 101.25 }),
+        320.0,
+        180.0,
+        10.0,
+    );
+    set(&mut image, "scale.x", json!(125));
+    set(&mut image, "scale.y", json!(125));
+    set(
+        &mut image,
+        "position.x",
+        keys(json!(320), &[(0.0, json!(260)), (3.0, json!(380))], EASES[0]),
+    );
+    set(
+        &mut image,
+        "rotation",
+        keys(json!(0), &[(0.0, json!(-12)), (3.0, json!(18))], EASES[0]),
+    );
+    let mut doc = project(640, 360, 30.0, 10.0, solid_fill("#141821"), vec![image]);
+    doc["assets"]["art"] = json!({
+        "id": "art", "name": "art.svg", "kind": "image", "format": "svg",
+        "w": 320, "h": 180, "dur": 0, "fps": 30, "persisted": true
+    });
+    Fixture {
+        doc,
+        media: std::collections::BTreeMap::from([("art".into(), path)]),
+        summary: json!({ "source": "animated SVG", "size": [320, 180], "box": [180, 101.25], "motion": "translate and rotate" }),
+        dir: Some(dir),
     }
 }
 

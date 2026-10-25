@@ -519,6 +519,7 @@ impl MeshRenderer {
     }
 
     /// Renders a mesh layer into the composition's working target in GL row order.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         device: &wgpu::Device,

@@ -5,7 +5,7 @@
 // every float is finite (no NaN or Infinity).
 
 /** The protocol build id (`pm_protocol::version::SOURCE_BUILD`): draft contracts need equal ids. */
-export const PROTOCOL_BUILD = "protocol-fcb04a1bcb4ad9fa";
+export const PROTOCOL_BUILD = "protocol-53df5426f16e9d93";
 
 export type { AgentFrame } from "./AgentFrame";
 export type { AgentFrameOutcome } from "./AgentFrameOutcome";
@@ -38,6 +38,7 @@ export type { BlenderStatus } from "./BlenderStatus";
 export type { BlenderSurface } from "./BlenderSurface";
 export type { BlenderThrottle } from "./BlenderThrottle";
 export type { BlenderUse } from "./BlenderUse";
+export type { BrowserRenditionFormat } from "./BrowserRenditionFormat";
 export type { ByteSize } from "./ByteSize";
 export type { Bytes } from "./Bytes";
 export type { CacheKind } from "./CacheKind";
@@ -260,15 +261,15 @@ export type { SnapshotRequest } from "./SnapshotRequest";
 export type { SnapshotResult } from "./SnapshotResult";
 export type { SnapshotTarget } from "./SnapshotTarget";
 export type { SnapshotViewer } from "./SnapshotViewer";
+export type { SourceColor } from "./SourceColor";
+export type { SourceFit } from "./SourceFit";
+export type { SourceVideoFrame } from "./SourceVideoFrame";
 export type { StripLevels } from "./StripLevels";
 export type { SubmitJob } from "./SubmitJob";
 export type { SurfaceDescriptor } from "./SurfaceDescriptor";
 export type { SurfaceFormat } from "./SurfaceFormat";
 export type { SurfacePool } from "./SurfacePool";
 export type { SurfaceRequest } from "./SurfaceRequest";
-export type { SvgRasterKey } from "./SvgRasterKey";
-export type { SvgRasterPixels } from "./SvgRasterPixels";
-export type { SvgRasterRequest } from "./SvgRasterRequest";
 export type { TickRange } from "./TickRange";
 export type { Ticks } from "./Ticks";
 export type { ToneMapping3d } from "./ToneMapping3d";

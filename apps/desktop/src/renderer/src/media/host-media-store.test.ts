@@ -384,11 +384,11 @@ describe('import decisions', () => {
   it('binds copied assets by key and hash and linked assets by link', () => {
     const link = { path: '/Media/a.mov', hash: 'b'.repeat(64), size: 3 };
     const bindings = bindingsFor({ assets: {
-      a1: { id: 'a1', storageKey: 'media:v2:1', contentHash: 'a'.repeat(64) },
-      a2: { id: 'a2', storage: 'linked', link },
-      a3: { id: 'a3', storageKey: 'media:v2:3' }
+      a1: { id: 'a1', storageKey: 'media:v2:1', contentHash: 'a'.repeat(64), rendition: true },
+      a2: { id: 'a2', storage: 'linked', link, rendition: true },
+      a3: { id: 'a3', storageKey: 'media:v2:3', rendition: 'true' }
     } }, (key) => (key === 'media:v2:3' ? { key, hash: 'c'.repeat(64), size: 1, type: '', revision: 'r', at: 0 } : null));
-    expect(bindings).toEqual({ a1: { key: 'media:v2:1', hash: 'a'.repeat(64) }, a2: { link }, a3: { key: 'media:v2:3', hash: 'c'.repeat(64) } });
+    expect(bindings).toEqual({ a1: { key: 'media:v2:1', hash: 'a'.repeat(64), rendition: true }, a2: { link, rendition: true }, a3: { key: 'media:v2:3', hash: 'c'.repeat(64) } });
   });
 
   it('hashes a blob in slices to the same digest', async () => {

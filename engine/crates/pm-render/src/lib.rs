@@ -63,7 +63,7 @@ pub use effects::{Effects, builtin_definitions};
 pub use error::{LayerFailure, RenderError};
 pub use renderer::{
     CommandBracket, Frame, HOST_COMPILE_WAITS, LayerPixels, LayerQuad, LayerRaster,
-    MediaPreparation, PassThrough, Rendered, Renderer, SnapshotRows, SvgWaiting, TextRaster,
+    MediaPreparation, PassThrough, Rendered, Renderer, SnapshotRows, TextRaster,
 };
 pub use request::{OutputKind, RenderRequest};
 pub use shader_layers::all_builtin_definitions;

@@ -40,7 +40,7 @@ mod encode_gpu;
 mod fallback;
 pub mod gate;
 mod qos;
-mod svg;
+mod source;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -670,13 +670,13 @@ impl JobService for JobEngineService {
                 "This engine only probes media.",
             )));
         }
-        let JobSpec::Export { .. } = &submit.spec else {
+        if matches!(&submit.spec, JobSpec::GenerateProxy { .. }) {
             return Err(Box::new(job_error(
                 &job,
                 ErrorCode::Unsupported,
                 "Proxy generation is not in the job engine yet (Phase 4a).",
             )));
-        };
+        }
         let Some(document) = document else {
             return Err(Box::new(job_error(
                 &job,
@@ -999,7 +999,16 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
         gate: shared.gate.clone(),
         lane,
     };
-    let mut renderer: Option<Renderer> = None;
+    // The user lane is about to serve source preparation and user jobs. Its
+    // Metal device and pipelines take far longer than one source frame on a
+    // cold process, so build them on this lane as soon as the job runtime
+    // starts. Other lanes stay lazy; a transient device failure is retried
+    // when actual work arrives.
+    let mut renderer = if lane == USER_LANE {
+        shared.renderer().ok()
+    } else {
+        None
+    };
     let mut definitions = definitions::LaneDefinitions::default();
     while let Some(work) = next_work(shared, lane) {
         let export_qos = match &work {
@@ -1011,7 +1020,9 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
         let _qos_scope = export_qos.as_ref().map(|qos| qos.enter());
         if renderer.is_none() {
             match shared.renderer() {
-                Ok(r) => renderer = Some(r),
+                Ok(r) => {
+                    renderer = Some(r);
+                }
                 Err(message) => {
                     fail_work(shared, work, ErrorCode::DeviceLost, &message);
                     continue;
@@ -1048,17 +1059,6 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
         // for: the requesting port's window, or the window main opened the
         // session for (an export).
         r.set_text_seed_scope(work.seed_scope());
-        // Level 1 SVG rasters come from the document's window through host
-        // services (decision S1); job frames (exports, agent frames) never
-        // draw a stand-in for one.
-        r.set_svg_wait(true);
-        let document = match &work {
-            Work::Frames { document, .. } | Work::Export { document, .. } => document,
-        };
-        r.set_svg_source(Some(Arc::new(svg::HostSvgRasters::new(
-            shared.clone(),
-            document,
-        ))));
         match work {
             Work::Frames {
                 port,
@@ -1099,7 +1099,6 @@ fn run_lane(shared: &Arc<Shared>, lane: usize) {
                 );
             }
         }
-        r.set_svg_source(None);
         // Keep the pool small between work items (lease pressure).
         r.trim(64 << 20);
     }
@@ -1445,6 +1444,12 @@ fn run_job(
     document: &JobDocument,
     cancel: &Arc<AtomicBool>,
 ) {
+    if !matches!(&submit.spec, JobSpec::Export { .. }) {
+        source::run(
+            shared, renderer, &gate.lane, job, host, submit, document, cancel,
+        );
+        return;
+    }
     let JobSpec::Export {
         composition,
         settings,

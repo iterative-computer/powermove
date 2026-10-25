@@ -38,11 +38,26 @@ for all of that.
 `SnapshotRequest { composition, time (ticks), outputSize, target, pixels,
 class, viewSeq, viewer?, waitMs, blenderWaitMs?, captionsHidden?, uploaded }`:
 
-- `target`: `frame { motionBlurSamples, background, draft3d }` or
+- `target`: `frame { motionBlurSamples, background, draft3d }`,
+  `source { asset, fit, color }`, or
   `layer { layer, scale, crop, content? }`. `content` is the layer object
   the caller passed, as canonical JSON (at most 4 MiB), when it is not the
   document's own (a raster wrapper's modified copy): the engine draws it in
   the composition in place of layer `layer`.
+- A `source` target reads the asset at non-negative source `time`, independent
+  of the composition, captions, layers, effects, and project color settings.
+  `fit` is `stretch`, `contain`, or `cover`; unused pixels are transparent.
+  `color: display` reads the original source through the session-scoped
+  `sourceRead` capability, and converts
+  video with the native colour reading. It preserves authored source content
+  without reproducing browser colour-conversion errors.
+  `interpreted` reads the frozen original and applies its source interpretation.
+  `compositor` supplies tagged decoded video planes or native-converted sRGB
+  for the source monitor's generated video track.
+  Source SVGs use the Chromium raster exchange below at the final output size,
+  with a source-fit key preserving the fractional fitted rectangle.
+  Missing sources fail by name; no composition or
+  legacy frame substitutes for them.
 - `pixels`: the RGBA8 encoding of the result, rows top-down: `opaque`
   (premultiplied over black, alpha 255: today's `renderOpaqueFrame` and the
   input of `toDataURL('image/jpeg')`), `premultiplied`, `straight` (canvas
@@ -102,6 +117,9 @@ exclusively (mode 0600, `/pm.` and 24 hex digits, 96 random bits). Main maps
 it once (pm-bridge `takePixels`), which unlinks it; the engine unlinks
 segments nobody took after a minute and at shutdown. Electron's IPC carries
 the buffer to the renderer in shared memory again (Mojo big buffers).
+Coded source planes are packed once, from the decoder straight into the
+segment (`shm::publish_with`), in the WebCodecs buffer layout the window's
+`VideoFrame` reads.
 
 ### Invariants
 
@@ -152,6 +170,32 @@ the buffer to the renderer in shared memory again (Mojo big buffers).
    `render.snapshot` returns `''` only then, and throws today's error for
    `blenderFailed` as today's capture does.
 
+### Source request cancellation
+
+The asynchronous IPC request may carry a window-scoped `requestId`.
+`engine:snapshot-cancel` cancels only that sender's request, forwarded as the
+protocol's existing `Message::Cancel` for the native request id. Queued
+snapshots are removed and answered `cancelled`. A decode or readback already
+executing finishes before the render thread handles the next command. Source
+monitor seeks cancel the previous frame and reject stale completions before
+painting; closing the monitor cancels its frame and audio voice.
+
+The renderer source service keeps at most 64 MiB of completed frame pixels,
+keyed by project, source content identity and interpretation, source time,
+size, fit, and color. Replacing the source changes the identity; loading a
+project clears frames and poster URLs. Native decoding uses the existing
+renderer media cache.
+
+### Source monitor audio
+
+Session-bound `AudioMessage::SourceMonitor { asset, time, playing, generation }`
+controls an isolated engine source voice. `asset: null` closes it.
+`SourceStatus { asset, time, playing, generation, levels, error? }` reports the
+heard time, channel levels, natural end, and named failures. The renderer
+ignores older generations. Silent video uses an engine host clock; sources
+with audio use the engine output clock. The source monitor and composition
+playback remain mutually exclusive in the existing viewer controls.
+
 ### Sync snapshots the window's session cannot serve
 
 A sync snapshot blocks the renderer, so the window's own session serves it
@@ -188,52 +232,10 @@ window declined the last reason is the answer (`notHeadlessRenderable`).
 One answer per ask, 30 s per ask, 32 asks in flight, segments the engine
 does not take unlinked after a minute.
 
-### SVG rasters (decision S1)
+### SVG images
 
-Level 1 SVG images are Chromium's rasters of today's buckets, drawn by the
-renderer that owns the document (`engine-connection/svg-rasters.ts`) and
-composited by the engine (docs/engine/vector.md, "Level 1: Chromium's raster
-of today's bucket"). Module `pm_protocol::svg_raster`; additive members of
-the messages above:
-
-| Message | Direction | Meaning |
-|---|---|---|
-| `CompatMessage::SvgRequests { requests }` | interactive engine → renderer (session-bound) | Buckets a viewer frame drew without: `SvgRasterRequest { key: { content, width, height }, asset }`, at most 64 per message. `content` is the lowercase SHA-256 of the SVG file's bytes |
-| `CompatMessage::SvgPixels { key, row, rows, data }` | renderer → interactive engine | One band (at most 8 MiB) of premultiplied RGBA8, top-down: the bytes today's `texImage2D` of the bucket canvas stores. Accepted from any session of the render thread, and kept for all of them |
-| `CompatMessage::SvgFailed { key, reason, message }` | renderer → interactive engine | `missing`, `stale` (the window's bytes hash differently), `decode`, `size`, `unavailable`. A viewer frame waiting for the bucket is drawn at once without that image (as is one whose ask had no answer within 5 s); asked again after 5 s while a view draws without it |
-| `SnapshotOutcome::NeedsRenderer.svg` | engine → main → renderer | Buckets a snapshot needs; the renderer posts them (`SvgPixels`) and asks again naming `svg:<content>:<w>x<h>` in `uploaded`; the engine waits for those bands. Absent in older answers (empty) |
-| `CompatSource::SvgImage`, `CompatFrameRequest.svg` | job engine → host | An export or agent frame's bucket (`svg` is set exactly when the source is `svgImage`). The answer is a `CompatFrame` keyed `<content>:<w>x<h>`, `rgba8Premultiplied`, the bucket's size, origin 0, scale 1. With no window that has the document open: `notHeadlessRenderable`, "SVG images are drawn by the editor window that has this project open; open the project in a window to export it." |
-
-The renderer draws a request only from its own asset whose decoded bytes
-hash to `content`. The app viewer, snapshots and job frames all wait for
-that exact bucket. The viewer retains the frame in its render-ahead schedule
-while its renderer answers; it never publishes the old bucket under a new
-frame's revision. Other sessions and the audio clock continue running. TypeScript: `EngineSnapshotReply.needsRenderer`
-gains `svg?: SvgRasterRequest[]`; `RenderTransportOptions.svgRasters`
-(`TransportSvgRasters`: `drawSync`, `draw`, `post`); `SessionOptions.svgRasters`;
-`PM.EngineSvgRasters` (`SvgRasters`, with `stats`).
-
-#### SVG material-map uploads
-
-`SvgRasterKey.texture?: true` identifies three.js's `new Texture(img)`
-SVG upload, distinct from a 2D canvas bucket with the same content and
-size. It carries straight RGBA8 after flipY, in texture-storage order
-(bottom row first); the renderer uses no color conversion or alpha
-premultiplication. Maps keep intrinsic size up to three.js's 16,384 px
-limit, with its canvas resize above that limit. Canvas buckets keep their
-8,192 px bound. SVG input assembly and shared-memory transfers are bounded
-to 1 GiB so one full-size map fits; output snapshots retain their 512 MiB
-cap. The flag is omitted for canvas buckets (`false` is refused
-to keep key identity canonical).
-
-Snapshot upload keys append `:texture`, as do job `CompatFrame` keys;
-job answers use `rgba8Straight`. Viewer SVG-map misses return
-`SvgRastersPending` and keep the previous frame on screen while the
-existing `SvgRequests`/`SvgPixels` exchange supplies them. The presenter
-never presents a frame with an absent model in place of the missing map.
-Map textures then receive the native 3D pass's usual mip chain. The same
-request kind is supported by captured `RasterDir` inputs (`-texture`
-filename suffix); pm-cli counts its resvg map raster as an approximation.
+SVG images, 3D SVG material maps included, are drawn natively by the
+engine at output resolution; no SVG pixels cross the transport.
 
 ### Depth and object-id surfaces
 
@@ -400,7 +402,6 @@ TypeScript and rebuild their addons when this lands.
   the 3D lane's.
 - **Compatibility rasters in frames**: the store holds them; pm-render does
   not draw a layer from them yet, so `needsRenderer.compat` is always empty.
-  (Level 1 SVG rasters are drawn: "SVG rasters" above.)
 - **The job engine's fonts**: the job engine has no font service yet, and
   pm-export gates exports with the fonts-less capability check, so text
   exports still route as before (export lane).

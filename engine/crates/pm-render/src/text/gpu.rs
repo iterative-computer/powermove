@@ -104,9 +104,37 @@ struct DirectSource {
     translation: [f64; 2],
 }
 
+/// Coverage storage for one atlas page. Each page recorded in one encoder
+/// needs its own: queue writes before the submit would otherwise replace an
+/// earlier page's inputs.
+#[derive(Default)]
+struct AreaSlot {
+    inputs: coverage::InputScratch,
+    values: Option<wgpu::Buffer>,
+}
+
+impl AreaSlot {
+    fn bytes(&self) -> u64 {
+        self.inputs.capacity_bytes() + self.values.as_ref().map_or(0, wgpu::Buffer::size)
+    }
+
+    fn values(&mut self, device: &wgpu::Device, bytes: u64) -> &wgpu::Buffer {
+        let needed = bytes.max(16).next_power_of_two();
+        if self.values.as_ref().is_none_or(|b| b.size() < needed) {
+            self.values = Some(coverage::buffer(device, needed));
+        }
+        self.values.as_ref().expect("coverage values allocated")
+    }
+}
+
+/// Coverage storage kept across submitted frames.
+const AREA_KEEP_BYTES: u64 = 8 * 1024 * 1024;
+
 pub struct TextGpu {
     area: AreaCoverage,
     batch: coverage::Batch,
+    area_slots: Vec<AreaSlot>,
+    area_cursor: usize,
     cpu: pm_text::render::cpu::Rasterizer,
     coverage: Coverage,
     item_layout: wgpu::BindGroupLayout,
@@ -535,6 +563,8 @@ impl TextGpu {
         TextGpu {
             area: AreaCoverage::new(device),
             batch: coverage::Batch::default(),
+            area_slots: Vec::new(),
+            area_cursor: 0,
             cpu: pm_text::render::cpu::Rasterizer::new(),
             coverage: Coverage::Auto,
             item_layout,
@@ -598,8 +628,15 @@ impl TextGpu {
     /// Marks a new submitted frame so area buffers can be reused without
     /// aliasing two text pages recorded in the same command encoder.
     pub fn begin_frame(&mut self) {
-        self.area.begin_frame();
-        self.batch.trim_scratch(8 * 1024 * 1024);
+        self.area_cursor = 0;
+        let mut kept = 0;
+        self.area_slots.retain(|slot| {
+            kept += slot.bytes();
+            kept <= AREA_KEEP_BYTES
+        });
+        if self.batch.capacity_bytes() > AREA_KEEP_BYTES {
+            self.batch = coverage::Batch::default();
+        }
         for target in self.retired.drain(..) {
             self.raster_pool.give(target);
         }
@@ -860,16 +897,31 @@ impl TextGpu {
                 let entries = area_items(scene, atlas, page, self.cpu.coverage_cache())?;
                 let items: Vec<_> = entries
                     .iter()
-                    .map(|entry| coverage::Item {
+                    .map(|entry| coverage::TransformedItem {
                         path: &entry.path,
-                        translation: entry.translation,
+                        transform: Affine::translate((entry.translation[0], entry.translation[1])),
                         bounds: entry.bounds,
                         at: entry.at,
                     })
                     .collect();
-                self.batch.rebuild(&items);
-                self.area
-                    .encode_reusing(device, queue, encoder, &self.batch, Some(&target.view));
+                self.batch.reset_transformed(&items);
+                if self.area_cursor == self.area_slots.len() {
+                    self.area_slots.push(AreaSlot::default());
+                }
+                let slot = &mut self.area_slots[self.area_cursor];
+                self.area_cursor += 1;
+                let values = slot.values(device, self.batch.bytes()).clone();
+                self.area.encode_pooled(
+                    device,
+                    queue,
+                    encoder,
+                    &self.batch,
+                    coverage::CoverageOutput {
+                        values: &values,
+                        page: Some(&target.view),
+                    },
+                    &mut slot.inputs,
+                )?;
             } else {
                 let (pw, ph, data) = self.cpu.render_page_r8(scene, atlas, page);
                 self.stats.cpu_pages += 1;

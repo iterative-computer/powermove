@@ -198,7 +198,11 @@ records separate raw float and mapped sRGB8 results.
 - `text_raster` checks requested raster geometry and reference quality on
   captured plain text, captions, color glyphs and transformed text.
 - `text_corpus` checks composed text, with the original projects and the
-  text-isolated witnesses both counted.
+  text-isolated witnesses both counted. Non-text pixels take G-C2's f64
+  proof. Text the reference cannot model yet fails unless it is a measured
+  owned pending entry (`fixtures/text-corpus-pending.json`, owners L4/L6),
+  admitted only when the same authored text passes the outline reference in
+  isolation or every pixel over today's 2 CV bar lies in a mask band.
 - `text_gpu`, `text_colors`, `text_level2` and `text_level2_semantics` check
   paint precision, color semantics, transformations and interaction.
 - `pm-text`'s bitmap test holds color-glyph ink to the painted pixels at

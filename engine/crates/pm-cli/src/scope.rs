@@ -60,9 +60,6 @@ pub struct Options {
     pub output: PathBuf,
     /// The editor's display scale factor (`crate::fonts`).
     pub ui_scale: Option<f32>,
-    /// With no Chromium helper, draw level 1 SVG images with resvg
-    /// (`crate::angle::configure_svg`).
-    pub approximate_svg: bool,
     /// A definition set snapshot (`render --definitions`), else the
     /// built-in definitions.
     pub definitions: Option<PathBuf>,
@@ -507,8 +504,8 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
         };
         // The same setup as `render` (crate::render::headless_renderer): the
         // desktop's shader pins read and honored, pinned or unverified user
-        // GLSL through the helper's Chromium runner, level 1 SVG images
-        // through the same Chromium, and the --definitions snapshot.
+        // GLSL through the helper's Chromium runner, and the --definitions
+        // snapshot.
         let crate::render::Headless {
             mut renderer,
             angle_host,
@@ -517,7 +514,6 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
             document: doc,
             composition: &loaded.composition,
             ui_scale: options.ui_scale,
-            approximate_svg: options.approximate_svg,
             definitions: options.definitions.as_deref(),
         })?;
         let headless =
@@ -555,12 +551,6 @@ pub fn run(options: &Options) -> Result<Stats, crate::render::Failure> {
                     other.to_string(),
                 )),
             })?;
-        if renderer.svg_approximated() > 0 {
-            eprintln!(
-                "{}",
-                crate::render::approximate_svg_notice(renderer.svg_approximated())
-            );
-        }
         if !frame.failures.is_empty() {
             return Err(Failure::Failed(format!(
                 "layer failures: {:?}",

@@ -93,9 +93,9 @@ pass") into the full pass. The plan stays the authority.
   (transparent black). Rows upload top row first, sRGB maps as
   `Rgba8UnormSrgb`, and mipmaps are box filters (in linear light for sRGB),
   equal to Chromium's `generateMipmap` (Phase 3c round 2, below). Probes
-  are cached per file version (`Textures::probe`). Nothing a level 1 image
-  layer draws is an unsupported map; SVG maps (an image element rasterized
-  by Chromium) are the one map class still listed.
+  are cached per file version (`Textures::probe`). SVG material maps are
+  painted natively at the map size; missing or broken files follow the
+  missing-texture rule.
 - **Missing textures** draw without the map and add `Missing texture: <id>`
   to `Scene3d::warnings`, as today's texture getter returns nothing for an
   image without a bitmap. That covers an image asset that is offline (the
@@ -187,7 +187,7 @@ write, and idempotent reopen. It fails before this fix.
 - `unsupported` lists, for 3D: imported glTF models, recipe parts, unknown
   primitives, unknown light types, map images outside the drawn still
   classes (probed when the media can be opened, by the recorded container
-  otherwise, as for image layers), SVG maps, model groups, and Blender
+  otherwise, as for image layers), model groups, and Blender
   rendering. The objects and lights inside a legacy scene layer meet the
   same checks (`scene3d::check_legacy_scene`), so a routing decision holds
   at every frame (`the_static_check_looks_inside_legacy_scenes`: every
@@ -347,7 +347,7 @@ Engine presenter and transport:
   pixels).
 - `pm-protocol/src/frame.rs` (`ChromeSelection`, `DepthIdSurface`
   encoding, `Scene3dMeta`, round 11 `ViewerState.surface_epoch`),
-  `preview.rs` (new), `blender.rs`, `snapshot.rs`, `svg_raster.rs`,
+  `preview.rs` (new), `blender.rs`, `snapshot.rs`,
   `envelope.rs`, `interop.rs`, `lib.rs`, `samples.rs`; wire fixtures
   `event-frame`, `event-previewControl`, `event-previewStatus`,
   `request-blenderRender`, `response-frame`; the generated
@@ -365,7 +365,7 @@ Renderer outside `scene3d/`:
 - `pm-render/src/renderer.rs`, `renderer/chrome.rs` (new: viewport chrome
   planes), `plan.rs`, `exec.rs`, `capability.rs` (Scene3d refusals
   removed), `media.rs` and `assets.rs` (level 1 map bitmaps),
-  `shader_layers/plan.rs`, `vector/svg_rasters.rs`, `lib.rs`,
+  `shader_layers/plan.rs`, `vector/svg.rs`, `lib.rs`,
   `blender/mod.rs`, `blender/snapshot.rs`, `blender/snapshot_gltf.rs`
   (new); `pm-export/src/blender.rs`.
 - `pm-media/src/image/compat.rs`, `image/compat_tiff.rs` (round 8: TIFF
@@ -386,7 +386,7 @@ Renderer outside `scene3d/`:
   `threed_maps.rs`, `viewport_chrome.rs`, `support/mod.rs`; fixtures
   `scene3d-cases.json`, `short-normal-programs.json`,
   `stills2/three-maps.json`; `pm-render/tools/blender-png/{page,run}.ts`,
-  `tools/svg-rasters/{page,run}.ts`, `tools/three-ref/cases.ts`;
+  `tools/three-ref/cases.ts`;
   `engine/corpus/src/media.ts`, `corpus/src/projects/space.ts`;
   `engine/Cargo.lock`.
 
@@ -402,9 +402,9 @@ App outside the lane's folders:
   `native-scene-limits.test.ts`.
 - `renderer/src/engine-connection/install.ts`, `session.ts`,
   `preview.ts` (new: Blender preview API), `blender-png.ts` (new),
-  `scene-metadata.ts` (new), `svg-rasters.ts`, `render-transport.ts`;
+  `scene-metadata.ts` (new), `render-transport.ts`;
   tests `preview.test.ts`, `blender-png.test.ts`,
-  `scene-metadata.test.ts`, `svg-rasters.test.ts`,
+  `scene-metadata.test.ts`,
   `engine-connection.test.ts`.
 - `main/engine/blender.ts`, `compat-frames.ts`, `native-engine.ts`,
   `snapshots.ts` and their tests; `main/media-store/service.ts` (round 8:
@@ -778,7 +778,7 @@ original JavaScript `ZodError` object.
 Merged the integration branch, the bridge branch, and the accepted SVG
 compatibility branch (it was not yet in the integration ref when this lane
 started). The three SVG merge conflicts keep both draw reuse/performance
-state and SVG raster delivery. Protocol TypeScript and both addons were
+state and native SVG material maps. Protocol TypeScript and both addons were
 regenerated/rebuilt, as was pm-wasm.
 
 Imported-model Blender snapshots now use pm-geom3d's CPU pose for vertices
@@ -1596,8 +1596,8 @@ production pixel.
 Transient render failures: `render_failed` (round 10) still makes a
 deterministic failure (an invalid request such as the scene budget
 refusal, a missing composition, a stopped job watchdog) wait for the next
-change. Device, readback, GPU, media, fallback-runner and SVG-raster
-errors now redraw the paused frame after 100 ms, 500 ms and 2 s first
+change. Device, readback, GPU, media and fallback-runner errors now
+redraw the paused frame after 100 ms, 500 ms and 2 s first
 (`RENDER_RETRY_US`), counted per frame (revision and view sequence).
 
 Merge with feat/native-engine (svgbucket V1 canvas, level 2 text): the

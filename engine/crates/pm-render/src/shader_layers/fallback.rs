@@ -452,10 +452,7 @@ impl Bands {
                 vec![false; h as usize],
             )
         };
-        let entry = self
-            .partial
-            .entry(band.key.clone())
-            .or_insert_with(|| fresh());
+        let entry = self.partial.entry(band.key.clone()).or_insert_with(&fresh);
         if entry.0.width != w || entry.0.height != h || entry.0.rgba32f.is_some() != float32 {
             *entry = fresh();
         }

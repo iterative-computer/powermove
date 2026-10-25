@@ -58,7 +58,7 @@
     "project-replace": 11,
     "touch": 57,
     "touch.paths": 6,
-    "doc.write": 15,
+    "doc.write": 16,
     "doc.touched": 7,
     "anim.touch": 28,
     "shader-uniforms": 9,
@@ -663,6 +663,12 @@
       "code": "PM.touch()"
     },
     {
+      "site": "apps/desktop/src/renderer/src/engine-connection/source-posters.ts:20",
+      "class": "doc.write",
+      "scope": "persistSourcePoster",
+      "code": "writeDocument(PM, [['assets', asset.id, 'poster']], () => { meta.poster = true; })"
+    },
+    {
       "site": "apps/desktop/src/renderer/src/engine-doc/edits.ts:268",
       "class": "doc.touched",
       "scope": "NativeEdits.ask",
@@ -765,31 +771,31 @@
       "code": "PM.hist.do('Export settings', () => { PM.proj.exportDefaults = storedExportDefaults(next, PM.proj.exportDefaults); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1365",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1368",
       "class": "project-swap",
       "scope": "install > switchProject",
       "code": "PM.proj = live ? live.project : prepared ? p : hydrate(p)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1372",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1375",
       "class": "doc.write",
       "scope": "install > switchProject",
       "code": "writeDocument(PM, [['name']], () => { PM.proj.name = name; })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1750",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1753",
       "class": "asset-metadata",
       "scope": "install > importFiles",
       "code": "meta.folder = target"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1751",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1754",
       "class": "doc.touched",
       "scope": "install > importFiles",
       "code": "touchedDocument(PM, [['assets', result.asset.id, 'folder']])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1762",
+      "site": "apps/desktop/src/renderer/src/legacy/app.ts:1765",
       "class": "home-composition-match",
       "scope": "install > importFiles",
       "code": "writeDocument(targetProject === PM.proj ? PM : null, [['w'], ['h'], ['fps'], ['fpsRational'], ['exportDefaults'], ['dur'], ['work']], () ..."
@@ -1755,73 +1761,73 @@
       "code": "ps[name] = { name, label: ct.label, control: ct.type === 'slider' ? 'num' : ct.type, value: ct.def, min: ct.min, max: ct.max, options: ct..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1101",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1102",
       "class": "doc.write",
       "scope": "install > ingestAsset",
       "code": "writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = { id, ...identity, persisted, ...(existingMeta?.folder ? { folder: exist..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1118",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1119",
       "class": "touch",
       "scope": "install > ingestAsset",
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1145",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1151",
       "class": "doc.write",
       "scope": "install > recoverSourceAsset",
       "code": "writeDocument(PM, [['assets', meta.id]], () => Object.assign(meta, assetIdentity(meta.id, file, imported.kind, imported.prepared, importe..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1150",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1156",
       "class": "touch.paths",
       "scope": "install > recoverSourceAsset",
       "code": "PM.touch([['assets', meta.id]])"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1186",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1192",
       "class": "touch",
       "scope": "install > importBatch",
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1250",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1256",
       "class": "doc.write",
       "scope": "install > replace > applyVersion",
       "code": "writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = JSON.parse(JSON.stringify(meta)); })"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1259",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1265",
       "class": "touch",
       "scope": "install > replace > applyVersion",
       "code": "PM.touch()"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1273",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1279",
       "class": "history.external",
       "scope": "install > replace",
       "code": "PM.hist.external( `Replace ${currentMeta.name || 'media'}`, () => applyVersion(previousMeta, previousRuntime, previousPoster), () => appl..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1452",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1464",
       "class": "touch.paths",
       "scope": "install > restoreProject",
       "code": "PM.touch(metadataPaths)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1464",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1476",
       "class": "touch.paths",
       "scope": "install > restoreProject",
       "code": "PM.touch?.(metadataPaths)"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1492",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1505",
       "class": "touch.paths",
       "scope": "install > restoreProject > setTimeout(callback) > (anonymous)",
       "code": "PM.touch(available.map(({ id }: any) => ['assets', id, 'poster']))"
     },
     {
-      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1512",
+      "site": "apps/desktop/src/renderer/src/legacy/gl/raster.ts:1525",
       "class": "doc.write",
       "scope": "install > gradient",
       "code": "writeDocument(PM, [['assets', id]], () => { PM.proj.assets[id] = { id, name, kind: 'image', w: 1280, h: 720 }; })"
@@ -2007,37 +2013,37 @@
       "code": "PM.hist.do('Interpret Footage', () => applyChange(record, change))"
     },
     {
-      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:340",
+      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:343",
       "class": "hist.do",
       "scope": "deleteAssets",
       "code": "PM.hist.do('Delete media', () => { const ids: string[] = []; for (const asset of liveItems) ids.push(...PM.MediaImport.removeAsset(projec..."
     },
     {
-      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:677",
+      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:680",
       "class": "hist.do",
       "scope": "folderEdit",
       "code": "PM.hist.do(label, () => edit(PM.proj))"
     },
     {
-      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:683",
+      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:686",
       "class": "hist.do",
       "scope": "newFolder",
       "code": "folderEdit('New folder', (project) => createFolder(project, 'Untitled Folder', parent))"
     },
     {
-      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:711",
+      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:714",
       "class": "hist.do",
       "scope": "commitRename",
       "code": "folderEdit('Rename folder', (project) => renameFolder(project, folder.id, value))"
     },
     {
-      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:715",
+      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:718",
       "class": "hist.do",
       "scope": "removeFolder",
       "code": "folderEdit('Delete folder', (project) => deleteFolder(project, folder.id))"
     },
     {
-      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:722",
+      "site": "apps/desktop/src/renderer/src/panels/AssetsPanel.svelte:725",
       "class": "hist.do",
       "scope": "moveInto",
       "code": "folderEdit('Move to folder', (project) => moveItems(project, items, target))"

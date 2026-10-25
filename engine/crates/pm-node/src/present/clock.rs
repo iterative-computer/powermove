@@ -18,8 +18,10 @@
 use pm_protocol::clock::{ClockSample, SeekMode, TransportCommand, TransportState};
 use pm_protocol::common::{HostMicros, PlaybackRate, Seq, TICKS_PER_SECOND, TickRange, Ticks};
 
-/// How long after a play command the first frame is due: enough to render
-/// and deliver a few frames before the line starts moving.
+/// How long after a play command the first frame is due when the viewer's
+/// timing is unknown (no vsync hint with its display latency yet), and
+/// after a seek while playing on the host clock. A Play otherwise starts at
+/// the first refresh its first new frame can make (`Thread::start_time`).
 pub const PREROLL_US: i64 = 50_000;
 
 /// Samples go out at least this often while playing (contract 6: 4 a second).
@@ -115,6 +117,19 @@ impl TransportClock {
             return true;
         }
         let new_run = self.followed != Some(sample.epoch) || !self.is_playing();
+        // The audio's first sample of a run scheduled on this line (one
+        // start for the picture and the sound): adopt its epoch, and keep
+        // the frames already rendered for the line.
+        if new_run
+            && self.is_playing()
+            && self.followed.is_none()
+            && sample.rate == self.rate
+            && (self.wrap(self.unwrapped_at(host)) - media).abs() <= TICKS_PER_SECOND / 10_000
+        {
+            self.followed = Some(sample.epoch);
+            self.device = (sample.output_latency_us, sample.sample_rate);
+            return false;
+        }
         let unwrapped = match sample.loop_range {
             Some(range) if !new_run && range.is_valid() => {
                 // The same run: keep the frame timeline unwrapped across passes.
@@ -295,23 +310,29 @@ impl TransportClock {
         self.epoch = self.epoch.wrapping_add(1).max(1);
     }
 
+    /// Plays at `rate` from where the line is at host µs `now`, the run's
+    /// first media shown at host µs `start` (at or after `now`).
+    pub fn play_at(&mut self, rate: PlaybackRate, now: i64, start: i64) {
+        let media = self.media_at(now);
+        self.anchor_media = media;
+        self.run_start = media;
+        self.followed = None;
+        self.anchor_host = start.max(now);
+        self.rate = rate;
+        self.state = if rate == PlaybackRate::NORMAL {
+            TransportState::Playing
+        } else {
+            TransportState::Shuttling
+        };
+    }
+
     /// Applies a transport command at host µs `now`. Returns whether the
     /// line changed (a sample is due).
     pub fn apply(&mut self, command: TransportCommand, now: i64) -> bool {
         self.around = None;
         match command {
             TransportCommand::Play { rate } if rate.num != 0 && rate.den > 0 => {
-                let media = self.media_at(now);
-                self.anchor_media = media;
-                self.run_start = media;
-                self.followed = None;
-                self.anchor_host = now + PREROLL_US;
-                self.rate = rate;
-                self.state = if rate == PlaybackRate::NORMAL {
-                    TransportState::Playing
-                } else {
-                    TransportState::Shuttling
-                };
+                self.play_at(rate, now, now + PREROLL_US);
             }
             TransportCommand::Play { .. } => return false,
             TransportCommand::Pause => {
@@ -628,6 +649,43 @@ mod tests {
             sample_rate: 48_000,
             loop_range: range,
         }
+    }
+
+    #[test]
+    fn a_play_scheduled_with_the_audio_keeps_its_line_when_the_audio_confirms_it() {
+        // Paused at 1 s; Play at host 2 s, both starting at host 2.019 s.
+        let mut clock = TransportClock::new(FRAME);
+        clock.apply(
+            TransportCommand::Seek {
+                time: Ticks::new(60 * FRAME).unwrap(),
+                mode: SeekMode::Exact,
+            },
+            0,
+        );
+        clock.play_at(PlaybackRate::NORMAL, 2_000_000, 2_019_000);
+        let epoch = clock.sample(2_000_000).epoch;
+        assert_eq!(clock.media_at(2_019_000), 60 * FRAME);
+        // The audio's first sample, heard on the line (a late start heard
+        // 3 ms in): adopted, the line and its epoch unchanged.
+        let heard = audio(
+            7,
+            TransportState::Playing,
+            2_022_000,
+            60 * FRAME + TICKS_PER_SECOND * 3 / 1000,
+            None,
+        );
+        assert!(!clock.follow(&heard));
+        assert!(clock.following());
+        assert_eq!(clock.sample(2_030_000).epoch, epoch);
+        assert_eq!(clock.media_at(2_019_000), 60 * FRAME);
+        // Off the line (the device started 40 ms late, from the start):
+        // the audio is the master, a new run.
+        let mut late = TransportClock::new(FRAME);
+        late.play_at(PlaybackRate::NORMAL, 2_000_000, 2_019_000);
+        let epoch = late.sample(2_000_000).epoch;
+        assert!(late.follow(&audio(8, TransportState::Playing, 2_059_000, 0, None)));
+        assert_ne!(late.sample(2_060_000).epoch, epoch);
+        assert_eq!(late.media_at(2_059_000), 0);
     }
 
     #[test]

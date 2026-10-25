@@ -14,11 +14,11 @@
 //! Many items go in one batch, each into its own rows of an f32 buffer
 //! and, optionally, its cell of an `r32float` page.
 
-use kurbo::{BezPath, PathEl, Point};
+use kurbo::{Affine, BezPath, PathEl, Point};
 use pm_vector::render::scene::PixelRect;
 
+use crate::composite::gaussian::{bind, compute};
 use crate::pipelines::LazyComputePipeline;
-use wgpu::util::DeviceExt;
 
 /// Flattening tolerance, px: a chord moves a pixel's coverage by at most
 /// this much.
@@ -32,15 +32,22 @@ const PIECE: f64 = 64.0;
 /// One outline to cover.
 #[derive(Debug, Clone, Copy)]
 pub struct Item<'a> {
-    /// Device-pixel outline before its translation, filled nonzero; open
-    /// contours close. Keeping translation separate permits glyph geometry
-    /// to stay cached across placements.
+    /// Device pixels, filled nonzero; open contours close.
     pub path: &'a BezPath,
-    /// Translation from `path` coordinates to device pixels.
-    pub translation: [f64; 2],
     /// The device pixels covered.
     pub bounds: PixelRect,
     /// Where `bounds`' top-left pixel lands in the page.
+    pub at: [u32; 2],
+}
+
+/// An outline retained in local cache space, mapped to device pixels as
+/// its edges enter the coverage batch. The mapping is exactly the same
+/// `Affine * PathEl` operation used to build a transformed `BezPath`.
+#[derive(Debug, Clone, Copy)]
+pub struct TransformedItem<'a> {
+    pub path: &'a BezPath,
+    pub transform: Affine,
+    pub bounds: PixelRect,
     pub at: [u32; 2],
 }
 
@@ -53,8 +60,6 @@ pub struct Batch {
     edge_items: Vec<u32>,
     /// (item, row) per scan workgroup.
     rows: Vec<[u32; 2]>,
-    /// Reused clipping breaks for each line segment.
-    ts: Vec<f64>,
     /// Values in the f32 buffer.
     len: u64,
 }
@@ -62,13 +67,12 @@ pub struct Batch {
 impl Batch {
     pub fn new(items: &[Item<'_>]) -> Batch {
         let mut b = Batch::default();
-        b.rebuild(items);
+        b.reset(items);
         b
     }
 
-    /// Rebuilds a batch while retaining its vector capacities for the next
-    /// text frame. All per-item offsets are computed anew.
-    pub fn rebuild(&mut self, items: &[Item<'_>]) {
+    /// Rebuild a batch while retaining the capacity of its CPU arrays.
+    pub fn reset(&mut self, items: &[Item<'_>]) {
         self.items.clear();
         self.edges.clear();
         self.edge_items.clear();
@@ -86,13 +90,41 @@ impl Batch {
                 0,
                 0,
             ]);
-            edges(
-                item.path,
-                item.translation,
-                r,
-                &mut self.edges,
-                &mut self.ts,
-            );
+            edges(item.path, r, &mut self.edges);
+            self.edge_items.resize(self.edges.len(), i as u32);
+            self.rows.extend((0..r.height).map(|y| [i as u32, y]));
+            self.len += u64::from(r.width) * u64::from(r.height);
+        }
+    }
+
+    /// Rebuild a batch from cached outlines without allocating device paths.
+    pub fn reset_transformed(&mut self, items: &[TransformedItem<'_>]) {
+        self.items.clear();
+        self.edges.clear();
+        self.edge_items.clear();
+        self.rows.clear();
+        self.len = 0;
+        for (i, item) in items.iter().enumerate() {
+            let r = item.bounds;
+            self.items.push([
+                self.len as u32,
+                r.width,
+                r.height,
+                item.at[0],
+                item.at[1],
+                0,
+                0,
+                0,
+            ]);
+            if item.transform == Affine::IDENTITY {
+                edges(item.path, r, &mut self.edges);
+            } else {
+                edges_iter(
+                    item.path.iter().map(|el| item.transform * el),
+                    r,
+                    &mut self.edges,
+                );
+            }
             self.edge_items.resize(self.edges.len(), i as u32);
             self.rows.extend((0..r.height).map(|y| [i as u32, y]));
             self.len += u64::from(r.width) * u64::from(r.height);
@@ -109,17 +141,70 @@ impl Batch {
         self.len * 4
     }
 
-    /// Drops unusually large scratch after a frame; ordinary typing keeps
-    /// its vectors to avoid reallocating their capacities on every key.
-    pub fn trim_scratch(&mut self, max_bytes: usize) {
-        let bytes = self.items.capacity() * size_of::<[u32; 8]>()
+    /// Capacity retained for rebuilding later batches.
+    pub fn capacity_bytes(&self) -> u64 {
+        (self.items.capacity() * size_of::<[u32; 8]>()
             + self.edges.capacity() * size_of::<[i32; 4]>()
             + self.edge_items.capacity() * size_of::<u32>()
-            + self.rows.capacity() * size_of::<[u32; 2]>()
-            + self.ts.capacity() * size_of::<f64>();
-        if bytes > max_bytes {
-            *self = Self::default();
+            + self.rows.capacity() * size_of::<[u32; 2]>()) as u64
+    }
+
+    /// Checks the exact buffer bindings and dispatch dimensions used by
+    /// `encode` before any GPU resource is created.
+    pub fn fits_gpu_limits(&self, limits: &wgpu::Limits) -> Result<(), String> {
+        let sizes = [
+            16u64,
+            size_of_val(self.items.as_slice()) as u64,
+            size_of_val(self.edges.as_slice()) as u64,
+            size_of_val(self.edge_items.as_slice()) as u64,
+            size_of_val(self.rows.as_slice()) as u64,
+        ];
+        let align = u64::from(limits.min_storage_buffer_offset_alignment.max(4));
+        let mut end = 0u64;
+        for (i, size) in sizes.into_iter().enumerate() {
+            let binding = size.max(16);
+            let limit = if i == 0 {
+                limits.max_uniform_buffer_binding_size
+            } else {
+                limits.max_storage_buffer_binding_size
+            };
+            if binding > limit {
+                return Err(format!(
+                    "coverage input binding {i} needs {binding} bytes, limit {limit}"
+                ));
+            }
+            end = end.div_ceil(align) * align + binding;
         }
+        if end > limits.max_buffer_size {
+            return Err(format!(
+                "coverage input needs {end} bytes, buffer limit {}",
+                limits.max_buffer_size
+            ));
+        }
+        let values = self.bytes().max(16);
+        let limit = limits
+            .max_buffer_size
+            .min(limits.max_storage_buffer_binding_size);
+        if values > limit {
+            return Err(format!(
+                "coverage values need {values} bytes, binding limit {limit}"
+            ));
+        }
+        let groups = u64::from(limits.max_compute_workgroups_per_dimension);
+        if (self.edges.len() as u64).div_ceil(64) > groups
+            || (self.rows.len() as u64).min(65535) > groups
+            || (self.rows.len() as u64).div_ceil(65535) > groups
+        {
+            return Err("coverage dispatch exceeds workgroup limits".into());
+        }
+        if self.items.len() > u32::MAX as usize
+            || self.edges.len() > u32::MAX as usize
+            || self.rows.len() > u32::MAX as usize
+            || self.len > u64::from(u32::MAX)
+        {
+            return Err("coverage item offsets exceed shader u32 range".into());
+        }
+        Ok(())
     }
 
     /// Edges of item `i` (tests).
@@ -151,12 +236,45 @@ pub fn bounds(path: &BezPath, width: u32, height: u32) -> Option<PixelRect> {
         .then(|| PixelRect::new(x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32))
 }
 
-/// One segment clipped to `r`'s rows, clamped to its columns, fixed point
-/// from its origin, at most [`PIECE`] px per edge.
-fn edge(a: Point, b: Point, r: PixelRect, out: &mut Vec<[i32; 4]>, ts: &mut Vec<f64>) {
-    if !a.is_finite() || !b.is_finite() || a.y == b.y {
-        return;
+/// Visit the flattened segments without materializing a second copy of
+/// every path. Subpaths close and non-finite segments are dropped.
+fn flattened_segments(path: impl IntoIterator<Item = PathEl>, mut visit: impl FnMut(Point, Point)) {
+    let (mut start, mut last) = (Point::ZERO, Point::ZERO);
+    fn line(a: Point, b: Point, visit: &mut impl FnMut(Point, Point)) {
+        if a.is_finite() && b.is_finite() {
+            visit(a, b);
+        }
     }
+    fn close(last: Point, start: Point, visit: &mut impl FnMut(Point, Point)) {
+        if last != start {
+            line(last, start, visit);
+        }
+    }
+    kurbo::flatten(path, FLATTEN, |el| match el {
+        PathEl::MoveTo(p) => {
+            close(last, start, &mut visit);
+            (start, last) = (p, p);
+        }
+        PathEl::LineTo(p) => {
+            line(last, p, &mut visit);
+            last = p;
+        }
+        PathEl::ClosePath => {
+            close(last, start, &mut visit);
+            last = start;
+        }
+        _ => {}
+    });
+    close(last, start, &mut visit);
+}
+
+/// `path` clipped to `r`'s rows, clamped to its columns, fixed point from
+/// its origin, at most [`PIECE`] px each, appended to `out`.
+fn edges(path: &BezPath, r: PixelRect, out: &mut Vec<[i32; 4]>) {
+    edges_iter(path.iter(), r, out);
+}
+
+fn edges_iter(path: impl IntoIterator<Item = PathEl>, r: PixelRect, out: &mut Vec<[i32; 4]>) {
     let (x0, x1) = (f64::from(r.x), f64::from(r.x) + f64::from(r.width));
     let (y0, y1) = (f64::from(r.y), f64::from(r.y) + f64::from(r.height));
     let fixed = |p: Point| -> [i32; 2] {
@@ -165,79 +283,49 @@ fn edge(a: Point, b: Point, r: PixelRect, out: &mut Vec<[i32; 4]>, ts: &mut Vec<
             ((p.y.clamp(y0, y1) - y0) * UNITS).round() as i32,
         ]
     };
-    // The part within the rows; rows outside never matter.
-    let at = |y: f64| (y - a.y) / (b.y - a.y);
-    let (t0, t1) = (at(y0), at(y1));
-    let (t0, t1) = (t0.min(t1).max(0.0), t0.max(t1).min(1.0));
-    if t0 >= t1 {
-        return;
-    }
-    // Split where it leaves the columns; beyond them it is clamped to
-    // the side.
-    ts.clear();
-    ts.extend([t0, t1]);
-    if a.x != b.x {
-        for x in [x0, x1] {
-            let t = (x - a.x) / (b.x - a.x);
-            if t > t0 && t < t1 {
-                ts.push(t);
+    let mut ts = [0.0; 4];
+    flattened_segments(path, |a, b| {
+        if a.y == b.y {
+            return;
+        }
+        // The part within the rows; rows outside never matter.
+        let at = |y: f64| (y - a.y) / (b.y - a.y);
+        let (t0, t1) = (at(y0), at(y1));
+        let (t0, t1) = (t0.min(t1).max(0.0), t0.max(t1).min(1.0));
+        if t0 >= t1 {
+            return;
+        }
+        // Split where it leaves the columns; beyond them it is clamped to
+        // the side.
+        ts[0] = t0;
+        ts[1] = t1;
+        let mut len = 2;
+        if a.x != b.x {
+            for x in [x0, x1] {
+                let t = (x - a.x) / (b.x - a.x);
+                if t > t0 && t < t1 {
+                    ts[len] = t;
+                    len += 1;
+                }
             }
         }
-    }
-    ts.sort_by(f64::total_cmp);
-    for pair in ts.windows(2) {
-        let (p, q) = (a.lerp(b, pair[0]), a.lerp(b, pair[1]));
-        let n = ((q - p).x.abs().max((q - p).y.abs()) / PIECE)
-            .ceil()
-            .max(1.0);
-        let mut prev = fixed(p);
-        for i in 1..=n as usize {
-            let next = fixed(p.lerp(q, i as f64 / n));
-            if next[1] != prev[1] {
-                out.push([prev[0], prev[1], next[0], next[1]]);
+        let ts = &mut ts[..len];
+        ts.sort_by(f64::total_cmp);
+        for pair in ts.windows(2) {
+            let (p, q) = (a.lerp(b, pair[0]), a.lerp(b, pair[1]));
+            let n = ((q - p).x.abs().max((q - p).y.abs()) / PIECE)
+                .ceil()
+                .max(1.0);
+            let mut prev = fixed(p);
+            for i in 1..=n as usize {
+                let next = fixed(p.lerp(q, i as f64 / n));
+                if next[1] != prev[1] {
+                    out.push([prev[0], prev[1], next[0], next[1]]);
+                }
+                prev = next;
             }
-            prev = next;
         }
-    }
-}
-
-/// Stream path segments into fixed edges. A cached text glyph is already a
-/// line path, so this avoids a second Vec of all its line segments.
-fn edges(
-    path: &BezPath,
-    translation: [f64; 2],
-    r: PixelRect,
-    out: &mut Vec<[i32; 4]>,
-    ts: &mut Vec<f64>,
-) {
-    let (mut start, mut last) = (Point::ZERO, Point::ZERO);
-    let mut segment = |a: Point, b: Point| {
-        if a != b {
-            edge(
-                Point::new(a.x + translation[0], a.y + translation[1]),
-                Point::new(b.x + translation[0], b.y + translation[1]),
-                r,
-                out,
-                ts,
-            );
-        }
-    };
-    kurbo::flatten(path.iter(), FLATTEN, |el| match el {
-        PathEl::MoveTo(p) => {
-            segment(last, start);
-            (start, last) = (p, p);
-        }
-        PathEl::LineTo(p) => {
-            segment(last, p);
-            last = p;
-        }
-        PathEl::ClosePath => {
-            segment(last, start);
-            last = start;
-        }
-        _ => {}
     });
-    segment(last, start);
 }
 
 /// `v` as bytes: arrays of 32-bit words (no padding).
@@ -247,94 +335,133 @@ fn words<T: Copy>(v: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), size_of_val(v)) }
 }
 
+/// Counts and four read-only arrays share one upload and tracked GPU resource.
+/// Each binding starts at the device's required storage offset alignment.
+type InputRanges = [(u64, u64); 5];
+
+fn input_buffer(device: &wgpu::Device, batch: &Batch) -> (wgpu::Buffer, InputRanges) {
+    let counts = [[batch.edges.len() as u32, batch.rows.len() as u32, 0, 0]];
+    let inputs = [
+        words(&counts),
+        words(&batch.items),
+        words(&batch.edges),
+        words(&batch.edge_items),
+        words(&batch.rows),
+    ];
+    let align = u64::from(device.limits().min_storage_buffer_offset_alignment.max(4));
+    let mut end = 0u64;
+    let mut ranges = [(0, 0); 5];
+    for (i, bytes) in inputs.iter().enumerate() {
+        let start = end.div_ceil(align) * align;
+        let size = bytes.len().max(16) as u64;
+        ranges[i] = (start, size);
+        end = start + size;
+    }
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("pm coverage inputs"),
+        size: end.div_ceil(4) * 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM,
+        mapped_at_creation: true,
+    });
+    {
+        let mut mapped = buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .expect("buffer mapped at creation");
+        for (bytes, &(start, _)) in inputs.iter().zip(&ranges) {
+            mapped
+                .slice(start as usize..start as usize + bytes.len())
+                .copy_from_slice(bytes);
+        }
+    }
+    buffer.unmap();
+    (buffer, ranges)
+}
+
+/// Reusable upload storage for one atlas page. A distinct instance is needed
+/// for each page recorded in the same command buffer: queue writes to one
+/// buffer before submit would otherwise replace earlier pages' inputs.
+#[derive(Default)]
+pub struct InputScratch {
+    buffer: Option<wgpu::Buffer>,
+    capacity: u64,
+}
+
+/// Grow reuse storage without rounding a valid request past a device limit.
+pub(crate) fn bounded_capacity(needed: u64, minimum: u64, limit: u64) -> Result<u64, String> {
+    let required = needed.max(minimum);
+    if required > limit {
+        return Err(format!(
+            "buffer needs {required} bytes, device limit {limit}"
+        ));
+    }
+    Ok(required
+        .checked_next_power_of_two()
+        .unwrap_or(required)
+        .min(limit))
+}
+
+impl InputScratch {
+    pub fn capacity_bytes(&self) -> u64 {
+        self.capacity
+    }
+
+    fn upload<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        batch: &Batch,
+    ) -> Result<(&'a wgpu::Buffer, InputRanges), String> {
+        let counts = [[batch.edges.len() as u32, batch.rows.len() as u32, 0, 0]];
+        let inputs = [
+            words(&counts),
+            words(&batch.items),
+            words(&batch.edges),
+            words(&batch.edge_items),
+            words(&batch.rows),
+        ];
+        let align = u64::from(device.limits().min_storage_buffer_offset_alignment.max(4));
+        let mut end = 0u64;
+        let mut ranges = [(0, 0); 5];
+        for (i, bytes) in inputs.iter().enumerate() {
+            let start = end.div_ceil(align) * align;
+            let size = bytes.len().max(16) as u64;
+            ranges[i] = (start, size);
+            end = start + size;
+        }
+        let limit = device.limits().max_buffer_size;
+        if end > self.capacity {
+            self.capacity = bounded_capacity(end, 256, limit)?;
+            self.buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pm coverage pooled inputs"),
+                size: self.capacity,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let buffer = self.buffer.as_ref().expect("coverage input buffer");
+        for (bytes, &(start, _)) in inputs.iter().zip(&ranges) {
+            if !bytes.is_empty() {
+                queue.write_buffer(buffer, start, bytes);
+            }
+        }
+        Ok((buffer, ranges))
+    }
+}
+
 /// The coverage pipelines.
 pub struct AreaCoverage {
     raster: LazyComputePipeline,
     scan: LazyComputePipeline,
     scan_page: LazyComputePipeline,
-    slots: Vec<GpuSlot>,
-    cursor: usize,
-    /// One retained CPU staging allocation for the five read-only inputs.
-    upload: Vec<u8>,
 }
 
-/// Buffers referenced by one page's commands. Distinct pages recorded in
-/// the same encoder use distinct slots; a new submitted frame can reuse the
-/// slots because queue writes follow the preceding submission in order.
-#[derive(Default)]
-struct GpuSlot {
-    inputs: SlotBuffer,
-    values: SlotBuffer,
-}
-
-#[derive(Default)]
-struct SlotBuffer {
-    buffer: Option<wgpu::Buffer>,
-    bytes: u64,
-}
-
-impl SlotBuffer {
-    fn get(
-        &mut self,
-        device: &wgpu::Device,
-        bytes: u64,
-        usage: wgpu::BufferUsages,
-    ) -> &wgpu::Buffer {
-        let needed = bytes.max(16).next_power_of_two();
-        if self.bytes < needed {
-            self.buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("pm reusable coverage"),
-                size: needed,
-                usage: usage | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            self.bytes = needed;
-        }
-        self.buffer.as_ref().expect("coverage buffer allocated")
-    }
-}
-
-impl GpuSlot {
-    fn bytes(&self) -> u64 {
-        self.inputs.bytes + self.values.bytes
-    }
-}
-
-/// Five shader bindings in one buffer. The separate ranges retain their
-/// original layouts and bind sizes; only their allocation and upload change.
-struct InputLayout {
-    offsets: [u64; 5],
-    sizes: [u64; 5],
-    bytes: u64,
-}
-
-impl InputLayout {
-    fn new(lengths: [usize; 5], alignment: u64) -> Self {
-        let mut offsets = [0; 5];
-        let mut sizes = [0; 5];
-        let mut end = 0u64;
-        for i in 0..5 {
-            offsets[i] = end.div_ceil(alignment) * alignment;
-            // Empty storage arrays still need a valid, nonzero binding.
-            sizes[i] = (lengths[i] as u64).max(16);
-            end = offsets[i] + sizes[i];
-        }
-        Self {
-            offsets,
-            sizes,
-            bytes: end,
-        }
-    }
-
-    fn bindings<'a>(&self, buffer: &'a wgpu::Buffer) -> [wgpu::BindingResource<'a>; 5] {
-        std::array::from_fn(|i| {
-            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                buffer,
-                offset: self.offsets[i],
-                size: wgpu::BufferSize::new(self.sizes[i]),
-            })
-        })
-    }
+/// Storage and optional atlas page written by one coverage batch.
+pub struct CoverageOutput<'a> {
+    pub values: &'a wgpu::Buffer,
+    pub page: Option<&'a wgpu::TextureView>,
 }
 
 /// A page `width × height`: `r32float`, written by [`AreaCoverage::encode`]
@@ -380,30 +507,6 @@ impl AreaCoverage {
             raster: compute(device, &module, "raster"),
             scan: compute(device, &module, "scan"),
             scan_page: compute(device, &module, "scan_page"),
-            slots: Vec::new(),
-            cursor: 0,
-            upload: Vec::new(),
-        }
-    }
-
-    /// Starts another command encoder's text work after the preceding one
-    /// was submitted. Each use within this encoder gets a distinct slot.
-    /// Retained storage is capped to 8 MiB between frames.
-    pub fn begin_frame(&mut self) {
-        self.cursor = 0;
-        const KEEP: u64 = 8 * 1024 * 1024;
-        let mut kept = 0;
-        self.slots.retain(|slot| {
-            let bytes = slot.bytes();
-            if kept + bytes > KEEP {
-                false
-            } else {
-                kept += bytes;
-                true
-            }
-        });
-        if self.upload.capacity() > KEEP as usize {
-            self.upload = Vec::new();
         }
     }
 
@@ -424,205 +527,102 @@ impl AreaCoverage {
             return;
         }
         encoder.clear_buffer(values, 0, Some(batch.bytes()));
-        let counts = wgpu::util::DeviceExt::create_buffer_init(
-            device,
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("pm coverage counts"),
-                contents: words(&[[batch.edges.len() as u32, batch.rows.len() as u32, 0, 0]]),
-                usage: wgpu::BufferUsages::UNIFORM,
-            },
-        );
-        let items = storage(device, "pm coverage items", words(&batch.items));
-        let edges = storage(device, "pm coverage edges", words(&batch.edges));
-        let edge_items = storage(device, "pm coverage edge items", words(&batch.edge_items));
-        let rows = storage(device, "pm coverage rows", words(&batch.rows));
-        record(
+        let (inputs, ranges) = input_buffer(device, batch);
+        self.encode_inputs(
             device,
             encoder,
             batch,
-            [
-                counts.as_entire_binding(),
-                items.as_entire_binding(),
-                edges.as_entire_binding(),
-                edge_items.as_entire_binding(),
-                rows.as_entire_binding(),
-            ],
-            values,
-            page,
-            &self.raster,
-            &self.scan,
-            &self.scan_page,
+            CoverageOutput { values, page },
+            &inputs,
+            ranges,
         );
     }
 
-    /// Records coverage using storage retained between submitted frames.
-    /// Each page within one encoder receives its own slot.
-    pub fn encode_reusing(
-        &mut self,
+    /// Records into reusable input storage. The caller keeps one scratch
+    /// buffer per page until the command buffer is submitted.
+    pub fn encode_pooled(
+        &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         batch: &Batch,
-        page: Option<&wgpu::TextureView>,
-    ) {
+        output: CoverageOutput<'_>,
+        scratch: &mut InputScratch,
+    ) -> Result<(), String> {
         if batch.len == 0 {
-            return;
+            return Ok(());
         }
-        let index = self.cursor;
-        self.cursor += 1;
-        if index == self.slots.len() {
-            self.slots.push(GpuSlot::default());
-        }
-        let slot = &mut self.slots[index];
-        let counts = [batch.edges.len() as u32, batch.rows.len() as u32, 0, 0];
-        let sources = [
-            words(std::slice::from_ref(&counts)),
-            words(&batch.items),
-            words(&batch.edges),
-            words(&batch.edge_items),
-            words(&batch.rows),
-        ];
-        let limits = device.limits();
-        let alignment = u64::from(
-            limits
-                .min_uniform_buffer_offset_alignment
-                .max(limits.min_storage_buffer_offset_alignment)
-                .max(4),
-        );
-        let layout = InputLayout::new(sources.map(|source| source.len()), alignment);
-        self.upload.resize(layout.bytes as usize, 0);
-        for (i, source) in sources.iter().enumerate() {
-            let offset = layout.offsets[i] as usize;
-            self.upload[offset..offset + source.len()].copy_from_slice(source);
-        }
-        let inputs = slot.inputs.get(
-            device,
-            layout.bytes,
-            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::STORAGE,
-        );
-        queue.write_buffer(inputs, 0, &self.upload[..layout.bytes as usize]);
-        let values = slot.values.get(
-            device,
-            batch.bytes(),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        );
-        encoder.clear_buffer(values, 0, Some(batch.bytes()));
-        record(
-            device,
-            encoder,
-            batch,
-            layout.bindings(inputs),
-            values,
-            page,
-            &self.raster,
-            &self.scan,
-            &self.scan_page,
-        );
+        batch.fits_gpu_limits(&device.limits())?;
+        encoder.clear_buffer(output.values, 0, Some(batch.bytes()));
+        let (inputs, ranges) = scratch.upload(device, queue, batch)?;
+        self.encode_inputs(device, encoder, batch, output, inputs, ranges);
+        Ok(())
     }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn record(
-    device: &wgpu::Device,
-    encoder: &mut wgpu::CommandEncoder,
-    batch: &Batch,
-    inputs: [wgpu::BindingResource<'_>; 5],
-    values: &wgpu::Buffer,
-    page: Option<&wgpu::TextureView>,
-    raster: &LazyComputePipeline,
-    scan: &LazyComputePipeline,
-    scan_page: &LazyComputePipeline,
-) {
-    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("pm coverage"),
-        timestamp_writes: None,
-    });
-    let raster = raster.get();
-    let group = bind(
-        device,
-        &raster.get_bind_group_layout(0),
-        &[
-            (0, inputs[0].clone()),
-            (1, inputs[1].clone()),
-            (2, inputs[2].clone()),
-            (3, inputs[3].clone()),
-            (5, values.as_entire_binding()),
-        ],
-    );
-    pass.set_pipeline(raster);
-    pass.set_bind_group(0, &group, &[]);
-    pass.dispatch_workgroups((batch.edges.len() as u32).div_ceil(64), 1, 1);
-    let mut entries = vec![
-        (0, inputs[0].clone()),
-        (1, inputs[1].clone()),
-        (4, inputs[4].clone()),
-        (6, values.as_entire_binding()),
-    ];
-    let scan = match page {
-        Some(view) => {
-            entries.push((7, wgpu::BindingResource::TextureView(view)));
-            scan_page.get()
-        }
-        None => scan.get(),
-    };
-    let group = bind(device, &scan.get_bind_group_layout(0), &entries);
-    pass.set_pipeline(scan);
-    pass.set_bind_group(0, &group, &[]);
-    let n = batch.rows.len() as u32;
-    pass.dispatch_workgroups(n.min(65535), n.div_ceil(65535), 1);
-}
+    fn encode_inputs(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        batch: &Batch,
+        output: CoverageOutput<'_>,
+        inputs: &wgpu::Buffer,
+        ranges: InputRanges,
+    ) {
+        let read = |index: usize| {
+            let (offset, size) = ranges[index];
+            wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: inputs,
+                offset,
+                size: std::num::NonZeroU64::new(size),
+            })
+        };
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("pm coverage"),
+            timestamp_writes: None,
+        });
+        let raster = self.raster.get();
+        let group = bind(
+            device,
+            &raster.get_bind_group_layout(0),
+            &[
+                (0, read(0)),
+                (1, read(1)),
+                (2, read(2)),
+                (3, read(3)),
+                (5, output.values.as_entire_binding()),
+            ],
+        );
+        pass.set_pipeline(raster);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups((batch.edges.len() as u32).div_ceil(64), 1, 1);
+        let mut entries = vec![
+            (0, read(0)),
+            (1, read(1)),
+            (4, read(4)),
+            (6, output.values.as_entire_binding()),
+        ];
+        let scan = match output.page {
+            Some(view) => {
+                entries.push((7, wgpu::BindingResource::TextureView(view)));
+                self.scan_page.get()
+            }
+            None => self.scan.get(),
+        };
+        let group = bind(device, &scan.get_bind_group_layout(0), &entries);
+        pass.set_pipeline(scan);
+        pass.set_bind_group(0, &group, &[]);
+        let n = batch.rows.len() as u32;
+        pass.dispatch_workgroups(n.min(65535), n.div_ceil(65535), 1);
+    }
 
-fn storage(device: &wgpu::Device, label: &str, contents: &[u8]) -> wgpu::Buffer {
-    let mut padded;
-    let contents = if contents.len() < 16 {
-        padded = contents.to_vec();
-        padded.resize(16, 0);
-        &padded[..]
-    } else {
-        contents
-    };
-    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(label),
-        contents,
-        usage: wgpu::BufferUsages::STORAGE,
-    })
-}
-
-fn compute(
-    device: &wgpu::Device,
-    module: &wgpu::ShaderModule,
-    entry: &'static str,
-) -> LazyComputePipeline {
-    let (device, module) = (device.clone(), module.clone());
-    LazyComputePipeline::new(move || {
-        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(entry),
-            layout: None,
-            module: &module,
-            entry_point: Some(entry),
-            compilation_options: Default::default(),
-            cache: None,
-        })
-    })
-}
-
-fn bind(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    entries: &[(u32, wgpu::BindingResource<'_>)],
-) -> wgpu::BindGroup {
-    let entries: Vec<wgpu::BindGroupEntry<'_>> = entries
-        .iter()
-        .map(|(binding, resource)| wgpu::BindGroupEntry {
-            binding: *binding,
-            resource: resource.clone(),
-        })
-        .collect();
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("pm coverage"),
-        layout,
-        entries: &entries,
-    })
+    #[cfg(test)]
+    pub(crate) fn pipelines(&self) -> [(&'static str, &LazyComputePipeline); 3] {
+        [
+            ("raster", &self.raster),
+            ("scan", &self.scan),
+            ("scan page", &self.scan_page),
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -632,21 +632,43 @@ mod tests {
     use pm_reference::coverage::{FillRule, fill};
 
     #[test]
-    fn packed_inputs_have_distinct_aligned_bindings() {
-        // Includes a short storage array and an empty one. The latter still
-        // needs a valid binding, while all following offsets must obey the
-        // device's uniform/storage alignment.
-        let lengths = [16, 32, 48, 4, 0];
-        let layout = InputLayout::new(lengths, 256);
-        assert_eq!(layout.offsets, [0, 256, 512, 768, 1024]);
-        assert_eq!(layout.sizes, [16, 32, 48, 16, 16]);
-        assert_eq!(layout.bytes, 1040);
-        for i in 0..5 {
-            assert_eq!(layout.offsets[i] % 256, 0);
-            assert!(layout.sizes[i] >= lengths[i] as u64);
-            if i > 0 {
-                assert!(layout.offsets[i] >= layout.offsets[i - 1] + layout.sizes[i - 1]);
-            }
+    fn pooled_growth_respects_non_power_of_two_device_limit() {
+        assert_eq!(bounded_capacity(129, 16, 160).unwrap(), 160);
+        assert_eq!(bounded_capacity(160, 16, 160).unwrap(), 160);
+        assert!(bounded_capacity(161, 16, 160).is_err());
+    }
+
+    #[test]
+    fn streamed_affine_edges_match_materialized_path_exactly() {
+        let mut path = BezPath::new();
+        path.move_to((4.125, 3.375));
+        path.line_to((31.625, 5.5));
+        path.line_to((19.25, 34.875));
+        path.line_to((7.75, 22.125));
+        path.close_path();
+        let rect = PixelRect::new(0, 0, 64, 64);
+        for transform in [
+            Affine::translate((9.0, 5.0)),
+            Affine::translate((6.375, 4.5)) * Affine::rotate(0.37),
+            Affine::new([0.71, 0.28, -0.17, 0.83, 7.0, 8.0]),
+        ] {
+            let materialized = transform * &path;
+            let direct = Batch::new(&[Item {
+                path: &materialized,
+                bounds: rect,
+                at: [0, 0],
+            }]);
+            let mut streamed = Batch::default();
+            streamed.reset_transformed(&[TransformedItem {
+                path: &path,
+                transform,
+                bounds: rect,
+                at: [0, 0],
+            }]);
+            assert_eq!(streamed.items, direct.items);
+            assert_eq!(streamed.edges, direct.edges);
+            assert_eq!(streamed.edge_items, direct.edge_items);
+            assert_eq!(streamed.rows, direct.rows);
         }
     }
 
@@ -689,7 +711,6 @@ mod tests {
                 &gpu,
                 &[Item {
                     path: &path,
-                    translation: [0.0, 0.0],
                     bounds: r,
                     at: [0, 0],
                 }],
@@ -708,62 +729,6 @@ mod tests {
     }
 
     #[test]
-    fn translated_cached_outline_matches_placed_outline() {
-        let gpu = pm_gpu::Gpu::new("coverage translation test").unwrap();
-        let local = Circle::new((12.37, 11.81), 8.2).to_path(1e-9);
-        let translation = [17.25, 9.75];
-        let placed = Affine::translate((translation[0], translation[1])) * local.clone();
-        let bounds = PixelRect::new(17, 10, 24, 23);
-        let cached = page(
-            &gpu,
-            &[Item {
-                path: &local,
-                translation,
-                bounds,
-                at: [0, 0],
-            }],
-            24,
-            23,
-        );
-        let direct = page(
-            &gpu,
-            &[Item {
-                path: &placed,
-                translation: [0.0, 0.0],
-                bounds,
-                at: [0, 0],
-            }],
-            24,
-            23,
-        );
-        assert_eq!(cached, direct);
-
-        let mut reuse = Batch::default();
-        reuse.rebuild(&[Item {
-            path: &local,
-            translation,
-            bounds,
-            at: [0, 0],
-        }]);
-        reuse.rebuild(&[Item {
-            path: &placed,
-            translation: [0.0, 0.0],
-            bounds,
-            at: [0, 0],
-        }]);
-        assert_eq!(
-            reuse.edges,
-            Batch::new(&[Item {
-                path: &placed,
-                translation: [0.0, 0.0],
-                bounds,
-                at: [0, 0],
-            }])
-            .edges
-        );
-    }
-
-    #[test]
     fn a_batch_keeps_each_item_in_its_cell() {
         let gpu = pm_gpu::Gpu::new("coverage test").unwrap();
         let paths = shapes();
@@ -779,7 +744,6 @@ mod tests {
             .enumerate()
             .map(|(i, (path, bounds))| Item {
                 path,
-                translation: [0.0, 0.0],
                 bounds,
                 at: [i as u32 * 50 + 1, 3],
             })
@@ -831,7 +795,6 @@ mod tests {
         assert_eq!(b, PixelRect::new(10, 4, 21, 16));
         let batch = Batch::new(&[Item {
             path: &r,
-            translation: [0.0, 0.0],
             bounds: b,
             at: [0, 0],
         }]);
@@ -843,7 +806,6 @@ mod tests {
         assert!(
             (area(&Batch::new(&[Item {
                 path: &r,
-                translation: [0.0, 0.0],
                 bounds: b,
                 at: [0, 0]
             }]))
@@ -858,7 +820,6 @@ mod tests {
         let b = bounds(&r, 512, 512).unwrap();
         let batch = Batch::new(&[Item {
             path: &r,
-            translation: [0.0, 0.0],
             bounds: b,
             at: [0, 0],
         }]);

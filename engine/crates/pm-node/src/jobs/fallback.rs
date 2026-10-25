@@ -349,7 +349,7 @@ mod tests {
         );
         assert!(pm_protocol::validate::Validate::validate(&seen[0]).is_ok());
         drop(seen);
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "files removed");
+        assert_eq!(std::fs::read_dir(dir).unwrap().count(), 0, "files removed");
         // The host's errors become runner failures.
         for (code, reason) in [
             (ErrorCode::ShaderCompile, "compile"),
@@ -368,7 +368,7 @@ mod tests {
             assert_eq!(f.reason, reason);
             assert_eq!(f.message, "why");
         }
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(dir).unwrap().count(), 0);
     }
 
     #[test]

@@ -688,7 +688,10 @@ impl VtDecoder {
         v.extend_from_slice(&(eos.len() as u64).to_be_bytes()[8 - ls..]);
         v.extend_from_slice(eos);
         let timing = Packet::default();
-        self.submit(&v, &timing, 0, EOS_REFCON)?;
+        // EOS has no output picture. Synchronous EOS submission stalled in
+        // the remote hardware decoder during HD scrubbing. Allow asynchronous
+        // decompression, as for subsequent samples.
+        self.submit(&v, &timing, ASYNC, EOS_REFCON)?;
         Ok(())
     }
 

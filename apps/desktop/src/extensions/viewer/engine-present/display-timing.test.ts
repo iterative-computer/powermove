@@ -30,8 +30,8 @@ describe('VsyncEstimator', () => {
   it('estimates the period across jittered refreshes without a nominal rate', () => {
     const estimator = new VsyncEstimator(null);
     for (const t of rafs(200, 0)) estimator.sample(t);
-    expect(estimator.fit().periodMs).toBeGreaterThan(8.0);
-    expect(estimator.fit().periodMs).toBeLessThan(8.7);
+    expect(estimator.current()!.periodMs).toBeGreaterThan(8.0);
+    expect(estimator.current()!.periodMs).toBeLessThan(8.7);
   });
 
   it('preserves fractional refresh periods despite 0.1 ms timestamp rounding and skipped refreshes', () => {
@@ -42,7 +42,7 @@ describe('VsyncEstimator', () => {
         if (i % 13 === 5) continue;
         estimator.sample(Math.round((1000 + i * period) * 10) / 10);
       }
-      expect(Math.abs(estimator.fit().periodMs - period)).toBeLessThan(0.0001);
+      expect(Math.abs(estimator.current()!.periodMs - period)).toBeLessThan(0.0001);
     }
   });
 
@@ -63,9 +63,31 @@ describe('VsyncEstimator', () => {
     const estimator = new VsyncEstimator();
     const period = 1000 / 120;
     for (let i = 0; i < 320; i++) estimator.sample(Math.round((1000 + i * period + (i >= 280 ? 4.2 : 0)) * 10) / 10);
-    expect(Math.abs(estimator.fit().periodMs - period)).toBeLessThan(0.001);
-    const phase = ((estimator.fit().vsyncMs - 1004.2) % period + period) % period;
+    expect(Math.abs(estimator.current()!.periodMs - period)).toBeLessThan(0.001);
+    const phase = ((estimator.current()!.vsyncMs - 1004.2) % period + period) % period;
     expect(Math.min(phase, period - phase)).toBeLessThan(0.1);
+  });
+
+  it('holds its phase through early and skipped BeginFrames, never moving by a refresh', () => {
+    // An idle machine: a third of the BeginFrames up to 2 ms early, some skipped.
+    const estimator = new VsyncEstimator(120);
+    const period = 1000 / 120;
+    let seed = 3;
+    const phases: number[] = [];
+    for (let i = 0; i < 1200; i++) {
+      seed = (seed * 1103515245 + 12345) % 2 ** 31;
+      const u = seed / 2 ** 31;
+      if (u < 0.05) continue;
+      const early = u < 0.35 ? -2 * ((u * 7) % 1) : 0;
+      const fit = estimator.sample(Math.round((1000 + i * period + early) * 10) / 10);
+      if (fit && i > 100) {
+        phases.push(((fit.vsyncMs - 1000) % period + period) % period);
+        expect(fit.jumped).toBe(false);
+      }
+    }
+    const folded = phases.map((x) => (x > period / 2 ? x - period : x));
+    expect(Math.max(...folded) - Math.min(...folded)).toBeLessThan(0.8);
+    expect(Math.abs(folded.at(-1)!)).toBeLessThan(0.6);
   });
 
   it('places the next vsync on the grid', () => {
@@ -75,11 +97,11 @@ describe('VsyncEstimator', () => {
     expect(nextVsync(fit, -20)).toBe(-17);
   });
 
-  it('re-sends the vsync hint only for a new period or a phase move beyond 250 µs', () => {
+  it('re-sends the vsync hint for a new period or a phase move beyond 100 µs', () => {
     const base = { hostTime: 1_000_000, periodUs: 8333.333 };
     expect(hintChanged(null, base)).toBe(true);
-    expect(hintChanged(base, { ...base, hostTime: base.hostTime + 8333.333 * 40 + 100 })).toBe(false);
-    expect(hintChanged(base, { ...base, hostTime: base.hostTime + 400 })).toBe(true);
+    expect(hintChanged(base, { ...base, hostTime: base.hostTime + 8333.333 * 40 + 60 })).toBe(false);
+    expect(hintChanged(base, { ...base, hostTime: base.hostTime + 150 })).toBe(true);
     expect(hintChanged(base, { ...base, hostTime: base.hostTime - 8333.333 + 50 })).toBe(false);
     expect(hintChanged(base, { hostTime: base.hostTime, periodUs: 16666.667 })).toBe(true);
   });

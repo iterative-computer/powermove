@@ -192,3 +192,188 @@ the unclipped reference over the same band centers.
 | Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
 |---|---|---|---|
 | Straight colour is the working float divided by alpha (today: rounded to 8 bits, truncated on unpremultiply, premultiplied and unpremultiplied again by Canvas2D) | 167, 78, 1.7 | 0.50, 0.50, 0.25 | 400,000 random premultiplied pixels |
+
+## Vector coverage
+
+- **Reference:** authored fills and f64 stroke regions with their caps, joins, miter
+  limits and dashes, covered at 16 × 16 cells per pixel (`pm-reference`); folded
+  stroke regions use 64 × 64 cells. Strokes expand in local space before the world
+  transform, as Canvas2D specifies.
+- **Gate:** `pm-render/tests/vector_gate.rs` (G-V1), all 474 captured canvases.
+  Geometry is checked separately at 1e-3. The corpus also checks paused
+  preview/export identity; out-of-scope reference gaps use the measured owned
+  pending ratchet in the gate policy.
+- **Units:** CV, pooled edge pixels.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Exact area coverage replaces density-bucket rasterization (Canvas2D fill and stroke geometry) | 123.65, 59.01, 0.661 | 3.16, 0.02, <0.001 | 474 shape and path canvases |
+| Authored stroke styles covered without raster seams (Canvas2D caps, joins, miter limits and dashes) | 123.21, 58.94, 0.658 | 3.16, 0.03, <0.001 | 209 stroked canvases from the same witness |
+
+## Solid corner radius
+
+- **Reference:** authored rounded-rectangle geometry, independently covered in
+  f64 at 16 × 16 cells per output pixel and composited over the authored background.
+- **Gate:** `pm-render/tests/corpus.rs` and `vector.rs::solid_radius_is_honored`.
+  Actual legacy captures stay in the comparison; corrected interiors additionally
+  prove authored paint directly, as described in the gate policy.
+- **Units:** CV, worst per-frame max, p99.9 and mean over edge pixels.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Honor the authored solid radius (SOLID-RADIUS-1); today ignores it | 224, 224, 50.888 | 0.62, 0.57, 0.121 | Three captured solid placements; interior engine error is at most 0.50 CV |
+
+## Path mask coverage and feather
+
+- **Reference:** f64 area coverage and the normalized separable Gaussian with
+  transparent canvas edges, at `σ = max(0, feather) × |world x| / 2`, followed by
+  authored add/subtract formulas.
+- **Gate:** `pm-render/tests/path_masks.rs` (G-V2), with the captured legacy mask
+  witness. All cases pass the per-pixel reference-closeness bar; sharp masks
+  also preserve area and centroid at 1e-3. The corpus checks preview/export identity.
+- **Units:** CV, worst per-case max, p99.9 and mean over edge pixels.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Exact path coverage and Gaussian feather replace canvas rasterization and the approximate blur | 95.25, 82.62, 3.876 | 0.080, 0.077, 0.016 | 54 masks and stacks, including transformed, subtract-only, HD and UHD cases |
+
+## SVG coverage and paint
+
+- **Reference:** independent f64 SVG geometry, gradients, Porter-Duff paint and
+  luminance masks, integrated with exact subcell coverage on a shared grid.
+  Text uses raw shaped glyph outlines before the engine's contour resolution.
+- **Gate:** `pm-render/tests/svg.rs` (G-V3), against 43 actual legacy-app frames
+  and 374 required Chromium semantic probe rasters. Geometry stays within 1e-3;
+  every placement checks preview/export identity.
+- **Units:** CV, worst per-case max, p99.9 and mean over resampled pixels.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Output-resolution coverage, float gradient integration and joint clip/mask compositing (SVG geometry and paint rules) | 170.45, 163.81, 21.368 | 6.757, 6.245, 0.0133 | Five SVG sources at contain/cover/stretch placements and 25–800% or animated scale, 43 frames |
+
+## SVG playback resampling
+
+- **Reference:** f64 coverage of the authored shapes and image crop under the
+  frame's exact transform, 64 × 64 subpixels per output pixel.
+- **Gate:** `pm-render` unit test
+  `svg_sample::tests::playback_frames_are_closer_to_f64_than_todays_bilinear_draw`.
+  Today is the same source raster stored as RGBA8 and sampled bilinearly at pixel
+  centers (the legacy textured quad). Area and centroid stay within 1e-3 and 2e-3 px.
+- **Units:** CV of alpha, worst case over Float32, Float16 and Unorm8 stores.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Playback frames integrate each pixel's source footprint (4 × 4 quadrature) of a float raster instead of one bilinear RGBA8 sample (area-correct resampling) | 53.01, 44.62, 0.569 | 15.63, 14.13, 0.265 | Rotated, scaled circle and masked stroke with a joint image crop |
+
+Paused frames, exports and captures paint at output resolution (the SVG
+coverage and paint row above).
+
+## SVG filters
+
+- **Reference:** analytic Gaussian/CDF integration and premultiplied f64 compositing,
+  following Filter Effects and SVG 1.1 filter regions, color domains and filterRes.
+  Paint, filter, clip and mask share a grid within an image; each image resolves
+  before layer compositing.
+- **Gate:** `pm-render/tests/svg_filters.rs`, four SHA-verified legacy-app witnesses,
+  plus transformed covariance and filter-grid cases; `e2e/engine-svg.spec.ts` checks
+  live placements, exact window/native byte endpoints and f32 geometry at 1e-3.
+- **Units:** CV, worst per-case max, p99.9 and mean across the four witnesses.
+
+| Correction (standard) | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean | Cases |
+|---|---|---|---|
+| Float Gaussian and per-primitive linearRGB/sRGB domains, source halos and hard filter regions (Filter Effects, SVG 1.1) | 5.1233, 5.1233, 0.50966 | 0.7380, 0.7380, 0.01997 | Anisotropic blur, default linearRGB and explicit sRGB, hard region/source halo, zero blur |
+
+Unsupported primitives and scenes beyond the checked device, memory or filter-work
+budget use the declared native resvg RGBA8 fallback with a runtime reason.
+Supported scenes within those bounds keep float intermediates.
+
+## Source monitor
+
+Reference: independent f64 Y′CbCr conversion (H.273), the documented SDR
+transfer reading, linear-light primaries and Bradford adaptation into the
+capture's display ICC. `e2e/helpers/source-colour-reference.ts` implements the
+math independently of production. Gate: `engine-source-compositor.spec.ts`.
+Numbers below are CV over flat, opaque RGB samples in the light-theme,
+full-size capture at 0.5 s; the gate also checks dark and intrinsic-size
+captures. Max, p99.9 and mean describe that same sampled population.
+
+| Correction / case | Today vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean |
+|---|---|---|
+| Tagged full-range HD H.264 | 11.801, 11.799, 4.163 | 0.538, 0.494, 0.173 |
+| Untagged HD H.264 | 11.700, 11.700, 4.409 | 0.524, 0.507, 0.196 |
+| Untagged portrait H.264 | 10.568, 8.998, 3.397 | 0.462, 0.453, 0.152 |
+| Partially tagged BT.709 matrix with SD primaries | 26.151, 26.151, 6.111 | 0.513, 0.513, 0.154 |
+| 10-bit HEVC (P010 decode, presented as I420P10) | 8.820, 8.820, 2.760 | 2.054, 2.054, 0.781 |
+| Untagged SD ProRes: today shows its 8-bit VP9 rendition with Rec.709 primaries; the engine converts the original 10-bit 4:2:2 itself and presents sRGB RGBA | 11.085, 11.085, 6.306 | 2.567, 2.567, 0.972 |
+| SD VP9 with alpha (opaque samples) | 11.939, 11.939, 2.385 | 0.490, 0.490, 0.113 |
+| Tagged BT.470BG PAL | 24.744, 24.744, 8.567 | 0.536, 0.529, 0.187 |
+| Untagged 576-line PAL | 26.126, 26.126, 6.550 | 0.536, 0.529, 0.187 |
+| Untagged HD VP9 | 11.849, 11.673, 4.193 | 0.529, 0.509, 0.176 |
+| Untagged image-sequence rendition, BT.601 matrix | 26.802, 26.802, 7.265 | 0.529, 0.524, 0.226 |
+| BT.2020 SDR through the sRGB working gamut | 20.558, 20.558, 6.509 | 12.273, 12.273, 1.446 |
+
+The 8-bit HD corrections remove Chromium's VideoToolbox transfer lift;
+partial tags retain the specified matrix. SD primaries follow VIDEO-SD-1,
+including BT.470BG for 576-line sources. Sequence renditions retain the
+BT.601 matrix used by their encoder.
+
+Residuals remain: Chromium presentation of 10-bit planes exceeds one CV;
+engine-converted frames (original ProRes, BT.2020) reach the display as 8-bit
+sRGB RGBA, which Chromium converts again into the display gamut; and BT.2020
+converted through the sRGB working gamut differs from direct conversion into
+the display gamut. These are measured limitations, not
+reference-accuracy claims. PQ playback is checked for an SDR capture; this
+screen gate does not supply an independent HDR tone-mapping reference.
+
+Fully tagged 8-bit SDR and untagged non-PAL SD H.264 retain their correct
+monitor reading. Interpret Footage uses the same native conversion as a
+composition layer (`source_snapshot`), and an open paused still/video monitor
+repaints Apply, Undo and Redo without seeking (`engine-source-refresh`).
+The source-frame/thumbnail gate independently decodes original media for
+native source consumers and the actual browser rendition for legacy consumers.
+For the solid SD red H.264 fixture at 0, 0.25 and 0.5 s, the f64 sRGB reference
+is `(247.554, 35.881, 0)`. All snapshot RGB channels give these CV distances:
+
+| Source snapshot | Today: max, p99.9, mean | Engine: max, p99.9, mean |
+|---|---|---|
+| H.264 source | 35.881, 35.881, 14.109 | 0.446, 0.446, 0.188 |
+
+The native result rounds to `(248, 36, 0)`. Posters match an independently
+synthesized reference encoded at the shipped WebP quality exactly; inline
+thumbnails retain that poster. Theme captures additionally compare layout and
+ICC-transformed reference colours. This gate requires half-code snapshot
+rounding accuracy, not equality with Chromium's Canvas2D colour bug.
+
+Frame identity at open-GOP boundaries. Reference: FFmpeg's sequential decode
+in presentation order; the shown frame is the one whose interval holds the
+time. Gate: `pm-media/tests/random_access.rs` (`s6_corpus`: every frame of
+open-GOP H.264 and HEVC by random access equals the sequential decode). Units
+are source frames.
+
+| Correction | Today vs reference | Engine vs reference | Cases |
+|---|---|---|---|
+| A seek to a leading picture of a CRA shows that picture (today: the CRA, the next keyframe) | 1 frame (frame 30, the CRA, for frame 29) | 0 | 4K HEVC Main10, keyint 30, open GOP |
+
+### Source sampling
+
+- **Reference:** independent f64, normalized Lanczos-3 over binary source
+  texels with clamp-to-edge support. The previous source draw's unmipped
+  bilinear result is exact at these pixel centres. This follows the declared
+  composition sampling kernel (`pm-render::sampling`), with no monitor filter.
+  Fractional fit edges use the exact area of each output pixel inside the
+  centred source rectangle, independently calculated in f64.
+- **Gate:** `source_snapshot::monitor_4k_checker_is_closer_to_f64_than_unmipped_bilinear`,
+  all 921,600 pixels classified Resampled under unchanged `EIGHT_BIT` bounds,
+  including per-pixel excess. The paused monitor equals the source export.
+  `fractional_source_contain_is_closer_to_exact_coverage` also checks alpha area
+  and centroid with `same_geometry` at the policy's unchanged 1e-3 bound.
+- **Units:** CV, maximum channel difference.
+
+| Correction / case | Previous monitor vs reference: max, p99.9, mean | Engine vs reference: max, p99.9, mean |
+|---|---|---|
+| Lanczos-3 when paused, 3840×2160 one-texel checker → 1280×720 | 127.50, 127.50, 127.500 | 0.50, 0.50, 0.500 |
+| GPU mip pyramid and trilinear playback, same checker | 127.50, 127.50, 127.500 | 4.01, 0.51, 0.500 |
+| Exact fractional fit coverage, 160×90 opaque red → 1464×824 contain | 63.75, 63.75, 0.155 | 0.25, 0.25, 0.001 |
+
+Playback's maximum is at the clamped outer support; every output pixel is
+closer than the previous draw. No colour or geometry tolerance is widened.

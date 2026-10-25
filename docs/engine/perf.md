@@ -799,29 +799,6 @@ PM_BENCH_EDIT=drag target/release/examples/compose_bench doc.json <composition> 
   corpus plans, pixel-exact frames, on-disk image changes, and drag reuse).
   These are correctness checks; no performance gate is claimed from them.
 
-### Worker commit deadlines (P4)
-
-The supplied fixups2 common-timeline traces locate the judder after submission:
-at HD the worker's canvas reaches viz p50 0.365 ms after its rAF, but viz
-starts drawing it either immediately (p50 0.436 ms after rAF) or one refresh
-later (p95 8.763 ms). UHD likewise splits one/two refreshes. Those are analyses
-of the supplied pre-change traces, not new performance measurements.
-
-Timed commits now target 0.75 refreshes after BeginFrame so they target the
-following compositor refresh consistently; the display prediction is two
-refreshes plus the existing 3.2 ms panel offset. Paused and gesture frames still
-draw on arrival. Every BeginFrame feeds the refresh estimator before scheduling
-the commit, including when a faster, initially unknown display supersedes a
-pending timer. A late timer uses the current refresh's decision. Retargeting and
-disposal cancel the outstanding timer. The presenter/worker regressions cover
-gestures, cancellation, timed frames and an unknown 120 Hz display.
-
-**Not gate-complete:** the initial run found and corrected starvation before the
-refresh period was known. The next paired run lost its awake display during the
-today row, so it is invalid and produced no native timing comparison. There is
-no valid final paired p50/p95/p99/max result at 30, 25 or 23.976 fps, or a final
-A/V-under-load result. Do not treat the changed phase or prediction as a P4 pass.
-
 ### perf3 P5: mount preparation and the reverse shuttle sawtooth
 
 The native connection now prepares one detached canvas and presentation worker
@@ -859,49 +836,27 @@ from the simulation. Re-run paired mount, cadence, and A/V probes on an awake,
 unlocked display with load at most 8. The between-deadline worker submission
 change above also still needs its common-compositor-clock validation.
 
-### SVG buckets and runner pixels in the viewer: every wait ends promptly
+### Runner pixels in the viewer: every wait ends promptly
 
-Waiting for the exact SVG bucket or fallback runner pixels (instead of a
-stand-in) introduced a per-view wait (`pm_node::present::wait`). Review found
-two freezes in its first version: a failed SVG raster held the viewer for 5 s
-and, for a permanent failure (`missing`, `decode`), forever, since every retry
-missed and waited again; a runner `Failed` (compile error, watchdog, lost
-context) or the end of a transient backoff only marked the view dirty, which a
-valid wait ignores, so the picture froze for up to 10 s. Every exit is now
-explicit and prompt:
+A viewer frame that needs fallback runner pixels waits for them instead of
+drawing a stand-in (`pm_node::present::wait`). Every exit is explicit and
+prompt:
 
-- the pixels arrive: drawn (unchanged);
-- `SvgFailed` or a refused band: the key is marked failed in the renderer
-  (`Renderer::fail_svg_raster`), views waiting for it draw at once without the
-  image (`Renderer::svg_waiting_viewer`; snapshots and exports still wait),
-  and the key is asked for again 5 s later while a view draws without it,
-  without drawing a frame for that;
-- runner `Failed`: the view's runner wait ends and it draws at once (a final
+- the pixels arrive: drawn;
+- runner `Failed`: the view's wait ends and it draws at once (a final
   failure draws nothing or skips the step; a transient one follows the
-  renderer's backoff), and a backoff's end ends a runner wait too;
+  renderer's backoff), and a backoff's end ends the wait too;
 - an edit, view change, or transport discontinuity: the wait is obsolete;
-- nothing arrives: the wait times out 5 s (SVG) or 10 s (runner, its own
-  compile and draw deadlines) after the first ask (re-rendering never extends
-  it); the timeout is a failure (`unanswered` for the runner, transient) and
-  the frame is drawn without it. `Stats::external_wait_timeouts` counts them.
-  `POWERMOVE_ENGINE_EXTERNAL_WAIT_MS` caps both bounds (tests only).
+- nothing arrives: the wait times out 10 s (the runner's own compile and
+  draw deadlines) after the first ask (re-rendering never extends it); the
+  timeout is a transient `unanswered` failure and the frame is drawn
+  without it. `Stats::external_wait_timeouts` counts them.
+  `POWERMOVE_ENGINE_EXTERNAL_WAIT_MS` caps the bound (tests only).
 
-Tests: `wait` unit tests (state, deadlines, bounds); `svg` unit tests
-(retry time, refused band names its key); pm-render
-`a_viewer_frame_draws_without_a_bucket_the_window_could_not_draw`; pm-node
-`an_svg_raster_the_window_cannot_draw_never_freezes_the_viewer` (frame within
-1 s of `SvgFailed`, not a stand-in, asked again at ≈5 s with no redraw, drawn
-when it lands), `an_unanswered_svg_raster_times_out_instead_of_freezing_the_viewer`
-(1.5 s cap), `a_runner_failure_or_silence_never_freezes_the_viewer` (a lost
-context asks again at once, a second draws the frame at once and asks again
-after the 250 ms backoff, silence times out at the 3 s cap), and the existing
-runner test now requires the compile-failure frame within 2 s. Each new
-integration assertion was checked to fail with its fix removed (frame after
-10.0 s, 4.7 s, and a re-ask after 3.0 s).
-
-Not covered by an integration test: a refused SVG band (it takes 256 rasters
-assembling at once or 512 MiB; the mapping is unit-tested and shares the
-`SvgFailed` path).
+Tests: `wait` unit tests (state, deadline, bound); pm-node
+`a_runner_failure_or_silence_never_freezes_the_viewer` (a lost context asks
+again at once, a second draws the frame at once and asks again after the
+250 ms backoff, silence times out at the 3 s cap).
 
 ### Repeating the paired perf3 rows
 
@@ -1035,7 +990,7 @@ directly, without full-output multisampled RGBA storage.
 Reproduce with the opt-in `scope-bench.test.ts`, `engine-doc-boot.spec.ts` and
 `path-mask-playback-measure.spec.ts` (`PM_FIXUPS2_MEASURE=1`,
 `PM_FIXUPS2_EVIDENCE=<outside-repo-dir>`); Electron specs under pm-electron-lock.
-Rust selections: pm-wasm tests; pm-vector canvas2d/mask_coverage and unit tests;
+Rust selections: pm-wasm tests; pm-vector canvas2d and unit tests;
 pm-render path_masks plus corpus with `PM_RENDER_ONLY=composite/path-masks`,
 and text_corpus with `PM_TEXT_ONLY=composite/path-masks`.
 

@@ -91,7 +91,10 @@ fn main() {
             b.plan.width(),
             b.plan.height()
         );
-        if max > 1.0 / 255.0 {
+        // One code value: an N32 canvas rounds the GPU's f32 blur and the
+        // CPU's f64 one to either side of a step (the difference of two
+        // codes, in f32, is 1/255 to within an ulp).
+        if max > 1.0 / 255.0 + f32::EPSILON {
             failures.push(format!(
                 "{name}: paint pass differs from the CPU reference by {max}"
             ));

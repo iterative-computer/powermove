@@ -215,6 +215,68 @@ pub struct Probed {
     pub index: Option<FrameIndex>,
 }
 
+/// Container and stream timing without building a video index or probing
+/// decoded video geometry/color. Used when only a playback clock is needed.
+pub struct TimingProbe {
+    pub duration_us: Option<i64>,
+    pub start_us: Option<i64>,
+    pub streams: Vec<StreamProbe>,
+    pub video_stream: Option<usize>,
+    pub audio_stream: Option<usize>,
+}
+
+pub fn probe_timing(path: &Path) -> Result<TimingProbe> {
+    let input = Input::open(path)?;
+    Ok(input_timing(path, &input, &input.format_name()))
+}
+
+fn input_timing(path: &Path, input: &Input, container: &str) -> TimingProbe {
+    let mut streams = Vec::new();
+    for i in 0..input.streams() {
+        let st = input.st(i);
+        let (tb, start, dur, disposition) = unsafe {
+            (
+                (*st).time_base,
+                (*st).start_time,
+                (*st).duration,
+                (*st).disposition,
+            )
+        };
+        let k = kind(input.media_type(i));
+        let audio = (k == StreamKind::Audio).then(|| audio_probe(path, input, i, container));
+        streams.push(StreamProbe {
+            index: i,
+            id: input.stream_id(i),
+            kind: k,
+            codec: input.codec_name(i),
+            timebase: [tb.num as i64, tb.den as i64],
+            start_pts: (start != ff::AV_NOPTS_VALUE).then_some(start),
+            duration_pts: (dur != ff::AV_NOPTS_VALUE && dur > 0).then_some(dur),
+            default: disposition & ff::AV_DISPOSITION_DEFAULT as i32 != 0,
+            attached_picture: disposition & ff::AV_DISPOSITION_ATTACHED_PIC as i32 != 0,
+            metadata: input.all_metadata(Some(i)),
+            audio,
+        });
+    }
+    let video_stream = input.best_video().filter(|&v| !streams[v].attached_picture);
+    let audio_stream = input.best_audio();
+    let (duration_us, start_us) = unsafe {
+        let d = (*input.fmt).duration;
+        let s = (*input.fmt).start_time;
+        (
+            (d != ff::AV_NOPTS_VALUE).then_some(d),
+            (s != ff::AV_NOPTS_VALUE).then_some(s),
+        )
+    };
+    TimingProbe {
+        duration_us,
+        start_us,
+        streams,
+        video_stream,
+        audio_stream,
+    }
+}
+
 fn kind(t: ff::AVMediaType) -> StreamKind {
     match t {
         ff::AVMEDIA_TYPE_VIDEO => StreamKind::Video,
@@ -260,35 +322,13 @@ fn probe_with_input_fingerprint(
 ) -> Result<(Probed, Input)> {
     let input = Input::open(path)?;
     let container = input.format_name();
-    let mut streams = Vec::new();
-    for i in 0..input.streams() {
-        let st = input.st(i);
-        let (tb, start, dur, disposition) = unsafe {
-            (
-                (*st).time_base,
-                (*st).start_time,
-                (*st).duration,
-                (*st).disposition,
-            )
-        };
-        let k = kind(input.media_type(i));
-        let audio = (k == StreamKind::Audio).then(|| audio_probe(path, &input, i, &container));
-        streams.push(StreamProbe {
-            index: i,
-            id: input.stream_id(i),
-            kind: k,
-            codec: input.codec_name(i),
-            timebase: [tb.num as i64, tb.den as i64],
-            start_pts: (start != ff::AV_NOPTS_VALUE).then_some(start),
-            duration_pts: (dur != ff::AV_NOPTS_VALUE && dur > 0).then_some(dur),
-            default: disposition & ff::AV_DISPOSITION_DEFAULT as i32 != 0,
-            attached_picture: disposition & ff::AV_DISPOSITION_ATTACHED_PIC as i32 != 0,
-            metadata: input.all_metadata(Some(i)),
-            audio,
-        });
-    }
-    let video_stream = input.best_video().filter(|&v| !streams[v].attached_picture);
-    let audio_stream = input.best_audio();
+    let TimingProbe {
+        duration_us,
+        start_us,
+        streams,
+        video_stream,
+        audio_stream,
+    } = input_timing(path, &input, &container);
     let (video, index) = match video_stream {
         Some(v) => {
             let (p, idx) = video_probe(path, &input, v)?;
@@ -326,14 +366,6 @@ fn probe_with_input_fingerprint(
                 frame,
             }
         });
-    let (duration_us, start_us) = unsafe {
-        let d = (*input.fmt).duration;
-        let s = (*input.fmt).start_time;
-        (
-            (d != ff::AV_NOPTS_VALUE).then_some(d),
-            (s != ff::AV_NOPTS_VALUE).then_some(s),
-        )
-    };
     let probe = MediaProbe {
         path: path.to_path_buf(),
         size,

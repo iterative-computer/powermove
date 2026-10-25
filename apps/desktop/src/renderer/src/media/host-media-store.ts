@@ -465,10 +465,10 @@ export function bindingsFor(project: any, records: (key: string) => MediaStoreRe
   const out: Record<string, MediaBinding> = {};
   for (const meta of Object.values<any>(project?.assets || {})) {
     if (!meta?.id) continue;
-    if (isLinked(meta)) { out[meta.id] = { link: meta.link }; continue; }
+    if (isLinked(meta)) { out[meta.id] = { link: meta.link, ...(meta.rendition === true ? { rendition: true } : {}) }; continue; }
     const key = storageKeyOf(meta);
     const hash = typeof meta.contentHash === 'string' ? meta.contentHash : key ? records(key)?.hash : undefined;
-    if (key || hash) out[meta.id] = { ...(key ? { key } : {}), ...(hash ? { hash } : {}) };
+    if (key || hash) out[meta.id] = { ...(key ? { key } : {}), ...(hash ? { hash } : {}), ...(meta.rendition === true ? { rendition: true } : {}) };
   }
   return out;
 }

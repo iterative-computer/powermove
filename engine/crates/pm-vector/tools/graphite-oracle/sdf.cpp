@@ -1,5 +1,5 @@
 // Synthetic atlas-byte oracle for Skia chrome/m152. No font data required.
-// Build/link as counts.cpp; invoke with no arguments.
+// Link against the pinned Skia CPU library; invoke with no arguments.
 #include "src/core/SkDistanceFieldGen.h"
 #include <cstdint>
 #include <cstdio>

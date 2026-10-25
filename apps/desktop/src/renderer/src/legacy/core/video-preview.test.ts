@@ -151,3 +151,36 @@ it('keeps small image sequences on the original without preparing an editing cop
     expect(media.beginPreview).not.toHaveBeenCalled();
   } finally { resetBridgeForTests(); }
 });
+
+it('with the new engine, resolves while a timeline loops and publishes the preview within the deferral bound', async () => {
+  vi.useFakeTimers();
+  const media = {
+    beginPreview: vi.fn(async () => 'preview'), writePreview: vi.fn(async () => {}),
+    finishPreview: vi.fn(async () => ({ size: 3 })),
+    readPlaybackProxy: vi.fn(async () => new Uint8Array([1, 2, 3])),
+    releasePlaybackProxy: vi.fn(async () => {}),
+  };
+  const PM: any = { EngineSourceMedia: {}, playing: true, MediaStore: { get: vi.fn(async () => null), put: vi.fn(async () => true) },
+    bus: { emit: vi.fn() }, invalidate: vi.fn() };
+  vi.stubGlobal('window', { powermove: { media } });
+  installBridgeForTests((window as any).powermove);
+  vi.stubGlobal('document', { createElement: () => {
+    const el: any = new EventTarget();
+    let frame: () => void;
+    Object.defineProperty(el, 'src', { set: () => queueMicrotask(() => el.dispatchEvent(new Event('loadeddata'))) });
+    el.requestVideoFrameCallback = (cb: () => void) => { frame = cb; };
+    el.play = async () => { frame(); };
+    el.pause = vi.fn();
+    return el;
+  } });
+  try {
+    const asset: any = { w: 1920, h: 1080, storageKey: 'media:original', el: { pause: vi.fn() }, playbackProxy: true, playbackProxyVersion: 2 };
+    // An older cutout proxy awaits this on import and restore.
+    await prepareVideoPreview(PM, asset, new Blob(['original bytes']), () => false);
+    expect(asset.preview).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(asset.preview).toBeDefined();
+    expect(PM.bus.emit).toHaveBeenCalledWith('assets', { runtimeOnly: true });
+    URL.revokeObjectURL(asset.preview.url);
+  } finally { vi.useRealTimers(); vi.unstubAllGlobals(); resetBridgeForTests(); }
+});

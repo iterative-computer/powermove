@@ -60,7 +60,8 @@ source. The open options are in
    anonymous port where every message must carry the accepted audit token.
    A restarted engine gets a new name.
 2. **Pool.** On the first viewer state the engine sizes a pool at viewer
-   device pixels: ring (2) + render-ahead (4) + 2 = 8 surfaces, `rgbaf16`
+   device pixels: ring (2) + render-ahead (4) + 2 = 8 surfaces (render-ahead
+   is longer in frames at high frame rates: [Pacing at 120 Hz](#pacing-at-120-hz)), `rgbaf16`
    when the viewer's display is EDR and the lease allows it, `bgra` with the
    blue-noise dither otherwise (amendment 4). Each IOSurface goes to main
    once over Mach; main imports it once with `importSharedTexture` and sends
@@ -1767,16 +1768,91 @@ P5) now belong to the perf3 lane.
   17 ms from run to run on 2026-10-16); a quiet-machine round would
   tighten the spread.
 
-## Perf3 worker commit phase
+## Pacing at 120 Hz
 
-Timed worker commits now target a fixed point between BeginFrames rather than
-racing the page's commit for the same refresh (`presenter.ts`,
-`commitPhaseRefreshes`; `present-worker.ts`, 0.75). Immediate gesture frames
-retain draw-on-arrival. The refresh fit is sampled before deferral, including
-when the display rate is initially unknown; pending timers are cancelled on
-retarget/dispose. The prediction is two refreshes plus the existing panel
-offset. See `perf.md`, "Worker commit deadlines (P4)": targeted unit tests pass,
-but final paired cadence and A/V feedback on an awake display remain required.
+Playback at the display's rate shows every frame the engine renders, from
+the first refresh the first new frame can make. The 120 Hz rig's `playing`
+row checks it (`docs/engine/perfbench.md`; `PM_PERFBENCH_RIG_TRACE` writes
+the per-frame trace).
+
+1. **One vsync timeline** (`VsyncEstimator`, `display-timing.ts`). The
+   presentation worker locks once on the median of its BeginFrame samples,
+   then tracks the phase like a PLL: each sample within a quarter refresh
+   moves it by 1/16 of its error (at most 1/16 of a refresh); twelve
+   agreeing samples outside that band relock it. The engine's vsync hint
+   is this timeline, re-sent when the phase moved 100 µs (at most every
+   250 ms), so the engine's plan and the viewer's decisions agree.
+   Decisions sit halfway between frame boundaries, folded by the frame's
+   exact share of a refresh (not the estimated period, which a seconds-old
+   clock sample would turn). Within a run each refresh decides one refresh
+   after the last, as many as its animation frame says passed (a BeginFrame
+   up to three quarters of a refresh off is still the next refresh): a
+   BeginFrame phase that moves by half a refresh under load neither skips
+   nor repeats a frame, and a missed refresh skips its frame. Decisions
+   more than a refresh and a half from the grid's are centred again.
+2. **The worker draws timed frames in its animation frame.** A worker canvas
+   hands viz what an animation frame drew when the callback returns; a frame
+   drawn later in the refresh waits for the next BeginFrame. The display
+   prediction is 1.5 refreshes and 3.2 ms (A/V sync above).
+3. **Render-ahead covers twice the delivery time and a phase slot**
+   (`Schedule::lead_frames`): at least `DEFAULT_LEAD` (4) frames, and
+   2 × delivery + one refresh. Delivery is the viewer's display latency
+   (the hint's `latencyUs`), half a refresh and the arrival; without a hint,
+   3 refreshes. One delivery is the viewer's horizon, the other covers the
+   render and a stall on the way (the window's main thread busy for a dozen
+   milliseconds); the refresh is the longest wait for the render's phase
+   slot: 7 frames at 120 fps on a 120 Hz display, 6 at 60 fps on a 60 Hz
+   one, the floor of 4 for slower frame rates on 120 Hz. A frame leaves the pool when the viewer has drawn it, about two refreshes
+   before it shows, so `poolWaits` stays 0.
+4. **Playback frames leave from the completion thread**
+   (`present/complete.rs`). The render thread encodes the next timed frame
+   while the GPU finishes the last; each is sent, in order, when its GPU
+   work is done, so a frame costs the render thread its compose only. The
+   schedule's cost estimate is render start to GPU done. The C′ prototype
+   presents on the render thread.
+5. **Frame events follow the refresh that drew the frame**
+   (`PresentedEvents`). A timed frame is announced at the first page
+   animation frame of a later refresh than its draw (the page's and the
+   worker's BeginFrame times agree within 0.1 ms), at most one emission per
+   page animation frame, inside it (decision EXT-TIMING-1).
+6. **Play starts the picture and the sound on one line**
+   (`Thread::start_time`). The line's first media shows at the earliest
+   instant both can make: for the picture, the first refresh the first new
+   frame can be ready for (what is left of its render, its delivery to the
+   worker, then the viewer's display latency); for the sound, the device's
+   latency and one of its buffers. pm-audio presents the run's first sample
+   at that host time (`Start::At`), partway into a device buffer, or passes
+   over what should already have played when its audio was late; its first
+   clock sample confirms the line (`TransportClock::follow`). A Play the
+   presenter forwarded to the audio at ingress (PLAY-1) is prepared there
+   and held (`Start::Held`, 150 ms at most) until the render thread times
+   it (`AudioCtl::StartAt`); a forwarded Play the render thread defers or
+   ignores starts at once. A device that never confirms leaves the line on
+   the host clock; without the viewer's timing the line starts after
+   `PREROLL_US`. When the playhead's frame is on screen and current, the
+   run renders from the next frame and the engine connection announces the
+   frame on screen again at the next animation frame
+   (`PresentedEvents.replay`), as today's Play does.
+7. **The first new frames are rendered while paused** (`Thread::arm`).
+   Once the paused frame has stayed 50 ms, the next frames of a forward 1×
+   run go into the paused pool's free slots (one stays free); any change
+   gives them back. A Play sends them at once, before the playing pool
+   replaces the paused one (`BridgePresenter::transport` sends the Play
+   first), and the viewer keeps drawing frames of a pool whose surfaces
+   match the new one's (`presenter.ts` `onPool`). Sessions with
+   compatibility producers start through the native preroll instead.
+
+`POWERMOVE_ENGINE_SIM_AUDIO=1` replaces the audio device with a simulated
+one (48 kHz, 512-frame buffers, 10 ms latency, called back a buffer ahead)
+for a machine whose output does not run (rig `PM_PERFBENCH_RIG_AUDIO=1`).
+
+Open, outside the bridge: **viz's latch.** viz draws a refresh as soon as
+every client has submitted, about 1.4 ms after BeginFrame with the page and
+the worker canvas. BeginFrames can come up to 2 ms early under load, and a
+draw that early is presented with the previous one, which is never seen
+(`Graphics.Pipeline.DrawAndSwap` feedback). Today's viewer escapes it on
+heavy projects only because its page frame takes about 3 ms. C′ presents
+outside viz.
 
 #### perf3: prepare the viewer drawing before mount
 
@@ -1819,7 +1895,7 @@ The canvas fills its CSS box (`V.inner`, or the crop's box), and Chromium
 composites it there: the box snapped to whole device pixels (each edge
 rounded, as Blink snaps a replaced element's content box) and the 8-bit
 canvas sampled bilinearly, without mipmaps, clamped at its edges. The
-compositor picks every raster (text, shapes, SVG buckets) at that canvas's
+compositor picks every raster (text, shapes, SVG images) at that canvas's
 `outputScale`.
 
 **The engine.** The viewer computes the same geometry before it sends the
@@ -1830,9 +1906,9 @@ sends the one a `render.gl.resize` caller sized. pm-node's
 `compose::canvas_placement`:
 
 - renders the frame at the canvas's size and today's `outputScale` (the
-  canvas over its crop), so every layer, effect and level 1 SVG bucket is
-  drawn at today's resolution; only the canvas texels the visible frame
-  pixels read are rendered;
+  canvas over its crop), so every layer and effect is drawn at today's
+  resolution; only the canvas texels the visible frame pixels read are
+  rendered;
 - stores the region as today's 8-bit opaque canvas (`Rgba8Unorm`,
   composited over black), then scales it into the box snapped as Blink snaps
   it, with hardware bilinear sampling clamped at the canvas edges, into the
@@ -1846,7 +1922,7 @@ preview viewport (`scaledWorld`), the origin unrounded, and its background
 (`backgroundView`) and effect coordinates (`effectViewportCoordinates`)
 follow the same origin. pm-render now has that origin
 (`RenderRequest::origin`): every level 1 placement goes through it
-(`scaled_world`, `vector_world`: shapes, text, SVG buckets, solids, images,
+(`scaled_world`, `vector_world`: shapes, text, SVG images, solids, images,
 video), as do 2.5D planes, masks, local level 2 content, groups, mattes and
 motion-blur accumulations; a precomp renders its own target from (0, 0) as
 today's nested `renderProject` does. The level's `OutputView` gives the
@@ -2035,7 +2111,7 @@ pm-vector `canvas2d` pass; `corpus.rs` 354 frames, 5 failed, all video
 class (`motion/blur-video` at 0.5 and 1.2 s, max 255; `retime/speed` at
 2.9 s, max 3; `space25d/precomps` at 1.5 and 2.6 s, max 7 and 9), failing
 identically (same pixel counts and maxima) at the branch's pre-V1b head,
-so not V1b's. The svg bucket grid: 950 of 950 views pick today's bucket.
+so not V1b's.
 E2e after V1b: `engine-svg.spec.ts` 6 of 7 (E1 unchanged: 56,037 and
 59,892 values off by 1 CV), `engine-render-transport.spec.ts` 7 of 7, the
 `viewer-*` specs 21 of 23 (the two `viewer-resize.spec.ts` failures that

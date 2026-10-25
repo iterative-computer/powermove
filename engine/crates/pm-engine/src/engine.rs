@@ -207,6 +207,16 @@ enum HostCall {
         asset: String,
         generation: u64,
     },
+    SourceMint {
+        session: SessionId,
+        asset: String,
+        generation: u64,
+    },
+    SourceResolve {
+        session: SessionId,
+        asset: String,
+        generation: u64,
+    },
     /// A call the job service asked for, answered to it by its token.
     Service {
         token: u64,
@@ -781,12 +791,11 @@ impl Engine {
             .map(|(id, _)| *id)
             .collect();
         for id in &closed {
-            if let Some(mut session) = self.sessions.remove(id) {
-                if let Some(mut checkpoint) = session.checkpoint.take() {
-                    checkpoint.expires =
-                        std::time::Instant::now() + std::time::Duration::from_secs(15);
-                    self.reconnect_mirror = Some(checkpoint);
-                }
+            if let Some(mut session) = self.sessions.remove(id)
+                && let Some(mut checkpoint) = session.checkpoint.take()
+            {
+                checkpoint.expires = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                self.reconnect_mirror = Some(checkpoint);
             }
         }
         self.resync_work.retain(|_, p| p.port != port);
@@ -1510,7 +1519,7 @@ impl Engine {
         let owner = self.document_owners.get(&session.port);
         let hash = hex(&resync.hash.0);
         if let Some(mirror) = self.kernel_mirrors.iter().find_map(|(candidate, saved)| {
-            if !owner.is_none_or(|owner| owner == candidate) || saved.document != resync.document {
+            if owner.is_some_and(|owner| owner != candidate) || saved.document != resync.document {
                 return None;
             }
             let usable = |mirror: &pm_model::Document, verified: Option<&str>| {
@@ -1656,10 +1665,52 @@ impl Engine {
             .reconcile(session.mirror.as_ref().and_then(|m| m.root()));
         for asset in work.removed {
             self.with_presenter(out, |p, ctx| p.media(ctx, port, sid, &asset, None));
+            self.with_presenter(out, |p, ctx| p.source_media(ctx, port, sid, &asset, None));
         }
         for attempt in work.start {
+            self.with_presenter(out, |p, ctx| {
+                p.source_media(ctx, port, sid, &attempt.asset, None)
+            });
+            self.start_source_media(sid, &attempt, out);
             self.start_media(sid, attempt, now, out);
         }
+    }
+
+    fn start_source_media(&mut self, sid: SessionId, attempt: &MediaAttempt, out: &mut Out) {
+        let request = Request::MintHandle(MintHandle {
+            kind: CapabilityKind::SourceRead {
+                asset: attempt.asset.as_str().into(),
+            },
+            session: sid,
+        });
+        let called = self
+            .open_host()
+            .and_then(|host| self.call_host(host, request, Some(sid), out));
+        if let Some(id) = called {
+            self.host_calls.insert(
+                id,
+                HostCall::SourceMint {
+                    session: sid,
+                    asset: attempt.asset.clone(),
+                    generation: attempt.generation,
+                },
+            );
+        } else {
+            self.source_media_failed(sid, &attempt.asset, attempt.generation, out);
+        }
+    }
+
+    fn source_media_failed(&mut self, sid: SessionId, asset: &str, generation: u64, out: &mut Out) {
+        let Some(state) = self.sessions.get(&sid) else {
+            return;
+        };
+        if !state.media.current(asset, generation) {
+            return;
+        }
+        let port = state.port;
+        self.with_presenter(out, |p, ctx| {
+            p.source_media(ctx, port, sid, asset, Some(None))
+        });
     }
 
     fn start_media(
@@ -1724,6 +1775,7 @@ impl Engine {
             })
             .collect();
         for (sid, attempt) in due {
+            self.start_source_media(sid, &attempt, out);
             self.start_media(sid, attempt, now, out);
         }
     }
@@ -2183,6 +2235,13 @@ impl Engine {
             self.host_calls.remove(&call_id);
             let error = request_error(id, ErrorCode::Cancelled, "The resync was cancelled.");
             self.send_error(port, id, error, out);
+        } else if self
+            .presenter
+            .as_mut()
+            .is_some_and(|p| p.cancel_snapshot(port, id))
+        {
+            let error = request_error(id, ErrorCode::Cancelled, "The snapshot was cancelled.");
+            self.send_error(port, id, error, out);
         }
     }
 
@@ -2326,6 +2385,67 @@ impl Engine {
                     });
                 }
             }
+            (
+                HostCall::SourceMint {
+                    session,
+                    asset,
+                    generation,
+                },
+                Response::Handle(grant),
+            ) => {
+                if !self
+                    .sessions
+                    .get(&session)
+                    .is_some_and(|s| s.media.current(&asset, generation))
+                {
+                    return;
+                }
+                let request = Request::ResolveHandle(ResolveHandle {
+                    handle: grant.handle,
+                    session,
+                });
+                let called = self
+                    .open_host()
+                    .and_then(|host| self.call_host(host, request, Some(session), out));
+                if let Some(id) = called {
+                    self.host_calls.insert(
+                        id,
+                        HostCall::SourceResolve {
+                            session,
+                            asset,
+                            generation,
+                        },
+                    );
+                } else {
+                    self.source_media_failed(session, &asset, generation, out);
+                }
+            }
+            (
+                HostCall::SourceResolve {
+                    session,
+                    asset,
+                    generation,
+                },
+                Response::HandleResolved(resolved),
+            ) => {
+                let readable = resolved.access == HandleAccess::Read
+                    && matches!(&resolved.kind, CapabilityKind::SourceRead { asset: a } if a.as_str() == asset);
+                if !readable {
+                    self.source_media_failed(session, &asset, generation, out);
+                    return;
+                }
+                let Some(state) = self.sessions.get(&session) else {
+                    return;
+                };
+                if !state.media.current(&asset, generation) {
+                    return;
+                }
+                let port = state.port;
+                let path = std::path::PathBuf::from(resolved.path);
+                self.with_presenter(out, |p, ctx| {
+                    p.source_media(ctx, port, session, &asset, Some(Some(path)))
+                });
+            }
             (HostCall::Service { token }, body) => {
                 if let Some(jobs) = self.jobs.as_mut() {
                     jobs.host_answer(token, Ok(body));
@@ -2383,6 +2503,18 @@ impl Engine {
                 }
                 let now = crate::clock::host_now();
                 self.media_failed(session, &asset, generation, now, out);
+            }
+            HostCall::SourceMint {
+                session,
+                asset,
+                generation,
+            }
+            | HostCall::SourceResolve {
+                session,
+                asset,
+                generation,
+            } => {
+                self.source_media_failed(session, &asset, generation, out);
             }
             HostCall::Service { token } => {
                 if let Some(jobs) = self.jobs.as_mut() {
@@ -2697,7 +2829,9 @@ impl Engine {
             return;
         }
         let document = match &job.spec {
-            pm_protocol::priority::JobSpec::Export { session, .. } => {
+            pm_protocol::priority::JobSpec::Export { session, .. }
+            | pm_protocol::priority::JobSpec::SourceFilmstrip { session, .. }
+            | pm_protocol::priority::JobSpec::BrowserRendition { session, .. } => {
                 if !self
                     .sessions
                     .get(session)

@@ -53,6 +53,14 @@ impl ShapeKind {
     }
 }
 
+/// The string-valued shape content (`d.color`, `d.strokeColor`): Canvas2D
+/// style strings, parsed when the layer is painted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShapeColors {
+    pub color: String,
+    pub stroke_color: String,
+}
+
 /// Evaluated shape content (`resolveContent` output) as numbers. Missing
 /// numeric fields are NaN, which is what `Number(undefined)` gives.
 #[derive(Debug, Clone, Copy, PartialEq)]

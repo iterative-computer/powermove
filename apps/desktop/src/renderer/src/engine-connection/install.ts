@@ -33,6 +33,7 @@ import { PortReconnector } from './reconnect';
 import { HostClock } from './host-clock';
 import { DocumentSession, documentId, type DocumentStream, type Route } from './session';
 import { EngineRenderTransport, EngineSnapshotError } from './render-transport';
+import { EngineSourceMedia, SOURCE_SERVICE } from './source-media';
 import { EngineStatsView, PresentedEvents, RevisionVersions, emitPresented } from './presentation-events';
 import { EngineCanvasBinding } from './canvas-binding';
 import { resolveFrameRate, TICKS_PER_SECOND } from '../../../shared/frame-rate';
@@ -44,7 +45,6 @@ import { viewportEngineCamera } from '../core/scene3d/viewport';
 import { ViewerPresentation } from '../../../extensions/viewer/engine-present/presentation';
 import { PresentationWarmup } from '../../../extensions/viewer/engine-present/prewarm';
 import { ShaderFallbackRunner, type ShaderFallbackRequest } from './shader-fallback';
-import { SvgRasters } from './svg-rasters';
 import { EngineTransport, ticks } from './transport';
 import { EnginePreview, documentWake } from './preview';
 import { EngineSceneMetadata } from './scene-metadata';
@@ -173,13 +173,17 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   let viewerHandlers: EngineViewerHandlers | null = null;
   let viewerLease = 0;
   let sessionReady: Promise<void> | null = null;
+  let sourceMedia: EngineSourceMedia | null = null;
   /** The open composition (what Play plays and the viewer shows). */
   const openComposition = (): string => String(PM.proj?.compId ?? PM.proj?.id ?? '');
   /** A viewerless session follows the open composition (composition-follow.ts). */
   const follower = followOpenComposition({ session: () => current, open: openComposition, bus: PM.bus });
   const transport = new EngineTransport(() => current, hostClock, {
     exclusive: true, wake: () => queueMicrotask(() => { void wakeStandby(); }),
-    prepare: follower.follow
+    prepare: follower.follow,
+    // Today's Play draws the frame at the playhead first; the engine shows
+    // it already, so its `frame:rendered` comes again at the next frame.
+    fromRest: () => { presentedEvents.replay(shownState()); }
   });
   const preview = new EnginePreview(
     () => current, openComposition, () => Number(PM.time) || 0,
@@ -222,12 +226,16 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
   /** A paused redraw request with nothing new for the engine to present:
    *  today's frame loop announces the frame it draws again
    *  (`PresentedEvents.redraw`). Called by the frame loop on `draw`. */
-  (PM as any).EngineRedraw = (): boolean => {
+  /** What the engine shows now: revision, view, and playhead time. */
+  function shownState(): { revision: number | null; viewSeq: number | null; pts: number | null; frameTicks: number } {
     const doc = PM.EngineDoc;
     doc?.barrier?.flush();
     const fps = Number((PM.curComp?.() ?? PM.proj)?.fps) || 30;
+    return { revision: doc?.barrier?.revision ?? current?.applied ?? null, viewSeq: current?.viewSeq ?? null, pts: Number.isFinite(PM.time) ? ticks(PM.time) : null, frameTicks: ticks(1) / fps };
+  }
+  (PM as any).EngineRedraw = (): boolean => {
     return presentedEvents.redraw(
-      { revision: doc?.barrier?.revision ?? current?.applied ?? null, viewSeq: current?.viewSeq ?? null, pts: Number.isFinite(PM.time) ? ticks(PM.time) : null, frameTicks: ticks(1) / fps },
+      shownState(),
       (frame, quality) => {
         // Today's redraw calls the raster wrappers again: an output that
         // changed is the engine's to draw and present (once, as today).
@@ -256,18 +264,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
     }
   });
   const unrouteAudio = routeAudioPanels(PM.Audio, audio, () => transport.active());
-  // Level 1 SVG images: Chromium draws today's bucket rasters for the
-  // engine (decision S1, svg-rasters.ts); their content hashes are taken
-  // ahead so a synchronous snapshot can draw one.
-  const svgRasters = new SvgRasters({
-    asset: (id) => PM.assets?.get?.(id) ?? null,
-    assets: () => (PM.assets?.map?.values?.() ?? []) as Iterable<Record<string, any>>,
-    log
-  });
-  svgRasters.prime();
   const offAssets = PM.bus?.on?.('assets', () => {
     audio.sync();
-    svgRasters.prime();
+    sourceMedia?.assetsChanged();
   }) ?? (() => {});
 
   // Edits reach the engine as soon as the write that made them returns: a
@@ -350,7 +349,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       fallbackRunner: () => (fallbackRunner ??= new ShaderFallbackRunner()),
       // The `raster` override's answers (kernel/raster-compat.ts).
       onCompat: (message) => renderTransport.receiveCompat(message, session),
-      svgRasters: () => svgRasters,
       handlers: {
         message: (message, arrivedMs) => {
           if (message.type === 'frame' && !firstFrame) {
@@ -385,7 +383,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
         transport.refresh();
         for (const listener of clockListeners) listener(sample);
       },
-      onAudio: (message) => audio.receive(message, session),
+      onAudio: (message) => { audio.receive(message, session); sourceMedia?.receive(message); },
       onPreviewStatus: (status) => preview.receiveStatus(session, status),
       onStats: (message) => {
         stats.receive(message, performance.now());
@@ -393,7 +391,7 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       },
       // Replace a seek queued on the home screen before any old clock can
       // overwrite the replacement document's requested UI position.
-      onLoading: () => transport.seek(Number(PM.time) || 0, false),
+      onLoading: () => { sourceMedia?.reset(); transport.seek(Number(PM.time) || 0, false); },
       onOpened: () => renderTransport.syncProducers(session),
       onLoaded: () => {
         stats.reset();
@@ -505,14 +503,21 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       PM.toast?.('The preview could not be rendered. See the console for details.');
     },
     captionsHidden: () => PM.captionsHidden === true,
-    svgRasters: () => svgRasters,
     log
   });
   (PM as any).EngineRender = renderTransport;
-  // The job engine's export and agent frames ask this window for the SVG
-  // rasters of the document it has open (main's `compatFrame`).
-  const unprovideSvg = renderTransport.provideCompat('svgImage', (request) => svgRasters.produce(request));
-  (PM as any).EngineSvgRasters = svgRasters;
+  sourceMedia = new EngineSourceMedia({
+    render: renderTransport, native,
+    project: () => PM.proj,
+    revision: () => renderTransport.currentRevision() ?? 0,
+    session: snapshotSession,
+    wake: wakeStandby,
+    bind: async () => { await (PM as any).HostMedia?.flushBindings?.(PM.proj); },
+    changed: () => PM.bus?.emit?.('assets'),
+    error: error => log('error', `source media: ${error instanceof Error ? error.message : String(error)}`)
+  });
+  (PM as any).EngineSourceMedia = sourceMedia;
+  const sourceRegistration = PM.Kernel.services.register(SOURCE_SERVICE, sourceMedia);
   // The app's own still captures (the Library's section thumbnails, the
   // agent's look and observe) draw through the engine too: with the new
   // engine on, nothing asks the current engine for pixels. The exporter's
@@ -801,7 +806,6 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       offHomeTabs();
       offAssets();
       follower.dispose();
-      unprovideSvg();
       unrouteAudio();
       target.removeEventListener('message', onMessage);
       PM.setTransportDriver?.(null);
@@ -814,6 +818,9 @@ export function installEngineConnection(PM: PMRegistry, host: EngineConnectionHo
       viewerHandlers = null;
       sessionReady = null;
       unrouteCaptures();
+      sourceRegistration.dispose();
+      sourceMedia?.dispose();
+      if ((PM as any).EngineSourceMedia === sourceMedia) (PM as any).EngineSourceMedia = null;
       detachRasterCompat();
       detachContextExports();
       if (typeof offPresented === 'function') offPresented();

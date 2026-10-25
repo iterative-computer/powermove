@@ -35,6 +35,7 @@ export class HandleRejected extends Error {
 export function accessOf(kind: CapabilityKind): HandleAccess {
   switch (kind.kind) {
     case 'mediaRead':
+    case 'sourceRead':
     case 'projectStore':
     case 'extensionBundle':
       return 'read';

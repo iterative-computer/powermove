@@ -63,11 +63,12 @@ impl ConsistencyHash {
         digest
     }
     fn visit(&mut self, node: &Node, path: &mut Vec<JsString>) -> String {
-        if let Some(entry) = self.entries.get(path) {
-            if entry.revision == node.rev() && entry.identity.matches(node) {
-                self.reused += 1;
-                return entry.digest.clone();
-            }
+        if let Some(entry) = self.entries.get(path)
+            && entry.revision == node.rev()
+            && entry.identity.matches(node)
+        {
+            self.reused += 1;
+            return entry.digest.clone();
         }
         self.hashed += 1;
         let bulk = match node.kind() {
@@ -117,10 +118,12 @@ impl ConsistencyHash {
         };
         // Keep the root and composition containers cacheable even when a
         // customized document fills the leaf-entry budget.
-        if self.entries.len() >= 16384 && path.len() < 4 && !self.entries.contains_key(path) {
-            if let Some(victim) = self.entries.keys().max_by_key(|key| key.len()).cloned() {
-                self.entries.remove(&victim);
-            }
+        if self.entries.len() >= 16384
+            && path.len() < 4
+            && !self.entries.contains_key(path)
+            && let Some(victim) = self.entries.keys().max_by_key(|key| key.len()).cloned()
+        {
+            self.entries.remove(&victim);
         }
         if (self.entries.len() < 16384 || self.entries.contains_key(path))
             && let Some(identity) = Identity::of(node)

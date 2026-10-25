@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::common::{
-    ByteSize, Bytes, CompositionId, Count, DocumentId, LayerId, PixelRect, Revision, Seq,
+    AssetId, ByteSize, Bytes, CompositionId, Count, DocumentId, LayerId, PixelRect, Revision, Seq,
     SessionId, Size, Ticks,
 };
 use crate::frame::{
@@ -149,6 +149,33 @@ pub enum SnapshotTarget {
         #[cfg_attr(feature = "ts", ts(optional = nullable))]
         content: Option<Bytes>,
     },
+    /// A source frame at `SnapshotRequest::time`, independently of the composition.
+    Source {
+        asset: AssetId,
+        fit: SourceFit,
+        color: SourceColor,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub enum SourceFit {
+    Stretch,
+    Contain,
+    Cover,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub enum SourceColor {
+    /// Browser Canvas2D display pixels, used by posters and filmstrips.
+    Display,
+    /// Native decoded video planes and source colour tags for Chromium video
+    /// presentation. Never an RGBA compatibility or composition conversion.
+    Compositor,
+    Interpreted,
 }
 
 /// One snapshot of a composition (or one layer of it) at one time.
@@ -364,6 +391,18 @@ impl Validate for SnapshotRequest {
             valid_scale(need.scale)?;
         }
         match &self.target {
+            SnapshotTarget::Source { asset, color, .. } => {
+                ensure(
+                    *color != SourceColor::Compositor
+                        || (self.class != SnapshotClass::Sync
+                            && self.pixels == SnapshotPixels::Straight),
+                    C,
+                    || "native video presentation requires an async straight source request".into(),
+                )?;
+                ensure(asset.is_valid() && self.time.get() >= 0, C, || {
+                    "source snapshots need an asset and nonnegative source time".into()
+                })
+            }
             SnapshotTarget::Frame {
                 motion_blur_samples,
                 ..
@@ -481,6 +520,9 @@ pub struct CompatNeed {
 }
 
 /// The answer to a [`HostSnapshot`].
+// Response already boxes this outcome. Boxing Rendered again would add a
+// second allocation to every source frame and snapshot.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
@@ -500,11 +542,6 @@ pub enum SnapshotOutcome {
         revision: Revision,
         fallback: Vec<crate::shader_fallback::ShaderFallbackRequest>,
         compat: Vec<CompatNeed>,
-        /// Level 1 SVG rasters the frame needs (decision S1): the renderer
-        /// draws them, posts them as `CompatMessage::SvgPixels`, and asks
-        /// again naming each `SvgRasterKey::upload_key` in `uploaded`.
-        #[serde(default)]
-        svg: Vec<crate::svg_raster::SvgRasterRequest>,
     },
     /// A `Layer` target that draws nothing at that time (no ink, no cue
     /// showing): today's `render.raster()` returns `null`.
@@ -519,16 +556,12 @@ impl Validate for SnapshotOutcome {
             SnapshotOutcome::Rendered(result) => result.validate(),
             SnapshotOutcome::Empty { .. } => Ok(()),
             SnapshotOutcome::NeedsRenderer {
-                fallback,
-                compat,
-                svg,
-                ..
+                fallback, compat, ..
             } => {
                 crate::shader_fallback::ShaderFallbackMessage::Requests {
                     requests: fallback.clone(),
                 }
                 .validate()?;
-                crate::svg_raster::validate_requests(svg)?;
                 ensure(
                     compat.len() <= crate::shader_fallback::MAX_REQUESTS
                         && compat.iter().all(|c| {
@@ -545,7 +578,89 @@ impl Validate for SnapshotOutcome {
     }
 }
 
-/// A rendered snapshot.
+/// Source video planes remain encoded in the stream's colour space. Chromium
+/// samples and colour-manages them exactly as its CSS video compositor does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS))]
+#[serde(rename_all = "camelCase")]
+pub struct SourceVideoFrame {
+    // WebCodecs buffer layout: nv12, planar i420a, i422 or i420p10, or rgba.
+    pub format: String,
+    // gfx::ColorSpace / WebCodecs identifiers describing the decoded frame.
+    pub primaries: String,
+    pub transfer: String,
+    pub matrix: String,
+    pub range: String,
+    // Visible width when Chromium retains a wider coded row (VP9 stride).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub visible_width: Option<u32>,
+}
+
+impl SourceVideoFrame {
+    /// Straight sRGB RGBA8 the engine converted itself (a reading Chromium
+    /// cannot apply exactly).
+    pub fn srgb_rgba() -> Self {
+        Self {
+            format: "rgba".into(),
+            primaries: "bt709".into(),
+            transfer: "srgb".into(),
+            matrix: "rgb".into(),
+            range: "full".into(),
+            visible_width: None,
+        }
+    }
+
+    /// Y then interleaved (nv12) or planar chroma, then i420a's alpha, or
+    /// RGBA8; no padding. i420p10 samples are 16-bit little-endian.
+    pub fn byte_len(&self, width: u32, height: u32) -> Option<u64> {
+        if self.visible_width.is_some_and(|w| w == 0 || w > width) {
+            return None;
+        }
+        let w = u64::from(width);
+        let h = u64::from(height);
+        if self.format == "rgba" {
+            return (w * h).checked_mul(4);
+        }
+        let chroma_h = if self.format == "i422" {
+            h
+        } else {
+            h.div_ceil(2)
+        };
+        let bytes = if self.format == "i420p10" { 2 } else { 1 };
+        let alpha = if self.format == "i420a" { w * h } else { 0 };
+        (w * h + w.div_ceil(2) * 2 * chroma_h)
+            .checked_mul(bytes)?
+            .checked_add(alpha)
+    }
+}
+
+impl Validate for SourceVideoFrame {
+    fn validate(&self) -> Result<(), Violation> {
+        // Only tags Chromium applies exactly as the engine reads them
+        // (`pm_render` chooses them); everything else arrives as RGBA.
+        let rgba = self.format == "rgba";
+        let ok = self
+            .visible_width
+            .is_none_or(|w| w > 0 && w <= MAX_OUTPUT_DIMENSION)
+            && if rgba {
+                *self == Self::srgb_rgba()
+            } else {
+                matches!(self.format.as_str(), "nv12" | "i420a" | "i422" | "i420p10")
+                    && matches!(self.primaries.as_str(), "bt709" | "smpte170m" | "bt470bg")
+                    && matches!(self.transfer.as_str(), "bt709" | "linear")
+                    && matches!(self.matrix.as_str(), "bt709" | "smpte170m" | "bt2020-ncl")
+                    && matches!(self.range.as_str(), "limited" | "full")
+            };
+        ensure(ok, ContractId::Frame, || {
+            "invalid source video format or colour tags".into()
+        })
+    }
+}
+
+/// A rendered snapshot. `video` is present only for SourceColor::Compositor:
+/// packed native YUV planes, or engine-converted RGBA, for a source-only
+/// VideoFrame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(rename_all = "camelCase")]
@@ -576,6 +691,9 @@ pub struct SnapshotResult {
     /// rendered, in microseconds.
     pub waited_us: u32,
     pub render_us: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    pub video: Option<SourceVideoFrame>,
 }
 
 /// A layer raster's geometry besides its anchor and box (today's
@@ -606,7 +724,20 @@ pub struct RasterGeometry {
 impl Validate for SnapshotResult {
     fn validate(&self) -> Result<(), Violation> {
         const C: ContractId = ContractId::Frame;
-        let expected = u64::from(self.width) * u64::from(self.height) * 4;
+        if let Some(video) = &self.video {
+            video.validate()?;
+            ensure(self.pixels == SnapshotPixels::Straight, C, || {
+                "source planes are straight encoded samples".into()
+            })?;
+        }
+        let expected = self
+            .video
+            .as_ref()
+            .map_or(
+                Some(u64::from(self.width) * u64::from(self.height) * 4),
+                |v| v.byte_len(self.width, self.height),
+            )
+            .unwrap_or(u64::MAX);
         ensure(
             self.width >= 1
                 && self.height >= 1
@@ -617,7 +748,7 @@ impl Validate for SnapshotResult {
         )?;
         ensure(self.payload.len() == expected, C, || {
             format!(
-                "{} pixel bytes for a {}×{} RGBA8 result",
+                "{} pixel bytes for a {}×{} snapshot result",
                 self.payload.len(),
                 self.width,
                 self.height
@@ -684,9 +815,6 @@ pub enum CompatSource {
     /// An extension's offscreen WebGL2 compatibility context
     /// (`render.gl.context` at apiVersion 1 to 3).
     CompatContext,
-    /// A level 1 SVG image's raster at a size bucket, drawn by Chromium
-    /// (decision S1; [`CompatFrameRequest::svg`] names it).
-    SvgImage,
     /// Chromium's decoded image, drawn into Canvas2D and encoded as PNG.
     BlenderPng,
 }
@@ -797,8 +925,8 @@ pub struct CompatNative {
 }
 
 /// Renderer ↔ interactive engine (session-bound, the viewer's port):
-/// `Pixels`, `Forget`, `Producers`, `Native`, `Reuse`, `SvgPixels`, and
-/// `SvgFailed` go to the engine, `Needs` and `SvgRequests` to the renderer.
+/// `Pixels`, `Forget`, `Producers`, `Native`, and `Reuse` go to the engine,
+/// `Needs` to the renderer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
 #[serde(
@@ -842,21 +970,6 @@ pub enum CompatMessage {
     Needs {
         revision: Revision,
         needs: Vec<CompatNeed>,
-    },
-    /// Interactive engine → renderer: level 1 SVG rasters a frame drew
-    /// without (`crate::svg_raster`).
-    SvgRequests {
-        requests: Vec<crate::svg_raster::SvgRasterRequest>,
-    },
-    /// Renderer → interactive engine: one band of an SVG raster.
-    SvgPixels(crate::svg_raster::SvgRasterPixels),
-    /// Renderer → interactive engine: the renderer could not draw an SVG
-    /// raster (`missing`: no such asset; `stale`: the window's bytes hash
-    /// differently; `decode`: Chromium could not draw it; `size`).
-    SvgFailed {
-        key: crate::svg_raster::SvgRasterKey,
-        reason: String,
-        message: String,
     },
 }
 
@@ -952,15 +1065,6 @@ impl Validate for CompatMessage {
                 }
                 Ok(())
             }
-            CompatMessage::SvgRequests { requests } => {
-                crate::svg_raster::validate_requests(requests)
-            }
-            CompatMessage::SvgPixels(p) => p.validate(),
-            CompatMessage::SvgFailed {
-                key,
-                reason,
-                message,
-            } => crate::svg_raster::validate_failure(key, reason, message),
         }
     }
 }
@@ -997,10 +1101,6 @@ fn valid_scale(scale: f64) -> Result<(), Violation> {
 /// document open, the producer is gone).
 /// Output pixels per layer pixel the export needs.
 /// The document revision the export snapshot was taken at.
-/// For [`CompatSource::SvgImage`] (and only then): the raster (its
-/// SVG's content hash and bucket) and the asset. The answer is that
-/// bucket's premultiplied RGBA8 pixels, keyed
-/// `<content>:<width>x<height>`.
 /// Set only for `blenderPng`; the original file's content identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS))]
@@ -1013,9 +1113,6 @@ pub struct CompatFrameRequest {
     pub source: CompatSource,
     pub scale: f64,
     pub revision: Revision,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub svg: Option<crate::svg_raster::SvgRasterRequest>,
     /// For [`CompatSource::CompatContext`] (and only then): the export
     /// frame as today's compositor canvas held it before `frame:rendered`
     /// (RGBA8, top-down, opaque, display-encoded). The window runs its
@@ -1082,14 +1179,6 @@ impl Validate for CompatFrameRequest {
             C,
             || "invalid compatibility frame ids".into(),
         )?;
-        ensure(
-            (self.source == CompatSource::SvgImage) == self.svg.is_some(),
-            C,
-            || "an svgImage compatibility frame names its SVG raster, and only it".into(),
-        )?;
-        if let Some(svg) = &self.svg {
-            svg.validate()?;
-        }
         ensure(
             (self.source == CompatSource::BlenderPng) == self.blender.is_some(),
             C,
@@ -1308,6 +1397,104 @@ mod tests {
             uploaded: Vec::new(),
             compat_uploaded: Vec::new(),
         }
+    }
+
+    #[test]
+    fn source_target_keeps_source_time_fit_and_color_on_the_wire() {
+        let mut source = request(160, 90);
+        source.time = Ticks::from_whole_seconds(7);
+        source.target = SnapshotTarget::Source {
+            asset: "source-a".into(),
+            fit: SourceFit::Contain,
+            color: SourceColor::Interpreted,
+        };
+        assert!(source.validate().is_ok());
+        let bytes = rmp_serde::to_vec_named(&source).unwrap();
+        let read: SnapshotRequest = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(read, source);
+        assert_eq!(
+            serde_json::to_value(&source.target).unwrap(),
+            serde_json::json!({
+                "kind": "source", "asset": "source-a", "fit": "contain", "color": "interpreted"
+            })
+        );
+        source.time = Ticks::new(-1).unwrap();
+        assert!(source.validate().is_err());
+    }
+
+    #[test]
+    fn source_compositor_intent_is_distinct_from_canvas_display() {
+        let mut source = request(160, 90);
+        source.target = SnapshotTarget::Source {
+            asset: "source-a".into(),
+            fit: SourceFit::Contain,
+            color: SourceColor::Compositor,
+        };
+        assert!(source.validate().is_err());
+        source.class = SnapshotClass::Async;
+        source.pixels = SnapshotPixels::Straight;
+        assert!(source.validate().is_ok());
+        let bytes = rmp_serde::to_vec_named(&source).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<SnapshotRequest>(&bytes).unwrap(),
+            source
+        );
+        assert_eq!(
+            serde_json::to_value(&source.target).unwrap()["color"],
+            "compositor"
+        );
+        assert_ne!(SourceColor::Compositor, SourceColor::Display);
+    }
+
+    #[test]
+    fn native_video_planes_are_bounded_and_validate_colour_tags() {
+        let mut video = SourceVideoFrame {
+            format: "nv12".into(),
+            primaries: "smpte170m".into(),
+            transfer: "bt709".into(),
+            matrix: "smpte170m".into(),
+            range: "limited".into(),
+            visible_width: None,
+        };
+        assert!(video.validate().is_ok());
+        assert_eq!(video.byte_len(160, 90), Some(21600));
+        assert_eq!(video.byte_len(3, 3), Some(17));
+        let wire = rmp_serde::to_vec_named(&video).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<SourceVideoFrame>(&wire).unwrap(),
+            video
+        );
+        video.visible_width = Some(160);
+        assert_eq!(video.byte_len(224, 90), Some(30240));
+        assert_eq!(video.byte_len(159, 90), None);
+        video.visible_width = None;
+        video.primaries = "unspecified".into();
+        assert!(video.validate().is_err(), "the reading is always complete");
+        video.primaries = "bt470bg".into();
+        video.transfer = "pq".into();
+        assert!(video.validate().is_err(), "HDR converts in the engine");
+        video.transfer = "linear".into();
+        assert!(video.validate().is_ok());
+        let rgba = SourceVideoFrame::srgb_rgba();
+        assert!(rgba.validate().is_ok());
+        assert_eq!(rgba.byte_len(160, 90), Some(57600));
+        assert!(
+            SourceVideoFrame {
+                range: "limited".into(),
+                ..rgba
+            }
+            .validate()
+            .is_err()
+        );
+        video.format = "i420a".into();
+        assert_eq!(video.byte_len(160, 90), Some(36000));
+        assert_eq!(video.byte_len(3, 3), Some(26));
+        video.format = "i420p10".into();
+        assert_eq!(video.byte_len(160, 90), Some(43200));
+        video.format = "i422".into();
+        assert_eq!(video.byte_len(160, 90), Some(28800));
+        video.transfer = "guessed-profile".into();
+        assert!(video.validate().is_err());
     }
 
     fn quality() -> FrameQuality {
@@ -1544,6 +1731,7 @@ mod tests {
             height: h,
             pixels: SnapshotPixels::Opaque,
             payload,
+            video: None,
             origin: [0.0, 0.0],
             layer_box: None,
             raster: None,
@@ -1602,7 +1790,6 @@ mod tests {
             source,
             scale: 1.0,
             revision: Revision::ZERO,
-            svg: None,
             frame,
             blender: None,
         };
@@ -1751,8 +1938,7 @@ mod tests {
                 source: CompatSource::RasterOverride,
                 scale,
                 revision: Revision::ZERO,
-                svg: None,
-                frame: None,
+                    frame: None,
                 blender: None,
             };
             assert_eq!(
@@ -1884,7 +2070,6 @@ mod tests {
             source: CompatSource::BlenderPng,
             scale: 1.0,
             revision: Revision::ZERO,
-            svg: None,
             frame: None,
             blender: Some(BlenderPngRequest {
                 asset: "a1".into(),

@@ -312,6 +312,9 @@ fn main() {
                 w,
                 h,
                 req.background,
+                1,
+                r.effects(),
+                &MapResolver::default(),
             );
             assert!(
                 background_reference.unmodelled.is_empty(),
