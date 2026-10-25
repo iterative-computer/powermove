@@ -52,7 +52,8 @@ Rewrite a row when its numbers change. Keep no round history here.
 ## 3D output and Library cards
 
 The scene pass writes linear RGBA16F samples (4× MSAA, memoryless on Apple GPUs),
-weights each by 1/(1 + luminance) after the last draw, resolves them in hardware
+weights each by 1/(1 + L) after the last draw (L the luminance the tone curve sees,
+exposure included), resolves them in hardware
 (coverage stays the box mean) and applies the preserved r180 ACES curve once at the
 composite boundary, after transparent blending (decision `3D-TONEMAP-1`); masks and
 effects keep their layer boundaries. Metal truncates f32 to half at a render-target
@@ -72,8 +73,8 @@ nearest-even half computed in the shader.
 | Legacy scene shaded and resolved in linear light | 64.18, 61.66, 0.371 | 3.72, 0.33, 0.006 | `legacy-scene:0` interior |
 | Nearest-half 3D and working stores (Editor Library card) | 25, 5, 0.0072 (card, signed +0.0008) | 25, 5, 0.0122 (card, signed +0.0005) | Editor-view card, depth 16 |
 | Transmission samples the authored background (r180 `renderTransmissionPass`) | 92.57, 91.62, 2.856 | 5.61, 0.47, 0.004 | `khr-GlassVaseFlowers` interior |
-| Luminance-weighted MSAA resolve (Karis) | 175.55, 128.96, 5.747 | 209.62, 126.71, 5.272 (box resolve: 243.04, 129.58, 5.347) | `khr-ToyCar` edge |
-| Material slots and mesh groups ignored, as v1.2.0 (main 2b1fa379a; the capture predates it) | 255.00, 255.00, 20.223 | 0.96, 0.84, 0.028 | `slots-draw-nothing:0` interior |
+| Luminance-weighted MSAA resolve (Karis) | 175.55, 128.96, 5.747 | 195.71, 125.52, 5.241 (box resolve: 243.04, 129.58, 5.347) | `khr-ToyCar` edge |
+| Material slots and mesh groups ignored, as v1.2.0 (main 2b1fa379a; both slot cases re-recorded from v1.2.0) | 1.40, 1.17, 0.048 | 0.96, 0.84, 0.028 | `slots-draw-nothing:0` interior |
 
 Library cards pass gate-policy's precision-bound rule (all 32). Their remaining
 one-code differences are the half-float working frame rounded again to 8 bits: the
@@ -81,28 +82,31 @@ Editor card's interior mean is 0.0070 CV (today 0.0004) and its edge mean 0.1601
 (today 0.1587). The scene gate passes.
 
 The weighted resolve brings edges toward the reference: per pixel, `khr-ToyCar`'s
-largest excess over today's error falls from 134.37 to 85.62 CV (p99.9 59.22 to 37.20)
-and `khr-IridescenceLamp`'s from 177.30 to 97.13 (p99.9 72.96 to 37.47). 41 glTF
-outputs still fail; 34 edge rows are p99.9 or per-pixel statistics over small edge
-sets. Interiors that miss the interior rule, by cause:
+largest excess over today's error falls from 134.37 to 71.71 CV (p99.9 59.22 to 32.04)
+and `khr-IridescenceLamp`'s from 177.30 to 64.39 (p99.9 72.96 to 31.73). Tone mapping
+each sample before the resolve was measured too and lands further from the reference
+on most of these (`khr-ToyCar` edge p99.9 excess 48.84, `khr-BoomBox` interior 5.70 CV).
+34 glTF outputs still fail: 2 geometry rows predate this work, the rest are p99.9 or
+per-pixel edge statistics over small edge sets, and 11 interiors miss the interior
+rule. By cause:
 
 - MSAA shading at the pixel center. Where triangles meet inside a surface, a
   sample's triangle is shaded at the pixel center, outside the triangle, and a
   normal-mapped, iridescent or anisotropic highlight lands in one sample. Today shows
   the same sparkle; the reference shades each sample where it lies. Today tones each
   sample before averaging, so the engine's sparkle stays brighter even weighted
-  (worst excess, box → weighted: `khr-NormalTangentTest` 112 → 87 CV,
-  `khr-NormalTangentMirrorTest` 133 → 80, `khr-LightsPunctualLamp` 39 → 28;
-  also `khr-IridescenceLamp`, `khr-IridescenceSuzanne`, `khr-AnisotropyBarnLamp`,
-  `khr-CompareAnisotropy`).
-- Partial coverage under an opaque background. The classifier sees the composited
-  display, so a sliver the four samples hit and the reference averages to nearly the
-  background counts as interior (`khr-IORTestGrid`, `pbr-ext-wireframe`,
-  `khr-CompareAlphaCoverage`).
-- One or two codes in a few pixels, excess at most 1.63 CV, cause not isolated:
-  `webp-avif`, `khr-TextureCoordinateTest`, `khr-CompareTransmission`,
-  `transmission-background`, `khr-BoomBox`, `khr-GlassHurricaneCandleHolder`,
-  `khr-GlassVaseFlowers`, `khr-PlaysetLightTest`.
+  (worst excess, box → weighted: `khr-NormalTangentTest` 112 → 72 CV,
+  `khr-NormalTangentMirrorTest` 133 → 61, `khr-LightsPunctualLamp` 39 → 22,
+  `khr-IridescenceLamp` 24 → 14, `khr-IridescenceSuzanne` 14 → 8,
+  `khr-AnisotropyBarnLamp` 3.4 → 2.8, `khr-CompareAnisotropy` 1.9 → 1.7).
+- A bright feature the reference keeps: `khr-PlaysetLightTest` (3.93 CV, box 1.25),
+  where one sample of a lamp pixel is genuinely bright and the weight dims it.
+- One or two codes in a few pixels, the same with the box, weighted and per-sample
+  toned resolves (so not the weights' recovery) and measured before the 8-bit encode:
+  `webp-avif` (1.33 CV over 45 pixels, blue only: the AVIF texels' decode),
+  `khr-TextureCoordinateTest` (1.57, one pixel 5% darker: a texture level of detail),
+  `khr-CompareTransmission` (1.62) and `transmission-background` (1.43), two pixels
+  each in the transmission sample.
 
 ## Raster sampling and masks
 

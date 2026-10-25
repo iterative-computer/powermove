@@ -42,9 +42,12 @@ exact: alpha area (relative) and centroid (px) within 1e-3 (`same_geometry`).
 today's 8-bit capture, edge p99.9 and mean within today's + 0.5 CV, and per pixel (so
 also the edge maximum) within one sample, a quarter of full scale, of today's error.
 Shading runs once per pixel, so a partly covered pixel can show a texel the reference
-averages away. The resolve weighs each sample by 1/(1 + luminance) and keeps the box
-coverage, near today's tone-then-average for a bright sample among dim ones; r180 does
-not weight its resolve, so the reference stays the plain 64-sample mean. Geometry within
+averages away. The resolve weighs each sample by 1/(1 + L), L the luminance the tone
+curve sees, and keeps the box coverage, near today's tone-then-average for a bright
+sample among dim ones; r180 does not weight its resolve, so the reference stays the
+plain 64-sample mean. Edges are classified from the reference's own coverage before
+the display background: a pixel it covers partly is an edge even where the composited
+background makes every displayed pixel opaque. Geometry within
 half a sample per partly covered pixel (`same_sampled_geometry`). Interiors stay at
 1 CV of today unless no interior pixel ends more than 1 CV further from the reference
 than today's (a 3D correction with a ledger row). The 3D references model r180 exactly
