@@ -155,7 +155,7 @@ fn format_index(format: wgpu::TextureFormat) -> usize {
 }
 
 impl Resampler {
-    pub fn new(device: &wgpu::Device, quad_layout: &wgpu::BindGroupLayout) -> Resampler {
+    pub fn new(device: &wgpu::Device) -> Resampler {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pm-render resample"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/resample.wgsl").into()),
@@ -215,7 +215,7 @@ impl Resampler {
         });
         let draw_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pm resample"),
-            bind_group_layouts: &[Some(quad_layout), Some(&layout)],
+            bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
         let mip_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

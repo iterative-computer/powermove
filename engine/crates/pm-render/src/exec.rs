@@ -1061,8 +1061,7 @@ impl Exec<'_> {
                 // content is in front of the camera and in the frame.
                 if let Some(bind) = &sample_binds[i] {
                     pass.set_pipeline(self.pipelines.resample.pipeline(format, blend));
-                    pass.set_bind_group(0, &quad_bind, &[offset]);
-                    pass.set_bind_group(1, bind, &[offset]);
+                    pass.set_bind_group(0, bind, &[offset]);
                     pass.draw(0..4, 0..1);
                 }
             } else if r.solid.is_some() {

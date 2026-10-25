@@ -467,7 +467,7 @@ impl Pipelines {
             &layout_with(&[&quad_layout, &texture_layout, &depth_layout]),
             "fs_id_3d",
         );
-        let resample = crate::sampling::gpu::Resampler::new(device, &quad_layout);
+        let resample = crate::sampling::gpu::Resampler::new(device);
         Pipelines {
             ops: crate::composite::gpu::OpPipelines::new(device),
             resample,
